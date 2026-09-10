@@ -54,9 +54,49 @@ impl Default for IndexerConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputStorageConfig {
+    pub bucket: String,
+    /// Object namespace; use a distinct prefix for deployments that reset chain state.
+    pub prefix: String,
+    pub timeout: Duration,
+    #[cfg(feature = "sandbox")]
+    pub emulator_endpoint: Option<String>,
+}
+
+impl OutputStorageConfig {
+    pub fn new(bucket: String, prefix: String, timeout: Duration) -> Self {
+        Self {
+            bucket,
+            prefix,
+            timeout,
+            #[cfg(feature = "sandbox")]
+            emulator_endpoint: None,
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.bucket.trim().is_empty(),
+            "midnight config: publisher.output_storage.bucket must not be empty"
+        );
+        anyhow::ensure!(
+            !self.prefix.trim_matches('/').trim().is_empty(),
+            "midnight config: publisher.output_storage.prefix is required"
+        );
+        anyhow::ensure!(
+            !self.timeout.is_zero(),
+            "midnight config: publisher.output_storage.timeout must be greater than zero"
+        );
+        Ok(())
+    }
+}
+
 /// Runs the out-of-process intent builder, the piece that stays TypeScript for its proving stack.
 #[derive(Clone, PartialEq)]
 pub struct PublisherConfig {
+    /// When absent, final responses only publish on-chain.
+    pub output_storage: Option<OutputStorageConfig>,
     /// argv of the builder, program first: a list so no operator path is word-split.
     pub intent_gen_command: Vec<String>,
     /// Funds respond transactions.
@@ -77,6 +117,7 @@ pub struct PublisherConfig {
 impl Default for PublisherConfig {
     fn default() -> Self {
         Self {
+            output_storage: None,
             // The `bin` name the TypeScript package installs, resolved on the fixed child PATH.
             intent_gen_command: vec!["midnight-publisher".to_string()],
             funding_seed: String::new(),
@@ -102,6 +143,7 @@ impl Default for PublisherConfig {
 impl fmt::Debug for PublisherConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PublisherConfig")
+            .field("output_storage", &self.output_storage)
             .field("intent_gen_command", &self.intent_gen_command)
             .field("funding_seed", &"<redacted>")
             .field("proof_server_url", &self.proof_server_url)
@@ -167,7 +209,15 @@ impl MidnightConfig {
 }
 
 impl PublisherConfig {
+    pub fn validate_output_storage(&self) -> anyhow::Result<()> {
+        if let Some(config) = &self.output_storage {
+            config.validate()?;
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
+        self.validate_output_storage()?;
         let program = self
             .intent_gen_command
             .first()
@@ -323,9 +373,86 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sandbox")]
+    #[test]
+    fn debug_includes_the_output_storage_emulator_endpoint_without_exposing_the_funding_seed() {
+        let seed = "0123456789abcdef0123456789abcdef";
+        let endpoint = "http://127.0.0.1:4443";
+        let mut config = valid_config();
+        config.publisher.funding_seed = seed.to_string();
+        config.publisher.output_storage = Some(OutputStorageConfig {
+            emulator_endpoint: Some(endpoint.to_string()),
+            ..OutputStorageConfig::new("outputs".into(), "v1".into(), Duration::from_secs(30))
+        });
+
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("emulator_endpoint"),
+            "the sandbox-only field is missing from Debug: {rendered}"
+        );
+        assert!(
+            rendered.contains(endpoint),
+            "the emulator endpoint is missing from Debug: {rendered}"
+        );
+        assert!(
+            !rendered.contains(seed),
+            "the funding seed reached Debug: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "the funding seed must remain visibly redacted: {rendered}"
+        );
+    }
+
     #[test]
     fn a_complete_config_validates() {
         valid_config().validate().expect("every field is valid");
+    }
+
+    #[test]
+    fn output_storage_settings_are_validated_from_the_top_level() {
+        valid_config()
+            .validate()
+            .expect("output storage is optional by default");
+
+        let mut configured = valid_config();
+        configured.publisher.output_storage = Some(OutputStorageConfig::new(
+            "outputs".into(),
+            "v1/test-deployment".into(),
+            Duration::from_secs(1),
+        ));
+        configured
+            .validate()
+            .expect("configured output storage is valid");
+
+        for (field, apply) in [
+            (
+                "output_storage.bucket",
+                (|config: &mut OutputStorageConfig| {
+                    config.bucket = " ".to_string();
+                }) as fn(&mut OutputStorageConfig),
+            ),
+            (
+                "output_storage.prefix",
+                |config: &mut OutputStorageConfig| {
+                    config.prefix = String::new();
+                },
+            ),
+            (
+                "output_storage.timeout",
+                |config: &mut OutputStorageConfig| {
+                    config.timeout = Duration::ZERO;
+                },
+            ),
+        ] {
+            let mut invalid = configured.clone();
+            apply(invalid.publisher.output_storage.as_mut().unwrap());
+            let error = invalid.validate().unwrap_err().to_string();
+            assert!(
+                error.contains(field),
+                "unexpected error for {field}: {error}"
+            );
+        }
     }
 
     #[test]

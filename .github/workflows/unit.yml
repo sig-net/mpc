@@ -2,16 +2,16 @@ name: Unit
 on:
   pull_request:
   merge_group:
+  # Cache policy: docs/ci-caching.md
+  push:
+    branches: [develop]
+    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "rust-toolchain*", .github/workflows/unit.yml]
+  workflow_dispatch:
 
 env:
   RUSTFLAGS: -D warnings
 jobs:
-  changes:
-    uses: ./.github/workflows/_ci-changes.yml
-
   test:
-    needs: [changes]
-    if: needs.changes.outputs.unit == 'true'
     runs-on: warp-ubuntu-latest-x64-4x
     name: Check & Test
     steps:
@@ -39,11 +39,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: unit-test
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
       
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
@@ -75,8 +74,6 @@ jobs:
         run: just test-unit
 
   audit:
-    needs: [changes]
-    if: needs.changes.outputs.audit == 'true'
     name: Audit
     runs-on: ubuntu-latest
     steps:

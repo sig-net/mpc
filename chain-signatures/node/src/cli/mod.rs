@@ -84,7 +84,7 @@ pub enum Cli {
         cipher_sk: String,
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"))]
-        sign_sk: Option<SecretKey>,
+        sign_sk: SecretKey,
         /// Ethereum Indexer options
         #[command(flatten)]
         eth: EthArgs,
@@ -164,9 +164,7 @@ impl Cli {
                     "--redis-url".to_string(),
                     storage_options.redis_url.to_string(),
                 ];
-                if let Some(sign_sk) = sign_sk {
-                    args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
-                }
+                args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
@@ -250,7 +248,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog,
             } = StorageHandles::new(&account_id, &storage_options).await?;
 
-            let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address.unwrap_or_else(|| {
                 let my_ip = local_ip().unwrap();
                 Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
@@ -399,10 +396,9 @@ fn configuration_digest(
     account_id: AccountId,
     account_sk: SecretKey,
     cipher_pk: String,
-    sign_sk: Option<SecretKey>,
+    sign_sk: SecretKey,
     eth: EthArgs,
 ) -> i64 {
-    let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
     let eth_contract_address = eth.eth_contract_address.unwrap_or_default();
     calculate_digest(
         mpc_contract_id,
@@ -1155,6 +1151,9 @@ mod tests {
             "MPC_MIDNIGHT_PROOF_SERVER_URL",
             "MPC_MIDNIGHT_INDEXER_URL",
             "MPC_MIDNIGHT_INDEXER_WS_URL",
+            "MPC_MIDNIGHT_OUTPUT_STORAGE_BUCKET",
+            "MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX",
+            "MPC_MIDNIGHT_OUTPUT_STORAGE_TIMEOUT_SECS",
         ] {
             assert!(
                 std::env::var_os(var).is_none(),
@@ -1173,6 +1172,7 @@ mod tests {
         assert_midnight_env_unset();
 
         let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
+        let sign_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign").to_string();
         let central_address = "ab".repeat(32);
         let funding_seed = "0f".repeat(32);
         let intent_gen_command = r#"["midnight-publisher"]"#;
@@ -1183,6 +1183,8 @@ mod tests {
             "test.near",
             "--account-sk",
             &account_sk,
+            "--sign-sk",
+            &sign_sk,
             "--cipher-sk",
             "cipher",
             "--env",
@@ -1205,6 +1207,12 @@ mod tests {
             "http://127.0.0.1:8088/api/v3/graphql",
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
+            "--midnight-output-storage-bucket",
+            "midnight-results",
+            "--midnight-output-storage-prefix",
+            "staging/testnet",
+            "--midnight-output-storage-timeout-secs",
+            "47",
         ];
         let out = Cli::try_parse_from(argv).unwrap().into_str_args();
 
@@ -1223,6 +1231,12 @@ mod tests {
             "http://127.0.0.1:8088/api/v3/graphql",
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
+            "--midnight-output-storage-bucket",
+            "midnight-results",
+            "--midnight-output-storage-prefix",
+            "staging/testnet",
+            "--midnight-output-storage-timeout-secs",
+            "47",
         ] {
             assert!(
                 out.contains(&expected.to_string()),

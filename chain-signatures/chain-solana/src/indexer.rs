@@ -156,13 +156,16 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 
     /// Catchup items in `[start_slot, anchor)` fetched in chunks.
     /// `fetch_slots` failures are propagated so the supervisor can restart.
-    async fn catchup_blocks(
+    pub async fn catchup_blocks(
         &self,
         anchor_height: u64,
         start_slot: u64,
     ) -> anyhow::Result<
         Pin<Box<dyn Stream<Item = anyhow::Result<CatchupBlockItem>> + Send + 'static>>,
     > {
+        #[cfg(feature = "bench")]
+        crate::bench::rpc_reset();
+
         let end_slot = anchor_height.saturating_sub(1);
         if start_slot > end_slot {
             tracing::info!(anchor_slot = anchor_height, "solana catchup not required");
@@ -219,6 +222,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                 elapsed = ?started_at.elapsed(),
                 "solana catchup signature pagination complete"
             );
+
+            #[cfg(feature = "bench")]
+            crate::bench::add_sig_fetch_time(started_at.elapsed());
 
             Ok::<_, anyhow::Error>(Self::chunk_slots(ordered_slots, chunk_size))
         })
@@ -359,7 +365,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         Box::pin(stream)
     }
 
-    async fn process_catchup_item(
+    pub async fn process_catchup_item(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
         slot: u64,
@@ -368,7 +374,11 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         match block {
             SolanaCatchupBlock::Block(block) => self.process_block(events_tx, slot, block).await,
             SolanaCatchupBlock::Missing => {
+                #[cfg(feature = "bench")]
+                let started_at = Instant::now();
                 let block = self.client.get_block(slot).await?;
+                #[cfg(feature = "bench")]
+                crate::bench::add_refetch_time(started_at.elapsed());
                 self.process_block(events_tx, slot, &block).await
             }
         }
@@ -403,7 +413,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     // walk never actually verified — silent loss. Consider discounting the
     // anchor by a requery margin before draining, so both the drain range
     // and the emitted markers stay behind the verified head.
-    async fn drain_range(
+    pub async fn drain_range(
         &self,
         events_tx: &mpsc::Sender<ChainEvent>,
         anchor: u64,
@@ -427,12 +437,16 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                 }
                 None => (anchor, None),
             };
+            #[cfg(feature = "bench")]
+            let marker_started_at = Instant::now();
             self.emit_block_markers_for_drained_inactive_slots(
                 events_tx,
                 next_marker..landmark,
                 cancel,
             )
             .await?;
+            #[cfg(feature = "bench")]
+            crate::bench::add_marker_time(marker_started_at.elapsed());
             let Some(block) = block else { break };
             self.process_catchup_retrying(events_tx, landmark, &block, cancel)
                 .await;
@@ -456,6 +470,8 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                 res = events_tx.send(ChainEvent::Block(slot)) => {
                     res.context("failed to send solana block marker event")?;
                     self.telemetry.block_indexed(slot);
+                    #[cfg(feature = "bench")]
+                    crate::bench::inc_marker();
                 }
             }
         }
@@ -468,19 +484,28 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         height: u64,
         block: &UiConfirmedBlock,
     ) -> anyhow::Result<()> {
+        #[cfg(feature = "bench")]
+        let started_at = Instant::now();
+
         // Update indexed block metrics
         self.telemetry.block_indexed(height);
 
-        let Some(transactions) = &block.transactions else {
-            events_tx.send(ChainEvent::Block(height)).await?;
-            return Ok(());
-        };
-
-        for tx in transactions {
-            process_transaction(events_tx, &self.program_id, tx).await?;
+        if let Some(transactions) = &block.transactions {
+            for tx in transactions {
+                process_transaction(events_tx, &self.program_id, tx).await?;
+            }
         }
 
         events_tx.send(ChainEvent::Block(height)).await?;
+
+        #[cfg(feature = "bench")]
+        {
+            crate::bench::add_process_time(started_at.elapsed());
+            if crate::bench::inc_slot().is_multiple_of(100) {
+                crate::bench::report_metrics("catchup_progress");
+            }
+        }
+
         Ok(())
     }
 }

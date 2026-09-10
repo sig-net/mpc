@@ -5,6 +5,7 @@ pub mod cluster;
 pub mod containers;
 pub mod eth;
 pub mod execute;
+pub mod gcs;
 pub mod local;
 pub mod midnight;
 pub mod mpc_fixture;

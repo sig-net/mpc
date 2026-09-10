@@ -1,5 +1,5 @@
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, fail } from 'k6';
 
 const PINGER_URL = "https://contract-ping.sig.network/ping";
 
