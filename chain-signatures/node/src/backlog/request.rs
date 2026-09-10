@@ -168,17 +168,11 @@ impl<State> SignEntry<State> {
     }
 
     fn map_state<Next>(self, f: impl FnOnce(State) -> Next) -> SignEntry<Next> {
-        let SignEntry {
-            chain,
-            request,
-            state,
-            backlog,
-        } = self;
         SignEntry {
-            chain,
-            request,
-            state: f(state),
-            backlog,
+            chain: self.chain,
+            request: self.request,
+            state: f(self.state),
+            backlog: self.backlog,
         }
     }
 
@@ -284,11 +278,11 @@ impl SignEntry<Generating> {
         .map_err(|_| BacklogError::InvalidSignature)?;
 
         let publish = Publishing::new(signature, participants, is_proposer);
-        self.record_publishing(publish.clone()).await?;
+        self.record_publishing(&publish).await?;
         Ok(self.transition(publish))
     }
 
-    async fn record_publishing(&self, publish: Publishing) -> Result<(), BacklogError> {
+    async fn record_publishing(&self, publish: &Publishing) -> Result<(), BacklogError> {
         let mut pending = self.backlog.pending(&self.chain).write().await;
         let entry = pending
             .requests
@@ -301,7 +295,7 @@ impl SignEntry<Generating> {
             SignStatus::Sign(progress)
             | SignStatus::Bidirectional(BidirectionalProgress::Initial(progress))
             | SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
-                *progress = SignProgress::Publishing(publish);
+                *progress = SignProgress::Publishing(publish.clone());
             }
             SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {}
         }
