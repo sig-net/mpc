@@ -684,26 +684,10 @@ impl PresignatureSpawner {
         participants: Vec<Participant>,
         timeout: Duration,
     ) {
-        if positor.is_proposer() {
-            for &p in &participants {
-                if p == self.me {
-                    continue;
-                }
-                self.msg
-                    .send(
-                        self.me,
-                        p,
-                        PositMessage {
-                            id: PositProtocolId::Presignature(id),
-                            from: self.me,
-                            action: PositAction::Start(participants.clone()),
-                        },
-                    )
-                    .await;
-            }
-        }
-
         let is_proposer = positor.is_proposer();
+
+        // Peers spend the pair as soon as START arrives. Announce only once our
+        // own slot and commit have succeeded, so we cannot back out after they did.
         if let Err(err) = self.generate(id, positor, &participants, timeout).await {
             self.ongoing_owned.remove(&id.id);
             tracing::warn!(
@@ -711,8 +695,30 @@ impl PresignatureSpawner {
                 ?participants,
                 is_proposer,
                 ?err,
-                "unable to start presignature generation on START"
+                "unable to start presignature generation"
             );
+            return;
+        }
+
+        if !is_proposer {
+            return;
+        }
+
+        for &p in &participants {
+            if p == self.me {
+                continue;
+            }
+            self.msg
+                .send(
+                    self.me,
+                    p,
+                    PositMessage {
+                        id: PositProtocolId::Presignature(id),
+                        from: self.me,
+                        action: PositAction::Start(participants.clone()),
+                    },
+                )
+                .await;
         }
     }
 
