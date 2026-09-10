@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
@@ -727,13 +727,8 @@ impl Solana {
                 .ok()
                 .is_some_and(|balance| balance > 0);
 
-            if version_ready && blockhash_ready && ws_ready {
-                if !funded {
-                    tracing::warn!(
-                        attempt,
-                        "solana validator RPC is ready but payer balance is still zero"
-                    );
-                }
+            if version_ready && blockhash_ready && ws_ready && funded {
+                Self::wait_for_block_production(rpc_client).await?;
                 return Ok(());
             }
 
@@ -749,6 +744,23 @@ impl Solana {
         }
 
         anyhow::bail!("solana-test-validator did not become ready in time")
+    }
+
+    /// Wait for the validator to produce a new block after startup or restart.
+    async fn wait_for_block_production(rpc_client: &SolanaRpcClient) -> anyhow::Result<()> {
+        const POLL: Duration = Duration::from_millis(100);
+        const DEADLINE: Duration = Duration::from_secs(30);
+
+        let start = Instant::now();
+        let last_slot = rpc_client.get_slot().await?;
+        while Instant::now() - start < DEADLINE {
+            sleep(POLL).await;
+            let slot = rpc_client.get_slot().await?;
+            if slot > last_slot {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("solana-test-validator did not produce new slots in time")
     }
 
     /// Kill and relaunch the validator against the same ledger
