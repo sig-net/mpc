@@ -2,6 +2,11 @@ name: Unit
 on:
   pull_request:
   merge_group:
+  # Cache policy: docs/ci-caching.md
+  push:
+    branches: [develop]
+    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "rust-toolchain*", .github/workflows/unit.yml]
+  workflow_dispatch:
 
 env:
   RUSTFLAGS: -D warnings
@@ -34,12 +39,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared by dev-only jobs; release-building jobs use "workspace-release".
-          shared-key: workspace
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
       
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL

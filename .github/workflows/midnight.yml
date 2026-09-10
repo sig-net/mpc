@@ -3,6 +3,11 @@ name: Midnight Integration Tests
 on:
   pull_request:
   merge_group:
+  # Cache policy: docs/ci-caching.md
+  push:
+    branches: [develop]
+    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "rust-toolchain*", .github/workflows/midnight.yml]
+  workflow_dispatch:
 
 env:
   RUSTFLAGS: -D warnings
@@ -104,13 +109,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared by jobs that build the release mpc-node via setup.sh; dev-only jobs
-          # use "workspace" so their faster save cannot race away the release artifacts.
-          shared-key: workspace-release
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-full
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest

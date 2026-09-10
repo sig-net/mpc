@@ -61,13 +61,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared by jobs that build the release mpc-node via setup.sh; dev-only jobs
-          # use "workspace" so their faster save cannot race away the release artifacts.
-          shared-key: workspace-release
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-full
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -162,13 +159,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared by jobs that build the release mpc-node via setup.sh; dev-only jobs
-          # use "workspace" so their faster save cannot race away the release artifacts.
-          shared-key: workspace-release
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-full
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -225,11 +219,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shared by dev-only jobs; release-building jobs use "workspace-release".
-          shared-key: workspace
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-dev
           cache-targets: true
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install Node.js
         uses: actions/setup-node@v4
