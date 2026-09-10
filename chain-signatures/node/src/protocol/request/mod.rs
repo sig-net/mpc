@@ -13,7 +13,7 @@ use crate::protocol::presignature::PresignatureId;
 use crate::protocol::sync::{SyncKind, SyncReportSender};
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
-use crate::storage::presignature_storage::PresignatureReservation;
+use crate::storage::presignature_storage::{PresignatureReservation, PresignatureTaken};
 use crate::storage::PresignatureStorage;
 use mpc_utils::{
     task::JoinMap,
