@@ -2,6 +2,12 @@ name: Unit
 on:
   pull_request:
   merge_group:
+  # Rebuild the shared dev rust cache on develop so PR and merge-queue runs can restore it
+  # (caches saved on PR or merge-queue refs are invisible to other branches).
+  push:
+    branches: [develop]
+    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "rust-toolchain*"]
+  workflow_dispatch:
 
 env:
   RUSTFLAGS: -D warnings
