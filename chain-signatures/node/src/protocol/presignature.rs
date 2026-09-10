@@ -689,7 +689,6 @@ impl PresignatureSpawner {
         // Peers spend the pair as soon as START arrives. Announce only once our
         // own slot and commit have succeeded, so we cannot back out after they did.
         if let Err(err) = self.generate(id, positor, &participants, timeout).await {
-            self.ongoing_owned.remove(&id.id);
             tracing::warn!(
                 ?id,
                 ?participants,
