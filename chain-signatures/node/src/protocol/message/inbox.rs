@@ -209,7 +209,7 @@ impl MessageInbox {
         while let Some((encrypted, timestamp)) = self.pending_decrypt.pop_front() {
             let decrypted: Result<(Participant, Vec<Message>), _> =
                 SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, |sig| {
-                    if self.idempotent.push(sig.clone(), ()).is_some() {
+                    if self.idempotent.put(sig.clone(), ()).is_some() {
                         Err(MessageError::Idempotent)
                     } else {
                         Ok(())

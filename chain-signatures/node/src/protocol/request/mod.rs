@@ -329,7 +329,7 @@ impl SignatureSpawner {
     /// instead of recreating an orphan mailbox. Automatically LRU-evicts the
     /// stalest entry when the cache exceeds [`MAX_DEAD_IDS`].
     fn mark_dead(&mut self, sign_id: SignId) {
-        self.dead_ids.push(sign_id, ());
+        self.dead_ids.put(sign_id, ());
     }
 
     /// Common teardown when a sign task ends: forget the id, drop its mailbox and
