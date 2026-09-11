@@ -7,10 +7,14 @@ use super::posit::PositPhase;
 use super::state::SignState;
 use super::*;
 
+use crate::storage::presignature_storage::PresignatureTaken;
+
 /// Generating phase — see [`SignPhase::Generating`].
 pub struct GeneratingPhase {
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
+    /// Our reservation when we are the proposer; `None` for a deliberator,
+    /// whose share is taken from storage when generation starts.
     pub presignature: Option<PresignatureReservation>,
     pub accepted_participants: Vec<Participant>,
 }
@@ -24,7 +28,8 @@ pub enum SignPhase {
     /// Agree on the presignature and participant set: the proposer collects
     /// Accepts and broadcasts Start; each deliberator does Propose -> Accept -> Start.
     Posit(PositPhase),
-    /// Commit the reserved presignature and run the signing protocol to completion.
+    /// Take the agreed presignature (commit our reservation, or take our share
+    /// from storage) and run the signing protocol to completion.
     Generating(GeneratingPhase),
     /// Terminal: the request finished (`Ok`) or aborted (`Err`).
     Complete(Result<(), SignError>),
@@ -62,20 +67,9 @@ impl GeneratingPhase {
             "posit complete, starting generation"
         );
 
-        let presignature_pending = if let Some(reservation) = self.presignature.take() {
-            // Commit: actually remove from Redis now that posit succeeded and generation starts
-            match reservation.commit().await {
-                Some(taken) => PendingPresignature::Available(Box::new(taken)),
-                None => {
-                    return state.reorganize("failed to commit presignature reservation");
-                }
-            }
-        } else {
-            PendingPresignature::InStorage(
-                self.presignature_id,
-                self.proposer,
-                ctx.presignatures.clone(),
-            )
+        let taken = match self.take_presignature(ctx).await {
+            Ok(taken) => taken,
+            Err(reason) => return state.reorganize(&reason),
         };
 
         // Create and run signature generator, which will drive the protocol to completion.
@@ -84,7 +78,7 @@ impl GeneratingPhase {
             &gen_ctx,
             self.proposer,
             Arc::clone(&state.request),
-            presignature_pending,
+            taken,
             self.accepted_participants.clone(),
         )
         .await
@@ -115,6 +109,23 @@ impl GeneratingPhase {
             Ok(()) => SignPhase::Complete(Ok(())),
             Err(err) => state.reorganize(&format!("signature generation failed: {err:?}")),
         }
+    }
+
+    /// The proposer commits its reservation. A deliberator takes its share from
+    /// storage. Reorganize in case of a failure.
+    async fn take_presignature(&mut self, ctx: &SignTask) -> Result<PresignatureTaken, String> {
+        if let Some(reservation) = self.presignature.take() {
+            return reservation
+                .commit()
+                .await
+                .ok_or_else(|| "failed to commit presignature reservation".to_string());
+        }
+
+        let id = self.presignature_id;
+        ctx.presignatures
+            .take(id, self.proposer)
+            .await
+            .ok_or_else(|| format!("failed to take presignature {id} from storage"))
     }
 
     /// Reject a `Propose` that arrives while we are already generating; drop

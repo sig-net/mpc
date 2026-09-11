@@ -1,43 +1,60 @@
 pub mod error;
 
-use crate::storage;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+use google_cloud_auth::credentials::AccessTokenCredentials;
+use reqwest12 as reqwest;
+use serde::{Deserialize, Serialize};
 
-use google_secretmanager1::api::{AddSecretVersionRequest, SecretPayload};
-use google_secretmanager1::oauth2::authenticator::ApplicationDefaultCredentialsTypes;
-use google_secretmanager1::oauth2::{
-    ApplicationDefaultCredentialsAuthenticator, ApplicationDefaultCredentialsFlowOpts,
-};
-use google_secretmanager1::SecretManager;
-use hyper::client::HttpConnector;
-use hyper_rustls::HttpsConnector;
+use crate::storage;
 
 pub type SecretResult<T> = std::result::Result<T, error::SecretStorageError>;
 
+const SECRET_MANAGER_ENDPOINT: &str = "https://secretmanager.googleapis.com";
+const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
+
+#[derive(Deserialize)]
+struct AccessSecretVersionResponse {
+    #[serde(default)]
+    payload: Option<SecretPayload>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SecretPayload {
+    #[serde(default)]
+    data: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AddSecretVersionRequest {
+    payload: AddSecretVersionPayload,
+}
+
+#[derive(Serialize)]
+struct AddSecretVersionPayload {
+    data: String,
+}
+
 #[derive(Clone)]
 pub struct SecretManagerService {
-    secret_manager: SecretManager<HttpsConnector<HttpConnector>>,
+    http: reqwest::Client,
+    credentials: AccessTokenCredentials,
     project_id: String,
 }
 
 impl SecretManagerService {
     #[tracing::instrument(level = "debug", skip_all, fields(name = name.as_ref()))]
     pub async fn load_secret<T: AsRef<str>>(&self, name: T) -> SecretResult<Option<Vec<u8>>> {
-        let (_, response) = self
-            .secret_manager
-            .projects()
-            .secrets_versions_access(&format!(
-                "projects/{}/secrets/{}/versions/latest",
-                self.project_id,
-                name.as_ref()
-            ))
-            .doit()
-            .await?;
-        match response.payload {
-            // GCP does not allow to upload empty secrets, so we reserve 1-byte values as a
-            // placeholder for empty secrets.
-            Some(SecretPayload {
-                data: Some(data), ..
-            }) if data.len() > 1 => Ok(Some(data)),
+        let url = format!(
+            "{SECRET_MANAGER_ENDPOINT}/v1/projects/{}/secrets/{}/versions/latest",
+            self.project_id,
+            name.as_ref(),
+        );
+        let response = self.request(reqwest::Method::GET, &url, None).await?;
+        let body: AccessSecretVersionResponse = response.json().await?;
+        match body.payload.and_then(|p| p.data).map(|d| BASE64.decode(d)) {
+            Some(Ok(data)) if data.len() > 1 => Ok(Some(data)),
+            Some(Err(err)) => Err(err.into()),
             _ => {
                 tracing::error!("failed to load existing key share, presuming it is missing");
                 Ok(None)
@@ -46,24 +63,48 @@ impl SecretManagerService {
     }
 
     pub async fn store_secret<T: AsRef<str>>(&mut self, data: &[u8], name: T) -> SecretResult<()> {
-        self.secret_manager
-            .projects()
-            .secrets_add_version(
-                AddSecretVersionRequest {
-                    payload: Some(SecretPayload {
-                        data: Some(data.to_owned()),
-                        ..Default::default()
-                    }),
-                },
-                &format!("projects/{}/secrets/{}", self.project_id, name.as_ref()),
-            )
-            .doit()
-            .await
-            .map_err(|e| {
-                tracing::error!(%e, "failed to store secret");
-                e
-            })?;
+        let url = format!(
+            "{SECRET_MANAGER_ENDPOINT}/v1/projects/{}/secrets/{}:addVersion",
+            self.project_id,
+            name.as_ref(),
+        );
+        let body = AddSecretVersionRequest {
+            payload: AddSecretVersionPayload {
+                data: BASE64.encode(data),
+            },
+        };
+        self.request(
+            reqwest::Method::POST,
+            &url,
+            Some(serde_json::to_vec(&body)?),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, "failed to store secret");
+            e
+        })?;
         Ok(())
+    }
+
+    async fn request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        body: Option<Vec<u8>>,
+    ) -> SecretResult<reqwest::Response> {
+        let token = self.credentials.access_token().await?;
+        let mut request = self.http.request(method, url).bearer_auth(token.token);
+        if let Some(body) = body {
+            request = request.header(reqwest::header::CONTENT_TYPE, "application/json");
+            request = request.body(body);
+        }
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let message = response.text().await.unwrap_or_default();
+            return Err(error::SecretStorageError::Api { status, message });
+        }
+        Ok(response)
     }
 }
 
@@ -74,31 +115,16 @@ pub struct GcpService {
 
 impl GcpService {
     pub async fn init(storage_options: &storage::Options) -> anyhow::Result<Self> {
-        let project_id = storage_options.gcp_project_id.clone();
-        let secret_manager = {
-            // restring client to use https in production
-            let client = hyper::Client::builder().build(
-                hyper_rustls::HttpsConnectorBuilder::new()
-                    .with_native_roots()
-                    .https_only()
-                    .enable_http1()
-                    .enable_http2()
-                    .build(),
-            );
-            let opts = ApplicationDefaultCredentialsFlowOpts::default();
-            let authenticator = match ApplicationDefaultCredentialsAuthenticator::builder(opts)
-                .await
-            {
-                ApplicationDefaultCredentialsTypes::InstanceMetadata(auth) => auth.build().await?,
-                ApplicationDefaultCredentialsTypes::ServiceAccount(auth) => auth.build().await?,
-            };
-            SecretManager::new(client.clone(), authenticator.clone())
-        };
+        let credentials = google_cloud_auth::credentials::Builder::default()
+            .with_scopes([CLOUD_PLATFORM_SCOPE])
+            .build_access_token_credentials()?;
+        let http = reqwest::Client::builder().https_only(true).build()?;
 
         Ok(Self {
             secret_manager: SecretManagerService {
-                secret_manager,
-                project_id,
+                http,
+                credentials,
+                project_id: storage_options.gcp_project_id.clone(),
             },
         })
     }

@@ -2,6 +2,11 @@ name: Unit
 on:
   pull_request:
   merge_group:
+  # Cache policy: docs/ci-caching.md
+  push:
+    branches: [develop]
+    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "deny.toml", "rust-toolchain*", .github/workflows/unit.yml]
+  workflow_dispatch:
 
 env:
   RUSTFLAGS: -D warnings
@@ -34,11 +39,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: unit-test
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
       
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
@@ -80,7 +84,11 @@ jobs:
           profile: minimal
           toolchain: 1.93.0
 
-      # Run cargo-audit to check for vulnerable dependencies
-      - uses: rustsec/audit-check@v2.0.0
+      # Check the feature-resolved dependency graph: security advisories
+      # (vulnerabilities deny; `unmaintained`/`unsound` downgraded to warnings to
+      # match the previous cargo-audit behavior), license compliance, dependency
+      # bans, and source allow-listing.
+      - name: Check dependencies (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          command: check advisories bans licenses sources -W unmaintained -W unsound --hide-inclusion-graph

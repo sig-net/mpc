@@ -17,10 +17,8 @@ jobs:
         suite:
           - name: Stream
             filter: canton_stream
-            cache-key: canton-test
           - name: E2E
             filter: cases::canton
-            cache-key: canton-e2e-test
 
     steps:
       - uses: actions/checkout@v6
@@ -38,8 +36,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Redis
-        run: docker pull redis:7.4.2
+      # Pull the images in parallel. The images are used in Canton test harness
+      - name: Pull Redis and Foundry images
+        run: |
+          printf '%s\n' redis:7.4.2 ghcr.io/foundry-rs/foundry:nightly \
+            | xargs -P "$(nproc)" -n 1 docker pull
 
       - name: Install Java 21
         uses: actions/setup-java@v4
@@ -84,11 +85,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.suite.cache-key }}
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-full
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Build eth contract
         run: just build eth

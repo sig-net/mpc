@@ -28,7 +28,6 @@ pub mod helpers;
 pub mod midnight_stream;
 pub mod mpc;
 pub mod mpc_with_stream;
-pub mod nightly;
 pub mod solana;
 pub mod solana_stream;
 pub mod state_sync;

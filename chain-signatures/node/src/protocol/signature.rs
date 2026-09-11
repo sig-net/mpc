@@ -2,11 +2,9 @@
 
 use crate::backlog::Backlog;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
-use crate::protocol::presignature::PresignatureId;
 use crate::rpc::{GovernanceInfo, RpcChannel};
 use crate::sign_bidirectional::PublishState;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
-use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
 use mpc_chain_near::AffinePointExt as _;
 
@@ -63,24 +61,16 @@ pub(crate) struct SignGenerator {
 }
 
 impl SignGenerator {
-    /// Fetch the committed presignature, apply the delta, and build the cait-sith signing protocol.
+    /// Apply the request's delta to the taken presignature and build the
+    /// cait-sith signing protocol.
     pub(crate) async fn new(
         ctx: &GenerateCtx,
         proposer: Participant,
         request: Arc<IndexedSignRequest>,
-        presignature: PendingPresignature,
+        taken: PresignatureTaken,
         participants: Vec<Participant>,
     ) -> Result<Self, InitializationError> {
-        let presignature_id = presignature.id();
-        let taken = presignature
-            .fetch(Duration::from_millis(ctx.cfg.signature.generation_timeout))
-            .await
-            .ok_or_else(|| {
-                InitializationError::BadParameters(format!(
-                    "presignature {presignature_id} not found or timeout",
-                ))
-            })?;
-
+        let presignature_id = taken.artifact.id;
         let sign_id = request.id;
         tracing::info!(
             me = ?ctx.governance.me,
@@ -368,53 +358,6 @@ impl Drop for SignGenerator {
             msg.unsubscribe_signature(sign_id, presignature_id).await;
             msg.filter_sign(sign_id, presignature_id).await;
         });
-    }
-}
-
-/// A presignature the generator will consume: already taken in memory, or still in storage (fetched with a timeout once generation starts).
-pub(crate) enum PendingPresignature {
-    Available(Box<PresignatureTaken>),
-    InStorage(PresignatureId, Participant, PresignatureStorage),
-}
-
-impl PendingPresignature {
-    pub fn id(&self) -> PresignatureId {
-        match self {
-            PendingPresignature::Available(taken) => taken.artifact.id,
-            PendingPresignature::InStorage(id, _, _) => *id,
-        }
-    }
-
-    /// Resolve to the taken presignature, polling storage up to `timeout` if not already in memory.
-    pub async fn fetch(self, timeout: Duration) -> Option<PresignatureTaken> {
-        let (id, storage, owner) = match self {
-            PendingPresignature::Available(taken) => return Some(*taken),
-            PendingPresignature::InStorage(id, owner, storage) => (id, storage, owner),
-        };
-
-        let presignature = tokio::time::timeout(timeout, async {
-            // TODO: we can make storage wait for presignature to be available instead of here
-            let mut interval = tokio::time::interval(Duration::from_millis(250));
-            loop {
-                interval.tick().await;
-                if let Some(presignature) = storage.take(id, owner).await {
-                    break presignature;
-                };
-            }
-        })
-        .await;
-
-        match presignature {
-            Ok(presignature) => Some(presignature),
-            Err(_) => {
-                tracing::warn!(
-                    id,
-                    ?timeout,
-                    "timeout waiting for presignature to be available"
-                );
-                None
-            }
-        }
     }
 }
 

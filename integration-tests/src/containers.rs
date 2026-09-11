@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
@@ -12,8 +12,7 @@ use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
 use backon::{ExponentialBuilder, Retryable};
 use bollard::errors::Error as DockerError;
-use bollard::network::CreateNetworkOptions;
-use bollard::secret::Ipam;
+use bollard::models::{Ipam, NetworkCreateRequest};
 use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
@@ -144,23 +143,19 @@ impl DockerClient {
     }
 
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
-        let create_network_options = CreateNetworkOptions {
-            name: network,
-            check_duplicate: true,
-            driver: if cfg!(windows) {
-                "transparent"
+        let create_network_request = NetworkCreateRequest {
+            name: network.to_string(),
+            driver: Some(if cfg!(windows) {
+                "transparent".to_string()
             } else {
-                "bridge"
-            },
-            ipam: Ipam {
-                config: None,
-                ..Default::default()
-            },
+                "bridge".to_string()
+            }),
+            ipam: Some(Ipam::default()),
             ..Default::default()
         };
         // Concurrent test threads have a race condition on creating this!
         // => Treat 409 Conflict (network already exists) as success and continue.
-        match self.docker.create_network(create_network_options).await {
+        match self.docker.create_network(create_network_request).await {
             Ok(_) => Ok(()),
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 409, ..
@@ -727,13 +722,8 @@ impl Solana {
                 .ok()
                 .is_some_and(|balance| balance > 0);
 
-            if version_ready && blockhash_ready && ws_ready {
-                if !funded {
-                    tracing::warn!(
-                        attempt,
-                        "solana validator RPC is ready but payer balance is still zero"
-                    );
-                }
+            if version_ready && blockhash_ready && ws_ready && funded {
+                Self::wait_for_block_production(rpc_client).await?;
                 return Ok(());
             }
 
@@ -749,6 +739,23 @@ impl Solana {
         }
 
         anyhow::bail!("solana-test-validator did not become ready in time")
+    }
+
+    /// Wait for the validator to produce a new block after startup or restart.
+    async fn wait_for_block_production(rpc_client: &SolanaRpcClient) -> anyhow::Result<()> {
+        const POLL: Duration = Duration::from_millis(100);
+        const DEADLINE: Duration = Duration::from_secs(30);
+
+        let start = Instant::now();
+        let last_slot = rpc_client.get_slot().await?;
+        while Instant::now() - start < DEADLINE {
+            sleep(POLL).await;
+            let slot = rpc_client.get_slot().await?;
+            if slot > last_slot {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("solana-test-validator did not produce new slots in time")
     }
 
     /// Kill and relaunch the validator against the same ledger

@@ -3,6 +3,11 @@ name: Midnight Integration Tests
 on:
   pull_request:
   merge_group:
+  # Cache policy: docs/ci-caching.md
+  push:
+    branches: [develop]
+    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "rust-toolchain*", .github/workflows/midnight.yml]
+  workflow_dispatch:
 
 env:
   RUSTFLAGS: -D warnings
@@ -21,6 +26,24 @@ jobs:
           mkdir -p "$HOME/.cargo/bin"
           curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Prefetch every image the real-stack test starts, in parallel
+      - name: Pull Docker images
+        run: |
+          {
+            echo 'redis:7.4.2'
+            echo 'ghcr.io/foundry-rs/foundry:nightly'
+            perl -0ne 'while (/const \w+_IMAGE: \(&str, &str\) = \(\s*"([^"]+)",\s*"([^"]+)",?/g) { print "$1:$2\n" }' \
+              integration-tests/src/midnight.rs
+          } | tee /tmp/images.txt | xargs -P "$(nproc)" -n 1 docker pull
+          test "$(wc -l < /tmp/images.txt)" -eq 5
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -86,10 +109,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: midnight-real-stack
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-full
           cache-targets: true
           cache-on-failure: false
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
