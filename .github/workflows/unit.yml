@@ -84,10 +84,11 @@ jobs:
           profile: minimal
           toolchain: 1.93.0
 
-      # Check the feature-resolved dependency graph for security advisories.
-      # `unmaintained`/`unsound` are downgraded to warnings to match the previous
-      # cargo-audit behavior; vulnerabilities always fail.
-      - name: Check advisories (cargo-deny)
+      # Check the feature-resolved dependency graph: security advisories
+      # (vulnerabilities deny; `unmaintained`/`unsound` downgraded to warnings to
+      # match the previous cargo-audit behavior), license compliance, dependency
+      # bans, and source allow-listing.
+      - name: Check dependencies (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check advisories -W unmaintained -W unsound
+          command: check advisories bans licenses sources -W unmaintained -W unsound --hide-inclusion-graph

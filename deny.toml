@@ -29,14 +29,46 @@ ignore = [
 ]
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+# Permissive licenses only
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+
+# ck-meow ships a deliberately mangled ("uwuified") MIT license text, pin the file hash to MIT.
+[[licenses.clarify]]
+name = "ck-meow"
+version = "0.1.0"
+expression = "MIT"
+license-files = [{ path = "LICENSE", hash = 0xe0d600d3 }]
+
+# Ignore private licenses for workspace members and third-party git-pinned helios crates.
+[licenses.private]
+ignore = true
+ignore-sources = ["https://github.com/a16z/helios"]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+# Fail on any dependency from a registry or git repo not explicitly
+# allow-listed below.
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = [
+    "https://github.com/a16z/helios",
+    "https://github.com/dalek-cryptography/curve25519-dalek",
+    "https://github.com/midnightntwrk/midnight-ledger",
+    "https://github.com/sig-net/cait-sith",
+]

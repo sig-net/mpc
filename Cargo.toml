@@ -23,6 +23,7 @@ resolver = "2"
 
 [workspace.package]
 version = "1.18.0"
+publish = false
 
 [workspace.dependencies]
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
