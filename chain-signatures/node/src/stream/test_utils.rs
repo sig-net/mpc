@@ -1,12 +1,12 @@
 //! Shared test fixtures for the `stream` module tests.
 
 use crate::backlog::Backlog;
-use crate::mesh::connection::NodeStatus;
 use crate::mesh::MeshState;
+use crate::mesh::connection::NodeStatus;
 use crate::node_client::NodeClient;
 use crate::protocol::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
-use crate::stream::{supervisor::run_supervised, StreamContext};
+use crate::stream::{StreamContext, supervisor::run_supervised};
 use alloy::primitives::{Address, B256};
 use cait_sith::protocol::Participant;
 use k256::{AffinePoint, ProjectivePoint, Scalar};

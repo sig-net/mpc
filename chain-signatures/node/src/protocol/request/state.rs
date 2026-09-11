@@ -1,4 +1,3 @@
-use super::limiter::SignPermit;
 use super::organize::OrganizingPhase;
 use super::task::SignPhase;
 use super::*;
@@ -9,7 +8,6 @@ pub struct SignState {
     pub mesh_state: watch::Receiver<MeshState>,
     /// Budget for the current organizing+posit attempt.
     pub budget: TimeoutBudget,
-    pub permit: Option<SignPermit>,
     /// The highest round sent by a peer
     pub highest_seen_round: usize,
     /// Posit message for `highest_seen_round` round.
@@ -21,7 +19,7 @@ pub struct SignState {
     /// INVARIANT: All messages stored here are for `highest_seen_round`. Must
     /// be cleared when `highest_seen_round` changes. One slot per sender.
     pub buffered_messages: HashMap<Participant, SignPositMessage>,
-    /// Shared with `SignEntry` so a respawn resumes at the round it left off;
+    /// Shared with the live slot so a respawn resumes at the round it left off;
     /// peers rely on our rounds never going down.
     carried_round: Arc<AtomicUsize>,
 }
@@ -37,7 +35,6 @@ impl SignState {
             request,
             mesh_state,
             budget: TimeoutBudget::new(round_timeout(0)),
-            permit: None,
             highest_seen_round: 0,
             buffered_messages: HashMap::new(),
             carried_round,
@@ -58,10 +55,9 @@ impl SignState {
         &self.request
     }
 
-    /// Abandon the current attempt: advance to the next round (releasing the
-    /// held permit and resetting the timeout budget) and restart the state
-    /// machine from the Organizing phase. The single back-edge of the sign
-    /// state machine.
+    /// Abandon the current attempt: advance to the next round (resetting the
+    /// timeout budget) and restart the state machine from the Organizing
+    /// phase. The single back-edge of the sign state machine.
     pub fn reorganize(&mut self, reason: &str) -> SignPhase {
         tracing::warn!(
             sign_id = ?self.request.id,
@@ -80,7 +76,6 @@ impl SignState {
             self.highest_seen_round,
         ));
         self.budget.reset(round_timeout(self.round));
-        self.permit = None;
         tracing::debug!(prev_round, new_round = self.round, "bumped round");
     }
 

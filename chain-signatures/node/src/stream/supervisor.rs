@@ -2,7 +2,7 @@
 // `run()` and dispatch its events. Regression or a watchdog stall cancels
 // `run()` and restarts it, re-running light recovery first.
 use super::recovery::recover_backlog;
-use super::{handle_chain_event, StreamContext};
+use super::{StreamContext, handle_chain_event};
 
 use crate::backlog::{Backlog, Checkpoint};
 use crate::types::CheckpointWatcher;
@@ -250,7 +250,7 @@ mod tests {
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::{mpsc, watch, Notify};
+    use tokio::sync::{Notify, mpsc, watch};
 
     /// Creates a test `StreamContext` along with channels for checkpoint and mesh state updates.
     fn test_ctx(
@@ -397,10 +397,12 @@ mod tests {
             applied.digest(),
             mpc_primitives::reset_checkpoint_digest(chain, 42)
         );
-        assert!(backlog
-            .confirm_consensus(chain, applied.digest())
-            .await
-            .unwrap());
+        assert!(
+            backlog
+                .confirm_consensus(chain, applied.digest())
+                .await
+                .unwrap()
+        );
 
         let (_tx, mut rx) = make_digest(42, mpc_primitives::reset_checkpoint_digest(chain, 42));
 
@@ -622,10 +624,12 @@ mod tests {
         let backlog = Backlog::new();
         backlog.set_processed_block(chain, 100).await.unwrap();
         let stale = backlog.checkpoint(chain).await.unwrap();
-        assert!(backlog
-            .confirm_consensus(chain, stale.digest())
-            .await
-            .unwrap());
+        assert!(
+            backlog
+                .confirm_consensus(chain, stale.digest())
+                .await
+                .unwrap()
+        );
 
         let attempts = Arc::new(AtomicUsize::new(0));
         let first_cancel = Arc::new(Notify::new());

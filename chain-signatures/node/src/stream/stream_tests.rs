@@ -130,14 +130,14 @@ async fn test_stream_handles_sign_and_respond() {
     )
     .await;
 
-    // We should have received the Request then Completion
+    // Catchup marks the chain live, then the sign request and its completion.
     let msg1 = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
         .unwrap()
         .unwrap();
     match msg1 {
-        SignCommand::Request(req) => assert_eq!(req.id, sign_id),
-        _ => panic!("expected request"),
+        SignCommand::ChainLive(chain) => assert_eq!(chain, Chain::Solana),
+        other => panic!("expected chain-live, got {other:?}"),
     }
 
     let msg2 = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -145,8 +145,17 @@ async fn test_stream_handles_sign_and_respond() {
         .unwrap()
         .unwrap();
     match msg2 {
+        SignCommand::Request(req) => assert_eq!(req.id, sign_id),
+        other => panic!("expected request, got {other:?}"),
+    }
+
+    let msg3 = timeout(Duration::from_secs(1), sign_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match msg3 {
         SignCommand::Completion(id) => assert_eq!(id, sign_id),
-        _ => panic!("expected completion"),
+        other => panic!("expected completion, got {other:?}"),
     }
 }
 
@@ -245,7 +254,16 @@ async fn test_bidirectional_sign_request_enqueues_command() {
     )
     .await;
 
-    // A SignCommand::Request should have been emitted for the bidirectional request
+    // Catchup first, then the bidirectional request.
+    let live = timeout(Duration::from_secs(1), sign_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match live {
+        SignCommand::ChainLive(chain) => assert_eq!(chain, Chain::Solana),
+        other => panic!("expected chain-live, got {other:?}"),
+    }
+
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
         .unwrap()
@@ -466,9 +484,13 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
 
     run_stream_with_two_node_mesh(indexer, sign_tx, backlog.clone(), root_pk).await;
 
+    match timeout(Duration::from_secs(1), sign_rx.recv()).await {
+        Ok(Some(SignCommand::ChainLive(Chain::Ethereum))) => {}
+        other => panic!("expected chain-live after catchup, got {other:?}"),
+    }
     match timeout(Duration::from_millis(100), sign_rx.recv()).await {
         Err(_) | Ok(None) => {}
-        Ok(Some(msg)) => panic!("unexpected sign message during catchup: {msg:?}"),
+        Ok(Some(msg)) => panic!("unexpected extra sign message: {msg:?}"),
     }
     assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
 }
@@ -521,13 +543,10 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
         .expect("recv should not timeout")
-        .expect("replacement request should be requeued");
+        .expect("catchup should mark the chain live");
     match msg {
-        SignCommand::Request(req) => {
-            assert_eq!(req.id, sign_id);
-            assert_eq!(req.unix_timestamp_indexed, replayed_timestamp);
-        }
-        other => panic!("expected replacement request after catchup, got {other:?}"),
+        SignCommand::ChainLive(Chain::Ethereum) => {}
+        other => panic!("expected chain-live after catchup, got {other:?}"),
     }
 
     let entry = backlog
@@ -597,9 +616,13 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
         .await;
     });
 
+    match timeout(Duration::from_secs(1), sign_rx.recv()).await {
+        Ok(Some(SignCommand::ChainLive(Chain::Solana))) => {}
+        other => panic!("expected chain-live after catchup, got {other:?}"),
+    }
     match timeout(Duration::from_millis(100), sign_rx.recv()).await {
         Err(_) | Ok(None) => {}
-        Ok(Some(msg)) => panic!("unexpected sign message during publish resume: {msg:?}"),
+        Ok(Some(msg)) => panic!("unexpected extra sign message during publish resume: {msg:?}"),
     }
 
     let action = timeout(Duration::from_secs(1), rpc_rx.recv())

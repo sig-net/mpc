@@ -174,9 +174,10 @@ pub struct SignTask {
     pub backlog: Backlog,
     pub cfg: ProtocolConfig,
     pub is_proposer: Arc<AtomicBool>,
-    /// Posit round, shared with `SignEntry` so it survives a respawn.
+    /// Posit round, shared with the live slot so it survives a respawn.
     pub round: Arc<AtomicUsize>,
-    pub limiter: SignLimiter,
+    /// When false, this chain is still catching up: do not propose.
+    pub chain_live: Arc<AtomicBool>,
     pub node_account_id: near_account_id::AccountId,
 }
 

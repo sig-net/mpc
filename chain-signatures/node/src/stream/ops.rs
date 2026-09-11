@@ -49,18 +49,13 @@ pub(crate) async fn requeue_pending_sign_requests(
     ctx: &StreamContext,
     source_chain: Chain,
 ) -> anyhow::Result<()> {
-    for sign_request in ctx.backlog.take_requeueable_requests(source_chain).await {
-        let sign_id = sign_request.id;
-        let source_chain = sign_request.chain;
-        ctx.sign_tx
-            .send(SignCommand::Request(sign_request))
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to requeue sign request after catchup for sign id {sign_id:?} on chain {source_chain}"
-                )
-            })?;
-    }
+    // Parked requests already sit in the backlog. Tell the spawner this chain
+    // is live so it can fill proposer slots; do not dump every id onto the
+    // command channel.
+    ctx.sign_tx
+        .send(SignCommand::ChainLive(source_chain))
+        .await
+        .with_context(|| format!("failed to mark chain {source_chain} live after catchup"))?;
     Ok(())
 }
 
@@ -106,7 +101,9 @@ pub(crate) async fn process_respond_event(
                 .await
         }
         SignKind::RespondBidirectional(_) => {
-            anyhow::bail!("unexpected sign type: RespondBidirectional should not be generated from a sign event");
+            anyhow::bail!(
+                "unexpected sign type: RespondBidirectional should not be generated from a sign event"
+            );
         }
     }
 }

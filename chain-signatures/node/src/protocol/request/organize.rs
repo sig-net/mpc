@@ -1,4 +1,3 @@
-use super::limiter::SignLimitError;
 use super::posit::PositPhase;
 use super::state::SignState;
 use super::task::SignPhase;
@@ -12,7 +11,7 @@ impl OrganizingPhase {
     ///
     /// Both operands are reduced before adding: `round` comes from
     /// `highest_seen_round`, which a peer sets, so it can be arbitrarily large.
-    fn proposer_per_round(
+    pub(crate) fn proposer_per_round(
         round: usize,
         participants: &[Participant],
         entropy: &[u8; 32],
@@ -88,7 +87,8 @@ impl OrganizingPhase {
             // elect different proposers and diverge permanently (#907).
             let proposer = Self::proposer_per_round(state.round(), &participants, &entropy);
 
-            let is_proposer = proposer == me;
+            // Catchup deliberators must not start proposing if they reorganize.
+            let is_proposer = proposer == me && ctx.chain_live.load(Ordering::Relaxed);
             ctx.is_proposer.store(is_proposer, Ordering::Relaxed);
 
             tracing::info!(
@@ -103,32 +103,6 @@ impl OrganizingPhase {
 
             (active, proposer, is_proposer)
         };
-
-        if is_proposer {
-            let remaining = state.budget.remaining();
-            tracing::info!(
-                ?sign_id,
-                round = ?state.round(),
-                timeout = ?remaining,
-                limit = ctx.limiter.limit(),
-                "proposer waiting for concurrency slot"
-            );
-
-            let permit = match ctx.limiter.acquire(remaining).await {
-                Ok(permit) => permit,
-                Err(SignLimitError::Timeout) => {
-                    return state.reorganize("proposer timeout waiting for concurrency slot");
-                }
-                Err(SignLimitError::Closed) => {
-                    tracing::error!(?sign_id, "proposer semaphore closed");
-                    return SignPhase::Complete(Err(SignError::Aborted));
-                }
-            };
-
-            state.permit = Some(permit);
-        } else {
-            state.permit = None;
-        }
 
         let (presignature_id, presignature, active) = if is_proposer {
             tracing::info!(?sign_id, round = ?state.round(), "proposer waiting for presignature");

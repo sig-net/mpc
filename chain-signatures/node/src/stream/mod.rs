@@ -53,7 +53,8 @@ impl StreamContext {
     }
 
     /// Forward a sign command to the signing pipeline, but only when caught up.
-    /// Pre-catchup commands are dropped: the backlog retains the request and re-enqueues it on `CatchupCompleted`.
+    /// Pre-catchup commands are dropped: the backlog retains the request and
+    /// `CatchupCompleted` sends [`SignCommand::ChainLive`] so the spawner can fill.
     pub async fn try_enqueue(&self, cmd: SignCommand) -> anyhow::Result<()> {
         if self.caught_up {
             self.sign_tx

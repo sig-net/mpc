@@ -1,4 +1,4 @@
-use super::{BacklogEntry, PendingRequests, MAX_PENDING_CHECKPOINTS};
+use super::{BacklogEntry, MAX_PENDING_CHECKPOINTS, PendingRequests};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use enum_map::EnumMap;
@@ -405,10 +405,12 @@ mod tests {
     async fn concurrent_persistence_respects_pending_checkpoint_cap() {
         let checkpoints = Checkpoints::new(CheckpointStorage::in_memory());
         for height in 0..MAX_PENDING_CHECKPOINTS as u64 - 1 {
-            assert!(checkpoints
-                .persist_pending(&checkpoint(height))
-                .await
-                .is_ok());
+            assert!(
+                checkpoints
+                    .persist_pending(&checkpoint(height))
+                    .await
+                    .is_ok()
+            );
         }
 
         let barrier = Arc::new(Barrier::new(2));
@@ -489,10 +491,12 @@ mod tests {
             checkpoints.confirm(latest.chain, latest.digest()).await,
             Ok(true)
         ));
-        assert!(checkpoints
-            .persist_pending(&checkpoint(MAX_PENDING_CHECKPOINTS as u64))
-            .await
-            .is_ok());
+        assert!(
+            checkpoints
+                .persist_pending(&checkpoint(MAX_PENDING_CHECKPOINTS as u64))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

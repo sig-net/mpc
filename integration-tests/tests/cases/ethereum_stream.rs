@@ -13,22 +13,21 @@ use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
 use mpc_chain_integration_core::{
-    utils::{retry::SharedBackoff, test::ChainIndexerStream},
     NoopChainTelemetry, StateManager,
+    utils::{retry::SharedBackoff, test::ChainIndexerStream},
 };
 use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::Backlog;
-use mpc_node::mesh::{connection::NodeStatus, MeshState};
+use mpc_node::mesh::{MeshState, connection::NodeStatus};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{supervisor::run_supervised, StreamContext};
+use mpc_node::stream::{StreamContext, supervisor::run_supervised};
 use mpc_primitives::{
-    BidirectionalTx, Chain, ChainEvent, IndexedSignRequest, SignArgs,
+    BidirectionalTx, Chain, ChainEvent, IndexedSignRequest, LATEST_MPC_KEY_VERSION, SignArgs,
     SignBidirectionalEvent as NodeSignBidirectionalEvent, SignCommand, SignId, SignKind,
-    LATEST_MPC_KEY_VERSION,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
@@ -644,7 +643,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
                 assert_eq!(req.chain, Chain::Solana);
                 saw_execution_follow_up = true;
             }
-            SignCommand::Request(req) if req.id == requeued_sign_id => {
+            SignCommand::ChainLive(Chain::Ethereum) => {
                 saw_requeued_request = true;
             }
             SignCommand::Request(req) if req.chain == Chain::Ethereum => {
@@ -669,7 +668,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     );
     assert!(
         saw_requeued_request,
-        "expected surviving recovered request to be requeued after catchup"
+        "expected catchup to mark the ethereum chain live for parked recovered requests"
     );
 
     run_handle.abort();
@@ -834,7 +833,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let mut saw_catchup_flush = false;
     for _ in 0..20 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(10)).await? {
-            SignCommand::Request(req) if req.id == dummy_sign_id => {
+            SignCommand::ChainLive(Chain::Ethereum) => {
                 saw_catchup_flush = true;
                 break;
             }
@@ -843,7 +842,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     }
     assert!(
         saw_catchup_flush,
-        "ethereum stream did not flush the pre-seeded request after catchup"
+        "ethereum stream did not mark the chain live after catchup"
     );
 
     let (tx_hash, tx_block) = submit_eth_transfer_with_block(&ctx).await?;

@@ -17,6 +17,8 @@ pub enum SignCommand {
     Request(Arc<IndexedSignRequest>),
     Completion(SignId),
     AbortChain(Chain),
+    /// The chain has finished catchup: proposer admission may start.
+    ChainLive(Chain),
 }
 
 /// All relevant info pertaining to an indexed sign request.

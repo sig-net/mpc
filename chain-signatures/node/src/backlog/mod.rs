@@ -14,9 +14,12 @@ use mpc_primitives::{
     SignId, SignKind, Signature,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::{Mutex, RwLock, oneshot, watch};
+
+/// Cap on waiters for ids not yet in the backlog (D5). Extra waits are dropped.
+const MAX_INDEX_WAITERS: usize = 4096;
 
 pub use checkpoints::Checkpoint;
 
@@ -157,6 +160,33 @@ impl ExecutionWatchers {
     }
 }
 
+/// Shared, non-durable hooks so [`crate::protocol::request::SignQueue`] can wait
+/// on an id being indexed without cloning request bodies.
+struct IndexWatch {
+    seq: AtomicUsize,
+    notify: watch::Sender<usize>,
+    waiters: Mutex<HashMap<SignId, Vec<oneshot::Sender<Arc<IndexedSignRequest>>>>>,
+}
+
+impl std::fmt::Debug for IndexWatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexWatch")
+            .field("seq", &self.seq.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+impl Default for IndexWatch {
+    fn default() -> Self {
+        let (notify, _) = watch::channel(0);
+        Self {
+            seq: AtomicUsize::new(0),
+            notify,
+            waiters: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 /// Backlog manages pending sign-respond requests across multiple chains.
 /// Each chain has its own isolated set of pending requests with their own
 /// publish queues.
@@ -169,6 +199,7 @@ pub struct Backlog {
     execution_watchers: Arc<EnumMap<Chain, RwLock<ExecutionWatchers>>>,
     /// Total number of pending requests across all chains, wrapped in Arc to make clonable
     total_pending: Arc<AtomicUsize>,
+    index_watch: Arc<IndexWatch>,
 }
 
 impl Default for Backlog {
@@ -189,6 +220,7 @@ impl Backlog {
             requests: Arc::default(),
             execution_watchers: Arc::default(),
             total_pending: Arc::new(AtomicUsize::new(0)),
+            index_watch: Arc::new(IndexWatch::default()),
         }
     }
 
@@ -208,7 +240,7 @@ impl Backlog {
     pub async fn insert(&self, request: Arc<IndexedSignRequest>) -> Option<BacklogEntry> {
         let chain = request.chain;
         let id = request.id;
-        let entry = BacklogEntry::new(request);
+        let entry = BacklogEntry::new(Arc::clone(&request));
         let (prev, len) = {
             let mut pending = self.pending(&chain).write().await;
             let p = pending.insert(id, entry);
@@ -218,6 +250,7 @@ impl Backlog {
         // Only increment total pending if this is a new entry
         if prev.is_none() {
             self.total_pending.fetch_add(1, Ordering::Relaxed);
+            self.wake_index_waiters(id, request).await;
         }
 
         self.observe_backlog_size(chain, len);
@@ -235,6 +268,7 @@ impl Backlog {
         // Only decrement total pending if an entry was actually removed
         if removed.is_some() {
             self.total_pending.fetch_sub(1, Ordering::Relaxed);
+            self.drop_index_waiters(id).await;
         }
 
         self.observe_backlog_size(chain, len);
@@ -261,6 +295,74 @@ impl Backlog {
         crate::metrics::requests::BACKLOG_SIZE
             .with_label_values(&[chain.as_str()])
             .set(len as i64);
+    }
+
+    /// Look up a request by id across chains. Used by [`SignQueue`] so the
+    /// spawner never scans the durable maps itself.
+    pub async fn get_by_id(&self, id: &SignId) -> Option<Arc<IndexedSignRequest>> {
+        for chain in Chain::iter() {
+            if let Some(entry) = self.get(chain, id).await {
+                return Some(Arc::clone(&entry.request));
+            }
+        }
+        None
+    }
+
+    /// Pending-generation requests on `chain`, oldest first. The queue peeks
+    /// this instead of cloning the full map.
+    pub async fn parked_generation(&self, chain: Chain) -> Vec<Arc<IndexedSignRequest>> {
+        self.take_requeueable_requests(chain).await
+    }
+
+    /// Subscribe to insert notifications. Sequence ticks on every new insert.
+    pub fn subscribe_index(&self) -> watch::Receiver<usize> {
+        self.index_watch.notify.subscribe()
+    }
+
+    /// Wait until `id` is in the backlog, or return `None` if it is removed
+    /// first / the waiter cap is full (D5).
+    pub async fn wait_indexed(&self, id: SignId) -> Option<Arc<IndexedSignRequest>> {
+        if let Some(request) = self.get_by_id(&id).await {
+            return Some(request);
+        }
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut waiters = self.index_watch.waiters.lock().await;
+            let waiter_count: usize = waiters.values().map(Vec::len).sum();
+            if waiter_count >= MAX_INDEX_WAITERS {
+                tracing::warn!(?id, waiter_count, "dropping index waiter; cap reached");
+                return None;
+            }
+            waiters.entry(id).or_default().push(tx);
+        }
+
+        if let Some(request) = self.get_by_id(&id).await {
+            self.drop_index_waiters(&id).await;
+            return Some(request);
+        }
+
+        rx.await.ok()
+    }
+
+    async fn wake_index_waiters(&self, id: SignId, request: Arc<IndexedSignRequest>) {
+        let waiters = {
+            let mut map = self.index_watch.waiters.lock().await;
+            map.remove(&id).unwrap_or_default()
+        };
+        for waiter in waiters {
+            let _ = waiter.send(Arc::clone(&request));
+        }
+        let seq = self.index_watch.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = self.index_watch.notify.send(seq);
+    }
+
+    async fn drop_index_waiters(&self, id: &SignId) {
+        let waiters = {
+            let mut map = self.index_watch.waiters.lock().await;
+            map.remove(id).unwrap_or_default()
+        };
+        drop(waiters);
     }
 
     /// Returns backlog requests for a chain that are still eligible to be
@@ -656,13 +758,18 @@ impl Backlog {
             "recovering backlog to checkpoint"
         );
 
-        let execution_to_watch = {
+        let (execution_to_watch, restored_ids) = {
             let mut pending = self.pending(&checkpoint.chain).write().await;
             let previous_height = pending.processed_block_height().unwrap_or(0);
 
             // Execution watchers are ephemeral, we need to get all the execution watchers here
             let cleared = pending.len();
             let restored_len = restored.len();
+            let restored_ids: Vec<(SignId, Arc<IndexedSignRequest>)> = restored
+                .requests
+                .iter()
+                .map(|(id, entry)| (*id, Arc::clone(&entry.request)))
+                .collect();
             *pending = restored;
 
             // Update total pending count based on the difference between cleared and restored requests
@@ -678,7 +785,7 @@ impl Backlog {
                 restored_requests = restored_len,
                 "successfully recovered from checkpoint"
             );
-            pending.pending_executions()
+            (pending.pending_executions(), restored_ids)
         };
 
         // Clear execution watchers whose source chain is the recovered chain
@@ -695,6 +802,10 @@ impl Backlog {
             if let Some(tx) = entry.execution_tx().cloned() {
                 self.watch_execution(tx.target_chain, sign_id, tx).await;
             }
+        }
+
+        for (id, request) in restored_ids {
+            self.wake_index_waiters(id, request).await;
         }
     }
 }
@@ -734,7 +845,9 @@ pub enum BacklogError {
     InvalidAdvanceTransition,
     #[error("cannot mark publishing: status must be pending generation")]
     InvalidPublishingTransition,
-    #[error("cannot transition to bidirectional response: id must match and request must be RespondBidirectional")]
+    #[error(
+        "cannot transition to bidirectional response: id must match and request must be RespondBidirectional"
+    )]
     InvalidBidirectionalResponseTransition,
 }
 

@@ -1,7 +1,7 @@
 use super::*;
 use crate::backlog::Backlog;
 use crate::mesh::connection::NodeStatus;
-use crate::mesh::{wait_threshold_active, MeshState};
+use crate::mesh::{MeshState, wait_threshold_active};
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::{PublishState, SignStatus};
@@ -94,14 +94,20 @@ async fn recover_backlog_requeues_pending_signs() {
         .expect("recv should not timeout");
 
     match msg.expect("sign_rx should contain a message") {
-        SignCommand::Request(req) => {
-            assert_eq!(req.id, sign_id);
-            assert_eq!(req.args, args);
-            assert_eq!(req.chain, Chain::Solana);
-            assert_eq!(req.kind, SignKind::Sign);
-            // Verify that the unix_timestamp_indexed is preserved from the original entry
-            assert_eq!(req.unix_timestamp_indexed, unix_timestamp_indexed);
-            assert!(req.unix_timestamp_indexed <= current_unix_timestamp());
+        SignCommand::ChainLive(chain) => {
+            assert_eq!(chain, Chain::Solana);
+            let recovered = ctx
+                .backlog
+                .get(Chain::Solana, &sign_id)
+                .await
+                .expect("recovered request stays parked in the backlog");
+            assert_eq!(recovered.request.args, args);
+            assert_eq!(recovered.request.kind, SignKind::Sign);
+            assert_eq!(
+                recovered.request.unix_timestamp_indexed,
+                unix_timestamp_indexed
+            );
+            assert!(recovered.request.unix_timestamp_indexed <= current_unix_timestamp());
         }
         other => panic!("unexpected message: {:?}", other),
     }
@@ -260,11 +266,12 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
     let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
     assert!(matches!(no_second, Err(_) | Ok(None)));
 
-    assert!(ctx
-        .backlog
-        .get_execution_watchers(tx.target_chain)
-        .await
-        .is_empty());
+    assert!(
+        ctx.backlog
+            .get_execution_watchers(tx.target_chain)
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -317,11 +324,12 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
         tx_after.request.kind,
         SignKind::RespondBidirectional(_)
     ));
-    assert!(ctx
-        .backlog
-        .get_execution_watchers(tx.target_chain)
-        .await
-        .is_empty());
+    assert!(
+        ctx.backlog
+            .get_execution_watchers(tx.target_chain)
+            .await
+            .is_empty()
+    );
 
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
@@ -413,11 +421,19 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         .unwrap()
         .unwrap();
     match msg {
-        SignCommand::Request(req) => {
-            assert_eq!(req.id, sign_id);
-            assert!(matches!(req.kind, SignKind::RespondBidirectional(_)));
+        SignCommand::ChainLive(chain) => {
+            assert_eq!(chain, tx.source_chain);
+            let recovered = recovered_ctx
+                .backlog
+                .get(tx.source_chain, &sign_id)
+                .await
+                .expect("recovered final respond stays parked");
+            assert!(matches!(
+                recovered.request.kind,
+                SignKind::RespondBidirectional(_)
+            ));
         }
-        other => panic!("expected recovered final respond request, got {other:?}"),
+        other => panic!("expected recovered chain-live, got {other:?}"),
     }
 }
 
@@ -707,8 +723,8 @@ async fn process_sign_request_duplicate_is_idempotent() {
         .expect("requeue should enqueue the pending request")
         .expect("sign channel open")
     {
-        SignCommand::Request(req) => assert_eq!(req.id, sign_id),
-        other => panic!("expected a single requeued request, got {other:?}"),
+        SignCommand::ChainLive(chain) => assert_eq!(chain, Chain::Ethereum),
+        other => panic!("expected chain-live after catchup, got {other:?}"),
     }
     assert!(
         timeout(Duration::from_millis(100), sign_rx.recv())
@@ -1214,11 +1230,12 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         assert_eq!(decoded.sign_event_contract_id, sign_event_contract_id);
     };
 
-    assert!(ctx
-        .backlog
-        .get_execution_watchers(tx.target_chain)
-        .await
-        .is_empty());
+    assert!(
+        ctx.backlog
+            .get_execution_watchers(tx.target_chain)
+            .await
+            .is_empty()
+    );
     let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
     assert_eq!(
         tx_after.status(),
@@ -1298,7 +1315,7 @@ async fn requeue_pending_sign_requests_is_chain_scoped() {
         .unwrap()
         .unwrap();
     match msg {
-        SignCommand::Request(req) => assert_eq!(req.id, solana_sign_id),
+        SignCommand::ChainLive(chain) => assert_eq!(chain, Chain::Solana),
         other => panic!("unexpected message: {other:?}"),
     }
 
@@ -1366,7 +1383,9 @@ async fn live_block_votes_for_checkpoint() {
         _ => panic!("unexpected rpc action"),
     }
 
-    assert!(timeout(Duration::from_millis(100), sign_rx.recv())
-        .await
-        .is_err());
+    assert!(
+        timeout(Duration::from_millis(100), sign_rx.recv())
+            .await
+            .is_err()
+    );
 }

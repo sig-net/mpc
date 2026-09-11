@@ -509,7 +509,8 @@ mod tests {
                 if case.remote_use_peer_digest {
                     let latest = fixture.backlog.latest_checkpoint(chain).await.unwrap();
                     assert_eq!(
-                        latest.digest(), remote_digest.unwrap(),
+                        latest.digest(),
+                        remote_digest.unwrap(),
                         "Test case failed: {}, expected local backlog latest checkpoint digest to match consensus digest",
                         case.name
                     );
@@ -616,11 +617,13 @@ mod tests {
         // cursor to match.
         fixture.backlog.set_processed_block(chain, 100).await;
         let stale = fixture.backlog.checkpoint(chain).await.unwrap();
-        assert!(fixture
-            .backlog
-            .confirm_consensus(chain, stale.digest())
-            .await
-            .unwrap());
+        assert!(
+            fixture
+                .backlog
+                .confirm_consensus(chain, stale.digest())
+                .await
+                .unwrap()
+        );
 
         // The contract settles the canonical reset checkpoint for height 42.
         // The mesh is empty, so any attempt to fetch this from a peer would

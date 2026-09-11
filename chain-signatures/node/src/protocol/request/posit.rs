@@ -499,7 +499,7 @@ pub(crate) mod tests {
             cfg: ProtocolConfig::default(),
             is_proposer: Arc::new(AtomicBool::new(false)),
             round: Arc::new(AtomicUsize::new(0)),
-            limiter: SignLimiter::new(1),
+            chain_live: Arc::new(AtomicBool::new(true)),
             node_account_id: account_id,
         };
 
