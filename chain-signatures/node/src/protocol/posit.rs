@@ -7,6 +7,9 @@ use std::fmt;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
+mod barrier;
+pub(crate) use barrier::{PositBarrier, PositBarrierResult};
+
 pub type ProposerId = Participant;
 
 #[derive(Debug)]
@@ -102,7 +105,7 @@ impl<T> PositCounter<T> {
     }
 
     pub fn enough_rejects(&self, threshold: usize) -> bool {
-        self.rejects.len() > self.participants.len() - threshold
+        self.rejects.len() > self.participants.len().saturating_sub(threshold)
     }
 
     pub fn meets_totality(&self) -> bool {
@@ -166,169 +169,178 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         threshold: usize,
         action: &PositAction,
     ) -> PositInternalAction<S> {
-        // Before getting to this point, we should have already checked storage for the related protocols.
-        // All information passed to this function should be valid. The only information that still needs
-        // to be checked is the information about the posit itself and whether we're in the right state for
-        // it to proceed and be acted upon.
-
         match action {
-            PositAction::Propose => {
-                // We have no information about this posit, so we can just accept it.
-                let Some((positor, _)) = self.posits.get(&id) else {
-                    self.posits
-                        .insert(id, (Positor::Deliberator(from), Instant::now()));
-                    return PositInternalAction::Reply(PositAction::Accept);
-                };
-
-                // Checks:
-                // 1. We are not the proposer.
-                // 2. Somebody else hasn't also proposed the protocol.
-                let proposer = positor.id();
-                if positor.is_proposer() {
-                    tracing::warn!(?id, ?from, "received INIT on protocol we already proposed");
-                    PositInternalAction::Reply(PositAction::RejectWithReason(
-                        PositRejectReason::InvalidRequest,
-                    ))
-                } else if proposer != from {
-                    tracing::warn!(
-                        ?id,
-                        ?from,
-                        ?proposer,
-                        "received INIT on conflicting proposer"
-                    );
-                    PositInternalAction::Reply(PositAction::RejectWithReason(
-                        PositRejectReason::InvalidRequest,
-                    ))
-                } else {
-                    PositInternalAction::Reply(PositAction::Accept)
-                }
-            }
-            PositAction::Start(participants) => {
-                // Checks:
-                // 1. We are a participant in the protocol.
-                // 2. We are not the proposer.
-                // 3. The proposer is the one that started the protocol.
-
-                if !participants.contains(&self.me) {
-                    tracing::warn!(
-                        ?id,
-                        ?from,
-                        "received START on protocol we are not a part of"
-                    );
-                    return PositInternalAction::Reply(PositAction::RejectWithReason(
-                        PositRejectReason::InvalidRequest,
-                    ));
-                }
-
-                if let Some((positor, timestamp)) = self.posits.remove(&id) {
-                    let proposer = positor.id();
-                    if positor.is_proposer() {
-                        tracing::warn!(
-                            ?id,
-                            ?from,
-                            "received START on protocol we already proposed"
-                        );
-                        self.posits.insert(id, (positor, timestamp));
-                        return PositInternalAction::Reply(PositAction::RejectWithReason(
-                            PositRejectReason::InvalidRequest,
-                        ));
-                    } else if proposer != from {
-                        tracing::warn!(
-                            ?id,
-                            ?from,
-                            ?proposer,
-                            "received START on conflicting proposer"
-                        );
-                        self.posits.insert(id, (positor, timestamp));
-                        return PositInternalAction::Reply(PositAction::RejectWithReason(
-                            PositRejectReason::InvalidRequest,
-                        ));
-                    }
-                } else {
-                    tracing::warn!(?id, ?from, "received START on protocol we have no info for");
-                    return PositInternalAction::Reply(PositAction::RejectWithReason(
-                        PositRejectReason::InvalidRequest,
-                    ));
-                }
-
-                PositInternalAction::StartProtocol(
-                    participants.to_vec(),
-                    Positor::Deliberator(from),
-                )
-            }
+            PositAction::Propose => self.handle_propose(id, from),
+            PositAction::Start(participants) => self.handle_start(id, from, participants),
             PositAction::Accept | PositAction::RejectWithReason(_) => {
-                let mut entry = match self.posits.entry(id) {
-                    Entry::Occupied(entry) => entry,
-                    Entry::Vacant(_) => {
-                        tracing::warn!(
-                            ?id,
-                            ?from,
-                            ?action,
-                            "received ACCEPT/REJECT on protocol we have no info for",
-                        );
-                        return PositInternalAction::None;
-                    }
-                };
-
-                let (Positor::Proposer(_, counter), _) = entry.get_mut() else {
-                    tracing::warn!(
-                        ?id,
-                        ?from,
-                        ?action,
-                        "received ACCEPT/REJECT on protocol we are not proposer for",
-                    );
-                    return PositInternalAction::None;
-                };
-
-                if !counter.participants.contains(&from) {
-                    tracing::warn!(
-                        ?id,
-                        ?from,
-                        ?action,
-                        "received ACCEPT/REJECT from participant not in protocol",
-                    );
-                    return PositInternalAction::None;
-                }
-
-                if action.is_accept() {
-                    if counter.accepts.insert(from) {
-                        tracing::info!(?id, ?from, "posit ACCEPT processed");
-                    } else {
-                        tracing::warn!(?id, ?from, "posit ACCEPT duplicate ignored");
-                    }
-                } else if counter.rejects.insert(from) {
-                    tracing::info!(?id, ?from, "posit REJECT processed");
-                } else {
-                    tracing::warn!(?id, ?from, "posit REJECT duplicate ignored");
-                }
-
-                // TODO: broadcast aborting the protocol if we have enough rejections
-                if counter.enough_rejects(threshold) {
-                    tracing::info!(
-                        ?id,
-                        ?counter.accepts,
-                        ?counter.rejects,
-                        "received enough REJECTs, aborting protocol",
-                    );
-                    entry.remove();
-                    return PositInternalAction::Abort;
-                }
-
-                if !counter.meets_totality() {
-                    return PositInternalAction::None;
-                }
-
-                tracing::info!(?id, ?counter.accepts, ?counter.rejects, "received enough ACCEPTs, starting protocol");
-                let (Positor::Proposer(_, counter), _) = entry.remove() else {
-                    unreachable!("we already checked that we are the proposer");
-                };
-                let participants = counter.accepts.into_iter().collect();
-                PositInternalAction::StartProtocol(
-                    participants,
-                    Positor::Proposer(self.me, counter.store),
-                )
+                self.handle_vote(id, from, threshold, action)
             }
         }
+    }
+
+    fn handle_propose(&mut self, id: Id, from: Participant) -> PositInternalAction<S> {
+        // We have no information about this posit, so we can just accept it.
+        let Some((positor, _)) = self.posits.get(&id) else {
+            self.posits
+                .insert(id, (Positor::Deliberator(from), Instant::now()));
+            return PositInternalAction::Reply(PositAction::Accept);
+        };
+
+        // Checks:
+        // 1. We are not the proposer.
+        // 2. Somebody else hasn't also proposed the protocol.
+        let proposer = positor.id();
+        if positor.is_proposer() {
+            tracing::warn!(?id, ?from, "received INIT on protocol we already proposed");
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::InvalidRequest,
+            ))
+        } else if proposer != from {
+            tracing::warn!(
+                ?id,
+                ?from,
+                ?proposer,
+                "received INIT on conflicting proposer"
+            );
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::InvalidRequest,
+            ))
+        } else {
+            PositInternalAction::Reply(PositAction::Accept)
+        }
+    }
+
+    fn handle_start(
+        &mut self,
+        id: Id,
+        from: Participant,
+        participants: &[Participant],
+    ) -> PositInternalAction<S> {
+        // Checks:
+        // 1. We are a participant in the protocol.
+        // 2. We are not the proposer.
+        // 3. The proposer is the one that started the protocol.
+
+        if !participants.contains(&self.me) {
+            tracing::warn!(
+                ?id,
+                ?from,
+                "received START on protocol we are not a part of"
+            );
+            return PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::InvalidRequest,
+            ));
+        }
+
+        if let Some((positor, timestamp)) = self.posits.remove(&id) {
+            let proposer = positor.id();
+            if positor.is_proposer() {
+                tracing::warn!(?id, ?from, "received START on protocol we already proposed");
+                self.posits.insert(id, (positor, timestamp));
+                return PositInternalAction::Reply(PositAction::RejectWithReason(
+                    PositRejectReason::InvalidRequest,
+                ));
+            } else if proposer != from {
+                tracing::warn!(
+                    ?id,
+                    ?from,
+                    ?proposer,
+                    "received START on conflicting proposer"
+                );
+                self.posits.insert(id, (positor, timestamp));
+                return PositInternalAction::Reply(PositAction::RejectWithReason(
+                    PositRejectReason::InvalidRequest,
+                ));
+            }
+        } else {
+            tracing::warn!(?id, ?from, "received START on protocol we have no info for");
+            return PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::InvalidRequest,
+            ));
+        }
+
+        PositInternalAction::StartProtocol(participants.to_vec(), Positor::Deliberator(from))
+    }
+
+    fn handle_vote(
+        &mut self,
+        id: Id,
+        from: Participant,
+        threshold: usize,
+        action: &PositAction,
+    ) -> PositInternalAction<S> {
+        let mut entry = match self.posits.entry(id) {
+            Entry::Occupied(entry) => entry,
+            Entry::Vacant(_) => {
+                tracing::warn!(
+                    ?id,
+                    ?from,
+                    ?action,
+                    "received ACCEPT/REJECT on protocol we have no info for",
+                );
+                return PositInternalAction::None;
+            }
+        };
+
+        let (Positor::Proposer(_, counter), _) = entry.get_mut() else {
+            tracing::warn!(
+                ?id,
+                ?from,
+                ?action,
+                "received ACCEPT/REJECT on protocol we are not proposer for",
+            );
+            return PositInternalAction::None;
+        };
+
+        if !counter.participants.contains(&from) {
+            tracing::warn!(
+                ?id,
+                ?from,
+                ?action,
+                "received ACCEPT/REJECT from participant not in protocol",
+            );
+            return PositInternalAction::None;
+        }
+
+        if action.is_accept() {
+            if counter.accepts.insert(from) {
+                tracing::info!(?id, ?from, "posit ACCEPT processed");
+            } else {
+                tracing::warn!(?id, ?from, "posit ACCEPT duplicate ignored");
+            }
+        } else if counter.rejects.insert(from) {
+            tracing::info!(?id, ?from, "posit REJECT processed");
+        } else {
+            tracing::warn!(?id, ?from, "posit REJECT duplicate ignored");
+        }
+
+        // TODO: broadcast aborting the protocol if we have enough rejections
+        if counter.enough_rejects(threshold) {
+            tracing::info!(
+                ?id,
+                ?counter.accepts,
+                ?counter.rejects,
+                "received enough REJECTs, aborting protocol",
+            );
+            entry.remove();
+            return PositInternalAction::Abort;
+        }
+
+        if !counter.meets_totality() {
+            return PositInternalAction::None;
+        }
+
+        tracing::info!(
+            ?id,
+            ?counter.accepts,
+            ?counter.rejects,
+            "received enough ACCEPTs, starting protocol"
+        );
+        let (Positor::Proposer(_, counter), _) = entry.remove() else {
+            unreachable!("we already checked that we are the proposer");
+        };
+        let participants = counter.accepts.into_iter().collect();
+        PositInternalAction::StartProtocol(participants, Positor::Proposer(self.me, counter.store))
     }
 
     #[cfg(feature = "debug-page")]
@@ -434,128 +446,6 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
             );
         }
         actions
-    }
-}
-
-/// The participants observed by a [`PositBarrier`] when it reaches a terminal
-/// state. `pending` contains participants that have not sent a usable response.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PositBarrierState {
-    pub(crate) accepted: HashSet<Participant>,
-    pub(crate) rejected: HashMap<Participant, PositRejectReason>,
-    pub(crate) pending: HashSet<Participant>,
-}
-
-/// The terminal state of a [`PositBarrier`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PositBarrierResult {
-    Timeout(PositBarrierState),
-    TooManyRejects(PositBarrierState),
-    EnoughAccepts(PositBarrierState),
-}
-
-/// Collects responses to one posit and reports when the posit can be decided.
-///
-/// Unlike [`tokio::sync::Barrier`], this barrier does not require every
-/// participant to respond. The caller owns async I/O and deadlines; this type
-/// only tracks votes and computes the current terminal result.
-pub(crate) struct PositBarrier {
-    participants: HashSet<Participant>,
-    threshold: usize,
-    accepted: HashSet<Participant>,
-    rejected: HashMap<Participant, PositRejectReason>,
-}
-
-impl PositBarrier {
-    /// Create a barrier with the local participant's implicit accept vote.
-    ///
-    /// The local participant is inserted into `participants` if it is not
-    /// already present. Each participant contributes at most one vote: later
-    /// duplicate or contradictory responses are ignored.
-    pub(crate) fn new(me: Participant, participants: &[Participant], threshold: usize) -> Self {
-        let mut participants: HashSet<_> = participants.iter().copied().collect();
-        participants.insert(me);
-
-        let mut accepted = HashSet::new();
-        accepted.insert(me);
-
-        Self {
-            participants,
-            threshold,
-            accepted,
-            rejected: HashMap::new(),
-        }
-    }
-
-    /// Record one participant's response. Returns false for non-voting posit
-    /// actions or senders outside the participant set.
-    ///
-    /// Each participant has one vote: the first response wins, and later
-    /// duplicate or contradictory responses are accepted as handled but do not
-    /// change the recorded result.
-    pub(crate) fn process_action(&mut self, from: Participant, action: &PositAction) {
-        if !self.participants.contains(&from) {
-            return;
-        }
-
-        let response_recorded = self.accepted.contains(&from) || self.rejected.contains_key(&from);
-        match action {
-            PositAction::Accept | PositAction::RejectWithReason(_) if response_recorded => {}
-            PositAction::Accept => {
-                self.accepted.insert(from);
-            }
-            PositAction::RejectWithReason(reason) => {
-                self.rejected.insert(from, *reason);
-            }
-            PositAction::Propose | PositAction::Start(_) => {}
-        }
-    }
-
-    fn enough_accepts(&self) -> bool {
-        self.accepted.len() >= self.threshold
-    }
-
-    fn enough_rejects(&self) -> bool {
-        self.rejected.len() > self.participants.len().saturating_sub(self.threshold)
-    }
-
-    fn meets_totality(&self) -> bool {
-        self.accepted.len() + self.rejected.len() == self.participants.len()
-    }
-
-    pub(crate) fn terminal_result(
-        &self,
-        accept_deadline_reached: bool,
-    ) -> Option<PositBarrierResult> {
-        if self.enough_rejects() {
-            return Some(PositBarrierResult::TooManyRejects(self.state()));
-        }
-
-        if self.enough_accepts() && (accept_deadline_reached || self.meets_totality()) {
-            return Some(PositBarrierResult::EnoughAccepts(self.state()));
-        }
-
-        None
-    }
-
-    pub(crate) fn timeout(&self) -> PositBarrierResult {
-        PositBarrierResult::Timeout(self.state())
-    }
-
-    fn state(&self) -> PositBarrierState {
-        let responded = self
-            .accepted
-            .iter()
-            .copied()
-            .chain(self.rejected.keys().copied())
-            .collect::<HashSet<_>>();
-        let pending = self.participants.difference(&responded).copied().collect();
-
-        PositBarrierState {
-            accepted: self.accepted.clone(),
-            rejected: self.rejected.clone(),
-            pending,
-        }
     }
 }
 
@@ -750,96 +640,14 @@ mod tests {
     }
 
     #[test]
-    fn test_posit_barrier_keeps_first_vote() {
-        let me = Participant::from(0);
-        let participants = vec![
-            me,
-            Participant::from(1),
-            Participant::from(2),
-            Participant::from(3),
-        ];
-        let mut barrier = PositBarrier::new(me, &participants, 2);
-
-        barrier.process_action(
-            Participant::from(1),
-            &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-        );
-        barrier.process_action(
-            Participant::from(3),
-            &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-        );
-        assert_eq!(barrier.state().rejected.len(), 2);
-
-        // A participant has one vote. Contradictory or duplicate responses are
-        // ignored once that participant has responded.
-        barrier.process_action(Participant::from(3), &PositAction::Accept);
-        assert!(!barrier.enough_accepts());
-        barrier.process_action(
-            Participant::from(1),
-            &PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
-        );
-        assert_eq!(barrier.state().rejected.len(), 2);
-        assert_eq!(
-            barrier.state().rejected[&Participant::from(1)],
-            PositRejectReason::AlreadyGenerating
-        );
-
-        barrier.process_action(Participant::from(99), &PositAction::Accept);
-        barrier.process_action(Participant::from(1), &PositAction::Propose);
-    }
-
-    #[test]
-    fn test_posit_barrier_returns_enough_accepts_with_pending() {
-        let me = Participant::from(0);
-        let participants = vec![
-            me,
-            Participant::from(1),
-            Participant::from(2),
-            Participant::from(3),
-        ];
-        let mut barrier = PositBarrier::new(me, &participants, 2);
-        barrier.process_action(Participant::from(1), &PositAction::Accept);
-
-        let Some(PositBarrierResult::EnoughAccepts(state)) = barrier.terminal_result(true) else {
-            panic!("expected enough accepts");
+    fn enough_rejects_handles_invalid_threshold() {
+        let counter = PositCounter {
+            participants: HashSet::from([Participant::from(0), Participant::from(1)]),
+            accepts: HashSet::new(),
+            rejects: HashSet::from([Participant::from(1)]),
+            store: (),
         };
-        assert_eq!(state.accepted.len(), 2);
-        assert!(state.rejected.is_empty());
-        assert_eq!(state.pending.len(), 2);
-    }
 
-    #[test]
-    fn test_posit_barrier_returns_too_many_rejects() {
-        let me = Participant::from(0);
-        let participants = vec![me, Participant::from(1), Participant::from(2)];
-        let mut barrier = PositBarrier::new(me, &participants, 2);
-        barrier.process_action(
-            Participant::from(1),
-            &PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
-        );
-        barrier.process_action(
-            Participant::from(2),
-            &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-        );
-
-        let Some(PositBarrierResult::TooManyRejects(state)) = barrier.terminal_result(false) else {
-            panic!("expected too many rejects");
-        };
-        assert_eq!(state.accepted, HashSet::from([me]));
-        assert_eq!(state.rejected.len(), 2);
-        assert!(state.pending.is_empty());
-    }
-
-    #[test]
-    fn test_posit_barrier_returns_timeout() {
-        let me = Participant::from(0);
-        let participants = vec![me, Participant::from(1)];
-        let barrier = PositBarrier::new(me, &participants, 2);
-        let PositBarrierResult::Timeout(state) = barrier.timeout() else {
-            panic!("expected timeout");
-        };
-        assert_eq!(state.accepted, HashSet::from([me]));
-        assert!(state.rejected.is_empty());
-        assert_eq!(state.pending, HashSet::from([Participant::from(1)]));
+        assert!(counter.enough_rejects(3));
     }
 }

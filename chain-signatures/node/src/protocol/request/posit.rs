@@ -11,7 +11,43 @@ pub struct PositPhase {
     pub presignature: Option<PresignatureReservation>,
 }
 
+#[derive(Clone, Copy)]
+enum RoundStatus {
+    Current,
+    Older,
+    Future,
+}
+
 impl PositPhase {
+    fn classify_round(state: &mut SignState, msg: &SignPositMessage) -> RoundStatus {
+        if let (PositAction::RejectWithReason(PositRejectReason::StaleRound), Some(peer_current)) =
+            (&msg.action, msg.stale_round)
+        {
+            state.record_peer_round(peer_current);
+        }
+
+        match state.round().cmp(&msg.round) {
+            std::cmp::Ordering::Less => RoundStatus::Future,
+            std::cmp::Ordering::Equal => RoundStatus::Current,
+            std::cmp::Ordering::Greater => RoundStatus::Older,
+        }
+    }
+
+    async fn send_stale_round(ctx: &SignTask, state: &SignState, msg: &SignPositMessage) {
+        ctx.msg
+            .send(
+                ctx.governance.me,
+                msg.from,
+                PositMessage {
+                    id: PositProtocolId::Signature(ctx.sign_id, msg.presignature_id, msg.round),
+                    from: ctx.governance.me,
+                    action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
+                    stale_round: Some(state.round()),
+                },
+            )
+            .await;
+    }
+
     /// Deliberator: wait for the proposer's Propose, reply Accept.
     async fn wait_for_propose(
         ctx: &mut SignTask,
@@ -34,18 +70,10 @@ impl PositPhase {
                     from,
                     action,
                     round: peer_round,
-                    stale_round,
+                    stale_round: _,
                 } = &task_msg;
 
-                // A StaleRound reject carries the rejector's current round;
-                // remember it so our next bump catches up in one step.
-                if let (
-                    PositAction::RejectWithReason(PositRejectReason::StaleRound),
-                    Some(peer_current),
-                ) = (action, stale_round)
-                {
-                    state.record_peer_round(*peer_current);
-                }
+                let round_status = Self::classify_round(state, &task_msg);
 
                 // Nothing else to do with a Reject: a deliberator has sent
                 // nothing that could be rejected, and answering one would
@@ -61,33 +89,14 @@ impl PositPhase {
                 // that round later. What we must not do is immediately jump to
                 // that higher round, or else any peer could force themselves to
                 // be the proposer every time.
-                if state.round() > *peer_round {
+                if matches!(round_status, RoundStatus::Older) {
                     tracing::info!(
                         ?from,
                         peer_round,
                         my_round = state.round(),
                         "Rejecting message from older round, as deliberator",
                     );
-                    ctx.msg
-                        .send(
-                            ctx.governance.me,
-                            *from,
-                            PositMessage {
-                                // The id echoes the rejected message so the
-                                // sender knows which attempt we are answering.
-                                id: PositProtocolId::Signature(
-                                    sign_id,
-                                    *presignature_id,
-                                    *peer_round,
-                                ),
-                                from: ctx.governance.me,
-                                action: PositAction::RejectWithReason(
-                                    PositRejectReason::StaleRound,
-                                ),
-                                stale_round: Some(state.round()),
-                            },
-                        )
-                        .await;
+                    Self::send_stale_round(ctx, state, &task_msg).await;
                     continue;
                 }
 
@@ -95,7 +104,7 @@ impl PositPhase {
                 // Note that we must first try and finish the current round and
                 // not immediately jump to that higher round. Otherwise, any peer
                 // could force themselves to be the proposer every time.
-                if state.round() < *peer_round {
+                if matches!(round_status, RoundStatus::Future) {
                     tracing::info!(
                         peer_round,
                         my_round = state.round(),
@@ -220,38 +229,17 @@ impl PositPhase {
             let task_msg = mailbox.recv().await;
             let peer_round = task_msg.round;
 
-            if let (
-                PositAction::RejectWithReason(PositRejectReason::StaleRound),
-                Some(peer_current),
-            ) = (&task_msg.action, task_msg.stale_round)
-            {
-                state.record_peer_round(peer_current);
-            }
+            let round_status = Self::classify_round(state, &task_msg);
 
-            if state.round() > peer_round {
+            if matches!(round_status, RoundStatus::Older) {
                 if matches!(&task_msg.action, PositAction::RejectWithReason(_)) {
                     continue;
                 }
-                ctx.msg
-                    .send(
-                        ctx.governance.me,
-                        task_msg.from,
-                        PositMessage {
-                            id: PositProtocolId::Signature(
-                                ctx.sign_id,
-                                task_msg.presignature_id,
-                                peer_round,
-                            ),
-                            from: ctx.governance.me,
-                            action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
-                            stale_round: Some(state.round()),
-                        },
-                    )
-                    .await;
+                Self::send_stale_round(ctx, state, &task_msg).await;
                 continue;
             }
 
-            if state.round() < peer_round {
+            if matches!(round_status, RoundStatus::Future) {
                 tracing::info!(
                     peer_round,
                     my_round = state.round(),
@@ -328,41 +316,18 @@ impl PositPhase {
                 Some(buffered) => buffered,
                 None => mailbox.recv().await,
             };
-            let peer_round = task_msg.round;
-
-            if let (
-                PositAction::RejectWithReason(PositRejectReason::StaleRound),
-                Some(peer_current),
-            ) = (&task_msg.action, task_msg.stale_round)
-            {
-                state.record_peer_round(peer_current);
-            }
+            let round_status = Self::classify_round(state, &task_msg);
 
             if matches!(&task_msg.action, PositAction::RejectWithReason(_)) {
                 continue;
             }
 
-            if state.round() > peer_round {
-                ctx.msg
-                    .send(
-                        ctx.governance.me,
-                        task_msg.from,
-                        PositMessage {
-                            id: PositProtocolId::Signature(
-                                ctx.sign_id,
-                                task_msg.presignature_id,
-                                peer_round,
-                            ),
-                            from: ctx.governance.me,
-                            action: PositAction::RejectWithReason(PositRejectReason::StaleRound),
-                            stale_round: Some(state.round()),
-                        },
-                    )
-                    .await;
+            if matches!(round_status, RoundStatus::Older) {
+                Self::send_stale_round(ctx, state, &task_msg).await;
                 continue;
             }
 
-            if state.round() < peer_round {
+            if matches!(round_status, RoundStatus::Future) {
                 state.buffer_future_posit_message(task_msg);
                 continue;
             }
@@ -426,11 +391,18 @@ impl PositPhase {
         let posit_participants = active.iter().copied().collect::<Vec<_>>();
 
         let accepted_participants = if is_proposer {
-            let mut barrier = PositBarrier::new(
+            let mut barrier = match PositBarrier::new(
                 ctx.governance.me,
                 &posit_participants,
                 ctx.governance.threshold,
-            );
+            ) {
+                Ok(barrier) => barrier,
+                Err(error) => {
+                    tracing::error!(?sign_id, ?error, "invalid posit barrier configuration");
+                    return state
+                        .reorganize(&format!("invalid posit barrier configuration: {error}"));
+                }
+            };
             let remaining = state.budget.remaining();
             let result = Self::wait_for_accepts(ctx, state, mailbox, &mut barrier, remaining).await;
 
@@ -749,7 +721,8 @@ mod tests {
             }
         });
 
-        let mut barrier = PositBarrier::new(proposer, &[proposer, other], 2);
+        let mut barrier =
+            PositBarrier::new(proposer, &[proposer, other], 2).expect("valid posit barrier");
         let result = PositPhase::wait_for_accepts(
             &t.ctx,
             &mut t.state,
