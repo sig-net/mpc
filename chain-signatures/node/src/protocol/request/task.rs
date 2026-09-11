@@ -14,7 +14,7 @@ pub struct GeneratingPhase {
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
     /// Our reservation when we are the proposer; `None` for a deliberator,
-    /// whose copy is taken from storage when generation starts.
+    /// whose share is taken from storage when generation starts.
     pub presignature: Option<PresignatureReservation>,
     pub accepted_participants: Vec<Participant>,
 }
@@ -28,8 +28,8 @@ pub enum SignPhase {
     /// Agree on the presignature and participant set: the proposer collects
     /// Accepts and broadcasts Start; each deliberator does Propose -> Accept -> Start.
     Posit(PositPhase),
-    /// Take the agreed presignature (commit our reservation, or wait for our
-    /// copy in storage) and run the signing protocol to completion.
+    /// Take the agreed presignature (commit our reservation, or take our share
+    /// from storage) and run the signing protocol to completion.
     Generating(GeneratingPhase),
     /// Terminal: the request finished (`Ok`) or aborted (`Err`).
     Complete(Result<(), SignError>),
@@ -111,11 +111,8 @@ impl GeneratingPhase {
         }
     }
 
-    /// Resolve the agreed presignature to one we hold. The proposer commits its
-    /// reservation, which removes the presignature from Redis now that posit
-    /// succeeded. A deliberator takes its copy from storage, waiting for it up
-    /// to the generation timeout: we accepted the Propose knowing only that the
-    /// presignature exists or is still being generated.
+    /// The proposer commits its reservation. A deliberator takes its share from
+    /// storage. Reorganize in case of a failure.
     async fn take_presignature(&mut self, ctx: &SignTask) -> Result<PresignatureTaken, String> {
         if let Some(reservation) = self.presignature.take() {
             return reservation
@@ -125,19 +122,10 @@ impl GeneratingPhase {
         }
 
         let id = self.presignature_id;
-        let timeout = Duration::from_millis(ctx.cfg.signature.generation_timeout);
-        // TODO: we can make storage wait for presignature to be available instead of here
-        tokio::time::timeout(timeout, async {
-            let mut interval = tokio::time::interval(Duration::from_millis(250));
-            loop {
-                interval.tick().await;
-                if let Some(taken) = ctx.presignatures.take(id, self.proposer).await {
-                    break taken;
-                }
-            }
-        })
-        .await
-        .map_err(|_| format!("timeout ({timeout:?}) waiting for presignature {id} to be available"))
+        ctx.presignatures
+            .take(id, self.proposer)
+            .await
+            .ok_or_else(|| format!("failed to take presignature {id} from storage"))
     }
 
     /// Reject a `Propose` that arrives while we are already generating; drop
