@@ -9428,7 +9428,7 @@ dependencies = [
  "hyper-rustls 0.24.2",
  "k256",
  "local-ip-address",
- "lru 0.13.0",
+ "lru 0.18.2",
  "maud",
  "mime",
  "mockito",

@@ -41,14 +41,14 @@ impl MessageFilter {
             return;
         };
 
-        self.filter.put((msg_type, id), ());
+        self.filter.push((msg_type, id), ());
         crate::metrics::messaging::set_channel_capacity("filter", self.filter_tx.capacity());
     }
 
     pub fn try_update(&mut self) {
         let mut updated = false;
         while let Ok((msg_type, id)) = self.filter_rx.try_recv() {
-            self.filter.put((msg_type, id), ());
+            self.filter.push((msg_type, id), ());
             updated = true;
         }
 
