@@ -1,17 +1,24 @@
 name: k6 Load Test
 
+# Three tiers of Solana dev load through the pinger, staggered so no two
+# overlap beyond the canary:
+#  - low: a canary trickle so the network is never idle and Grafana has a
+#    continuous latency series to alert on;
+#  - mid: 1 rps sustained for 20 minutes, twice a day, to check the
+#    presignature stockpile keeps up with steady traffic;
+#  - high: a ramp twice a day that steps 1 -> 2 -> 5 -> 10 rps and reports
+#    where the thresholds break.
+# Every Solana request costs the pinger key ~10k lamports and the dev
+# responder ~5k, and both are refilled by hand from the devnet faucet, so the
+# steady rate is kept low on purpose. Raise it only with a funding plan.
 on:
-  push:
-    branches:
-      - develop
-  pull_request:
-    types: [closed]
-    paths:
-      - chain-signatures/**
-      - loadtests/**
-      - .github/workflows/k6-ci-loadtest.yml
   schedule:
+    # Low: 0.1 rps for 1h, every hour (~0.09 SOL/day from the pinger key).
     - cron: '0 * * * *'
+    # Mid: 1 rps for 20m, ~1,200 requests (~0.01 SOL per run).
+    - cron: '15 9,21 * * *'
+    # High: 12-minute ramp, ~3,240 requests (~0.03 SOL per run).
+    - cron: '30 3,15 * * *'
   workflow_dispatch:
     inputs:
       lt_strategy:
@@ -21,6 +28,7 @@ on:
           - rps_1
           - rps_5
           - rps_10
+          - ramp_1_10
         default: rps_5
         required: true
       lt_duration:
@@ -53,39 +61,40 @@ on:
 
 jobs:
   load-test:
-    if: ${{ github.event_name == 'push' || github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     runs-on: ${{ github.event_name == 'schedule' && 'arc-runner-set' || 'ubuntu-latest' }}
     steps:
-      - name: Wait for 1 hour due to new version deployment
-        if: ${{ github.event.pull_request.merged == true }}
-        run: sleep 3600
-
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Normalize inputs
         id: normalized
         run: |
-          # Set defaults based on event type (schedule, pull_request, else)
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
-            echo "lt_env=${ENV:-dev}" >> "$GITHUB_OUTPUT"
-            echo "lt_strategy=${STRATEGY:-rps_0_1}" >> "$GITHUB_OUTPUT"
-            echo "lt_duration=${DURATION:-1h}" >> "$GITHUB_OUTPUT"
-            echo "lt_check_signature=${CHECK_SIGNATURE:-true}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            # Short PR-friendly defaults
-            echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
-            echo "lt_env=${ENV:-dev}" >> "$GITHUB_OUTPUT"
-            echo "lt_strategy=${STRATEGY:-rps_5}" >> "$GITHUB_OUTPUT"
-            echo "lt_duration=${DURATION:-5m}" >> "$GITHUB_OUTPUT"
-            echo "lt_check_signature=${CHECK_SIGNATURE:-true}" >> "$GITHUB_OUTPUT"
+            case "${{ github.event.schedule }}" in
+              "30 3,15 * * *")
+                STRATEGY=ramp_1_10
+                DURATION=12m
+                ;;
+              "15 9,21 * * *")
+                STRATEGY=rps_1
+                DURATION=20m
+                ;;
+              *)
+                STRATEGY=rps_0_1
+                DURATION=1h
+                ;;
+            esac
+            echo "lt_chain=Solana" >> "$GITHUB_OUTPUT"
+            echo "lt_env=dev" >> "$GITHUB_OUTPUT"
+            echo "lt_strategy=$STRATEGY" >> "$GITHUB_OUTPUT"
+            echo "lt_duration=$DURATION" >> "$GITHUB_OUTPUT"
+            echo "lt_check_signature=true" >> "$GITHUB_OUTPUT"
           else
-            echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
-            echo "lt_env=${ENV:-dev}" >> "$GITHUB_OUTPUT"
-            echo "lt_strategy=${STRATEGY:-rps_0_1}" >> "$GITHUB_OUTPUT"
-            echo "lt_duration=${DURATION:-20m}" >> "$GITHUB_OUTPUT"
-            echo "lt_check_signature=${CHECK_SIGNATURE:-true}" >> "$GITHUB_OUTPUT"
+            echo "lt_chain=${CHAIN}" >> "$GITHUB_OUTPUT"
+            echo "lt_env=${ENV}" >> "$GITHUB_OUTPUT"
+            echo "lt_strategy=${STRATEGY}" >> "$GITHUB_OUTPUT"
+            echo "lt_duration=${DURATION}" >> "$GITHUB_OUTPUT"
+            echo "lt_check_signature=${CHECK_SIGNATURE}" >> "$GITHUB_OUTPUT"
           fi
         env:
           CHAIN: ${{ github.event.inputs.chain }}
@@ -97,7 +106,10 @@ jobs:
       - name: Setup K6
         uses: grafana/setup-k6-action@v1
 
+      # No --exit-on-running: the action waits for the test to finish, so the
+      # job fails when the script's thresholds fail.
       - name: Run k6 test
+        id: k6
         uses: grafana/run-k6-action@v1
         env:
           K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
@@ -114,7 +126,6 @@ jobs:
           cloud-run-locally: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
           cloud-comment-on-pr: false
           flags: >-
-            ${{ github.event_name != 'schedule' && '--exit-on-running' || '' }}
             --include-system-env-vars
             --tag chain=${{ steps.normalized.outputs.lt_chain }}
             --tag env=${{ steps.normalized.outputs.lt_env }}
@@ -122,3 +133,17 @@ jobs:
             --tag strategy=${{ steps.normalized.outputs.lt_strategy }}
             --tag run_id=${{ github.run_id }}
           inspect-flags: --include-system-env-vars
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## k6 Load Test"
+            echo
+            echo "- Result: \`${{ steps.k6.outcome }}\`"
+            echo "- Chain: \`${{ steps.normalized.outputs.lt_chain }}\` on \`${{ steps.normalized.outputs.lt_env }}\`"
+            echo "- Rate: \`${{ steps.normalized.outputs.lt_strategy }}\` for \`${{ steps.normalized.outputs.lt_duration }}\`"
+            echo "- Check signature: \`${{ steps.normalized.outputs.lt_check_signature }}\`"
+            echo "- Thresholds: http_req_failed rate < 3%, http_req_duration p(95) < 10s"
+            echo "- Cost: ~10k lamports per request from the pinger key, ~5k from the dev responder"
+          } >> "${GITHUB_STEP_SUMMARY}"
