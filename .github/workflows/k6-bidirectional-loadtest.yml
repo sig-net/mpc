@@ -46,8 +46,7 @@ concurrency:
 
 jobs:
   loadtest:
-    # Self-hosted: every run holds a runner for over an hour, and only this
-    # pool has the workload identity that reaches Secret Manager below.
+    # Self-hosted: every run holds a runner for over an hour.
     runs-on: arc-runner-set
     # Submission runs for lt_duration, then the scenario's 45m gracefulStop
     # lets in-flight jobs finish, so a 1h run occupies the runner for ~1h45m.
@@ -65,22 +64,15 @@ jobs:
         env:
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
 
-      # The same three values the grafana-agent collectors remote-write with,
-      # read at run time rather than mirrored into repo secrets, so there is no
-      # second copy to keep level with the collectors'.
-      #
-      # Authenticated as near-dev-github, which holds secretAccessor on these
-      # three secrets and nothing else. The runner pods themselves have no GCP
-      # identity: they run as the arc-runners default service account, and the
-      # k8s-sa in that namespace belongs to the External Secrets controller
-      # rather than to jobs.
+      # near-dev-github holds secretAccessor on the three secrets below and
+      # nothing else. The runner pods have no GCP identity of their own.
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: '${{ secrets.SIG_CREDENTIALS_DEV }}'
 
-      # Masked outputs. `gcloud secrets versions access` into GITHUB_ENV would
-      # not mask, and would print them on any step that dumps the environment.
+      # The collectors' own credentials, read at run time so there is no second
+      # copy to keep level. Masked, which `gcloud ... >> GITHUB_ENV` is not.
       - name: Read Grafana credentials
         id: grafana
         uses: google-github-actions/get-secretmanager-secrets@v2
@@ -101,20 +93,14 @@ jobs:
           k6 run -o experimental-prometheus-rw \
             loadtests/k6-bidirectional.js 2>&1 | tee k6-bidirectional.log
         env:
-          # Metrics outlive the runner. Everything else here dies with the job:
-          # the summary is scraped into the step summary and then discarded.
           K6_PROMETHEUS_RW_SERVER_URL: ${{ steps.grafana.outputs.push_url }}
           K6_PROMETHEUS_RW_USERNAME: ${{ steps.grafana.outputs.username }}
           K6_PROMETHEUS_RW_PASSWORD: ${{ steps.grafana.outputs.password }}
-          # One series per trend instead of one per quantile, and the quantile
-          # is chosen at query time. Percentiles cannot be averaged, so with
-          # pre-computed stats any panel spanning more than one scrape is
-          # approximating; with histograms histogram_quantile() is exact over
-          # whatever window is asked for.
+          # Percentiles cannot be averaged, so pre-computed stats are wrong
+          # over any window but one scrape. Histograms are exact over any.
           K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM: 'true'
-          # No run_id tag on purpose: it would mint a fresh set of series every
-          # run and fragment every panel wider than one run. Runs are separated
-          # in time, so the time range is the run.
+          # No run_id tag: runs are separated in time, so the range is the run,
+          # and the label would fragment every panel wider than one.
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
           LT_CHAIN_ENV: ${{ inputs.environment }}
           LT_STRATEGY: ${{ inputs.lt_strategy }}

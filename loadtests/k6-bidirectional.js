@@ -14,10 +14,8 @@ const BASE_URL = __ENV.LT_PINGER_URL || 'https://contract-ping.sig.network';
 // The service's own phase timings, not wall-clock around our polling, which
 // would fold the poll interval into whichever phase ended between two polls.
 //
-// Seconds, not the milliseconds the API returns: these are remote-written to
-// Prometheus, which expects base units and a _seconds suffix. That also costs
-// the summary's "17m30s" formatting, since k6 only pretty-prints times it is
-// told are milliseconds — the suffix is the unit now.
+// Seconds, not the milliseconds the API returns: Prometheus expects base units.
+// That costs the summary's "17m30s" formatting, which only applies to ms.
 const SEC = 1000;
 const leaseWait = new Trend('bidi_lease_wait_seconds');
 const signature = new Trend('bidi_signature_seconds');
@@ -25,8 +23,8 @@ const confirmation = new Trend('bidi_confirmation_seconds');
 const respond = new Trend('bidi_respond_seconds');
 const total = new Trend('bidi_total_seconds');
 
-// Read once in setup(), so a run records the pool it actually ran against
-// rather than leaving that in a log line nothing can query later.
+// Read once in setup(): the pool a run actually ran against, rather than a log
+// line nothing can query later.
 const workersTotal = new Gauge('bidi_workers_total');
 const workersUnderfunded = new Gauge('bidi_workers_underfunded');
 const workerBalanceMin = new Gauge('bidi_worker_balance_min_eth');
@@ -149,8 +147,7 @@ export function setup() {
   const workers = res.json('workers') || [];
   const short = workers.filter(w => w.underfunded);
 
-  // Recorded before the shortfall check below, so an aborted run still says
-  // how short the pool was rather than only that it was short.
+  // Before the shortfall check, so an aborted run still records how short.
   const balances = workers.map(w => Number(w.balanceWei) / 1e18);
   workersTotal.add(workers.length);
   workersUnderfunded.add(short.length);
