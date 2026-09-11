@@ -90,5 +90,4 @@ jobs:
       - name: Check advisories (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check advisories
-          arguments: -W unmaintained -W unsound
+          command: check advisories -W unmaintained -W unsound
