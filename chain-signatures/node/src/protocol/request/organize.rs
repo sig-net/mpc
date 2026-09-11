@@ -150,10 +150,19 @@ impl OrganizingPhase {
                                 "skipping presignature due to inactive participants, returning to pool"
                             );
                             local_skip.push(reservation.id);
-                            // drop: in-memory reservation released, presignature stays in redis
                             continue;
                         }
-
+                        if participants.len() > ctx.governance.threshold {
+                            break (reservation, participants);
+                        }
+                        local_skip.push(reservation.id);
+                        if let Some(other) = ctx.presignatures.peek_mine(&local_skip).await {
+                            let other_holders = other.holders();
+                            let other_participants = intersect_vec(&[other_holders, &active]);
+                            if other_participants.len() > ctx.governance.threshold {
+                                break (other, other_participants);
+                            }
+                        }
                         break (reservation, participants);
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -192,6 +201,9 @@ impl OrganizingPhase {
 
             // Update active to only include participants that are in both the presignature and active set
             let active = participants.into_iter().collect::<BTreeSet<_>>();
+            // Mesh/permit/presig waits already ran; posit needs a full round for
+            // Propose → Accept → Start without inheriting a leftover budget.
+            state.budget.reset(round_timeout(state.round()));
             (presignature_id, Some(reservation), active)
         } else {
             (PresignatureId::default(), None, active)

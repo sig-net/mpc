@@ -8,10 +8,11 @@ use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::ProtocolState;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::{Chain, SignCommand};
+use serial_test::serial;
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use test_log::test;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
@@ -1249,4 +1250,85 @@ fn test_truncate_per_owner_insufficient() {
     let mut data = BTreeMap::new();
     data.insert(p, BTreeMap::from([(p, vec![dummy_pair(1)])]));
     truncate_per_owner(data, 2);
+}
+
+fn percentile(mut samples: Vec<Duration>, p: f64) -> Duration {
+    samples.sort();
+    samples[((samples.len() as f64 - 1.0) * p).round() as usize]
+}
+
+async fn sign_p50(network: &MpcFixture, seeds: impl Iterator<Item = u32>) -> Duration {
+    let mut samples = Vec::new();
+    let already = network.wait_for_actions(0).await.len();
+    for seed in seeds {
+        let start = Instant::now();
+        network.broadcast(&sign_request(seed)).await;
+        network
+            .assert_publish_actions(already + samples.len() + 1, Duration::from_secs(30))
+            .await;
+        samples.push(start.elapsed());
+    }
+    percentile(samples, 0.5)
+}
+
+struct LatencyBenchGuard;
+
+impl Drop for LatencyBenchGuard {
+    fn drop(&mut self) {
+        mpc_node::protocol::request::set_wait_for_accept_gather(false);
+    }
+}
+
+/// Extra Accepts are delayed 300ms so the old gather wait is on the critical
+/// path. Start-at-t must beat that on both 3-node (t=2) and 8-node (t=5).
+#[test(tokio::test(flavor = "multi_thread"))]
+#[serial]
+async fn test_sign_p50_improves_on_3_and_8_node_clusters() {
+    let _guard = LatencyBenchGuard;
+    let extra_accept_delay = Duration::from_millis(300);
+    const SAMPLES: u32 = 5;
+
+    let three = MpcFixtureBuilder::new(3, 2)
+        .only_generate_signatures()
+        .with_delayed_extra_accepts(extra_accept_delay)
+        .build()
+        .await;
+    three
+        .assert_presignatures(1, Duration::from_millis(500))
+        .await;
+
+    mpc_node::protocol::request::set_wait_for_accept_gather(true);
+    let three_before = sign_p50(&three, 0..SAMPLES).await;
+    mpc_node::protocol::request::set_wait_for_accept_gather(false);
+    let three_after = sign_p50(&three, SAMPLES..SAMPLES * 2).await;
+
+    tracing::info!(?three_before, ?three_after, "3-node sign p50");
+    assert!(
+        three_after < three_before,
+        "3-node p50 did not improve: before={three_before:?} after={three_after:?}"
+    );
+
+    let eight = MpcFixtureBuilder::new(8, 5)
+        .with_node_min_triples(2)
+        .with_node_min_presignatures(2)
+        .with_delayed_extra_accepts(extra_accept_delay)
+        .build()
+        .await;
+    tokio::time::timeout(Duration::from_secs(120), eight.wait_for_running())
+        .await
+        .expect("8-node cluster should reach running");
+    eight
+        .assert_presignatures(2, Duration::from_secs(180))
+        .await;
+
+    mpc_node::protocol::request::set_wait_for_accept_gather(true);
+    let eight_before = sign_p50(&eight, 100..100 + SAMPLES).await;
+    mpc_node::protocol::request::set_wait_for_accept_gather(false);
+    let eight_after = sign_p50(&eight, 200..200 + SAMPLES).await;
+
+    tracing::info!(?eight_before, ?eight_after, "8-node sign p50");
+    assert!(
+        eight_after < eight_before,
+        "8-node p50 did not improve: before={eight_before:?} after={eight_after:?}"
+    );
 }

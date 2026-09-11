@@ -187,6 +187,23 @@ impl MessageOutbox {
         }
     }
 
+    fn enqueue(&mut self, message: SendMessage) {
+        set_channel_capacity_tx("outgoing", &self.outbox_tx);
+        self.messages
+            .entry((message.from, message.to))
+            .or_default()
+            .push((message.message, message.queued_at));
+    }
+
+    fn drain(&mut self) {
+        while let Ok(message) = self.outbox_rx.try_recv() {
+            self.messages
+                .entry((message.from, message.to))
+                .or_default()
+                .push((message.message, message.queued_at));
+        }
+    }
+
     /// Publish messages to other nodes
     async fn publish(
         &mut self,
@@ -208,21 +225,35 @@ impl MessageOutbox {
         mut self,
         client: NodeClient,
         config: watch::Receiver<Config>,
-        contract: ContractStateWatcher,
+        mut contract: ContractStateWatcher,
     ) {
-        let mut interval = tokio::time::interval(Duration::from_millis(10));
         loop {
-            tokio::select! {
-                Some(SendMessage { message, from, to, queued_at }) = self.outbox_rx.recv() => {
-                    set_channel_capacity_tx("outgoing", &self.outbox_tx);
-                    // add it to the outbox and sort it by from and to participant
-                    let entry = self.messages.entry((from, to)).or_default();
-                    entry.push((message, queued_at));
-                }
-                _ = interval.tick() => {
-                    self.publish(&client, &config, &contract).await;
+            if self.messages.is_empty() {
+                let Some(message) = self.outbox_rx.recv().await else {
+                    return;
+                };
+                self.enqueue(message);
+                self.drain();
+            }
+            if contract.participants().is_none() {
+                tokio::select! {
+                    message = self.outbox_rx.recv() => {
+                        let Some(message) = message else {
+                            return;
+                        };
+                        self.enqueue(message);
+                        self.drain();
+                        continue;
+                    }
+                    participants = contract.wait_participants() => {
+                        if participants.is_none() {
+                            return;
+                        }
+                    }
                 }
             }
+            self.drain();
+            self.publish(&client, &config, &contract).await;
         }
     }
 

@@ -49,19 +49,41 @@ use task::SignTask;
 pub(crate) use mailbox::{PositMailbox, SignPositMessage};
 
 /// Max number of concurrent proposers, with unlimited deliberators.
-const MAX_CONCURRENT_PROPOSERS: usize = 4;
+const MAX_CONCURRENT_PROPOSERS: usize = 8;
 
-/// Timeout budget for the organizing and posit phases of round 0 (shorter under
-/// test for speed). Later rounds follow [`round_timeout`], which may exceed this.
-const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
-    5
-} else {
-    20
-});
+/// Timeout budget for the organizing and posit phases of round 0. Later rounds
+/// follow [`round_timeout`], which may exceed this. Short enough that a dead
+/// first proposer is cheap; later rounds grow to absorb indexing skew.
+const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A proposer tries to include all eligible deliberators but will go ahead with
-/// a subset after this timeout, if above the minimum threshold.
+/// Deliberator floor for Waiting-for-Start, and the unit behind
+/// [`ROUND_TIMEOUT_FLOOR`]. Also the A/B gather wait from Propose.
 const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// After `t` accepts, wait this long for extra holders before Start.
+/// Skipped when the invite set is already size `t` — extras cannot arrive.
+const ACCEPT_SLACK: Duration = Duration::from_millis(50);
+
+#[cfg(feature = "test-feature")]
+static WAIT_FOR_ACCEPT_GATHER: AtomicBool = AtomicBool::new(false);
+
+/// When true, the proposer waits [`ACCEPT_POSIT_TIMEOUT`] after Propose to
+/// gather extra Accepts (the pre-p50 behavior). Production always starts at t.
+#[cfg(feature = "test-feature")]
+pub fn set_wait_for_accept_gather(wait: bool) {
+    WAIT_FOR_ACCEPT_GATHER.store(wait, Ordering::Relaxed);
+}
+
+fn wait_for_accept_gather() -> bool {
+    #[cfg(feature = "test-feature")]
+    {
+        WAIT_FOR_ACCEPT_GATHER.load(Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "test-feature"))]
+    {
+        false
+    }
+}
 
 /// Shortest a round may be. A round has to fit a Propose broadcast plus accept
 /// gathering, and an accepted deliberator keeps waiting twice

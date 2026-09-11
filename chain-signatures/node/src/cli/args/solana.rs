@@ -18,8 +18,9 @@ pub struct SolArgs {
     /// The program address to watch
     #[arg(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]
     pub sol_program_address: Option<String>,
-    /// Polling interval for the Solana indexer in milliseconds
-    #[arg(long, env("MPC_SOL_POLL_INTERVAL_MS"), default_value = "1000")]
+    /// Polling interval for the Solana indexer in milliseconds.
+    /// Matches the ~400ms finalized-frontier cadence; faster cannot see a new anchor.
+    #[arg(long, env("MPC_SOL_POLL_INTERVAL_MS"), default_value = "400")]
     pub sol_poll_interval_ms: u64,
 }
 

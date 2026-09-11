@@ -9,17 +9,36 @@ use mpc_chain_integration_core::NoopChainTelemetry;
 use mpc_keys::hpke::Ciphered;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
-use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
+use mpc_node::protocol::message::{Message, MessageOutbox, SendMessage, SignedMessage};
+use mpc_node::protocol::posit::PositAction;
 use mpc_node::rpc::RpcAction;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 pub type MessageFilter = Box<dyn FnMut(&SendMessage) -> bool + Send>;
+
+fn extra_accept_delay(send_message: &SendMessage, n: usize, delay: Duration) -> Duration {
+    if delay.is_zero() || n == 0 {
+        return Duration::ZERO;
+    }
+    let Message::Posit(posit) = &send_message.message else {
+        return Duration::ZERO;
+    };
+    if posit.action != PositAction::Accept {
+        return Duration::ZERO;
+    }
+    // Slow the highest third so t fast Accepts still arrive; extras sit past 500ms.
+    if (u32::from(send_message.from) as usize) < (2 * n) / 3 {
+        return Duration::ZERO;
+    }
+    delay
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn test_mock_network(
@@ -31,6 +50,7 @@ pub(super) fn test_mock_network(
     config: watch::Sender<Config>,
     mut filter: MessageFilter,
     mock_chain: Option<MockChain>,
+    delay_extra_accept: Duration,
 ) -> JoinHandle<()> {
     let msg_log = Arc::clone(&shared_output.msg_log);
     let rpc_actions = Arc::clone(&shared_output.rpc_actions);
@@ -48,6 +68,15 @@ pub(super) fn test_mock_network(
                     msg_log.lock().await.observe_message(&send_message, passes_filter);
                     if !passes_filter {
                         continue;
+                    }
+
+                    let delay = extra_accept_delay(
+                        &send_message,
+                        mesh.borrow().active().len(),
+                        delay_extra_accept,
+                    );
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
                     }
 
                     // directly send out single message, no batching

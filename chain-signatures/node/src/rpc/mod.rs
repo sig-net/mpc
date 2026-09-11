@@ -34,9 +34,10 @@ const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract's state
 const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
-// Publish retry constants
-pub(crate) const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
-const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
+// Publish retry constants. First retry is short so a failed send does not add
+// 5s to e2e; later attempts still cap at a minute.
+pub(crate) const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
+const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60);
 
 /// The maximum time to wait for a checkpoint vote to complete before retrying
 const VOTE_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -277,6 +278,18 @@ impl ContractStateWatcher {
             ProtocolState::Initializing(state) => Some(state.candidates.clone().into()),
             ProtocolState::Running(state) => Some(state.participants.clone()),
             ProtocolState::Resharing(state) => Some(state.new_participants.clone()),
+        }
+    }
+
+    /// Wait until the contract lists participants, or the watch closes.
+    pub async fn wait_participants(&mut self) -> Option<Participants> {
+        loop {
+            if let Some(participants) = self.participants() {
+                return Some(participants);
+            }
+            if self.contract_state.changed().await.is_err() {
+                return None;
+            }
         }
     }
 

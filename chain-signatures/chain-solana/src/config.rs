@@ -14,9 +14,9 @@ pub struct SolIndexerConfig {
 impl Default for SolIndexerConfig {
     fn default() -> Self {
         Self {
-            // The finalized frontier advances ~every 400ms,
-            // polling faster than that can never observe a new anchor
-            poll_interval: Duration::from_secs(1),
+            // The finalized frontier advances ~every 400ms;
+            // polling faster than that cannot observe a new anchor.
+            poll_interval: Duration::from_millis(400),
             slot_stall_timeout: Duration::from_secs(60),
         }
     }
@@ -52,5 +52,18 @@ impl fmt::Debug for SolConfig {
             .field("program_address", &self.program_address)
             .field("indexer", &self.indexer)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_poll_matches_finalized_frontier() {
+        assert_eq!(
+            SolIndexerConfig::default().poll_interval,
+            Duration::from_millis(400)
+        );
     }
 }

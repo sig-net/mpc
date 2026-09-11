@@ -39,6 +39,7 @@ use mpc_primitives::Chain;
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::{watch, Mutex};
 
@@ -89,6 +90,7 @@ struct FixtureConfig {
 
     /// Overrides the publish failover schedule's observe lag; `None` is production.
     observe_lag: Option<std::time::Duration>,
+    delay_extra_accept: Duration,
 }
 
 /// Context required to start a fixture node.
@@ -102,6 +104,7 @@ struct MockedNodeContext {
     init_mesh: MeshState,
     contract_state: ContractStateWatcher,
     observe_lag: Option<std::time::Duration>,
+    delay_extra_accept: Duration,
 
     #[allow(dead_code)]
     node_account_id: AccountId,
@@ -141,6 +144,7 @@ impl FixtureConfig {
             signature_timeout_ms: 10_000,
             presignature_timeout_ms: 10_000,
             observe_lag: None,
+            delay_extra_accept: Duration::ZERO,
             triple_timeout_ms: min_to_ms(10),
         }
     }
@@ -273,6 +277,7 @@ impl MpcFixtureBuilder {
                 init_mesh: initial_mesh_state.clone(),
                 contract_state,
                 observe_lag: self.fixture_config.observe_lag,
+                delay_extra_accept: self.fixture_config.delay_extra_accept,
                 node_account_id: node.participant_info.account_id.clone(),
             };
 
@@ -417,6 +422,13 @@ impl MpcFixtureBuilder {
     /// that assert the failover itself rather than its production timing.
     pub fn with_observe_lag(mut self, lag: std::time::Duration) -> Self {
         self.fixture_config.observe_lag = Some(lag);
+        self
+    }
+
+    /// Delay Accepts from the slowest third of participants. Used to make
+    /// start-at-t vs a 500ms gather wait measurable.
+    pub fn with_delayed_extra_accepts(mut self, delay: Duration) -> Self {
+        self.fixture_config.delay_extra_accept = delay;
         self
     }
 
@@ -620,6 +632,7 @@ impl MpcFixtureNodeBuilder {
             config_tx.clone(),
             self.messaging.filter,
             mock_chain,
+            context.delay_extra_accept,
         );
 
         // --- SyncChannel and SyncTask setup ---

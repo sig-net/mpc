@@ -245,20 +245,42 @@ impl PositPhase {
 
         let mut remaining = state.budget.remaining();
         if is_deliberator {
-            // We just sent an Accept to the proposer. The proposer might wait up to ACCEPT_POSIT_TIMEOUT
-            // to gather more accepts before sending Start.
-            // We must wait at least that long so we don't abandon the round after promising to participate,
-            // which would cause the proposer's generation phase to hang.
+            // Floor under Waiting-for-Start so an Accept stays binding even if
+            // the round budget is almost gone: the proposer starts after t
+            // plus ACCEPT_SLACK, and Start still has to propagate.
             let min_wait = 2 * ACCEPT_POSIT_TIMEOUT;
             if remaining < min_wait {
                 remaining = min_wait;
             }
         }
+        if is_proposer
+            && counter.enough_accepts(ctx.governance.threshold)
+            && counter.meets_totality()
+        {
+            let accepted_participants =
+                Self::start_with_current_accepts(ctx, state, counter, sign_id, presignature_id)
+                    .await;
+            return SignPhase::Generating(GeneratingPhase {
+                proposer,
+                presignature_id,
+                presignature,
+                accepted_participants,
+            });
+        }
+
         let posit_deadline = tokio::time::sleep(remaining);
         tokio::pin!(posit_deadline);
         let accept_deadline = tokio::time::sleep(ACCEPT_POSIT_TIMEOUT);
         tokio::pin!(accept_deadline);
         let mut accept_deadline_reached = false;
+        let slack_useful = posit_participants.len() > ctx.governance.threshold;
+        let slack = tokio::time::sleep(ACCEPT_SLACK);
+        tokio::pin!(slack);
+        let mut slack_armed = is_proposer
+            && slack_useful
+            && !wait_for_accept_gather()
+            && counter.enough_accepts(ctx.governance.threshold);
+        let mut slack_reached = false;
 
         let accepted_participants = loop {
             tokio::select! {
@@ -362,17 +384,13 @@ impl PositPhase {
                             ));
                         }
 
-                        // Starting as soon as we have enough accepts leaves
-                        // participants accepting a bit later in a bad state.
-                        // They will try to become propose in later rounds,
-                        // wasting Presignatures, memory and CPU time.
-                        //
-                        // Instead, wait for at least the `accept_deadline`,
-                        // only nodes answer slower will be left out. This isn't
-                        // perfect but much better than always forcing nodes
-                        // into the bad state.
-                        let ready_to_go = counter.meets_totality() ||  accept_deadline_reached;
-                        if ready_to_go && counter.enough_accepts(ctx.governance.threshold) {
+                        if counter.enough_accepts(ctx.governance.threshold)
+                            && Self::ready_to_start(
+                                &counter,
+                                slack_reached,
+                                accept_deadline_reached,
+                            )
+                        {
                             let participants = Self::start_with_current_accepts(
                                 ctx,
                                 state,
@@ -381,6 +399,17 @@ impl PositPhase {
                                 presignature_id
                             ).await;
                             break participants;
+                        }
+                        if is_proposer
+                            && slack_useful
+                            && !wait_for_accept_gather()
+                            && !slack_armed
+                            && counter.enough_accepts(ctx.governance.threshold)
+                        {
+                            slack.as_mut().reset(
+                                tokio::time::Instant::now() + ACCEPT_SLACK,
+                            );
+                            slack_armed = true;
                         }
                     }
                 }
@@ -400,8 +429,21 @@ impl PositPhase {
 
                     return state.reorganize(&reason);
                 }
-                _ = &mut accept_deadline, if is_proposer && !accept_deadline_reached => {
+                _ = &mut accept_deadline, if is_proposer && wait_for_accept_gather() && !accept_deadline_reached => {
                     accept_deadline_reached = true;
+                    if counter.enough_accepts(ctx.governance.threshold) {
+                        let participants = Self::start_with_current_accepts(
+                            ctx,
+                            state,
+                            counter,
+                            sign_id,
+                            presignature_id
+                        ).await;
+                        break participants;
+                    }
+                }
+                _ = &mut slack, if is_proposer && slack_armed && !slack_reached => {
+                    slack_reached = true;
                     if counter.enough_accepts(ctx.governance.threshold) {
                         let participants = Self::start_with_current_accepts(
                             ctx,
@@ -423,6 +465,20 @@ impl PositPhase {
             presignature,
             accepted_participants,
         })
+    }
+
+    fn ready_to_start(
+        counter: &SinglePositCounter,
+        slack_reached: bool,
+        accept_deadline_reached: bool,
+    ) -> bool {
+        if counter.meets_totality() {
+            return true;
+        }
+        if wait_for_accept_gather() {
+            return accept_deadline_reached;
+        }
+        slack_reached
     }
 
     /// Proposer-only: broadcast Start to all Accepters and return that set.
@@ -802,5 +858,133 @@ pub(crate) mod tests {
             t.sync_report_rx.try_recv().is_err(),
             "the InvalidRequest rejector must not be reported"
         );
+    }
+
+    /// Threshold of accepts is enough to Start. Waiting for the rest of the
+    /// invite set would add a silent delay on every request whose holder set
+    /// is larger than t.
+    #[tokio::test]
+    async fn advance_starts_at_threshold_without_waiting_for_totality() {
+        let proposer = Participant::from(0);
+        let first = Participant::from(1);
+        let second = Participant::from(2);
+        let mut t = setup(proposer, first, 2);
+        t.state.budget.reset(Duration::from_secs(5));
+
+        let mailbox = PositMailbox::new();
+        mailbox.push(SignPositMessage {
+            presignature_id: 42,
+            round: 0,
+            from: first,
+            action: PositAction::Accept,
+        });
+
+        let mut phase = PositPhase {
+            proposer,
+            active: [proposer, first, second].into_iter().collect(),
+            presignature_id: 42,
+            presignature: None,
+        };
+        let next = tokio::time::timeout(
+            Duration::from_millis(250),
+            phase.advance(&mut t.ctx, &mut t.state, &mailbox),
+        )
+        .await
+        .expect("must start after slack without waiting for the remaining invitee");
+        let SignPhase::Generating(generating) = next else {
+            panic!("expected Generating after t accepts");
+        };
+        assert!(generating.accepted_participants.contains(&proposer));
+        assert!(generating.accepted_participants.contains(&first));
+        assert!(!generating.accepted_participants.contains(&second));
+
+        let (round, action) = sent_posit(&mut t.outbox, proposer, first);
+        assert_eq!(round, 0);
+        let PositAction::Start(participants) = action else {
+            panic!("expected Start");
+        };
+        assert!(participants.contains(&proposer));
+        assert!(participants.contains(&first));
+        assert!(!participants.contains(&second));
+    }
+
+    /// Invite set of size t has no extra holders; Start as soon as t accept.
+    #[tokio::test]
+    async fn advance_skips_slack_when_invite_set_is_threshold() {
+        let proposer = Participant::from(0);
+        let first = Participant::from(1);
+        let mut t = setup(proposer, first, 2);
+        t.state.budget.reset(Duration::from_secs(5));
+
+        let mailbox = PositMailbox::new();
+        mailbox.push(SignPositMessage {
+            presignature_id: 42,
+            round: 0,
+            from: first,
+            action: PositAction::Accept,
+        });
+
+        let mut phase = PositPhase {
+            proposer,
+            active: [proposer, first].into_iter().collect(),
+            presignature_id: 42,
+            presignature: None,
+        };
+        let next = tokio::time::timeout(
+            Duration::from_millis(40),
+            phase.advance(&mut t.ctx, &mut t.state, &mailbox),
+        )
+        .await
+        .expect("must start immediately when extras cannot arrive");
+        assert!(matches!(next, SignPhase::Generating(_)));
+    }
+
+    /// An extra Accept that arrives inside ACCEPT_SLACK is included in Start.
+    #[tokio::test]
+    async fn advance_includes_accepts_arriving_during_slack() {
+        let proposer = Participant::from(0);
+        let first = Participant::from(1);
+        let second = Participant::from(2);
+        let mut t = setup(proposer, first, 2);
+        t.state.budget.reset(Duration::from_secs(5));
+
+        let mailbox = PositMailbox::new();
+        mailbox.push(SignPositMessage {
+            presignature_id: 42,
+            round: 0,
+            from: first,
+            action: PositAction::Accept,
+        });
+        tokio::spawn({
+            let mailbox = mailbox.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                mailbox.push(SignPositMessage {
+                    presignature_id: 42,
+                    round: 0,
+                    from: second,
+                    action: PositAction::Accept,
+                });
+            }
+        });
+
+        let mut phase = PositPhase {
+            proposer,
+            active: [proposer, first, second].into_iter().collect(),
+            presignature_id: 42,
+            presignature: None,
+        };
+        let next = tokio::time::timeout(
+            Duration::from_millis(250),
+            phase.advance(&mut t.ctx, &mut t.state, &mailbox),
+        )
+        .await
+        .expect("must start after the extra Accept inside slack");
+        let SignPhase::Generating(generating) = next else {
+            panic!("expected Generating");
+        };
+        assert!(generating.accepted_participants.contains(&proposer));
+        assert!(generating.accepted_participants.contains(&first));
+        assert!(generating.accepted_participants.contains(&second));
     }
 }

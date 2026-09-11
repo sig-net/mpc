@@ -189,7 +189,7 @@ flag exists to limit after the fact.
 
 The tally is keyed on `SinglePositCounter::participants` and `process_action`
 drops senders outside that set, so a reply from a member the proposer did not
-address cannot move `enough_rejects` or `meets_totality`. A member that holds
+address cannot move `enough_rejects` or `enough_accepts`. A member that holds
 the presignature but was absent from the active set at reservation time is in
 that position: it would `ACCEPT`, go uncounted, and wait for a `START` that
 never comes.
@@ -197,7 +197,7 @@ never comes.
 No message carries the outcome of a round, so an excluded member cannot tell
 "round `r` succeeded without me" from "round `r` still running". It keeps
 rotating: it burns the round for every peer still waiting, and in the rounds
-where it is elected proposer it takes one of the `MAX_CONCURRENT_PROPOSERS` (4)
+where it is elected proposer it takes one of the `MAX_CONCURRENT_PROPOSERS` (8)
 permits, which is proposer-only, so a deliberator holds none, and reserves a
 presignature that it returns to the pool on timeout. The permit is therefore
 held intermittently rather than for the whole wait, and the steady cost is the
@@ -310,7 +310,7 @@ which is why agreeing on `r` is all the nodes need:
 (`bump_round`), or at task spawn for round 0. It starts before `t` participants
 are known, and every state shares whatever is left of it.
 
-Round 0 gets 20s. Round 1 starts at a 2s floor and each later round grows 1.15x,
+Round 0 gets 5s. Round 1 starts at a 2s floor and each later round grows 1.15x,
 up to a 600s ceiling. Short early rounds rotate quickly past dead proposers;
 long later rounds outlast the skew between nodes that indexed the request at
 different times.
@@ -351,10 +351,12 @@ because the round timeout ran out.
    terminal (`Complete(Err(Aborted))`) needs a closed proposer semaphore, which
    nothing closes, so no request ever fails from inside the machine. This is
    the desired behavior.
-2. **A late accepter burns a full round.** A node that catches up mid-round
-   sends `ACCEPT` after the proposer already sent `START`. The proposer is
-   in `Generating` and drops `ACCEPT` there, so the late node waits out its
-   timeout in `Waiting for Start` and only rejoins at `r+1`.
+2. **A late accepter burns a full round.** The proposer starts shortly after
+   it has t accepts (a short slack for extra holders), so a node that answers
+   after that (or catches up mid-round) sends `ACCEPT` after `START` has
+   already gone out. The proposer is in `Generating` and drops `ACCEPT` there,
+   so the late node waits out its timeout in `Waiting for Start` and only
+   rejoins at `r+1`. That is the cost of not waiting for totality.
 3. **`REJECT MissingArtifact` can cost a whole round.** The proposer selects the presignature's holders that are active, itself included, and that set is only guaranteed to reach t. It abandons the round once the rejects exceed the set's size minus t. So at exactly threshold size it has no slack at all: every one of the other t−1 members must accept, and one reject ends the round. With k members of slack it takes k+1.
 4. **One slot per sender assumes an ordering which is not guaranteed.**
    Buffers are overwritten on arrival, so the later of two messages for one
