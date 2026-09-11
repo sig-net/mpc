@@ -1,0 +1,42 @@
+# cargo-deny configuration
+#
+# Replaces .cargo/audit.toml (cargo-audit). cargo-deny resolves the actual
+# feature-enabled dependency graph, so lock-only entries from optional feature
+# subtrees (libp2p's quic stack, tracing-subscriber 0.2, idna 0.2.3, quinn-proto
+# 0.9) are no longer flagged and do not need ignore entries.
+#
+# `unmaintained` and `unsound` advisories are downgraded to warnings in CI
+# (`-W unmaintained -W unsound`), matching the previous cargo-audit behavior
+# where they never failed the build. Vulnerabilities always deny.
+
+[graph]
+# Match production builds (`just build-node` enables mpc-node/helios) and cover
+# dev-only features in the same pass.
+all-features = true
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2024-0344", reason = "curve25519-dalek 3.x pinned via Solana 2.x; upgrade blocked until Solana adopts dalek 4.x (mpc#855)" },
+    { id = "RUSTSEC-2022-0093", reason = "ed25519-dalek 1.x required by the Solana 2.x dependency tree (mpc#855)" },
+    { id = "RUSTSEC-2026-0258", reason = "h2 0.3 unbounded empty DATA frames; DoS only, outgoing client connections (reqwest 0.11 + helios' jsonrpsee 0.19, both hyper 0.14); no 0.3 patch exists (mpc#782)" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101.7 URI name constraints accepted; pinned by rustls 0.21 via helios' jsonrpsee-http-client 0.19 (hyper-rustls 0.24)" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101.7 wildcard name constraints accepted; same chain as RUSTSEC-2026-0098" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101.7 CRL parsing panic; same chain as RUSTSEC-2026-0098; we do not use CRLs" },
+    { id = "RUSTSEC-2026-0118", reason = "hickory-proto NSEC3 unbounded loop on cross-zone responses; no fixed upgrade available; via reqwest 0.12 consumers (alloy/helios/near)" },
+    { id = "RUSTSEC-2026-0119", reason = "hickory-proto O(n²) name compression CPU exhaustion; fix needs hickory 0.26+/reqwest 0.13, blocked by alloy/helios/near pins" },
+    { id = "RUSTSEC-2026-0222", reason = "wasmtime 45 type-index mixup; only reachable via near-sdk unit-testing dev-only feature (near-vm-runner pins wasmtime ^45, no patched release)" },
+    { id = "RUSTSEC-2026-0269", reason = "wasmtime 45 filesystem sandbox escape; same chain as RUSTSEC-2026-0222; dev-only, no WASI filesystem exposed to guest code" },
+]
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
