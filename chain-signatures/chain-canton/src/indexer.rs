@@ -320,6 +320,9 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
     const CHAIN: Chain = Chain::Canton;
+    /// Bump when Canton indexer parsing changes and unconfirmed
+    /// checkpoints produced by the old parser must be dropped.
+    const INDEXER_PARSER_VERSION: u64 = 0;
 
     // TODO: add unit tests for `run()` mirroring Ethereum's `RunFixture`
     // (catchup ordering, live-after-catchup, cancel-during-catchup, cancel-while-live).

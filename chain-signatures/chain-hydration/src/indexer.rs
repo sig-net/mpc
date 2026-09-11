@@ -545,6 +545,9 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
 #[async_trait::async_trait]
 impl<T: ChainTelemetry> ChainIndexer for HydrationIndexer<T> {
     const CHAIN: Chain = Chain::Hydration;
+    /// Bump when Hydration indexer parsing changes and unconfirmed
+    /// checkpoints produced by the old parser must be dropped.
+    const INDEXER_PARSER_VERSION: u64 = 0;
 
     async fn run(
         &self,

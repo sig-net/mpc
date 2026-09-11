@@ -604,6 +604,13 @@ impl Backlog {
         self.recover_local(chain).await
     }
 
+    /// Drop this chain's unconfirmed pending checkpoints when `version`
+    /// differs from the stored parser version. Missing stored value is
+    /// bootstrap and does not evict. Returns true when pending was dropped.
+    pub async fn apply_parser_version(&self, chain: Chain, version: u64) -> anyhow::Result<bool> {
+        self.checkpoints.apply_parser_version(chain, version).await
+    }
+
     /// Recovers local backlog state from the latest durable checkpoint if one exists.
     pub async fn recover_local(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
         let Some(checkpoint) = self.checkpoints.latest(chain).await? else {

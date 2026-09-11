@@ -11,6 +11,9 @@ use tokio_util::sync::CancellationToken;
 #[async_trait::async_trait]
 pub trait ChainIndexer: Send + Sync + 'static {
     const CHAIN: Chain;
+    /// Bump when this chain's indexer parsing changes and unconfirmed
+    /// checkpoints produced by the old parser must be dropped.
+    const INDEXER_PARSER_VERSION: u64 = 0;
 
     async fn run(
         &self,

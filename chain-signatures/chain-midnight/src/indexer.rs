@@ -550,6 +550,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> {
     const CHAIN: Chain = Chain::Midnight;
+    /// Bump when Midnight indexer parsing changes and unconfirmed
+    /// checkpoints produced by the old parser must be dropped.
+    const INDEXER_PARSER_VERSION: u64 = 0;
 
     async fn run(
         &self,

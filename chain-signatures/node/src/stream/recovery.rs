@@ -16,6 +16,7 @@ use tokio::sync::watch;
 pub(crate) async fn recover_backlog(
     chain: Chain,
     load_local: bool,
+    parser_version: u64,
     backlog: &Backlog,
     checkpoints_rx: &mut CheckpointWatcher,
     mesh_state: &mut watch::Receiver<MeshState>,
@@ -23,6 +24,23 @@ pub(crate) async fn recover_backlog(
     my_account_id: &AccountId,
 ) -> Result<(), crate::backlog::CheckpointError> {
     tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
+
+    // Parser version only changes with a new binary, so apply it on the first
+    // recovery pass before hydrating the pending counter from storage.
+    if load_local {
+        match backlog.apply_parser_version(chain, parser_version).await {
+            Ok(true) => {
+                tracing::info!(
+                    ?chain,
+                    "dropped unconfirmed pending checkpoints for re-parse after parser bump"
+                );
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(?chain, %err, "failed to apply parser version; continuing");
+            }
+        }
+    }
 
     // Hydrate the in-memory pending checkpoint counter from storage on every
     // recovery pass so any counter drift self-heals across restarts.
