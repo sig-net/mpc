@@ -465,7 +465,7 @@ pub async fn emit_events(
             for ev in bidirectional {
                 let signature =
                     to_mpc_signature(&ev.signature).context("failed to parse Solana signature")?;
-                let _ = events_tx
+                events_tx
                     .send(ChainEvent::RespondBidirectional(
                         mpc_primitives::RespondBidirectionalEvent {
                             request_id: ev.request_id,
@@ -473,13 +473,13 @@ pub async fn emit_events(
                             chain: Chain::Solana,
                         },
                     ))
-                    .await;
+                    .await?;
             }
 
             for ev in responded {
                 let signature =
                     to_mpc_signature(&ev.signature).context("failed to parse Solana signature")?;
-                let _ = events_tx
+                events_tx
                     .send(ChainEvent::Respond(
                         mpc_primitives::SignatureRespondedEvent {
                             request_id: ev.request_id,
@@ -487,7 +487,7 @@ pub async fn emit_events(
                             chain: Chain::Solana,
                         },
                     ))
-                    .await;
+                    .await?;
             }
         }
         SolanaEvents::None => {}
