@@ -160,10 +160,9 @@ export function setup() {
     console.warn(`  underfunded: ${w.path} ${w.address} holds ${w.balanceWei} wei`);
   }
 
-  // A lease is released at confirmation, so it lasts ~30s rather than the
-  // round trip: one address covers about a job a minute, and the pool only has
-  // to cover the arrival rate. Short addresses are skipped by the service, not
-  // fatal to it.
+  // A lease ends at confirmation, not at the round trip, so one address covers
+  // roughly a job a minute and the pool only has to cover the arrival rate.
+  // The service skips short addresses rather than failing on them.
   // options is k6's own by now; strategies is this module's.
   const perMinute = strategies[__ENV.LT_STRATEGY].scenarios.bidirectional.rate;
   const funded = workers.length - short.length;

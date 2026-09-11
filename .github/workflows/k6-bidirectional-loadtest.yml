@@ -4,10 +4,8 @@ name: k6 Bidirectional Load Test
 # loadtests/k6-bidirectional.js.
 #
 # Every job spends gas from addresses only a funding sweep refills, so the
-# cadence is a standing cost: ~120 round trips a run at the scheduled defaults.
-#
-# Ticking every 20 minutes rather than once a run. A tick landing mid-run
-# creates nothing, so frequent ticks only shorten the wait for the next one.
+# cadence is a standing cost. A tick landing mid-run creates no run, so the
+# short interval only shortens the wait after one ends.
 on:
   schedule:
     - cron: '*/20 * * * *'
@@ -35,27 +33,38 @@ on:
         description: MPC network
         type: choice
         options:
+          - both
           - dev
           - testnet
-        default: dev
+        default: both
         required: true
 
 permissions:
   contents: read
 
-# One run at a time: overlapping runs would double the arrival rate a run
-# claims to apply. Queued rather than cancelled, since cancelling mid-flight
-# abandons jobs whose Ethereum transaction is already paid for.
-concurrency:
-  group: k6-bidirectional-loadtest
-  cancel-in-progress: false
-
 jobs:
   loadtest:
+    strategy:
+      # Add an option above without adding it here and the run fails rather
+      # than silently driving both. A schedule carries no inputs, hence ''.
+      matrix:
+        environment: ${{ (inputs.environment == 'dev' && fromJSON('["dev"]'))
+          || (inputs.environment == 'testnet' && fromJSON('["testnet"]'))
+          || ((inputs.environment == 'both' || inputs.environment == '')
+              && fromJSON('["dev","testnet"]'))
+          || fromJSON('["unmatched"]') }}
+      # The networks hold separate address pools and rate limits, so they
+      # need no max-parallel.
+      fail-fast: false
+    # Per network: overlapping runs would double the arrival rate one claims
+    # to apply. Queued, since cancelling abandons jobs already paid for.
+    concurrency:
+      group: k6-bidirectional-${{ matrix.environment }}
+      cancel-in-progress: false
     # Self-hosted: every run holds a runner for over an hour.
     runs-on: arc-runner-set
     # Submission runs for lt_duration, then the scenario's 45m gracefulStop
-    # lets in-flight jobs finish, so the scheduled 2h submits for ~2h45m.
+    # lets in-flight jobs finish.
     timeout-minutes: 200
     steps:
       - uses: actions/checkout@v6
@@ -67,8 +76,17 @@ jobs:
             echo "::error::Missing required secret: LT_PINGER_API_KEY"
             exit 1
           fi
+          # What the matrix yields for an unrecognised input.
+          case "${LT_CHAIN_ENV}" in
+            dev | testnet) ;;
+            *)
+              echo "::error::Unhandled environment '${LT_CHAIN_ENV}': add it to the matrix"
+              exit 1
+              ;;
+          esac
         env:
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
+          LT_CHAIN_ENV: ${{ matrix.environment }}
 
       # near-dev-github holds secretAccessor on the three secrets below and
       # nothing else. The runner pods have no GCP identity of their own.
@@ -97,6 +115,7 @@ jobs:
         run: |
           set -euo pipefail
           k6 run -o experimental-prometheus-rw \
+            --tag env="${LT_CHAIN_ENV}" \
             loadtests/k6-bidirectional.js 2>&1 | tee k6-bidirectional.log
         env:
           K6_PROMETHEUS_RW_SERVER_URL: ${{ steps.grafana.outputs.push_url }}
@@ -106,9 +125,10 @@ jobs:
           # over any window but one scrape. Histograms are exact over any.
           K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM: 'true'
           # No run_id tag: runs are separated in time, so the range is the run,
-          # and the label would fragment every panel wider than one.
+          # and the label would fragment every panel wider than one. env is
+          # needed: without it both networks write the same series.
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
-          LT_CHAIN_ENV: ${{ inputs.environment || 'dev' }}
+          LT_CHAIN_ENV: ${{ matrix.environment }}
           LT_STRATEGY: ${{ inputs.lt_strategy || 'rpm_1' }}
           LT_DURATION: ${{ inputs.lt_duration || '2h' }}
 
@@ -118,7 +138,7 @@ jobs:
           {
             echo "## k6 Bidirectional Load Test"
             echo
-            echo "- Network: \`${{ inputs.environment || 'dev' }}\`"
+            echo "- Network: \`${{ matrix.environment }}\`"
             echo "- Rate: \`${{ inputs.lt_strategy || 'rpm_1' }}\` submitting for \`${{ inputs.lt_duration || '2h' }}\`"
             echo
             if [ -f k6-bidirectional.log ]; then
