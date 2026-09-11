@@ -3,12 +3,12 @@ use super::posit::{PositAction, Positor, Posits};
 use super::triple::TripleId;
 use crate::config::Config;
 use crate::mesh::MeshState;
+use crate::protocol::MpcSignProtocol;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::posit::{PositInternalAction, PositRejectReason};
-use crate::protocol::MpcSignProtocol;
+use crate::storage::TripleStorage;
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
 use crate::storage::triple_storage::{TriplesReserved, TriplesTaken, TriplesTakenDropper};
-use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use mpc_chain_near::AffinePointExt as _;
 use mpc_utils::task::JoinMap;
@@ -33,6 +33,13 @@ use tokio::time;
 /// Without `PresignatureId` it would be unclear where to route incoming cait-sith presignature
 /// generation messages.
 pub type PresignatureId = u64;
+
+/// How long a deliberator waits for the required triple pair before rejecting
+/// `Propose` with `MissingArtifact`. Short: late Redis visibility, not a
+/// generation stall. Longer waits inflate p99 when the pair never arrives.
+const TRIPLE_WAIT: Duration = Duration::from_millis(300);
+
+type PairSearch = JoinHandle<Option<(TriplesReserved, Vec<Participant>)>>;
 
 /// The full presignature id. This encompasses the presignature id and the triple pair
 /// that was used to generate it.
@@ -314,6 +321,11 @@ pub struct PresignatureSpawner {
     /// the posit round succeeds and generation starts, so a failed round does
     /// not waste it.
     posits: Posits<FullPresignatureId, TriplesReserved>,
+    /// True while an owned-pair search is in flight. Counts toward
+    /// `len_introduced` so stockpile does not start a second search.
+    searching: bool,
+    /// Deliberators waiting for a late triple pair before answering Propose.
+    pending_waits: JoinMap<FullPresignatureId, (Participant, bool)>,
 
     me: Participant,
     threshold: usize,
@@ -351,6 +363,8 @@ impl PresignatureSpawner {
             ongoing: JoinMap::new(),
             ongoing_owned: HashSet::new(),
             posits: Posits::new(me),
+            searching: false,
+            pending_waits: JoinMap::new(),
             me,
             threshold,
             epoch,
@@ -393,7 +407,7 @@ impl PresignatureSpawner {
     }
 
     pub fn len_introduced(&self) -> usize {
-        self.posits.len_proposed() + self.ongoing_owned.len()
+        self.posits.len_proposed() + self.ongoing_owned.len() + usize::from(self.searching)
     }
 
     /// Returns the number of unspent presignatures we will have in the manager once
@@ -431,13 +445,12 @@ impl PresignatureSpawner {
             PositInternalAction::Reply(PositAction::RejectWithReason(
                 PositRejectReason::AlreadyGenerating,
             ))
-        } else if !{
-            // TODO: we can potentially wait for the triples to exist first to then be able to accept.
-            // whereas we just blatantly reject here. The problem with waiting is that the other side
-            // might expire their posit first.
-            self.triples.contains_reserved(id.pair_id).await
-                || self.triples.contains(id.pair_id).await
-        } {
+        } else if matches!(action, PositAction::Propose)
+            && !triples_known(&self.triples, id.pair_id).await
+        {
+            self.queue_triple_wait(id, from);
+            return;
+        } else if !triples_known(&self.triples, id.pair_id).await {
             tracing::warn!(
                 ?id,
                 ?from,
@@ -455,6 +468,26 @@ impl PresignatureSpawner {
             internal_action
         };
 
+        self.apply_posit(id, from, internal_action, timeout).await;
+    }
+
+    fn queue_triple_wait(&mut self, id: FullPresignatureId, from: Participant) {
+        if self.pending_waits.contains_key(&id) {
+            return;
+        }
+        let triples = self.triples.clone();
+        self.pending_waits.spawn(id, async move {
+            (from, wait_for_triples(&triples, id.pair_id).await)
+        });
+    }
+
+    async fn apply_posit(
+        &mut self,
+        id: FullPresignatureId,
+        from: Participant,
+        internal_action: PositInternalAction<TriplesReserved>,
+        timeout: Duration,
+    ) {
         match internal_action {
             PositInternalAction::None => {}
             PositInternalAction::Abort => {
@@ -481,7 +514,7 @@ impl PresignatureSpawner {
     }
 
     /// Starts a new presignature generation protocol.
-    async fn propose_posit(&mut self, active: &[Participant]) {
+    fn spawn_search(&mut self, active: &[Participant]) -> Option<PairSearch> {
         // To ensure there is no contention between different nodes we are only using triples
         // that we own. This way in a non-BFT environment we are guaranteed to never try
         // to use the same triple as any other node.
@@ -489,34 +522,23 @@ impl PresignatureSpawner {
         // The pair is only reserved here and stays in storage. It is taken out of
         // storage once the posit round succeeds and generation starts. Dropping the
         // reservation on a failed round returns the pair to the pool.
-        // TODO: have all this part be a separate task such that finding a pair of triples is done in parallel instead
-        // of waiting for storage to respond here.
+        if self.searching {
+            return None;
+        }
+        self.searching = true;
+        let triples = self.triples.clone();
+        let active = active.to_vec();
+        let threshold = self.threshold;
+        Some(tokio::spawn(async move {
+            find_usable_pair(&triples, &active, threshold).await
+        }))
+    }
 
-        // IDs that were found unsuitable this round (kept in storage, skipped on the next peek)
-        let mut local_skip: Vec<TripleId> = Vec::new();
-        let (reservation, participants) = loop {
-            let Some(reservation) = self.triples.peek_mine(&local_skip).await else {
-                return;
-            };
-
-            let pair_id = reservation.id;
-            // use holders (not original participants) since some nodes may have lost the artifact.
-            let participants = intersect_vec(&[active, reservation.holders()]);
-            if participants.len() < self.threshold {
-                tracing::warn!(
-                    ?pair_id,
-                    ?active,
-                    ?participants,
-                    "intersection < threshold, skipping triple pair"
-                );
-                local_skip.push(pair_id);
-                // drop: in-memory reservation released, pair stays in storage
-                continue;
-            }
-
-            break (reservation, participants);
-        };
-
+    async fn propose_found(
+        &mut self,
+        reservation: TriplesReserved,
+        participants: Vec<Participant>,
+    ) {
         let id = FullPresignatureId::from_pair(reservation.id);
         tracing::info!(?id, "proposing protocol to generate a new presignature");
 
@@ -543,7 +565,12 @@ impl PresignatureSpawner {
     /// Generate new presignatures if this node owns fewer than the per-node minimum
     /// (`min_presignatures`) and the network-wide total hasn't reached the cap
     /// (`max_presignatures`).
-    async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
+    async fn stockpile(
+        &mut self,
+        active: &[Participant],
+        cfg: &ProtocolConfig,
+        search: &mut Option<PairSearch>,
+    ) {
         let not_enough_presignatures = {
             // Network-wide cap: stop generating once total potential presignatures reach max.
             if self.len_potential().await >= cfg.presignature.max_presignatures as usize {
@@ -558,7 +585,9 @@ impl PresignatureSpawner {
 
         if not_enough_presignatures {
             tracing::debug!("not enough presignatures, generating");
-            self.propose_posit(active).await;
+            if let Some(handle) = self.spawn_search(active) {
+                *search = Some(handle);
+            }
         }
     }
 
@@ -730,6 +759,7 @@ impl PresignatureSpawner {
 
         let mut protocol = cfg.borrow().protocol.clone();
         let mut active = mesh_state.borrow().active().keys_vec();
+        let mut search = None;
 
         loop {
             tokio::select! {
@@ -750,6 +780,48 @@ impl PresignatureSpawner {
                     let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
                     self.process_posit(id, from, action, timeout).await;
                 }
+                Some(result) = async {
+                    Some(search.as_mut()?.await)
+                }, if search.is_some() => {
+                    search = None;
+                    self.searching = false;
+                    match result {
+                        Ok(Some((reservation, participants))) => {
+                            self.propose_found(reservation, participants).await;
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::warn!(?err, "presignature pair search interrupted");
+                        }
+                    }
+                }
+                Some(result) = self.pending_waits.join_next(), if !self.pending_waits.is_empty() => {
+                    let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
+                    match result {
+                        Ok((id, (from, true))) => {
+                            self.process_posit(id, from, PositAction::Propose, timeout).await;
+                        }
+                        Ok((id, (from, false))) => {
+                            tracing::warn!(
+                                ?id,
+                                ?from,
+                                "presignature required triples are not known"
+                            );
+                            self.apply_posit(
+                                id,
+                                from,
+                                PositInternalAction::Reply(PositAction::RejectWithReason(
+                                    PositRejectReason::MissingArtifact,
+                                )),
+                                timeout,
+                            )
+                            .await;
+                        }
+                        Err(id) => {
+                            tracing::warn!(?id, "presignature triple wait interrupted");
+                        }
+                    }
+                }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
                     let id = match result {
@@ -765,7 +837,7 @@ impl PresignatureSpawner {
                 _ = stockpile_interval.tick() => {
                     if active.len() >= self.threshold {
                         last_active_warn = None;
-                        self.stockpile(&active, &protocol).await;
+                        self.stockpile(&active, &protocol, &mut search).await;
                         let _ = ongoing_gen_tx.send(self.ongoing.len());
 
                         crate::metrics::storage::NUM_PRESIGNATURES_MINE
@@ -798,6 +870,60 @@ impl Drop for PresignatureSpawner {
     fn drop(&mut self) {
         let msg = self.msg.clone();
         tokio::spawn(msg.unsubscribe_presignature_posit());
+    }
+}
+
+async fn triples_known(triples: &TripleStorage, pair_id: TripleId) -> bool {
+    triples.contains_reserved(pair_id).await || triples.contains(pair_id).await
+}
+
+async fn wait_for_triples(triples: &TripleStorage, pair_id: TripleId) -> bool {
+    if triples_known(triples, pair_id).await {
+        return true;
+    }
+
+    tokio::time::timeout(TRIPLE_WAIT, async {
+        let mut interval = tokio::time::interval(Duration::from_millis(50));
+        loop {
+            interval.tick().await;
+            if triples_known(triples, pair_id).await {
+                return;
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
+fn pair_participants(
+    active: &[Participant],
+    holders: &[Participant],
+    threshold: usize,
+) -> Option<Vec<Participant>> {
+    let participants = intersect_vec(&[active, holders]);
+    (participants.len() >= threshold).then_some(participants)
+}
+
+async fn find_usable_pair(
+    triples: &TripleStorage,
+    active: &[Participant],
+    threshold: usize,
+) -> Option<(TriplesReserved, Vec<Participant>)> {
+    let mut local_skip: Vec<TripleId> = Vec::new();
+    loop {
+        let reservation = triples.peek_mine(&local_skip).await?;
+        let pair_id = reservation.id;
+        let Some(participants) = pair_participants(active, reservation.holders(), threshold) else {
+            tracing::warn!(
+                ?pair_id,
+                ?active,
+                holders = ?reservation.holders(),
+                "intersection < threshold, skipping triple pair"
+            );
+            local_skip.push(pair_id);
+            continue;
+        };
+        return Some((reservation, participants));
     }
 }
 
@@ -907,10 +1033,25 @@ impl PendingTriples {
 
 #[cfg(test)]
 mod tests {
-    use cait_sith::{protocol::Participant, PresignOutput};
-    use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
+    use cait_sith::{PresignOutput, protocol::Participant};
+    use k256::{Secp256k1, elliptic_curve::CurveArithmetic};
 
-    use crate::protocol::presignature::Presignature;
+    use super::{Presignature, pair_participants};
+
+    #[test]
+    fn pair_participants_requires_threshold() {
+        let p0 = Participant::from(0);
+        let p1 = Participant::from(1);
+        let p2 = Participant::from(2);
+        let active = [p0, p1, p2];
+        let holders = [p0, p1];
+        assert_eq!(
+            pair_participants(&active, &holders, 2).map(|p| p.len()),
+            Some(2)
+        );
+        assert_eq!(pair_participants(&active, &holders, 3), None);
+        assert_eq!(pair_participants(&active, &[p0], 2), None);
+    }
 
     #[tokio::test]
     async fn test_presignature_serialize_deserialize() {

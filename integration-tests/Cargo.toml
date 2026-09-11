@@ -101,6 +101,11 @@ name = "store"
 path = "benches/store.rs"
 harness = false
 
+[[bench]]
+name = "presig"
+path = "benches/presig.rs"
+harness = false
+
 [features]
 default = []
 helios = ["mpc-chain-ethereum/helios", "mpc-node/helios"]
