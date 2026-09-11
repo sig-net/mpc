@@ -13,10 +13,10 @@ axum = "0.7.9"
 axum-extra = "0.9.6"
 backon.workspace = true
 chrono = "0.4.24"
+base64 = "0.22"
 dashmap = "6.1"
-google-secretmanager1 = "5"
+google-cloud-auth = { version = "1.16", default-features = false, features = ["default-rustls-provider"] }
 http = "1.1.0"
-hyper-rustls = { version = "=0.24", features = ["http2"] }
 local-ip-address = "0.5.4"
 lru = "0.18"
 mime = "0.3.17"
@@ -45,10 +45,11 @@ ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
 hex.workspace = true
-hyper.workspace = true
 k256.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+# reqwest 0.12 (already in the tree via alloy) backs the GCP Secret Manager REST client.
+reqwest12 = { package = "reqwest", version = "0.12", default-features = false, features = ["rustls-tls"] }
 semver.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true

@@ -5,7 +5,7 @@
 ignore = [
 	"RUSTSEC-2024-0344", # curve25519-dalek pinned via Solana 2.x; upgrade blocked until Solana adopts dalek 4.x
 	"RUSTSEC-2022-0093", # ed25519-dalek 2.x unavailable in Solana 2.x dependency tree
-	"RUSTSEC-2024-0421", # idna >=1.0 incompatible with google-apis + libp2p stacks we cannot yet bump
+	"RUSTSEC-2024-0421", # idna 0.2.3 exists only in Cargo.lock via libp2p 0.51's optional dns subtree (trust-dns-proto, never compiled); google-apis' url 1.x/idna 0.1.5 was removed with the secretmanager migration.
 	"RUSTSEC-2025-0009", # ring 0.16.20 exists only in Cargo.lock via libp2p 0.51's optional quic subtree (never compiled); lock regen blocked by yanked core2.
 	"RUSTSEC-2024-0336", # rustls 0.20.9 same story as RUSTSEC-2025-0009: lock-only entry via libp2p 0.51's optional quic subtree, never compiled.
 	"RUSTSEC-2025-0055", # tracing-subscriber 0.2.25 is an orphaned Cargo.lock entry (no dependent); cannot be pruned because full lock regen is blocked by yanked core2.
@@ -13,10 +13,10 @@ ignore = [
 	# we will likely need to fix this once we have a more recent near smart contract version.
 	"RUSTSEC-2026-0002", # lru (0.12.5, 0.13.0) `IterMut` violates Stacked Borrows (unsound); pulled in by alloy/smoldot-light downstreams.
 	"RUSTSEC-2026-0037", # quinn-proto 0.9.6 exists only in Cargo.lock via libp2p 0.51's optional quic subtree (never compiled); blocked on libp2p bumps.
-	"RUSTSEC-2026-0049", # rustls-webpki 0.101.7/0.102.8 faulty CRL matching; no fix in those series, pinned by rustls 0.21/0.22 (reqwest 0.11, google-secretmanager).
-	"RUSTSEC-2026-0098", # rustls-webpki 0.101.7/0.102.8 URI name constraints incorrectly accepted; same dependency chain as RUSTSEC-2026-0049.
-	"RUSTSEC-2026-0099", # rustls-webpki 0.101.7/0.102.8 wildcard name constraints accepted; same dependency chain as RUSTSEC-2026-0049.
-	"RUSTSEC-2026-0104", # rustls-webpki CRL parsing panic; 0.103.x line updated to 0.103.13 (fixed). Remaining 0.101.7/0.102.8 pinned by rustls 0.21/0.22; we do not use CRLs, so not reachable.
+	"RUSTSEC-2026-0049", # rustls-webpki 0.101.7 faulty CRL matching; no fix in the 0.101 series, pinned by rustls 0.21 via helios' jsonrpsee-http-client 0.19 (hyper-rustls 0.24).
+	"RUSTSEC-2026-0098", # rustls-webpki 0.101.7 URI name constraints incorrectly accepted; same dependency chain as RUSTSEC-2026-0049.
+	"RUSTSEC-2026-0099", # rustls-webpki 0.101.7 wildcard name constraints accepted; same dependency chain as RUSTSEC-2026-0049.
+	"RUSTSEC-2026-0104", # rustls-webpki CRL parsing panic; 0.103.x line updated to 0.103.13 (fixed), 0.102.8 removed with the google-apis migration. Remaining 0.101.7 pinned by rustls 0.21 (helios' jsonrpsee 0.19); we do not use CRLs, so not reachable.
 	"RUSTSEC-2026-0119", # CPU exhaustion via O(n²) name compression in hickory-proto; transitively locked through reqwest 0.12/helios, blocked on upstream updates
 	"RUSTSEC-2026-0118", # hickory-proto NSEC3 closest-encloser proof validation enters unbounded loop on cross-zone responses;
 	# no fixed upgrade is available, transitively pulled by reqwest 0.12 consumers (helios, near-jsonrpc-client, solana-rpc-client)
@@ -31,7 +31,6 @@ ignore = [
 	"RUSTSEC-2026-0269",
 	# h2 unbounded empty DATA frames (RUSTSEC-2026-0258); DoS via CPU exhaustion on HTTP/2 stream parsing (not a secret/data leakage vulnerability).
 	# Server-side traffic uses hyper 1.x / h2 0.4 which is upgraded to >=0.4.16. h2 0.3.x is used solely by outgoing client connections
-	# to GCP Secret Manager endpoints (via unmaintained google-apis-rs / hyper 0.14) and helios' jsonrpsee 0.19 RPC client (hyper 0.14);
-	# no upstream 0.3 patch is available.
+	# from our reqwest 0.11 workspace client and helios' jsonrpsee 0.19 RPC client (both hyper 0.14); no upstream 0.3 patch is available.
 	"RUSTSEC-2026-0258",
 ]
