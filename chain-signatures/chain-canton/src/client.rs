@@ -469,6 +469,7 @@ mod tests {
             SignKind::RespondBidirectional(RespondBidirectionalTx {
                 tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
                 output: vec![1, 2, 3],
+                origin_indexed_at: None,
                 chain_ctx: Some(
                     borsh::to_vec(&CantonChainCtx {
                         sign_event_contract_id: "cid".to_string(),
@@ -769,6 +770,7 @@ mod tests {
         let tx = RespondBidirectionalTx {
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![1, 2, 3],
+            origin_indexed_at: None,
             chain_ctx: Some(chain_ctx),
         };
 
@@ -795,6 +797,7 @@ mod tests {
         let tx = RespondBidirectionalTx {
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
+            origin_indexed_at: None,
             chain_ctx: None, // Missing
         };
 
@@ -833,6 +836,7 @@ mod tests {
         let tx = RespondBidirectionalTx {
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
+            origin_indexed_at: None,
             chain_ctx: Some(chain_ctx),
         };
         let action = make_publish_action(
@@ -881,6 +885,7 @@ mod tests {
         let tx = RespondBidirectionalTx {
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
+            origin_indexed_at: None,
             chain_ctx: Some(chain_ctx),
         };
         let action = make_publish_action(
@@ -919,6 +924,7 @@ mod tests {
         let tx = RespondBidirectionalTx {
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
+            origin_indexed_at: None,
             chain_ctx: Some(chain_ctx),
         };
         let action = make_publish_action(

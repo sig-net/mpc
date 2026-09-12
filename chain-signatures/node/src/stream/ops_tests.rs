@@ -47,6 +47,54 @@ fn signature_respond_event_conversion() {
     assert_eq!(event.chain, Chain::Ethereum);
 }
 
+#[test]
+fn bidirectional_origin_uses_the_stage_appropriate_timestamp() {
+    let sign_id = SignId::new([31; 32]);
+    let initial = test_indexed_request(
+        sign_id,
+        Chain::Solana,
+        test_sign_args(31),
+        100,
+        SignKind::Sign,
+    );
+    assert_eq!(bidirectional_origin_indexed_at(&initial), Some(100));
+
+    let final_response = IndexedSignRequest::respond_bidirectional(
+        sign_id,
+        test_sign_args(31),
+        Chain::Solana,
+        200,
+        RespondBidirectionalTx {
+            tx_id: mpc_primitives::BidirectionalTxId([31; 32]),
+            output: vec![],
+            origin_indexed_at: Some(100),
+            chain_ctx: None,
+        },
+    );
+    assert_eq!(
+        bidirectional_origin_indexed_at(&final_response),
+        Some(100),
+        "stage 2 must not substitute its own queue timestamp"
+    );
+
+    let legacy_final_response = IndexedSignRequest::respond_bidirectional(
+        sign_id,
+        test_sign_args(31),
+        Chain::Solana,
+        200,
+        RespondBidirectionalTx {
+            tx_id: mpc_primitives::BidirectionalTxId([31; 32]),
+            output: vec![],
+            origin_indexed_at: None,
+            chain_ctx: None,
+        },
+    );
+    assert_eq!(
+        bidirectional_origin_indexed_at(&legacy_final_response),
+        None
+    );
+}
+
 #[tokio::test]
 async fn recover_backlog_requeues_pending_signs() {
     // Prepare backlog with a single pending sign request on a chain that
@@ -186,6 +234,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
         SignCommand::Request(req) => {
             if let mpc_primitives::SignKind::RespondBidirectional(res) = &req.kind {
                 assert_eq!(res.tx_id, tx.id);
+                assert_eq!(res.origin_indexed_at, Some(unix_timestamp_indexed));
             } else {
                 panic!("Expected RespondBidirectional request");
             }
@@ -518,6 +567,7 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
         RespondBidirectionalTx {
             tx_id: BidirectionalTxId(B256::from([12u8; 32]).0),
             output: vec![],
+            origin_indexed_at: None,
             chain_ctx: None,
         },
     );
@@ -776,6 +826,7 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
             RespondBidirectionalTx {
                 tx_id: BidirectionalTxId(B256::from([13u8; 32]).0),
                 output: vec![1, 2, 3],
+                origin_indexed_at: None,
                 chain_ctx: None,
             },
         )))
@@ -831,6 +882,7 @@ async fn process_respond_bidirectional_event_rejects_invalid_signature() {
             RespondBidirectionalTx {
                 tx_id: BidirectionalTxId(B256::from([16u8; 32]).0),
                 output: vec![1, 2, 3],
+                origin_indexed_at: None,
                 chain_ctx: None,
             },
         )))
@@ -1445,6 +1497,7 @@ async fn publish_failover_fires_once_per_leg() {
                 RespondBidirectionalTx {
                     tx_id: mpc_primitives::BidirectionalTxId([0u8; 32]),
                     output: vec![],
+                    origin_indexed_at: None,
                     chain_ctx: None,
                 },
             )),

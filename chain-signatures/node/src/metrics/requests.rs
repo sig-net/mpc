@@ -27,18 +27,32 @@ pub enum SignRequestStep {
     Generating,
     /// Time to respond to the sign request (Status: ok)
     Responding,
-    /// Bidirectional only: time from publishing the initial response to the
-    /// source chain until the target-chain execution is confirmed and the final
-    /// response request is built (Status: ok).
+    /// Bidirectional only: the gap between the two legs, ending when the
+    /// target-chain execution is confirmed and the final response request is
+    /// built.
+    ///
+    /// It starts at `PublishState::publishing_since`, which every participant
+    /// stamps on generation success -- so this is the publish boundary on the
+    /// proposer and "signature ready" elsewhere, and it therefore also contains
+    /// publish dispatch and source-chain inclusion/indexing, not the
+    /// target-chain wait alone. Expect it to differ systematically between
+    /// proposer and non-proposer nodes.
     ///
     /// Recorded under `kind="respond_bidirectional"`, the kind the request has
     /// once the transition completes, so the whole second leg shares one kind.
+    ///
+    /// Status:
+    ///     - ok: the target chain executed successfully
+    ///     - execution_failed: the target-chain execution reverted; the round
+    ///       trip still completed, so the latency is real
     AwaitingExecution,
     /// Bidirectional only: time from indexing the initial request to the final
-    /// response landing on the source chain, spanning both legs (Status: ok).
+    /// response landing on the source chain, spanning both legs. Same statuses
+    /// as `AwaitingExecution`.
     ///
-    /// The origin timestamp is node-local state that checkpoint recovery
-    /// resets, so requests that cross a restart are not observed here.
+    /// The origin travels in the serialized request, so it survives a restart
+    /// but may carry a peer's clock; an origin ahead of this node's clock is
+    /// skipped rather than observed as zero.
     EndToEnd,
     /// Total time from indexing to responding
     /// Status:

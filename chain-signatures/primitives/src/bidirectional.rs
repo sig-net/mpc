@@ -29,6 +29,11 @@ pub struct BidirectionalTx {
 pub struct RespondBidirectionalTx {
     pub tx_id: BidirectionalTxId,
     pub output: crate::RespondBidirectionalSerializedOutput,
+    /// Unix timestamp at which the initial request was indexed. This remains
+    /// distinct from the follow-up request's own indexing timestamp so queueing
+    /// and per-leg latency metrics retain their existing semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_indexed_at: Option<u64>,
     /// Opaque per-chain context blob. The producing indexer serializes its own
     /// struct (see e.g. `indexer_canton::CantonChainCtx`) into bytes; the
     /// consuming publisher deserializes it back. Backlog and protocol layers

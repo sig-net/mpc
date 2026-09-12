@@ -2,11 +2,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
-use crate::metrics::requests::{
-    record_request_latency, record_request_latency_since, SignRequestStep,
-};
+use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
-use crate::respond_bidirectional::CompletedTx;
+use crate::respond_bidirectional::{is_failed_execution_output, CompletedTx};
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use mpc_chain_integration_core::ChainTelemetry;
@@ -16,6 +14,7 @@ use mpc_primitives::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignCommand, SignId, SignKind,
     SignatureRespondedEvent,
 };
+use mpc_utils::time::unix_elapsed_checked;
 
 pub(crate) async fn process_sign_request(
     sign_request: Arc<IndexedSignRequest>,
@@ -284,17 +283,28 @@ pub(crate) async fn process_respond_bidirectional_event(
 
     entry.verify_signature(root_pk, &event.signature)?;
 
-    // The whole round trip, measured against when the *initial* request was
-    // indexed. Skipped when the entry crossed a restart, which drops the
-    // node-local origin timestamp.
-    if let Some(origin_indexed_at) = entry.origin_indexed_at() {
-        record_request_latency_since(
-            source_chain,
-            SignRequestStep::EndToEnd,
-            "ok",
-            RequestKind::RespondBidirectional,
-            origin_indexed_at,
-        );
+    // The whole round trip, measured against when the initial request was
+    // indexed. The origin travels with the final-response request so checkpoint
+    // recovery does not change whether this observation is emitted -- but it
+    // may therefore carry a peer's clock, so a future origin is skipped rather
+    // than saturated to a zero-length round trip.
+    if let SignKind::RespondBidirectional(response) = &entry.request.kind {
+        if let Some(origin_indexed_at) = response.origin_indexed_at {
+            match unix_elapsed_checked(origin_indexed_at) {
+                Some(elapsed) => record_request_latency(
+                    source_chain,
+                    SignRequestStep::EndToEnd,
+                    execution_status(is_failed_execution_output(&response.output)),
+                    RequestKind::RespondBidirectional,
+                    elapsed,
+                ),
+                None => tracing::warn!(
+                    ?sign_id,
+                    origin_indexed_at,
+                    "skipping end-to-end latency: origin timestamp is ahead of local clock"
+                ),
+            }
+        }
     }
 
     if ctx.backlog.remove(source_chain, &sign_id).await.is_some() {
@@ -307,6 +317,26 @@ pub(crate) async fn process_respond_bidirectional_event(
     ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
 
     Ok(())
+}
+
+/// Status label for the two spanning bidirectional steps. A reverted
+/// target-chain execution still completes a round trip, so it is observed --
+/// but not as `ok`, which would make it indistinguishable from a healthy one.
+fn execution_status(failed: bool) -> &'static str {
+    if failed {
+        "execution_failed"
+    } else {
+        "ok"
+    }
+}
+
+/// Return the initial request's indexing time without confusing it with the
+/// final-response request's independent queue timestamp.
+fn bidirectional_origin_indexed_at(request: &IndexedSignRequest) -> Option<u64> {
+    match &request.kind {
+        SignKind::RespondBidirectional(response) => response.origin_indexed_at,
+        _ => Some(request.unix_timestamp_indexed),
+    }
 }
 
 /// Process an execution confirmation emitted by a chain client.
@@ -356,22 +386,30 @@ pub async fn process_execution_confirmed(
     }
     let source_chain = pending_tx.source_chain;
 
-    let chain_ctx = ctx
+    let (chain_ctx, origin_indexed_at) = ctx
         .backlog
         .get(pending_tx.source_chain, &unwatched_sign_id)
         .await
-        .and_then(|entry| match &entry.request.kind {
-            SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
-            _ => None,
-        });
+        .map(|entry| {
+            let chain_ctx = match &entry.request.kind {
+                SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
+                _ => None,
+            };
+            (chain_ctx, bidirectional_origin_indexed_at(&entry.request))
+        })
+        .context("pending execution entry was not found")?;
 
     let completed_tx = CompletedTx::new(Arc::clone(&pending_tx));
+    let execution_failed = matches!(result, ExecutionOutcome::Failed);
 
     let sign_request = match result {
-        ExecutionOutcome::Success { output } => {
-            completed_tx.create_sign_request_from_serialized_output(output, chain_ctx)?
+        ExecutionOutcome::Success { output } => completed_tx
+            .create_sign_request_from_serialized_output(output, chain_ctx, origin_indexed_at)?,
+        ExecutionOutcome::Failed => {
+            completed_tx
+                .create_failed_sign_request(chain_ctx, origin_indexed_at)
+                .await?
         }
-        ExecutionOutcome::Failed => completed_tx.create_failed_sign_request(chain_ctx).await?,
     };
 
     let sign_request = Arc::new(sign_request);
@@ -396,7 +434,7 @@ pub async fn process_execution_confirmed(
         record_request_latency(
             source_chain,
             SignRequestStep::AwaitingExecution,
-            "ok",
+            execution_status(execution_failed),
             RequestKind::RespondBidirectional,
             awaiting_execution,
         );

@@ -562,6 +562,7 @@ mod tests {
             SignKind::RespondBidirectional(RespondBidirectionalTx {
                 tx_id: BidirectionalTxId([0x11; 32]),
                 output,
+                origin_indexed_at: None,
                 chain_ctx: None,
             }),
             SignId::new(REQUEST_ID),

@@ -719,6 +719,7 @@ async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
         RespondBidirectionalTx {
             tx_id: BidirectionalTxId([1u8; 32]),
             output: vec![0xde, 0xad, 0xbe, 0xef],
+            origin_indexed_at: None,
             chain_ctx: None,
         },
     ));
