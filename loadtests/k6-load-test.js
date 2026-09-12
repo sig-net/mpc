@@ -65,6 +65,33 @@ const strategies = {
     },
   },
 
+  // Steps up through the constant-rate tiers in one run so a single test shows
+  // where latency breaks instead of a pass/fail at one rate. ~3,240 requests.
+  "ramp_1_10": {
+    scenarios: {
+      ramp: {
+        executor: 'ramping-arrival-rate',
+        startRate: 1,
+        timeUnit: '1s',
+        preAllocatedVUs: 40,
+        maxVUs: 300,
+        stages: [
+          { target: 1, duration: '3m' },
+          { target: 2, duration: '3m' },
+          { target: 5, duration: '3m' },
+          { target: 10, duration: '3m' },
+        ],
+      },
+    },
+    thresholds: {
+      http_req_failed: ['rate<0.03'],
+      http_req_duration: ['p(95)<10000'],
+      // k6 skips iterations when every VU is still waiting on a signature. A
+      // run that silently sent less than it was asked to is not a pass.
+      dropped_iterations: ['count<10'],
+    },
+  },
+
 };
 
 export const options = (() => {
@@ -80,7 +107,9 @@ export const options = (() => {
   // Deep clone to avoid mutating the shared `strategies` object
   const opts = JSON.parse(JSON.stringify(base));
   for (const scen of Object.keys(opts.scenarios || {})) {
-    opts.scenarios[scen].duration = duration;
+    if (!opts.scenarios[scen].stages) {
+      opts.scenarios[scen].duration = duration;
+    }
   }
   return opts;
 })();
