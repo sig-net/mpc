@@ -7,6 +7,10 @@ edition = "2021"
 name = "mpc-node"
 path = "src/main.rs"
 
+[[bin]]
+name = "mem-simulation"
+path = "src/bin/mem_simulation.rs"
+
 [dependencies]
 async-trait.workspace = true
 axum = "0.7.9"
