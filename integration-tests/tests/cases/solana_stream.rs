@@ -14,7 +14,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::contract::primitives::{ParticipantInfo, Participants};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
-use mpc_node::sign_bidirectional::{PublishState, SignStatus};
+use mpc_node::sign_bidirectional::{PublishState, SignProgress, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_primitives::{
@@ -531,13 +531,11 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         .set_status(
             Chain::Solana,
             &sign_id,
-            SignStatus::PendingPublish {
-                publish: Arc::new(PublishState::new(
-                    signature,
-                    vec![Participant::from(0u32)],
-                    true,
-                )),
-            },
+            SignStatus::Sign(SignProgress::Publishing(Arc::new(PublishState::new(
+                signature,
+                vec![Participant::from(0u32)],
+                true,
+            )))),
         )
         .await;
     seeded_backlog

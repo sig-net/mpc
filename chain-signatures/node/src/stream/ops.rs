@@ -272,10 +272,10 @@ pub(crate) async fn process_respond_bidirectional_event(
         return Ok(());
     };
 
-    if !matches!(entry.request.kind, SignKind::RespondBidirectional(_)) {
+    if !matches!(entry.request().kind, SignKind::RespondBidirectional(_)) {
         anyhow::bail!(
             "unexpected sign type for RespondBidirectionalEvent: {:?}",
-            entry.request.kind
+            entry.request().kind
         );
     }
 
@@ -361,7 +361,7 @@ pub async fn process_execution_confirmed(
     let sign_request = Arc::new(sign_request);
     let updated_tx = ctx
         .backlog
-        .transition_to_bidirectional_response(
+        .respond(
             pending_tx.source_chain,
             &unwatched_sign_id,
             Arc::clone(&sign_request),

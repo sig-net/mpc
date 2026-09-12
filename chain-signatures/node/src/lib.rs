@@ -6,6 +6,28 @@ pub const CHECKPOINT_VERSION: u64 = 0;
 /// Redis namespace version for persisted checkpoints.
 pub(crate) const CHECKPOINT_STORAGE_VERSION: &str = "v14";
 
+/// Polyfill for `std::assert_matches`. Once contract and CI use Rust 1.96+,
+/// this macro can be removed in favor of `std::assert_matches`.
+#[macro_export]
+macro_rules! assert_matches {
+    ($expression:expr, $pattern:pat $(if $guard:expr)? $(,)?) => {
+        match $expression {
+            $pattern $(if $guard)? => {}
+            ref e => panic!(
+                "assertion failed: `{:?}` does not match `{}`",
+                e,
+                stringify!($pattern $(if $guard)?)
+            ),
+        }
+    };
+    ($expression:expr, $pattern:pat $(if $guard:expr)?, $($arg:tt)+) => {
+        match $expression {
+            $pattern $(if $guard)? => {}
+            ref e => panic!($($arg)+),
+        }
+    };
+}
+
 pub mod backlog;
 pub mod cli;
 pub mod config;
