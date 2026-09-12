@@ -1,4 +1,4 @@
-use crate::{BidirectionalTxId, Chain, Signature};
+use crate::{BidirectionalTxId, Chain, SignId, Signature};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BidirectionalTx {
@@ -23,6 +23,12 @@ pub struct BidirectionalTx {
     #[serde(with = "serde_bytes")]
     pub from_address: [u8; 20],
     pub nonce: u64,
+}
+
+impl BidirectionalTx {
+    pub const fn sign_id(&self) -> SignId {
+        SignId::new(self.request_id)
+    }
 }
 
 #[derive(Hash, PartialEq, Eq, Clone, Debug, serde::Serialize, serde::Deserialize)]

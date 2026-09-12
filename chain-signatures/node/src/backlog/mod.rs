@@ -1,19 +1,23 @@
 mod checkpoints;
 pub mod consensus;
 pub(crate) mod migration;
+#[cfg(any(test, feature = "test-feature"))]
+pub mod mock;
+pub mod request;
 
-use crate::sign_bidirectional::{
-    BidirectionalProgress, PublishState, SignBidirectionalEventExt, SignProgress, SignStatus,
+pub use request::{
+    AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign, SignEntry,
 };
+
+use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 
-use anyhow::Context as _;
 use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, PublicKey,
-    SignId, SignKind, Signature,
+    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
+    SignKind,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -47,7 +51,7 @@ impl PendingRequests {
 
     /// Inserts a sign-respond transaction into the pending requests map
     /// Returns Some(old_value) if the key was already present
-    fn insert(&mut self, id: SignId, entry: BacklogEntry) -> Option<BacklogEntry> {
+    pub(super) fn insert(&mut self, id: SignId, entry: BacklogEntry) -> Option<BacklogEntry> {
         self.requests.insert(id, entry)
     }
 
@@ -68,49 +72,24 @@ impl PendingRequests {
         self.requests.len()
     }
 
-    fn pending_generations(&self) -> HashMap<SignId, BacklogEntry> {
+    fn pending_executions(
+        &self,
+        chain: Chain,
+        backlog: &Backlog,
+    ) -> Vec<SignEntry<Bidirectional<Executing>>> {
         self.requests
-            .iter()
-            .filter(|(_, entry)| {
-                matches!(
-                    &entry.status,
-                    SignStatus::Sign(SignProgress::Generating)
-                        | SignStatus::Bidirectional(BidirectionalProgress::Initial(
-                            SignProgress::Generating
-                        ))
-                )
-            })
-            .map(|(id, entry)| (*id, entry.clone()))
-            .collect()
-    }
-
-    fn pending_generation_bidirectionals(&self) -> HashMap<SignId, BacklogEntry> {
-        self.requests
-            .iter()
-            .filter(|(_, entry)| {
-                matches!(
-                    &entry.status,
-                    SignStatus::Bidirectional(BidirectionalProgress::Final {
-                        progress: SignProgress::Generating,
-                        ..
+            .values()
+            .filter_map(|entry| match &entry.status {
+                SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)) => {
+                    Some(SignEntry {
+                        chain,
+                        request: Arc::clone(entry.request()),
+                        state: Bidirectional(Executing(Arc::clone(tx))),
+                        backlog: backlog.clone(),
                     })
-                )
+                }
+                _ => None,
             })
-            .map(|(id, entry)| (*id, entry.clone()))
-            .collect()
-    }
-
-    fn pending_execution(&self, id: &SignId) -> Option<&BacklogEntry> {
-        self.requests
-            .get(id)
-            .filter(|entry| entry.status().is_pending_execution())
-    }
-
-    fn pending_executions(&self) -> Vec<(SignId, BacklogEntry)> {
-        self.requests
-            .iter()
-            .filter(|(_, entry)| entry.status().is_pending_execution())
-            .map(|(&id, entry)| (id, entry.clone()))
             .collect()
     }
 
@@ -120,13 +99,8 @@ impl PendingRequests {
     }
 
     /// Set the processed block height for this chain
-    fn set_processed_block(&mut self, height: u64) {
+    pub(super) fn set_processed_block(&mut self, height: u64) {
         self.processed_block_height = Some(height);
-    }
-
-    #[cfg(test)]
-    fn checkpoint(&self, chain: Chain) -> Checkpoint {
-        Checkpoints::snapshot(self, chain)
     }
 
     fn from_checkpoint(checkpoint: &Checkpoint) -> Self {
@@ -211,7 +185,7 @@ impl Backlog {
 
     /// Get the pending requests for a specific chain.
     #[inline]
-    fn pending(&self, chain: &Chain) -> &RwLock<PendingRequests> {
+    pub(crate) fn pending(&self, chain: &Chain) -> &RwLock<PendingRequests> {
         &self.requests[*chain]
     }
 
@@ -222,35 +196,39 @@ impl Backlog {
     }
 
     /// Insert a new Sign request into the backlog for the specified chain.
-    pub async fn insert(&self, request: Arc<IndexedSignRequest>) -> Option<BacklogEntry> {
+    /// Returns the initial [`SignEntry<Generating>`] handle and a boolean indicating
+    /// whether the request was newly inserted (`true`) or was already present (`false`).
+    pub async fn insert(&self, request: Arc<IndexedSignRequest>) -> (SignEntry<Generating>, bool) {
         let chain = request.chain;
         let id = request.id;
-        let entry = BacklogEntry::new(request);
+        let entry = BacklogEntry::new(Arc::clone(&request));
         let (prev, len) = {
             let mut pending = self.pending(&chain).write().await;
             let p = pending.insert(id, entry);
             (p, pending.len())
         };
 
+        let is_new = prev.is_none();
         // Only increment total pending if this is a new entry
-        if prev.is_none() {
+        if is_new {
             self.total_pending.fetch_add(1, Ordering::Relaxed);
         }
 
         self.observe_backlog_size(chain, len);
-        prev
+        (SignEntry::generating(request, self), is_new)
     }
 
     /// Remove a Sign request from the backlog for the specified chain.
-    pub async fn remove(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
+    /// Returns `true` if an entry was removed, `false` otherwise.
+    pub async fn remove(&self, chain: Chain, id: &SignId) -> bool {
         let (removed, len) = {
             let mut pending = self.pending(&chain).write().await;
             let rem = pending.remove(id);
-            (rem, pending.len())
+            (rem.is_some(), pending.len())
         };
 
         // Only decrement total pending if an entry was actually removed
-        if removed.is_some() {
+        if removed {
             self.total_pending.fetch_sub(1, Ordering::Relaxed);
         }
 
@@ -258,9 +236,15 @@ impl Backlog {
         removed
     }
 
-    /// Get a Sign request from the backlog for the specified chain.
-    pub async fn get(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
-        self.pending(&chain).read().await.get(id).cloned()
+    /// Get an in-flight sign request entry from the backlog for the specified chain.
+    pub async fn get(&self, chain: Chain, id: &SignId) -> Option<SignEntry> {
+        let entry = self.pending(&chain).read().await.get(id).cloned()?;
+        Some(SignEntry {
+            chain,
+            request: Arc::clone(entry.request()),
+            state: entry.status,
+            backlog: self.clone(),
+        })
     }
 
     /// Returns the number of pending requests in total
@@ -282,20 +266,26 @@ impl Backlog {
 
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
-    pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<Arc<IndexedSignRequest>> {
-        let pending = self.pending(&chain).write().await;
+    pub async fn requeueable_requests(&self, chain: Chain) -> Vec<SignEntry<Generating>> {
+        let pending = self.pending(&chain).read().await;
 
         let mut requeueable: Vec<_> = pending
             .requests
             .values()
             .filter(|entry| entry.status().is_pending_generation())
-            .map(|entry| Arc::clone(entry.request()))
+            .map(|entry| SignEntry {
+                chain,
+                request: Arc::clone(entry.request()),
+                state: Generating,
+                backlog: self.clone(),
+            })
             .collect();
 
         requeueable.sort_by(|left, right| {
-            left.unix_timestamp_indexed
-                .cmp(&right.unix_timestamp_indexed)
-                .then_with(|| left.id.request_id.cmp(&right.id.request_id))
+            left.request()
+                .unix_timestamp_indexed
+                .cmp(&right.request().unix_timestamp_indexed)
+                .then_with(|| left.request_id().cmp(&right.request_id()))
         });
 
         requeueable
@@ -304,10 +294,7 @@ impl Backlog {
     /// Returns backlog requests for a chain that are ready to be published, each
     /// with whether this node already dispatched a publish for it.
     /// Sorted by indexed timestamp and request id.
-    pub async fn publishable_requests(
-        &self,
-        chain: Chain,
-    ) -> Vec<(Arc<IndexedSignRequest>, Arc<PublishState>, bool)> {
+    pub async fn publishable_requests(&self, chain: Chain) -> Vec<SignEntry<Publishing>> {
         // Read-only scan; the publish failover sweep calls this on every block, so a
         // write lock here would serialize against the signing hot path for nothing.
         let pending = self.pending(&chain).read().await;
@@ -316,48 +303,33 @@ impl Backlog {
             .requests
             .values()
             .filter_map(|entry| {
-                let publish = entry.status.publish_state()?;
-                Some((
-                    Arc::clone(entry.request()),
-                    Arc::clone(publish),
-                    entry.publish_dispatched,
-                ))
+                let publish = entry.status.publishing()?;
+                Some(SignEntry {
+                    chain,
+                    request: Arc::clone(entry.request()),
+                    state: publish.clone(),
+                    backlog: self.clone(),
+                })
             })
             .collect();
 
         publishable.sort_by(|left, right| {
-            left.0
+            left.request()
                 .unix_timestamp_indexed
-                .cmp(&right.0.unix_timestamp_indexed)
-                .then_with(|| left.0.id.request_id.cmp(&right.0.id.request_id))
+                .cmp(&right.request().unix_timestamp_indexed)
+                .then_with(|| left.request_id().cmp(&right.request_id()))
         });
 
         publishable
     }
 
-    /// Returns backlog requests for a chain that are still pending generation
-    pub async fn pending_generations(&self, chain: Chain) -> HashMap<SignId, BacklogEntry> {
-        self.pending(&chain).read().await.pending_generations()
-    }
-
-    /// Returns backlog requests for a chain that are still pending generation for bidirectional transactions
-    pub async fn pending_generation_bidirectionals(
+    /// Returns all backlog entries currently in destination-chain execution for a specific chain.
+    pub async fn pending_executions(
         &self,
         chain: Chain,
-    ) -> HashMap<SignId, BacklogEntry> {
-        self.pending(&chain)
-            .read()
-            .await
-            .pending_generation_bidirectionals()
-    }
-
-    /// Returns backlog entries that are pending execution for a given chain and request id
-    pub async fn pending_execution(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
-        self.pending(&chain)
-            .read()
-            .await
-            .pending_execution(id)
-            .cloned()
+    ) -> Vec<SignEntry<Bidirectional<Executing>>> {
+        let pending = self.pending(&chain).read().await;
+        pending.pending_executions(chain, self)
     }
 
     /// Returns the number of pending requests for a specific chain
@@ -365,99 +337,38 @@ impl Backlog {
         self.pending(&chain).read().await.len()
     }
 
-    /// Marks a request as publishing for a specific chain and request id, with the given publish state.
-    pub async fn publish(
-        &self,
-        chain: Chain,
-        id: &SignId,
-        publish: Arc<PublishState>,
-    ) -> Result<(), BacklogError> {
-        let mut pending = self.pending(&chain).write().await;
-
-        let Some(entry) = pending.requests.get_mut(id) else {
-            return Err(BacklogError::NotFound { chain, id: *id });
-        };
-
-        entry.publish(publish)
-    }
-
     /// Record that this node dispatched a publish for `id`'s current
     /// pending-publish episode, returning `false` if one was already dispatched or
     /// the entry is gone.
     pub async fn mark_publish_dispatched(&self, chain: Chain, id: &SignId) -> bool {
-        let mut pending = self.pending(&chain).write().await;
+        let pending = self.pending(&chain).read().await;
 
         pending
             .requests
-            .get_mut(id)
-            .is_some_and(BacklogEntry::mark_publish_dispatched)
-    }
-
-    // Test-only: production transitions go through the checked helpers above, which keep
-    // request kind and status paired. `test-feature` is what exposes this to
-    // `integration-tests`; a bare `cfg(test)` would not.
-    #[cfg(any(test, feature = "test-feature"))]
-    pub async fn set_request(
-        &self,
-        chain: Chain,
-        id: &SignId,
-        request: Arc<IndexedSignRequest>,
-    ) -> Result<(), BacklogError> {
-        let mut pending = self.pending(&chain).write().await;
-
-        let Some(entry) = pending.requests.get_mut(id) else {
-            return Err(BacklogError::NotFound { chain, id: *id });
-        };
-        entry.set_request(request);
-        Ok(())
-    }
-
-    /// Atomically move a completed target-chain execution into final response signing.
-    pub async fn respond(
-        &self,
-        chain: Chain,
-        id: &SignId,
-        request: Arc<IndexedSignRequest>,
-    ) -> Result<BacklogEntry, BacklogError> {
-        let mut pending = self.pending(&chain).write().await;
-
-        let entry = pending
-            .requests
-            .get_mut(id)
-            .ok_or(BacklogError::NotFound { chain, id: *id })?;
-        entry.respond(request)?;
-        Ok(entry.clone())
+            .get(id)
+            .and_then(|entry| entry.status.publishing())
+            .map(|publishing| publishing.mark_publish_dispatched())
+            .unwrap_or(false)
     }
 
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
-    ///
-    /// The watcher's `sign_id` and `tx.request_id` are expected to agree: on
-    /// confirmation the final-response request is rebuilt from `tx.request_id` while
-    /// the backlog entry is looked up by `sign_id`, and
-    /// `BacklogEntry::respond` rejects the pair when they
-    /// disagree. Warn here, where the divergence originates, rather than leaving only
-    /// a stalled request at confirmation time.
     pub async fn watch_execution(
         &self,
-        chain: Chain,
-        sign_id: SignId,
-        tx: Arc<BidirectionalTx>,
+        entry: &SignEntry<Bidirectional<Executing>>,
     ) -> Option<(SignId, Arc<BidirectionalTx>)> {
-        if sign_id != SignId::new(tx.request_id) {
-            tracing::warn!(
-                ?chain,
-                ?sign_id,
-                request_id = ?SignId::new(tx.request_id),
-                tx_id = ?tx.id,
-                "execution watcher sign_id disagrees with tx request_id; the final \
-                 response transition will be rejected for this request"
-            );
-        }
+        let tx = entry.execution_tx();
+        let target_chain = tx.target_chain;
+        let sign_id = entry.sign_id();
+        let mut watchers = self.watchers(&target_chain).write().await;
 
-        let mut entry = self.watchers(&chain).write().await;
-
-        entry
-            .insert(tx.id, ExecutionWatcher { sign_id, tx })
+        watchers
+            .insert(
+                tx.id,
+                ExecutionWatcher {
+                    sign_id,
+                    tx: Arc::clone(tx),
+                },
+            )
             .map(|previous| (previous.sign_id, previous.tx))
     }
 
@@ -472,58 +383,6 @@ impl Backlog {
         entry
             .remove(tx_id)
             .map(|watcher| (watcher.sign_id, watcher.tx))
-    }
-
-    /// Update the status of a tracked bidirectional transaction on the source chain.
-    ///
-    /// Test-only; see the note on [`Backlog::set_request`].
-    #[cfg(any(test, feature = "test-feature"))]
-    pub async fn set_status(
-        &self,
-        chain: Chain,
-        id: &SignId,
-        status: SignStatus,
-    ) -> Option<BacklogEntry> {
-        let mut pending = self.pending(&chain).write().await;
-
-        let Some(entry) = pending.requests.get_mut(id) else {
-            tracing::warn!(
-                ?chain,
-                ?id,
-                ?status,
-                "set_status: tx id not found in chain pending requests"
-            );
-            return None;
-        };
-        tracing::info!(?chain, ?id, before = ?entry.status(), after = ?status, "set_status: updating");
-        entry.set_status(status);
-        Some(entry.clone())
-    }
-
-    /// Advances a `Sign` transaction to its execution phase and register execution watcher.
-    /// This is called after the protocol generates the signature for a SignBidirectional request.
-    pub async fn advance(
-        &self,
-        chain: Chain,
-        sign_id: SignId,
-        bidirectional_tx: Arc<BidirectionalTx>,
-    ) -> Result<(), BacklogError> {
-        // Update the transaction in the backlog from Sign to Bidirectional
-        let mut pending = self.pending(&chain).write().await;
-
-        let entry = pending
-            .requests
-            .get_mut(&sign_id)
-            .ok_or(BacklogError::NotFound { chain, id: sign_id })?;
-
-        entry.advance(Arc::clone(&bidirectional_tx))?;
-
-        // Registration successful, now register the execution watcher on the target chain
-        let target_chain = bidirectional_tx.target_chain;
-        drop(pending);
-        self.watch_execution(target_chain, sign_id, bidirectional_tx)
-            .await;
-        Ok(())
     }
 
     /// Set the processed block height for a specific chain.
@@ -678,7 +537,7 @@ impl Backlog {
                 restored_requests = restored_len,
                 "successfully recovered from checkpoint"
             );
-            pending.pending_executions()
+            pending.pending_executions(chain, self)
         };
 
         // Clear execution watchers whose source chain is the recovered chain
@@ -689,12 +548,9 @@ impl Backlog {
                 .retain(|_, watcher| watcher.tx.source_chain != chain);
         }
 
-        // Repopulate our execution watchers
-        for (sign_id, entry) in execution_to_watch {
-            // Only restore execution watchers for bidirectional transactions
-            if let Some(tx) = entry.execution_tx().cloned() {
-                self.watch_execution(tx.target_chain, sign_id, tx).await;
-            }
+        // now repopulate our execution watchers
+        for entry in execution_to_watch {
+            self.watch_execution(&entry).await;
         }
     }
 }
@@ -726,34 +582,17 @@ impl StateManager for Backlog {
 pub enum BacklogError {
     #[error("request not found for chain {chain:?} with id {id:?}")]
     NotFound { chain: Chain, id: SignId },
-    #[error("chain not initialized: {chain:?}")]
-    ChainNotInitialized { chain: Chain },
-    #[error("transaction not found")]
-    TransactionNotFound,
-    #[error("cannot advance sign request: status must be pending generation or publishing")]
-    InvalidAdvanceTransition,
+    #[error("failed to reconstruct signature")]
+    InvalidSignature,
     #[error("cannot mark publishing: status must be pending generation")]
-    InvalidPublishingTransition,
-    #[error("cannot transition to bidirectional response: id must match and request must be RespondBidirectional")]
-    InvalidBidirectionalResponseTransition,
+    InvalidPublishTransition,
 }
 
-#[derive(Debug, Clone, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(from = "migration::MigratableBacklogEntry")]
 pub struct BacklogEntry {
     pub request: Arc<IndexedSignRequest>,
     pub status: SignStatus,
-    /// Whether this node has dispatched a publish for this entry. Node-local, so it
-    /// is not serialized, and checkpoint recovery resets it.
-    #[serde(skip)]
-    publish_dispatched: bool,
-}
-
-/// Node-local state is not part of an entry's identity to avoid divergence.
-impl PartialEq for BacklogEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.request == other.request && self.status == other.status
-    }
 }
 
 impl BacklogEntry {
@@ -770,26 +609,11 @@ impl BacklogEntry {
                 })
             }
         };
-        Self {
-            request,
-            status,
-            publish_dispatched: false,
-        }
+        Self { request, status }
     }
 
     pub fn with_status(request: Arc<IndexedSignRequest>, status: SignStatus) -> Self {
-        Self {
-            request,
-            status,
-            publish_dispatched: false,
-        }
-    }
-
-    pub fn pending_execution(request: Arc<IndexedSignRequest>, tx: Arc<BidirectionalTx>) -> Self {
-        Self::with_status(
-            request,
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)),
-        )
+        Self { request, status }
     }
 
     pub fn sign_id(&self) -> SignId {
@@ -811,157 +635,13 @@ impl BacklogEntry {
         }
     }
 
-    /// Check that a respond event's signature is the one this entry asked for.
-    pub fn verify_signature(
-        &self,
-        root_public_key: PublicKey,
-        signature: &Signature,
-    ) -> anyhow::Result<()> {
-        let active = self.request();
-        mpc_crypto::verify_signature(
-            root_public_key,
-            active.args.epsilon,
-            active.args.payload,
-            signature,
-        )
-        .with_context(|| {
-            format!(
-                "respond event carried invalid signature for sign id {:?}",
-                self.sign_id()
-            )
-        })
-    }
-
-    /// Get the request ID for this transaction
-    pub fn request_id(&self) -> [u8; 32] {
-        self.request.id.request_id
-    }
-
-    /// Get the source chain for this transaction
-    pub fn source_chain(&self) -> Chain {
-        self.request.chain
-    }
-
     /// Get the status of this transaction
     pub fn status(&self) -> SignStatus {
         self.status.clone()
     }
 
-    /// The single place a status is assigned. Every transition ends the current
-    /// pending-publish episode, so no dispatch flag may survive one.
-    fn enter_status(&mut self, status: SignStatus) {
-        self.status = status;
-        self.publish_dispatched = false;
-    }
-
-    /// Record that this node dispatched a publish for the current episode,
-    /// returning `false` if one was already dispatched.
-    fn mark_publish_dispatched(&mut self) -> bool {
-        !std::mem::replace(&mut self.publish_dispatched, true)
-    }
-
-    /// Set the status of this transaction
-    ///
-    /// Test-only; see the note on [`Backlog::set_request`].
-    #[cfg(any(test, feature = "test-feature"))]
-    pub fn set_status(&mut self, status: SignStatus) {
-        self.enter_status(status);
-    }
-
-    /// Test-only; see the note on [`Backlog::set_request`].
-    #[cfg(any(test, feature = "test-feature"))]
-    pub fn set_request(&mut self, request: Arc<IndexedSignRequest>) {
-        self.request = request;
-    }
-
-    /// Move this entry into the final-response request produced by a confirmed
-    /// target-chain execution.
-    ///
-    /// Rejects a request whose id differs from this entry's. Callers look the entry
-    /// up by `SignId`, so accepting a mismatch would leave `request.id` disagreeing
-    /// with the key it is stored under, and `checkpoint` commits to the key while
-    /// diagnostics report the id. `Backlog::watch_execution` warns when the two
-    /// identifiers diverge, which is the only way to reach this rejection.
-    pub fn respond(&mut self, request: Arc<IndexedSignRequest>) -> Result<(), BacklogError> {
-        if self.request.id != request.id
-            || !matches!(&request.kind, SignKind::RespondBidirectional(_))
-        {
-            return Err(BacklogError::InvalidBidirectionalResponseTransition);
-        }
-
-        self.enter_status(SignStatus::Bidirectional(BidirectionalProgress::Final {
-            respond_request: request,
-            progress: SignProgress::Generating,
-        }));
-        Ok(())
-    }
-
-    pub fn publish(&mut self, publish: Arc<PublishState>) -> Result<(), BacklogError> {
-        let result = match &mut self.status {
-            SignStatus::Sign(progress) => progress.publish(publish),
-            SignStatus::Bidirectional(BidirectionalProgress::Initial(progress)) => {
-                progress.publish(publish)
-            }
-            SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
-                progress.publish(publish)
-            }
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {
-                Err(BacklogError::InvalidPublishingTransition)
-            }
-        };
-        if result.is_ok() {
-            self.publish_dispatched = false;
-        }
-        result
-    }
-
-    pub fn advance(&mut self, tx: Arc<BidirectionalTx>) -> Result<(), BacklogError> {
-        match &mut self.status {
-            SignStatus::Bidirectional(progress @ BidirectionalProgress::Initial(_)) => {
-                *progress = BidirectionalProgress::Executing(tx);
-                self.publish_dispatched = false;
-                Ok(())
-            }
-            _ => Err(BacklogError::InvalidAdvanceTransition),
-        }
-    }
-
-    /// Get target chain if this is a bidirectional transaction
-    pub fn target_chain(&self) -> Option<Chain> {
-        match &self.status {
-            SignStatus::Sign(_) => None,
-            SignStatus::Bidirectional(progress) => match progress {
-                BidirectionalProgress::Executing(tx) => Some(tx.target_chain),
-                BidirectionalProgress::Initial(_) | BidirectionalProgress::Final { .. } => {
-                    match &self.request.kind {
-                        SignKind::SignBidirectional(event) => event.target_chain().ok(),
-                        _ => None,
-                    }
-                }
-            },
-        }
-    }
-
-    /// Check if this is a bidirectional transaction
-    pub fn is_bidirectional(&self) -> bool {
-        matches!(self.status, SignStatus::Bidirectional(_))
-    }
-
     pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
         self.status.execution_tx()
-    }
-
-    pub fn typename(&self) -> &'static str {
-        match &self.status {
-            SignStatus::Sign(_) => "Sign",
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {
-                "BidirectionalExecution"
-            }
-            SignStatus::Bidirectional(BidirectionalProgress::Initial(_)) => "BidirectionalPending",
-            SignStatus::Bidirectional(BidirectionalProgress::Final { .. }) => {
-                "BidirectionalRespondPending"
-            }
-        }
     }
 }
 

@@ -11,11 +11,11 @@ use crate::stream::ops::{
     process_respond_event, process_sign_request, publish_failover_due,
     requeue_pending_sign_requests, resume_pending_publish_requests,
 };
-use crate::types::CheckpointWatcher;
+use crate::types::{CheckpointWatcher, SignCommand};
 
 use anyhow::Context;
 use mpc_chain_integration_core::ChainTelemetry;
-use mpc_primitives::{Chain, ChainEvent, SignCommand};
+use mpc_primitives::{Chain, ChainEvent};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 

@@ -1,5 +1,5 @@
-use crate::backlog::BacklogEntry;
-use crate::sign_bidirectional::{BidirectionalProgress, PublishState, SignProgress, SignStatus};
+use crate::backlog::{BacklogEntry, Publishing};
+use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use mpc_primitives::{BidirectionalTx, IndexedSignRequest, SignKind};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -17,10 +17,10 @@ pub enum MigratableSignStatus {
 
     // Legacy format variants
     PendingGeneration,
-    PendingPublish { publish: Arc<PublishState> },
+    PendingPublish { publish: Publishing },
     PendingExecution { tx: Arc<BidirectionalTx> },
     PendingGenerationBidirectional,
-    PendingPublishBidirectional { publish: Arc<PublishState> },
+    PendingPublishBidirectional { publish: Publishing },
 }
 
 /// Migration deserializer for `BacklogEntry`.
@@ -86,25 +86,6 @@ impl From<MigratableBacklogEntry> for BacklogEntry {
     }
 }
 
-/// Legacy representation used only in tests to verify backward compatibility.
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
-#[allow(clippy::enum_variant_names)]
-pub enum LegacySignStatus {
-    PendingGeneration,
-    PendingPublish { publish: Arc<PublishState> },
-    PendingExecution { tx: Arc<BidirectionalTx> },
-    PendingGenerationBidirectional,
-    PendingPublishBidirectional { publish: Arc<PublishState> },
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
-pub struct LegacyBacklogEntry {
-    pub request: Arc<IndexedSignRequest>,
-    pub status: LegacySignStatus,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,16 +95,39 @@ mod tests {
         BidirectionalTxId, Chain, RespondBidirectionalTx, SignArgs, SignId, Signature,
     };
 
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+    struct LegacyPublishState {
+        signature: Signature,
+        participants: Vec<Participant>,
+        is_proposer: bool,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+    #[allow(clippy::enum_variant_names)]
+    enum LegacySignStatus {
+        PendingGeneration,
+        PendingPublish { publish: LegacyPublishState },
+        PendingExecution { tx: Arc<BidirectionalTx> },
+        PendingGenerationBidirectional,
+        PendingPublishBidirectional { publish: LegacyPublishState },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+    struct LegacyBacklogEntry {
+        request: Arc<IndexedSignRequest>,
+        status: LegacySignStatus,
+    }
+
     fn test_signature() -> Signature {
         Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0)
     }
 
-    fn test_publish_state() -> Arc<PublishState> {
-        Arc::new(PublishState::new(
-            test_signature(),
-            vec![Participant::from(0u32)],
-            true,
-        ))
+    fn test_publish_state() -> LegacyPublishState {
+        LegacyPublishState {
+            signature: test_signature(),
+            participants: vec![Participant::from(0u32)],
+            is_proposer: true,
+        }
     }
 
     fn test_sign_request(kind: SignKind) -> Arc<IndexedSignRequest> {
@@ -165,7 +169,7 @@ mod tests {
         let legacy_entry = LegacyBacklogEntry {
             request: Arc::clone(&req),
             status: LegacySignStatus::PendingPublish {
-                publish: Arc::clone(&publish),
+                publish: publish.clone(),
             },
         };
 
@@ -173,10 +177,16 @@ mod tests {
         ciborium::into_writer(&legacy_entry, &mut cbor_bytes).unwrap();
 
         let decoded: BacklogEntry = ciborium::from_reader(&cbor_bytes[..]).unwrap();
-        assert_eq!(
-            decoded.status,
-            SignStatus::Sign(SignProgress::Publishing(publish))
-        );
+        let pub_handle = decoded
+            .status
+            .publishing()
+            .expect("should be in publishing");
+        assert_eq!(pub_handle.signature(), &publish.signature);
+        assert_eq!(pub_handle.participants(), &publish.participants);
+        assert_eq!(pub_handle.is_proposer(), publish.is_proposer);
+        assert_eq!(pub_handle.publishing_since(), None);
+        assert!(!pub_handle.publish_dispatched());
+        assert_eq!(decoded.request(), &req);
     }
 
     #[test]
@@ -193,7 +203,7 @@ mod tests {
         let legacy_entry = LegacyBacklogEntry {
             request: Arc::clone(&respond_req),
             status: LegacySignStatus::PendingPublishBidirectional {
-                publish: Arc::clone(&publish),
+                publish: publish.clone(),
             },
         };
 
@@ -201,20 +211,22 @@ mod tests {
         ciborium::into_writer(&legacy_entry, &mut cbor_bytes).unwrap();
 
         let decoded: BacklogEntry = ciborium::from_reader(&cbor_bytes[..]).unwrap();
-        assert_eq!(
-            decoded.status,
-            SignStatus::Bidirectional(BidirectionalProgress::Final {
-                respond_request: Arc::clone(&respond_req),
-                progress: SignProgress::Publishing(publish),
-            })
-        );
+        let pub_handle = decoded
+            .status
+            .publishing()
+            .expect("should be in publishing");
+        assert_eq!(pub_handle.signature(), &publish.signature);
+        assert_eq!(pub_handle.participants(), &publish.participants);
+        assert_eq!(pub_handle.is_proposer(), publish.is_proposer);
+        assert_eq!(pub_handle.publishing_since(), None);
+        assert!(!pub_handle.publish_dispatched());
         assert_eq!(decoded.request(), &respond_req);
     }
 
     #[test]
     fn test_modern_cbor_roundtrip() {
         let req = test_sign_request(SignKind::Sign);
-        let publish = test_publish_state();
+        let publish = Publishing::new(test_signature(), vec![Participant::from(0u32)], true);
         let modern_entry = BacklogEntry::with_status(
             Arc::clone(&req),
             SignStatus::Sign(SignProgress::Publishing(publish.clone())),

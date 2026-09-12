@@ -459,6 +459,7 @@ impl PositPhase {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::backlog::Backlog;
     use crate::protocol::message::{Message, MessageInbox, MessageOutbox};
     use crate::protocol::presignature::Presignature;
     use crate::protocol::sync::SyncReportReceiver;
@@ -504,7 +505,6 @@ pub(crate) mod tests {
             presignatures,
             msg: msg_channel,
             rpc: RpcChannel { tx: rpc_tx },
-            backlog: Backlog::new(),
             cfg: ProtocolConfig::default(),
             is_proposer: Arc::new(AtomicBool::new(false)),
             round: Arc::new(AtomicUsize::new(0)),
@@ -527,7 +527,8 @@ pub(crate) mod tests {
             SignKind::Sign,
         );
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let state = SignState::new(Arc::new(request), mesh_rx, Arc::clone(&ctx.round));
+        let entry = backlog::SignEntry::generating(Arc::new(request), &Backlog::new());
+        let state = SignState::new(entry, mesh_rx, Arc::clone(&ctx.round));
 
         TestSetup {
             ctx,

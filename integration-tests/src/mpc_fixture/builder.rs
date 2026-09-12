@@ -576,7 +576,6 @@ impl MpcFixtureNodeBuilder {
             storage,
             channels,
             context.contract_state.clone(),
-            backlog.clone(),
         )
         .await;
 

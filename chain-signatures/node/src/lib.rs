@@ -45,3 +45,5 @@ pub mod stream;
 pub mod types;
 pub mod util;
 pub mod web;
+
+pub use types::SignCommand;

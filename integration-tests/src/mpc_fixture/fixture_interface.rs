@@ -15,7 +15,8 @@ use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
 use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
-use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, SignCommand};
+use mpc_node::types::SignCommand;
+use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -284,7 +285,18 @@ impl MpcFixture {
     /// Send the same `SignCommand` to every node's `sign_tx`.
     pub async fn broadcast(&self, request: &SignCommand) {
         for node in &self.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
+            match request {
+                SignCommand::Request(entry) => {
+                    let (node_entry, _) = node.backlog.insert(Arc::clone(entry.request())).await;
+                    node.sign_tx
+                        .send(SignCommand::Request(node_entry))
+                        .await
+                        .unwrap();
+                }
+                cmd => {
+                    node.sign_tx.send(cmd.clone()).await.unwrap();
+                }
+            }
         }
     }
 
