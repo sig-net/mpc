@@ -247,6 +247,24 @@ mod tests {
         assert_eq!(respond.chain_ctx, chain_ctx);
     }
 
+    #[tokio::test]
+    async fn midnight_failure_payload_differs_from_zero_padded_success() {
+        let completed = CompletedTx::new(sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]));
+        let failure = completed.create_failed_sign_request(None).await.unwrap();
+        let SignKind::RespondBidirectional(response) = &failure.kind else {
+            panic!("expected RespondBidirectional kind");
+        };
+
+        for length in [8, 9] {
+            let mut output = response.output.clone();
+            output.resize(length, 0);
+            let success = completed
+                .create_sign_request_from_serialized_output(output, None)
+                .unwrap();
+            assert_ne!(failure.args.payload, success.args.payload);
+        }
+    }
+
     #[test]
     fn response_hash_policy_preserves_legacy_keccak_for_non_midnight_chains() {
         let request_id = [0x2f; 32];
@@ -288,7 +306,7 @@ mod tests {
 
         assert_eq!(
             hex::encode(midnight_hash),
-            "61c48f724b114d830caafcb9722b07c5428e2b906b5a61afa26c063735722700"
+            "48755c01b13d35977c80da4ec29a61995d7f48d45357891cf783de38f1337600"
         );
         assert_ne!(midnight_hash, <B256 as Into<[u8; 32]>>::into(keccak));
     }
@@ -304,7 +322,7 @@ mod tests {
             .create_sign_request_from_serialized_output(serialized_output, None)
             .unwrap();
         let expected_payload = Scalar::from_bytes(
-            hex::decode("61c48f724b114d830caafcb9722b07c5428e2b906b5a61afa26c063735722700")
+            hex::decode("48755c01b13d35977c80da4ec29a61995d7f48d45357891cf783de38f1337600")
                 .unwrap()
                 .try_into()
                 .unwrap(),
