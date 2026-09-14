@@ -135,6 +135,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         for candidate in candidates {
             for SingletonCallEmissions {
                 call_index,
+                physical_segment,
+                phase,
                 emissions,
             } in candidate.calls
             {
@@ -144,6 +146,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         height = block.number,
                         extrinsic_index = candidate.extrinsic_index,
                         call_index,
+                        physical_segment,
+                        ?phase,
                         "midnight singleton call emitted no decoded events"
                     );
                 }
@@ -693,6 +697,8 @@ mod tests {
 
     fn one_call(kind: EmissionKind, payload: [u8; 256]) -> Vec<SingletonCallEmissions> {
         vec![SingletonCallEmissions {
+            phase: crate::emissions::TranscriptPhase::Guaranteed,
+            physical_segment: 1,
             call_index: 1,
             emissions: vec![Emission { kind, payload }],
         }]
@@ -1081,6 +1087,8 @@ mod tests {
         let expected = batch(
             42,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
                 emissions: vec![
                     Emission {
@@ -1119,6 +1127,8 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
                 emissions: vec![
                     Emission {
@@ -1156,6 +1166,8 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
                 emissions: vec![
                     Emission {
@@ -1321,6 +1333,8 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 4,
                 emissions: vec![
                     Emission {
@@ -1368,6 +1382,8 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
                 emissions: vec![
                     Emission {
@@ -1451,6 +1467,8 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
                 emissions: vec![
                     Emission {
@@ -1518,6 +1536,8 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 6,
                 emissions: Vec::new(),
             }],
@@ -1736,6 +1756,8 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
                 emissions: vec![
                     Emission {
