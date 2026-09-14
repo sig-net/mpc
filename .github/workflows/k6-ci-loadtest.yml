@@ -144,6 +144,6 @@ jobs:
             echo "- Chain: \`${{ steps.normalized.outputs.lt_chain }}\` on \`${{ steps.normalized.outputs.lt_env }}\`"
             echo "- Rate: \`${{ steps.normalized.outputs.lt_strategy }}\` for \`${{ steps.normalized.outputs.lt_duration }}\`"
             echo "- Check signature: \`${{ steps.normalized.outputs.lt_check_signature }}\`"
-            echo "- Thresholds: http_req_failed rate < 3%, http_req_duration p(95) < 10s"
+            echo "- Thresholds: http_req_failed rate < 3%, http_req_duration p(95) < 20s"
             echo "- Cost: ~10k lamports per request from the pinger key, ~5k from the dev responder"
           } >> "${GITHUB_STEP_SUMMARY}"
