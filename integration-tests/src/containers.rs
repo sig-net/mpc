@@ -640,6 +640,13 @@ impl Solana {
                 .arg("127.0.0.1")
                 .arg("--mint")
                 .arg(payer_keypair.pubkey().to_string())
+                // The committed program artifact is SBPFv0; agave >= 4.x test validators
+                // activate `disable_sbpf_v0_v1_v2_deployment` at genesis, which restricts
+                // deploys to SBPF >= V3 (program-runtime/src/deploy.rs). Deactivate it until
+                // the artifact is rebuilt with an SBPF >= V1 toolchain. Deactivating an
+                // unknown feature is a no-op, so this is safe for older validators too.
+                .arg("--deactivate-feature")
+                .arg("B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g") // on-chain feature-gate pubkey
                 .arg("--reset")
                 .arg("--quiet");
 
@@ -794,6 +801,9 @@ impl Solana {
             .arg("127.0.0.1")
             .arg("--mint")
             .arg(self.payer_keypair.pubkey().to_string())
+            // See run(): keep SBPFv0 deployment allowed for the committed artifact.
+            .arg("--deactivate-feature")
+            .arg("B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g")
             .arg("--quiet");
 
         let mut process = command
