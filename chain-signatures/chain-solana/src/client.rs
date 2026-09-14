@@ -19,7 +19,8 @@ use solana_client::rpc_config::RpcBlockConfig;
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
 use solana_sdk::signer::keypair::Keypair;
-use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
+use solana_commitment_config::CommitmentConfig;
+use solana_sdk::{pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::{TransactionDetails, UiConfirmedBlock, UiTransactionEncoding};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
@@ -603,7 +604,7 @@ mod tests {
         assert_eq!(config.rewards, Some(false));
         assert_eq!(
             config.commitment.map(|c| c.commitment),
-            Some(solana_sdk::commitment_config::CommitmentLevel::Finalized)
+            Some(solana_commitment_config::CommitmentLevel::Finalized)
         );
         assert_eq!(config.max_supported_transaction_version, Some(1));
     }

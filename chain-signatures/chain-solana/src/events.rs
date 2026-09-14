@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use alloy::sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
-use anchor_lang::solana_program::keccak;
+use sha3::Digest as _;
 use anchor_lang::Discriminator;
 use anyhow::Context;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -87,7 +87,7 @@ impl SolanaSignEvent {
                 )
                     .abi_encode_packed();
 
-                keccak::hash(&encoded).to_bytes()
+                sha3::Keccak256::digest(&encoded).into()
             }
         }
     }

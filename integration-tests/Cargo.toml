@@ -41,6 +41,7 @@ rlp = "0.5"
 anchor-client.workspace = true
 signet-program.workspace = true
 solana-sdk.workspace = true
+solana-commitment-config.workspace = true
 solana-client.workspace = true
 solana-transaction-status.workspace = true
 
