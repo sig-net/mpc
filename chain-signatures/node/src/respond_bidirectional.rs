@@ -11,8 +11,6 @@ use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 
-/// Whether an output carries the failed-execution sentinel. Shares the marker's
-/// ambiguity: a success starting with the prefix mislabels its metric.
 pub(crate) fn is_failed_execution_output(output: &[u8]) -> bool {
     output.starts_with(&MAGIC_ERROR_PREFIX)
 }
@@ -31,15 +29,9 @@ fn respond_bidirectional_path(chain: Chain) -> anyhow::Result<String> {
     }
 }
 
-/// A confirmed target-chain execution, with everything the final-response
-/// request is built from. The context is fixed when the execution is
-/// confirmed, so it is captured once here rather than threaded through each
-/// constructor.
 pub struct CompletedTx {
     tx: Arc<BidirectionalTx>,
-    /// Opaque per-chain blob carried over from the initial request.
     chain_ctx: Option<Vec<u8>>,
-    /// When the initial request was indexed, i.e. when the round trip began.
     origin_indexed_at: Option<u64>,
 }
 

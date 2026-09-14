@@ -27,22 +27,13 @@ pub enum SignRequestStep {
     Generating,
     /// Time to respond to the sign request (Status: ok)
     Responding,
-    /// Bidirectional only: from observing the initial response on the source
-    /// chain to the target-chain execution being confirmed. Starts after
-    /// `Responding` ends, so the two do not overlap -- but the source chain's
-    /// inclusion and indexing delay falls between them and is in neither.
-    /// Status:
-    ///     - ok: the target chain executed successfully
-    ///     - execution_failed: the execution reverted, but the leg still ran
+    /// Bidirectional only: time from the observed initial response to the
+    /// target-chain execution being confirmed (Status: ok, execution_failed)
     AwaitingExecution,
-    /// Bidirectional only: the whole round trip across both legs, from indexing
-    /// the initial request to the final response landing. Whole-second
-    /// resolution. `Total` is the per-leg figure. Same statuses as
-    /// `AwaitingExecution`.
+    /// Bidirectional only: time across both legs, from indexing the initial
+    /// request to the final response landing (Status: ok, execution_failed)
     BidirectionalTotal,
-    /// Total time from indexing to responding, for a single request. A
-    /// bidirectional round trip reports one per leg; `BidirectionalTotal`
-    /// spans both.
+    /// Total time from indexing to responding
     /// Status:
     ///     - in_time: request was delivered in time (expected finality delay + margin)
     ///     - expired: request was delivered after expiration (expected finality delay + margin)

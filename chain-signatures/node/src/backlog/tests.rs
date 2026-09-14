@@ -1051,13 +1051,8 @@ async fn test_advance_rejects_invalid_publish_transition() {
     assert_eq!(err2, BacklogError::InvalidPublishTransition);
 }
 
-// =========================================================================
-// Bidirectional spanning-latency bookkeeping
-// =========================================================================
-
-/// Execution confirmations recover the publish boundary from the watch.
 #[tokio::test]
-async fn publish_boundary_survives_the_unwatch_lookup() {
+async fn respond_observed_at_survives_the_unwatch_lookup() {
     let backlog = Backlog::new();
     let tx = mock_bidirectional_tx(SignId::new([71; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
@@ -1069,14 +1064,13 @@ async fn publish_boundary_survives_the_unwatch_lookup() {
 
     let measured = entry
         .awaiting_execution()
-        .expect("boundary must survive the lookup the handler goes through");
+        .expect("wait start must survive the lookup the handler goes through");
     assert!(
         measured < std::time::Duration::from_secs(60),
         "a freshly published entry has barely been waiting, got {measured:?}"
     );
 }
 
-/// Status lookups cannot recover the node-local publish boundary.
 #[tokio::test]
 async fn plain_lookup_cannot_measure_the_execution_wait() {
     let backlog = Backlog::new();
@@ -1143,9 +1137,8 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
     assert_eq!(entry.respond_observed_at(), unrelated_observed_at);
 }
 
-/// Restart recovery leaves execution latency unknown.
 #[tokio::test]
-async fn recovered_executing_entry_has_no_publish_boundary() {
+async fn recovered_executing_entry_has_no_wait_start() {
     let backlog = Backlog::new();
     let tx = mock_bidirectional_tx(SignId::new([73; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;

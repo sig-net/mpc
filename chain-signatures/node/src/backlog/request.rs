@@ -116,17 +116,9 @@ impl Publishing {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Initial<P = Generating>(pub P);
 
-/// A destination-chain execution being awaited: the transaction, plus the
-/// when this node observed the initial response on the source chain, which is
-/// what moved the request here and so starts the wait.
-///
-/// Every node observes that event, published or not, so this is symmetric
-/// across the network -- unlike the publish stamp, which only the proposer
-/// acts on. It is a local monotonic reading, never serialized and never taken
-/// from a peer, so it needs no clock-skew guard.
-///
-/// It is node-local, so anything rebuilt from a backlog status has `None`; the
-/// execution watcher is what carries it across a lookup.
+/// A destination-chain execution being awaited, with when this node observed
+/// the initial response. The observation is node-local: `None` when rebuilt
+/// from a backlog status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionWatch {
     pub tx: Arc<BidirectionalTx>,
@@ -534,20 +526,17 @@ impl SignEntry<Bidirectional<Executing>> {
         &self.state.0 .0.tx
     }
 
-    /// How long this entry has been waiting on the target chain, measured from
-    /// when this node observed the initial response. `None` on an entry rebuilt
-    /// from a status without its watch, i.e. across a restart.
+    /// How long this entry has been waiting on the target chain.
     pub fn awaiting_execution(&self) -> Option<Duration> {
         self.respond_observed_at().map(|at| at.elapsed())
     }
 
-    /// When this node observed the initial response, if known locally.
+    /// When this node observed the initial response.
     pub(crate) fn respond_observed_at(&self) -> Option<Instant> {
         self.state.0 .0.respond_observed_at
     }
 
-    /// Restore the node-local observation time that a status lookup cannot
-    /// reconstruct, from the watch that spans the wait.
+    /// Restore the observation time onto an entry rebuilt from a status.
     pub(crate) fn with_respond_observed_at(mut self, at: Option<Instant>) -> Self {
         self.state.0 .0.respond_observed_at = at;
         self

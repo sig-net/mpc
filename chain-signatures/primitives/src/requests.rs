@@ -8,11 +8,7 @@ pub enum SignKind {
     RespondBidirectional(RespondBidirectionalTx),
 }
 
-/// Payload-free projection of `SignKind`, used as a metric label.
-///
-/// For bidirectional requests this doubles as the leg discriminator: both legs
-/// share a `SignId` and run the same phases, so the kind is the only thing that
-/// tells the initial signature apart from the post-execution response.
+/// Payload-free projection of [`SignKind`], used as a metric label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestKind {
     Sign,

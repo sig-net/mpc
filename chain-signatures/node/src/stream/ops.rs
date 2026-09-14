@@ -252,9 +252,6 @@ pub(crate) async fn process_respond_bidirectional_event(
     Ok(())
 }
 
-/// Status label for the two spanning bidirectional steps. A reverted
-/// target-chain execution still completes a round trip, so it is observed --
-/// but not as `ok`, which would make it indistinguishable from a healthy one.
 fn execution_status(failed: bool) -> &'static str {
     if failed {
         "execution_failed"
@@ -319,8 +316,6 @@ pub async fn process_execution_confirmed(
     );
     let chain = entry.chain;
 
-    // Labelled with the kind the entry now carries, so the gap between the two
-    // legs stacks with the second leg's phases rather than sitting on its own.
     if let Some(awaiting_execution) = awaiting_execution {
         record_request_latency(
             source_chain,

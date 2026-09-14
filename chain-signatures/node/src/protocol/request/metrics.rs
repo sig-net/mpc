@@ -8,18 +8,12 @@ use super::*;
 /// loops back. Indexing/AwaitingGeneration/Responding/AwaitingExecution/
 /// BidirectionalTotal/Total are emitted elsewhere and ignored by `add`.
 ///
-/// Per leg, AwaitingGeneration + Organizing + Posit + Generating + Responding
-/// sum to Total, except governance pauses add idle time only to Total.
-/// Indexing precedes Total. Exclude both totals from stage stacks:
-/// BidirectionalTotal spans both legs and Total spans its own leg's stages.
-///
-/// Between the legs there is an unmeasured gap. `Responding` ends when this
-/// node's publish is acknowledged; `AwaitingExecution` starts when the response
-/// is observed back on the source chain. The source chain's inclusion, finality
-/// and indexing delay sits between the two and is attributed to no stage, so
-/// per-leg stages plus AwaitingExecution fall short of BidirectionalTotal by
-/// that amount. Plot the shortfall rather than assuming it away -- on a
-/// slow-finality source chain it is the largest term in the round trip.
+/// Additivity caveat: without governance pauses, all five stages sum to
+/// Total. Resharing or other transitions out of `Running` mid-request show
+/// idle time only in Total, so the equality holds as `<=` in that case.
+/// Source-chain inclusion between Responding and AwaitingExecution is in no
+/// stage, so per-leg stages plus AwaitingExecution fall short of
+/// BidirectionalTotal.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseDurations {
     organizing: Duration,

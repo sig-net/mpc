@@ -167,8 +167,6 @@ async fn process_execution_confirmed_success_creates_respond_request() {
         SignCommand::Request(req) => {
             if let mpc_primitives::SignKind::RespondBidirectional(res) = &req.request().kind {
                 assert_eq!(res.tx_id, tx.id);
-                // The mock initial request is indexed at 0; the origin must be
-                // that, not the follow-up request's own queue timestamp.
                 assert_eq!(res.origin_indexed_at, Some(0));
             } else {
                 panic!("Expected RespondBidirectional request");
