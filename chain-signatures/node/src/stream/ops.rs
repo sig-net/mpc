@@ -356,6 +356,30 @@ pub async fn process_execution_confirmed(
             completed_tx.create_sign_request_from_serialized_output(output, chain_ctx)?
         }
         ExecutionOutcome::Failed => completed_tx.create_failed_sign_request(chain_ctx).await?,
+
+        ExecutionOutcome::ExtractionFailed => {
+            tracing::error!(
+                ?tx_id,
+                sign_id = ?unwatched_sign_id,
+                ?source_chain,
+                ?target_chain,
+                block_height,
+                output_deserialization_schema =
+                    %String::from_utf8_lossy(&pending_tx.output_deserialization_schema),
+                respond_serialization_schema =
+                    %String::from_utf8_lossy(&pending_tx.respond_serialization_schema),
+                "bidirectional output extraction failed terminally; resolving the request \
+                 without a response, even though the destination transaction executed."
+            );
+            ctx.backlog.remove(source_chain, &unwatched_sign_id).await;
+            // Retire the id: a leg-1 task on a node that lagged the publish would
+            // outlive its request.
+            ctx.sign_tx
+                .send(SignCommand::Completion(unwatched_sign_id))
+                .await
+                .context("failed to send completion into queue")?;
+            return Ok(());
+        }
     };
 
     let sign_request = Arc::new(sign_request);

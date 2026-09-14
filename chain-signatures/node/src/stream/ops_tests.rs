@@ -1099,6 +1099,109 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     }
 }
 
+/// A terminal extraction failure means the transaction executed but its output
+/// could not be interpreted. The watcher and the backlog entry are dropped and
+/// no sign request is queued.
+#[tokio::test]
+async fn process_execution_confirmed_extraction_failed_signs_nothing() {
+    let backlog = Backlog::new();
+
+    let tx = test_bidirectional_tx(2, Chain::Solana, Chain::Ethereum);
+    let sign_id = SignId::new(tx.request_id);
+
+    let args = SignArgs {
+        entropy: [2u8; 32],
+        epsilon: Scalar::from(1u64),
+        payload: Scalar::from(3u64),
+        path: "test".to_string(),
+        key_version: 1,
+    };
+    backlog
+        .insert(test_indexed_request(
+            sign_id,
+            tx.source_chain,
+            args,
+            current_unix_timestamp(),
+            SignKind::Sign,
+        ))
+        .await;
+
+    backlog
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
+        .await;
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+
+    process_execution_confirmed(
+        tx.id,
+        sign_id,
+        tx.source_chain,
+        456u64,
+        ExecutionOutcome::ExtractionFailed,
+        &ctx,
+        tx.target_chain,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        ctx.backlog
+            .get_execution_watchers(tx.target_chain)
+            .await
+            .is_empty(),
+        "the watcher is dropped: retrying re-runs the same deterministic decode"
+    );
+    assert!(
+        ctx.backlog.get(tx.source_chain, &sign_id).await.is_none(),
+        "the entry is removed on every node, so checkpoints stay aligned"
+    );
+    match sign_rx.try_recv() {
+        Ok(SignCommand::Completion(id)) => assert_eq!(id, sign_id, "the id is retired"),
+        other => panic!("expected only a completion, got {other:?}"),
+    }
+    assert!(
+        sign_rx.try_recv().is_err(),
+        "no response is signed for an execution that actually happened"
+    );
+}
+
+/// The completion refers to an entry that was just removed, so nothing can
+/// requeue it once dropped: it must not sit behind the target chain's catchup
+/// barrier the way an ordinary follow-up sign request does.
+#[tokio::test]
+async fn process_execution_confirmed_extraction_failed_retires_id_before_catchup() {
+    let backlog = Backlog::new();
+
+    let tx = test_bidirectional_tx(3, Chain::Solana, Chain::Ethereum);
+    let sign_id = SignId::new(tx.request_id);
+
+    backlog
+        .watch_execution(tx.target_chain, sign_id, Arc::new(tx.clone()))
+        .await;
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    // Not caught up on the target chain, which is where the confirmation is observed.
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+
+    process_execution_confirmed(
+        tx.id,
+        sign_id,
+        tx.source_chain,
+        456u64,
+        ExecutionOutcome::ExtractionFailed,
+        &ctx,
+        tx.target_chain,
+    )
+    .await
+    .unwrap();
+
+    match sign_rx.try_recv() {
+        Ok(SignCommand::Completion(id)) => assert_eq!(id, sign_id),
+        other => panic!("expected the id to be retired during catchup, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
     let backlog = Backlog::new();
