@@ -59,6 +59,7 @@ pub struct OutputStorageConfig {
     pub bucket: String,
     /// Object namespace; use a distinct prefix for deployments that reset chain state.
     pub prefix: String,
+    /// Maximum time for initialization or one upload attempt.
     pub timeout: Duration,
     #[cfg(feature = "sandbox")]
     pub emulator_endpoint: Option<String>,
@@ -95,7 +96,7 @@ impl OutputStorageConfig {
 /// Runs the out-of-process intent builder, the piece that stays TypeScript for its proving stack.
 #[derive(Clone, PartialEq)]
 pub struct PublisherConfig {
-    /// When absent, final responses only publish on-chain.
+    /// Optional output cache. Runtime storage failures warn and do not prevent on-chain responses.
     pub output_storage: Option<OutputStorageConfig>,
     /// argv of the builder, program first: a list so no operator path is word-split.
     pub intent_gen_command: Vec<String>,

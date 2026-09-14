@@ -29,14 +29,36 @@ impl GcsOutputStore {
             return Ok(None);
         };
         config.validate()?;
-        #[cfg(feature = "sandbox")]
-        if let Some(endpoint) = &config.emulator_endpoint {
-            return Self::connect_emulator(config, network_id, central_address, endpoint)
-                .await
-                .map(Some);
+        let connect = async {
+            #[cfg(feature = "sandbox")]
+            if let Some(endpoint) = &config.emulator_endpoint {
+                return Self::connect_emulator(config, network_id, central_address, endpoint).await;
+            }
+            let client = Storage::builder().build().await?;
+            Self::new(config, network_id, central_address, client)
+        };
+        Ok(Self::connect_with_timeout(config, connect).await)
+    }
+
+    async fn connect_with_timeout(
+        config: &OutputStorageConfig,
+        connect: impl std::future::Future<Output = anyhow::Result<Self>>,
+    ) -> Option<Self> {
+        match tokio::time::timeout(config.timeout, connect)
+            .await
+            .context("Midnight output storage initialization timed out")
+            .and_then(|result| result)
+        {
+            Ok(store) => Some(store),
+            Err(error) => {
+                tracing::warn!(
+                    bucket = %config.bucket,
+                    ?error,
+                    "Midnight output storage initialization failed; continuing without output caching"
+                );
+                None
+            }
         }
-        let client = Storage::builder().build().await?;
-        Self::new(config, network_id, central_address, client).map(Some)
     }
 
     #[cfg(feature = "sandbox")]
@@ -86,7 +108,7 @@ impl GcsOutputStore {
             Ok(_) => Ok(()),
             Err(error) if error.http_status_code() == Some(412) => {
                 // A lost upload reply or another publisher can create this object first.
-                // Only identical bytes satisfy the precondition for publishing on-chain.
+                // Only identical bytes count as a successful cache publication.
                 let mut response = self.client.read_object(&self.bucket, object).send().await?;
                 let mut offset = 0;
                 while let Some(chunk) = response.next().await.transpose()? {
@@ -112,16 +134,11 @@ impl GcsOutputStore {
 impl OutputStore for GcsOutputStore {
     async fn ensure_output(&self, request_id: &[u8; 32], output: &[u8]) -> anyhow::Result<()> {
         let object = format!("{}/{}.bin", self.prefix, hex::encode(request_id));
-        let result = tokio::time::timeout(self.timeout, self.upload(&object, output))
+        tokio::time::timeout(self.timeout, self.upload(&object, output))
             .await
             .context("Midnight output upload timed out")
-            .and_then(|result| result);
-        if let Err(error) = &result {
-            tracing::error!(%object, ?error, "Midnight output is unavailable; withholding on-chain response");
-        }
-        // The shared RPC retry policy inspects the outer error's text for HTTP codes.
-        // Keep all storage failures pending, retaining provider details in the cause.
-        result.context("Midnight output storage unavailable")
+            .and_then(|result| result)
+            .with_context(|| format!("Midnight output storage unavailable for {object}"))
     }
 }
 
@@ -240,15 +257,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_errors_keep_the_response_retryable() {
+    async fn storage_errors_preserve_the_object_and_provider_details() {
         let mut server = Server::new_async().await;
         let store = store(&server).await;
         let write = upload(&mut server).with_status(403).create_async().await;
         let error = store.ensure_output(&REQUEST_ID, &[1]).await.unwrap_err();
-        assert!(mpc_chain_integration_core::utils::retry::is_retryable(
-            &error
-        ));
         assert!(format!("{error:#}").contains("403"));
+        assert!(format!("{error:#}").contains(&object_name()));
         write.assert_async().await;
     }
 
@@ -270,9 +285,6 @@ mod tests {
         .unwrap();
         let error = store.ensure_output(&REQUEST_ID, &[1]).await.unwrap_err();
         assert!(format!("{error:#}").contains("timed out"));
-        assert!(mpc_chain_integration_core::utils::retry::is_retryable(
-            &error
-        ));
     }
 
     #[tokio::test]
@@ -282,6 +294,43 @@ mod tests {
                 .await
                 .unwrap();
         assert!(store.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn client_initialization_timeout_disables_optional_storage_at_the_deadline() {
+        let config =
+            OutputStorageConfig::new("outputs".into(), "v1".into(), Duration::from_secs(2));
+        let started = tokio::time::Instant::now();
+        let store = tokio::time::timeout(
+            config.timeout + Duration::from_secs(1),
+            GcsOutputStore::connect_with_timeout(&config, std::future::pending()),
+        )
+        .await
+        .expect("stalled initialization must finish within its own timeout");
+
+        assert!(store.is_none());
+        assert_eq!(started.elapsed(), config.timeout);
+    }
+
+    #[cfg(feature = "sandbox")]
+    #[tokio::test]
+    async fn client_initialization_failure_disables_optional_storage() {
+        let mut config =
+            OutputStorageConfig::new("outputs".into(), "v1".into(), Duration::from_secs(2));
+        config.emulator_endpoint = Some("http://[invalid".into());
+        let address = MidnightAddress::from_bytes([0xab; 32]);
+        assert!(GcsOutputStore::connect_emulator(
+            &config,
+            "preprod",
+            address,
+            config.emulator_endpoint.as_ref().unwrap(),
+        )
+        .await
+        .is_err());
+        assert!(GcsOutputStore::connect(Some(&config), "preprod", address)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[test]
