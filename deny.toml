@@ -26,6 +26,7 @@ ignore = [
     { id = "RUSTSEC-2026-0119", reason = "hickory-proto O(n²) name compression CPU exhaustion; fix needs hickory 0.26+/reqwest 0.13, blocked by alloy/helios/near pins" },
     { id = "RUSTSEC-2026-0222", reason = "wasmtime 45 type-index mixup; only reachable via near-sdk unit-testing dev-only feature (near-vm-runner pins wasmtime ^45, no patched release)" },
     { id = "RUSTSEC-2026-0269", reason = "wasmtime 45 filesystem sandbox escape; same chain as RUSTSEC-2026-0222; dev-only, no WASI filesystem exposed to guest code" },
+    { id = "RUSTSEC-2026-0285", reason = "rustls 0.23.43 accepts TLS 1.3 handshake messages across an encryption-level boundary; the fix is 0.23.45, which needs aws-lc-rs ^1.18 while near-crypto 0.37.x pins =1.16.2. The transcript stays authenticated, so a handshake cannot be altered or completed by an attacker" },
 ]
 
 [licenses]
