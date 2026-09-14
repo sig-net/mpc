@@ -16,8 +16,7 @@ all-features = true
 
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2024-0344", reason = "curve25519-dalek 3.x pinned via Solana 2.x; upgrade blocked until Solana adopts dalek 4.x (mpc#855)" },
-    { id = "RUSTSEC-2022-0093", reason = "ed25519-dalek 1.x required by the Solana 2.x dependency tree (mpc#855)" },
+    { id = "RUSTSEC-2024-0344", reason = "curve25519-dalek 3.x via libp2p-noise -> x25519-dalek 1.x (helios' libp2p 0.51 pin); fixed only by a helios/libp2p bump" },
     { id = "RUSTSEC-2026-0258", reason = "h2 0.3 unbounded empty DATA frames; DoS only, outgoing client connections (reqwest 0.11 + helios' jsonrpsee 0.19, both hyper 0.14); no 0.3 patch exists (mpc#782)" },
     { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101.7 URI name constraints accepted; pinned by rustls 0.21 via helios' jsonrpsee-http-client 0.19 (hyper-rustls 0.24)" },
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101.7 wildcard name constraints accepted; same chain as RUSTSEC-2026-0098" },
