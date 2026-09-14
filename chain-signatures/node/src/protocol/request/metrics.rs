@@ -8,9 +8,10 @@ use super::*;
 /// loops back. Indexing/AwaitingGeneration/Responding/AwaitingExecution/
 /// EndToEnd/Total are emitted elsewhere and ignored by `add`.
 ///
-/// Additivity caveat: without governance pauses, all five stages sum to
-/// Total. Resharing or other transitions out of `Running` mid-request show
-/// idle time only in Total, so the equality holds as `<=` in that case.
+/// Per leg, AwaitingGeneration + Organizing + Posit + Generating + Responding
+/// sum to Total, except governance pauses add idle time only to Total.
+/// Indexing precedes Total; AwaitingExecution spans the gap between legs.
+/// Exclude Total and EndToEnd from stage stacks: EndToEnd overlaps both legs.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseDurations {
     organizing: Duration,

@@ -1055,27 +1055,42 @@ async fn test_advance_rejects_invalid_publish_transition() {
 // Bidirectional spanning-latency bookkeeping
 // =========================================================================
 
-/// The publish boundary must survive the hop into `Executing`: it is the only
-/// start point for the wait on the target chain, and the status that replaces
-/// `Publishing` does not carry it.
+/// Execution confirmations recover the publish boundary from the watch.
 #[tokio::test]
-async fn executing_carries_the_publish_boundary() {
+async fn publish_boundary_survives_the_unwatch_lookup() {
     let backlog = Backlog::new();
     let tx = mock_bidirectional_tx(SignId::new([71; 32]), Chain::Solana);
-    let entry = backlog.insert_mock_executing(&tx).await;
+    backlog.insert_mock_executing(&tx).await;
+
+    let entry = backlog
+        .unwatch_execution(tx.target_chain, &tx.id)
+        .await
+        .expect("watch must resolve to the executing entry");
 
     let measured = entry
         .awaiting_execution()
-        .expect("publish boundary must be measurable");
+        .expect("boundary must survive the lookup the handler goes through");
     assert!(
         measured < std::time::Duration::from_secs(60),
         "a freshly published entry has barely been waiting, got {measured:?}"
     );
 }
 
-/// `publishing_since` is serialized, so it can arrive from a peer whose clock
-/// runs ahead. Saturating that to zero would put a bogus instantaneous wait in
-/// the bottom histogram bucket instead of leaving the sample out.
+/// Status lookups cannot recover the node-local publish boundary.
+#[tokio::test]
+async fn plain_lookup_cannot_measure_the_execution_wait() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::new([75; 32]), Chain::Solana);
+    backlog.insert_mock_executing(&tx).await;
+
+    let entry = backlog
+        .get_by::<Bidirectional<Executing>>(Chain::Solana, &tx.sign_id())
+        .await
+        .expect("entry must still be executing");
+    assert_eq!(entry.awaiting_execution(), None);
+}
+
+/// Future publish timestamps are excluded from latency observations.
 #[tokio::test]
 async fn awaiting_execution_skips_a_publish_boundary_from_the_future() {
     let backlog = Backlog::new();
@@ -1103,8 +1118,58 @@ async fn awaiting_execution_skips_a_publish_boundary_from_the_future() {
     );
 }
 
-/// An entry rebuilt from a checkpoint has no publish boundary, so the wait is
-/// skipped rather than measured from an invented start.
+#[tokio::test]
+async fn live_regress_preserves_only_matching_execution_boundaries() {
+    let backlog = Backlog::new();
+    let retained = mock_bidirectional_tx(SignId::from_u8(80), Chain::Solana);
+    let restored = mock_bidirectional_tx(SignId::from_u8(81), Chain::Solana);
+    let stale = mock_bidirectional_tx(SignId::from_u8(82), Chain::Solana);
+    let unrelated = mock_bidirectional_tx(SignId::from_u8(83), Chain::Canton);
+
+    // Distinguish the original boundary from recovery time.
+    let boundary = mpc_utils::time::current_unix_timestamp() - 120;
+    let entry = backlog
+        .insert_mock_executing(&retained)
+        .await
+        .with_publish_boundary(Some(boundary));
+    backlog.watch_execution(&entry).await;
+    backlog.insert_mock_executing(&restored).await;
+    let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
+    backlog
+        .unwatch_execution(restored.target_chain, &restored.id)
+        .await
+        .unwrap();
+    backlog.insert_mock_executing(&stale).await;
+    let unrelated_boundary = backlog
+        .insert_mock_executing(&unrelated)
+        .await
+        .publish_boundary();
+
+    backlog.regress(&checkpoint).await.unwrap();
+
+    let entry = backlog
+        .unwatch_execution(retained.target_chain, &retained.id)
+        .await
+        .expect("matching execution must remain watched");
+    assert_eq!(entry.publish_boundary(), Some(boundary));
+    assert!(entry.awaiting_execution().unwrap() >= std::time::Duration::from_secs(120));
+    let entry = backlog
+        .unwatch_execution(restored.target_chain, &restored.id)
+        .await
+        .expect("checkpoint execution must be re-watched");
+    assert_eq!(entry.publish_boundary(), None);
+    assert!(backlog
+        .unwatch_execution(stale.target_chain, &stale.id)
+        .await
+        .is_none());
+    let entry = backlog
+        .unwatch_execution(unrelated.target_chain, &unrelated.id)
+        .await
+        .expect("other source chain must remain watched");
+    assert_eq!(entry.publish_boundary(), unrelated_boundary);
+}
+
+/// Restart recovery leaves execution latency unknown.
 #[tokio::test]
 async fn recovered_executing_entry_has_no_publish_boundary() {
     let backlog = Backlog::new();
@@ -1119,10 +1184,14 @@ async fn recovered_executing_entry_has_no_publish_boundary() {
     recovered.recover_by_checkpoint(&checkpoint).await;
 
     let entry = recovered
-        .get_by::<Bidirectional<Executing>>(Chain::Solana, &tx.sign_id())
+        .unwatch_execution(tx.target_chain, &tx.id)
         .await
-        .expect("recovered entry must still be executing");
-    assert_eq!(entry.awaiting_execution(), None);
+        .expect("recovery must re-register the watch");
+    assert_eq!(
+        entry.awaiting_execution(),
+        None,
+        "a wait that began before the restart has no measurable start"
+    );
 }
 
 /// The final-response request stamps its own queue timestamp with "now", so the

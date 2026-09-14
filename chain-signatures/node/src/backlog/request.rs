@@ -519,10 +519,19 @@ impl SignEntry<Bidirectional<Executing>> {
     /// recorded that boundary, and when the boundary is ahead of the local
     /// clock -- it is serialized, so it can have come from a peer.
     pub fn awaiting_execution(&self) -> Option<Duration> {
-        self.state
-            .0
-             .1
+        self.publish_boundary()
             .and_then(mpc_utils::time::unix_elapsed_checked)
+    }
+
+    /// Unix-second publish boundary, if known locally.
+    pub(crate) fn publish_boundary(&self) -> Option<u64> {
+        self.state.0 .1
+    }
+
+    /// Restore the node-local publish boundary after a status lookup.
+    pub(crate) fn with_publish_boundary(mut self, boundary: Option<u64>) -> Self {
+        self.state.0 .1 = boundary;
+        self
     }
 
     /// Watch execution of this bidirectional transaction on its target chain.

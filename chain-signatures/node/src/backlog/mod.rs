@@ -116,24 +116,41 @@ impl PendingRequests {
     }
 }
 
+/// Execution watch with a node-local publish boundary absent from backlog status.
+#[derive(Debug, Clone)]
+struct ExecutionWatch {
+    tx: Arc<BidirectionalTx>,
+    publish_boundary: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ExecutionWatchers {
-    watchers: HashMap<BidirectionalTxId, Arc<BidirectionalTx>>,
+    watchers: HashMap<BidirectionalTxId, ExecutionWatch>,
 }
 
 impl ExecutionWatchers {
-    fn insert(&mut self, tx: Arc<BidirectionalTx>) -> Option<Arc<BidirectionalTx>> {
-        self.watchers.insert(tx.id, tx)
+    fn insert(
+        &mut self,
+        tx: Arc<BidirectionalTx>,
+        publish_boundary: Option<u64>,
+    ) -> Option<ExecutionWatch> {
+        self.watchers.insert(
+            tx.id,
+            ExecutionWatch {
+                tx,
+                publish_boundary,
+            },
+        )
     }
 
-    fn remove(&mut self, tx_id: &BidirectionalTxId) -> Option<Arc<BidirectionalTx>> {
+    fn remove(&mut self, tx_id: &BidirectionalTxId) -> Option<ExecutionWatch> {
         self.watchers.remove(tx_id)
     }
 
     fn all(&self) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers
             .iter()
-            .map(|(id, tx)| (*id, (tx.sign_id(), Arc::clone(tx))))
+            .map(|(id, watch)| (*id, (watch.tx.sign_id(), Arc::clone(&watch.tx))))
             .collect()
     }
 }
@@ -333,7 +350,7 @@ impl Backlog {
         let target_chain = tx.target_chain;
         let mut watchers = self.watchers(&target_chain).write().await;
 
-        watchers.insert(Arc::clone(tx));
+        watchers.insert(Arc::clone(tx), entry.publish_boundary());
     }
 
     /// Stop watching for execution of a bidirectional transaction on the destination chain
@@ -343,13 +360,15 @@ impl Backlog {
         chain: Chain,
         tx_id: &BidirectionalTxId,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
-        let tx = {
+        let watch = {
             let mut watchers = self.watchers(&chain).write().await;
             watchers.remove(tx_id)?
         };
 
-        self.get_by::<Bidirectional<Executing>>(tx.source_chain, &tx.sign_id())
+        // Restore the boundary absent from backlog status.
+        self.get_by::<Bidirectional<Executing>>(watch.tx.source_chain, &watch.tx.sign_id())
             .await
+            .map(|entry| entry.with_publish_boundary(watch.publish_boundary))
     }
 
     /// Set the processed block height for a specific chain.
@@ -507,15 +526,23 @@ impl Backlog {
             pending.pending_executions(chain, self)
         };
 
-        // Clear execution watchers whose source chain is the recovered chain
+        // Replace this chain's watches, retaining boundaries for matching executions.
         for destination_chain in Chain::iter() {
             let mut watchers = self.watchers(&destination_chain).write().await;
-            watchers.watchers.retain(|_, tx| tx.source_chain != chain);
-        }
-
-        // now repopulate our execution watchers
-        for entry in execution_to_watch {
-            self.watch_execution(&entry).await;
+            let mut boundaries = HashMap::new();
+            watchers.watchers.retain(|id, watch| {
+                if watch.tx.source_chain != chain {
+                    return true;
+                }
+                boundaries.insert(*id, watch.publish_boundary);
+                false
+            });
+            for entry in &execution_to_watch {
+                let tx = entry.execution_tx();
+                if tx.target_chain == destination_chain {
+                    watchers.insert(Arc::clone(tx), boundaries.remove(&tx.id).flatten());
+                }
+            }
         }
     }
 }

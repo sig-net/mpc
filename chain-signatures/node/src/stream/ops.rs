@@ -263,15 +263,6 @@ fn execution_status(failed: bool) -> &'static str {
     }
 }
 
-/// Return the initial request's indexing time without confusing it with the
-/// final-response request's independent queue timestamp.
-fn bidirectional_origin_indexed_at(request: &IndexedSignRequest) -> Option<u64> {
-    match &request.kind {
-        SignKind::RespondBidirectional(response) => response.origin_indexed_at,
-        _ => Some(request.unix_timestamp_indexed),
-    }
-}
-
 /// Process an execution confirmation emitted by a chain client.
 /// The target chain is the chain where the execution was observed.
 pub async fn process_execution_confirmed(

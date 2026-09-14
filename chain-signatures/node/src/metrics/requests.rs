@@ -40,6 +40,7 @@ pub enum SignRequestStep {
     ///
     /// Recorded under `kind="respond_bidirectional"`, the kind the request has
     /// once the transition completes, so the whole second leg shares one kind.
+    /// Unix-second timestamps limit observations to whole-second resolution.
     ///
     /// Status:
     ///     - ok: the target chain executed successfully
@@ -53,6 +54,7 @@ pub enum SignRequestStep {
     /// The origin travels in the serialized request, so it survives a restart
     /// but may carry a peer's clock; an origin ahead of this node's clock is
     /// skipped rather than observed as zero.
+    /// Unix-second timestamps limit observations to whole-second resolution.
     EndToEnd,
     /// Total time from indexing to responding
     /// Status:
