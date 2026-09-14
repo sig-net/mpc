@@ -20,7 +20,7 @@ use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
 use crate::config::{MidnightConfig, RpcConfig};
-use crate::emissions::{emissions_in, DecodedTransaction, UnsupportedFallibleCall};
+use crate::emissions::{emissions_in, DecodedTransaction};
 use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
 
@@ -127,6 +127,57 @@ struct TxApplied(TxAppliedDetails);
 impl subxt::events::StaticEvent for TxApplied {
     const PALLET: &'static str = "Midnight";
     const EVENT: &'static str = "TxApplied";
+}
+
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct TxPartialSuccess(TxAppliedDetails);
+
+impl subxt::events::StaticEvent for TxPartialSuccess {
+    const PALLET: &'static str = "Midnight";
+    const EVENT: &'static str = "TxPartialSuccess";
+}
+
+/// Accept only one unambiguous full-success status from this extrinsic.
+/// These are RPC-reported events; this check does not verify their inclusion.
+fn fully_applied_hash(
+    events: &subxt::blocks::ExtrinsicEvents<SubstrateConfig>,
+) -> anyhow::Result<Option<[u8; 32]>> {
+    let mut applied = None;
+    let mut partial = None;
+    for event in events.iter() {
+        let event = event.context("Midnight status events did not match metadata")?;
+        if let Some(TxApplied(details)) = event.as_event::<TxApplied>()? {
+            anyhow::ensure!(
+                applied.replace(details.tx_hash).is_none(),
+                "duplicate TxApplied status"
+            );
+        }
+        if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()? {
+            anyhow::ensure!(
+                partial.replace(details.tx_hash).is_none(),
+                "duplicate TxPartialSuccess status"
+            );
+        }
+    }
+    anyhow::ensure!(
+        applied.is_none() || partial.is_none(),
+        "conflicting Midnight statuses"
+    );
+    Ok(applied)
+}
+
+fn decode_applied_transaction(
+    bytes: &[u8],
+    expected_hash: [u8; 32],
+) -> anyhow::Result<DecodedTransaction> {
+    let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(&mut &bytes[..])
+        .context("candidate ledger transaction did not decode")?;
+    anyhow::ensure!(
+        tx.transaction_hash().0 .0 == expected_hash,
+        "TxApplied hash does not match the candidate ledger transaction"
+    );
+    Ok(tx)
 }
 
 /// One finalized block as plain data: the number plus the `0x`-prefixed hashes
@@ -315,14 +366,9 @@ impl MidnightRpc {
             scale_system_events
                 .get_or_insert_with(|| events.all_events_in_block().bytes().to_vec());
 
-            let applied = events.find_first::<TxApplied>().map_err(|err| {
-                BlockHold::new(
-                    "emission-schema-hold",
-                    height,
-                    anyhow::Error::new(err).context("TxApplied did not match metadata"),
-                )
-            })?;
-            let Some(TxApplied(details)) = applied else {
+            let applied = fully_applied_hash(&events)
+                .map_err(|err| BlockHold::new("emission-schema-hold", height, err))?;
+            let Some(ledger_tx_hash) = applied else {
                 tracing::warn!(
                     reason = "unsupported-midnight-status",
                     height,
@@ -331,45 +377,32 @@ impl MidnightRpc {
                 );
                 continue;
             };
-            let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(
-                &mut &found.value.midnight_tx[..],
-            )
-            .map_err(|err| {
+            let tx = decode_applied_transaction(&found.value.midnight_tx, ledger_tx_hash).map_err(
+                |err| {
+                    BlockHold::new(
+                        "singleton-tx-undecodable",
+                        height,
+                        err.context(format!(
+                            "candidate extrinsic {} ledger transaction",
+                            found.details.index()
+                        )),
+                    )
+                },
+            )?;
+            // TxApplied covers both logical phases. Partial results cannot identify
+            // committed fallible segments through this node's status events.
+            let calls = emissions_in(&tx, singleton).map_err(|err| {
                 BlockHold::new(
-                    "singleton-tx-undecodable",
+                    "emission-schema-hold",
                     height,
-                    anyhow::Error::new(err).context(format!(
-                        "candidate extrinsic {} ledger transaction",
+                    err.context(format!(
+                        "candidate extrinsic {} singleton emissions",
                         found.details.index()
                     )),
                 )
             })?;
-            let calls = match emissions_in(&tx, singleton) {
-                Ok(calls) => calls,
-                Err(err) => {
-                    if let Some(unsupported) = err.downcast_ref::<UnsupportedFallibleCall>() {
-                        tracing::warn!(
-                            reason = "unsupported-fallible-singleton-call",
-                            height,
-                            extrinsic_index = found.details.index(),
-                            call_index = unsupported.call_index,
-                            "midnight transaction skipped: fallible singleton calls are unsupported"
-                        );
-                        continue;
-                    }
-                    return Err(BlockHold::new(
-                        "emission-schema-hold",
-                        height,
-                        err.context(format!(
-                            "candidate extrinsic {} singleton emissions",
-                            found.details.index()
-                        )),
-                    )
-                    .into());
-                }
-            };
             decoded_candidates.push(CandidateTransactionEmissions {
-                ledger_tx_hash: details.tx_hash,
+                ledger_tx_hash,
                 extrinsic_index: found.details.index(),
                 calls,
             });
@@ -780,6 +813,119 @@ mod tests {
     impl subxt::events::StaticEvent for CaptureContractCall {
         const PALLET: &'static str = "Midnight";
         const EVENT: &'static str = "ContractCall";
+    }
+
+    fn captured_status_events(
+        bytes: Vec<u8>,
+        extrinsic: u32,
+    ) -> subxt::blocks::ExtrinsicEvents<SubstrateConfig> {
+        let metadata = subxt::Metadata::decode_all(
+            &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
+        )
+        .expect("captured node metadata");
+        subxt::blocks::ExtrinsicEvents::new(
+            H256::zero(),
+            extrinsic,
+            subxt::events::Events::decode_from(bytes, metadata),
+        )
+    }
+
+    fn encode_status_records(records: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = subxt::ext::codec::Compact(records.len() as u32).encode();
+        for record in records {
+            bytes.extend_from_slice(record);
+        }
+        bytes
+    }
+
+    #[test]
+    fn full_success_gate_uses_the_captured_extrinsic_status() {
+        let raw = include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec();
+        let events = captured_status_events(raw.clone(), 4);
+        let hash = fully_applied_hash(&events)
+            .expect("valid status")
+            .expect("TxApplied");
+        let tx = decode_applied_transaction(
+            include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
+            hash,
+        )
+        .expect("captured transaction matches status");
+        let singleton = crate::test_utils::hex_32(
+            "4daa9701226222a9db302dfb6f347f48c947278a4dc93812a79494f4086a0172",
+        );
+        let calls = emissions_in(&tx, &singleton).expect("successful fallible transcript decodes");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].phase, crate::emissions::TranscriptPhase::Fallible);
+        assert_eq!(calls[0].physical_segment, 49592);
+        assert_eq!(calls[0].emissions.len(), 1);
+        assert_eq!(
+            fully_applied_hash(&captured_status_events(raw, 0)).unwrap(),
+            None
+        );
+        let mut wrong_hash = hash;
+        wrong_hash[0] ^= 1;
+        assert!(decode_applied_transaction(
+            include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
+            wrong_hash,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("hash does not match"));
+    }
+
+    #[test]
+    fn full_success_gate_rejects_partial_and_ambiguous_statuses() {
+        let events = captured_status_events(
+            include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
+            4,
+        );
+        let applied = events
+            .iter()
+            .map(Result::unwrap)
+            .find(|event| event.as_event::<TxApplied>().unwrap().is_some())
+            .expect("capture has TxApplied");
+        let mut partial = applied.bytes().to_vec();
+        // Synthetic status cases retain the captured producer's SCALE layout:
+        // ApplyExtrinsic(u32), Midnight pallet, then its event discriminant.
+        assert_eq!(&partial[..7], &[0, 4, 0, 0, 0, 5, 2]);
+        partial[6] = 7; // TxPartialSuccess in the captured metadata.
+        assert!(
+            captured_status_events(encode_status_records(&[partial.clone()]), 4)
+                .find_first::<TxPartialSuccess>()
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            fully_applied_hash(&captured_status_events(
+                encode_status_records(&[partial.clone()]),
+                4,
+            ))
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            fully_applied_hash(&captured_status_events(encode_status_records(&[]), 4,)).unwrap(),
+            None
+        );
+        for records in [
+            vec![applied.bytes().to_vec(), partial.clone()],
+            vec![applied.bytes().to_vec(), applied.bytes().to_vec()],
+            vec![partial.clone(), partial],
+        ] {
+            assert!(
+                fully_applied_hash(&captured_status_events(encode_status_records(&records), 4,))
+                    .is_err(),
+                "ambiguous outcome must hold"
+            );
+        }
+        assert!(
+            fully_applied_hash(&captured_status_events(
+                encode_status_records(&[applied.bytes()[..12].to_vec()]),
+                4,
+            ))
+            .is_err(),
+            "truncated outcome must hold"
+        );
     }
 
     fn capture_output_dir(value: &str) -> anyhow::Result<PathBuf> {
