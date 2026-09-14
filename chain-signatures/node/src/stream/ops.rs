@@ -231,7 +231,7 @@ pub(crate) async fn process_respond_bidirectional_event(
             match unix_elapsed_checked(origin_indexed_at) {
                 Some(elapsed) => record_request_latency(
                     source_chain,
-                    SignRequestStep::EndToEnd,
+                    SignRequestStep::BidirectionalTotal,
                     execution_status(is_failed_execution_output(&response.output)),
                     RequestKind::RespondBidirectional,
                     elapsed,

@@ -11,14 +11,8 @@ use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 
-/// Whether a final-response output is the sentinel written by
-/// [`CompletedTx::create_failed_sign_request`] for a target-chain execution
-/// that failed.
-///
-/// This reads the same marker the source-chain contract reads, so it inherits
-/// that marker's ambiguity: a successful execution whose output happens to
-/// begin with the prefix is indistinguishable. Used only to label metrics, so a
-/// collision costs a miscategorised observation and nothing more.
+/// Whether an output carries the failed-execution sentinel. Shares the marker's
+/// ambiguity: a success starting with the prefix mislabels its metric.
 pub(crate) fn is_failed_execution_output(output: &[u8]) -> bool {
     output.starts_with(&MAGIC_ERROR_PREFIX)
 }
@@ -37,41 +31,43 @@ fn respond_bidirectional_path(chain: Chain) -> anyhow::Result<String> {
     }
 }
 
+/// A confirmed target-chain execution, with everything the final-response
+/// request is built from. The context is fixed when the execution is
+/// confirmed, so it is captured once here rather than threaded through each
+/// constructor.
 pub struct CompletedTx {
     tx: Arc<BidirectionalTx>,
+    /// Opaque per-chain blob carried over from the initial request.
+    chain_ctx: Option<Vec<u8>>,
+    /// When the initial request was indexed, i.e. when the round trip began.
+    origin_indexed_at: Option<u64>,
 }
 
 impl CompletedTx {
-    pub fn new(tx: Arc<BidirectionalTx>) -> Self {
-        Self { tx }
-    }
-
-    pub(crate) async fn create_failed_sign_request(
-        &self,
+    pub fn new(
+        tx: Arc<BidirectionalTx>,
         chain_ctx: Option<Vec<u8>>,
         origin_indexed_at: Option<u64>,
-    ) -> anyhow::Result<IndexedSignRequest> {
-        self.process_failed_tx(chain_ctx, origin_indexed_at).await
+    ) -> Self {
+        Self {
+            tx,
+            chain_ctx,
+            origin_indexed_at,
+        }
+    }
+
+    pub(crate) async fn create_failed_sign_request(&self) -> anyhow::Result<IndexedSignRequest> {
+        self.process_failed_tx().await
     }
 
     pub(crate) fn create_sign_request_from_serialized_output(
         &self,
         serialized_output: RespondBidirectionalSerializedOutput,
-        chain_ctx: Option<Vec<u8>>,
-        origin_indexed_at: Option<u64>,
     ) -> anyhow::Result<IndexedSignRequest> {
-        self.create_respond_bidirectional_sign_request(
-            serialized_output,
-            chain_ctx,
-            origin_indexed_at,
-        )
+        self.create_respond_bidirectional_sign_request(serialized_output)
     }
 
-    async fn process_failed_tx(
-        &self,
-        chain_ctx: Option<Vec<u8>>,
-        origin_indexed_at: Option<u64>,
-    ) -> anyhow::Result<IndexedSignRequest> {
+    async fn process_failed_tx(&self) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("Tx failed: {:?}", self.tx.id);
 
         let source_chain = self.tx.source_chain;
@@ -97,19 +93,13 @@ impl CompletedTx {
                 Bytes::from(output).into()
             }
         };
-        let sign_request = self.create_respond_bidirectional_sign_request(
-            serialized_output,
-            chain_ctx,
-            origin_indexed_at,
-        )?;
+        let sign_request = self.create_respond_bidirectional_sign_request(serialized_output)?;
         Ok(sign_request)
     }
 
     fn create_respond_bidirectional_sign_request(
         &self,
         serialized_output: RespondBidirectionalSerializedOutput,
-        chain_ctx: Option<Vec<u8>>,
-        origin_indexed_at: Option<u64>,
     ) -> anyhow::Result<IndexedSignRequest> {
         let source_chain = self.tx.source_chain;
         let request_id_bytes = self.tx.request_id;
@@ -146,8 +136,8 @@ impl CompletedTx {
             RespondBidirectionalTx {
                 tx_id: self.tx.id,
                 output: serialized_output,
-                origin_indexed_at,
-                chain_ctx,
+                origin_indexed_at: self.origin_indexed_at,
+                chain_ctx: self.chain_ctx.clone(),
             },
         ))
     }
@@ -218,20 +208,28 @@ mod tests {
     #[tokio::test]
     async fn create_failed_sign_request_emits_error_prefix() {
         // Solana (Borsh).
-        let borsh = CompletedTx::new(sample_bidirectional_tx(Chain::Solana, [0x22; 32]))
-            .create_failed_sign_request(None, Some(100))
-            .await
-            .unwrap();
+        let borsh = CompletedTx::new(
+            sample_bidirectional_tx(Chain::Solana, [0x22; 32]),
+            None,
+            Some(100),
+        )
+        .create_failed_sign_request()
+        .await
+        .unwrap();
         let SignKind::RespondBidirectional(respond) = borsh.kind else {
             panic!("expected RespondBidirectional kind");
         };
         assert_eq!(respond.output, [&MAGIC_ERROR_PREFIX[..], &[1u8]].concat());
 
         // Canton (ABI).
-        let abi = CompletedTx::new(sample_bidirectional_tx(Chain::Canton, [0x22; 32]))
-            .create_failed_sign_request(None, Some(100))
-            .await
-            .unwrap();
+        let abi = CompletedTx::new(
+            sample_bidirectional_tx(Chain::Canton, [0x22; 32]),
+            None,
+            Some(100),
+        )
+        .create_failed_sign_request()
+        .await
+        .unwrap();
         let SignKind::RespondBidirectional(respond) = abi.kind else {
             panic!("expected RespondBidirectional kind");
         };
@@ -241,10 +239,14 @@ mod tests {
         assert_eq!(respond.output, expected);
 
         // Midnight (FAB).
-        let fab = CompletedTx::new(sample_bidirectional_tx(Chain::Midnight, [0x22; 32]))
-            .create_failed_sign_request(None, Some(100))
-            .await
-            .unwrap();
+        let fab = CompletedTx::new(
+            sample_bidirectional_tx(Chain::Midnight, [0x22; 32]),
+            None,
+            Some(100),
+        )
+        .create_failed_sign_request()
+        .await
+        .unwrap();
         let SignKind::RespondBidirectional(respond) = fab.kind else {
             panic!("expected RespondBidirectional kind");
         };
@@ -254,16 +256,12 @@ mod tests {
     #[test]
     fn create_sign_request_carries_output_and_context() {
         let tx = sample_bidirectional_tx(Chain::Solana, [0x22; 32]);
-        let completed = CompletedTx::new(tx.clone());
         let output = vec![1, 2, 3, 4];
         let chain_ctx = Some(vec![9, 9]);
+        let completed = CompletedTx::new(tx.clone(), chain_ctx.clone(), Some(100));
 
         let req = completed
-            .create_sign_request_from_serialized_output(
-                output.clone(),
-                chain_ctx.clone(),
-                Some(100),
-            )
+            .create_sign_request_from_serialized_output(output.clone())
             .unwrap();
 
         assert_eq!(req.chain, Chain::Solana);
@@ -280,18 +278,26 @@ mod tests {
     /// failed and successful paths must stay distinguishable.
     #[tokio::test]
     async fn failed_execution_output_is_detectable() {
-        let failed = CompletedTx::new(sample_bidirectional_tx(Chain::Solana, [0x31; 32]))
-            .create_failed_sign_request(None, Some(100))
-            .await
-            .unwrap();
+        let failed = CompletedTx::new(
+            sample_bidirectional_tx(Chain::Solana, [0x31; 32]),
+            None,
+            Some(100),
+        )
+        .create_failed_sign_request()
+        .await
+        .unwrap();
         let SignKind::RespondBidirectional(failed) = failed.kind else {
             panic!("expected RespondBidirectional");
         };
         assert!(is_failed_execution_output(&failed.output));
 
-        let succeeded = CompletedTx::new(sample_bidirectional_tx(Chain::Solana, [0x32; 32]))
-            .create_sign_request_from_serialized_output(vec![1, 2, 3, 4, 5], None, Some(100))
-            .unwrap();
+        let succeeded = CompletedTx::new(
+            sample_bidirectional_tx(Chain::Solana, [0x32; 32]),
+            None,
+            Some(100),
+        )
+        .create_sign_request_from_serialized_output(vec![1, 2, 3, 4, 5])
+        .unwrap();
         let SignKind::RespondBidirectional(succeeded) = succeeded.kind else {
             panic!("expected RespondBidirectional");
         };
@@ -315,11 +321,12 @@ mod tests {
 
     #[tokio::test]
     async fn midnight_failure_payload_differs_from_zero_padded_success() {
-        let completed = CompletedTx::new(sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]));
-        let failure = completed
-            .create_failed_sign_request(None, Some(100))
-            .await
-            .unwrap();
+        let completed = CompletedTx::new(
+            sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]),
+            None,
+            Some(100),
+        );
+        let failure = completed.create_failed_sign_request().await.unwrap();
         let SignKind::RespondBidirectional(response) = &failure.kind else {
             panic!("expected RespondBidirectional kind");
         };
@@ -328,7 +335,7 @@ mod tests {
             let mut output = response.output.clone();
             output.resize(length, 0);
             let success = completed
-                .create_sign_request_from_serialized_output(output, None, Some(100))
+                .create_sign_request_from_serialized_output(output)
                 .unwrap();
             assert_ne!(failure.args.payload, success.args.payload);
         }
@@ -387,8 +394,8 @@ mod tests {
         let tx = sample_bidirectional_tx(Chain::Midnight, request_id);
         assert_eq!(tx.target_chain, Chain::Ethereum);
 
-        let request = CompletedTx::new(tx)
-            .create_sign_request_from_serialized_output(serialized_output, None, Some(100))
+        let request = CompletedTx::new(tx, None, Some(100))
+            .create_sign_request_from_serialized_output(serialized_output)
             .unwrap();
         let expected_payload = Scalar::from_bytes(
             hex::decode("48755c01b13d35977c80da4ec29a61995d7f48d45357891cf783de38f1337600")

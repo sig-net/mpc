@@ -1090,29 +1090,22 @@ async fn plain_lookup_cannot_measure_the_execution_wait() {
     assert_eq!(entry.awaiting_execution(), None);
 }
 
-/// Future publish timestamps are excluded from latency observations.
+/// Future publish timestamps are excluded from latency observations: the
+/// boundary is serialized, so it can arrive from a peer whose clock runs ahead.
 #[tokio::test]
 async fn awaiting_execution_skips_a_publish_boundary_from_the_future() {
     let backlog = Backlog::new();
     let tx = mock_bidirectional_tx(SignId::new([72; 32]), Chain::Solana);
-    let bidi = backlog
-        .insert_mock_bidirectional(tx.sign_id(), tx.source_chain)
-        .await;
-    let (pk, output) = mock_signature_output(&bidi.request().args);
-
-    let entry = bidi
-        .advance(pk, &output, mock_participants(), true)
-        .await
-        .expect("advance to publishing")
-        .advance(Arc::new(tx.clone()))
-        .await
-        .expect("advance to executing");
-
-    // Rebuild the executing state with a boundary an hour ahead of us.
     let future = mpc_utils::time::current_unix_timestamp() + 3_600;
-    let skewed = super::Executing(Arc::clone(entry.execution_tx()), Some(future));
+
+    let entry = backlog
+        .insert_mock_executing(&tx)
+        .await
+        .with_publish_boundary(Some(future));
+
+    assert_eq!(entry.publish_boundary(), Some(future));
     assert_eq!(
-        skewed.1.and_then(mpc_utils::time::unix_elapsed_checked),
+        entry.awaiting_execution(),
         None,
         "a future publish boundary must be unmeasured, not zero"
     );

@@ -6,12 +6,13 @@ use super::*;
 /// Organizing, Posit, Generating. Times are summed across attempts so each
 /// histogram observation covers the full request even when the state machine
 /// loops back. Indexing/AwaitingGeneration/Responding/AwaitingExecution/
-/// EndToEnd/Total are emitted elsewhere and ignored by `add`.
+/// BidirectionalTotal/RequestTotal are emitted elsewhere and ignored by `add`.
 ///
 /// Per leg, AwaitingGeneration + Organizing + Posit + Generating + Responding
-/// sum to Total, except governance pauses add idle time only to Total.
-/// Indexing precedes Total; AwaitingExecution spans the gap between legs.
-/// Exclude Total and EndToEnd from stage stacks: EndToEnd overlaps both legs.
+/// sum to RequestTotal, except governance pauses add idle time only to the
+/// total. Indexing precedes RequestTotal; AwaitingExecution spans the gap
+/// between legs. Exclude both totals from stage stacks: BidirectionalTotal
+/// overlaps both legs, and RequestTotal overlaps its own leg's stages.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseDurations {
     organizing: Duration,
@@ -31,8 +32,8 @@ impl PhaseDurations {
             | SignRequestStep::AwaitingGeneration
             | SignRequestStep::Responding
             | SignRequestStep::AwaitingExecution
-            | SignRequestStep::EndToEnd
-            | SignRequestStep::Total => {}
+            | SignRequestStep::BidirectionalTotal
+            | SignRequestStep::RequestTotal => {}
         }
     }
 
@@ -93,8 +94,11 @@ mod tests {
             SignRequestStep::AwaitingExecution,
             Duration::from_millis(500),
         );
-        d.add(SignRequestStep::EndToEnd, Duration::from_millis(600));
-        d.add(SignRequestStep::Total, Duration::from_millis(400));
+        d.add(
+            SignRequestStep::BidirectionalTotal,
+            Duration::from_millis(600),
+        );
+        d.add(SignRequestStep::RequestTotal, Duration::from_millis(400));
 
         assert_eq!(d, PhaseDurations::default());
     }

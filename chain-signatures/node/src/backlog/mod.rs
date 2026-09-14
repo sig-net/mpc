@@ -6,7 +6,8 @@ pub mod mock;
 pub mod request;
 
 pub use request::{
-    AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign, SignEntry,
+    AnyProgress, Bidirectional, Executing, ExecutionWatch, Final, Generating, Initial, Publishing,
+    Sign, SignEntry,
 };
 
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
@@ -84,7 +85,7 @@ impl PendingRequests {
                     Some(SignEntry {
                         chain,
                         request: Arc::clone(entry.request()),
-                        state: Bidirectional(Executing(Arc::clone(tx), None)),
+                        state: Bidirectional(Executing(ExecutionWatch::new(Arc::clone(tx), None))),
                         backlog: backlog.clone(),
                     })
                 }
@@ -116,31 +117,14 @@ impl PendingRequests {
     }
 }
 
-/// Execution watch with a node-local publish boundary absent from backlog status.
-#[derive(Debug, Clone)]
-struct ExecutionWatch {
-    tx: Arc<BidirectionalTx>,
-    publish_boundary: Option<u64>,
-}
-
 #[derive(Debug, Clone, Default)]
 struct ExecutionWatchers {
     watchers: HashMap<BidirectionalTxId, ExecutionWatch>,
 }
 
 impl ExecutionWatchers {
-    fn insert(
-        &mut self,
-        tx: Arc<BidirectionalTx>,
-        publish_boundary: Option<u64>,
-    ) -> Option<ExecutionWatch> {
-        self.watchers.insert(
-            tx.id,
-            ExecutionWatch {
-                tx,
-                publish_boundary,
-            },
-        )
+    fn insert(&mut self, watch: ExecutionWatch) -> Option<ExecutionWatch> {
+        self.watchers.insert(watch.tx.id, watch)
     }
 
     fn remove(&mut self, tx_id: &BidirectionalTxId) -> Option<ExecutionWatch> {
@@ -350,7 +334,7 @@ impl Backlog {
         let target_chain = tx.target_chain;
         let mut watchers = self.watchers(&target_chain).write().await;
 
-        watchers.insert(Arc::clone(tx), entry.publish_boundary());
+        watchers.insert(entry.execution_watch());
     }
 
     /// Stop watching for execution of a bidirectional transaction on the destination chain
@@ -538,9 +522,10 @@ impl Backlog {
                 false
             });
             for entry in &execution_to_watch {
-                let tx = entry.execution_tx();
-                if tx.target_chain == destination_chain {
-                    watchers.insert(Arc::clone(tx), boundaries.remove(&tx.id).flatten());
+                let mut watch = entry.execution_watch();
+                if watch.tx.target_chain == destination_chain {
+                    watch.publish_boundary = boundaries.remove(&watch.tx.id).flatten();
+                    watchers.insert(watch);
                 }
             }
         }

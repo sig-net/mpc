@@ -27,40 +27,24 @@ pub enum SignRequestStep {
     Generating,
     /// Time to respond to the sign request (Status: ok)
     Responding,
-    /// Bidirectional only: the gap between the two legs, ending when the
-    /// target-chain execution is confirmed and the final response request is
-    /// built.
-    ///
-    /// It starts at `PublishState::publishing_since`, which every participant
-    /// stamps on generation success -- so this is the publish boundary on the
-    /// proposer and "signature ready" elsewhere, and it therefore also contains
-    /// publish dispatch and source-chain inclusion/indexing, not the
-    /// target-chain wait alone. Expect it to differ systematically between
-    /// proposer and non-proposer nodes.
-    ///
-    /// Recorded under `kind="respond_bidirectional"`, the kind the request has
-    /// once the transition completes, so the whole second leg shares one kind.
-    /// Unix-second timestamps limit observations to whole-second resolution.
-    ///
+    /// Bidirectional only: gap between the legs, from the initial response's
+    /// publish boundary to the target-chain execution being confirmed.
+    /// Whole-second resolution; see `SignEntry<Bidirectional<Executing>>`.
     /// Status:
     ///     - ok: the target chain executed successfully
-    ///     - execution_failed: the target-chain execution reverted; the round
-    ///       trip still completed, so the latency is real
+    ///     - execution_failed: the execution reverted, but the leg still ran
     AwaitingExecution,
-    /// Bidirectional only: time from indexing the initial request to the final
-    /// response landing on the source chain, spanning both legs. Same statuses
-    /// as `AwaitingExecution`.
-    ///
-    /// The origin travels in the serialized request, so it survives a restart
-    /// but may carry a peer's clock; an origin ahead of this node's clock is
-    /// skipped rather than observed as zero.
-    /// Unix-second timestamps limit observations to whole-second resolution.
-    EndToEnd,
-    /// Total time from indexing to responding
+    /// Bidirectional only: the whole round trip across both legs, from indexing
+    /// the initial request to the final response landing. Whole-second
+    /// resolution. `RequestTotal` is the per-leg figure. Same statuses as
+    /// `AwaitingExecution`.
+    BidirectionalTotal,
+    /// Time from indexing to responding, for a single request. A bidirectional
+    /// round trip reports one per leg; `BidirectionalTotal` spans both.
     /// Status:
     ///     - in_time: request was delivered in time (expected finality delay + margin)
     ///     - expired: request was delivered after expiration (expected finality delay + margin)
-    Total,
+    RequestTotal,
 }
 
 impl SignRequestStep {
@@ -73,8 +57,8 @@ impl SignRequestStep {
             Self::Generating => "generating",
             Self::Responding => "responding",
             Self::AwaitingExecution => "awaiting_execution",
-            Self::EndToEnd => "end_to_end",
-            Self::Total => "total",
+            Self::BidirectionalTotal => "bidirectional_total",
+            Self::RequestTotal => "request_total",
         }
     }
 }

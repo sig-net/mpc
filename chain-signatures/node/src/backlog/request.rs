@@ -116,14 +116,31 @@ impl Publishing {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Initial<P = Generating>(pub P);
 
-/// Typestate marker: Phase 1.5 awaiting destination-chain execution.
+/// A destination-chain execution being awaited: the transaction, plus the
+/// publish boundary of the initial response ([`Publishing::publishing_since`])
+/// that the wait is measured from.
 ///
-/// The second field is the publish boundary of the initial response
-/// ([`Publishing::publishing_since`]), carried so the wait for the target chain
-/// can be measured. It is node-local: this typestate is rebuilt from the status
-/// on recovery, where the boundary is simply unknown.
+/// The boundary is node-local -- the backlog status does not carry it -- so it
+/// is `None` on anything rebuilt from a status, and the execution watcher is
+/// what carries it across a lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Executing(pub Arc<BidirectionalTx>, pub Option<u64>);
+pub struct ExecutionWatch {
+    pub tx: Arc<BidirectionalTx>,
+    pub publish_boundary: Option<u64>,
+}
+
+impl ExecutionWatch {
+    pub fn new(tx: Arc<BidirectionalTx>, publish_boundary: Option<u64>) -> Self {
+        Self {
+            tx,
+            publish_boundary,
+        }
+    }
+}
+
+/// Typestate marker: Phase 1.5 awaiting destination-chain execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Executing(pub ExecutionWatch);
 
 /// Typestate marker: Phase 2 signing the final respond transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,7 +491,10 @@ impl SignEntry<Bidirectional<Initial<Publishing>>> {
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
         let publishing_since = self.publishing_since();
         self.executing(Arc::clone(&tx)).await?;
-        let entry = self.transition(Bidirectional(Executing(tx, publishing_since)));
+        let entry = self.transition(Bidirectional(Executing(ExecutionWatch::new(
+            tx,
+            publishing_since,
+        ))));
         entry.watch_execution().await;
         Ok(entry)
     }
@@ -493,7 +513,10 @@ impl SignEntry<Bidirectional<Initial<AnyProgress>>> {
             SignProgress::Generating => None,
         };
         self.executing(Arc::clone(&tx)).await?;
-        let entry = self.transition(Bidirectional(Executing(tx, publishing_since)));
+        let entry = self.transition(Bidirectional(Executing(ExecutionWatch::new(
+            tx,
+            publishing_since,
+        ))));
         entry.watch_execution().await;
         Ok(entry)
     }
@@ -511,7 +534,7 @@ impl<P> SignEntry<Bidirectional<Initial<P>>> {
 
 impl SignEntry<Bidirectional<Executing>> {
     pub fn execution_tx(&self) -> &Arc<BidirectionalTx> {
-        &self.state.0 .0
+        &self.state.0 .0.tx
     }
 
     /// How long this entry has been waiting on the target chain, measured from
@@ -525,13 +548,19 @@ impl SignEntry<Bidirectional<Executing>> {
 
     /// Unix-second publish boundary, if known locally.
     pub(crate) fn publish_boundary(&self) -> Option<u64> {
-        self.state.0 .1
+        self.state.0 .0.publish_boundary
     }
 
-    /// Restore the node-local publish boundary after a status lookup.
+    /// Restore the node-local publish boundary that a status lookup cannot
+    /// reconstruct, from the watch that spans the wait.
     pub(crate) fn with_publish_boundary(mut self, boundary: Option<u64>) -> Self {
-        self.state.0 .1 = boundary;
+        self.state.0 .0.publish_boundary = boundary;
         self
+    }
+
+    /// This execution as a watch record.
+    pub(crate) fn execution_watch(&self) -> ExecutionWatch {
+        self.state.0 .0.clone()
     }
 
     /// Watch execution of this bidirectional transaction on its target chain.
@@ -559,15 +588,16 @@ impl SignEntry<Bidirectional<Executing>> {
         // follow-up request stamps itself with "now", so it must be carried.
         let origin_indexed_at = Some(self.request.unix_timestamp_indexed);
 
-        let completed_tx = CompletedTx::new(Arc::clone(self.execution_tx()));
+        let completed_tx = CompletedTx::new(
+            Arc::clone(self.execution_tx()),
+            chain_ctx,
+            origin_indexed_at,
+        );
         let sign_request = match outcome {
-            ExecutionOutcome::Success { output } => completed_tx
-                .create_sign_request_from_serialized_output(output, chain_ctx, origin_indexed_at)?,
-            ExecutionOutcome::Failed => {
-                completed_tx
-                    .create_failed_sign_request(chain_ctx, origin_indexed_at)
-                    .await?
+            ExecutionOutcome::Success { output } => {
+                completed_tx.create_sign_request_from_serialized_output(output)?
             }
+            ExecutionOutcome::Failed => completed_tx.create_failed_sign_request().await?,
         };
 
         let respond_request = Arc::new(sign_request);
@@ -704,9 +734,9 @@ impl SignState for Bidirectional<Initial<Publishing>> {
 impl SignState for Bidirectional<Executing> {
     fn try_from_status(status: &SignStatus) -> Option<Self> {
         match status {
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)) => {
-                Some(Bidirectional(Executing(Arc::clone(tx), None)))
-            }
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)) => Some(Bidirectional(
+                Executing(ExecutionWatch::new(Arc::clone(tx), None)),
+            )),
             _ => None,
         }
     }
