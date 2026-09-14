@@ -1,7 +1,6 @@
 use anyhow::Context as _;
 use oauth2::basic::{BasicClient, BasicTokenType};
-use oauth2::reqwest::async_http_client;
-use oauth2::{AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl};
+use oauth2::{ClientId, ClientSecret, EndpointNotSet, EndpointSet, Scope, TokenResponse, TokenUrl};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -10,11 +9,12 @@ use crate::config::CantonAuthConfig;
 
 const DEFAULT_TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(60);
-const UNUSED_CLIENT_CREDENTIALS_AUTH_URL: &str = "http://localhost/unused-canton-oauth-auth-url";
 
 #[derive(Clone)]
 pub struct CantonAuthProvider {
-    oauth_client: BasicClient,
+    oauth_client:
+        BasicClient<EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>,
+    http_client: reqwest::Client,
     audience: String,
     scope: Option<String>,
     token_request_timeout: Duration,
@@ -31,20 +31,13 @@ impl CantonAuthProvider {
     pub fn new(config: CantonAuthConfig) -> anyhow::Result<Self> {
         let token_url =
             TokenUrl::new(config.token_url.clone()).context("invalid Canton OIDC token URL")?;
-        // oauth2 4.x requires an auth URL even though the client credentials
-        // flow never uses it. When migrating to oauth2 5.x with reqwest 0.12,
-        // remove this dummy URL and use `set_token_uri(...)` instead.
-        let unused_auth_url = AuthUrl::new(UNUSED_CLIENT_CREDENTIALS_AUTH_URL.to_string())
-            .context("invalid unused Canton OIDC auth URL")?;
-        let oauth_client = BasicClient::new(
-            ClientId::new(config.client_id),
-            Some(ClientSecret::new(config.client_secret)),
-            unused_auth_url,
-            Some(token_url),
-        );
+        let oauth_client = BasicClient::new(ClientId::new(config.client_id))
+            .set_client_secret(ClientSecret::new(config.client_secret))
+            .set_token_uri(token_url);
 
         Ok(Self {
             oauth_client,
+            http_client: reqwest::Client::new(),
             audience: config.audience,
             scope: config.scope.filter(|s| !s.trim().is_empty()),
             token_request_timeout: DEFAULT_TOKEN_REQUEST_TIMEOUT,
@@ -77,7 +70,7 @@ impl CantonAuthProvider {
 
         let response = tokio::time::timeout(
             self.token_request_timeout,
-            request.request_async(async_http_client),
+            request.request_async(&self.http_client),
         )
         .await
         .with_context(|| {
