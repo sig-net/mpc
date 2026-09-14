@@ -3,6 +3,15 @@ import { check, fail } from 'k6';
 
 const PINGER_URL = "https://contract-ping.sig.network/ping";
 
+// Shared by every strategy so a tier cannot silently lack a check.
+const thresholds = {
+  http_req_failed: ['rate<0.03'],
+  http_req_duration: ['p(95)<10000'],
+  // k6 skips iterations when every VU is still waiting on a signature. A
+  // run that silently sent less than it was asked to is not a pass.
+  dropped_iterations: ['count<10'],
+};
+
 const strategies = {
   "rps_0_1": {
     scenarios: {
@@ -14,10 +23,7 @@ const strategies = {
         maxVUs: 10,
       },
     },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<10000'],
-    },
+    thresholds,
   },
   "rps_1": {
     scenarios: {
@@ -29,10 +35,7 @@ const strategies = {
         maxVUs: 50,
       },
     },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<10000'],
-    },
+    thresholds,
   },
   "rps_5": {
     scenarios: {
@@ -44,10 +47,7 @@ const strategies = {
         maxVUs: 100,
       },
     },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<10000'],
-    },
+    thresholds,
   },
   "rps_10": {
     scenarios: {
@@ -59,10 +59,7 @@ const strategies = {
         maxVUs: 200,
       },
     },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<10000'],
-    },
+    thresholds,
   },
 
   // Steps up through the constant-rate tiers in one run so a single test shows
@@ -83,13 +80,7 @@ const strategies = {
         ],
       },
     },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<10000'],
-      // k6 skips iterations when every VU is still waiting on a signature. A
-      // run that silently sent less than it was asked to is not a pass.
-      dropped_iterations: ['count<10'],
-    },
+    thresholds,
   },
 
 };
