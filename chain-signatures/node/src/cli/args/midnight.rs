@@ -61,7 +61,8 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_indexer_ws_url: Option<String>,
-    /// Optional GCS output cache. Upload failures warn and do not prevent the on-chain response.
+    /// Optional GCS output cache. Initialization retries in the background; upload failures warn
+    /// and do not prevent the on-chain response.
     #[arg(
         long,
         env("MPC_MIDNIGHT_OUTPUT_STORAGE_BUCKET"),
@@ -75,7 +76,7 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_output_storage_prefix: Option<String>,
-    /// Maximum time for cache initialization or storing one output, in seconds (default: 30).
+    /// Maximum time for one cache initialization attempt or storing one output, in seconds (default: 30).
     #[arg(
         long,
         env("MPC_MIDNIGHT_OUTPUT_STORAGE_TIMEOUT_SECS"),

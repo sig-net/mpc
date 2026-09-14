@@ -12,7 +12,7 @@ use mpc_utils::time::current_unix_timestamp;
 
 use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
 use crate::intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
-use crate::output_storage::{GcsOutputStore, OutputStore};
+use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 
 const RESPOND: &str = "respond";
@@ -92,12 +92,11 @@ impl MidnightPublisher {
     ) -> anyhow::Result<Self> {
         config.publisher.validate_output_storage()?;
         let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
-        let output_store = GcsOutputStore::connect(
+        let output_store = RecoveringOutputStore::start(
             config.publisher.output_storage.as_ref(),
             rpc.network_id(),
             config.central_address,
-        )
-        .await?
+        )?
         .map(|store| Arc::new(store) as Arc<dyn OutputStore>);
         let intent_gen = Arc::new(IntentGen::spawn(config, rpc.network_id()).await?);
         Ok(Self::new(
@@ -292,6 +291,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    use crate::output_storage::GcsOutputStore;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{
@@ -627,22 +627,20 @@ mod tests {
         assert_eq!(client.submissions(), 1);
     }
 
-    async fn gcs_store(endpoint: String, timeout: Duration) -> Arc<dyn OutputStore> {
+    async fn gcs_store(endpoint: String, timeout: Duration) -> GcsOutputStore {
         let client = google_cloud_storage::client::Storage::builder()
             .with_endpoint(endpoint)
             .with_credentials(google_cloud_auth::credentials::anonymous::Builder::new().build())
             .build()
             .await
             .unwrap();
-        Arc::new(
-            GcsOutputStore::new(
-                &crate::config::OutputStorageConfig::new("outputs".into(), "v1".into(), timeout),
-                "preprod",
-                MidnightAddress::from_hex(CENTRAL).unwrap(),
-                client,
-            )
-            .unwrap(),
+        GcsOutputStore::new(
+            &crate::config::OutputStorageConfig::new("outputs".into(), "v1".into(), timeout),
+            "preprod",
+            MidnightAddress::from_hex(CENTRAL).unwrap(),
+            client,
         )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -681,7 +679,9 @@ mod tests {
             };
             let client = StubClient::new();
             let mut publisher = publisher(StubReads::new(), client.clone());
-            publisher.output_store = Some(gcs_store(server.url(), Duration::from_secs(2)).await);
+            publisher.output_store = Some(Arc::new(
+                gcs_store(server.url(), Duration::from_secs(2)).await,
+            ));
             publisher
                 .publish_signature(&bidirectional_action(vec![0, 255, 0]))
                 .await
@@ -700,13 +700,13 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = StubClient::new();
         let mut publisher = publisher(StubReads::new(), client.clone());
-        publisher.output_store = Some(
+        publisher.output_store = Some(Arc::new(
             gcs_store(
                 format!("http://{}", listener.local_addr().unwrap()),
                 Duration::from_millis(100),
             )
             .await,
-        );
+        ));
         tokio::time::timeout(
             Duration::from_secs(2),
             publisher.publish_signature(&bidirectional_action(vec![1])),
@@ -715,6 +715,85 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(client.submissions(), 1);
+    }
+
+    #[tokio::test]
+    async fn responses_continue_during_initialization_and_cache_after_recovery() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut server = mockito::Server::new_async().await;
+        let write = server
+            .mock("POST", "/upload/storage/v1/b/outputs/o")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"bucket":"outputs","generation":"1"}"#)
+            .expect(2)
+            .create_async()
+            .await;
+        let mut initialized = Some(gcs_store(server.url(), Duration::from_secs(2)).await);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let calls = attempts.clone();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate = release.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let attempts_started = entered.clone();
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let initialized_signal = completed.clone();
+        tokio::time::pause();
+        let store =
+            RecoveringOutputStore::spawn("outputs".into(), Duration::from_secs(2), move || {
+                let result = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(anyhow::anyhow!("initialization failed"))
+                } else {
+                    Ok(initialized.take().expect("client initializes only once"))
+                };
+                attempts_started.notify_one();
+                let gate = gate.clone();
+                let completed = initialized_signal.clone();
+                async move {
+                    if result.is_ok() {
+                        gate.acquire().await.unwrap().forget();
+                        completed.notify_one();
+                    }
+                    result
+                }
+            });
+        let client = StubClient::new();
+        let mut publisher = publisher(StubReads::new(), client.clone());
+        publisher.output_store = Some(Arc::new(store));
+        entered.notified().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let started = tokio::time::Instant::now();
+        publisher
+            .publish_signature(&bidirectional_action(vec![1]))
+            .await
+            .unwrap();
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(client.submissions(), 1);
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let started = tokio::time::Instant::now();
+        publisher
+            .publish_signature(&bidirectional_action(vec![2]))
+            .await
+            .unwrap();
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(client.submissions(), 2);
+        release.add_permits(1);
+        completed.notified().await;
+        tokio::time::advance(Duration::from_secs(120)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        tokio::time::resume();
+        for output in [vec![3], vec![4]] {
+            publisher
+                .publish_signature(&bidirectional_action(output))
+                .await
+                .unwrap();
+        }
+        assert_eq!(client.submissions(), 4);
+        write.assert_async().await;
     }
 
     #[tokio::test]
