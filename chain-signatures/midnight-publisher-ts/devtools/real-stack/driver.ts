@@ -4,7 +4,6 @@ import { findDeployedContract, type FoundContract } from "@midnight-ntwrk/midnig
 import { setNetworkId } from "@midnight-ntwrk/midnight-js/network-id";
 import {
   buildDeployTransaction,
-  contractAddressToReference,
   deploySignetContract,
   deriveAccountKeys,
   deriveWalletAddresses,
@@ -21,6 +20,7 @@ import {
   type WalletFacade,
 } from "@sig-net/midnight-contract-deploy";
 import {
+  contractAddressFromHex,
   parseRequestIdHex,
   parseSecp256k1PublicKey,
   requestIdBytes,
@@ -61,6 +61,7 @@ interface SubmitRequest {
   nonce: string;
   target: string;
   argument: string;
+  outputType: "bool" | "uint64" | "bytes32";
 }
 
 interface SignedTransactionRequest {
@@ -73,6 +74,7 @@ interface SettleResponseRequest {
   op: "settleResponse";
   requestId: string;
   serializedOutput: string;
+  rejectPaddedReplay?: boolean;
 }
 
 interface ShutdownRequest {
@@ -257,7 +259,7 @@ async function bootstrap(request: BootstrapRequest) {
         deployerKeys.shieldedSecretKeys.coinPublicKey,
         createCallerPrivateState(deployerSecret),
         deployerCommitment,
-        contractAddressToReference(central.contractAddress),
+        contractAddressFromHex(central.contractAddress),
       );
       await submitUnprovenTransaction(facade, deployerKeys, built.serializedTransaction);
       return { contractAddress: built.contractAddress };
@@ -339,11 +341,40 @@ async function dispatch(request: Request): Promise<unknown> {
     const response = await waitFor("a verified respondBidirectional entry", () =>
       active.reader.getVerifiedRespondBidirectionalEvent(requestId, serializedOutput, responseKey),
     );
-    await active.caller.callTx.verifyResponse(
-      requestIdBytes(requestId),
-      respondBidirectionalEventToCircuitInput(response),
-      serializedOutput,
-    );
+    const circuitInput = respondBidirectionalEventToCircuitInput(response);
+    if (request.rejectPaddedReplay === true) {
+      const padded = new Uint8Array(8);
+      padded.set(serializedOutput);
+      const replay = await active.reader.getVerifiedRespondBidirectionalEvent(
+        requestId,
+        padded,
+        responseKey,
+      );
+      if (replay !== undefined) throw new Error("SDK accepted a zero-padded failure replay");
+      let rejected = false;
+      try {
+        await active.caller.callTx.verifyResponse8(requestIdBytes(requestId), circuitInput, padded);
+      } catch (error) {
+        if (!String(error).includes("Invalid attestation signature")) throw error;
+        rejected = true;
+      }
+      if (!rejected) throw new Error("Compact accepted a zero-padded failure replay");
+      if (!(await callerHasRequest(active, requestId)))
+        throw new Error("replay consumed the pending request");
+    }
+    const verify =
+      serializedOutput.length === 1
+        ? active.caller.callTx.verifyResponse
+        : serializedOutput.length === 5
+          ? active.caller.callTx.verifyResponse5
+          : serializedOutput.length === 8
+            ? active.caller.callTx.verifyResponse8
+            : serializedOutput.length === 32
+              ? active.caller.callTx.verifyResponse32
+              : undefined;
+    if (verify === undefined)
+      throw new Error(`unsupported real-stack output width ${serializedOutput.length}`);
+    await verify(requestIdBytes(requestId), circuitInput, serializedOutput);
     await waitFor("the caller request to be removed", async () =>
       (await callerHasRequest(active, requestId)) ? undefined : true,
     );
@@ -354,6 +385,12 @@ async function dispatch(request: Request): Promise<unknown> {
     1n,
     bytes(request.target, 20),
     bytes(request.argument, 32),
+    new TextEncoder().encode(
+      JSON.stringify([{ name: "success", type: request.outputType }]).padEnd(64, " "),
+    ),
+    new TextEncoder().encode(
+      JSON.stringify([{ name: "success", type: request.outputType }]).padEnd(64, " "),
+    ),
   );
   return {};
 }
