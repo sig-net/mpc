@@ -14,7 +14,7 @@ struct BoolResponse {
 export ledger requestNonce: Counter;
 export ledger mpcResponseKey: Secp256k1Point;
 sealed ledger signetSigner: SignetSigner;
-export ledger requests: SignBidirectionalEventMap<EvmType2TxParams<1, 0, 0>, 34, 34>;
+export ledger requests: SignBidirectionalEventMap<EvmType2TxParams<1, 0, 0>, 64, 64>;
 sealed ledger deployer: Bytes<32>;
 export ledger initialised: Counter;
 
@@ -40,7 +40,9 @@ export circuit submitIsEvenRequest(
   evmNonce: Uint<64>,
   keyVersion: Uint<8>,
   to: Bytes<20>,
-  argWord: Bytes<32>
+  argWord: Bytes<32>,
+  outputSchema: Bytes<64>,
+  responseSchema: Bytes<64>
 ): [] {
   const calldata = EvmCalldata<1> {
     selector: Bytes [0x2a, 0x2e, 0x13, 0x20],
@@ -59,9 +61,8 @@ export circuit submitIsEvenRequest(
     accessListEntryCount: 0,
     accessList: []
   };
-  const schema = "[{\"name\":\"success\",\"type\":\"bool\"}]" as Bytes<34>;
   const nonce = requestNonce as Uint<64>;
-  const request = constructSignBidirectionalEvent<EvmType2TxParams<1, 0, 0>, 34, 34>(
+  const request = constructSignBidirectionalEvent<EvmType2TxParams<1, 0, 0>, 64, 64>(
     kernel.self(),
     nonce,
     keyVersion,
@@ -72,10 +73,10 @@ export circuit submitIsEvenRequest(
     TxParamType.evmType2,
     txParams,
     pad(32, "eip155:1"),
-    schema,
-    schema
+    outputSchema,
+    responseSchema
   );
-  const requestId = disclose(calculateRequestId<EvmType2TxParams<1, 0, 0>, 34, 34>(request));
+  const requestId = disclose(calculateRequestId<EvmType2TxParams<1, 0, 0>, 64, 64>(request));
 
   assert(!requests.member(requestId), "Request already exists");
   requestNonce.increment(1);
@@ -91,24 +92,53 @@ export circuit submitIsEvenRequest(
   );
 }
 
-export circuit verifyResponse(
+circuit consumeResponse<#N>(
   requestId: RequestId,
-  respondBidirectionalEvent: RespondBidirectionalEvent,
-  serializedOutput: Bytes<1>
+  response: RespondBidirectionalEvent,
+  serializedOutput: Bytes<N>
 ): [] {
   const disclosedRequestId = disclose(requestId);
   assert(initialised != 0, "Not initialised");
   assert(
-    verifyRespondBidirectionalEvent<1>(
-      disclosedRequestId,
-      serializedOutput,
-      disclose(respondBidirectionalEvent),
-      mpcResponseKey
+    verifyRespondBidirectionalEvent<N>(
+      disclosedRequestId, serializedOutput, disclose(response), mpcResponseKey
     ),
     "Invalid attestation signature"
   );
-  const response = deserialize<BoolResponse, 1>(serializedOutput);
-  assert(response.success, "Foreign call reported failure");
   assert(requests.member(disclosedRequestId), "Request not found");
   requests.remove(disclosedRequestId);
+}
+
+export circuit verifyResponse(
+  requestId: RequestId,
+  response: RespondBidirectionalEvent,
+  serializedOutput: Bytes<1>
+): [] {
+  consumeResponse<1>(requestId, response, serializedOutput);
+  assert(deserialize<BoolResponse, 1>(serializedOutput).success, "Foreign call reported failure");
+}
+
+export circuit verifyResponse5(
+  requestId: RequestId,
+  response: RespondBidirectionalEvent,
+  serializedOutput: Bytes<5>
+): [] {
+  consumeResponse<5>(requestId, response, serializedOutput);
+  assert(serializedOutput == Bytes [0xde, 0xad, 0xbe, 0xef, 1], "Expected execution failure");
+}
+
+export circuit verifyResponse8(
+  requestId: RequestId,
+  response: RespondBidirectionalEvent,
+  serializedOutput: Bytes<8>
+): [] {
+  consumeResponse<8>(requestId, response, serializedOutput);
+}
+
+export circuit verifyResponse32(
+  requestId: RequestId,
+  response: RespondBidirectionalEvent,
+  serializedOutput: Bytes<32>
+): [] {
+  consumeResponse<32>(requestId, response, serializedOutput);
 }

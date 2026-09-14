@@ -11,7 +11,7 @@ anyhow.workspace = true
 async-process = "1"
 async-trait = "0.1"
 backon.workspace = true
-bollard = "0.17.0"
+bollard = "0.21"
 borsh.workspace = true
 bs58 = "0.5.1"
 ciborium.workspace = true
@@ -25,7 +25,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-escape = "0.1.5"
-testcontainers = "0.23.1"
+testcontainers = "0.28"
 tokio = { version = "1.45.1", features = ["full", "test-util"] }
 tokio-util.workspace = true
 tracing.workspace = true

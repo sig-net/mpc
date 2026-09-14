@@ -70,7 +70,7 @@ impl std::fmt::Debug for SignId {
 }
 
 impl SignId {
-    pub fn new(request_id: [u8; 32]) -> Self {
+    pub const fn new(request_id: [u8; 32]) -> Self {
         Self { request_id }
     }
 
@@ -82,6 +82,16 @@ impl SignId {
         hasher.update(key_version.to_le_bytes());
         let request_id: [u8; 32] = hasher.finalize().into();
         Self { request_id }
+    }
+
+    pub const fn from_u8(byte: u8) -> Self {
+        Self::new([byte; 32])
+    }
+}
+
+impl From<[u8; 32]> for SignId {
+    fn from(request_id: [u8; 32]) -> Self {
+        Self::new(request_id)
     }
 }
 

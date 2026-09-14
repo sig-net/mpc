@@ -64,7 +64,7 @@ impl OrganizingPhase {
         let sign_id = ctx.sign_id;
         let threshold = ctx.governance.threshold;
         let me = ctx.governance.me;
-        let entropy = state.request.args.entropy;
+        let entropy = state.request().args.entropy;
         let participants = ctx
             .governance
             .participants

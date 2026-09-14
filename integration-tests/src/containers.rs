@@ -12,8 +12,7 @@ use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
 use backon::{ExponentialBuilder, Retryable};
 use bollard::errors::Error as DockerError;
-use bollard::network::CreateNetworkOptions;
-use bollard::secret::Ipam;
+use bollard::models::{Ipam, NetworkCreateRequest};
 use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
@@ -144,23 +143,19 @@ impl DockerClient {
     }
 
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
-        let create_network_options = CreateNetworkOptions {
-            name: network,
-            check_duplicate: true,
-            driver: if cfg!(windows) {
-                "transparent"
+        let create_network_request = NetworkCreateRequest {
+            name: network.to_string(),
+            driver: Some(if cfg!(windows) {
+                "transparent".to_string()
             } else {
-                "bridge"
-            },
-            ipam: Ipam {
-                config: None,
-                ..Default::default()
-            },
+                "bridge".to_string()
+            }),
+            ipam: Some(Ipam::default()),
             ..Default::default()
         };
         // Concurrent test threads have a race condition on creating this!
         // => Treat 409 Conflict (network already exists) as success and continue.
-        match self.docker.create_network(create_network_options).await {
+        match self.docker.create_network(create_network_request).await {
             Ok(_) => Ok(()),
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 409, ..
