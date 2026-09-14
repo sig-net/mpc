@@ -11,14 +11,17 @@ name: k6 Load Test
 # Every Solana request costs the pinger key ~10k lamports and the dev
 # responder ~5k, and both are refilled by hand from the devnet faucet, so the
 # steady rate is kept low on purpose. Raise it only with a funding plan.
+# Off-the-hour minutes drawn at random: GitHub delays or drops schedules
+# most at the minutes everyone else uses, so :00, :15 and :30 are the worst
+# choices.
 on:
   schedule:
     # Low: 0.1 rps for 1h, every hour (~0.09 SOL/day from the pinger key).
-    - cron: '0 * * * *'
+    - cron: '7 * * * *'
     # Mid: 1 rps for 20m, ~1,200 requests (~0.01 SOL per run).
-    - cron: '15 9,21 * * *'
+    - cron: '42 9,21 * * *'
     # High: 12-minute ramp, ~3,240 requests (~0.03 SOL per run).
-    - cron: '30 3,15 * * *'
+    - cron: '59 2,14 * * *'
   workflow_dispatch:
     inputs:
       lt_strategy:
@@ -71,11 +74,11 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             case "${{ github.event.schedule }}" in
-              "30 3,15 * * *")
+              "59 2,14 * * *")
                 STRATEGY=ramp_1_10
                 DURATION=12m
                 ;;
-              "15 9,21 * * *")
+              "42 9,21 * * *")
                 STRATEGY=rps_1
                 DURATION=20m
                 ;;
