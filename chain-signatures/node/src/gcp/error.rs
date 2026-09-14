@@ -4,11 +4,11 @@ pub enum SecretStorageError {
     Auth(#[from] google_cloud_auth::errors::CredentialsError),
     #[error("GCP API error ({status}): {message}")]
     Api {
-        status: reqwest12::StatusCode,
+        status: reqwest::StatusCode,
         message: String,
     },
     #[error("HTTP error: {0}")]
-    Http(#[from] reqwest12::Error),
+    Http(#[from] reqwest::Error),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("(de)serialization error: {0}")]
