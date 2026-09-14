@@ -46,13 +46,15 @@ impl SecretManagerService {
     #[tracing::instrument(level = "debug", skip_all, fields(name = name.as_ref()))]
     pub async fn load_secret<T: AsRef<str>>(&self, name: T) -> SecretResult<Option<Vec<u8>>> {
         let url = format!(
-            "{SECRET_MANAGER_ENDPOINT}/v1/projects/{}/secrets/{}/versions/latest",
+            "{SECRET_MANAGER_ENDPOINT}/v1/projects/{}/secrets/{}/versions/latest:access",
             self.project_id,
             name.as_ref(),
         );
         let response = self.request(reqwest::Method::GET, &url, None).await?;
         let body: AccessSecretVersionResponse = response.json().await?;
         match body.payload.and_then(|p| p.data).map(|d| BASE64.decode(d)) {
+            // GCP does not allow uploading empty secrets, so we reserve 1-byte values as a
+            // placeholder for empty secrets.
             Some(Ok(data)) if data.len() > 1 => Ok(Some(data)),
             Some(Err(err)) => Err(err.into()),
             _ => {
@@ -127,5 +129,50 @@ impl GcpService {
                 project_id: storage_options.gcp_project_id.clone(),
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_access_secret_version_response() {
+        let raw = serde_json::json!({
+            "name": "projects/123/secrets/dev-0-sk-share/versions/1",
+            "payload": {
+                "data": BASE64.encode(b"hello world secret data"),
+                "dataCrc32c": "12345"
+            }
+        });
+        let res: AccessSecretVersionResponse = serde_json::from_value(raw).unwrap();
+        let payload = res.payload.and_then(|p| p.data).unwrap();
+        let decoded = BASE64.decode(payload).unwrap();
+        assert_eq!(decoded, b"hello world secret data");
+        assert!(decoded.len() > 1);
+    }
+
+    #[test]
+    fn test_deserialize_empty_placeholder_payload() {
+        let raw = serde_json::json!({
+            "name": "projects/123/secrets/dev-0-sk-share/versions/1",
+            "payload": {
+                "data": BASE64.encode(b"a"),
+            }
+        });
+        let res: AccessSecretVersionResponse = serde_json::from_value(raw).unwrap();
+        let payload = res.payload.and_then(|p| p.data).unwrap();
+        let decoded = BASE64.decode(payload).unwrap();
+        assert_eq!(decoded.len(), 1);
+    }
+
+    #[test]
+    fn test_deserialize_metadata_only_response_missing_payload() {
+        let raw = serde_json::json!({
+            "name": "projects/123/secrets/dev-0-sk-share/versions/1",
+            "state": "ENABLED"
+        });
+        let res: AccessSecretVersionResponse = serde_json::from_value(raw).unwrap();
+        assert!(res.payload.is_none());
     }
 }
