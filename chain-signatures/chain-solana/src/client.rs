@@ -483,7 +483,6 @@ impl ChainPublisher for SolanaClient {
             SignKind::Sign | SignKind::SignBidirectional(_) => {
                 let tx = program
                     .request()
-                    .signer(self.payer.clone())
                     .accounts(SolanaRespondAccount {
                         responder: self.payer.pubkey(),
                         event_authority,
@@ -521,7 +520,6 @@ impl ChainPublisher for SolanaClient {
                     respond_bidirectional_tx.output.clone();
                 let tx = program
                     .request()
-                    .signer(self.payer.clone())
                     .accounts(SolanaRespondBidirectionalAccount {
                         responder: self.payer.pubkey(),
                         event_authority,
