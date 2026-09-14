@@ -152,6 +152,7 @@ impl MidnightContext {
         nonce: u64,
         target: [u8; 20],
         argument: [u8; 32],
+        output_type: &str,
     ) -> anyhow::Result<()> {
         let mut driver = self.driver.lock().await;
         let _: serde_json::Value = driver
@@ -160,6 +161,7 @@ impl MidnightContext {
                 "nonce": nonce.to_string(),
                 "target": hex::encode(target),
                 "argument": hex::encode(argument),
+                "outputType": output_type,
             }))
             .await?;
         Ok(())
@@ -200,12 +202,14 @@ impl MidnightContext {
         &self,
         request_id: [u8; 32],
         serialized_output: &[u8],
+        reject_padded_replay: bool,
     ) -> anyhow::Result<()> {
         let mut driver = self.driver.lock().await;
         let _: serde_json::Value = driver
             .request(&serde_json::json!({
                 "op": "settleResponse",
                 "serializedOutput": hex::encode(serialized_output),
+                "rejectPaddedReplay": reject_padded_replay,
                 "requestId": format!("0x{}", hex::encode(request_id)),
             }))
             .await?;
