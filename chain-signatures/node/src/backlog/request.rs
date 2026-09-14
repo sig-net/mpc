@@ -13,7 +13,7 @@ use mpc_primitives::{
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Type alias for [`SignProgress`], indicating any progress state (generating or publishing).
 pub type AnyProgress = SignProgress;
@@ -117,23 +117,27 @@ impl Publishing {
 pub struct Initial<P = Generating>(pub P);
 
 /// A destination-chain execution being awaited: the transaction, plus the
-/// publish boundary of the initial response ([`Publishing::publishing_since`])
-/// that the wait is measured from.
+/// when this node observed the initial response on the source chain, which is
+/// what moved the request here and so starts the wait.
 ///
-/// The boundary is node-local -- the backlog status does not carry it -- so it
-/// is `None` on anything rebuilt from a status, and the execution watcher is
-/// what carries it across a lookup.
+/// Every node observes that event, published or not, so this is symmetric
+/// across the network -- unlike the publish stamp, which only the proposer
+/// acts on. It is a local monotonic reading, never serialized and never taken
+/// from a peer, so it needs no clock-skew guard.
+///
+/// It is node-local, so anything rebuilt from a backlog status has `None`; the
+/// execution watcher is what carries it across a lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionWatch {
     pub tx: Arc<BidirectionalTx>,
-    pub publish_boundary: Option<u64>,
+    pub respond_observed_at: Option<Instant>,
 }
 
 impl ExecutionWatch {
-    pub fn new(tx: Arc<BidirectionalTx>, publish_boundary: Option<u64>) -> Self {
+    pub fn new(tx: Arc<BidirectionalTx>, respond_observed_at: Option<Instant>) -> Self {
         Self {
             tx,
-            publish_boundary,
+            respond_observed_at,
         }
     }
 }
@@ -489,11 +493,10 @@ impl SignEntry<Bidirectional<Initial<Publishing>>> {
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
-        let publishing_since = self.publishing_since();
         self.executing(Arc::clone(&tx)).await?;
         let entry = self.transition(Bidirectional(Executing(ExecutionWatch::new(
             tx,
-            publishing_since,
+            Some(Instant::now()),
         ))));
         entry.watch_execution().await;
         Ok(entry)
@@ -506,16 +509,10 @@ impl SignEntry<Bidirectional<Initial<AnyProgress>>> {
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
-        // Only a node that reached publishing has a boundary to measure from;
-        // one still generating never recorded one.
-        let publishing_since = match &self.state.0 .0 {
-            SignProgress::Publishing(publish) => publish.publishing_since(),
-            SignProgress::Generating => None,
-        };
         self.executing(Arc::clone(&tx)).await?;
         let entry = self.transition(Bidirectional(Executing(ExecutionWatch::new(
             tx,
-            publishing_since,
+            Some(Instant::now()),
         ))));
         entry.watch_execution().await;
         Ok(entry)
@@ -538,23 +535,21 @@ impl SignEntry<Bidirectional<Executing>> {
     }
 
     /// How long this entry has been waiting on the target chain, measured from
-    /// the initial response's publish boundary. `None` when this node never
-    /// recorded that boundary, and when the boundary is ahead of the local
-    /// clock -- it is serialized, so it can have come from a peer.
+    /// when this node observed the initial response. `None` on an entry rebuilt
+    /// from a status without its watch, i.e. across a restart.
     pub fn awaiting_execution(&self) -> Option<Duration> {
-        self.publish_boundary()
-            .and_then(mpc_utils::time::unix_elapsed_checked)
+        self.respond_observed_at().map(|at| at.elapsed())
     }
 
-    /// Unix-second publish boundary, if known locally.
-    pub(crate) fn publish_boundary(&self) -> Option<u64> {
-        self.state.0 .0.publish_boundary
+    /// When this node observed the initial response, if known locally.
+    pub(crate) fn respond_observed_at(&self) -> Option<Instant> {
+        self.state.0 .0.respond_observed_at
     }
 
-    /// Restore the node-local publish boundary that a status lookup cannot
+    /// Restore the node-local observation time that a status lookup cannot
     /// reconstruct, from the watch that spans the wait.
-    pub(crate) fn with_publish_boundary(mut self, boundary: Option<u64>) -> Self {
-        self.state.0 .0.publish_boundary = boundary;
+    pub(crate) fn with_respond_observed_at(mut self, at: Option<Instant>) -> Self {
+        self.state.0 .0.respond_observed_at = at;
         self
     }
 

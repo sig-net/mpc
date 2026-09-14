@@ -30,7 +30,7 @@ impl PublisherTelemetry for NodeTelemetry {
         if elapsed_secs <= chain.expected_response_time_secs() {
             record_request_latency_since(
                 chain,
-                SignRequestStep::RequestTotal,
+                SignRequestStep::Total,
                 "in_time",
                 kind,
                 action.request.unix_timestamp_indexed,
@@ -38,7 +38,7 @@ impl PublisherTelemetry for NodeTelemetry {
         } else {
             record_request_latency_since(
                 chain,
-                SignRequestStep::RequestTotal,
+                SignRequestStep::Total,
                 "expired",
                 kind,
                 action.request.unix_timestamp_indexed,

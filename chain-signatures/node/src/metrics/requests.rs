@@ -27,24 +27,26 @@ pub enum SignRequestStep {
     Generating,
     /// Time to respond to the sign request (Status: ok)
     Responding,
-    /// Bidirectional only: gap between the legs, from the initial response's
-    /// publish boundary to the target-chain execution being confirmed.
-    /// Whole-second resolution; see `SignEntry<Bidirectional<Executing>>`.
+    /// Bidirectional only: from observing the initial response on the source
+    /// chain to the target-chain execution being confirmed. Starts after
+    /// `Responding` ends, so the two do not overlap -- but the source chain's
+    /// inclusion and indexing delay falls between them and is in neither.
     /// Status:
     ///     - ok: the target chain executed successfully
     ///     - execution_failed: the execution reverted, but the leg still ran
     AwaitingExecution,
     /// Bidirectional only: the whole round trip across both legs, from indexing
     /// the initial request to the final response landing. Whole-second
-    /// resolution. `RequestTotal` is the per-leg figure. Same statuses as
+    /// resolution. `Total` is the per-leg figure. Same statuses as
     /// `AwaitingExecution`.
     BidirectionalTotal,
-    /// Time from indexing to responding, for a single request. A bidirectional
-    /// round trip reports one per leg; `BidirectionalTotal` spans both.
+    /// Total time from indexing to responding, for a single request. A
+    /// bidirectional round trip reports one per leg; `BidirectionalTotal`
+    /// spans both.
     /// Status:
     ///     - in_time: request was delivered in time (expected finality delay + margin)
     ///     - expired: request was delivered after expiration (expected finality delay + margin)
-    RequestTotal,
+    Total,
 }
 
 impl SignRequestStep {
@@ -58,7 +60,7 @@ impl SignRequestStep {
             Self::Responding => "responding",
             Self::AwaitingExecution => "awaiting_execution",
             Self::BidirectionalTotal => "bidirectional_total",
-            Self::RequestTotal => "request_total",
+            Self::Total => "total",
         }
     }
 }

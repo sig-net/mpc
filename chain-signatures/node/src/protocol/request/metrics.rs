@@ -6,13 +6,20 @@ use super::*;
 /// Organizing, Posit, Generating. Times are summed across attempts so each
 /// histogram observation covers the full request even when the state machine
 /// loops back. Indexing/AwaitingGeneration/Responding/AwaitingExecution/
-/// BidirectionalTotal/RequestTotal are emitted elsewhere and ignored by `add`.
+/// BidirectionalTotal/Total are emitted elsewhere and ignored by `add`.
 ///
 /// Per leg, AwaitingGeneration + Organizing + Posit + Generating + Responding
-/// sum to RequestTotal, except governance pauses add idle time only to the
-/// total. Indexing precedes RequestTotal; AwaitingExecution spans the gap
-/// between legs. Exclude both totals from stage stacks: BidirectionalTotal
-/// overlaps both legs, and RequestTotal overlaps its own leg's stages.
+/// sum to Total, except governance pauses add idle time only to Total.
+/// Indexing precedes Total. Exclude both totals from stage stacks:
+/// BidirectionalTotal spans both legs and Total spans its own leg's stages.
+///
+/// Between the legs there is an unmeasured gap. `Responding` ends when this
+/// node's publish is acknowledged; `AwaitingExecution` starts when the response
+/// is observed back on the source chain. The source chain's inclusion, finality
+/// and indexing delay sits between the two and is attributed to no stage, so
+/// per-leg stages plus AwaitingExecution fall short of BidirectionalTotal by
+/// that amount. Plot the shortfall rather than assuming it away -- on a
+/// slow-finality source chain it is the largest term in the round trip.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseDurations {
     organizing: Duration,
@@ -33,7 +40,7 @@ impl PhaseDurations {
             | SignRequestStep::Responding
             | SignRequestStep::AwaitingExecution
             | SignRequestStep::BidirectionalTotal
-            | SignRequestStep::RequestTotal => {}
+            | SignRequestStep::Total => {}
         }
     }
 
@@ -98,7 +105,7 @@ mod tests {
             SignRequestStep::BidirectionalTotal,
             Duration::from_millis(600),
         );
-        d.add(SignRequestStep::RequestTotal, Duration::from_millis(400));
+        d.add(SignRequestStep::Total, Duration::from_millis(400));
 
         assert_eq!(d, PhaseDurations::default());
     }

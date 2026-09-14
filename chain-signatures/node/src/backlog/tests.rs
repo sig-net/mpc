@@ -1090,41 +1090,22 @@ async fn plain_lookup_cannot_measure_the_execution_wait() {
     assert_eq!(entry.awaiting_execution(), None);
 }
 
-/// Future publish timestamps are excluded from latency observations: the
-/// boundary is serialized, so it can arrive from a peer whose clock runs ahead.
 #[tokio::test]
-async fn awaiting_execution_skips_a_publish_boundary_from_the_future() {
-    let backlog = Backlog::new();
-    let tx = mock_bidirectional_tx(SignId::new([72; 32]), Chain::Solana);
-    let future = mpc_utils::time::current_unix_timestamp() + 3_600;
-
-    let entry = backlog
-        .insert_mock_executing(&tx)
-        .await
-        .with_publish_boundary(Some(future));
-
-    assert_eq!(entry.publish_boundary(), Some(future));
-    assert_eq!(
-        entry.awaiting_execution(),
-        None,
-        "a future publish boundary must be unmeasured, not zero"
-    );
-}
-
-#[tokio::test]
-async fn live_regress_preserves_only_matching_execution_boundaries() {
+async fn live_regress_preserves_only_matching_execution_wait_starts() {
     let backlog = Backlog::new();
     let retained = mock_bidirectional_tx(SignId::from_u8(80), Chain::Solana);
     let restored = mock_bidirectional_tx(SignId::from_u8(81), Chain::Solana);
     let stale = mock_bidirectional_tx(SignId::from_u8(82), Chain::Solana);
     let unrelated = mock_bidirectional_tx(SignId::from_u8(83), Chain::Canton);
 
-    // Distinguish the original boundary from recovery time.
-    let boundary = mpc_utils::time::current_unix_timestamp() - 120;
+    // Backdate the wait so it is distinguishable from one restarted at recovery.
+    let observed_at = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(120))
+        .expect("clock must support backdating");
     let entry = backlog
         .insert_mock_executing(&retained)
         .await
-        .with_publish_boundary(Some(boundary));
+        .with_respond_observed_at(Some(observed_at));
     backlog.watch_execution(&entry).await;
     backlog.insert_mock_executing(&restored).await;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
@@ -1133,10 +1114,10 @@ async fn live_regress_preserves_only_matching_execution_boundaries() {
         .await
         .unwrap();
     backlog.insert_mock_executing(&stale).await;
-    let unrelated_boundary = backlog
+    let unrelated_observed_at = backlog
         .insert_mock_executing(&unrelated)
         .await
-        .publish_boundary();
+        .respond_observed_at();
 
     backlog.regress(&checkpoint).await.unwrap();
 
@@ -1144,13 +1125,13 @@ async fn live_regress_preserves_only_matching_execution_boundaries() {
         .unwatch_execution(retained.target_chain, &retained.id)
         .await
         .expect("matching execution must remain watched");
-    assert_eq!(entry.publish_boundary(), Some(boundary));
+    assert_eq!(entry.respond_observed_at(), Some(observed_at));
     assert!(entry.awaiting_execution().unwrap() >= std::time::Duration::from_secs(120));
     let entry = backlog
         .unwatch_execution(restored.target_chain, &restored.id)
         .await
         .expect("checkpoint execution must be re-watched");
-    assert_eq!(entry.publish_boundary(), None);
+    assert_eq!(entry.respond_observed_at(), None);
     assert!(backlog
         .unwatch_execution(stale.target_chain, &stale.id)
         .await
@@ -1159,7 +1140,7 @@ async fn live_regress_preserves_only_matching_execution_boundaries() {
         .unwatch_execution(unrelated.target_chain, &unrelated.id)
         .await
         .expect("other source chain must remain watched");
-    assert_eq!(entry.publish_boundary(), unrelated_boundary);
+    assert_eq!(entry.respond_observed_at(), unrelated_observed_at);
 }
 
 /// Restart recovery leaves execution latency unknown.

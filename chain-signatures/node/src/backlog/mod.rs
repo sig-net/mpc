@@ -349,10 +349,10 @@ impl Backlog {
             watchers.remove(tx_id)?
         };
 
-        // Restore the boundary absent from backlog status.
+        // Restore the observation time absent from backlog status.
         self.get_by::<Bidirectional<Executing>>(watch.tx.source_chain, &watch.tx.sign_id())
             .await
-            .map(|entry| entry.with_publish_boundary(watch.publish_boundary))
+            .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
     }
 
     /// Set the processed block height for a specific chain.
@@ -510,21 +510,22 @@ impl Backlog {
             pending.pending_executions(chain, self)
         };
 
-        // Replace this chain's watches, retaining boundaries for matching executions.
+        // Replace this chain's watches, retaining wait start times for executions
+        // that are still being awaited.
         for destination_chain in Chain::iter() {
             let mut watchers = self.watchers(&destination_chain).write().await;
-            let mut boundaries = HashMap::new();
+            let mut observed = HashMap::new();
             watchers.watchers.retain(|id, watch| {
                 if watch.tx.source_chain != chain {
                     return true;
                 }
-                boundaries.insert(*id, watch.publish_boundary);
+                observed.insert(*id, watch.respond_observed_at);
                 false
             });
             for entry in &execution_to_watch {
                 let mut watch = entry.execution_watch();
                 if watch.tx.target_chain == destination_chain {
-                    watch.publish_boundary = boundaries.remove(&watch.tx.id).flatten();
+                    watch.respond_observed_at = observed.remove(&watch.tx.id).flatten();
                     watchers.insert(watch);
                 }
             }
