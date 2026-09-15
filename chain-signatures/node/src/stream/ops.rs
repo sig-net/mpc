@@ -259,14 +259,23 @@ pub async fn process_execution_confirmed(
         "handling execution confirmation"
     );
 
-    let entry = entry
+    let Some(entry) = entry
         .advance(result)
         .await
         .with_context(|| {
             format!(
                 "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
             )
-        })?;
+        })?
+    else {
+        // Retire the id: a leg-1 task on a node that lagged the publish would
+        // outlive its request.
+        ctx.sign_tx
+            .send(SignCommand::Completion(sign_id))
+            .await
+            .context("failed to send completion into queue")?;
+        return Ok(());
+    };
     tracing::info!(
         ?tx_id,
         ?sign_id,
