@@ -222,7 +222,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
     let tracer_otlp_provider = init_otlp_traces(env, node_id, options.otlp_endpoint.as_str()).await;
     let tracer_otlp = tracer_otlp_provider.tracer("mpc");
 
-    if is_running_on_gcp().await && !options.disable_gcp_logs {
+    if !options.disable_gcp_logs && is_running_on_gcp().await {
         let log_stackdriver_layer = stackdriver_layer()
             .with_writer(std::io::stderr)
             .with_filter(EnvFilter::from_default_env());

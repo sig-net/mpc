@@ -71,15 +71,17 @@ impl SignedMessage {
             .get(&from)
             .ok_or(MessageError::UnknownParticipant(from))?;
 
-        // Do external check before verifying the signature.
-        check(&sig)?;
-
         if !sig.verify(&msg, &info.sign_pk) {
             tracing::error!(?from, "signed message erred out with invalid signature");
             return Err(MessageError::Verification(
                 "invalid signature while verifying authenticity of encrypted protocol message",
             ));
         }
+
+        // Only after verifying: the caller dedups on this signature, so letting
+        // an unverified batch through would hand anyone able to reach us a way
+        // to fill or evict that cache with signatures of their choosing.
+        check(&sig)?;
 
         Ok((from, cbor_from_bytes(&msg)?))
     }

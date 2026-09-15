@@ -7,14 +7,9 @@ on:
 env:
   RUSTFLAGS: -D warnings
 jobs:
-  changes:
-    uses: ./.github/workflows/_ci-changes.yml
-
   # Fixture tests: in-process MPC protocol tests, no Docker or external infra needed.
   # Runs the `fixture` nextest profile (see .config/nextest.toml).
   fixture-test:
-    needs: [changes]
-    if: needs.changes.outputs.core == 'true'
     name: Fixture Test
     runs-on: warp-ubuntu-latest-x64-4x
 
@@ -48,9 +43,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Relayer, Sandbox, Redis Docker Images
-        run: |
-          docker pull redis:7.4.2
+      - name: Pull Redis image
+        run: docker pull redis:7.4.2
 
       - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
@@ -67,11 +61,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: fixture-test
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-full
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -96,8 +89,6 @@ jobs:
   # Integration tests that need Docker (near-sandbox, anvil, solana validator) and
   # additional Solana/Anchor setup. Runs with num-cpus threads (see .config/nextest.toml).
   cluster-test:
-    needs: [changes]
-    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.near == 'true' || needs.changes.outputs.eth == 'true' || needs.changes.outputs.solana == 'true' || needs.changes.outputs.hydration == 'true' || needs.changes.outputs.contract_eth == 'true'
     name: Integration Test
     strategy:
       matrix:
@@ -134,9 +125,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Relayer, Sandbox, Redis Docker Images
+      # Pull the images in parallel.
+      - name: Pull Redis and Foundry images
         run: |
-          docker pull redis:7.4.2
+          printf '%s\n' redis:7.4.2 ghcr.io/foundry-rs/foundry:nightly \
+            | xargs -P "$(nproc)" -n 1 docker pull
 
       - name: Install Rust (1.93.0)
         uses: actions-rs/toolchain@v1
@@ -166,11 +159,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: integration-test
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-full
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -202,8 +194,6 @@ jobs:
 
   # Anvil-backed integration tests (no docker cluster): real EVM + real contract bytecode
   anvil-integration-test:
-    needs: [changes]
-    if: needs.changes.outputs.eth == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.contract_eth == 'true'
     name: Anvil Integration Tests
     runs-on: warp-ubuntu-latest-x64-4x
 
@@ -229,9 +219,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: anvil-integration-test
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-dev
           cache-targets: true
-          save-if: ${{ github.event_name == 'merge_group' }}
 
       - name: Install Node.js
         uses: actions/setup-node@v4
