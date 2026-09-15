@@ -10,6 +10,7 @@ pub mod emissions;
 mod hashing;
 mod indexer;
 mod intent_gen;
+mod output_storage;
 mod publisher;
 mod reader;
 pub mod records;
@@ -20,7 +21,9 @@ mod state;
 mod test_utils;
 mod tx;
 
-pub use config::{IndexerConfig, MidnightAddress, MidnightConfig, PublisherConfig, RpcConfig};
+pub use config::{
+    IndexerConfig, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig, RpcConfig,
+};
 pub use indexer::MidnightIndexer;
 pub use intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
 pub use publisher::MidnightPublisher;

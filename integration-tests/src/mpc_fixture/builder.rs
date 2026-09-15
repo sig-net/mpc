@@ -576,7 +576,6 @@ impl MpcFixtureNodeBuilder {
             storage,
             channels,
             context.contract_state.clone(),
-            backlog.clone(),
         )
         .await;
 
@@ -670,7 +669,6 @@ impl MpcFixtureNodeBuilder {
             secret_storage::init(
                 None,
                 &Options {
-                    env: "test_env".to_owned(),
                     gcp_project_id: "-".to_owned(),
                     sk_share_secret_id: None,
                     sk_share_local_path: None,

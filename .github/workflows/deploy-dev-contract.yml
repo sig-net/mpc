@@ -46,7 +46,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: deploy-dev-contract
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
 

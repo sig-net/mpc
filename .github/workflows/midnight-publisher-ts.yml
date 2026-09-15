@@ -4,45 +4,14 @@
 #
 # The Rust half of the seam (`chain-midnight`'s IntentGen spawning `dist/main.js`)
 # runs here too: the `intent_seam` differential drives the freshly built entry point
-# with the real client, which is what catches the two sides drifting apart, and is
-# why the `chain-midnight` path filter below is among the triggers.
+# with the real client, which is what catches the two sides drifting apart.
 #
 # The required live end-to-end path runs in the Integration workflow's
 # Midnight Real Stack job; this workflow keeps the package and Rust seam fast.
 name: Midnight Publisher TS
 
 on:
-  push:
-    branches:
-      - develop
-    paths:
-      - ".github/workflows/midnight-publisher-ts.yml"
-      - "Dockerfile"
-      - "chain-signatures/midnight-publisher-ts/**"
-      - "chain-signatures/chain-midnight/**"
-  # Push paths plus the shared core, since the seam differential compiles
-  # mpc-chain-midnight. merge_group stays unfiltered as the safety net.
-  # Keep core in sync with the other chain workflows.
   pull_request:
-    paths:
-      - ".github/workflows/midnight-publisher-ts.yml"
-      - "Dockerfile"
-      - "chain-signatures/midnight-publisher-ts/**"
-      - "chain-signatures/chain-midnight/**"
-      # Shared core: compiled into mpc-chain-midnight and the seam tests.
-      - "chain-signatures/chain-integration-core/**"
-      - "chain-signatures/primitives/**"
-      - "chain-signatures/crypto/**"
-      - "chain-signatures/keys/**"
-      - "chain-signatures/utils/**"
-      - "chain-signatures/compact-hashing/**"
-      - "chain-signatures/node/**"
-      - "signet-crypto/**"
-      - "signet-primitives/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "justfile"
-      - ".config/nextest.toml"
   merge_group:
 
 jobs:
@@ -96,11 +65,11 @@ jobs:
           toolchain: 1.93.0
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: midnight-seam
+          # Cache policy: docs/ci-caching.md
+          shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       # The filter names the test binary: the seam tests live in
