@@ -42,16 +42,16 @@ Happy path:
   `req` in the pseudocode.
 * *Request ID* (rid): a collision-resistant hash over (contract, tx, dest,
   key) in a length-committing encoding, so within one source chain a rid
-  names one execution and nothing else. I.e.,  rid(a) = rid(b) <=> a.tx = b.tx. The schemas are outside it, so that
-  two calls for one transaction cannot both be outstanding. The key
-  parameters must be canonical, or two rids could name one execution.
+  names one execution and nothing else: rid(a) = rid(b) <=> a.tx = b.tx. The
+  schemas are outside it, so that two calls for one transaction cannot both
+  be outstanding. The key parameters must be canonical, or two rids could
+  name one execution.
 * *Outcome*: a pair (kind, data). kind is Executed or Failed.
   * *Executed* means the transaction was finalised, succeeded, and its
     return data decoded against the contract's schema; data is that decoded
     return data.
   * *Failed* means the transaction was finalised and reverted; data is a
-    bounded prefix of the revert reason. (Appendix A adds two more reasons
-    as extensions.)
+    bounded prefix of the revert reason.
   * A transaction that succeeded but whose return data does not decode has
     no outcome: the MPC reports nothing.
 * *Attestation key*: a signing key the MPC derives from its root key, the
@@ -118,22 +118,36 @@ accepted response per call whose transaction executes".
   describes is final.
 * G4 Integrity: an accepted resp(c, o) carries the true outcome of tx(c),
   never of another transaction.
-* G5 Delivery: if tx(c) is finalised under a signature the MPC issued for
-  call(c), and its return data, if any, decodes against the contract's
-  schema, a resp(c, o) is eventually accepted.
+* G5 Delivery: if tx(c) is finalised under a signature the MPC issued and
+  published for call(c), and its return data, if any, decodes against the
+  contract's schema, a resp(c, o) is eventually accepted.
 
 ### 3.3 Assumptions
 
-* Chains  
-  * Finality: no re-orgs on source or destination chain below the finality criterion the MPC uses to index requests and attest outcomes.  
-  * Payload-level replay protection: once a transaction has executed on the destination chain under a key, no transaction with the same bytes executes again under that key, whatever signature it bears (EVM account nonce, spent UTXO, Solana durable nonce). Solana transactions using a recent blockhash do not qualify; see open points.  
-  *  Source and destination chains, eventually make progress: outages only delay delivery
-* Contracts and library:  
-  * Durable contract state: the library's state (section 4.1) survives upgrades and migrations. A contract that keeps its key and loses this state can be replayed against everything it ever executed.  
-  * On Midnight, someone enqueues every published response and runs `process` (section 4.2).  
-* MPC:   
-  * at most f of the nodes are faulty and every signature or attestation needs 2f+1 participants and honest nodes eventually publish.  
-  * Honest nodes observe the same finalised destination state, receipts and return data included, and compute the attestation content as the same pure function of receipt and schemas, which an upgrade does not change for requests already made; otherwise nodes split and no attestation reaches 2f+1.
+* Chains
+  * Finality: no re-orgs on source or destination chain below the finality
+    criterion the MPC uses to index requests and attest outcomes.
+  * Payload-level replay protection: once a transaction has executed on the
+    destination chain under a key, no transaction with the same bytes executes
+    again under that key, whatever signature it bears (EVM account nonce, spent
+    UTXO, Solana durable nonce). Solana transactions using a recent blockhash
+    do not qualify; see open points.
+  * Source and destination chains eventually make progress: an outage only
+    delays delivery
+* Contracts and library
+  * Durable contract state: the library's state (section 4.1) survives upgrades
+    and migrations. A contract that keeps its key and loses this state can be
+    replayed against everything it ever executed.
+  * On Midnight, someone enqueues every published response and runs `process`
+    (section 4.2).
+* MPC
+  * at most f of the nodes are faulty and every signature or attestation needs
+    2f+1 participants and honest nodes eventually publish.
+  * Honest nodes observe the same finalised destination state, receipts and
+    return data included, and compute the attestation content as the same pure
+    function of receipt and schemas, which an upgrade does not change for
+    requests already made; otherwise nodes split and no attestation reaches
+    2f+1.
 
 ## 4. Pseudocode and properties per entity
 
@@ -284,9 +298,8 @@ state:
 on SignRequest { contract, rid, req } finalised on the source chain:
     if not authentic(contract, rid, req):                 // M1
         drop
-    if rid in pending:                                    // republish on repeat
-        publish_signature(rid, s) for s in pending[rid].signatures
-        return
+    if rid in pending:                                    // repeat
+        drop
     if processable(req):                                  // M4
         pending[rid] = { req, contract, signatures: {} }
         signature = threshold_sign(req.tx, derived_key(contract, req.key))   // M1
@@ -327,7 +340,7 @@ joins another, so all of them are looked up; they cover the same transaction
 bytes, so replay protection lets at most one execute. Lookup is by
 transaction ID at any height, so when a node starts looking does not matter.
 A transaction that never executes gets no response, nor does a request the
-MPC cannot process (Appendix A changes both).
+MPC cannot process (see the appendix).
 
 Restarts. A node keeps `pending` durably and indexes forward from it, so
 what it admitted survives a restart, what it dropped stays dropped (M4), and
@@ -356,8 +369,7 @@ Properties:
   up by the ID of tx(c) under a signature it issued. It infers no outcome
   from anything else.
 * M4 The MPC drops a request that is not authentic, or that it cannot
-  process, and keeps no record of it, so the call is unanswered. (Appendix A
-  answers Failed instead.)
+  process, and keeps no record of it, so the call is unanswered.
 * M5 The MPC attests nothing for an execution whose return data does not
   decode against the contract's schema and it drops the request.
 
@@ -416,9 +428,10 @@ accepted for it.
 
 * G5: the signature was issued after call(c) was finalised (M1) and e.known
   is at most the destination height finalised by then (C2), so
-  height(exec(c)) > e.known. The MPC finds the execution by its receipt, whenever it started
-  looking. The return data decodes (G5's premise), so M5 does not apply, and
-  honest nodes compute the same attestation and publish it (assumptions). By
+  height(exec(c)) > e.known. The MPC finds the execution by its receipt,
+  whenever it started looking. The return data decodes (G5's premise), so M5
+  does not apply, and honest nodes compute the same attestation and publish
+  it (assumptions). By
   C4 the entry is still outstanding unless a response for rid(c) was
   accepted first, and any such response reports exec(c) too, since at most
   one signature executes (replay protection) and M3 attests only that
@@ -450,54 +463,31 @@ accepted for it.
   assumption in section 3.3 depends on the answer.
 * `pending` grows without bound. An entry lives until a verified Response,
   and a request whose signature nobody broadcasts never produces one. The
-  dead-transaction extension in Appendix A closes those, and an
   application can free a rid by having a cancel transaction consume its
-  slot, but nothing bounds the set without giving up G5 for a late
-  execution. Checking old entries less often bounds the work per block,
+  nonce, but nothing bounds the set without giving up G5 for a late
+  execution. The library's `outstanding` grows the same way and for the
+  same reason. Checking old entries less often bounds the work per block,
   which is the part that matters.
 
-## Appendix A: failure reporting extensions
+## Appendix: the failures the MPC does not report
 
-In the core a call is unanswered when its transaction never executes,
-whether never broadcast or no longer finalisable, and when the MPC cannot
-process the request. Two extensions turn some of those into Failed
-responses.
+Two things leave a call unanswered: a transaction that never executes,
+because nobody broadcast it or because it can no longer be included, and a
+request the MPC refuses to process. An earlier draft answered both with
+`Failed`. Both were dropped, for the same reason.
 
-Both need a property the core does not. In the core every attestation for a
-rid has the same content (section 3.3), so a duplicate is dropped (C3a).
-Here honest nodes can legitimately arrive at different contents, or some at
-Failed and others at a signature, and the library accepts whichever lands
-first. *Exclusivity*: a node commits durably to one attestation content per
-rid before contributing its first share, and for unprocessable requests the
-commitment covers signing versus attesting Failed as well. With 2f+1
-participants per result at most one of the competing results completes,
-possibly none, so both extensions need the network to agree on the content
-beforehand.
+Every attestation carries the height of the block it describes (M2), and the
+library accepts it only if that height is above what it has already seen
+(C3c). A `Failed` of either kind has no block to name, since nothing
+executed, so the nodes would have to agree on a height between themselves,
+and for a refused request on the refusal as well, which differs between node
+versions during an upgrade. Agreeing like that means each node committing to
+one answer per rid before it contributes its first share, machinery the rest
+of this design does without.
 
-Dead transactions: when the replay-protection slot of a pending request's
-transaction is consumed by a finalised transaction, the MPC compares bodies.
-A different body means the request can never be finalised, and the MPC
-attests Failed at the block where it determined that, never at the block
-that consumed the slot, which for a re-issued request is the original
-execution's own. The same body means the request's transaction executed
-under another signature, so that receipt is the request's. Costs: the slot
-notion is chain specific, the consuming transaction has to be fetched, and
-nodes determining impossibility at different blocks must agree on one
-height.
+What it costs is that an application waits for an answer that never comes.
 
-Unprocessable requests: instead of dropping, record the request and attest
-`Failed` at the next destination block finalised after it. The destination
-has to be one the MPC watches, so the library must refuse destinations it
-does not support. During an upgrade nodes may disagree on `processable`, and
-exclusivity is what lets at most one of signing and attesting Failed
-complete.
-
-What this changes in the core: Failed gains two reasons, M3 gains the two
-rules above, and an attestation height can be a block the MPC chooses, which
-M2 already allows and C3c accepts. The same-body rule is the one exception,
-attesting an older execution at its own height, which C3c drops, so G1 is
-unchanged; G4 rests on the body comparison. One consequence needs handling:
-a replayed old Response event deletes the MPC's entry for a re-issued rid
-and would suppress the Failed it should get, so the MPC should ignore
-Response events whose height is not above the destination height at the
-request's finalisation.
+If we want one of them back, the dead transaction is the cheap one: when a
+finalised transaction carrying other bytes takes the nonce of a pending
+request, that request can never execute, and the block that took it is a
+height every node sees.
