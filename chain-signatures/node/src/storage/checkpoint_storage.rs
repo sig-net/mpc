@@ -16,6 +16,7 @@ pub enum CheckpointStorage {
     InMemory {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
+        parser_version: Arc<RwLock<HashMap<Chain, u64>>>,
     },
     /// A storage configured to fail operations, used to exercise error paths in tests.
     #[cfg(test)]
@@ -33,6 +34,7 @@ impl CheckpointStorage {
         Self::InMemory {
             latest: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(RwLock::new(HashMap::new())),
+            parser_version: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -63,6 +65,85 @@ impl CheckpointStorage {
 
     fn pending_digest_key(&self, chain: Chain) -> String {
         self.key("pending_digest", chain)
+    }
+
+    fn parser_version_key(&self, chain: Chain) -> String {
+        match self {
+            CheckpointStorage::Redis(_, account_id) => {
+                format!(
+                    "{account_id}:checkpoint:parser_version:{}:{chain}",
+                    crate::CHECKPOINT_STORAGE_VERSION
+                )
+            }
+            CheckpointStorage::InMemory { .. } => format!("checkpoint:parser_version:{chain}"),
+            #[cfg(test)]
+            CheckpointStorage::Failing => format!("checkpoint:parser_version:{chain}"),
+        }
+    }
+
+    pub async fn load_parser_version(&self, chain: Chain) -> anyhow::Result<Option<u64>> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let value: Option<String> = conn
+                    .get(self.parser_version_key(chain))
+                    .await
+                    .context("failed to get parser version from redis")?;
+                match value {
+                    Some(raw) => {
+                        let version = raw
+                            .parse::<u64>()
+                            .context("failed to parse parser version")?;
+                        Ok(Some(version))
+                    }
+                    None => Ok(None),
+                }
+            }
+            CheckpointStorage::InMemory { parser_version, .. } => {
+                Ok(parser_version.read().await.get(&chain).copied())
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+    }
+
+    pub async fn persist_parser_version(&self, chain: Chain, version: u64) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                conn.set::<_, _, ()>(self.parser_version_key(chain), version.to_string())
+                    .await
+                    .context("failed to persist parser version to redis")?;
+            }
+            CheckpointStorage::InMemory { parser_version, .. } => {
+                parser_version.write().await.insert(chain, version);
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
+    }
+
+    /// Drop unconfirmed pending checkpoints while keeping the confirmed latest.
+    pub async fn clear_pending(&self, chain: Chain) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let _: () = conn
+                    .del((
+                        self.pending_checkpoint_key(chain),
+                        self.pending_digest_key(chain),
+                    ))
+                    .await
+                    .context("failed to clear pending checkpoints")?;
+            }
+            CheckpointStorage::InMemory { pending, .. } => {
+                pending.write().await.remove(&chain);
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
     }
 
     /// Persist a checkpoint as the latest consensus checkpoint.
@@ -599,6 +680,50 @@ mod tests {
             .await?
             .is_none());
         assert_eq!(storage.load_pending(Chain::Solana).await?, vec![checkpoint]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parser_version_roundtrip_in_memory() -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+        assert!(storage
+            .load_parser_version(Chain::Ethereum)
+            .await?
+            .is_none());
+        storage.persist_parser_version(Chain::Ethereum, 3).await?;
+        assert_eq!(storage.load_parser_version(Chain::Ethereum).await?, Some(3));
+        assert!(storage.load_parser_version(Chain::Solana).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_parser_version_loads_as_none() -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+        assert!(storage.load_parser_version(Chain::Canton).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clear_pending_drops_pending_keeps_latest() -> anyhow::Result<()> {
+        let storage = CheckpointStorage::in_memory();
+        let chain = Chain::Ethereum;
+        let latest = Checkpoint {
+            chain,
+            block_height: 5,
+            pending_requests: vec![],
+            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+        };
+        let pending = Checkpoint {
+            chain,
+            block_height: 10,
+            pending_requests: vec![],
+            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+        };
+        storage.persist(&latest).await?;
+        storage.persist_pending(&pending).await?;
+        storage.clear_pending(chain).await?;
+        assert_eq!(storage.load_latest(chain).await?, Some(latest));
+        assert!(storage.load_pending(chain).await?.is_empty());
         Ok(())
     }
 

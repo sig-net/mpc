@@ -535,6 +535,9 @@ async fn process_transaction(
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
     const CHAIN: Chain = Chain::Solana;
+    /// Bump when Solana indexer parsing changes and unconfirmed
+    /// checkpoints produced by the old parser must be dropped.
+    const INDEXER_PARSER_VERSION: u64 = 0;
 
     async fn run(
         &self,
