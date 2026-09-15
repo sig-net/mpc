@@ -42,7 +42,7 @@ Happy path:
   `req` in the pseudocode.
 * *Request ID* (rid): a collision-resistant hash over (contract, tx, dest,
   key) in a length-committing encoding, so within one source chain a rid
-  names one execution and nothing else. The schemas are outside it, so that
+  names one execution and nothing else. I.e.,  rid(a) = rid(b) <=> a.tx = b.tx. The schemas are outside it, so that
   two calls for one transaction cannot both be outstanding. The key
   parameters must be canonical, or two rids could name one execution.
 * *Outcome*: a pair (kind, data). kind is Executed or Failed.
@@ -124,27 +124,16 @@ accepted response per call whose transaction executes".
 
 ### 3.3 Assumptions
 
-G1 to G5 hold only under:
-
-* Finality: no re-orgs on source or destination chain below the finality
-  criterion the MPC uses to index requests and attest outcomes.
-* Payload-level replay protection: once a transaction has executed on the
-  destination chain under a key, no transaction with the same bytes executes
-  again under that key, whatever signature it bears (EVM account nonce,
-  spent UTXO, Solana durable nonce). Solana transactions using a recent
-  blockhash do not qualify; see open points.
-* Durable contract state: the library's state (section 4.1) survives
-  upgrades and migrations. A contract that keeps its key and loses this
-  state can be replayed against everything it ever executed.
-* MPC: at most f of the nodes are faulty and every signature or attestation
-  needs 2f+1 participants and honest nodes eventually publish.
-* Honest nodes observe the same finalised destination state, receipts and
-  return data included, and compute the attestation content as the same pure
-  function of receipt and schemas, which an upgrade does not change for
-  requests already made; otherwise nodes split and no attestation reaches
-  2f+1.
-* Source and destination chains stay live. On Midnight, someone enqueues
-  every published response and runs `process` (section 4.2).
+* Chains  
+  * Finality: no re-orgs on source or destination chain below the finality criterion the MPC uses to index requests and attest outcomes.  
+  * Payload-level replay protection: once a transaction has executed on the destination chain under a key, no transaction with the same bytes executes again under that key, whatever signature it bears (EVM account nonce, spent UTXO, Solana durable nonce). Solana transactions using a recent blockhash do not qualify; see open points.  
+  *  Source and destination chains, eventually make progress: outages only delay delivery
+* Contracts and library:  
+  * Durable contract state: the library's state (section 4.1) survives upgrades and migrations. A contract that keeps its key and loses this state can be replayed against everything it ever executed.  
+  * On Midnight, someone enqueues every published response and runs `process` (section 4.2).  
+* MPC:   
+  * at most f of the nodes are faulty and every signature or attestation needs 2f+1 participants and honest nodes eventually publish.  
+  * Honest nodes observe the same finalised destination state, receipts and return data included, and compute the attestation content as the same pure function of receipt and schemas, which an upgrade does not change for requests already made; otherwise nodes split and no attestation reaches 2f+1.
 
 ## 4. Pseudocode and properties per entity
 
@@ -180,6 +169,9 @@ on response(rid, att = (kind, height, data), sig):
     delete outstanding[rid]                             // C4
     self.on_response(rid, (kind, data))
 ```
+
+The entry keeps `dest` because the rid is a hash and cannot yield it, and
+C3d needs it to pick the last_seen to raise.
 
 When the library starts tracking a destination, last_seen[dest] starts at
 dest's finalised height at that moment. At deployment and on the first call
