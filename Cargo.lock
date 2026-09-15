@@ -9321,6 +9321,8 @@ dependencies = [
  "near-account-id",
  "near-crypto",
  "near-fetch",
+ "near-jsonrpc-client",
+ "near-primitives",
  "serde_json",
  "tokio",
  "tracing",

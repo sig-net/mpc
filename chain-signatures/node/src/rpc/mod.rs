@@ -16,7 +16,7 @@ use cait_sith::protocol::Participant;
 use dashmap::DashSet;
 use k256::AffinePoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, RetryConfig},
+    utils::retry::{retry_rpc, retry_rpc_gated, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
@@ -620,24 +620,28 @@ async fn execute_vote_checkpoint(near: NearGovernanceClient, checkpoint: Checkpo
         &checkpoint,
         VOTE_CHECKPOINT_TIMEOUT,
         VOTE_CHECKPOINT_RETRY,
+        near.provider_gate(),
         || near.vote_checkpoint(&checkpoint),
     )
     .await
 }
 
-/// Submit a checkpoint vote under a bounded retry policy.
+/// Submit a checkpoint vote under a bounded retry policy, waiting out the NEAR
+/// endpoint's shared cooldown before each attempt.
 async fn vote_checkpoint_with_retry<F, Fut>(
     checkpoint: &CheckpointDigest,
     timeout: Duration,
     retry_config: RetryConfig,
+    gate: &SharedBackoff,
     vote: F,
 ) where
     F: Fn() -> Fut + Send + Sync,
     Fut: std::future::Future<Output = anyhow::Result<CheckpointVoteOutcome>> + Send,
 {
-    let result = retry_rpc!(
+    let result = retry_rpc_gated!(
         timeout,
         retry_config,
+        gate,
         |attempt, err, sleep| {
             tracing::warn!(
                 ?checkpoint,
@@ -710,10 +714,79 @@ mod tests {
             jitter: false,
         };
 
-        vote_checkpoint_with_retry(&checkpoint, timeout, retry, vote).await;
+        vote_checkpoint_with_retry(&checkpoint, timeout, retry, &SharedBackoff::new(), vote).await;
 
         // 1 initial attempt + 2 retries, each cut off by the per-attempt timeout.
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    fn test_governance_client(url: &str) -> NearGovernanceClient {
+        let account_id: AccountId = "node.testnet".parse().unwrap();
+        let sign_sk = near_crypto::SecretKey::from_seed(
+            near_crypto::KeyType::ED25519,
+            "rpc-cancellation-test",
+        );
+        let signer =
+            match near_crypto::InMemorySigner::from_secret_key(account_id.clone(), sign_sk.clone())
+            {
+                near_crypto::Signer::InMemory(s) => s,
+                _ => unreachable!(),
+            };
+        let cipher_sk = mpc_keys::hpke::SecretKey::from_bytes(&[0; 32]);
+        let my_addr = "http://127.0.0.1:3000".parse().unwrap();
+        let contract_id: AccountId = "contract.testnet".parse().unwrap();
+        NearGovernanceClient::new(
+            near_fetch::Client::new(url),
+            &my_addr,
+            &sign_sk,
+            &cipher_sk,
+            &contract_id,
+            signer,
+            mpc_chain_near::NearRpcGates::new(SharedBackoff::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn vote_surfaces_provider_errors_and_engages_the_shared_gate() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(402)
+            .expect(2)
+            .create_async()
+            .await;
+        let near = test_governance_client(&server.url());
+        let checkpoint = CheckpointDigest {
+            chain: Chain::Ethereum,
+            height: 10,
+            digest: [1; 32],
+        };
+
+        // One send, and its real error, not a timeout hiding it.
+        let err = near
+            .vote_checkpoint(&checkpoint)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("402"), "unexpected error: {err}");
+
+        // Through the retry loop, the 402 engages the shared NEAR gate.
+        let single_attempt = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_times: 0,
+            jitter: false,
+        };
+        vote_checkpoint_with_retry(
+            &checkpoint,
+            Duration::from_secs(5),
+            single_attempt,
+            near.provider_gate(),
+            || near.vote_checkpoint(&checkpoint),
+        )
+        .await;
+        assert!(!near.provider_gate().remaining().is_zero());
+        mock.assert_async().await;
     }
 
     /// Vote churn must be absorbed without completing; real governance changes
@@ -1042,23 +1115,7 @@ mod tests {
             .create_async()
             .await;
 
-        let account_id: AccountId = "node.testnet".parse().unwrap();
-        let sign_sk = near_crypto::SecretKey::from_seed(
-            near_crypto::KeyType::ED25519,
-            "rpc-cancellation-test",
-        );
-        let signer =
-            match near_crypto::InMemorySigner::from_secret_key(account_id.clone(), sign_sk.clone())
-            {
-                near_crypto::Signer::InMemory(s) => s,
-                _ => unreachable!(),
-            };
-        let cipher_sk = mpc_keys::hpke::SecretKey::from_bytes(&[0; 32]);
-        let my_addr = "http://127.0.0.1:3000".parse().unwrap();
-        let contract_id: AccountId = "contract.testnet".parse().unwrap();
-        let near = near_fetch::Client::new(&server.url());
-        let near =
-            NearGovernanceClient::new(near, &my_addr, &sign_sk, &cipher_sk, &contract_id, signer);
+        let near = test_governance_client(&server.url());
 
         let (tx, mut rx) = mpsc::channel(16);
         let publishers = HashMap::new();
