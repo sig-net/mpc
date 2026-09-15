@@ -251,6 +251,7 @@ pub fn mock_bidi_response_request(
         RespondBidirectionalTx {
             tx_id,
             output: vec![],
+            origin_indexed_at: None,
             chain_ctx: None,
         },
     ))
