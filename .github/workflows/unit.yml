@@ -73,6 +73,9 @@ jobs:
       - name: Unit tests
         run: just test-unit
 
+      - name: Midnight output storage tests
+        run: cargo test -p mpc-chain-midnight --lib --features sandbox output_storage::tests
+
   audit:
     name: Audit
     runs-on: ubuntu-latest
