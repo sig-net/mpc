@@ -89,6 +89,16 @@ impl Checkpoint {
     }
 }
 
+impl From<&Checkpoint> for mpc_primitives::CheckpointDigest {
+    fn from(checkpoint: &Checkpoint) -> Self {
+        Self {
+            chain: checkpoint.chain,
+            height: checkpoint.block_height,
+            digest: checkpoint.digest(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Checkpoints {
     storage: CheckpointStorage,
@@ -224,6 +234,17 @@ impl Checkpoints {
     pub async fn latest(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
         self.storage
             .latest(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
+    /// Loads the durable unconfirmed checkpoints for `chain`, ordered by height.
+    pub(crate) async fn load_pending(
+        &self,
+        chain: Chain,
+    ) -> Result<Vec<Checkpoint>, CheckpointError> {
+        self.storage
+            .load_pending(chain)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })
     }
