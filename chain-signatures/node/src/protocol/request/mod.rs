@@ -158,8 +158,7 @@ pub struct SignatureSpawner {
 }
 
 impl SignatureSpawner {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub fn new(
         node_account_id: near_account_id::AccountId,
         contract: ContractStateWatcher,
         presignatures: PresignatureStorage,
@@ -499,28 +498,11 @@ pub struct SignatureSpawnerTask {
 }
 
 impl SignatureSpawnerTask {
-    #[allow(clippy::too_many_arguments)]
     pub fn run(
-        my_account_id: near_account_id::AccountId,
+        spawner: SignatureSpawner,
         sign_rx: mpsc::Receiver<SignCommand>,
-        contract: ContractStateWatcher,
         config: watch::Receiver<Config>,
-        presignature_storage: PresignatureStorage,
-        mesh_state: watch::Receiver<MeshState>,
-        msg_channel: MessageChannel,
-        rpc_channel: RpcChannel,
-        sync_report_tx: SyncReportSender,
     ) -> Self {
-        let spawner = SignatureSpawner::new(
-            my_account_id,
-            contract,
-            presignature_storage,
-            mesh_state,
-            msg_channel,
-            rpc_channel,
-            sync_report_tx,
-        );
-
         Self {
             handle: tokio::spawn(spawner.run(sign_rx, config)),
         }

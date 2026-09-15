@@ -11,7 +11,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
-use crate::protocol::request::SignatureSpawnerTask;
+use crate::protocol::request::{SignatureSpawner, SignatureSpawnerTask};
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::{SyncReportSender, SyncTask};
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
@@ -749,17 +749,16 @@ impl ProtocolHandles {
             contract_watcher.clone(),
         )
         .await;
-        let sign_task = SignatureSpawnerTask::run(
+        let spawner = SignatureSpawner::new(
             account_id.clone(),
-            sign_rx,
             contract_watcher.clone(),
-            config_rx.clone(),
             presignature_storage.clone(),
             mesh_state.clone(),
             message_channel.clone(),
             rpc_channel,
             sync_report_tx,
         );
+        let sign_task = SignatureSpawnerTask::run(spawner, sign_rx, config_rx.clone());
         let protocol = MpcSignProtocol {
             my_account_id: account_id.clone(),
             msg_channel: message_channel.clone(),
