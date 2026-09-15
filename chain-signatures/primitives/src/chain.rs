@@ -24,7 +24,7 @@ impl ChainConfig for Chain {
         let (key, default) = match self {
             Chain::NEAR | Chain::Bitcoin => return None,
             Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
-            Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
+            Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 1200),
             Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
             Chain::Canton => ("CHECKPOINT_INTERVAL_CANTON", 50),
             Chain::Midnight => ("CHECKPOINT_INTERVAL_MIDNIGHT", 120),
