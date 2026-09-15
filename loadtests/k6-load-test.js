@@ -3,10 +3,16 @@ import { check, fail } from 'k6';
 
 const PINGER_URL = "https://contract-ping.sig.network/ping";
 
+// Since #1169 the Solana indexer waits for finalized blocks (~13s behind the
+// tip). The node budgets 15s for that plus a 5s buffer; same here.
+const SOLANA_EXPECTED_FINALITY_S = 15;
+const BUFFER_S = 5;
+const P95_BUDGET_MS = (SOLANA_EXPECTED_FINALITY_S + BUFFER_S) * 1000;
+
 // Shared by every strategy so a tier cannot silently lack a check.
 const thresholds = {
   http_req_failed: ['rate<0.03'],
-  http_req_duration: ['p(95)<10000'],
+  http_req_duration: [`p(95)<${P95_BUDGET_MS}`],
   // k6 skips iterations when every VU is still waiting on a signature. A
   // run that silently sent less than it was asked to is not a pass.
   dropped_iterations: ['count<10'],
