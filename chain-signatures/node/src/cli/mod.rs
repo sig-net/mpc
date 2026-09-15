@@ -38,7 +38,7 @@ use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
 use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
-use mpc_chain_near::NearClient;
+use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
@@ -649,10 +649,14 @@ impl RpcHandles {
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         let near_rpc = near_fetch::Client::new(near_rpc_url);
+        // One set of gates for every NEAR call: the publisher and the governance
+        // client share the endpoint and the signer.
+        let near_gates = NearRpcGates::new(stack.gate(Chain::NEAR));
         let near_client = NearClient::new(
             near_rpc.clone(),
             mpc_contract_id,
             signer.clone(),
+            near_gates.clone(),
             publisher_telemetry,
         );
         let near_governance_client = NearGovernanceClient::new(
@@ -662,6 +666,7 @@ impl RpcHandles {
             &network.cipher_sk,
             mpc_contract_id,
             signer,
+            near_gates,
         );
         let publishers = stack.publishers(near_client.clone()).await;
         let (rpc_channel, rpc_executor) =
@@ -1279,6 +1284,7 @@ mod tests {
             near,
             &account_id,
             signer,
+            NearRpcGates::new(SharedBackoff::new()),
             Arc::new(NodeTelemetry::new(Chain::NEAR)),
         );
         let publishers = ChainStack::new(chains).publishers(near).await;
