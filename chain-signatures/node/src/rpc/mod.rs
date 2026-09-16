@@ -18,7 +18,7 @@ use cait_sith::protocol::Participant;
 use dashmap::{mapref::entry::Entry, DashMap, DashSet};
 use k256::AffinePoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, RetryConfig},
+    utils::retry::{retry_rpc, retry_rpc_gated, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
@@ -746,25 +746,29 @@ async fn execute_vote_checkpoint(
         &checkpoint,
         VOTE_CHECKPOINT_TIMEOUT,
         VOTE_CHECKPOINT_RETRY,
+        near.provider_gate(),
         || near.vote_checkpoint(&checkpoint),
     )
     .await
 }
 
-/// Submit a checkpoint vote under a bounded retry policy.
+/// Submit a checkpoint vote under a bounded retry policy, waiting out the NEAR
+/// endpoint's shared cooldown before each attempt.
 async fn vote_checkpoint_with_retry<F, Fut>(
     checkpoint: &CheckpointDigest,
     timeout: Duration,
     retry_config: RetryConfig,
+    gate: &SharedBackoff,
     vote: F,
 ) -> anyhow::Result<CheckpointVoteOutcome>
 where
     F: Fn() -> Fut + Send + Sync,
     Fut: std::future::Future<Output = anyhow::Result<CheckpointVoteOutcome>> + Send,
 {
-    let result = retry_rpc!(
+    let result = retry_rpc_gated!(
         timeout,
         retry_config,
+        gate,
         |attempt, err, sleep| {
             tracing::warn!(
                 ?checkpoint,
@@ -838,7 +842,9 @@ mod tests {
             jitter: false,
         };
 
-        let result = vote_checkpoint_with_retry(&checkpoint, timeout, retry, vote).await;
+        let result =
+            vote_checkpoint_with_retry(&checkpoint, timeout, retry, &SharedBackoff::new(), vote)
+                .await;
         assert!(result.is_err());
 
         // 1 initial attempt + 2 retries, each cut off by the per-attempt timeout.
@@ -880,7 +886,49 @@ mod tests {
             &cipher_sk,
             &contract_id,
             signer,
+            mpc_chain_near::NearRpcGates::new(SharedBackoff::new()),
         )
+    }
+
+    #[tokio::test]
+    async fn vote_surfaces_provider_errors_and_engages_the_shared_gate() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(402)
+            .expect(2)
+            .create_async()
+            .await;
+        let near = test_governance_client(&server.url());
+        let checkpoint = checkpoint_digest(Chain::Ethereum, 10, 1);
+
+        // One send, and its real error, not a timeout hiding it.
+        let err = near
+            .vote_checkpoint(&checkpoint)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("402"), "unexpected error: {err}");
+
+        // Through the retry loop, the 402 engages the shared NEAR gate.
+        let single_attempt = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_times: 0,
+            jitter: false,
+        };
+        let result = vote_checkpoint_with_retry(
+            &checkpoint,
+            Duration::from_secs(5),
+            single_attempt,
+            near.provider_gate(),
+            || near.vote_checkpoint(&checkpoint),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!near.provider_gate().remaining().is_zero());
+        mock.assert_async().await;
     }
 
     #[test]
