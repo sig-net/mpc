@@ -44,7 +44,7 @@ Happy path:
   schemas are outside it, so that two calls for one transaction cannot both
   be outstanding. The key parameters must be canonical, or two rids could
   name one execution.
-* *Outcome*: a pair (kind, data), with four kinds.
+* *Outcome*: a pair (kind, data), with three kinds.
   * *Executed*: the transaction was finalised, succeeded, and its return
     data decoded against the contract's schema; data is that decoded return
     data.
@@ -52,9 +52,8 @@ Happy path:
     prefix of the revert reason.
   * *Unviable*: a finalised transaction carrying other bytes took tx's
     nonce, so tx can never be included; data is empty.
-  * *Undecodable*: the transaction was finalised and succeeded, but its
-    return data does not decode against the contract's schema; data is a
-    bounded prefix of that return data.
+  * A transaction that succeeded but whose return data does not decode has
+    no outcome: the MPC reports nothing.
 * *Attestation key*: a signing key the MPC derives from its root key, the
   source chain and the contract, used for nothing but attestations to that
   contract.
@@ -126,7 +125,8 @@ accepted response per call whose transaction executes".
 * G4 Integrity: an accepted resp(c, o) carries the true outcome of tx(c),
   never of another transaction.
 * G5 Delivery: if tx(c) is finalised under a signature the MPC issued and
-  published for call(c), a resp(c, o) is eventually accepted.
+  published for call(c), and its return data, if any, decodes against the
+  contract's schema, a resp(c, o) is eventually accepted.
 
 ### 3.3 Assumptions
 
@@ -305,14 +305,15 @@ on Signature { rid, signature } finalised on the source chain:
         pending[rid].signatures.add(signature)
 
 on destination block at height h finalised on chain dest:
-    for (rid, e) in pending with e.req.dest = dest, e.signatures nonempty,
-      and no e.attestation:
+    for (rid, e) in pending with e.req.dest = dest and no e.attestation:
         ours = { txid(s, e.req.tx) for s in e.signatures }
         if some id in ours has a receipt r, finalised at height h':
-            (kind, data) = decode(r, e.req.schemas)         // Undecodable
-            attest(rid, (kind, h', data))                   // if not (M5)
-        else if this block holds a finalised transaction that is not in
-          ours and uses e.req.tx's nonce:
+            if decode(r, e.req.schemas) gives (kind, data):
+                attest(rid, (kind, h', data))
+            else:
+                delete pending[rid]                         // M5
+        else if this block holds a finalised transaction that uses
+          e.req.tx's nonce and whose unsigned bytes are not e.req.tx:
             attest(rid, (Unviable, h, empty))               // M6
 
 attest(rid, att):
@@ -333,7 +334,10 @@ joins another, so all of them are looked up; they cover the same transaction
 bytes, so replay protection lets at most one execute. Lookup is by
 transaction ID at any height, so when a node starts looking does not matter.
 A transaction is reported Unviable when a node processing a finalised
-destination block sees a transaction in it take the request's nonce. The MPC
+destination block sees a transaction in it take the request's nonce. The
+test is on the transaction's unsigned bytes rather than its ID, so a node
+that was not in the signing round, and so holds no signature yet, cannot
+mistake the request's own execution for someone else taking the nonce. The MPC
 does not search for that block: a node that was not watching at the time
 would have to query historical state, so a nonce taken before the request
 was admitted is not reported. Such a transaction gets no response, nor does
@@ -363,12 +367,12 @@ Properties:
   committed fields, and describes only destination state finalised at that
   height.
 * M3 The MPC attests an outcome only from a finalised transaction: the
-  receipt of tx(c) under a signature it issued, or, for Unviable, another
-  transaction that took tx(c)'s nonce. Nothing else.
+  receipt of tx(c) under a signature it issued, or, for Unviable, one whose
+  unsigned bytes are not tx(c) and that took tx(c)'s nonce. Nothing else.
 * M4 The MPC drops a request that is not authentic, or that it cannot
   process, and keeps no state for it, so the call is unanswered.
-* M5 An execution whose return data does not decode is attested Undecodable,
-  at its own height, with a bounded prefix of that data.
+* M5 An execution whose return data does not decode is not attested, and
+  the MPC drops the request.
 * M6 Unviable is attested only from a block a node processed, so a nonce
   taken before the request was admitted is not reported.
 
@@ -434,8 +438,9 @@ and C3c drops it.
 * G5: the signature was issued after call(c) was finalised (M1) and e.known
   is at most the destination height finalised by then (C2), so
   height(exec(c)) > e.known. The MPC finds the execution by its receipt,
-  whenever it started looking, and decodes it or not (M5); either way honest
-  nodes compute the same attestation and publish it (assumptions). By C4 the
+  whenever it started looking. The return data decodes (G5's premise), so M5
+  does not apply, and honest nodes compute the same attestation and publish
+  it (assumptions). By C4 the
   entry is still outstanding unless a response for rid(c) was accepted
   first, and any such response reports exec(c) too, since at most one
   signature executes (replay protection) and M3 attests only that receipt.
@@ -465,9 +470,10 @@ and C3c drops it.
 
 ## Appendix: the failures the MPC does not report
 
-Two things leave a call unanswered: a transaction nobody broadcasts and
-whose nonce no node sees taken (M6), and a request the MPC refuses to
-process. An earlier draft answered both with `Failed`.
+Three things leave a call unanswered: a transaction nobody broadcasts and
+whose nonce no node sees taken (M6), an execution whose return data does not
+decode (M5), and a request the MPC refuses to process. An earlier draft
+answered the first and the last with `Failed`.
 
 Every attestation carries the height of the block it describes (M2), and the
 library accepts it only if that height is above what it has already seen
