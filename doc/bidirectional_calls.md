@@ -1,7 +1,5 @@
 # Bidirectional calls: entities, API, properties
 
-Status: draft, to be moved to github
-
 ## 1. Entities and Happy Path
 
 * *Application contract*: the contract a developer writes on the source
