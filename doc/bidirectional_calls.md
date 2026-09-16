@@ -203,36 +203,28 @@ Properties:
 
 ### 4.2 Library on Midnight: inbox and processing
 
-On Midnight a transaction is proven against a snapshot of the contract's
-state and fails at inclusion if any state it read has changed since. Some of
-our circuits take 30 seconds to prove. Section 4.1 reads last_seen on every
-call (C2) and writes it on every response (C3d), so a response landing while
-a call is being proven fails that call, and the contract handles at most one
-message per proving time. To fix this, enqueueing and processing are
-separated:
+Midnight has two programming languages, Impact and Compact
+
+Compact generates a proof against a snapshot of the contract's state and fails at inclusion if any state it read has changed, it then issues impact instructions to change the state of the ledger. Some of our circuits take 30 seconds to prove. Section 4.1 reads last_seen on every call (C2) and writes it on every response (C3d), so a response landing while a call is being proven fails that call, and the contract handles at most one message per proving time.
+
+Impact runs on the tip of the chain, and is a simple stack machine.
+
+To avoid this, ordering and processing are separated:
+
+First we put the call, or validated response into the inbox/outbox, as a compact call.
+
+We then issue Impact ops which stamp with and update the last seen on these calls/responses.
 
 ```
-state (per application contract, in addition to 4.1):
-    inbox: Key -> Message            // Message = Call(req) | Response(rid, att, sig)
-
-on enqueue(key, message):
-    if key in inbox: fail            // the key is already in use
-    inbox[key] = message             // touches no state any other transaction reads
-
-on process(keys) from anyone:        // keys: a witness listing inbox entries to process
-    for key in keys:
-        if key not in inbox: fail
-        run the 4.1 handler for inbox[key]
-        delete inbox[key]
+case message of
+    Call(rid, dest)
+        outstanding[rid].last_seen <- copy last_seen[req.dest]
+    Response(rid, chain_id, height, outcome, sig) =>
+        last_seen[chain_id] <- max height last_seen[chain_id]
 ```
 
-* Whoever enqueues chooses the key off chain. Under the per-key conflict
-  assumption below, a fresh key conflicts with nothing, so enqueues
-  run concurrently; two enqueuers picking one key is the only collision.
-* `process` is the single transaction per proving time that touches
-  last_seen and outstanding, so throughput is a batch rather than a
-  message. It takes its keys as a witness and touches only those entries, so
-  it does not conflict with concurrent enqueues.
+We then emit the call_bidirectional request, or process the response.
+
 * A call is made, in the sense of C2, when it is processed rather than
   enqueued, so its known height is last_seen at processing time. A Call
   carries the application's continuation, which runs then with the return
@@ -241,12 +233,6 @@ on process(keys) from anyone:        // keys: a witness listing inbox entries to
 
 What must hold is that every message enters through the inbox, is processed
 exactly once, and that `process` touches only the entries it deletes.
-
-Assumption:
-
-* The ledger detects state conflicts per map key. A transaction that inserts
-  under a key nobody else touches, or reads a key nobody else writes, is not
-  failed by concurrent transactions on other keys.
 
 Property:
 
