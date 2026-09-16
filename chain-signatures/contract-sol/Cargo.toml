@@ -10,5 +10,5 @@ crate-type = ["lib"]
 name = "signet_program"
 
 [dependencies]
-anchor-lang = { version = "0.31.1", features = ["event-cpi"] }
+anchor-lang = { version = "1.2.0", features = ["event-cpi"] }
 serde.workspace = true
