@@ -599,7 +599,7 @@ mod tests {
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use mpc_primitives::SignId;
     use signet_program::{SignatureRequestedEvent, SignatureRespondedEvent};
-    use solana_sdk::commitment_config::CommitmentLevel;
+    use solana_commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::{
         TransactionDetails, UiTransactionEncoding, UiTransactionStatusMeta,
@@ -874,14 +874,13 @@ mod tests {
         );
     }
 
-    /// Check we can still parse the old format for failed transactions.
-    ///
-    /// Note that there are some SDK versions that can parse the new format but
-    /// not the new, and other versions that have the opposite problem.
+    /// The pre-4.0 RPC error shape (`{"BorshIoError": "Reason for the error"}`)
+    /// is no longer parseable by the solana 3.x crate line: `BorshIoError` became
+    /// a plain unit variant. Agave 4.0+ RPC nodes serialize the unit shape for
+    /// all transactions (including historical ones), so this is fine as long as
+    /// we only talk to 4.0-era RPC endpoints.
     /// See: https://github.com/anza-xyz/solana-sdk/pull/410
     /// and https://github.com/anza-xyz/solana-sdk/issues/394
-    ///
-    /// We want a version that can parse both.
     #[test]
     fn transaction_error_borsh_io_error_object_deserialization() {
         // Exact error shape returned _before_ Solana 4.0 RPC for a failed transaction.
@@ -889,9 +888,9 @@ mod tests {
         let result: std::result::Result<solana_sdk::transaction::TransactionError, _> =
             serde_json::from_str(json);
         assert!(
-            result.is_ok(),
-            "BorshIoError unit-variant deserialization failed: {:?}",
-            result.err()
+            result.is_err(),
+            "pre-4.0 RPC error shape unexpectedly parsed; \
+             if dual-format support returned to the SDK, restore the old compatibility test"
         );
     }
 

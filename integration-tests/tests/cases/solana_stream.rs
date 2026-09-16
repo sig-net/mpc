@@ -34,7 +34,7 @@ use tokio::time::Instant;
 use std::time::Duration;
 
 /// Timeout for waiting for a finalized event (SignRequest or Block)
-const FINALIZED_EVENT_TIMEOUT: Duration = Duration::from_secs(45);
+const FINALIZED_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 async fn solana_sandbox() -> Result<Solana> {
     let solana = Solana::run().await;

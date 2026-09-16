@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use alloy::sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
-use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use anyhow::Context;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -16,6 +15,7 @@ use mpc_primitives::{
     MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
+use sha3::Digest as _;
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
     SignatureRespondedEvent,
@@ -87,7 +87,7 @@ impl SolanaSignEvent {
                 )
                     .abi_encode_packed();
 
-                keccak::hash(&encoded).to_bytes()
+                sha3::Keccak256::digest(&encoded).into()
             }
         }
     }
