@@ -302,11 +302,9 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
     /// Construct a `ChainEvent::ExecutionConfirmed` for a mined transaction.
     ///
-    /// A terminal extraction failure resolves the execution as
-    /// [`ExecutionOutcome::Failed`] rather than dropping the event, so the
-    /// bidirectional request completes with an explicit failure instead of
-    /// staying pending forever. A retryable one emits nothing and asks for
-    /// another attempt on the next block.
+    /// A terminal extraction failure resolves as
+    /// [`ExecutionOutcome::ExtractionFailed`], never `Failed`: the transaction
+    /// executed. A retryable one emits nothing and retries on the next block.
     async fn execution_confirmed_event(
         &self,
         tx_id: BidirectionalTxId,
@@ -358,9 +356,9 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                                 ?sign_id,
                                 ?err,
                                 "unrecoverable transaction output extraction failure; \
-                                 resolving bidirectional execution as failed"
+                                 the transaction executed, so this is not a failed execution"
                             );
-                            ExecutionOutcome::Failed
+                            ExecutionOutcome::ExtractionFailed
                         }
                     }
                 }
@@ -1551,11 +1549,11 @@ mod tests {
         })
     }
 
-    /// A deterministic extraction failure — trace return data that contradicts
-    /// the declared output schema — resolves the execution as failed instead of
-    /// silently dropping the event and wedging the request.
+    /// A deterministic extraction failure — trace return data contradicting the
+    /// declared output schema — resolves as `ExtractionFailed`, never `Failed`:
+    /// the transaction executed, so it must not be attested as one that did not.
     #[tokio::test]
-    async fn terminal_extraction_failure_emits_failed_event() {
+    async fn terminal_extraction_failure_emits_extraction_failed_event() {
         let mut server = Server::new_async().await;
 
         let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
@@ -1649,7 +1647,10 @@ mod tests {
             } => {
                 assert_eq!(tx_id.0, tx_hash.0);
                 assert_eq!(*block_height, 5, "event height is the mined block");
-                assert!(matches!(result, ExecutionOutcome::Failed));
+                assert!(
+                    matches!(result, ExecutionOutcome::ExtractionFailed),
+                    "the receipt succeeded: this must not be attested as a failed execution"
+                );
             }
             other => panic!("expected ExecutionConfirmed, got {other:?}"),
         }
