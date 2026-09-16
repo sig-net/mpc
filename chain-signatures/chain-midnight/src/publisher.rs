@@ -12,7 +12,7 @@ use mpc_utils::time::current_unix_timestamp;
 
 use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
 use crate::intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
-use crate::output_storage::{GcsOutputStore, OutputStore};
+use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 
 const RESPOND: &str = "respond";
@@ -92,12 +92,11 @@ impl MidnightPublisher {
     ) -> anyhow::Result<Self> {
         config.publisher.validate_output_storage()?;
         let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
-        let output_store = GcsOutputStore::connect(
+        let output_store = RecoveringOutputStore::start(
             config.publisher.output_storage.as_ref(),
             rpc.network_id(),
             config.central_address,
-        )
-        .await?
+        )?
         .map(|store| Arc::new(store) as Arc<dyn OutputStore>);
         let intent_gen = Arc::new(IntentGen::spawn(config, rpc.network_id()).await?);
         Ok(Self::new(
@@ -158,10 +157,17 @@ impl ChainPublisher for MidnightPublisher {
         {
             // Compact circuit byte payloads need a compile-time size, but serialized
             // execution outcomes vary in length across requests. Cache the exact attested
-            // bytes off-chain before publishing the fixed-size signature on-chain.
-            store
+            // bytes off-chain when possible; cache availability does not gate the response.
+            if let Err(error) = store
                 .ensure_output(&call.request_id, &response.output)
-                .await?;
+                .await
+            {
+                tracing::warn!(
+                    request_id = %hex::encode(call.request_id),
+                    ?error,
+                    "Midnight output caching failed; continuing with on-chain response"
+                );
+            }
         }
         let _flow = self.flow.lock().await;
         let central_address = self.central_address.to_hex();
@@ -285,6 +291,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    use crate::output_storage::GcsOutputStore;
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{
@@ -569,8 +576,22 @@ mod tests {
         )
     }
 
+    #[derive(Clone, Default)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[tokio::test]
-    async fn final_response_requires_output_storage_before_reading_the_chain() {
+    async fn final_response_publishes_when_output_storage_fails() {
         let reads = StubReads::new();
         let client = StubClient::new();
         let mut publisher = publisher(reads.clone(), client.clone());
@@ -578,13 +599,218 @@ mod tests {
             failure: true,
             ..Default::default()
         }));
+        let logs = LogWriter::default();
+        let writer = logs.clone();
+        let _registration_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
         let result = publisher
             .publish_signature(&bidirectional_action(vec![0xde, 0xad, 0xbe, 0xef, 1]))
             .await;
 
-        assert!(result.is_err(), "final response needs an output store");
-        assert!(reads.reads().is_empty());
-        assert!(client.built().is_empty());
+        result.expect("optional output storage must not block the on-chain response");
+        let recorded = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        let warning = recorded
+            .lines()
+            .find(|line| line.contains("output caching failed"))
+            .unwrap();
+        assert!(warning.contains("WARN"), "{recorded}");
+        assert!(warning.contains(&hex::encode(REQUEST_ID)), "{recorded}");
+        assert!(warning.contains("output storage unavailable"), "{recorded}");
+        assert!(!recorded.contains("ERROR"), "{recorded}");
+        assert_eq!(reads.reads().len(), 3);
+        assert_eq!(client.built().len(), 1);
+        assert_eq!(client.built()[0].circuit, RESPOND_BIDIRECTIONAL);
+        assert_eq!(client.submissions(), 1);
+    }
+
+    async fn gcs_store(endpoint: String, timeout: Duration) -> GcsOutputStore {
+        let client = google_cloud_storage::client::Storage::builder()
+            .with_endpoint(endpoint)
+            .with_credentials(google_cloud_auth::credentials::anonymous::Builder::new().build())
+            .build()
+            .await
+            .unwrap();
+        GcsOutputStore::new(
+            &crate::config::OutputStorageConfig::new("outputs".into(), "v1".into(), timeout),
+            "preprod",
+            MidnightAddress::from_hex(CENTRAL).unwrap(),
+            client,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn gcs_failures_do_not_block_final_responses() {
+        // A denied upload, conflicting bytes, and a denied conflict readback all
+        // leave the optional cache unavailable but must still submit the response.
+        for (upload_status, read_status, existing) in [
+            (403, None, vec![]),
+            (412, Some(200), vec![0, 254, 0]),
+            (412, Some(200), vec![0, 255]),
+            (412, Some(403), vec![]),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let write = server
+                .mock("POST", "/upload/storage/v1/b/outputs/o")
+                .match_query(mockito::Matcher::Any)
+                .with_status(upload_status)
+                .create_async()
+                .await;
+            let read = if let Some(status) = read_status {
+                let object = format!("v1/preprod/{CENTRAL}/{}.bin", hex::encode(REQUEST_ID));
+                let encoded: String =
+                    url::form_urlencoded::byte_serialize(object.as_bytes()).collect();
+                Some(
+                    server
+                        .mock("GET", format!("/storage/v1/b/outputs/o/{encoded}").as_str())
+                        .match_query(mockito::Matcher::UrlEncoded("alt".into(), "media".into()))
+                        .with_header("x-goog-generation", "1")
+                        .with_status(status)
+                        .with_body(existing)
+                        .create_async()
+                        .await,
+                )
+            } else {
+                None
+            };
+            let client = StubClient::new();
+            let mut publisher = publisher(StubReads::new(), client.clone());
+            publisher.output_store = Some(Arc::new(
+                gcs_store(server.url(), Duration::from_secs(2)).await,
+            ));
+            publisher
+                .publish_signature(&bidirectional_action(vec![0, 255, 0]))
+                .await
+                .unwrap();
+            assert_eq!(client.submissions(), 1);
+            assert_eq!(client.built()[0].request_id, hex::encode(REQUEST_ID));
+            write.assert_async().await;
+            if let Some(read) = read {
+                read.assert_async().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gcs_timeout_does_not_block_final_responses() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = StubClient::new();
+        let mut publisher = publisher(StubReads::new(), client.clone());
+        publisher.output_store = Some(Arc::new(
+            gcs_store(
+                format!("http://{}", listener.local_addr().unwrap()),
+                Duration::from_millis(100),
+            )
+            .await,
+        ));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            publisher.publish_signature(&bidirectional_action(vec![1])),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(client.submissions(), 1);
+    }
+
+    #[tokio::test]
+    async fn responses_continue_during_initialization_and_cache_after_recovery() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut server = mockito::Server::new_async().await;
+        let write = server
+            .mock("POST", "/upload/storage/v1/b/outputs/o")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"bucket":"outputs","generation":"1"}"#)
+            .expect(2)
+            .create_async()
+            .await;
+        let mut initialized = Some(gcs_store(server.url(), Duration::from_secs(2)).await);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let calls = attempts.clone();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate = release.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let attempts_started = entered.clone();
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let initialized_signal = completed.clone();
+        tokio::time::pause();
+        let store =
+            RecoveringOutputStore::spawn("outputs".into(), Duration::from_secs(2), move || {
+                let result = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(anyhow::anyhow!("initialization failed"))
+                } else {
+                    Ok(initialized.take().expect("client initializes only once"))
+                };
+                attempts_started.notify_one();
+                let gate = gate.clone();
+                let completed = initialized_signal.clone();
+                async move {
+                    if result.is_ok() {
+                        gate.acquire().await.unwrap().forget();
+                        completed.notify_one();
+                    }
+                    result
+                }
+            });
+        let client = StubClient::new();
+        let mut publisher = publisher(StubReads::new(), client.clone());
+        publisher.output_store = Some(Arc::new(store));
+        entered.notified().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let started = tokio::time::Instant::now();
+        publisher
+            .publish_signature(&bidirectional_action(vec![1]))
+            .await
+            .unwrap();
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(client.submissions(), 1);
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let started = tokio::time::Instant::now();
+        publisher
+            .publish_signature(&bidirectional_action(vec![2]))
+            .await
+            .unwrap();
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(client.submissions(), 2);
+        release.add_permits(1);
+        completed.notified().await;
+        tokio::time::advance(Duration::from_secs(120)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        tokio::time::resume();
+        for output in [vec![3], vec![4]] {
+            publisher
+                .publish_signature(&bidirectional_action(output))
+                .await
+                .unwrap();
+        }
+        assert_eq!(client.submissions(), 4);
+        write.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn storage_failure_does_not_hide_chain_submission_failure() {
+        let client = StubClient::refusing_submit("node refused submission");
+        let mut publisher = publisher(StubReads::new(), client.clone());
+        publisher.output_store = Some(Arc::new(StubOutputStore {
+            failure: true,
+            ..Default::default()
+        }));
+        let error = publisher
+            .publish_signature(&bidirectional_action(vec![1]))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("node refused submission"));
+        assert_eq!(client.built().len(), 1);
         assert_eq!(client.submissions(), 0);
     }
 
