@@ -16,7 +16,6 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{SignId, Signature};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -169,11 +168,6 @@ impl BatchPublisher {
             num_requests = actions.len(),
             "publishing batch of ethereum signatures",
         );
-        let signatures: HashMap<SignId, Signature> = actions
-            .iter()
-            .map(|action| (action.request.id, action.signature))
-            .collect();
-
         let res = retry_rpc_gated!(
             Duration::MAX, // Prevent from timing out
             self.config.batch_publish_retry,
@@ -183,7 +177,7 @@ impl BatchPublisher {
                     "batch publish failed (attempt {attempt}): {err}, retrying in {sleep:?}"
                 );
             },
-            { self.batch_publish_signatures(actions, &signatures).await }
+            { self.batch_publish_signatures(actions).await }
         );
 
         // Log metrics for successful publishes, or log an error if all retries failed
@@ -331,24 +325,15 @@ impl BatchPublisher {
         }
     }
 
-    async fn batch_publish_signatures(
-        &self,
-        actions: &[PublishAction],
-        signatures: &HashMap<SignId, Signature>,
-    ) -> anyhow::Result<()> {
+    async fn batch_publish_signatures(&self, actions: &[PublishAction]) -> anyhow::Result<()> {
         let num_requests = actions.len();
         let sign_ids: Vec<_> = actions.iter().map(|a| a.request.id).collect();
 
         let responses: Vec<ChainSignatures::Response> = actions
             .iter()
-            .map(|action| {
-                let mpc_sig = signatures
-                    .get(&action.request.id)
-                    .expect("signature not found");
-                ChainSignatures::Response {
-                    requestId: action.request.id.request_id.into(),
-                    signature: mpc_sig.into(),
-                }
+            .map(|action| ChainSignatures::Response {
+                requestId: action.request.id.request_id.into(),
+                signature: (&action.signature).into(),
             })
             .collect();
 

@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::request::SignatureSpawnerTask;
+use crate::protocol::request::{SignatureSpawner, SignatureSpawnerTask};
 use crate::protocol::{MessageChannel, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::secret_storage::SecretNodeStorageVariant;
@@ -36,17 +36,17 @@ impl MpcSignProtocol {
         // Nothing in tests observes sync-status reports, so the receiving end is
         // dropped immediately.
         let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-        let sign_task = SignatureSpawnerTask::run(
+        let spawner = SignatureSpawner::new(
             my_account_id.clone(),
-            channels.sign_rx,
             contract.clone(),
-            channels.config.clone(),
             storage.presignature_storage.clone(),
             channels.mesh_state.clone(),
             channels.msg_channel.clone(),
             channels.rpc_channel.clone(),
             sync_report_tx,
         );
+        let sign_task =
+            SignatureSpawnerTask::run(spawner, channels.sign_rx, channels.config.clone());
         Self {
             my_account_id,
             secret_storage: storage.secret_storage,

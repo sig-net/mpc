@@ -3,7 +3,6 @@ pub mod error;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use google_cloud_auth::credentials::AccessTokenCredentials;
-use reqwest12 as reqwest;
 use serde::{Deserialize, Serialize};
 
 use crate::storage;
