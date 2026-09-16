@@ -6,7 +6,8 @@ pub mod mock;
 pub mod request;
 
 pub use request::{
-    AnyProgress, Bidirectional, Executing, Final, Generating, Initial, Publishing, Sign, SignEntry,
+    AnyProgress, Bidirectional, Executing, ExecutionWatch, Final, Generating, Initial, Publishing,
+    Sign, SignEntry,
 };
 
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
@@ -84,7 +85,7 @@ impl PendingRequests {
                     Some(SignEntry {
                         chain,
                         request: Arc::clone(entry.request()),
-                        state: Bidirectional(Executing(Arc::clone(tx))),
+                        state: Bidirectional(Executing(ExecutionWatch::new(Arc::clone(tx), None))),
                         backlog: backlog.clone(),
                     })
                 }
@@ -118,22 +119,22 @@ impl PendingRequests {
 
 #[derive(Debug, Clone, Default)]
 struct ExecutionWatchers {
-    watchers: HashMap<BidirectionalTxId, Arc<BidirectionalTx>>,
+    watchers: HashMap<BidirectionalTxId, ExecutionWatch>,
 }
 
 impl ExecutionWatchers {
-    fn insert(&mut self, tx: Arc<BidirectionalTx>) -> Option<Arc<BidirectionalTx>> {
-        self.watchers.insert(tx.id, tx)
+    fn insert(&mut self, watch: ExecutionWatch) -> Option<ExecutionWatch> {
+        self.watchers.insert(watch.tx.id, watch)
     }
 
-    fn remove(&mut self, tx_id: &BidirectionalTxId) -> Option<Arc<BidirectionalTx>> {
+    fn remove(&mut self, tx_id: &BidirectionalTxId) -> Option<ExecutionWatch> {
         self.watchers.remove(tx_id)
     }
 
     fn all(&self) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers
             .iter()
-            .map(|(id, tx)| (*id, (tx.sign_id(), Arc::clone(tx))))
+            .map(|(id, watch)| (*id, (watch.tx.sign_id(), Arc::clone(&watch.tx))))
             .collect()
     }
 }
@@ -333,7 +334,7 @@ impl Backlog {
         let target_chain = tx.target_chain;
         let mut watchers = self.watchers(&target_chain).write().await;
 
-        watchers.insert(Arc::clone(tx));
+        watchers.insert(entry.execution_watch());
     }
 
     /// Stop watching for execution of a bidirectional transaction on the destination chain
@@ -343,13 +344,15 @@ impl Backlog {
         chain: Chain,
         tx_id: &BidirectionalTxId,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
-        let tx = {
+        let watch = {
             let mut watchers = self.watchers(&chain).write().await;
             watchers.remove(tx_id)?
         };
 
-        self.get_by::<Bidirectional<Executing>>(tx.source_chain, &tx.sign_id())
+        // Restore the observation time absent from backlog status.
+        self.get_by::<Bidirectional<Executing>>(watch.tx.source_chain, &watch.tx.sign_id())
             .await
+            .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
     }
 
     /// Set the processed block height for a specific chain.
@@ -507,15 +510,25 @@ impl Backlog {
             pending.pending_executions(chain, self)
         };
 
-        // Clear execution watchers whose source chain is the recovered chain
+        // Replace this chain's watches, retaining wait start times for executions
+        // that are still being awaited.
         for destination_chain in Chain::iter() {
             let mut watchers = self.watchers(&destination_chain).write().await;
-            watchers.watchers.retain(|_, tx| tx.source_chain != chain);
-        }
-
-        // now repopulate our execution watchers
-        for entry in execution_to_watch {
-            self.watch_execution(&entry).await;
+            let mut observed = HashMap::new();
+            watchers.watchers.retain(|id, watch| {
+                if watch.tx.source_chain != chain {
+                    return true;
+                }
+                observed.insert(*id, watch.respond_observed_at);
+                false
+            });
+            for entry in &execution_to_watch {
+                let mut watch = entry.execution_watch();
+                if watch.tx.target_chain == destination_chain {
+                    watch.respond_observed_at = observed.remove(&watch.tx.id).flatten();
+                    watchers.insert(watch);
+                }
+            }
         }
     }
 }

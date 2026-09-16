@@ -167,6 +167,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
         SignCommand::Request(req) => {
             if let mpc_primitives::SignKind::RespondBidirectional(res) = &req.request().kind {
                 assert_eq!(res.tx_id, tx.id);
+                assert_eq!(res.origin_indexed_at, Some(0));
             } else {
                 panic!("Expected RespondBidirectional request");
             }
