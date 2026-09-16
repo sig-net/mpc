@@ -218,7 +218,7 @@ We then issue Impact ops which stamp with and update the last seen on these call
 ```
 case message of
     Call(rid, dest)
-        outstanding[rid].last_seen <- copy last_seen[req.dest]
+        outstanding[rid].known <- copy last_seen[dest]
     Response(rid, chain_id, height, outcome, sig) =>
         last_seen[chain_id] <- max height last_seen[chain_id]
 ```
