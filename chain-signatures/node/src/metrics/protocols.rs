@@ -299,6 +299,27 @@ pub(crate) static SIGNATURE_GENERATOR_FAILURES: LazyLock<Counter> = LazyLock::ne
     .with_label_values(&[] as &[&str])
 });
 
+pub(crate) static SIGN_REORGANIZES: LazyLock<Counter> = LazyLock::new(|| {
+    try_create_counter_vec_with_node_account_id(
+        "multichain_sign_reorganizes_total",
+        "total sign request reorganizations (round rotations)",
+        &[],
+    )
+    .unwrap()
+    .with_label_values(&[] as &[&str])
+});
+
+pub(crate) static SIGN_REORGANIZE_ROUND: LazyLock<Histogram> = LazyLock::new(|| {
+    try_create_histogram_vec_with_node_account_id(
+        "multichain_sign_reorganize_round",
+        "round number at reorganization; a persistent high-round tail indicates wedged requests",
+        &[],
+        Some(exponential_buckets(1.0, 2.0, 10).unwrap()),
+    )
+    .unwrap()
+    .with_label_values(&[] as &[&str])
+});
+
 pub(crate) static SIGNATURE_GENERATOR_MINE_FAILURES: LazyLock<Counter> = LazyLock::new(|| {
     try_create_counter_vec_with_node_account_id(
         "multichain_signature_generator_mine_failures",
