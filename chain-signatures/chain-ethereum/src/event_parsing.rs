@@ -30,9 +30,6 @@ pub fn parse_filtered_logs(logs: Vec<Log>) -> Vec<IndexedSignRequest> {
             None => tracing::warn!("Failed to parse Ethereum log: {:?}", log),
         }
     }
-    if indexed_requests.is_empty() {
-        tracing::info!("No valid Ethereum sign requests found in logs");
-    }
     indexed_requests
 }
 
