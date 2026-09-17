@@ -42,10 +42,18 @@ const midnight = { LT_SOURCE_CHAIN: 'midnight', LT_CHAIN_ENV: 'stagenet', LT_STR
 const workers = { workers: [{ path: 'load/0', address: '0x1234', balanceWei: '9000000000000000', underfunded: false }] };
 
 test('Solana retains arrival strategy and thresholds', () => {
-  const run = driver();
-  assert.equal(run.options.scenarios.bidirectional.rate, 1);
-  assert.equal(run.options.scenarios.bidirectional.executor, 'constant-arrival-rate');
-  assert.deepEqual(Object.keys(run.options.thresholds), ['bidi_success']);
+  for (const [strategy, rate, preAllocatedVUs, maxVUs] of [['rpm_1', 1, 50, 80], ['rpm_6', 6, 250, 350]]) {
+    for (const duration of [undefined, '5m']) {
+      const run = driver({ LT_STRATEGY: strategy, LT_DURATION: duration });
+      assert.deepEqual(JSON.parse(JSON.stringify(run.options)), {
+        scenarios: { bidirectional: {
+          executor: 'constant-arrival-rate', rate, timeUnit: '1m', preAllocatedVUs,
+          maxVUs, gracefulStop: '45m', duration: duration || '1h',
+        } },
+        thresholds: { bidi_success: ['rate>0.95'] },
+      });
+    }
+  }
 });
 
 test('Midnight serial configuration bounds concurrency and requires completed work', () => {
@@ -145,4 +153,21 @@ test('Midnight driver allows proving plus the Ethereum finality budget', () => {
   run.iteration();
   assert.deepEqual(run.metrics.get('bidi_success').map(sample => sample.value), [true]);
   assert.equal(run.options.scenarios.bidirectional.gracefulStop, '90m');
+});
+
+test('terminal durations include zero, convert milliseconds, and omit missing phases', () => {
+  const fields = ['leaseWaitMs', 'signatureMs', 'confirmationMs', 'respondMs', 'totalMs'];
+  const metrics = ['lease_wait', 'signature', 'confirmation', 'respond', 'total'];
+  for (const state of ['responded', 'failed']) {
+    for (const value of [0, 2500, undefined]) {
+      const durations = Object.fromEntries(fields.map((field, i) => [field, value === undefined ? undefined : value * (i + 1)]));
+      const run = driver({}, [[202, { jobId: 'timings' }], [200, { state, durations }]]);
+      run.iteration();
+      for (const [i, metric] of metrics.entries()) {
+        assert.deepEqual(run.metrics.get(`bidi_${metric}_seconds`).map(sample => sample.value), value === undefined ? [] : [value * (i + 1) / 1000]);
+      }
+      assert.deepEqual(run.metrics.get('bidi_success').map(sample => sample.value), [state === 'responded']);
+      assert.equal(run.metrics.get('bidi_completed').at(-1).value, 1);
+    }
+  }
 });
