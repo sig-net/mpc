@@ -354,7 +354,9 @@ impl PositPhase {
                                 }
                             }
                             if let Some(_reservation) = presignature {
-                                tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
+                                if let Some(count) = mpc_utils::throttle::check("posit:presig-return-rejects") {
+                                    tracing::warn!(count, ?sign_id, "returning presignature to pool due to REJECTs");
+                                }
                             }
                             return state.reorganize(&format!(
                                 "received enough rejects: {:?}",
@@ -387,7 +389,9 @@ impl PositPhase {
                 _ = &mut posit_deadline => {
                     let reason = if is_proposer {
                         if presignature.is_some() {
-                            tracing::warn!(?sign_id, "returning presignature to pool due to proposer timeout");
+                            if let Some(count) = mpc_utils::throttle::check("posit:presig-return-proposer-timeout") {
+                                tracing::warn!(count, ?sign_id, "returning presignature to pool due to proposer timeout");
+                            }
                         }
                         format!(
                             "proposer posit deadline reached ({} accepts, threshold {})",
