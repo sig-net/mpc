@@ -39,7 +39,7 @@ Happy path:
 * *Request ID* (rid): a collision-resistant hash over (contract, tx, dest,
   key) in a length-committing encoding, so within one source chain
   rid(a) = rid(b) exactly when a and b agree on all four. One rid names one
-  execution, and by the derivation assumption (section 3.3) one execution
+  execution, and by key derivation (section 3.3) one execution
   names one rid. The schemas are outside it, so that two calls for one
   transaction cannot both be outstanding. The key parameters must be
   canonical, or two rids could name one execution.
@@ -48,19 +48,19 @@ Happy path:
     data decoded against the contract's schema; data is that decoded return
     data.
   * *Failed*: the transaction was finalised and reverted; data is empty.
-    Revert reasons are not in the receipt, and every byte of data is a byte
-    the nodes must agree on.
   * *Unviable*: a finalised transaction carrying other bytes took tx's
-    nonce, so tx can never be included; data is empty. The nonce is
-    whatever replay protection tx consumes: the account nonce on EVM, the
-    spent outputs on a UTXO chain, the durable nonce on Solana.
+    nonce, so tx can never be included (section 3.3); data is empty. The
+    nonce is whatever replay protection tx consumes (account nonce, spent
+    output). Unlike the other two, this outcome is best-effort: section 4.4
+    says when it is missed.
   * A transaction that succeeded but whose return data does not decode has
     no outcome: the MPC reports nothing.
 * *Attestation key*: a signing key the MPC derives from its root key, the
   source chain and the contract, used for nothing but attestations to that
   contract.
-* *Attestation*: a statement (rid, height, outcome) signed with the
-  attestation key of rid's contract, each field length-committed. height is
+* *Attestation*: a statement (rid, version, height, outcome) signed with
+  rid's contract's attestation key at that version, each field
+  length-committed. height is
   the height of the block that includes the transaction the outcome
   describes, attested once that block is final, in the destination chain's
   own numbering (a slot on Solana): the execution's block, or for Unviable
@@ -70,7 +70,8 @@ Happy path:
 Events for a call c made by the application contract:
 
 * call(c): the contract asks for transaction tx(c) to be signed and executed
-  on destination chain dest(c). It is identified by rid(c).
+  on destination chain dest(c), naming it rid(c). Making the same request
+  again is a new call with the same rid.
 * exec(c): tx(c) is included in a finalised destination block.
   height(exec(c)) is that block's height.
 * resp(c, o): a response for rid(c) carrying outcome o.
@@ -94,7 +95,8 @@ within a transaction happens-before a later one. Across chains, a
 destination block happens-before the source transaction in which this
 contract accepts a response attesting it. Nothing else is an edge, not a
 cross-chain call, not a dropped response, not another contract's
-acceptance: this contract's state changes only on acceptance.
+acceptance: destination state reaches this contract only through a
+response it accepts.
 
 ## 3. API and guarantees
 
@@ -123,26 +125,28 @@ not settle.
 
 ### 3.2 Guarantees
 
-G1 to G4 are safety, G5 is liveness. G2 and G5 together give "exactly one
-accepted response per call whose transaction executes".
+G1 to G3 are safety, G4 is liveness. G2 and G4 together give "exactly one
+accepted response per call that meets G4's premise".
 
 * G1 Causal order: an accepted resp(c, o) reports destination state that
   does not happen-before call(c).
 * G2 At-most-once: for each execution, at most one response reporting it
   as the outcome of its own transaction is ever accepted, however many calls
-  named that transaction and however many times it is attested. The one
-  exception is the upgrade case in section 4.1.
-* G3 Finality: an outcome is reported only once the destination state it
-  describes is final.
-* G4 Integrity: an accepted resp(c, o) carries the true outcome of tx(c),
-  never of another transaction.
-* G5 Delivery: if tx(c) is finalised under a signature the MPC issued and
-  published for this call event, not for an earlier call with the same rid,
-  and its return data, if any, decodes against the contract's schema, a
-  resp(c, o) is eventually accepted.
+  named that transaction and however many times it is attested.
+* G3 Integrity and finality: an accepted resp(c, o) carries the true, final
+  outcome of tx(c), never of another transaction.
+* G4 Delivery: if tx(c) is finalised under a signature the MPC issued and
+  published for call(c), and its return data, if any, decodes against the
+  contract's schema, a resp(c, o) is eventually accepted.
 
-Nothing is promised for a transaction that never executes, nor for one
-executed under a signature no honest node holds.
+After the upgrade that introduces last_seen, G1 and G2 are suspended per
+destination until an acceptance raises last_seen[dest] above every earlier
+execution (section 4.1).
+
+Nothing is promised for a transaction that never executes, for an execution
+whose return data does not decode (M5), or for a request the MPC refuses to
+process. Reporting any of them needs machinery the rest of this design does
+without.
 
 ### 3.3 Assumptions
 
@@ -152,7 +156,8 @@ executed under a signature no honest node holds.
   * Payload-level replay protection: once a transaction has executed on the
     destination chain under a key, no transaction with the same bytes executes
     again under that key, whatever signature it bears (EVM account nonce, spent
-    UTXO, Solana durable nonce). Solana transactions using a recent blockhash
+    UTXO, Solana durable nonce), and a nonce consumed by one transaction blocks
+    every other that names it. Solana transactions using a recent blockhash
     do not qualify; see open points.
   * Source and destination chains eventually make progress: an outage only
     delays delivery
@@ -162,12 +167,12 @@ executed under a signature no honest node holds.
   * Durable contract state: the library's state (section 4.1) survives upgrades
     and migrations. A contract that keeps its key and loses this state can be
     replayed against everything it ever executed.
-  * Every published response is delivered: on Midnight someone enqueues it
-    and runs `process` (section 4.2), elsewhere the signet contract delivers
-    it once (section 4.3), and one the library dropped or whose handler
-    failed is delivered again once it can be accepted, for instance after
-    the application has added a new key version.
-  * `on_response` does not revert on a response the library accepts.
+  * Every published response is delivered, and again if the library dropped
+    it: on Midnight someone enqueues it and runs `process` (section 4.2),
+    elsewhere the signet contract or anyone calls `response` (section 4.3).
+    A handler that runs inside `response` may fail, since that reverts the
+    acceptance; one that runs outside must not, since the entry is already
+    gone.
 * MPC
   * at most f of the n nodes are faulty, a signature or attestation needs a
     threshold t of participants with f < t <= n - f, so faulty nodes alone
@@ -175,13 +180,13 @@ executed under a signature no honest node holds.
     publish. The contract sets t = floor(2n/3) + 1, which is 2f+1 at n = 3f+1.
   * Honest nodes observe the same finalised destination state, receipts and
     return data included, and compute the attestation content as the same pure
-    function of receipt and schemas, which an upgrade does not change for
-    requests already made; otherwise nodes split and no attestation reaches
-    the threshold. The same holds for `authentic` and `processable`: a
-    request admitted by too few nodes is never attested. A change to any of
-    these therefore applies only to requests made at or after a source
-    height the upgrade names, and a change applied to requests in flight
-    leaves them unanswered.
+    function of what they read and the schemas, which an upgrade does not
+    change for requests already made; otherwise nodes split and no
+    attestation reaches the threshold. The same holds for `authentic` and
+    `processable`: a request admitted by too few nodes is never attested.
+  * A change to `authentic`, `processable` or the attestation function
+    applies only to requests made at or after a source height the upgrade
+    names; applied to requests in flight it leaves them unanswered.
   * Key derivation is collision-resistant: distinct (source chain, contract,
     key parameters) derive distinct keys, so the sender of an executed
     transaction identifies the contract and key it was signed for. A key
@@ -200,7 +205,7 @@ version may be delivered after the next.
 
 ```
 state (per application contract):
-    attestation_key: PublicKey           // set by the application, section 3.1
+    attestation_key: KeyVersion -> PublicKey   // section 3.1
     last_seen:   ChainId -> Height       // 0 for every chain, see below
     outstanding: RequestId -> Entry
     Entry = { dest: ChainId, known: Height }
@@ -213,11 +218,12 @@ on sign_bidirectional(req) from the application logic:
     signet.sign_bidirectional(rid, req)
     return rid
 
-on response(rid, att = (kind, height, data), sig):
+on response(rid, att = (version, kind, height, data), sig):
     if rid not in outstanding:                          // C3a
         drop
     e = outstanding[rid]
-    if not verify(sig, H(rid || att)):                  // C3b
+    if not verify(sig, H(rid || att),                   // C3b
+                  attestation_key[att.version]):
         drop
     if height <= e.known:                               // C3c
         drop
@@ -226,19 +232,23 @@ on response(rid, att = (kind, height, data), sig):
     self.on_response(rid, (kind, data))
 ```
 
-The entry keeps `dest` because the rid is a hash and cannot yield it, and
-C3d needs it to pick the last_seen to raise. `response` is atomic: a
-handler that fails reverts C3d and C4 with it, so the entry stays
-outstanding and the response can be delivered again (section 6).
+The check is here and not in the MPC because the nodes have no agreed
+mapping between source and destination heights, so no node can say what the
+destination looked like when a call was made; the contract can, from the
+responses it has accepted. The entry keeps `dest` because the rid is a hash
+and cannot yield it, and C3d needs it to pick the last_seen to raise. Where
+the chain runs the handler in the response transaction, `response` is
+atomic: a handler that fails reverts C3d and C4 with it, so the entry
+stays outstanding and the response can be delivered again (section 6).
 
 last_seen starts at 0 for every destination, and so does `known` for any
 entry already outstanding when a contract upgrades to this version. The
-cost: a rid whose transaction already executed, through this or any other
-signing API, and that is issued again with the same bytes can accept one
-replayed old response, a stale answer for a call that could never execute
-again, and a second accepted response for that execution (G2). A start
-height an operator supplies instead would, if too high, drop every
-execution at or below it with no way back (C4).
+cost: a rid whose transaction already executed through this API, and that
+is issued again with the same bytes, can accept one replayed old response,
+a stale answer for a call that could never execute again, and a second
+accepted response for that execution (G2). A start height an operator
+supplies instead would, if too high, drop every execution at or below it
+with no way back (C4).
 
 Properties:
 
@@ -298,7 +308,7 @@ emits three events:
 * `SignRequest { contract, rid, req }`, when a contract asks for a
   signature.
 * `Signature { rid, signature }`, when a signature is published, for the
-  broadcaster.
+  broadcaster and for nodes that were not in the signing round.
 * `Response { contract, rid, att, sig }`, when an attestation is published.
   Where the chain allows it, the contract's `response` handler is called in
   the same transaction, with a bounded gas allowance, since it runs on the
@@ -306,9 +316,6 @@ emits three events:
   library verifies what it receives (C3), so anyone may call `response`
   directly, which is how a response is delivered where the signet contract
   cannot call it, and again after a failed handler.
-
-The library verifies responses (C3b) and the MPC verifies the requests and
-responses it reads (section 4.4).
 
 ### 4.4 MPC network
 
@@ -336,13 +343,12 @@ state:
 on SignRequest { contract, rid, req } finalised on the source chain:
     if not authentic(contract, rid, req):                 // M1
         drop
-    if rid in pending:                                    // repeat
+    if rid in pending or not processable(req):            // M4
         drop
-    if processable(req):                                  // M4
-        pending[rid] = { req, contract, signatures: {} }
-        signature = threshold_sign(req.tx, derived_key(contract, req.key))   // M1
-        pending[rid].signatures.add(signature)
-        publish_signature(rid, signature)
+    pending[rid] = { req, contract, signatures: {} }
+    signature = threshold_sign(req.tx, derived_key(contract, req.key))   // M1
+    pending[rid].signatures.add(signature)
+    publish_signature(rid, signature)
 
 on Signature { rid, signature } finalised on the source chain:
     e = pending[rid] if rid in pending
@@ -351,9 +357,9 @@ on Signature { rid, signature } finalised on the source chain:
         e.signatures.add(signature)
 
 on destination block at height h finalised on chain dest:
-    for (rid, e) in pending with e.req.dest = dest and no e.attestation:
+    for (rid, e) in pending for dest and no e.attestation:
         ours = { txid(s, e.req.tx) for s in e.signatures }
-        account = derived_key(e.contract, e.req.key)
+        account = derived_address(e.contract, e.req.key)
         if some id in ours has a receipt r in a block at height h' that is
           now final, or this block holds a transaction sent by account with
           receipt r whose unsigned bytes are e.req.tx, with h' = h:   // M3
@@ -369,7 +375,6 @@ attest(rid, att):
     e = pending[rid]
     e.attestation = att
     sig = threshold_sign(H(rid || att), attestation_key(e.contract))     // M2
-          retried with the same att until it succeeds
     publish_response(e.contract, rid, att, sig)
 
 on Response { contract, rid, att, sig } finalised on the source chain:
@@ -377,15 +382,21 @@ on Response { contract, rid, att, sig } finalised on the source chain:
         delete pending[rid]
 ```
 
-A request's execution is found in two ways. By transaction ID, at any
-height, under every signature the MPC issued for it: there can be several,
-for instance when a node whose share went into one run restarts and joins
+A request's execution is found two ways. By transaction ID, at any height,
+under every signature the MPC issued for it: there can be several, for
+instance when a node whose share went into one run restarts and joins
 another, and replay protection lets at most one execute. And in the block
-being processed, by sender and unsigned bytes, with no signature at all:
-the sender is the request's own account, which only the network controls,
-and the bytes alone would not do, since another contract or key may have
-requested the same bytes. The second way covers a signing round whose
-result only its faulty participants hold, on the same terms as Unviable.
+being processed, by sender and unsigned bytes, holding no signature: the
+sender is the request's own account, which only the network controls, and
+the bytes alone would not do, since another contract or key may have
+requested the same bytes.
+
+The second way is what keeps an attestation off the critical path of the
+source chain. A signing round has t participants, at most f of them
+faulty, so it leaves fewer than t nodes holding the signature and the
+attestation always needs nodes that were not in it. Without the block
+scan those nodes must wait for the `Signature` event to be published and
+indexed, on every request.
 
 Unviable is attested only by nodes that process the block taking the nonce
 after admitting the request. Finding that block later would mean querying
@@ -395,13 +406,14 @@ its destination indexing runs ahead of its source indexing, so a nonce
 taken soon after the request is made may be seen by fewer nodes than the
 threshold: Unviable is best-effort.
 
-Restarts. A node keeps `pending` and its position on every chain durably
-and resumes indexing from that position, so what it admitted survives, what
-it dropped stays dropped (M4), no destination block goes unprocessed, and
+Restarts. A node keeps `pending` and its position on every chain durably,
+advancing the position only once the event's effects are persisted, and
+resumes indexing from that position, so what it admitted survives, what it
+dropped stays dropped (M4), no destination block goes unprocessed, and
 each entry resumes at the step it is missing: signing, lookup or
-publishing, the last two retried with the recorded attestation until the
-Response event is finalised, since the Unviable and bytes tests see only
-the block being processed. A duplicate attestation has the same content
+publishing, the last retried with the recorded attestation until the
+Response event is finalised, since the block-scan tests see only the block
+being processed. A duplicate attestation has the same content
 (section 3.3) and is dropped (C3a). Restarting at any point is therefore
 harmless.
 
@@ -413,15 +425,16 @@ Properties:
   no request on any signing API may name (`processable` covers this one);
   otherwise a contract could have its own attestation key sign an arbitrary
   hash and forge a response to itself.
-* M2 An attestation binds rid, kind, height and data as separate length-
-  committed fields, and describes only destination state finalised at that
-  height.
+* M2 An attestation binds rid, key version, kind, height and data as
+  separate length-committed fields, and describes only destination state
+  finalised at that height.
 * M3 The MPC attests an outcome only from a finalised transaction sent by
   the request's own account, which only the network controls: the receipt
   of one whose unsigned bytes are tx(c), or, for Unviable, one whose
   unsigned bytes are not tx(c) and that took tx(c)'s nonce. Nothing else.
-* M4 The MPC drops a request that is not authentic, or that it cannot
-  process, and keeps no state for it, so the call is unanswered.
+* M4 The MPC drops a request that is not authentic, that it cannot process,
+  or whose rid is still pending, and keeps no new state for it; a re-issued
+  rid cannot execute, so nothing is lost.
 * M5 An execution whose return data does not decode is not attested, and
   the MPC drops the request.
 * M6 Unviable is attested only from a block a node processed, so a nonce
@@ -459,43 +472,42 @@ flowchart LR
 
 Caption: Solid arrows are happens-before for the two contracts involved,
 one on each chain; dashed arrows are cross-chain calls, which are
-deliberately not part of the relation. exec(c) at B48
-happens-before A15 and therefore before the second call(c) at A16, so a
-response attesting B48 is dropped for that call (C3c in section 4.1). The
-first call(c) at A12 has no such path, so a response attesting B48 is
-accepted for it.
+deliberately not part of the relation. The second call(c) at A16 has a path
+from B48 through A15; the first at A12 has none.
 
 * G2: suppose two responses reporting the same execution (height h) are
-  accepted by entries e1 and e2. Both carry the same rid: the execution
-  fixes the transaction and the destination, and its sender fixes the
-  contract and key (derivation assumption, section 3.3). By C1 they were not
+  accepted by entries e1 and e2. An accepted response is for a rid the MPC
+  admitted (C3b), so its key parameters are canonical (M4) and its dest
+  names one chain (section 3.3). Both then carry the same rid: the
+  execution fixes the transaction and the destination, and its sender fixes
+  the contract and key (key derivation, section 3.3). By C1 they were not
   outstanding together, so e2 was created after e1 was removed, after the
   first acceptance. By C3d last_seen[dest] was already at least h then,
   so by C2 e2.known >= h, and C3c drops the second response. Contradiction.
   exec(c) itself happening at most once is the replay-protection assumption,
   not something the library enforces.
 
-* G3: M2, the finality assumption, and C3b (only attestations under the key
-  are accepted).
-
-* G4: the attestation key binds the source chain and the contract (M1), the
+* G3: the attestation key binds the source chain and the contract (M1), the
   attestation binds the rid (M2), the rid binds the transaction (a length-
   committing hash), and the MPC reports only the receipt of a transaction
   with tx(c)'s bytes from tx(c)'s account (M3). So the reported receipt is
-  tx(c)'s own. For Unviable, M3 and M6 report a transaction from tx(c)'s
-  account taking tx(c)'s nonce, which is tx(c)'s outcome by definition.
+  tx(c)'s own, and final (M2, finality assumption). For Unviable, M3 and M6
+  report a transaction from tx(c)'s account taking tx(c)'s nonce, which
+  blocks tx(c) for good (section 3.3).
 
-* G5: the signature was issued after call(c) was finalised (section 4.4,
-  signing follows the finalised SignRequest), and e.known
-  is a height some accepted response attested before call(c) (C2, C3d),
+* G4: the signature was issued after call(c) was finalised (section 4.4,
+  signing follows the finalised SignRequest), and e.known is a height some
+  accepted response attested before call(c) (C2, C3d),
   hence finalised by then (M2), so height(exec(c)) > e.known. The MPC finds
-  the execution by its published signature, whenever it started looking
-  (M3); the return data decodes (G5's premise), so M5 does not apply, and
-  honest nodes compute the same attestation and publish it (assumptions).
+  the execution by its transaction ID or in its own block (M3), whenever it
+  started looking; the return data decodes (G4's premise), so M5 does not
+  apply, and honest nodes compute the same attestation and publish it
+  (assumptions).
   By C4 the entry is still outstanding unless a response for rid(c) was
   accepted first, and any such response reports exec(c) too, since at most
-  one signature executes (replay protection) and M3 attests only that
-  receipt. So a response reporting exec(c) passes C3 and is accepted.
+  one signature executes and no Unviable can follow an execution (replay
+  protection, section 3.3), and M3 attests only that receipt. So a response
+  reporting exec(c) passes C3 and is accepted.
 
 ## 6. Open design points
 
@@ -511,11 +523,15 @@ accepted for it.
   `process` batch carrying its message, so `process` has to isolate
   handler failures. Removing the entry before the handler runs is not an
   alternative, since C3a would then drop the re-delivery.
+* A dropped request strands its rid. After M4 or M5 the MPC keeps nothing
+  while the library's entry stays outstanding, so C1 refuses that rid for
+  good and the application can only retry with a different transaction.
 * `pending` grows without bound. An entry lives until a verified Response,
   and a request whose signature nobody broadcasts never produces one. A
   cancel transaction that takes the nonce ends the MPC's entry when enough
   nodes see it (M6), and the library's when that is attested, so an
   application has a way out, but nothing bounds the entries nobody clears.
-  `outstanding` grows the same way. Checking old entries less often bounds
-  the work per block, which is the part that matters.
+  `outstanding` and an entry's `signatures` grow the same way. Checking old
+  entries less often bounds the work per block, which is the part that
+  matters.
 
