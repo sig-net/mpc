@@ -75,7 +75,7 @@ pub async fn align_backlog_with_consensus(
     };
 
     if let Err(err) = backlog.regress(&fetched_checkpoint).await {
-        tracing::error!(?err, %chain, "failed to regress backlog to checkpoint");
+        tracing::error!(error = %format_args!("{err:#}"), %chain, "failed to regress backlog to checkpoint");
         return None;
     }
 
@@ -92,7 +92,7 @@ async fn fetch_peer_checkpoint(
         .fetch_checkpoint_by_digest(url, chain, target_digest)
         .await
         .inspect_err(|err| {
-            tracing::warn!(?url, ?chain, ?err, "failed to query peer for checkpoint");
+            tracing::warn!(?url, ?chain, error = %format_args!("{err:#}"), "failed to query peer for checkpoint");
         })
         .ok()?;
 
