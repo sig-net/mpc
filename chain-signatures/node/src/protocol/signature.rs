@@ -188,7 +188,10 @@ impl SignGenerator {
                     if self.proposer == me {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES.inc();
                     }
-                    tracing::error!(
+                    // Every failure reorganizes and re-logs round-aware in
+                    // `reorganize`, so keep this detail at info to avoid one error
+                    // per round from wedged requests.
+                    tracing::info!(
                         ?sign_id,
                         ?err,
                         awaited = ?self.awaited(&seen),
