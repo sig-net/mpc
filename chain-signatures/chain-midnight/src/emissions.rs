@@ -75,9 +75,10 @@ fn log_items<P: ProofKind<DefaultDB>>(
         [Op::Ckpt, rest @ ..] => rest,
         rest => rest,
     };
+    let (pairs, remainder) = log_program.as_chunks::<2>();
     anyhow::ensure!(
-        log_program.chunks_exact(2).remainder().is_empty()
-            && log_program.chunks_exact(2).all(|pair| matches!(
+        remainder.is_empty()
+            && pairs.iter().all(|pair| matches!(
                 pair, [Op::Push { storage: false, .. }, Op::Log]
             )),
         "unsupported-singleton-transcript: expected optional leading Ckpt and literal non-storage Push/Log pairs"
