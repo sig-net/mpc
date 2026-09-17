@@ -15,6 +15,8 @@ or error: if on-call would gain nothing from reading it, it does not belong at t
   entry per occurrence.
 - Log metadata, not payloads: no binaries, contract bytecode, or other bulky data — reference them by
   hash or id instead.
+- Never log secrets, including URLs carrying API keys — log the host only. See
+  `doc/SECRET_MANAGEMENT.md`.
 
 ## Examples
 
