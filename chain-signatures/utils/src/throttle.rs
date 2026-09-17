@@ -2,10 +2,9 @@
 //! the occurrence count for the elapsed window.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-const MAX_KEYS: usize = 1024;
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
 
 struct KeyState {
@@ -15,7 +14,7 @@ struct KeyState {
 
 pub struct Throttle {
     interval: Duration,
-    state: Mutex<HashMap<String, KeyState>>,
+    state: Mutex<HashMap<&'static str, KeyState>>,
 }
 
 impl Throttle {
@@ -26,21 +25,17 @@ impl Throttle {
         }
     }
 
-    /// Records an occurrence for `key`. Returns the total occurrence count for
-    /// the elapsed window when the entry should be logged, `None` while
-    /// suppressed. The first occurrence of a key logs immediately.
-    pub fn check(&self, key: &str) -> Option<u64> {
+    /// Keys are compile-time constants, so the map is bounded by the number of
+    /// call sites and no eviction policy is needed.
+    pub fn check(&self, key: &'static str) -> Option<u64> {
         self.check_at(key, Instant::now())
     }
 
-    pub fn check_at(&self, key: &str, now: Instant) -> Option<u64> {
-        let mut state = self.state.lock().unwrap();
+    pub fn check_at(&self, key: &'static str, now: Instant) -> Option<u64> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(entry) = state.get_mut(key) else {
-            if state.len() >= MAX_KEYS {
-                return Some(1);
-            }
             state.insert(
-                key.to_owned(),
+                key,
                 KeyState {
                     window_start: now,
                     count: 1,
@@ -69,7 +64,7 @@ static GLOBAL: OnceLock<Throttle> = OnceLock::new();
 ///     tracing::warn!(count, "repeated failure");
 /// }
 /// ```
-pub fn check(key: &str) -> Option<u64> {
+pub fn check(key: &'static str) -> Option<u64> {
     GLOBAL
         .get_or_init(|| Throttle::new(DEFAULT_INTERVAL))
         .check(key)
@@ -104,15 +99,5 @@ mod tests {
         assert_eq!(t.check_at("a", t0), Some(1));
         assert_eq!(t.check_at("b", t0), Some(1));
         assert_eq!(t.check_at("a", t0 + Duration::from_secs(1)), None);
-    }
-
-    #[test]
-    fn key_cap_degrades_to_pass_through() {
-        let t = Throttle::new(Duration::from_secs(60));
-        let t0 = Instant::now();
-        for i in 0..MAX_KEYS {
-            assert_eq!(t.check_at(&i.to_string(), t0), Some(1));
-        }
-        assert_eq!(t.check_at("overflow", t0 + Duration::from_secs(1)), Some(1));
     }
 }
