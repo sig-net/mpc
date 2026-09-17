@@ -210,8 +210,7 @@ async fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkT
 
 pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
     let log_otlp_provider = init_otlp_logs(env, node_id, options.otlp_endpoint.as_str()).await;
-    let otlp_filter =
-        EnvFilter::new(std::env::var("RUST_LOG_OTLP").unwrap_or_else(|_| "info".to_string()));
+    let log_otlp_layer = OpenTelemetryTracingBridge::new(&log_otlp_provider);
 
     let log_fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(std::io::stderr().is_terminal())
@@ -229,10 +228,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
             .with_filter(EnvFilter::from_default_env());
 
         tracing_subscriber::registry()
-            .with(
-                OpenTelemetryTracingBridge::new(&log_otlp_provider)
-                    .with_filter(otlp_filter.clone()),
-            )
+            .with(log_otlp_layer)
             .with(OpenTelemetryLayer::new(tracer_otlp))
             .with(log_stackdriver_layer)
             .init();
@@ -240,7 +236,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
     } else {
         tracing_subscriber::registry()
             .with(log_fmt_layer)
-            .with(OpenTelemetryTracingBridge::new(&log_otlp_provider).with_filter(otlp_filter))
+            .with(log_otlp_layer)
             .with(OpenTelemetryLayer::new(tracer_otlp))
             .init();
         tracing::info!("Set global logging subscriber: fmt, otlp");
