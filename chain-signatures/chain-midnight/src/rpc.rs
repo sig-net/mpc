@@ -928,6 +928,179 @@ mod tests {
         );
     }
 
+    async fn read_fallible_capture(events: Vec<u8>) -> anyhow::Result<Option<BlockEmissions>> {
+        let metadata = subxt::Metadata::decode_all(
+            &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
+        )?;
+        let server = ServerBuilder::default().build("127.0.0.1:0").await?;
+        let mut config = http_config(server.local_addr()?);
+        config.rpc.retry = attempts(0);
+        let transport = connect_http(&config)?;
+        // The header and extrinsic wrappers are synthetic, encoded against captured
+        // metadata. The ledger transaction and successful events are captured bytes;
+        // negative cases alter status records explicitly. This is not an inclusion proof.
+        let client = OnlineClient::<SubstrateConfig>::from_rpc_client_with(
+            H256([0x11; 32]),
+            subxt::client::RuntimeVersion {
+                spec_version: 1,
+                transaction_version: 1,
+            },
+            metadata,
+            transport.clone(),
+        )?;
+        let filler = client.tx().create_unsigned(&subxt::dynamic::tx(
+            "System",
+            "remark",
+            vec![subxt::dynamic::Value::from_bytes([])],
+        ))?;
+        let candidate = client.tx().create_unsigned(&subxt::dynamic::tx(
+            "Midnight",
+            "send_mn_transaction",
+            vec![subxt::dynamic::Value::from_bytes(include_bytes!(
+                "../fixtures/fallible-deposit-tx-432.mn"
+            ))],
+        ))?;
+        // Preserve the captured candidate's extrinsic index, including preceding
+        // unrelated calls, so status association is exercised by Subxt itself.
+        let mut body = vec![format!("0x{}", hex::encode(filler.encoded())); 4];
+        body.push(format!("0x{}", hex::encode(candidate.encoded())));
+        let header = json!({
+            "parentHash": hash_of_byte(0x42),
+            "number": "0x1b0",
+            "stateRoot": hash_of_byte(0x44),
+            "extrinsicsRoot": hash_of_byte(0x45),
+            "digest": { "logs": [] }
+        });
+        let mut module = RpcModule::new(());
+        let response_header = header.clone();
+        module.register_method("chain_getHeader", move |params, _, _| {
+            assert_eq!(params.parse::<Vec<String>>().unwrap(), [hash_of_byte(0x43)]);
+            response_header.clone()
+        })?;
+        module.register_method("chain_getBlock", move |params, _, _| {
+            assert_eq!(params.parse::<Vec<String>>().unwrap(), [hash_of_byte(0x43)]);
+            json!({ "block": { "header": header, "extrinsics": body }, "justifications": null })
+        })?;
+        let events_key = client.storage().address_bytes(&subxt::dynamic::storage(
+            "System",
+            "Events",
+            Vec::<subxt::dynamic::Value>::new(),
+        ))?;
+        module.register_method("state_getStorage", move |params, _, _| {
+            assert_eq!(
+                params.parse::<Vec<String>>().unwrap(),
+                [
+                    format!("0x{}", hex::encode(&events_key)),
+                    hash_of_byte(0x43)
+                ]
+            );
+            format!("0x{}", hex::encode(&events))
+        })?;
+        let handle = server.start(module);
+        let rpc = MidnightRpc {
+            client,
+            reads: Reads::new(transport, config.rpc.request_timeout, config.rpc.retry),
+        };
+        let block = BlockRef {
+            number: 432,
+            hash: hash_of_byte(0x43),
+            parent_hash: hash_of_byte(0x42),
+        };
+        let singleton = crate::test_utils::hex_32(
+            "4daa9701226222a9db302dfb6f347f48c947278a4dc93812a79494f4086a0172",
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            rpc.block_emissions(&block, &singleton),
+        )
+        .await;
+        handle.stop()?;
+        handle.stopped().await;
+        result.context("block reader timed out")?
+    }
+
+    #[tokio::test]
+    async fn block_reader_extracts_captured_applied_fallible_notification() {
+        let events = include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec();
+        let block = read_fallible_capture(events.clone())
+            .await
+            .expect("read captured fallible transaction")
+            .expect("block contains a singleton candidate");
+        assert_eq!(block.proof_seed.reported_block_number, 432);
+        assert_eq!(block.proof_seed.reported_block_hash, [0x43; 32]);
+        assert_eq!(block.proof_seed.scale_body.len(), 5);
+        assert_eq!(block.proof_seed.scale_system_events, events);
+        assert_eq!(block.candidates.len(), 1);
+        let candidate = &block.candidates[0];
+        assert_eq!(candidate.extrinsic_index, 4);
+        assert_eq!(
+            candidate.ledger_tx_hash,
+            crate::test_utils::hex_32(
+                "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d"
+            )
+        );
+        assert_eq!(candidate.calls.len(), 1);
+        let call = &candidate.calls[0];
+        assert_eq!(call.call_index, 1);
+        assert_eq!(call.physical_segment, 49592);
+        assert_eq!(call.phase, crate::emissions::TranscriptPhase::Fallible);
+        assert_eq!(call.emissions.len(), 1);
+        assert_eq!(
+            call.emissions[0].kind,
+            crate::emissions::EmissionKind::SignBidirectional
+        );
+        assert_eq!(
+            call.emissions[0].payload[1..33],
+            crate::test_utils::hex_32(
+                "ee3385dda706877d30e802a0df57c228310016889104b8fb361c830a58d1e500"
+            )
+        );
+    }
+
+    fn captured_applied_status_record() -> Vec<u8> {
+        captured_status_events(
+            include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
+            4,
+        )
+        .iter()
+        .map(Result::unwrap)
+        .find(|event| event.as_event::<TxApplied>().unwrap().is_some())
+        .expect("captured applied status")
+        .bytes()
+        .to_vec()
+    }
+
+    #[tokio::test]
+    async fn block_reader_skips_partial_success_and_other_extrinsics_statuses() {
+        let applied = captured_applied_status_record();
+        assert_eq!(&applied[..7], &[0, 4, 0, 0, 0, 5, 2]);
+        let mut partial = applied.clone();
+        partial[6] = 7; // TxPartialSuccess in the captured metadata.
+        let mut other_extrinsic = applied;
+        other_extrinsic[1..5].copy_from_slice(&0u32.to_le_bytes());
+        for records in [vec![partial.clone()], vec![other_extrinsic, partial]] {
+            let block = read_fallible_capture(encode_status_records(&records))
+                .await
+                .expect("unsupported outcome is skipped")
+                .expect("candidate is present in the block body");
+            assert!(block.candidates.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn block_reader_holds_when_applied_hash_does_not_match_transaction() {
+        let mut applied = captured_applied_status_record();
+        assert_eq!(&applied[..7], &[0, 4, 0, 0, 0, 5, 2]);
+        applied[7] ^= 1; // First byte of TxAppliedDetails.tx_hash.
+        let err = read_fallible_capture(encode_status_records(&[applied]))
+            .await
+            .expect_err("a different transaction's status must hold the block");
+        let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
+        assert_eq!(hold.height, 432);
+        assert_eq!(hold.reason, "singleton-tx-undecodable");
+        assert!(format!("{:#}", hold.cause).contains("hash does not match"));
+    }
+
     fn capture_output_dir(value: &str) -> anyhow::Result<PathBuf> {
         anyhow::ensure!(
             !value.is_empty(),

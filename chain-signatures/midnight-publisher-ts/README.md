@@ -22,9 +22,9 @@ The process memoizes one wallet facade, including while it is starting. A single
 
 ## Supported event transactions
 
-The MPC reader accepts events only from finalized `TxApplied` transactions and decodes only the guaranteed transcripts of calls to the configured Signet singleton. Unsupported statuses and singleton calls with a fallible transcript are logged and skipped so they cannot hold block processing.
+The MPC reader accepts events only from finalized, fully successful `TxApplied` transactions whose decoded transaction hash matches the status event. It decodes both guaranteed and fallible transcripts of calls to the configured Signet singleton, processing all guaranteed phases before fallible phases in ledger execution order. Partial-success transactions and other candidates without `TxApplied` are logged and skipped; malformed, duplicate or conflicting statuses hold block processing.
 
-Integrations must enforce this before submission using the ledger builder's `{ tag: "guaranteedOnly" }` segment specifier, or by rejecting a constructed call when `partitionedTranscript[1]` is present. `guaranteedOnly` validates the partitioning result and fails construction when the call is too expensive; it does not move fallible work into the guaranteed phase.
+Supported singleton transcripts contain only an optional leading `Ckpt` followed by literal, non-storage `Push`/`Log` pairs, with empty declared effects and supported Signet event schemas. Malformed or unsupported singleton transcripts in fully applied candidate transactions hold block processing. Integrations do not need to enforce `{ tag: "guaranteedOnly" }` or reject `partitionedTranscript[1]` solely because a fallible transcript is present; both phases must satisfy the supported transcript and event schemas.
 
 ## Deadlines and retry policy
 
