@@ -106,6 +106,11 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             request,
             block_timestamp,
         } => {
+            // Read the kind before the request is consumed: it labels the
+            // indexing observation so a bidirectional first leg is separable
+            // from a plain sign request.
+            let kind = request.request_kind();
+
             // Record the request's indexed timestamp if it's a new request
             let is_new = process_sign_request(request, ctx)
                 .await
@@ -114,10 +119,10 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             if is_new {
                 if let Some(ts) = block_timestamp {
                     // Ethereum (~15 min finality) reports the block timestamp.
-                    telemetry.request_indexed_at(ts);
+                    telemetry.request_indexed_at(ts, kind);
                 } else {
                     // Faster chains (Solana, Canton, Hydration) report no timestamp.
-                    telemetry.request_indexed();
+                    telemetry.request_indexed(kind);
                 }
             }
         }

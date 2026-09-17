@@ -17,9 +17,10 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
 use solana_client::rpc_config::RpcBlockConfig;
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::signature::Signer as SolanaSigner;
 use solana_sdk::signer::keypair::Keypair;
-use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
+use solana_sdk::{pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::{TransactionDetails, UiConfirmedBlock, UiTransactionEncoding};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
@@ -482,7 +483,6 @@ impl ChainPublisher for SolanaClient {
             SignKind::Sign | SignKind::SignBidirectional(_) => {
                 let tx = program
                     .request()
-                    .signer(self.payer.clone())
                     .accounts(SolanaRespondAccount {
                         responder: self.payer.pubkey(),
                         event_authority,
@@ -520,7 +520,6 @@ impl ChainPublisher for SolanaClient {
                     respond_bidirectional_tx.output.clone();
                 let tx = program
                     .request()
-                    .signer(self.payer.clone())
                     .accounts(SolanaRespondBidirectionalAccount {
                         responder: self.payer.pubkey(),
                         event_authority,
@@ -603,7 +602,7 @@ mod tests {
         assert_eq!(config.rewards, Some(false));
         assert_eq!(
             config.commitment.map(|c| c.commitment),
-            Some(solana_sdk::commitment_config::CommitmentLevel::Finalized)
+            Some(solana_commitment_config::CommitmentLevel::Finalized)
         );
         assert_eq!(config.max_supported_transaction_version, Some(1));
     }

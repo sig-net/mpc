@@ -25,7 +25,7 @@ use cait_sith::protocol::Participant;
 use enum_map::EnumMap;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
-use mpc_primitives::{ChainConfig as _, IndexedSignRequest, SignId};
+use mpc_primitives::{ChainConfig as _, IndexedSignRequest, RequestKind, SignId};
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -404,6 +404,7 @@ impl SignatureSpawner {
                     entry.chain(),
                     SignRequestStep::AwaitingGeneration,
                     "ok",
+                    entry.request().request_kind(),
                     entry.request().unix_timestamp_indexed,
                 );
 

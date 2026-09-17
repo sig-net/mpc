@@ -1,5 +1,6 @@
 use crate::protocol::Governance;
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff};
+use mpc_chain_near::NearRpcGates;
 use mpc_contract::errors::CheckpointError;
 pub use mpc_contract::primitives::{Read, View};
 use mpc_keys::hpke;
@@ -12,16 +13,14 @@ use serde_json::json;
 use std::time::Duration;
 use url::Url;
 
-/// Base delay in milliseconds between NEAR governance RPC retries
-const NEAR_RETRY_BASE_DELAY_MS: u64 = 500;
-/// Maximum number of retry attempts for NEAR governance calls (vote, join)
-const NEAR_GOVERNANCE_MAX_RETRIES: usize = 5;
 /// Timeout for NEAR governance RPC calls (vote, join)
 const NEAR_GOVERNANCE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Each attempt is a single send, so allow more attempts than when near-fetch
+/// also retried within one.
 const NEAR_GOVERNANCE_RETRY: RetryConfig = RetryConfig {
     min_delay: Duration::from_secs(1),
     max_delay: Duration::from_secs(10),
-    max_times: 3,
+    max_times: 5,
     jitter: true,
 };
 
@@ -45,6 +44,7 @@ pub struct NearGovernanceClient {
     signer: InMemorySigner,
     cipher_pk: hpke::PublicKey,
     sign_pk: near_crypto::PublicKey,
+    gates: NearRpcGates,
 }
 
 impl NearGovernanceClient {
@@ -55,6 +55,7 @@ impl NearGovernanceClient {
         cipher_sk: &hpke::SecretKey,
         contract_id: &AccountId,
         signer: InMemorySigner,
+        gates: NearRpcGates,
     ) -> Self {
         Self {
             client,
@@ -63,14 +64,21 @@ impl NearGovernanceClient {
             signer,
             cipher_pk: cipher_sk.public_key(),
             sign_pk: sign_sk.public_key(),
+            gates,
         }
+    }
+
+    /// The NEAR endpoint's shared cooldown, for retry loops outside this client.
+    pub fn provider_gate(&self) -> &SharedBackoff {
+        &self.gates.provider
     }
 
     /// Read views from the MPC contract.
     pub async fn read(&self, reads: Vec<Read>) -> anyhow::Result<Vec<View>> {
-        retry_rpc!(
+        retry_rpc_gated!(
             NEAR_GOVERNANCE_TIMEOUT,
             NEAR_GOVERNANCE_RETRY,
+            self.gates.provider,
             "governance_read",
             {
                 let views: Vec<View> = self
@@ -89,20 +97,18 @@ impl NearGovernanceClient {
     /// Returns a terminal outcome for successful, behind, or conflicting
     /// checkpoints. Contract-level checkpoint rejections are not retried.
     ///
-    /// The outer `retry_rpc!` in `execute_vote_checkpoint` bounds the overall
-    /// attempt, so no per-call timeout is needed here.
+    /// A single send; the retry loop in `execute_vote_checkpoint` retries it
+    /// and bounds each attempt.
     pub async fn vote_checkpoint(
         &self,
         checkpoint: &CheckpointDigest,
     ) -> anyhow::Result<CheckpointVoteOutcome> {
-        let transaction = self
+        let call = self
             .client
             .call(&self.signer, &self.contract_id, "vote_checkpoint")
             .args_json(json!({ "checkpoint": checkpoint }))
-            .max_gas()
-            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
-            .transact()
-            .await;
+            .max_gas();
+        let transaction = self.gates.transact(call).await;
 
         let transaction = match transaction {
             Ok(transaction) => transaction,
@@ -122,7 +128,7 @@ impl NearGovernanceClient {
             }
             Err(err) => {
                 tracing::warn!(%err, ?checkpoint, "failed to vote for checkpoint");
-                return Err(err.into());
+                return Err(err);
             }
         };
 
@@ -153,12 +159,14 @@ impl Governance for NearGovernanceClient {
     fn propose_join(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
         tracing::info!(signer_id = %self.signer.account_id, "joining the protocol");
         async move {
-            retry_rpc!(
+            retry_rpc_gated!(
                 NEAR_GOVERNANCE_TIMEOUT,
                 NEAR_GOVERNANCE_RETRY,
+                self.gates.provider,
                 "propose_join",
                 {
-                    self.client
+                    let call = self
+                        .client
                         .call(&self.signer, &self.contract_id, "join")
                         .args_json(json!({
                             "url": self.my_addr,
@@ -166,11 +174,8 @@ impl Governance for NearGovernanceClient {
                             "sign_pk": self.sign_pk,
                         }))
                         .deposit(mpc_contract::REQUIRED_JOIN_DEPOSIT)
-                        .max_gas()
-                        .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
-                        .transact()
-                        .await?
-                        .into_result()?;
+                        .max_gas();
+                    self.gates.transact(call).await?.into_result()?;
                     Ok(())
                 }
             )
@@ -185,9 +190,10 @@ impl Governance for NearGovernanceClient {
     > + Send {
         let account_id = account_id.clone();
         async move {
-            retry_rpc!(
+            retry_rpc_gated!(
                 NEAR_GOVERNANCE_TIMEOUT,
                 NEAR_GOVERNANCE_RETRY,
+                self.gates.provider,
                 "governance_candidate_info",
                 {
                     let candidacy = self
@@ -208,20 +214,22 @@ impl Governance for NearGovernanceClient {
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
         tracing::info!(%epoch, signer_id = %self.signer.account_id, "voting for reshared");
         async move {
-            retry_rpc!(
+            retry_rpc_gated!(
                 NEAR_GOVERNANCE_TIMEOUT,
                 NEAR_GOVERNANCE_RETRY,
+                self.gates.provider,
                 "vote_reshared",
                 {
-                    let result = self
+                    let call = self
                         .client
                         .call(&self.signer, &self.contract_id, "vote_reshared")
                         .args_json(json!({
                             "epoch": epoch
                         }))
-                        .max_gas()
-                        .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
-                        .transact()
+                        .max_gas();
+                    let result = self
+                        .gates
+                        .transact(call)
                         .await
                         .inspect_err(|err| {
                             tracing::warn!(%err, "failed to vote for reshared");
@@ -239,20 +247,22 @@ impl Governance for NearGovernanceClient {
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
         tracing::info!(%public_key, signer_id = %self.signer.account_id, "voting for public key");
         async move {
-            retry_rpc!(
+            retry_rpc_gated!(
                 NEAR_GOVERNANCE_TIMEOUT,
                 NEAR_GOVERNANCE_RETRY,
+                self.gates.provider,
                 "vote_public_key",
                 {
-                    let result = self
+                    let call = self
                         .client
                         .call(&self.signer, &self.contract_id, "vote_pk")
                         .args_json(json!({
                             "public_key": public_key
                         }))
-                        .max_gas()
-                        .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
-                        .transact()
+                        .max_gas();
+                    let result = self
+                        .gates
+                        .transact(call)
                         .await
                         .inspect_err(|err| {
                             tracing::warn!(%err, "failed to vote for public key");
@@ -274,20 +284,22 @@ impl Governance for NearGovernanceClient {
             "voting for new threshold"
         );
         async move {
-            retry_rpc!(
+            retry_rpc_gated!(
                 NEAR_GOVERNANCE_TIMEOUT,
                 NEAR_GOVERNANCE_RETRY,
+                self.gates.provider,
                 "vote_threshold",
                 {
-                    let result = self
+                    let call = self
                         .client
                         .call(&self.signer, &self.contract_id, "vote_threshold")
                         .args_json(json!({
                             "new_threshold": new_threshold
                         }))
-                        .max_gas()
-                        .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
-                        .transact()
+                        .max_gas();
+                    let result = self
+                        .gates
+                        .transact(call)
                         .await
                         .inspect_err(|err| {
                             tracing::warn!(%err, "failed to vote for new threshold");
