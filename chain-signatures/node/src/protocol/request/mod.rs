@@ -221,6 +221,7 @@ impl SignatureSpawner {
         self.delay_monitor.watch(
             sign_id,
             chain,
+            request.request_kind(),
             unix_timestamp_indexed,
             remaining_time,
             Arc::clone(&is_proposer),
