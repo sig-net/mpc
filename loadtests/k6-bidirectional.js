@@ -2,7 +2,7 @@ import http from 'k6/http';
 import { check, fail, sleep } from 'k6';
 import { Trend, Rate, Counter, Gauge } from 'k6/metrics';
 
-// Load test for the Solana -> Ethereum bidirectional round trip.
+// Load test for Solana or Midnight -> Ethereum bidirectional round trips.
 //
 // POST /sign_bidirectional answers 202 with a job id in milliseconds and the
 // round trip settles tens of minutes later, so thresholds on the built-in HTTP
@@ -30,6 +30,7 @@ const workersUnderfunded = new Gauge('bidi_workers_underfunded');
 const workerBalanceMin = new Gauge('bidi_worker_balance_min_eth');
 
 const success = new Rate('bidi_success');
+const completed = new Counter('bidi_completed');
 
 // Tagged with the service's own failure reason: respond_timeout and
 // all_workers_underfunded call for different remedies.
@@ -41,7 +42,10 @@ const rejectedRate = new Counter('bidi_rejected_rate_limit');
 const rejectedCapacity = new Counter('bidi_rejected_capacity');
 
 const pollSeconds = Number(__ENV.LT_POLL_SECONDS || 15);
-const jobTimeoutSeconds = Number(__ENV.LT_JOB_TIMEOUT_SECONDS || 2400);
+// Midnight additionally proves/submits the caller request before the signing
+// and Ethereum finality budgets start. Allow the full service deadline span.
+const jobTimeoutSeconds = Number(__ENV.LT_JOB_TIMEOUT_SECONDS ||
+  (__ENV.LT_SOURCE_CHAIN === 'midnight' ? 5400 : 2400));
 
 // Rates are per minute because the service caps arrivals at ten a minute;
 // above that this would measure the 429 handler.
@@ -52,6 +56,21 @@ const jobTimeoutSeconds = Number(__ENV.LT_JOB_TIMEOUT_SECONDS || 2400);
 // gracefulStop is what lets the last jobs finish; the default 30s would
 // discard most of the run's respond measurements.
 const strategies = {
+  // Midnight holds its single wallet through the complete round trip. One VU
+  // exercises that path without filling the API with overlapping jobs.
+  serial: {
+    scenarios: {
+      bidirectional: {
+        executor: 'constant-vus',
+        vus: 1,
+        gracefulStop: '90m',
+      },
+    },
+    thresholds: {
+      bidi_success: ['rate>0.95'],
+      bidi_completed: ['count>0'],
+    },
+  },
   rpm_1: {
     scenarios: {
       bidirectional: {
@@ -88,6 +107,13 @@ const strategies = {
 
 export const options = (() => {
   const key = __ENV.LT_STRATEGY;
+  const sourceChain = __ENV.LT_SOURCE_CHAIN || 'solana';
+  if (!['solana', 'midnight'].includes(sourceChain)) {
+    throw new Error(`Unknown LT_SOURCE_CHAIN: ${sourceChain}`);
+  }
+  if ((sourceChain === 'midnight') !== (key === 'serial')) {
+    throw new Error('Midnight requires LT_STRATEGY=serial; Solana requires an rpm strategy');
+  }
   if (!key) {
     throw new Error(
       `Missing LT_STRATEGY. Known strategies: ${Object.keys(strategies).join(', ')}`
@@ -110,6 +136,7 @@ export const options = (() => {
 
 const config = () => {
   const env = __ENV.LT_CHAIN_ENV;
+  const sourceChain = __ENV.LT_SOURCE_CHAIN || 'solana';
   // Not a CI input: the modes differ only in gas and in whether the respond
   // value is decoded or synthesized, neither of which this test measures.
   const mode = __ENV.LT_MODE || 'eth_self_transfer';
@@ -119,7 +146,11 @@ const config = () => {
       `Missing required environment: LT_CHAIN_ENV=${env}, LT_PINGER_API_KEY=${apiKey ? 'set' : 'unset'}`
     );
   }
-  return { env, mode, apiKey };
+  const environments = sourceChain === 'midnight' ? ['stagenet'] : ['dev', 'testnet', 'mainnet'];
+  if (!environments.includes(env)) {
+    throw new Error(`Unsupported environment ${env} for ${sourceChain}`);
+  }
+  return { env, mode, apiKey, sourceChain };
 };
 
 const headers = apiKey => ({
@@ -134,9 +165,9 @@ const headers = apiKey => ({
  * each one in seconds — otherwise reported only after an hour of submissions.
  */
 export function setup() {
-  const { env, apiKey } = config();
+  const { env, apiKey, sourceChain } = config();
   const res = http.get(
-    `${BASE_URL}/sign_bidirectional/workers?env=${env}`,
+    `${BASE_URL}/sign_bidirectional/workers?env=${env}&sourceChain=${sourceChain}`,
     { headers: headers(apiKey) }
   );
 
@@ -160,26 +191,41 @@ export function setup() {
     console.warn(`  underfunded: ${w.path} ${w.address} holds ${w.balanceWei} wei`);
   }
 
-  // A lease ends at confirmation, not at the round trip, so one address covers
-  // roughly a job a minute and the pool only has to cover the arrival rate.
-  // The service skips short addresses rather than failing on them.
-  // options is k6's own by now; strategies is this module's.
-  const perMinute = strategies[__ENV.LT_STRATEGY].scenarios.bidirectional.rate;
+  // Solana releases an address at confirmation; Midnight keeps its wallet for
+  // the full round trip and the serial scenario needs one funded ETH address.
+  const required = sourceChain === 'midnight'
+    ? 1
+    : strategies[__ENV.LT_STRATEGY].scenarios.bidirectional.rate;
   const funded = workers.length - short.length;
-  if (funded < perMinute) {
+  if (funded < required) {
     fail(
-      `${funded}/${workers.length} addresses funded, ${perMinute} needed at ${perMinute}/min`
+      `${funded}/${workers.length} addresses funded, ${required} needed for ${__ENV.LT_STRATEGY}`
     );
   }
   return { env };
 }
 
 export default function () {
-  const { env, mode, apiKey } = config();
+  const { sourceChain } = config();
+  const started = Date.now();
+  try {
+    runRoundTrip();
+  } finally {
+    // A quick failure must not turn the serial canary into a tight retry loop.
+    if (sourceChain === 'midnight') {
+      const remaining = 60 - (Date.now() - started) / 1000;
+      if (remaining > 0) sleep(remaining);
+    }
+  }
+}
+
+function runRoundTrip() {
+  const { env, mode, apiKey, sourceChain } = config();
+  completed.add(0);
 
   const submit = http.post(
     `${BASE_URL}/sign_bidirectional`,
-    JSON.stringify({ env, mode }),
+    JSON.stringify({ env, mode, sourceChain }),
     { headers: headers(apiKey) }
   );
 
@@ -192,6 +238,9 @@ export default function () {
     } else {
       rejectedRate.add(1);
     }
+    // A serial Midnight run should fit its one-worker capacity. Rejecting it
+    // is a failed canary attempt, even though no round trip was accepted.
+    if (sourceChain === 'midnight') success.add(false);
     return;
   }
 
@@ -224,6 +273,7 @@ export default function () {
 
     const state = view.json('state');
     if (state !== 'responded' && state !== 'failed') continue;
+    completed.add(1);
 
     const d = view.json('durations') || {};
     if (d.leaseWaitMs !== undefined) leaseWait.add(d.leaseWaitMs / SEC);
