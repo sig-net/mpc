@@ -189,24 +189,23 @@ impl Backlog {
     /// Insert a new Sign request into the backlog for the specified chain.
     /// Returns the initial [`SignEntry<Generating>`] handle and a boolean indicating
     /// whether the request was newly inserted (`true`) or was already present (`false`).
+    /// A request that is already present keeps the state its entry has reached:
+    /// overwriting would reset an executing entry and sign it a second time.
     pub async fn insert(&self, request: Arc<IndexedSignRequest>) -> (SignEntry<Generating>, bool) {
         let chain = request.chain;
         let id = request.id;
-        let entry = BacklogEntry::new(Arc::clone(&request));
-        let (prev, len) = {
+        let len = {
             let mut pending = self.pending(&chain).write().await;
-            let p = pending.insert(id, entry);
-            (p, pending.len())
+            if pending.get(&id).is_some() {
+                return (SignEntry::generating(request, self), false);
+            }
+            pending.insert(id, BacklogEntry::new(Arc::clone(&request)));
+            pending.len()
         };
 
-        let is_new = prev.is_none();
-        // Only increment total pending if this is a new entry
-        if is_new {
-            self.total_pending.fetch_add(1, Ordering::Relaxed);
-        }
-
+        self.total_pending.fetch_add(1, Ordering::Relaxed);
         self.observe_backlog_size(chain, len);
-        (SignEntry::generating(request, self), is_new)
+        (SignEntry::generating(request, self), true)
     }
 
     /// Remove a Sign request from the backlog for the specified chain.
