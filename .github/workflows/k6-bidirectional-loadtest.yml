@@ -20,7 +20,7 @@ on:
         default: solana
         required: true
       lt_strategy:
-        description: Solana arrivals per minute (Midnight always uses serial)
+        description: Solana arrivals per minute (mainnet always uses rpm_1; Midnight uses serial)
         type: choice
         options:
           - rpm_1
@@ -151,7 +151,7 @@ jobs:
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
           LT_CHAIN_ENV: ${{ matrix.environment }}
           LT_SOURCE_CHAIN: ${{ matrix.source }}
-          LT_STRATEGY: ${{ matrix.source == 'midnight' && 'serial' || inputs.lt_strategy || 'rpm_1' }}
+          LT_STRATEGY: ${{ matrix.source == 'midnight' && 'serial' || matrix.environment == 'mainnet' && 'rpm_1' || inputs.lt_strategy || 'rpm_1' }}
           LT_DURATION: ${{ inputs.lt_duration || '2h' }}
 
       - name: Write job summary
@@ -161,7 +161,7 @@ jobs:
             echo "## k6 Bidirectional Load Test"
             echo
             echo "- Source/network: \`${{ matrix.source }}/${{ matrix.environment }}\`"
-            echo "- Workload: \`${{ matrix.source == 'midnight' && 'serial (one active job, at most one start/minute)' || inputs.lt_strategy || 'rpm_1' }}\` submitting for \`${{ inputs.lt_duration || '2h' }}\`"
+            echo "- Workload: \`${{ matrix.source == 'midnight' && 'serial (one active job, at most one start/minute)' || matrix.environment == 'mainnet' && 'rpm_1' || inputs.lt_strategy || 'rpm_1' }}\` submitting for \`${{ inputs.lt_duration || '2h' }}\`"
             echo
             if [ -f k6-bidirectional.log ]; then
               echo '```'

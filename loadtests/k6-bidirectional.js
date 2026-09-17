@@ -113,6 +113,9 @@ const config = () => {
   if (!environments.includes(env)) {
     throw new Error(`Unsupported environment ${env} for ${sourceChain}`);
   }
+  if (env === 'mainnet' && __ENV.LT_STRATEGY !== 'rpm_1') {
+    throw new Error('Mainnet requires LT_STRATEGY=rpm_1');
+  }
   return { env, mode, apiKey, sourceChain };
 };
 

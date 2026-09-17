@@ -74,6 +74,36 @@ test('invalid source/network combinations fail before any HTTP call', () => {
   }
 });
 
+test('mainnet only accepts one arrival per minute before any HTTP call', () => {
+  for (const entrypoint of ['setup', 'iteration']) {
+    const run = driver({ LT_CHAIN_ENV: 'mainnet', LT_STRATEGY: 'rpm_6' });
+    assert.throws(() => run[entrypoint](), /Mainnet requires LT_STRATEGY=rpm_1/);
+    assert.equal(run.requests.length, 0);
+  }
+  const run = driver({ LT_CHAIN_ENV: 'mainnet' }, [[200, workers]]);
+  run.setup();
+  assert.equal(run.options.scenarios.bidirectional.rate, 1);
+  assert.match(run.requests[0].url, /workers\?env=mainnet&sourceChain=solana$/);
+});
+
+test('workflow resolves mainnet to rpm_1 while retaining other workloads', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/k6-bidirectional-loadtest.yml'), 'utf8');
+  const strategyExpression = workflow.match(/LT_STRATEGY: \$\{\{ (.*?) \}\}/)[1];
+  const summaryExpression = workflow.match(/Workload:.*?\$\{\{ (.*?) \}\}/)[1];
+  for (const environment of ['dev', 'testnet', 'mainnet', 'stagenet']) {
+    for (const strategy of ['', 'rpm_1', 'rpm_6']) {
+      const source = environment === 'stagenet' ? 'midnight' : 'solana';
+      const context = { matrix: { source, environment }, inputs: { lt_strategy: strategy } };
+      const expected = source === 'midnight' ? 'serial' : environment === 'mainnet' ? 'rpm_1' : strategy || 'rpm_1';
+      assert.equal(vm.runInNewContext(strategyExpression, context), expected);
+      assert.equal(vm.runInNewContext(summaryExpression, context), source === 'midnight'
+        ? 'serial (one active job, at most one start/minute)' : expected);
+      const run = driver({ LT_CHAIN_ENV: environment, LT_SOURCE_CHAIN: source, LT_STRATEGY: expected });
+      assert.equal(run.options.scenarios.bidirectional.rate, source === 'midnight' ? undefined : expected === 'rpm_6' ? 6 : 1);
+    }
+  }
+});
+
 test('Midnight sends source selection, polls completion, and reports service timings', () => {
   const run = driver(midnight, [
     [200, workers], [202, { jobId: 'job-1' }],
