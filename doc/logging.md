@@ -13,7 +13,8 @@ or error: if on-call would gain nothing from reading it, it does not belong at t
 - One event, one entry: flatten anyhow `Caused by:` chains rather than emitting multi-line output.
 - Rate-limit per-attempt output of retries or polling: one entry per interval with a count, not one
   entry per occurrence. For events that repeat per state-machine round (e.g. reorganization), sample
-  by progression — the first round and every Nth — instead of logging each round.
+  by progression — warn on the first round, then at most once per N rounds advanced — instead of
+  logging each round.
 - Log metadata, not payloads: no binaries, contract bytecode, or other bulky data — reference them by
   hash or id instead.
 - Never log secrets, including URLs carrying API keys — log the host only. See

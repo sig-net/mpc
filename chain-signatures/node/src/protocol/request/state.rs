@@ -7,6 +7,9 @@ use crate::metrics::protocols;
 
 pub struct SignState {
     round: usize,
+    /// Round of the last reorganize warn; reorganizations are sampled against
+    /// it so `bump_round` jumps can't skip the sampling points.
+    last_warned_round: usize,
     pub entry: SignEntry<Generating>,
     pub mesh_state: watch::Receiver<MeshState>,
     /// Budget for the current organizing+posit attempt.
@@ -36,6 +39,7 @@ impl SignState {
     ) -> Self {
         Self {
             round: carried_round.load(Ordering::Relaxed),
+            last_warned_round: 0,
             entry,
             mesh_state,
             budget: TimeoutBudget::new(round_timeout(0)),
@@ -66,16 +70,19 @@ impl SignState {
     /// state machine.
     pub fn reorganize(&mut self, reason: &str) -> SignPhase {
         protocols::SIGN_REORGANIZES.inc();
+        protocols::SIGN_REORGANIZE_ROUND.observe(self.round as f64);
 
-        // Wedged requests rotate forever at the 600s ceiling; sampling every 10th
-        // round emits roughly one heartbeat per 100 min instead of one per round.
-        if self.round == 0 || self.round.is_multiple_of(10) {
+        // Wedged requests rotate forever; a watermark on the last warned round
+        // keeps the warn rate at ~1 per 10 rounds even when StaleRound jumps
+        // `bump_round` past whole decades.
+        if self.round == 0 || self.round >= self.last_warned_round + 10 {
             tracing::warn!(
                 sign_id = ?self.entry.sign_id(),
                 round = self.round,
                 reason,
                 "reorganizing sign request"
             );
+            self.last_warned_round = self.round;
         } else {
             tracing::info!(
                 sign_id = ?self.entry.sign_id(),
@@ -161,10 +168,40 @@ mod tests {
         state.highest_seen_round = 9;
         state.reorganize("test");
         assert_eq!(state.round(), 9);
+    }
 
-        // The task is aborted and a new incarnation takes over.
+    #[test]
+    fn warn_watermark_survives_round_jumps() {
+        let carried = Arc::new(AtomicUsize::new(0));
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let backlog = Backlog::new();
+        let entry = SignEntry::generating(
+            mock_sign_request(SignId::new([0u8; 32]), Chain::Ethereum),
+            &backlog,
+        );
+        let mut state = SignState::new(entry.clone(), mesh_rx.clone(), Arc::clone(&carried));
+
+        state.reorganize("test");
+        assert_eq!(state.last_warned_round, 0);
+
+        state.highest_seen_round = 9;
+        state.reorganize("test");
+        assert_eq!(state.round(), 9);
+        assert_eq!(state.last_warned_round, 0);
+
+        state.highest_seen_round = 20;
+        state.reorganize("test");
+        assert_eq!(state.round(), 20);
+        assert_eq!(state.last_warned_round, 0);
+
+        state.reorganize("test");
+        assert_eq!(state.last_warned_round, 20);
+
+        // A respawned incarnation resumes at the carried round; its watermark
+        // starts fresh, but the high carried round re-arms the next warn.
         drop(state);
         let respawned = SignState::new(entry, mesh_rx, carried);
-        assert_eq!(respawned.round(), 9);
+        assert_eq!(respawned.round(), 21);
+        assert_eq!(respawned.last_warned_round, 0);
     }
 }
