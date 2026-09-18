@@ -323,6 +323,17 @@ impl SignatureSpawner {
         }
     }
 
+    /// A bidirectional leg's response is on chain: drop its task so the next
+    /// leg, which reuses this sign id, is not skipped as a duplicate.
+    fn handle_leg_completed(&mut self, sign_id: SignId) {
+        if self.drop_task(sign_id, "leg completed") {
+            tracing::info!(
+                ?sign_id,
+                "aborting signature task; bidirectional leg responded"
+            );
+        }
+    }
+
     /// A task's `JoinMap` entry finished (or was cancelled): tear down and log.
     fn handle_task_exit(&mut self, result: Result<(SignId, Result<(), SignError>), SignId>) {
         self.observe_queue_size();
@@ -356,8 +367,14 @@ impl SignatureSpawner {
     /// running, mark the id dead, forget the request, drop its mailbox and
     /// unwatch its delay monitoring. Returns whether a task was aborted.
     fn retire_task(&mut self, sign_id: SignId, reason: &'static str) -> bool {
-        let aborted = self.tasks.abort(sign_id);
         self.mark_dead(sign_id);
+        self.drop_task(sign_id, reason)
+    }
+
+    /// Like [`Self::retire_task`], but leaves the sign id live so a later
+    /// request carrying it is admitted instead of skipped as a duplicate.
+    fn drop_task(&mut self, sign_id: SignId, reason: &'static str) -> bool {
+        let aborted = self.tasks.abort(sign_id);
         self.requests.remove(&sign_id);
         self.posit_mailboxes.remove(&sign_id);
         self.delay_monitor.unwatch(sign_id, reason);
@@ -373,6 +390,9 @@ impl SignatureSpawner {
         match sign {
             SignCommand::Completion(sign_id) => {
                 self.handle_completion(sign_id);
+            }
+            SignCommand::LegCompleted(sign_id) => {
+                self.handle_leg_completed(sign_id);
             }
             SignCommand::AbortChain(chain) => {
                 tracing::warn!(
@@ -670,6 +690,74 @@ mod tests {
             "respawned task must share the entry's round, not a fresh one"
         );
         assert!(carried.load(Ordering::Relaxed) >= 7);
+    }
+
+    /// A bidirectional request's second leg reuses the first leg's sign id. If
+    /// the first leg's task is still tracked when it arrives, the duplicate
+    /// guard drops it and the round trip never finishes.
+    #[tokio::test]
+    async fn test_leg_completed_admits_the_next_leg() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+
+        let mut spawner = SignatureSpawner::new(
+            account_id,
+            contract,
+            presignatures,
+            mesh_rx,
+            msg_channel,
+            RpcChannel { tx: rpc_tx },
+            sync_report_tx,
+        );
+        let backlog = crate::backlog::Backlog::new();
+        let cfg = ProtocolConfig::default();
+        let sign_id = SignId::new([7u8; 32]);
+        let request = crate::backlog::mock::mock_sign_request(sign_id, Chain::Solana);
+
+        // First leg in flight.
+        let entry = backlog::SignEntry::generating(Arc::clone(&request), &backlog);
+        spawner.add_request(&governance, entry, cfg.clone());
+        assert!(spawner.test_requests_contains(&sign_id));
+
+        // Its response landed on chain: the task is dropped, but the sign id
+        // stays live for the second leg.
+        spawner.handle_sign(&governance, SignCommand::LegCompleted(sign_id), &cfg);
+        assert!(!spawner.test_requests_contains(&sign_id));
+        assert!(!spawner.test_tasks_contains(sign_id));
+        assert!(
+            !spawner.test_dead_ids_contains(&sign_id),
+            "the second leg reuses this sign id, so it must not be marked dead"
+        );
+
+        // Second leg, same sign id: admitted rather than skipped as a duplicate.
+        let entry = backlog::SignEntry::generating(request, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+        assert!(spawner.test_requests_contains(&sign_id));
+        assert!(spawner.test_tasks_contains(sign_id));
     }
 
     #[test]

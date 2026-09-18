@@ -766,12 +766,24 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     let (_contract_watcher, _tx) =
         ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
-    let (sign_tx, _sign_rx) = mpsc::channel(4);
-    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    // Caught up, so the leg completion reaches the sign queue rather than being
+    // dropped until catchup finishes.
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
     process_respond_event(event, &ctx, public_key)
         .await
         .expect("respond event should advance pending publish bidirectional entries");
+
+    // The first leg's task has nothing left to do, and it holds the sign id the
+    // second leg reuses.
+    match sign_rx
+        .try_recv()
+        .expect("leg completion should be enqueued")
+    {
+        SignCommand::LegCompleted(id) => assert_eq!(id, sign_id),
+        other => panic!("unexpected sign command: {other:?}"),
+    }
 
     let entry = ctx
         .backlog

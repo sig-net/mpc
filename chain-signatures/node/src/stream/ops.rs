@@ -139,7 +139,7 @@ pub(crate) async fn process_respond_event(
 
     if let Some(entry) = entry.cast::<Bidirectional<Initial<AnyProgress>>>() {
         entry.verify_signature(root_pk, &respond_event.signature)?;
-        return advance_bidirectional_to_execution(entry, respond_event, root_pk).await;
+        return advance_bidirectional_to_execution(entry, respond_event, root_pk, ctx).await;
     }
 
     if entry.is::<Bidirectional<Executing>>() {
@@ -165,6 +165,7 @@ async fn advance_bidirectional_to_execution(
     entry: SignEntry<Bidirectional<Initial<AnyProgress>>>,
     respond_event: SignatureRespondedEvent,
     root_pk: mpc_primitives::PublicKey,
+    ctx: &StreamContext,
 ) -> anyhow::Result<()> {
     let sign_id = entry.sign_id();
     let source_chain = entry.chain();
@@ -198,6 +199,10 @@ async fn advance_bidirectional_to_execution(
     })?;
 
     tracing::info!(?sign_id, "advance bidirectional tx to execution successful");
+    // This leg is done, but its task keeps running until told otherwise, and it
+    // holds the sign id that the second leg reuses.
+    ctx.try_enqueue(SignCommand::LegCompleted(sign_id)).await?;
+
     Ok(())
 }
 

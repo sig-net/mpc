@@ -30,6 +30,10 @@ pub type CheckpointWatcher = watch::Receiver<Option<CheckpointDigest>>;
 pub enum SignCommand {
     Request(SignEntry<Generating>),
     Completion(SignId),
+    /// A bidirectional leg's response landed on chain, so its task has nothing
+    /// left to do. Unlike [`SignCommand::Completion`] the sign id stays live:
+    /// the next leg reuses it and must not be dropped as already finished.
+    LegCompleted(SignId),
     AbortChain(Chain),
 }
 
