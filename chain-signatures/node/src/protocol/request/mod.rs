@@ -25,7 +25,7 @@ use cait_sith::protocol::Participant;
 use enum_map::EnumMap;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
-use mpc_primitives::{ChainConfig as _, IndexedSignRequest, RequestKind, SignId};
+use mpc_primitives::{ChainConfig as _, IndexedSignRequest, RequestId, RequestKind};
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -135,16 +135,16 @@ pub struct SignatureSpawner {
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
-    tasks: JoinMap<SignId, Result<(), SignError>>,
+    tasks: JoinMap<RequestId, Result<(), SignError>>,
     /// Per-sign posit mailboxes; also buffer messages that arrive before their
     /// task spawns.
-    posit_mailboxes: HashMap<SignId, Arc<PositMailbox>>,
+    posit_mailboxes: HashMap<RequestId, Arc<PositMailbox>>,
     /// Monitor alerting when signature requests exceed their expected response time.
     delay_monitor: DelayMonitor,
     /// In-flight requests: enables chain-scoped abort and respawning.
-    requests: HashMap<SignId, SignEntry>,
+    requests: HashMap<RequestId, SignEntry>,
     /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan mailboxes.
-    dead_ids: LruCache<SignId, ()>,
+    dead_ids: LruCache<RequestId, ()>,
     mesh_state: watch::Receiver<MeshState>,
     /// Caps concurrent sign-task progress per chain so requests don't flood the system's compute.
     limiters: EnumMap<Chain, SignLimiter>,
@@ -302,7 +302,7 @@ impl SignatureSpawner {
     }
 
     /// Handle a posit message - routes to existing task or buffers if task not yet created
-    fn handle_posit(&mut self, sign_id: SignId, msg: SignPositMessage) {
+    fn handle_posit(&mut self, sign_id: RequestId, msg: SignPositMessage) {
         // Drop late-arriving posits for already-completed/aborted sign IDs
         // to prevent re-creating orphan mailboxes.
         if self.dead_ids.contains(&sign_id) {
@@ -315,7 +315,7 @@ impl SignatureSpawner {
     }
 
     /// A peer/chain reported this signature done: tear down and abort our task.
-    fn handle_completion(&mut self, sign_id: SignId) {
+    fn handle_completion(&mut self, sign_id: RequestId) {
         if self.retire_task(sign_id, "completion") {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
         } else {
@@ -324,7 +324,7 @@ impl SignatureSpawner {
     }
 
     /// A task's `JoinMap` entry finished (or was cancelled): tear down and log.
-    fn handle_task_exit(&mut self, result: Result<(SignId, Result<(), SignError>), SignId>) {
+    fn handle_task_exit(&mut self, result: Result<(RequestId, Result<(), SignError>), RequestId>) {
         self.observe_queue_size();
         let (sign_id, result) = match result {
             Ok(outcome) => outcome,
@@ -348,14 +348,14 @@ impl SignatureSpawner {
     /// Record a sign ID as dead so that late-arriving peer posits are dropped
     /// instead of recreating an orphan mailbox. Automatically LRU-evicts the
     /// stalest entry when the cache exceeds [`MAX_DEAD_IDS`].
-    fn mark_dead(&mut self, sign_id: SignId) {
+    fn mark_dead(&mut self, sign_id: RequestId) {
         self.dead_ids.put(sign_id, ());
     }
 
     /// Common teardown when a sign request ends: abort its task if one is still
     /// running, mark the id dead, forget the request, drop its mailbox and
     /// unwatch its delay monitoring. Returns whether a task was aborted.
-    fn retire_task(&mut self, sign_id: SignId, reason: &'static str) -> bool {
+    fn retire_task(&mut self, sign_id: RequestId, reason: &'static str) -> bool {
         let aborted = self.tasks.abort(sign_id);
         self.mark_dead(sign_id);
         self.requests.remove(&sign_id);
@@ -379,7 +379,7 @@ impl SignatureSpawner {
                     ?chain,
                     "aborting all in-flight signature tasks on chain regression"
                 );
-                let to_abort: Vec<SignId> = self
+                let to_abort: Vec<RequestId> = self
                     .requests
                     .iter()
                     .filter(|(_, q)| q.entry.chain() == chain)
@@ -472,18 +472,18 @@ impl SignatureSpawner {
 
 #[cfg(test)]
 impl SignatureSpawner {
-    fn test_dead_ids_contains(&self, sign_id: &SignId) -> bool {
+    fn test_dead_ids_contains(&self, sign_id: &RequestId) -> bool {
         self.dead_ids.contains(sign_id)
     }
 
-    fn test_posit_mailboxes_contains(&self, sign_id: &SignId) -> bool {
+    fn test_posit_mailboxes_contains(&self, sign_id: &RequestId) -> bool {
         self.posit_mailboxes.contains_key(sign_id)
     }
 
-    fn test_tasks_contains(&self, sign_id: SignId) -> bool {
+    fn test_tasks_contains(&self, sign_id: RequestId) -> bool {
         self.tasks.contains_key(&sign_id)
     }
-    fn test_requests_contains(&self, sign_id: &SignId) -> bool {
+    fn test_requests_contains(&self, sign_id: &RequestId) -> bool {
         self.requests.contains_key(sign_id)
     }
 }
@@ -580,10 +580,10 @@ mod tests {
         let backlog = crate::backlog::Backlog::new();
 
         let cfg = ProtocolConfig::default();
-        let sign_id = SignId::new([42u8; 32]);
+        let sign_id = RequestId::new([42u8; 32]);
         let request = crate::backlog::mock::mock_sign_request(sign_id, Chain::Solana);
 
-        let probe_id = SignId::new([43u8; 32]);
+        let probe_id = RequestId::new([43u8; 32]);
         let probe_request = crate::backlog::mock::mock_sign_request(probe_id, Chain::Solana);
         let dropped = Arc::new(Notify::new());
         struct DropProbe(Arc<Notify>);

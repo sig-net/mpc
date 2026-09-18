@@ -92,7 +92,7 @@ mod tests {
     use cait_sith::protocol::Participant;
     use k256::{AffinePoint, Scalar};
     use mpc_primitives::{
-        BidirectionalTxId, Chain, RespondBidirectionalTx, SignArgs, SignId, Signature,
+        BidirectionalTxId, Chain, RequestId, RespondBidirectionalTx, SignArgs, Signature,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
@@ -132,7 +132,7 @@ mod tests {
 
     fn test_sign_request(kind: SignKind) -> Arc<IndexedSignRequest> {
         Arc::new(IndexedSignRequest::new(
-            SignId::new([1u8; 32]),
+            RequestId::new([1u8; 32]),
             SignArgs {
                 entropy: [0u8; 32],
                 epsilon: Scalar::ONE,

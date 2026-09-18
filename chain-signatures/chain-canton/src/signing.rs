@@ -10,7 +10,7 @@ use k256::Scalar;
 use mpc_chain_integration_core::utils::hashing::hash_payload;
 use mpc_crypto::x_coordinate;
 use mpc_primitives::{
-    Chain, IndexedSignRequest, ScalarExt, SignArgs, SignBidirectionalEvent, SignId, Signature,
+    Chain, IndexedSignRequest, RequestId, ScalarExt, SignArgs, SignBidirectionalEvent, Signature,
     LATEST_MPC_KEY_VERSION,
 };
 
@@ -120,7 +120,7 @@ impl CantonSignBidirectionalRequestedEvent {
             anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
         };
 
-        let sign_id = SignId::new(request_id);
+        let sign_id = RequestId::new(request_id);
         tracing::info!(?sign_id, "canton signature requested");
 
         let ctx = CantonChainCtx {

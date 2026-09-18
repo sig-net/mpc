@@ -17,7 +17,7 @@ pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
+    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, RequestId,
     SignKind,
 };
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ pub const MAX_PENDING_CHECKPOINTS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct PendingRequests {
-    requests: HashMap<SignId, BacklogEntry>,
+    requests: HashMap<RequestId, BacklogEntry>,
     /// The highest block height that has been processed for this chain
     processed_block_height: Option<u64>,
 }
@@ -52,19 +52,19 @@ impl PendingRequests {
 
     /// Inserts a sign-respond transaction into the pending requests map
     /// Returns Some(old_value) if the key was already present
-    pub(super) fn insert(&mut self, id: SignId, entry: BacklogEntry) -> Option<BacklogEntry> {
+    pub(super) fn insert(&mut self, id: RequestId, entry: BacklogEntry) -> Option<BacklogEntry> {
         self.requests.insert(id, entry)
     }
 
     /// Removes a sign-respond transaction from the pending requests map
     /// Returns Some(value) if the key was present
-    fn remove(&mut self, id: &SignId) -> Option<BacklogEntry> {
+    fn remove(&mut self, id: &RequestId) -> Option<BacklogEntry> {
         self.requests.remove(id)
     }
 
     /// Gets a ref of a backlog entry from the pending requests map
     /// Returns Some(value) if the key is present
-    fn get(&self, id: &SignId) -> Option<&BacklogEntry> {
+    fn get(&self, id: &RequestId) -> Option<&BacklogEntry> {
         self.requests.get(id)
     }
 
@@ -131,7 +131,7 @@ impl ExecutionWatchers {
         self.watchers.remove(tx_id)
     }
 
-    fn all(&self) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
+    fn all(&self) -> HashMap<BidirectionalTxId, (RequestId, Arc<BidirectionalTx>)> {
         self.watchers
             .iter()
             .map(|(id, watch)| (*id, (watch.tx.sign_id(), Arc::clone(&watch.tx))))
@@ -211,7 +211,7 @@ impl Backlog {
 
     /// Remove a Sign request from the backlog for the specified chain.
     /// Returns `true` if an entry was removed, `false` otherwise.
-    pub async fn remove(&self, chain: Chain, id: &SignId) -> bool {
+    pub async fn remove(&self, chain: Chain, id: &RequestId) -> bool {
         let (removed, len) = {
             let mut pending = self.pending(&chain).write().await;
             let rem = pending.remove(id);
@@ -228,7 +228,7 @@ impl Backlog {
     }
 
     /// Get an in-flight sign request entry from the backlog for the specified chain.
-    pub async fn get(&self, chain: Chain, id: &SignId) -> Option<SignEntry> {
+    pub async fn get(&self, chain: Chain, id: &RequestId) -> Option<SignEntry> {
         let entry = self.pending(&chain).read().await.get(id).cloned()?;
         Some(SignEntry {
             chain,
@@ -550,7 +550,7 @@ impl StateManager for Backlog {
     async fn get_execution_watchers(
         &self,
         chain: Chain,
-    ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
+    ) -> HashMap<BidirectionalTxId, (RequestId, Arc<BidirectionalTx>)> {
         self.watchers(&chain).read().await.all()
     }
 }
@@ -559,7 +559,7 @@ impl StateManager for Backlog {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BacklogError {
     #[error("request not found for chain {chain:?} with id {id:?}")]
-    NotFound { chain: Chain, id: SignId },
+    NotFound { chain: Chain, id: RequestId },
     #[error("failed to reconstruct signature")]
     InvalidSignature,
     #[error("cannot mark publishing: status must be pending generation")]
@@ -594,7 +594,7 @@ impl BacklogEntry {
         Self { request, status }
     }
 
-    pub fn sign_id(&self) -> SignId {
+    pub fn sign_id(&self) -> RequestId {
         self.request.id
     }
 

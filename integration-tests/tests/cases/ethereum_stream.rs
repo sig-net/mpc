@@ -27,7 +27,7 @@ use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    BidirectionalTx, Chain, ChainEvent, SignArgs, SignId, SignKind, LATEST_MPC_KEY_VERSION,
+    BidirectionalTx, Chain, ChainEvent, RequestId, SignArgs, SignKind, LATEST_MPC_KEY_VERSION,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
@@ -47,7 +47,7 @@ fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<mpc_node::rpc:
 
 fn test_eth_bidirectional_tx(
     tx_id: mpc_primitives::BidirectionalTxId,
-    sign_id: SignId,
+    sign_id: RequestId,
     from_address: Address,
     nonce: u64,
 ) -> BidirectionalTx {
@@ -485,8 +485,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
 
-    let resolved_sign_id = SignId::new([0x11; 32]);
-    let requeued_sign_id = SignId::new([0x22; 32]);
+    let resolved_sign_id = RequestId::new([0x11; 32]);
+    let requeued_sign_id = RequestId::new([0x22; 32]);
     seeded_backlog
         .insert(Arc::new(mpc_node::protocol::IndexedSignRequest::sign(
             resolved_sign_id,
@@ -517,7 +517,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
 
     let backlog = Backlog::persisted(storage.clone());
 
-    let execution_sign_id = SignId::new([0x33; 32]);
+    let execution_sign_id = RequestId::new([0x33; 32]);
     let execution_tx = test_eth_bidirectional_tx(
         mpc_primitives::BidirectionalTxId(B256::from([0x44; 32]).0),
         execution_sign_id,
@@ -691,7 +691,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
     // Register an execution watcher with an intentionally stale nonce to trigger the staleness path.
     let tx = test_eth_bidirectional_tx(
         mpc_primitives::BidirectionalTxId(B256::from([9u8; 32]).0),
-        SignId::new([7u8; 32]),
+        RequestId::new([7u8; 32]),
         ctx.wallet,
         0,
     );
@@ -729,7 +729,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
 
-    let dummy_sign_id = SignId::new([0x66; 32]);
+    let dummy_sign_id = RequestId::new([0x66; 32]);
     backlog
         .insert_mock_sign(dummy_sign_id, Chain::Ethereum)
         .await;
@@ -805,7 +805,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
 
     // Register the execution watcher only after catchup has completed and the
     // transaction is already in the past relative to the stream.
-    let sign_id = SignId::new([0x88; 32]);
+    let sign_id = RequestId::new([0x88; 32]);
     let tx_id = mpc_primitives::BidirectionalTxId(tx_hash.0);
     let tx = test_eth_bidirectional_tx(tx_id, sign_id, ctx.wallet, 0);
     backlog.insert_mock_executing(&tx).await;
@@ -897,7 +897,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
     let tx_a_hash = *responder.send_transaction(tx_a).await?.tx_hash();
 
     // Register the execution watcher
-    let sign_id = SignId::new([0x71; 32]);
+    let sign_id = RequestId::new([0x71; 32]);
     let watched_tx_id = mpc_primitives::BidirectionalTxId(tx_a_hash.0);
     let tx = test_eth_bidirectional_tx(watched_tx_id, sign_id, responder_address, nonce);
 
@@ -924,7 +924,7 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
         .context("replacement receipt missing block number")?;
 
     // Watch the replacement transaction
-    let replacement_sign_id = SignId::new([0x72; 32]);
+    let replacement_sign_id = RequestId::new([0x72; 32]);
     let replacement_tx_id = mpc_primitives::BidirectionalTxId(receipt_b.transaction_hash.0);
 
     let replacement_tx = test_eth_bidirectional_tx(

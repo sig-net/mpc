@@ -3,8 +3,8 @@ use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
-    BidirectionalTx, Chain, ChainConfig as _, IndexedSignRequest,
-    RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
+    BidirectionalTx, Chain, ChainConfig as _, IndexedSignRequest, RequestId,
+    RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs,
 };
 use mpc_utils::time::current_unix_timestamp;
 use std::sync::Arc;
@@ -115,7 +115,7 @@ impl CompletedTx {
         let epsilon = self.tx.epsilon(&path)?;
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest::respond_bidirectional(
-            SignId::new(request_id_bytes),
+            RequestId::new(request_id_bytes),
             SignArgs {
                 entropy,
                 epsilon,

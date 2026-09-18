@@ -11,7 +11,7 @@ use crate::update::ProposedUpdates;
 use crate::MpcContract;
 
 use borsh::BorshDeserialize;
-use mpc_primitives::{Chain, CheckpointDigest, SignId};
+use mpc_primitives::{Chain, CheckpointDigest, RequestId};
 use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, PublicKey};
 use std::collections::BTreeMap;
@@ -130,7 +130,7 @@ fn upgrade_devnet_protocol_state(old: DevnetProtocolContractState) -> ProtocolCo
 #[derive(BorshDeserialize)]
 pub(crate) struct PreviousDevnet {
     protocol_state: DevnetProtocolContractState,
-    pending_requests: IterableMap<SignId, PendingRequest>,
+    pending_requests: IterableMap<RequestId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
     latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
@@ -153,7 +153,7 @@ impl PreviousDevnet {
 #[derive(BorshDeserialize)]
 pub(crate) struct PreviousTestnet {
     protocol_state: OldProtocolContractState,
-    pending_requests: IterableMap<SignId, PendingRequest>,
+    pending_requests: IterableMap<RequestId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
 }
@@ -180,7 +180,7 @@ impl PreviousTestnet {
 #[derive(BorshDeserialize)]
 pub(crate) struct PreviousMainnet {
     protocol_state: OldProtocolContractState,
-    pending_requests: IterableMap<SignId, PendingRequest>,
+    pending_requests: IterableMap<RequestId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
 }

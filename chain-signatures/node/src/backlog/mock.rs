@@ -8,7 +8,7 @@ use cait_sith::FullSignature;
 use k256::{AffinePoint, Scalar, Secp256k1};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey,
-    RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignId, SignKind, Signature,
+    RequestId, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind, Signature,
 };
 use std::sync::Arc;
 
@@ -20,11 +20,11 @@ mod sealed {
 /// Sealed test extension trait providing ergonomic helpers on [`Backlog`] for tests.
 #[allow(async_fn_in_trait)]
 pub trait BacklogTestExt: sealed::Sealed {
-    async fn insert_mock_sign(&self, id: SignId, chain: Chain) -> SignEntry<Sign<Generating>>;
+    async fn insert_mock_sign(&self, id: RequestId, chain: Chain) -> SignEntry<Sign<Generating>>;
 
     async fn insert_mock_bidirectional(
         &self,
-        id: SignId,
+        id: RequestId,
         chain: Chain,
     ) -> SignEntry<Bidirectional<Initial<Generating>>>;
 
@@ -40,13 +40,13 @@ pub trait BacklogTestExt: sealed::Sealed {
 }
 
 impl BacklogTestExt for Backlog {
-    async fn insert_mock_sign(&self, id: SignId, chain: Chain) -> SignEntry<Sign<Generating>> {
+    async fn insert_mock_sign(&self, id: RequestId, chain: Chain) -> SignEntry<Sign<Generating>> {
         self.insert_sign(mock_sign_request(id, chain)).await
     }
 
     async fn insert_mock_bidirectional(
         &self,
-        id: SignId,
+        id: RequestId,
         chain: Chain,
     ) -> SignEntry<Bidirectional<Initial<Generating>>> {
         self.insert_bidirectional(mock_bidi_request(id, chain))
@@ -146,7 +146,7 @@ pub fn bidi_initial_status() -> SignStatus {
 }
 
 /// Create a mock single-phase sign request for tests.
-pub fn mock_sign_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
+pub fn mock_sign_request(id: RequestId, chain: Chain) -> Arc<IndexedSignRequest> {
     Arc::new(IndexedSignRequest::new(
         id,
         SignArgs {
@@ -163,7 +163,7 @@ pub fn mock_sign_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
 }
 
 /// Create a mock bidirectional sign request for tests.
-pub fn mock_bidi_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
+pub fn mock_bidi_request(id: RequestId, chain: Chain) -> Arc<IndexedSignRequest> {
     let target_chain = if chain == Chain::Ethereum {
         Chain::Solana
     } else {
@@ -199,7 +199,7 @@ pub fn mock_bidi_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
 }
 
 /// Create a mock bidirectional transaction for tests.
-pub fn mock_bidirectional_tx(id: SignId, source_chain: Chain) -> BidirectionalTx {
+pub fn mock_bidirectional_tx(id: RequestId, source_chain: Chain) -> BidirectionalTx {
     let target_chain = if source_chain == Chain::Ethereum {
         Chain::Solana
     } else {
@@ -228,12 +228,12 @@ pub fn mock_bidirectional_tx(id: SignId, source_chain: Chain) -> BidirectionalTx
 
 /// Create a mock bidirectional transaction from a u8 seed without Arc wrapping.
 pub fn mock_tx(id: u8) -> BidirectionalTx {
-    mock_bidirectional_tx(SignId::from_u8(id), Chain::Solana)
+    mock_bidirectional_tx(RequestId::from_u8(id), Chain::Solana)
 }
 
 /// Create a mock bidirectional final response request.
 pub fn mock_bidi_response_request(
-    sign_id: SignId,
+    sign_id: RequestId,
     tx_id: BidirectionalTxId,
     chain: Chain,
 ) -> Arc<IndexedSignRequest> {

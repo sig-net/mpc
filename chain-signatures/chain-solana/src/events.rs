@@ -10,7 +10,7 @@ use mpc_chain_integration_core::utils::hashing::{compute_request_id, hash_payloa
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, SignKind, LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, IndexedSignRequest, RequestId, SignArgs, SignKind, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
@@ -42,7 +42,7 @@ pub enum SolanaSignEvent {
 }
 
 impl SolanaSignEvent {
-    fn is_valid(&self, sign_id: SignId) -> bool {
+    fn is_valid(&self, sign_id: RequestId) -> bool {
         let (deposit, key_version) = match self {
             SolanaSignEvent::SignatureRequested(ev) => (ev.deposit, ev.key_version),
             SolanaSignEvent::SignBidirectional(ev) => (ev.deposit, ev.key_version),
@@ -92,7 +92,7 @@ impl SolanaSignEvent {
     }
 
     pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
-        let sign_id = SignId::new(self.generate_request_id());
+        let sign_id = RequestId::new(self.generate_request_id());
         if !self.is_valid(sign_id) {
             return None;
         }

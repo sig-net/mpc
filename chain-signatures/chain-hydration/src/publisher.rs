@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::config::HydrationConfig;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
-use mpc_primitives::{SignId, SignKind, Signature};
+use mpc_primitives::{RequestId, SignKind, Signature};
 use parity_scale_codec::{Decode, Encode};
 use sp_core::{sr25519, Pair as _};
 use sp_runtime::{
@@ -210,7 +210,7 @@ impl HydrationClient {
         })
     }
 
-    async fn call_respond(&self, id: &SignId, response: &Signature) -> anyhow::Result<()> {
+    async fn call_respond(&self, id: &RequestId, response: &Signature) -> anyhow::Result<()> {
         let tx = HydrationRespondTx {
             request_ids: BoundedVec(vec![id.request_id]),
             signatures: BoundedVec(vec![Self::to_hydration_signature(response)?]),
@@ -228,7 +228,7 @@ impl HydrationClient {
 
     async fn call_respond_bidirectional(
         &self,
-        id: &SignId,
+        id: &RequestId,
         serialized_output: Vec<u8>,
         response: &Signature,
     ) -> anyhow::Result<subxt::config::HashFor<HydradxConfig>> {

@@ -3,7 +3,7 @@
 
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
 use mpc_node::protocol::IndexedSignRequest;
-use mpc_primitives::{Chain, SignId};
+use mpc_primitives::{Chain, RequestId};
 use std::time::Duration;
 use test_log::test;
 
@@ -347,7 +347,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
     #[derive(Default)]
     struct SignatureTracker {
         /// Keyed by (participant, sign_id) to count messages per participant and request.
-        counts: Arc<std::sync::Mutex<HashMap<(Participant, SignId), MessageCounts>>>,
+        counts: Arc<std::sync::Mutex<HashMap<(Participant, RequestId), MessageCounts>>>,
         /// Notifies when a posit message has been observed, so the test can wait for it.
         posit_delivered: Arc<Notify>,
     }
@@ -387,10 +387,10 @@ async fn run_stale_task_test(drop_respond_event: bool) {
 
     /// Waits for a posit message from a specific participant and sign request to be observed, or times out.
     async fn wait_for_delivered_posit(
-        counts: &Arc<std::sync::Mutex<HashMap<(Participant, SignId), MessageCounts>>>,
+        counts: &Arc<std::sync::Mutex<HashMap<(Participant, RequestId), MessageCounts>>>,
         posit_delivered: &Notify,
         from: Participant,
-        id: SignId,
+        id: RequestId,
         timeout: Duration,
     ) -> bool {
         tokio::time::timeout(timeout, async {

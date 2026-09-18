@@ -29,7 +29,7 @@ use primitives::{
     InternalSignRequest, Participants, PendingRequest, PkVotes, Read, SignPoll, SignRequest,
     StorageKey, View, Votes, YieldIndex,
 };
-use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{Chain, RequestId, Signature, LATEST_MPC_KEY_VERSION};
 use std::collections::{BTreeMap, HashSet};
 
 use crate::config::Config;
@@ -71,7 +71,7 @@ pub const REQUIRED_JOIN_DEPOSIT: NearToken = NearToken::from_near(1);
 #[derive(Debug)]
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
-    pending_requests: IterableMap<SignId, PendingRequest>,
+    pending_requests: IterableMap<RequestId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
     latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
@@ -131,7 +131,8 @@ impl MpcContract {
             return Err(SignError::RequestLimitExceeded.into());
         }
         let predecessor = env::predecessor_account_id();
-        let sign_id = SignId::from_parts(predecessor.as_str(), &payload_bytes, &path, key_version);
+        let sign_id =
+            RequestId::from_parts(predecessor.as_str(), &payload_bytes, &path, key_version);
         if self.contains_request(&sign_id) {
             return Err(SignError::RequestCollision.into());
         }
@@ -214,7 +215,7 @@ impl MpcContract {
 #[near]
 impl MpcContract {
     #[handle_result]
-    pub fn respond(&mut self, sign_id: SignId, signature: Signature) -> Result<(), Error> {
+    pub fn respond(&mut self, sign_id: RequestId, signature: Signature) -> Result<(), Error> {
         let protocol_state = self.mutable_state();
         if !matches!(protocol_state, ProtocolContractState::Running(_)) {
             return Err(InvalidState::ProtocolStateNotRunning.into());
@@ -973,7 +974,7 @@ impl MpcContract {
         self.pending_requests.len()
     }
 
-    pub fn pending_requests_data(&self) -> Vec<(&SignId, &PendingRequest)> {
+    pub fn pending_requests_data(&self) -> Vec<(&RequestId, &PendingRequest)> {
         self.pending_requests.iter().collect()
     }
 
@@ -1094,11 +1095,11 @@ impl MpcContract {
         &self.protocol_state
     }
 
-    fn contains_request(&self, id: &SignId) -> bool {
+    fn contains_request(&self, id: &RequestId) -> bool {
         self.pending_requests.contains_key(id)
     }
 
-    fn lock_request(&mut self, sign_id: SignId, payload: Scalar, epsilon: Scalar) {
+    fn lock_request(&mut self, sign_id: RequestId, payload: Scalar, epsilon: Scalar) {
         self.pending_requests.insert(
             sign_id,
             PendingRequest {
@@ -1109,17 +1110,17 @@ impl MpcContract {
         );
     }
 
-    fn get_request(&self, id: &SignId) -> Option<&PendingRequest> {
+    fn get_request(&self, id: &RequestId) -> Option<&PendingRequest> {
         self.pending_requests.get(id)
     }
 
-    fn set_request_yield(&mut self, sign_id: &SignId, data_id: CryptoHash) {
+    fn set_request_yield(&mut self, sign_id: &RequestId, data_id: CryptoHash) {
         if let Some(request) = self.pending_requests.get_mut(sign_id) {
             request.index = Some(YieldIndex { data_id });
         }
     }
 
-    fn remove_request(&mut self, sign_id: &SignId) -> Result<PendingRequest, Error> {
+    fn remove_request(&mut self, sign_id: &RequestId) -> Result<PendingRequest, Error> {
         self.pending_requests
             .remove(sign_id)
             .ok_or(InvalidParameters::RequestNotFound.into())
@@ -1240,7 +1241,7 @@ mod tests {
     #[derive(BorshSerialize)]
     struct OldMpcContract {
         protocol_state: ProtocolContractState,
-        pending_requests: IterableMap<SignId, PendingRequest>,
+        pending_requests: IterableMap<RequestId, PendingRequest>,
         proposed_updates: ProposedUpdates,
         config: Config,
     }

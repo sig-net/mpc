@@ -9,7 +9,7 @@ use alloy::providers::{Provider, WalletProvider};
 use alloy::rpc::types::{request::TransactionRequest, Filter};
 use alloy::sol_types::{SolEvent, SolValue};
 use anyhow::{Context, Result};
-use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{RequestId, LATEST_MPC_KEY_VERSION};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -58,7 +58,7 @@ where
 
 /// Submit a `sign` request on-chain and return its derived `request_id`.
 ///
-/// The emitted `SignatureRequested` log and its `SignId` are cross-checked
+/// The emitted `SignatureRequested` log and its `RequestId` are cross-checked
 /// against the off-chain derivation
 pub async fn submit_sign_request<P>(
     contract: &ChainSignatures::ChainSignaturesInstance<P>,
@@ -127,7 +127,7 @@ where
                     .await
                     .context("fetch SignatureRequested logs")?;
                 let parsed = parse_filtered_logs(logs);
-                let expected = SignId::new(request_id.into());
+                let expected = RequestId::new(request_id.into());
                 anyhow::ensure!(
                     parsed.iter().any(|r| r.id == expected),
                     "emitted SignatureRequested log parsed to {parsed:?}, expected id {expected:?}"

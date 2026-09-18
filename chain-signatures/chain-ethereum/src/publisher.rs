@@ -15,7 +15,7 @@ use mpc_chain_integration_core::{
     utils::retry::{retry_rpc_gated, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
-use mpc_primitives::{SignId, Signature};
+use mpc_primitives::{RequestId, Signature};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -196,7 +196,7 @@ impl BatchPublisher {
     async fn wait_for_transaction_receipt(
         &self,
         tx_hash: B256,
-        sign_ids: &[SignId],
+        sign_ids: &[RequestId],
     ) -> anyhow::Result<TransactionReceipt> {
         retry_rpc_gated!(
             self.config.receipt_timeout,
@@ -236,7 +236,7 @@ impl BatchPublisher {
         &self,
         responses: Vec<ChainSignatures::Response>,
         gas: u64,
-        sign_ids: &[SignId],
+        sign_ids: &[RequestId],
     ) -> anyhow::Result<B256> {
         retry_rpc_gated!(
             self.config.send_timeout,
@@ -283,7 +283,7 @@ impl BatchPublisher {
         &self,
         responses: Vec<ChainSignatures::Response>,
         gas: u64,
-        sign_ids: &[SignId],
+        sign_ids: &[RequestId],
     ) -> anyhow::Result<()> {
         let tx_hash = self.send_responses(responses, gas, sign_ids).await?;
         let receipt = self.wait_for_transaction_receipt(tx_hash, sign_ids).await?;
@@ -372,7 +372,7 @@ mod tests {
     use serde_json::json;
 
     fn mock_publish_action(id: u8) -> PublishAction {
-        make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new([id; 32]))
+        make_publish_action(Chain::Ethereum, SignKind::Sign, RequestId::new([id; 32]))
     }
 
     /// Poll until `mock` has been hit the expected number of times, or panic.
@@ -588,8 +588,8 @@ mod tests {
         let publisher = BatchPublisher::new(&cfg, Arc::new(NoopPublisherTelemetry), gate);
 
         let start = std::time::Instant::now();
-        let ids1 = [SignId::new([1u8; 32])];
-        let ids2 = [SignId::new([2u8; 32])];
+        let ids1 = [RequestId::new([1u8; 32])];
+        let ids2 = [RequestId::new([2u8; 32])];
         let (r1, r2) = tokio::join!(
             publisher.send_responses(vec![], 21000, &ids1),
             publisher.send_responses(vec![], 21000, &ids2),
@@ -652,7 +652,7 @@ mod tests {
 
         let publisher = test_publisher(&server.url());
         let receipt = publisher
-            .wait_for_transaction_receipt(tx_hash, &[SignId::new([2u8; 32])])
+            .wait_for_transaction_receipt(tx_hash, &[RequestId::new([2u8; 32])])
             .await
             .unwrap();
 
@@ -690,7 +690,7 @@ mod tests {
 
         // Attempt to send
         let result = publisher
-            .send_responses(vec![], 21000, &[SignId::new([3u8; 32])])
+            .send_responses(vec![], 21000, &[RequestId::new([3u8; 32])])
             .await;
 
         // Verify it failed completely
@@ -751,7 +751,7 @@ mod tests {
 
         // Execute the full publish pipeline
         let result = publisher
-            .execute_publish(vec![], 21000, &[SignId::new([4u8; 32])])
+            .execute_publish(vec![], 21000, &[RequestId::new([4u8; 32])])
             .await;
 
         // It should return Err(()) because the receipt status was 0x0
@@ -806,7 +806,7 @@ mod tests {
         let publisher = test_publisher(&server.url());
 
         let result = publisher
-            .execute_publish(vec![], 21000, &[SignId::new([5u8; 32])])
+            .execute_publish(vec![], 21000, &[RequestId::new([5u8; 32])])
             .await;
 
         // Assert the happy path returns Ok

@@ -7,8 +7,8 @@ use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_crypto::{derive_key, reconstruct_signature};
 use mpc_primitives::{
-    BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey,
-    SignBidirectionalEvent, SignId, SignKind, Signature,
+    BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey, RequestId,
+    SignBidirectionalEvent, SignKind, Signature,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -162,7 +162,7 @@ impl<State> SignEntry<State> {
         self.chain
     }
 
-    pub fn sign_id(&self) -> SignId {
+    pub fn sign_id(&self) -> RequestId {
         self.request.id
     }
 
@@ -834,7 +834,7 @@ impl Backlog {
     pub async fn get_by<State: SignState>(
         &self,
         chain: Chain,
-        id: &SignId,
+        id: &RequestId,
     ) -> Option<SignEntry<State>> {
         self.get(chain, id).await?.try_into().ok()
     }

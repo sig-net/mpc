@@ -8,7 +8,7 @@ use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
-use signet_primitives::{borsh_scalar, SignId, Signature};
+use signet_primitives::{borsh_scalar, RequestId, Signature};
 use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
 
 pub mod hpke {
@@ -413,7 +413,7 @@ impl ThresholdVotes {
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct InternalSignRequest {
-    pub id: SignId,
+    pub id: RequestId,
     pub requester: AccountId,
     pub deposit: NearToken,
     pub required_deposit: NearToken,

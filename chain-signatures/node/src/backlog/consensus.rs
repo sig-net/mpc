@@ -217,7 +217,7 @@ mod tests {
     use crate::protocol::ParticipantInfo;
     use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::StateManager;
-    use mpc_primitives::{Chain, CheckpointDigest, SignId};
+    use mpc_primitives::{Chain, CheckpointDigest, RequestId};
     use near_account_id::AccountId;
     use std::collections::HashMap;
     use std::time::Duration;
@@ -378,7 +378,7 @@ mod tests {
                 if case.local_has_pending_tx {
                     fixture
                         .backlog
-                        .insert_mock_sign(SignId::new([1u8; 32]), chain)
+                        .insert_mock_sign(RequestId::new([1u8; 32]), chain)
                         .await;
                 }
 
@@ -400,7 +400,7 @@ mod tests {
             if case.peer_has_checkpoint {
                 let pending_requests = if case.peer_checkpoint_has_pending_tx {
                     vec![BacklogEntry::new(mock_sign_request(
-                        SignId::new([2u8; 32]),
+                        RequestId::new([2u8; 32]),
                         chain,
                     ))]
                 } else {

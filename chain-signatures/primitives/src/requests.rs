@@ -1,4 +1,4 @@
-use crate::{Chain, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignId};
+use crate::{Chain, RequestId, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
@@ -39,7 +39,7 @@ impl SignKind {
 /// All relevant info pertaining to an indexed sign request.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IndexedSignRequest {
-    pub id: SignId,
+    pub id: RequestId,
     pub args: SignArgs,
     pub chain: Chain,
     /// Unix timestamp when the request was indexed by MPC node.
@@ -50,7 +50,7 @@ pub struct IndexedSignRequest {
 
 impl IndexedSignRequest {
     pub fn new(
-        id: SignId,
+        id: RequestId,
         args: SignArgs,
         chain: Chain,
         unix_timestamp_indexed: u64,
@@ -70,12 +70,12 @@ impl IndexedSignRequest {
         self.kind.request_kind()
     }
 
-    pub fn sign(id: SignId, args: SignArgs, chain: Chain, unix_timestamp_indexed: u64) -> Self {
+    pub fn sign(id: RequestId, args: SignArgs, chain: Chain, unix_timestamp_indexed: u64) -> Self {
         Self::new(id, args, chain, unix_timestamp_indexed, SignKind::Sign)
     }
 
     pub fn sign_bidirectional(
-        id: SignId,
+        id: RequestId,
         args: SignArgs,
         chain: Chain,
         unix_timestamp_indexed: u64,
@@ -91,7 +91,7 @@ impl IndexedSignRequest {
     }
 
     pub fn respond_bidirectional(
-        id: SignId,
+        id: RequestId,
         args: SignArgs,
         chain: Chain,
         unix_timestamp_indexed: u64,

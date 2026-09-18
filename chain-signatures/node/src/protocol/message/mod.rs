@@ -42,7 +42,7 @@ use crate::protocol::Config;
 use crate::rpc::ContractStateWatcher;
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
-use mpc_primitives::SignId;
+use mpc_primitives::RequestId;
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 
@@ -162,7 +162,7 @@ impl MessageChannel {
         }
     }
 
-    pub async fn filter_sign(&self, sign_id: SignId, presignature_id: PresignatureId) {
+    pub async fn filter_sign(&self, sign_id: RequestId, presignature_id: PresignatureId) {
         self.filter(&(sign_id, presignature_id)).await;
     }
 
@@ -271,7 +271,7 @@ impl MessageChannel {
 
     pub async fn subscribe_signature(
         &self,
-        sign_id: SignId,
+        sign_id: RequestId,
         presignature_id: PresignatureId,
     ) -> mpsc::Receiver<SignatureMessage> {
         self.subscribe_or_closed(
@@ -281,7 +281,7 @@ impl MessageChannel {
         .await
     }
 
-    pub async fn unsubscribe_signature(&self, sign_id: SignId, presignature_id: PresignatureId) {
+    pub async fn unsubscribe_signature(&self, sign_id: RequestId, presignature_id: PresignatureId) {
         self.send_unsubscribe(
             SubscribeId::Signature(sign_id, presignature_id),
             "signature",
@@ -291,7 +291,7 @@ impl MessageChannel {
 
     pub async fn subscribe_signature_posit(
         &self,
-    ) -> mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)> {
+    ) -> mpsc::Receiver<(RequestId, PresignatureId, Round, Participant, PositAction)> {
         self.subscribe_or_closed(SubscribeId::SignaturePosit, "signature posit")
             .await
     }

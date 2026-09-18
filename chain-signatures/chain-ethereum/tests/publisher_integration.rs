@@ -11,7 +11,7 @@ use common::{submit_sign_request, wait_for_responded, EthTestEnv};
 use mpc_chain_ethereum::publisher::EthClient;
 use mpc_chain_integration_core::utils::{retry::SharedBackoff, test::make_publish_action};
 use mpc_chain_integration_core::{ChainPublisher, NoopPublisherTelemetry};
-use mpc_primitives::{Chain, SignId, SignKind};
+use mpc_primitives::{Chain, RequestId, SignKind};
 
 #[tokio::test]
 async fn publishes_single_response() {
@@ -24,7 +24,7 @@ async fn publishes_single_response() {
     let action = make_publish_action(
         Chain::Ethereum,
         SignKind::Sign,
-        SignId::new(request_id.into()),
+        RequestId::new(request_id.into()),
     );
 
     let client = EthClient::new(
@@ -64,8 +64,11 @@ async fn publishes_batched_responses() {
 
     // Publish all 3 responses.
     for rid in &request_ids {
-        let action =
-            make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new((*rid).into()));
+        let action = make_publish_action(
+            Chain::Ethereum,
+            SignKind::Sign,
+            RequestId::new((*rid).into()),
+        );
         client
             .publish_signature(&action)
             .await
@@ -108,8 +111,11 @@ async fn publishes_across_multiple_batches() {
     let client = EthClient::new(&cfg, Arc::new(NoopPublisherTelemetry), SharedBackoff::new());
 
     for rid in &request_ids {
-        let action =
-            make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new((*rid).into()));
+        let action = make_publish_action(
+            Chain::Ethereum,
+            SignKind::Sign,
+            RequestId::new((*rid).into()),
+        );
         client
             .publish_signature(&action)
             .await

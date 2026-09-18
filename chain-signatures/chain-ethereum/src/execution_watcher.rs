@@ -20,7 +20,7 @@ use futures_util::{stream, StreamExt};
 use mpc_chain_integration_core::{ChainTelemetry, ExtractionFailureKind, StateManager};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
-    SignId,
+    RequestId,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -37,12 +37,12 @@ pub(crate) struct WatcherGateState {
 }
 
 /// A pending execution watcher entry from the state manager.
-type WatcherEntry = (BidirectionalTxId, (SignId, Arc<BidirectionalTx>));
+type WatcherEntry = (BidirectionalTxId, (RequestId, Arc<BidirectionalTx>));
 
 /// Per-watcher receipt resolution result.
 type WatcherReceipt = (
     BidirectionalTxId,
-    SignId,
+    RequestId,
     Arc<BidirectionalTx>,
     anyhow::Result<BackfillOutcome>,
 );
@@ -197,7 +197,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     /// (retried every block).
     fn schedule_watcher_gates(
         &self,
-        watchers: &HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>,
+        watchers: &HashMap<BidirectionalTxId, (RequestId, Arc<BidirectionalTx>)>,
     ) -> (HashSet<BidirectionalTxId>, HashSet<BidirectionalTxId>) {
         let mut gate = self.lock_watcher_gate();
         gate.retry.retain(|id| watchers.contains_key(id));
@@ -310,7 +310,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     async fn execution_confirmed_event(
         &self,
         tx_id: BidirectionalTxId,
-        sign_id: SignId,
+        sign_id: RequestId,
         pending_tx: &BidirectionalTx,
         block_number: u64,
         receipt: &TransactionReceipt,
@@ -381,7 +381,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     async fn backfill_execution_confirmation(
         &self,
         tx_id: BidirectionalTxId,
-        sign_id: SignId,
+        sign_id: RequestId,
         pending_tx: &BidirectionalTx,
         current_block_number: u64,
     ) -> anyhow::Result<BackfillOutcome> {
@@ -649,7 +649,7 @@ mod tests {
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::StateManager;
     use mpc_primitives::{
-        BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
+        BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, RequestId,
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;
@@ -740,7 +740,7 @@ mod tests {
             .create_async()
             .await;
 
-        let sign_id = SignId::new([0x55; 32]);
+        let sign_id = RequestId::new([0x55; 32]);
         let tx = test_watcher_tx(tx_hash, from_address, 0);
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
@@ -834,7 +834,7 @@ mod tests {
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
-                SignId::new([0; 32]),
+                RequestId::new([0; 32]),
                 test_watcher_tx(tx_hash_0, from_address, 0),
             )
             .await;
@@ -842,7 +842,7 @@ mod tests {
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
-                SignId::new([1; 32]),
+                RequestId::new([1; 32]),
                 test_watcher_tx(tx_hash_1, from_address, 1),
             )
             .await;
@@ -850,7 +850,7 @@ mod tests {
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
-                SignId::new([2; 32]),
+                RequestId::new([2; 32]),
                 test_watcher_tx(tx_hash_2, from_address, 2),
             )
             .await;
@@ -925,7 +925,7 @@ mod tests {
             .create_async()
             .await;
 
-        let sign_id = SignId::new([0x55; 32]);
+        let sign_id = RequestId::new([0x55; 32]);
         let tx = test_watcher_tx(tx_hash, from_address, 0);
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
@@ -1007,7 +1007,7 @@ mod tests {
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
-                SignId::new([1; 32]),
+                RequestId::new([1; 32]),
                 test_watcher_tx(tx_hash_ok, from_address, 0),
             )
             .await;
@@ -1015,7 +1015,7 @@ mod tests {
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
-                SignId::new([2; 32]),
+                RequestId::new([2; 32]),
                 test_watcher_tx(tx_hash_err, from_address, 0),
             )
             .await;
@@ -1088,7 +1088,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([3; 32]), tx)
+            .watch_execution(Chain::Ethereum, RequestId::new([3; 32]), tx)
             .await;
 
         // Block height 10 triggers the throttled nonce check
@@ -1171,7 +1171,7 @@ mod tests {
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
-                SignId::new([4; 32]),
+                RequestId::new([4; 32]),
                 Arc::new(BidirectionalTx {
                     id: BidirectionalTxId(tx_hash.0),
                     sender: [0u8; 32],
@@ -1264,7 +1264,7 @@ mod tests {
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
-                SignId::new([5; 32]),
+                RequestId::new([5; 32]),
                 Arc::new(BidirectionalTx {
                     id: BidirectionalTxId(tx_hash.0),
                     sender: [0u8; 32],
@@ -1378,7 +1378,7 @@ mod tests {
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
-                SignId::new([6; 32]),
+                RequestId::new([6; 32]),
                 Arc::new(BidirectionalTx {
                     id: BidirectionalTxId(tx_hash.0),
                     sender: [0u8; 32],
@@ -1624,7 +1624,7 @@ mod tests {
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
-                SignId::new([9; 32]),
+                RequestId::new([9; 32]),
                 empty_output_schema_tx(tx_hash, from_address),
             )
             .await;
@@ -1719,7 +1719,7 @@ mod tests {
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
-                SignId::new([0xaa; 32]),
+                RequestId::new([0xaa; 32]),
                 empty_output_schema_tx(tx_hash, from_address),
             )
             .await;
@@ -1882,7 +1882,7 @@ mod tests {
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
-                SignId::new([0xbb; 32]),
+                RequestId::new([0xbb; 32]),
                 empty_output_schema_tx(tx_hash, from_address),
             )
             .await;
@@ -2002,11 +2002,19 @@ mod tests {
 
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
+            .watch_execution(
+                Chain::Ethereum,
+                RequestId::new([7; 32]),
+                create_tx(tx_hash_a),
+            )
             .await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
+            .watch_execution(
+                Chain::Ethereum,
+                RequestId::new([8; 32]),
+                create_tx(tx_hash_b),
+            )
             .await;
 
         let mut block4: Block = Block::default();

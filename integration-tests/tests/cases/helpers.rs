@@ -8,13 +8,13 @@ use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
-use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{Chain, IndexedSignRequest, RequestId, SignArgs, LATEST_MPC_KEY_VERSION};
 use sha2::Digest;
 use std::sync::Arc;
 
 pub(crate) fn dummy_indexed_sign_request(id: u8, chain: Chain) -> Arc<IndexedSignRequest> {
     Arc::new(IndexedSignRequest::sign(
-        SignId::new([id; 32]),
+        RequestId::new([id; 32]),
         SignArgs {
             entropy: [id; 32],
             epsilon: k256::Scalar::ONE,
@@ -175,5 +175,5 @@ pub fn test_sign_arg(seed: impl Into<u32>) -> SignArgs {
 
 pub(crate) fn sign_request(seed: u32, chain: Chain) -> IndexedSignRequest {
     let bytes: [u8; 32] = seed.to_be_bytes().repeat(8).try_into().unwrap();
-    IndexedSignRequest::sign(SignId::new(bytes), test_sign_arg(seed), chain, 0)
+    IndexedSignRequest::sign(RequestId::new(bytes), test_sign_arg(seed), chain, 0)
 }

@@ -8,7 +8,7 @@
 
 use mpc_chain_integration_core::utils::hashing::hash_payload;
 use mpc_primitives::{
-    Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, LATEST_MPC_KEY_VERSION,
+    Chain, IndexedSignRequest, RequestId, SignArgs, SignBidirectionalEvent, LATEST_MPC_KEY_VERSION,
 };
 
 use crate::records::SignBidirectionalRecord;
@@ -74,7 +74,7 @@ pub fn generate_sign_request(
     let entropy = hash_payload(&request_id);
 
     Ok(IndexedSignRequest::sign_bidirectional(
-        SignId::new(request_id),
+        RequestId::new(request_id),
         SignArgs {
             entropy,
             epsilon,
@@ -197,7 +197,7 @@ mod tests {
         );
         assert_eq!(
             request.id,
-            mpc_primitives::SignId::new(request_id_before),
+            mpc_primitives::RequestId::new(request_id_before),
             "the generated request must retain the ID verified from the full record bytes"
         );
         let SignKind::SignBidirectional(event) = request.kind else {

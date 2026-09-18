@@ -57,7 +57,7 @@ mod tests {
     use super::*;
     use crate::utils::test::{make_indexed, make_signature, scalar};
     use k256::AffinePoint;
-    use mpc_primitives::{Chain, SignId, SignKind};
+    use mpc_primitives::{Chain, RequestId, SignKind};
 
     #[test]
     fn publish_action_accepts_valid_signature() {
@@ -72,7 +72,7 @@ mod tests {
             epsilon,
             payload,
             SignKind::Sign,
-            SignId::new([0u8; 32]),
+            RequestId::new([0u8; 32]),
         );
 
         assert!(PublishAction::new(pk, Arc::new(request), output, vec![]).is_some());
@@ -92,7 +92,7 @@ mod tests {
             epsilon,
             payload,
             SignKind::Sign,
-            SignId::new([0u8; 32]),
+            RequestId::new([0u8; 32]),
         );
 
         assert!(PublishAction::new(pk, Arc::new(request), output, vec![]).is_none());

@@ -18,7 +18,7 @@
 
 use crate::backlog::Publishing;
 
-use mpc_primitives::{Chain, ChainConfig as _, SignId};
+use mpc_primitives::{Chain, ChainConfig as _, RequestId};
 use near_account_id::AccountId;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
@@ -53,7 +53,7 @@ pub fn max_publish_failover_delay(
 /// This node's position in the schedule for one request: uniform in [0, 1) as a
 /// pure function of sign id and account id. Identical draws would put every
 /// participant on chain at once (`E[responses]` of `m`, not `1 + d`).
-fn failover_jitter(sign_id: &SignId, me: &AccountId) -> f64 {
+fn failover_jitter(sign_id: &RequestId, me: &AccountId) -> f64 {
     let mut hasher = DefaultHasher::new();
     (sign_id.request_id, me.as_str()).hash(&mut hasher);
     // Top 53 bits: exact in an f64, so the result stays strictly below 1.
@@ -76,7 +76,7 @@ fn failover_delay(participants: usize, jitter: f64, lag: Duration) -> Duration {
 /// carrying no stamp, which never fails over; see
 /// [`PublishState::publishing_since`].
 pub(crate) fn publish_deadline(
-    sign_id: &SignId,
+    sign_id: &RequestId,
     publish: &Publishing,
     me: &AccountId,
     lag: Duration,
@@ -109,11 +109,11 @@ mod tests {
     #[test]
     fn failover_jitter_is_deterministic_and_spread() {
         let me = account("node0.near");
-        let id = SignId::new([7u8; 32]);
+        let id = RequestId::new([7u8; 32]);
         assert_eq!(failover_jitter(&id, &me), failover_jitter(&id, &me));
 
         let mut draws: Vec<f64> = (0u8..20)
-            .map(|byte| failover_jitter(&SignId::new([byte; 32]), &me))
+            .map(|byte| failover_jitter(&RequestId::new([byte; 32]), &me))
             .collect();
         draws.extend(
             (0u8..20).map(|byte| failover_jitter(&id, &account(&format!("node{byte}.near")))),
@@ -128,7 +128,7 @@ mod tests {
     /// two nodes reach different deadlines for the same entry.
     #[test]
     fn publish_deadline_follows_the_stamp_and_the_node() {
-        let sign_id = SignId::new([1u8; 32]);
+        let sign_id = RequestId::new([1u8; 32]);
         let lag = observe_lag(Chain::Solana, LAG).as_secs();
         let me = account("node0.near");
 

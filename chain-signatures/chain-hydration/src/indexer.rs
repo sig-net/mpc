@@ -11,8 +11,8 @@ use mpc_chain_integration_core::{
 };
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
-    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, IndexedSignRequest, RequestId, RespondBidirectionalEvent, SignArgs,
+    SignBidirectionalEvent, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
@@ -91,7 +91,7 @@ impl HydrationSignatureRequestedEvent {
             &self.path,
         );
 
-        let sign_id = SignId::new(self.generate_request_id());
+        let sign_id = RequestId::new(self.generate_request_id());
         tracing::info!(?sign_id, "hydration signature requested");
 
         Some(IndexedSignRequest::sign(
@@ -203,7 +203,7 @@ impl HydrationSignBidirectionalRequestedEvent {
             &self.path,
         );
 
-        let sign_id = SignId::new(request_id);
+        let sign_id = RequestId::new(request_id);
         tracing::info!(?sign_id, "hydration signature requested");
         let unsigned_tx_hash = hash_payload(&self.serialized_transaction);
         let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| {

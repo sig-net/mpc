@@ -2,7 +2,7 @@ use cait_sith::protocol::{Action, InitializationError, MessageData, Participant,
 use cait_sith::{protocol::Protocol, KeygenOutput};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
-use mpc_primitives::{Chain, CheckpointDigest, SignId};
+use mpc_primitives::{Chain, CheckpointDigest, RequestId};
 use tokio::sync::watch;
 
 use crate::backlog::{Generating, SignEntry};
@@ -29,7 +29,7 @@ pub type CheckpointWatcher = watch::Receiver<Option<CheckpointDigest>>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum SignCommand {
     Request(SignEntry<Generating>),
-    Completion(SignId),
+    Completion(RequestId),
     AbortChain(Chain),
 }
 

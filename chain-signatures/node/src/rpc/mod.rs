@@ -22,7 +22,7 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, SignId, SignKind, Signature};
+use mpc_primitives::{CheckpointDigest, RequestId, SignKind, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -495,7 +495,7 @@ impl RpcExecutor {
         // Keep track of in-flight publish requests to avoid duplicate publishes.
         // Keyed by publish kind too: the two legs of a bidirectional request share
         // a sign id, and a first leg still retrying must not block its second.
-        let in_flight: Arc<DashSet<(Chain, SignId, PublishKind)>> = Arc::new(DashSet::new());
+        let in_flight: Arc<DashSet<(Chain, RequestId, PublishKind)>> = Arc::new(DashSet::new());
         loop {
             let Some(action) = action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
@@ -637,11 +637,11 @@ async fn update_contract_data(
     }
 }
 
-/// Releases a `SignId` from the dispatch loop's in-flight set when dropped,
+/// Releases a `RequestId` from the dispatch loop's in-flight set when dropped,
 /// including during a panic unwind, so the slot is always freed for re-publish.
 struct InFlightGuard {
-    in_flight: Arc<DashSet<(Chain, SignId, PublishKind)>>,
-    id: (Chain, SignId, PublishKind),
+    in_flight: Arc<DashSet<(Chain, RequestId, PublishKind)>>,
+    id: (Chain, RequestId, PublishKind),
 }
 
 impl Drop for InFlightGuard {
@@ -811,7 +811,7 @@ mod tests {
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
     use mpc_chain_integration_core::utils::test::make_publish_action;
-    use mpc_primitives::{SignId, SignKind};
+    use mpc_primitives::{RequestId, SignKind};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -1267,7 +1267,7 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Ethereum,
             SignKind::Sign,
-            SignId::new([0u8; 32]),
+            RequestId::new([0u8; 32]),
         )))
         .await
         .unwrap();
@@ -1302,7 +1302,7 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Ethereum,
             SignKind::Sign,
-            SignId::new([0u8; 32]),
+            RequestId::new([0u8; 32]),
         )))
         .await
         .unwrap();
@@ -1335,14 +1335,14 @@ mod tests {
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::NEAR,
             SignKind::Sign,
-            SignId::new([0u8; 32]),
+            RequestId::new([0u8; 32]),
         )))
         .await
         .unwrap();
         tx.send(RpcAction::Publish(make_publish_action(
             Chain::Solana,
             SignKind::Sign,
-            SignId::new([1u8; 32]),
+            RequestId::new([1u8; 32]),
         )))
         .await
         .unwrap();
@@ -1391,7 +1391,7 @@ mod tests {
             tx.send(RpcAction::Publish(make_publish_action(
                 Chain::NEAR,
                 SignKind::Sign,
-                SignId::new([i as u8; 32]),
+                RequestId::new([i as u8; 32]),
             )))
             .await
             .unwrap();
@@ -1401,7 +1401,7 @@ mod tests {
             tx.send(RpcAction::Publish(make_publish_action(
                 Chain::Solana,
                 SignKind::Sign,
-                SignId::new([(NEAR_ACTION_COUNT + i) as u8; 32]),
+                RequestId::new([(NEAR_ACTION_COUNT + i) as u8; 32]),
             )))
             .await
             .unwrap();
@@ -1468,9 +1468,9 @@ mod tests {
         );
 
         let (tx, mut rx) = mpsc::channel(16);
-        let sign_id = SignId::new([7u8; 32]);
+        let sign_id = RequestId::new([7u8; 32]);
 
-        // Multiple publishes for the SAME SignId
+        // Multiple publishes for the SAME RequestId
         for _ in 0..5 {
             tx.send(RpcAction::Publish(make_publish_action(
                 Chain::Ethereum,

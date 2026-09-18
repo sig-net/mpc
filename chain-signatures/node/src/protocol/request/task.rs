@@ -178,7 +178,7 @@ impl GeneratingPhase {
 /// Owns everything needed to fulfil one sign request; the context passed between phases of the state machine.
 pub struct SignTask {
     pub governance: GovernanceInfo,
-    pub sign_id: SignId,
+    pub sign_id: RequestId,
     pub presignatures: PresignatureStorage,
     pub msg: MessageChannel,
     pub rpc: RpcChannel,

@@ -13,7 +13,7 @@ use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
-use mpc_primitives::{IndexedSignRequest, SignId};
+use mpc_primitives::{IndexedSignRequest, RequestId};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -44,7 +44,7 @@ pub(crate) struct SignGenerator {
     participants: Vec<Participant>,
     /// Node that proposed this round (determines who publishes).
     proposer: Participant,
-    sign_id: SignId,
+    sign_id: RequestId,
     /// Start time, for the generation timeout and latency metrics.
     created: Instant,
     timeout: Duration,

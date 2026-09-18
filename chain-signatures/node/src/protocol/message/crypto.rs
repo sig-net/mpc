@@ -122,7 +122,7 @@ mod tests {
 
     use cait_sith::protocol::Participant;
     use mpc_keys::hpke::{self, Ciphered};
-    use mpc_primitives::SignId;
+    use mpc_primitives::RequestId;
     use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
     #[test]
@@ -298,7 +298,7 @@ mod tests {
                 data: vec![8; 512],
             }),
             Message::Signature(SignatureMessage {
-                id: SignId::new([7; 32]),
+                id: RequestId::new([7; 32]),
                 proposer: from,
                 presignature_id: 1234,
                 epoch: 0,

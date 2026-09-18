@@ -434,7 +434,7 @@ impl PositPhase {
         ctx: &SignTask,
         state: &mut SignState,
         counter: SinglePositCounter,
-        sign_id: SignId,
+        sign_id: RequestId,
         presignature_id: PresignatureId,
     ) -> Vec<Participant> {
         let participants = counter.accepts.into_iter().collect::<Vec<_>>();
@@ -504,7 +504,7 @@ pub(crate) mod tests {
 
         let ctx = SignTask {
             governance,
-            sign_id: SignId::new([0u8; 32]),
+            sign_id: RequestId::new([0u8; 32]),
             presignatures,
             msg: msg_channel,
             rpc: RpcChannel { tx: rpc_tx },

@@ -16,8 +16,8 @@ use mockito::Server;
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, CheckpointDigest, IndexedSignRequest,
-    RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId, Signature,
+    BidirectionalTx, BidirectionalTxId, Chain, CheckpointDigest, IndexedSignRequest, RequestId,
+    RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, Signature,
     SignatureRespondedEvent,
 };
 use mpc_utils::time::current_unix_timestamp;
@@ -59,7 +59,7 @@ pub fn test_sign_args(id: u8) -> SignArgs {
 }
 
 pub fn test_canton_sign_bidirectional_request(
-    sign_id: SignId,
+    sign_id: RequestId,
     sign_event_contract_id: &str,
 ) -> Arc<IndexedSignRequest> {
     let ctx = CantonChainCtx {
@@ -90,7 +90,7 @@ pub fn test_canton_sign_bidirectional_request(
     ))
 }
 
-pub fn respond_event(sign_id: SignId, signature: Signature) -> RespondBidirectionalEvent {
+pub fn respond_event(sign_id: RequestId, signature: Signature) -> RespondBidirectionalEvent {
     RespondBidirectionalEvent {
         request_id: sign_id.request_id,
         signature,
@@ -99,7 +99,7 @@ pub fn respond_event(sign_id: SignId, signature: Signature) -> RespondBidirectio
 }
 
 pub fn signature_responded_event(
-    sign_id: SignId,
+    sign_id: RequestId,
     signature: Signature,
     chain: Chain,
 ) -> SignatureRespondedEvent {

@@ -6,7 +6,7 @@ use mpc_contract::primitives::{PendingRequest, SignRequest};
 use near_sdk::{CurveType, PublicKey};
 use near_workspaces::types::NearToken;
 use serde_json::json;
-use signet_primitives::SignId;
+use signet_primitives::RequestId;
 use signet_primitives::LATEST_MPC_KEY_VERSION;
 use std::str::FromStr;
 #[tokio::test]
@@ -131,7 +131,7 @@ async fn test_poll_pending_requests() -> anyhow::Result<()> {
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    let pending_requests: Vec<(SignId, PendingRequest)> = contract
+    let pending_requests: Vec<(RequestId, PendingRequest)> = contract
         .view("pending_requests_data")
         .await
         .unwrap()

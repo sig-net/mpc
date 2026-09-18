@@ -56,20 +56,20 @@ pub static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     BorshSerialize,
     BorshDeserialize,
 )]
-pub struct SignId {
+pub struct RequestId {
     #[serde(with = "serde_bytes")]
     pub request_id: [u8; 32],
 }
 
-impl std::fmt::Debug for SignId {
+impl std::fmt::Debug for RequestId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("SignId")
+        f.debug_tuple("RequestId")
             .field(&hex::encode(self.request_id))
             .finish()
     }
 }
 
-impl SignId {
+impl RequestId {
     pub const fn new(request_id: [u8; 32]) -> Self {
         Self { request_id }
     }
@@ -89,7 +89,7 @@ impl SignId {
     }
 }
 
-impl From<[u8; 32]> for SignId {
+impl From<[u8; 32]> for RequestId {
     fn from(request_id: [u8; 32]) -> Self {
         Self::new(request_id)
     }

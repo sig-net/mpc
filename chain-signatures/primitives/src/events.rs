@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    bidirectional::RespondBidirectionalEvent, BidirectionalTxId, Chain, IndexedSignRequest, SignId,
-    Signature,
+    bidirectional::RespondBidirectionalEvent, BidirectionalTxId, Chain, IndexedSignRequest,
+    RequestId, Signature,
 };
 
 /// Unified event produced by a chain stream
@@ -29,7 +29,7 @@ pub enum ChainEvent {
     /// carries either the serialized output (Success) or a failure indicator.
     ExecutionConfirmed {
         tx_id: BidirectionalTxId,
-        sign_id: SignId,
+        sign_id: RequestId,
         source_chain: Chain,
         block_height: u64,
         result: ExecutionOutcome,

@@ -1,6 +1,6 @@
 use mpc_chain_integration_core::StateManager;
 use mpc_contract::primitives::PendingRequest;
-use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignId};
+use mpc_primitives::{Chain, IndexedSignRequest, RequestId, SignArgs};
 use mpc_utils::time::current_unix_timestamp;
 use near_account_id::AccountId;
 use std::collections::{HashMap, HashSet};
@@ -13,11 +13,11 @@ use tokio::task::JoinHandle;
 #[derive(Debug, Clone, PartialEq)]
 pub enum SignCommand {
     Request(Arc<IndexedSignRequest>),
-    Completion(SignId),
+    Completion(RequestId),
 }
 
 pub struct NearIndexer {
-    processed_requests: HashMap<SignId, Instant>,
+    processed_requests: HashMap<RequestId, Instant>,
 }
 
 impl NearIndexer {
@@ -27,11 +27,11 @@ impl NearIndexer {
         }
     }
 
-    fn seen_request(&self, sign_id: &SignId) -> bool {
+    fn seen_request(&self, sign_id: &RequestId) -> bool {
         self.processed_requests.contains_key(sign_id)
     }
 
-    fn mark_request_seen(&mut self, sign_id: SignId) {
+    fn mark_request_seen(&mut self, sign_id: RequestId) {
         self.processed_requests.insert(sign_id, Instant::now());
     }
 
@@ -41,7 +41,7 @@ impl NearIndexer {
             .retain(|_, timestamp| *timestamp > cutoff);
     }
 
-    fn completed_requests(&mut self, currently_pending: &HashSet<SignId>) -> Vec<SignId> {
+    fn completed_requests(&mut self, currently_pending: &HashSet<RequestId>) -> Vec<RequestId> {
         let mut completed = Vec::new();
 
         self.processed_requests.retain(|sign_id, _| {
@@ -61,7 +61,7 @@ impl NearIndexer {
         &self,
         rpc_client: &near_fetch::Client,
         contract_id: &AccountId,
-    ) -> anyhow::Result<Vec<(SignId, PendingRequest)>> {
+    ) -> anyhow::Result<Vec<(RequestId, PendingRequest)>> {
         let response = rpc_client
             .view(contract_id, "pending_requests_data")
             .await?;
@@ -72,7 +72,7 @@ impl NearIndexer {
     /// Convert contract pending request to indexed sign request
     fn convert_to_indexed_request(
         &self,
-        sign_id: SignId,
+        sign_id: RequestId,
         pending_request: PendingRequest,
     ) -> IndexedSignRequest {
         let payload = pending_request.payload;
@@ -101,7 +101,7 @@ impl NearIndexer {
     }
 
     /// Derive entropy deterministically from sign_id
-    fn derive_entropy_from_sign_id(&self, sign_id: &SignId) -> [u8; 32] {
+    fn derive_entropy_from_sign_id(&self, sign_id: &RequestId) -> [u8; 32] {
         use k256::sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(format!("{:?}", sign_id).as_bytes());

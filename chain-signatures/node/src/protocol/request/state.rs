@@ -138,7 +138,7 @@ mod tests {
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let backlog = Backlog::new();
         let entry = SignEntry::generating(
-            mock_sign_request(SignId::new([0u8; 32]), Chain::Ethereum),
+            mock_sign_request(RequestId::new([0u8; 32]), Chain::Ethereum),
             &backlog,
         );
 

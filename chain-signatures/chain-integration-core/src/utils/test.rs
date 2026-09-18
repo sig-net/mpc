@@ -6,7 +6,7 @@ use anyhow::Context as _;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
 use mpc_crypto::kdf::derive_secret_key;
-use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, SignKind};
+use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest, RequestId, SignArgs, SignKind};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -49,7 +49,7 @@ pub fn make_indexed(
     epsilon: k256::Scalar,
     payload: k256::Scalar,
     kind: SignKind,
-    sign_id: SignId,
+    sign_id: RequestId,
 ) -> IndexedSignRequest {
     IndexedSignRequest {
         id: sign_id,
@@ -67,7 +67,7 @@ pub fn make_indexed(
 }
 
 /// Build a `PublishAction` with fixed epsilon/payload; see [`make_publish_action_for`].
-pub fn make_publish_action(chain: Chain, kind: SignKind, sign_id: SignId) -> PublishAction {
+pub fn make_publish_action(chain: Chain, kind: SignKind, sign_id: RequestId) -> PublishAction {
     make_publish_action_for(
         chain,
         kind,
@@ -82,7 +82,7 @@ pub fn make_publish_action(chain: Chain, kind: SignKind, sign_id: SignId) -> Pub
 pub fn make_publish_action_for(
     chain: Chain,
     kind: SignKind,
-    sign_id: SignId,
+    sign_id: RequestId,
     epsilon: k256::Scalar,
     payload: k256::Scalar,
 ) -> PublishAction {

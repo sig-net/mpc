@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, SignId};
+use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, RequestId};
 use tokio::sync::RwLock;
 
 /// Interface for the Indexer to query and update state.
@@ -16,7 +16,7 @@ pub trait StateManager: Send + Sync + Clone + 'static {
     async fn get_execution_watchers(
         &self,
         chain: Chain,
-    ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>;
+    ) -> HashMap<BidirectionalTxId, (RequestId, Arc<BidirectionalTx>)>;
 
     /// Set the processed block height for a specific chain.
     async fn set_processed_block(&self, chain: Chain, height: u64);
@@ -24,7 +24,7 @@ pub trait StateManager: Send + Sync + Clone + 'static {
 
 /// Type alias to make clippy happy
 type Watchers =
-    Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>>>>;
+    Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, (RequestId, Arc<BidirectionalTx>)>>>>;
 
 /// In-memory mock implementation of [`StateManager`] intended for use in tests.
 ///
@@ -45,7 +45,7 @@ impl StateManager for MockStateManager {
     async fn get_execution_watchers(
         &self,
         chain: Chain,
-    ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
+    ) -> HashMap<BidirectionalTxId, (RequestId, Arc<BidirectionalTx>)> {
         self.watchers
             .read()
             .await
@@ -65,7 +65,12 @@ impl MockStateManager {
     }
 
     /// Register a bidirectional transaction awaiting execution on `chain`.
-    pub async fn watch_execution(&self, chain: Chain, sign_id: SignId, tx: Arc<BidirectionalTx>) {
+    pub async fn watch_execution(
+        &self,
+        chain: Chain,
+        sign_id: RequestId,
+        tx: Arc<BidirectionalTx>,
+    ) {
         self.watchers
             .write()
             .await

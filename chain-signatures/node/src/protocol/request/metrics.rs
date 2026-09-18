@@ -41,7 +41,7 @@ impl PhaseDurations {
     /// Record per-phase totals as latency histograms. Call once on success.
     ///
     /// `kind` separates the two bidirectional legs, which run these same three
-    /// phases under a shared `SignId`.
+    /// phases under a shared `RequestId`.
     pub fn emit(self, chain: Chain, kind: RequestKind) {
         record_request_latency(
             chain,

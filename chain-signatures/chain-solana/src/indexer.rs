@@ -597,7 +597,7 @@ mod tests {
     use crate::events::SolanaSignEvent;
     use anchor_lang::{AnchorSerialize, Discriminator};
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
-    use mpc_primitives::SignId;
+    use mpc_primitives::RequestId;
     use signet_program::{SignatureRequestedEvent, SignatureRespondedEvent};
     use solana_commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
@@ -1151,7 +1151,7 @@ mod tests {
 
         assert!(matches!(
             events_rx.recv().await,
-            Some(ChainEvent::SignRequest { request, .. }) if request.id == SignId::new(request_id)
+            Some(ChainEvent::SignRequest { request, .. }) if request.id == RequestId::new(request_id)
         ));
         assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
         assert!(matches!(

@@ -423,7 +423,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     /// The Block event is the whole progress report: the node advances the persisted
     /// height only after CONSUMING it, which is what makes a supervised restart
     /// self-healing. Delivery is therefore at-least-once (blocks past the last
-    /// consumed checkpoint re-emit on restart); dedup is by SignId downstream, never
+    /// consumed checkpoint re-emit on restart); dedup is by RequestId downstream, never
     /// here.
     async fn emit_block(
         &self,
@@ -574,7 +574,7 @@ mod tests {
     use midnight_onchain_state::state::StateValue;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
-    use mpc_primitives::SignId;
+    use mpc_primitives::RequestId;
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::fmt;
     use std::sync::{Arc, Mutex};
@@ -969,7 +969,7 @@ mod tests {
         else {
             panic!("expected SignRequest");
         };
-        assert_eq!(request.id, SignId::new(rid));
+        assert_eq!(request.id, RequestId::new(rid));
         assert_eq!(block_timestamp, None);
     }
 
@@ -1205,7 +1205,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(correlations.len(), 2);
         let expected_tx_hash = hex::encode(LEDGER_TX_HASH);
-        let expected_sign_id = format!("{:?}", SignId::new(rid));
+        let expected_sign_id = format!("{:?}", RequestId::new(rid));
         for fields in correlations {
             assert_eq!(fields.get("tx_hash"), Some(&expected_tx_hash));
             assert_eq!(fields.get("sign_id"), Some(&expected_sign_id));
@@ -1294,7 +1294,7 @@ mod tests {
             .expect("captured entry processing does not hold")
             .expect("captured entry produces a request");
 
-        assert_eq!(request.id, SignId::new(request_id));
+        assert_eq!(request.id, RequestId::new(request_id));
         assert_eq!(request.args.key_version, 1);
         assert_eq!(
             request.args.path,

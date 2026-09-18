@@ -58,7 +58,7 @@ async fn recover_backlog_requeues_pending_signs() {
     // Prepare backlog with a single pending sign request on a chain that
     // should be marked for requeue during recovery.
     let backlog = Backlog::new();
-    let sign_id = SignId::new([9u8; 32]);
+    let sign_id = RequestId::new([9u8; 32]);
     let entry = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
     let expected_args = entry.request().args.clone();
     let expected_timestamp = entry.request().unix_timestamp_indexed;
@@ -299,7 +299,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
 #[tokio::test]
 async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([11u8; 32]);
+    let sign_id = RequestId::new([11u8; 32]);
     let args = SignArgs {
         entropy: [11u8; 32],
         epsilon: Scalar::from(1u64),
@@ -374,7 +374,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
 #[tokio::test]
 async fn process_sign_request_rejects_respond_bidirectional_kind() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([12u8; 32]);
+    let sign_id = RequestId::new([12u8; 32]);
     let tx_id = BidirectionalTxId(B256::from([12u8; 32]).0);
     let request = mock_bidi_response_request(sign_id, tx_id, Chain::Solana);
 
@@ -393,7 +393,7 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
 #[tokio::test]
 async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_advance() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([23u8; 32]);
+    let sign_id = RequestId::new([23u8; 32]);
     let req = mock_bidi_request(sign_id, Chain::Solana);
 
     // Inserted directly, as checkpoint recovery would: never passed admission.
@@ -450,7 +450,7 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
 #[tokio::test]
 async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([14u8; 32]);
+    let sign_id = RequestId::new([14u8; 32]);
     let request = mock_bidi_request(sign_id, Chain::Solana);
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
@@ -468,7 +468,7 @@ async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
 #[tokio::test]
 async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([13u8; 32]);
+    let sign_id = RequestId::new([13u8; 32]);
 
     // A bidirectional request with an empty `serialized_transaction`. If accepted
     // it would sit in the backlog and later panic in `sign_and_hash_transaction`
@@ -499,7 +499,7 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
 #[tokio::test]
 async fn process_sign_request_duplicate_is_idempotent() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([9u8; 32]);
+    let sign_id = RequestId::new([9u8; 32]);
     let request = mock_sign_request(sign_id, Chain::Ethereum);
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -512,8 +512,8 @@ async fn process_sign_request_duplicate_is_idempotent() {
     assert!(was_new, "first insert must report a new entry");
     assert_eq!(backlog.len(), 1);
 
-    // Replay: the indexer re-emitted the same SignId
-    // backlog.insert is keyed on SignId, so the replay is absorbed, not duplicated.
+    // Replay: the indexer re-emitted the same RequestId
+    // backlog.insert is keyed on RequestId, so the replay is absorbed, not duplicated.
     let is_new = process_sign_request(request, &ctx)
         .await
         .expect("replayed sign request should be accepted");
@@ -521,7 +521,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
     assert_eq!(
         backlog.len(),
         1,
-        "replaying the same SignId must not grow the backlog"
+        "replaying the same RequestId must not grow the backlog"
     );
 
     // No sign command was enqueued during catchup
@@ -557,7 +557,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
 #[tokio::test]
 async fn process_respond_event_rejects_invalid_signature() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([15u8; 32]);
+    let sign_id = RequestId::new([15u8; 32]);
     let entry = backlog.insert_mock_sign(sign_id, Chain::Ethereum).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
@@ -658,7 +658,7 @@ async fn process_respond_bidirectional_event_rejects_invalid_signature() {
 #[tokio::test]
 async fn process_respond_event_duplicate_ethereum_is_idempotent() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([3u8; 32]);
+    let sign_id = RequestId::new([3u8; 32]);
     let entry = backlog.insert_mock_sign(sign_id, Chain::Ethereum).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
@@ -957,8 +957,8 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
 #[tokio::test]
 async fn requeue_pending_sign_requests_is_chain_scoped() {
     let backlog = Backlog::new();
-    let solana_sign_id = SignId::new([7u8; 32]);
-    let ethereum_sign_id = SignId::new([8u8; 32]);
+    let solana_sign_id = RequestId::new([7u8; 32]);
+    let ethereum_sign_id = RequestId::new([8u8; 32]);
 
     backlog
         .insert_mock_sign(solana_sign_id, Chain::Solana)
@@ -1126,7 +1126,7 @@ async fn next_publish(rx: &mut mpsc::Receiver<RpcAction>) -> Option<RpcAction> {
 #[tokio::test]
 async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
     let backlog = Backlog::new();
-    let sign_id = mpc_primitives::SignId::new([22u8; 32]);
+    let sign_id = mpc_primitives::RequestId::new([22u8; 32]);
 
     let sign = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
     let (pk, output) = mock_signature_output(&sign.request().args);
@@ -1158,7 +1158,7 @@ async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
 
 /// Put an entry in pending-publish with a deadline in the past, whatever the draw.
 async fn insert_publishable(backlog: &Backlog, seed: u8) {
-    let sign_id = mpc_primitives::SignId::new([seed; 32]);
+    let sign_id = mpc_primitives::RequestId::new([seed; 32]);
     let sign = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
     let (pk, output) = mock_signature_output(&sign.request().args);
     sign.advance(pk, &output, mock_participants(), false)

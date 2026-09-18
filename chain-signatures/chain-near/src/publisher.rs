@@ -6,7 +6,7 @@ use crate::util::AffinePointExt as _;
 
 use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig};
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
-use mpc_primitives::{SignId, Signature};
+use mpc_primitives::{RequestId, Signature};
 
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
@@ -54,7 +54,7 @@ impl NearClient {
 
     async fn call_respond(
         &self,
-        id: &SignId,
+        id: &RequestId,
         response: &Signature,
     ) -> anyhow::Result<ExecutionFinalResult> {
         let call = self

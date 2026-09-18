@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use mpc_primitives::{Chain, ChainConfig as _, RequestKind, SignId};
+use mpc_primitives::{Chain, ChainConfig as _, RequestId, RequestKind};
 use mpc_utils::time::unix_elapsed;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -24,7 +24,7 @@ struct DelayEntry {
 
 enum DelayCommand {
     Watch {
-        sign_id: SignId,
+        sign_id: RequestId,
         chain: Chain,
         kind: RequestKind,
         unix_timestamp_indexed: u64,
@@ -33,7 +33,7 @@ enum DelayCommand {
         is_proposer: Arc<AtomicBool>,
     },
     Unwatch {
-        sign_id: SignId,
+        sign_id: RequestId,
         reason: &'static str,
     },
 }
@@ -62,7 +62,7 @@ impl DelayMonitor {
     /// Registers a sign request to be watched for deadline expiration.
     pub fn watch(
         &self,
-        sign_id: SignId,
+        sign_id: RequestId,
         chain: Chain,
         kind: RequestKind,
         unix_timestamp_indexed: u64,
@@ -87,13 +87,13 @@ impl DelayMonitor {
     }
 
     /// Unwatches a completed or aborted sign request with a reason.
-    pub fn unwatch(&self, sign_id: SignId, reason: &'static str) {
+    pub fn unwatch(&self, sign_id: RequestId, reason: &'static str) {
         let _ = self.tx.send(DelayCommand::Unwatch { sign_id, reason });
     }
 
     async fn run(mut rx: mpsc::UnboundedReceiver<DelayCommand>) {
-        let mut entries: HashMap<SignId, DelayEntry> = HashMap::new();
-        let mut queue: DelayQueue<SignId> = DelayQueue::new();
+        let mut entries: HashMap<RequestId, DelayEntry> = HashMap::new();
+        let mut queue: DelayQueue<RequestId> = DelayQueue::new();
 
         loop {
             tokio::select! {
@@ -132,8 +132,8 @@ impl DelayMonitor {
 
     fn handle_command(
         cmd: DelayCommand,
-        entries: &mut HashMap<SignId, DelayEntry>,
-        queue: &mut DelayQueue<SignId>,
+        entries: &mut HashMap<RequestId, DelayEntry>,
+        queue: &mut DelayQueue<RequestId>,
     ) {
         match cmd {
             DelayCommand::Watch {
@@ -177,8 +177,8 @@ impl DelayMonitor {
 mod tests {
     use super::*;
 
-    fn sample_sign_id(byte: u8) -> SignId {
-        SignId::new([byte; 32])
+    fn sample_sign_id(byte: u8) -> RequestId {
+        RequestId::new([byte; 32])
     }
 
     fn read_delayed_metric(chain: Chain, kind: RequestKind) -> u64 {

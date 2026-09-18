@@ -19,7 +19,7 @@ use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{supervisor::run_supervised, StreamContext};
 use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    BidirectionalTxId, Chain, ChainEvent, IndexedSignRequest, ScalarExt, SignId, Signature,
+    BidirectionalTxId, Chain, ChainEvent, IndexedSignRequest, RequestId, ScalarExt, Signature,
     LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
@@ -510,7 +510,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
 
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
-    let sign_id = SignId::new([77u8; 32]);
+    let sign_id = RequestId::new([77u8; 32]);
     let checkpoint_slot = solana.rpc_client.get_slot().await?;
     let entry = seeded_backlog
         .insert_mock_sign(sign_id, Chain::Solana)
@@ -685,7 +685,7 @@ async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
     let config = solana.get_config(program_address);
     let mut indexer = run_solana_indexer(config.clone()).await?;
 
-    let sign_id = SignId::new([9u8; 32]);
+    let sign_id = RequestId::new([9u8; 32]);
     let request = mock_bidi_response_request(sign_id, BidirectionalTxId([1u8; 32]), Chain::Solana);
 
     let publisher = SolanaClient::from_config(&config, Arc::new(NoopPublisherTelemetry));

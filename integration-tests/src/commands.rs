@@ -6,7 +6,7 @@ use mpc_contract::{
     update::ProposeUpdateArgs,
 };
 use mpc_keys::hpke;
-use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{RequestId, Signature, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use near_primitives::borsh;
 use near_sdk::PublicKey;
@@ -40,7 +40,7 @@ pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow
     let payload_hashed = alloy::primitives::keccak256(PAYLOAD);
     let path = "test";
 
-    let sign_id = SignId::from_parts(
+    let sign_id = RequestId::from_parts(
         caller_id.as_str(),
         &payload_hashed,
         path,

@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use cait_sith::protocol::Participant;
 use mpc_chain_integration_core::{ChainIndexer, StateManager};
 use mpc_chain_solana::Pubkey;
-use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId};
+use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest, RequestId, SignArgs};
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
 use std::sync::Arc;
@@ -71,7 +71,7 @@ impl_test_indexer!(EthereumTestIndexer, Chain::Ethereum);
 #[tokio::test]
 async fn test_stream_handles_sign_and_respond() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([1u8; 32]);
+    let sign_id = RequestId::new([1u8; 32]);
     let request = mock_sign_request(sign_id, Chain::Solana);
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
@@ -146,7 +146,7 @@ fn build_solana_to_ethereum_bidirectional_request(
 ) -> (Arc<IndexedSignRequest>, SignArgs, k256::SecretKey) {
     use mpc_primitives::SignBidirectionalEvent as SBE;
 
-    let sign_id = SignId::new([seed; 32]);
+    let sign_id = RequestId::new([seed; 32]);
     let args = test_sign_args(seed);
 
     // Minimal legacy unsigned Ethereum tx encoded as RLP so sign_and_hash can parse it
@@ -341,7 +341,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
 
     let backlog = Backlog::new();
     let seed = 42;
-    let sign_id = SignId::new([seed; 32]);
+    let sign_id = RequestId::new([seed; 32]);
 
     // Pre-seed the backlog with a bidirectional request
     let (request, _args, _root_sk) = build_solana_to_ethereum_bidirectional_request(seed);
@@ -418,7 +418,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
 async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
-    let sign_id = SignId::new([99u8; 32]);
+    let sign_id = RequestId::new([99u8; 32]);
     let entry = seeded_backlog
         .insert_mock_sign(sign_id, Chain::Ethereum)
         .await;
@@ -456,7 +456,7 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
 async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
-    let sign_id = SignId::new([100u8; 32]);
+    let sign_id = RequestId::new([100u8; 32]);
     let args = test_sign_args(5);
     let recovered_timestamp = current_unix_timestamp();
     let replayed_timestamp = recovered_timestamp.saturating_add(1);
@@ -519,7 +519,7 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
 #[tokio::test]
 async fn test_stream_resumes_pending_publish_after_catchup() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([77u8; 32]);
+    let sign_id = RequestId::new([77u8; 32]);
     let entry = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
     let (pk, output) = mock_signature_output(&entry.request().args);
 
@@ -588,7 +588,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
 #[tokio::test]
 async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup() {
     let backlog = Backlog::new();
-    let sign_id = SignId::new([88u8; 32]);
+    let sign_id = RequestId::new([88u8; 32]);
     let entry = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
     let (pk, output) = mock_signature_output(&entry.request().args);
 

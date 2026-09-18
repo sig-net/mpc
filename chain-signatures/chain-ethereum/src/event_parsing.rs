@@ -10,7 +10,7 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature,
+    Chain, ChainEvent, IndexedSignRequest, RequestId, SignArgs, Signature as MpcSignature,
     SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
@@ -83,7 +83,7 @@ pub async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEven
     }
 }
 
-fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
+fn sign_id_from_signature_responded_log(log: &Log) -> Option<RequestId> {
     if log
         .topic0()
         .is_none_or(|topic| *topic != ChainSignatures::SignatureResponded::SIGNATURE_HASH)
@@ -93,7 +93,7 @@ fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
 
     let request_topic = log.topics().get(1)?;
     let request_id: [u8; 32] = (*request_topic).into();
-    Some(SignId { request_id })
+    Some(RequestId { request_id })
 }
 
 fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
@@ -133,7 +133,7 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let tx_hash = log.transaction_hash.unwrap_or_default();
     let entropy = tx_hash;
 
-    let sign_id = SignId::new(generate_request_id(
+    let sign_id = RequestId::new(generate_request_id(
         event.requester,
         &event.payload_hash,
         &event.path,

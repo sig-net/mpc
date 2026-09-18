@@ -295,7 +295,8 @@ mod tests {
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{
-        BidirectionalTxId, Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignId, SignKind,
+        BidirectionalTxId, Chain, RequestId, RespondBidirectionalTx, SignBidirectionalEvent,
+        SignKind,
     };
 
     /// An arbitrary well-formed central address.
@@ -559,7 +560,7 @@ mod tests {
         make_publish_action(
             Chain::Midnight,
             SignKind::SignBidirectional(sign_event(Chain::Midnight)),
-            SignId::new(REQUEST_ID),
+            RequestId::new(REQUEST_ID),
         )
     }
 
@@ -572,7 +573,7 @@ mod tests {
                 origin_indexed_at: None,
                 chain_ctx: None,
             }),
-            SignId::new(REQUEST_ID),
+            RequestId::new(REQUEST_ID),
         )
     }
 
@@ -901,7 +902,7 @@ mod tests {
                 make_publish_action(
                     Chain::Canton,
                     SignKind::SignBidirectional(sign_event(Chain::Canton)),
-                    SignId::new(REQUEST_ID),
+                    RequestId::new(REQUEST_ID),
                 ),
                 "Canton",
             ),
@@ -909,12 +910,12 @@ mod tests {
                 make_publish_action(
                     Chain::Midnight,
                     SignKind::SignBidirectional(sign_event(Chain::Canton)),
-                    SignId::new(REQUEST_ID),
+                    RequestId::new(REQUEST_ID),
                 ),
                 "Canton",
             ),
             (
-                make_publish_action(Chain::Midnight, SignKind::Sign, SignId::new(REQUEST_ID)),
+                make_publish_action(Chain::Midnight, SignKind::Sign, RequestId::new(REQUEST_ID)),
                 "Sign",
             ),
         ];

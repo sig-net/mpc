@@ -21,7 +21,7 @@ use crate::protocol::message::types::{
 
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::{self, Ciphered};
-use mpc_primitives::SignId;
+use mpc_primitives::RequestId;
 use near_crypto::Signature;
 use tokio::sync::{mpsc, watch};
 
@@ -74,9 +74,9 @@ pub struct MessageInbox {
     /// Posit conversations for all presignatures; demuxed by the PresignatureSpawner.
     presignature_posit: Subscriber<(FullPresignatureId, Participant, PositAction)>,
     /// Protocol messages per running signature generation.
-    signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
+    signature: HashMap<(RequestId, PresignatureId), Subscriber<SignatureMessage>>,
     /// Posit conversations for all sign requests; demuxed per sign_id by the SignatureSpawner.
-    signature_posit: Subscriber<(SignId, PresignatureId, Round, Participant, PositAction)>,
+    signature_posit: Subscriber<(RequestId, PresignatureId, Round, Participant, PositAction)>,
 }
 
 impl MessageInbox {
@@ -787,7 +787,7 @@ mod tests {
             _ => panic!("expected ready subscription"),
         };
 
-        let sign_id = SignId::new([9; 32]);
+        let sign_id = RequestId::new([9; 32]);
         let from = Participant::from(0);
         // Flood the signature posit channel beyond its capacity
         let mut messages = Vec::with_capacity(sub::MAX_MESSAGE_SUB_CHANNEL_SIZE + 2);

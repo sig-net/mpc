@@ -1,5 +1,5 @@
 use cait_sith::protocol::Participant;
-use mpc_primitives::SignId;
+use mpc_primitives::RequestId;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::metrics::messaging::{
@@ -31,7 +31,7 @@ pub enum SubscribeId {
     SignaturePosit,
     Triple(TripleId),
     Presignature(PresignatureId),
-    Signature(SignId, PresignatureId),
+    Signature(RequestId, PresignatureId),
 }
 
 pub enum SubscribeResponse {
@@ -43,7 +43,7 @@ pub enum SubscribeResponse {
     Presignature(mpsc::Receiver<PresignatureMessage>),
     PresignaturePosit(mpsc::Receiver<(FullPresignatureId, Participant, PositAction)>),
     Signature(mpsc::Receiver<SignatureMessage>),
-    SignaturePosit(mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)>),
+    SignaturePosit(mpsc::Receiver<(RequestId, PresignatureId, Round, Participant, PositAction)>),
 }
 
 /// Ties a message type to the `SubscribeResponse` variant carrying its receiver.
@@ -73,7 +73,7 @@ impl_subscription_message! {
     PresignatureMessage => Presignature,
     (FullPresignatureId, Participant, PositAction) => PresignaturePosit,
     SignatureMessage => Signature,
-    (SignId, PresignatureId, Round, Participant, PositAction) => SignaturePosit,
+    (RequestId, PresignatureId, Round, Participant, PositAction) => SignaturePosit,
 }
 
 pub enum SubscribeRequestAction {

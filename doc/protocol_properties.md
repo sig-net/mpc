@@ -35,7 +35,7 @@ Both artifacts below have a single owner, the node that coordinated their genera
   * the proposer reserves its artifact when proposing and commits it, removing it from the pool, when generation starts; aborting before the commit releases the reservation, aborting after does not  
 
 * Instance: one attempt to run the protocol to completion over a specific artifact, named by that artifact
-  * Signature: (sign\_id, presignature\_id) (the code's SignId wraps the request\_id above, same 32 bytes)  
+  * Signature: (sign\_id, presignature\_id) (the code's RequestId wraps the request\_id above, same 32 bytes)  
   * Triple pair/presignature: identified by artifact id. A triple pair's id is drawn at random by its proposer; a presignature's id is derived from the pair it consumes (hash of the pair id), not chosen.  
 
   A request's round tries to establish a signature instance; since the artifact tentatively picked for this round can differ round to round, rounds are usually different instances. If a round is not successful, a new proposer is chosen deterministically (rotating over the nodes). Only posit messages name the round; generation messages name only (sign\_id, presignature\_id), so two rounds that re-pick the same presignature, possible when the first aborted before committing it, share one name.

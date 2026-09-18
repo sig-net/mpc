@@ -9,7 +9,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
-use mpc_primitives::{Chain, ChainConfig as _, CheckpointDigest, SignId};
+use mpc_primitives::{Chain, ChainConfig as _, CheckpointDigest, RequestId};
 use near_sdk::AccountId;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -315,7 +315,7 @@ async fn test_reset_converges_divergent_nodes() {
     // which is exactly the state that makes post-reset digests disagree if a
     // reset preserves it.
     for (index, node) in network.nodes.iter().enumerate() {
-        let sign_id = SignId::new([index as u8 + 1; 32]);
+        let sign_id = RequestId::new([index as u8 + 1; 32]);
         node.backlog.insert_mock_sign(sign_id, chain).await;
         node.backlog
             .set_processed_block(chain, interval * (index as u64 + 3))

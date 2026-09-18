@@ -9,7 +9,7 @@ use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
 use crate::types::Epoch;
 use mpc_keys::hpke;
-use mpc_primitives::SignId;
+use mpc_primitives::RequestId;
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Protocols {
@@ -27,7 +27,7 @@ pub type Round = usize;
 pub enum PositProtocolId {
     Triple(TripleId),
     Presignature(FullPresignatureId),
-    Signature(SignId, PresignatureId, Round),
+    Signature(RequestId, PresignatureId, Round),
 }
 
 /// The message associated with positing a new protocol.
@@ -144,7 +144,7 @@ impl From<PresignatureMessage> for Message {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct SignatureMessage {
-    pub id: SignId,
+    pub id: RequestId,
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
     pub epoch: u64,
@@ -267,7 +267,7 @@ impl ProtocolType for SignatureMessage {
     const PROTOCOL: Protocols = Protocols::Signature;
 }
 
-impl ProtocolType for (SignId, PresignatureId) {
+impl ProtocolType for (RequestId, PresignatureId) {
     const PROTOCOL: Protocols = Protocols::Signature;
 }
 
@@ -296,7 +296,7 @@ impl MessageFilterId for SignatureMessage {
     }
 }
 
-impl MessageFilterId for (SignId, PresignatureId) {
+impl MessageFilterId for (RequestId, PresignatureId) {
     fn id(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         self.0.hash(&mut hasher);

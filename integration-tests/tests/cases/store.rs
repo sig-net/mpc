@@ -9,7 +9,7 @@ use mpc_node::types::SecretKeyShare;
 use test_log::test;
 
 use super::helpers::{dummy_backlog_entry, dummy_pair, dummy_presignature};
-use mpc_primitives::SignId;
+use mpc_primitives::RequestId;
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
@@ -363,7 +363,10 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 10);
     assert_eq!(latest.pending_requests.len(), 1);
-    assert_eq!(latest.pending_requests[0].sign_id(), SignId::new([1u8; 32]));
+    assert_eq!(
+        latest.pending_requests[0].sign_id(),
+        RequestId::new([1u8; 32])
+    );
 
     // 4. Persist second checkpoint at higher height (newer consensus checkpoint)
     let tx2 = dummy_backlog_entry(2, Chain::Solana);
@@ -379,7 +382,10 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 20);
     assert_eq!(latest.pending_requests.len(), 1);
-    assert_eq!(latest.pending_requests[0].sign_id(), SignId::new([2u8; 32]));
+    assert_eq!(
+        latest.pending_requests[0].sign_id(),
+        RequestId::new([2u8; 32])
+    );
 
     Ok(())
 }

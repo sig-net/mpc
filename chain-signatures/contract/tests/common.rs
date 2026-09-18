@@ -19,7 +19,7 @@ use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccountId, NearToken};
 use near_workspaces::{Account, Contract, Worker};
 use signature::DigestSigner;
-use signet_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
+use signet_primitives::{RequestId, Signature, LATEST_MPC_KEY_VERSION};
 
 pub const INVALID_CONTRACT: &str = "../res/mpc_test_contract.wasm";
 pub const PARTICIPANT_LEN: usize = 3;
@@ -201,7 +201,7 @@ pub async fn create_response(
     msg: &str,
     path: &str,
     sk: &k256::SecretKey,
-) -> ([u8; 32], SignId, Signature) {
+) -> ([u8; 32], RequestId, Signature) {
     let (digest, scalar_hash, payload_hash) = process_message(msg).await;
     let pk = sk.public_key();
 
@@ -218,7 +218,7 @@ pub async fn create_response(
 
     let s = signature.s();
     let (r_bytes, _s_bytes) = signature.split_bytes();
-    let sign_id = SignId::from_parts(
+    let sign_id = RequestId::from_parts(
         predecessor_id.as_str(),
         &payload_hash,
         path,
@@ -247,7 +247,7 @@ pub async fn create_response(
 
 pub async fn sign_and_validate(
     request: &SignRequest,
-    respond: Option<(&SignId, &Signature)>,
+    respond: Option<(&RequestId, &Signature)>,
     contract: &Contract,
 ) -> anyhow::Result<()> {
     let status = contract
