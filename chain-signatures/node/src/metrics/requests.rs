@@ -114,8 +114,8 @@ pub fn record_indexing_step_reached(chain: Chain, kind: RequestKind) {
 pub(crate) static SIGN_REQUEST_DELAYED: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec_with_node_and_version(
         "multichain_sign_request_delayed",
-        "Number of delayed requests by chain, reported by the current proposer node.",
-        &["chain"],
+        "Number of delayed requests by chain and request kind, reported by the current proposer node.",
+        &["chain", "kind"],
     )
     .unwrap()
 });
