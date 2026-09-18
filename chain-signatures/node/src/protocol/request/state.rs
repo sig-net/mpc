@@ -66,7 +66,6 @@ impl SignState {
     /// state machine.
     pub fn reorganize(&mut self, reason: &str) -> SignPhase {
         protocols::SIGN_REORGANIZES.inc();
-        protocols::SIGN_REORGANIZE_ROUND.observe(self.round as f64);
 
         // Wedged requests rotate forever at the 600s ceiling; sampling every 10th
         // round emits roughly one heartbeat per 100 min instead of one per round.
