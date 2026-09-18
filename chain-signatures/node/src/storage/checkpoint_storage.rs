@@ -447,6 +447,40 @@ impl CheckpointStorage {
         }
     }
 
+    /// Returns whether a pending or confirmed checkpoint exists for `chain`,
+    /// without reading its body. Mirrors [`Self::latest`]'s key selection, so it
+    /// answers `true` whenever `latest` would return a body, and may also answer
+    /// `true` for stored state `latest` cannot read back.
+    pub async fn has_checkpoint(&self, chain: Chain) -> anyhow::Result<bool> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                // An empty hash does not exist in Redis, so these two keys cover
+                // exactly the pending-or-confirmed states `latest` looks at.
+                let found: usize = conn
+                    .exists((
+                        self.pending_checkpoint_key(chain),
+                        self.checkpoint_key(chain),
+                    ))
+                    .await
+                    .context("failed to check for a stored checkpoint in redis")?;
+                Ok(found > 0)
+            }
+            CheckpointStorage::InMemory {
+                latest, pending, ..
+            } => {
+                let has_pending = pending
+                    .read()
+                    .await
+                    .get(&chain)
+                    .is_some_and(|checkpoints| !checkpoints.is_empty());
+                Ok(has_pending || latest.read().await.contains_key(&chain))
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+    }
+
     /// Finds a checkpoint by digest, searching durable latest and pending storage.
     pub async fn find(&self, chain: Chain, digest: [u8; 32]) -> anyhow::Result<Option<Checkpoint>> {
         match self {
@@ -652,5 +686,19 @@ mod tests {
         let encoded = encode_checkpoint(&checkpoint).unwrap();
         let decoded = decode_checkpoint(&encoded).unwrap();
         assert_eq!(checkpoint, decoded);
+    }
+
+    /// `promote_pending` leaves an empty map behind for a chain that has no
+    /// checkpoints, so "pending is present" must not be read as "non-empty".
+    /// The Redis arm is covered in integration-tests/tests/cases/store.rs.
+    #[tokio::test]
+    async fn has_checkpoint_ignores_an_empty_pending_map() -> anyhow::Result<()> {
+        let chain = Chain::Solana;
+        let storage = CheckpointStorage::in_memory();
+        storage.promote_pending(chain, [0u8; 32]).await?;
+
+        assert!(!storage.has_checkpoint(chain).await?);
+        assert!(storage.latest(chain).await?.is_none());
+        Ok(())
     }
 }
