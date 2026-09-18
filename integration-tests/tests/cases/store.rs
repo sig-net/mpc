@@ -475,7 +475,11 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         .arg(1000)
         .query_async(&mut conn)
         .await?;
-    assert_eq!(keys.len(), 1, "expected exactly one confirmed checkpoint key");
+    assert_eq!(
+        keys.len(),
+        1,
+        "expected exactly one confirmed checkpoint key"
+    );
     let _: () = redis::cmd("SET")
         .arg(&keys[0])
         .arg("not cbor")
