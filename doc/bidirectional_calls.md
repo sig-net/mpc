@@ -56,10 +56,10 @@ Happy path:
   * A transaction that succeeded but whose return data does not decode has
     no outcome: the MPC reports nothing.
 * *Attestation key*: a signing key the MPC derives from its root key, the
-  source chain and the contract, used for nothing but attestations to that
-  contract.
-* *Attestation*: a statement (rid, version, height, outcome) signed with
-  rid's contract's attestation key at that version, each field
+  source chain, the contract, a reserved path and the request's key version,
+  used for nothing but attestations to that contract.
+* *Attestation*: a statement (rid, key version, height, outcome) signed
+  with rid's contract's attestation key at that key version, each field
   length-committed. height is
   the height of the block that includes the transaction the outcome
   describes, attested once that block is final, in the destination chain's
@@ -190,15 +190,16 @@ without.
   * Key derivation is collision-resistant: distinct (source chain, contract,
     key parameters) derive distinct keys, so the sender of an executed
     transaction identifies the contract and key it was signed for. A key
-    version names a distinct root key, so a resharing keeps the version, and
-    two signing schemes never share a key.
+    version may change the root key or only the derivation path; a resharing
+    changes neither, so it keeps the key version. Two signing schemes never
+    share a key.
 
 ## 4. Pseudocode and properties per entity
 
 Each entity is an event handler over its own state. `drop` means the event
 has no effect. Key versions are omitted throughout: an attestation names
-the version it is signed under, and the library keeps the key of every
-version it has been given, since an attestation published under one
+the key version it is signed under, and the library keeps the key of every
+key version it has been given, since an attestation published under one key
 version may be delivered after the next.
 
 ### 4.1 Library (inside the application contract)
@@ -218,12 +219,12 @@ on sign_bidirectional(req) from the application logic:
     signet.sign_bidirectional(rid, req)
     return rid
 
-on response(rid, att = (version, kind, height, data), sig):
+on response(rid, att = (key_version, kind, height, data), sig):
     if rid not in outstanding:                          // C3a
         drop
     e = outstanding[rid]
     if not verify(sig, H(rid || att),                   // C3b
-                  attestation_key[att.version]):
+                  attestation_key[att.key_version]):
         drop
     if height <= e.known:                               // C3c
         drop
@@ -242,7 +243,7 @@ atomic: a handler that fails reverts C3d and C4 with it, so the entry
 stays outstanding and the response can be delivered again (section 6).
 
 last_seen starts at 0 for every destination, and so does `known` for any
-entry already outstanding when a contract upgrades to this version. The
+entry already outstanding when a contract upgrades to this design. The
 cost: a rid whose transaction already executed through this API, and that
 is issued again with the same bytes, can accept one replayed old response,
 a stale answer for a call that could never execute again, and a second
@@ -421,8 +422,9 @@ Properties:
 
 * M1 The MPC signs a request only if it provably comes from the contract it
   names, with a key derived from that contract. The attestation key is
-  derived from the contract and its source chain under a reserved path that
-  no request on any signing API may name (`processable` covers this one);
+  derived from the contract, its source chain and the request's key version
+  under a reserved path that no request on any signing API may name
+  (`processable` covers this one);
   otherwise a contract could have its own attestation key sign an arbitrary
   hash and forge a response to itself.
 * M2 An attestation binds rid, key version, kind, height and data as
@@ -526,6 +528,10 @@ from B48 through A15; the first at A12 has none.
 * A dropped request strands its rid. After M4 or M5 the MPC keeps nothing
   while the library's entry stays outstanding, so C1 refuses that rid for
   good and the application can only retry with a different transaction.
+* A key version can be retired only once no call using it is outstanding,
+  and an unanswered call is outstanding forever. Until then C3b accepts any
+  key version the library holds, for any rid, so a compromised old key forges
+  responses to current calls.
 * `pending` grows without bound. An entry lives until a verified Response,
   and a request whose signature nobody broadcasts never produces one. A
   cancel transaction that takes the nonce ends the MPC's entry when enough
