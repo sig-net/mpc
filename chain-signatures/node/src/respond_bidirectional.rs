@@ -29,6 +29,13 @@ fn respond_bidirectional_path(chain: Chain) -> anyhow::Result<String> {
     }
 }
 
+/// Whether `path` is the one `chain`'s attestation key is derived under. False
+/// for a chain that has no attestation key, so a chain that gains one has to be
+/// added to `respond_bidirectional_path` or its path is admitted here.
+pub(crate) fn is_respond_bidirectional_path(chain: Chain, path: &str) -> bool {
+    respond_bidirectional_path(chain).is_ok_and(|reserved| path == reserved)
+}
+
 pub struct CompletedTx {
     tx: Arc<BidirectionalTx>,
     chain_ctx: Option<Vec<u8>>,
