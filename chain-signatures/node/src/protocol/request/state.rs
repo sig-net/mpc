@@ -65,11 +65,11 @@ impl SignState {
     /// machine from the Organizing phase. The single back-edge of the sign
     /// state machine.
     pub fn reorganize(&mut self, reason: &str) -> SignPhase {
-        // Record the reorganization in the metrics.
         protocols::SIGN_REORGANIZES.inc();
         protocols::SIGN_REORGANIZE_ROUND.observe(self.round as f64);
 
-        // Log a warning if this is the first round or a multiple of 10, otherwise log info.
+        // Wedged requests rotate forever at the 600s ceiling; sampling every 10th
+        // round emits roughly one heartbeat per 100 min instead of one per round.
         if self.round == 0 || self.round % 10 == 0 {
             tracing::warn!(
                 sign_id = ?self.entry.sign_id(),
