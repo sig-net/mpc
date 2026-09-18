@@ -496,6 +496,39 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
     );
 }
 
+/// Plain `sign` takes a free-text path and never reaches `validate`, so without
+/// this check a contract asks for its own chain's attestation path with a payload
+/// of keccak(request_id || output) and gets a valid attestation for any outcome.
+#[tokio::test]
+async fn process_sign_request_rejects_the_reserved_attestation_path() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
+
+    let mut reserved = mock_sign_request(SignId::new([31u8; 32]), Chain::Solana);
+    Arc::make_mut(&mut reserved).args.path = "solana response key".to_string();
+    let err = process_sign_request(reserved, &ctx)
+        .await
+        .expect_err("a sign request on the attestation path must be rejected");
+    assert!(err.to_string().contains("reserved attestation path"));
+    assert_eq!(
+        backlog.len(),
+        0,
+        "a rejected request must not reach the backlog"
+    );
+
+    // Only this request's own source chain's path is reserved. Another chain's
+    // cannot derive this one's attestation key, so it stays admitted, which is
+    // what distinguishes the check from one that matches all four strings.
+    let foreign_id = SignId::new([32u8; 32]);
+    let mut foreign = mock_sign_request(foreign_id, Chain::Solana);
+    Arc::make_mut(&mut foreign).args.path = "canton response key".to_string();
+    process_sign_request(foreign, &ctx)
+        .await
+        .expect("another chain's attestation path must still be admitted");
+    assert!(backlog.get(Chain::Solana, &foreign_id).await.is_some());
+}
+
 #[tokio::test]
 async fn process_sign_request_duplicate_is_idempotent() {
     let backlog = Backlog::new();
