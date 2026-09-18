@@ -19,9 +19,9 @@ use tokio::sync::mpsc;
 
 /// Outcome of a signature task. Produced here on a protocol/abort error, and by
 /// the `request` layer when organizing cannot proceed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum SignError {
-    Aborted,
+    Aborted(String),
 }
 
 pub(crate) struct GenerateCtx {
@@ -143,7 +143,7 @@ impl SignGenerator {
                     awaited = ?self.awaited(seen),
                     "signature generation aborted",
                 );
-                Err(SignError::Aborted)
+                Err(SignError::Aborted("inbox closed".to_string()))
             }
             Err(_err) => {
                 tracing::warn!(
@@ -152,7 +152,7 @@ impl SignGenerator {
                     awaited = ?self.awaited(seen),
                     "signature generation timeout",
                 );
-                Err(SignError::Aborted)
+                Err(SignError::Aborted("timeout".to_string()))
             }
         }
     }
@@ -188,16 +188,18 @@ impl SignGenerator {
                     if self.proposer == me {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES.inc();
                     }
-                    // Every failure reorganizes and re-logs round-aware in
-                    // `reorganize`, so keep this detail at info to avoid one error
-                    // per round from wedged requests.
+                    // Wedged requests re-fail every round; `reorganize` warns
+                    // round-aware and carries this cause in its reason.
                     tracing::info!(
                         ?sign_id,
                         ?err,
                         awaited = ?self.awaited(&seen),
                         "signature generation failed on protocol advancement",
                     );
-                    break Err(SignError::Aborted);
+                    break Err(SignError::Aborted(format!(
+                        "{err:?} (awaited {:?})",
+                        self.awaited(&seen)
+                    )));
                 }
             };
 
