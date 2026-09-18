@@ -2,7 +2,7 @@ use crate::backlog::{
     Backlog, BacklogEntry, Bidirectional, Checkpoint, Checkpoints, Executing, Final, Generating,
     Initial, PendingRequests, Publishing, Sign, SignEntry,
 };
-use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+use crate::sign_bidirectional::{BidirectionalProgress, ExecutingTx, SignProgress, SignStatus};
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Scalar, Secp256k1};
@@ -73,9 +73,10 @@ impl BacklogTestExt for Backlog {
         &self,
         tx: &BidirectionalTx,
     ) -> SignEntry<Bidirectional<Final<Generating>>> {
-        self.insert_mock_executing(tx)
-            .await
-            .advance(ExecutionOutcome::Success { output: vec![] })
+        let entry = self.insert_mock_executing(tx).await;
+        let executed = Arc::clone(entry.execution_tx());
+        entry
+            .advance(executed, ExecutionOutcome::Success { output: vec![] })
             .await
             .expect("advance to final generating")
     }
@@ -137,7 +138,9 @@ pub fn mock_publishing_since(participants: usize, publishing_since: Option<u64>)
 
 /// Helper to construct a pending execution status for a bidirectional tx.
 pub fn pending_execution_status(tx: &BidirectionalTx) -> SignStatus {
-    SignStatus::Bidirectional(BidirectionalProgress::Executing(Arc::new(tx.clone())))
+    SignStatus::Bidirectional(BidirectionalProgress::Executing(ExecutingTx::new(Arc::new(
+        tx.clone(),
+    ))))
 }
 
 /// Helper to construct an initial generating status for bidirectional requests.

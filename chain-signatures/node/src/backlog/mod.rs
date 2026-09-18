@@ -81,16 +81,36 @@ impl PendingRequests {
         self.requests
             .values()
             .filter_map(|entry| match &entry.status {
-                SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)) => {
+                SignStatus::Bidirectional(BidirectionalProgress::Executing(executing)) => {
                     Some(SignEntry {
                         chain,
                         request: Arc::clone(entry.request()),
-                        state: Bidirectional(Executing(ExecutionWatch::new(Arc::clone(tx), None))),
+                        state: Bidirectional(Executing(ExecutionWatch::new(
+                            Arc::clone(&executing.tx),
+                            None,
+                        ))),
                         backlog: backlog.clone(),
                     })
                 }
                 _ => None,
             })
+            .collect()
+    }
+
+    /// One watch per transaction that could carry a pending execution. A request
+    /// signed more than once has a candidate per signature, and only the one that
+    /// mined names the execution.
+    fn pending_execution_watches(&self) -> Vec<ExecutionWatch> {
+        self.requests
+            .values()
+            .filter_map(|entry| match &entry.status {
+                SignStatus::Bidirectional(BidirectionalProgress::Executing(executing)) => {
+                    Some(executing.candidates())
+                }
+                _ => None,
+            })
+            .flatten()
+            .map(|tx| ExecutionWatch::new(tx, None))
             .collect()
     }
 
@@ -337,22 +357,45 @@ impl Backlog {
         watchers.insert(entry.execution_watch());
     }
 
+    /// Watch another transaction of a request already watched, keeping the wait
+    /// start of the one it joins so both measure the same round trip.
+    pub async fn watch_beside(&self, watched: &BidirectionalTxId, tx: Arc<BidirectionalTx>) {
+        let mut watchers = self.watchers(&tx.target_chain).write().await;
+        let respond_observed_at = watchers
+            .watchers
+            .get(watched)
+            .and_then(|watch| watch.respond_observed_at);
+        watchers.insert(ExecutionWatch::new(tx, respond_observed_at));
+    }
+
     /// Stop watching for execution of a bidirectional transaction on the destination chain
     /// and retrieve the executing backlog entry from its source chain.
     pub async fn unwatch_execution(
         &self,
         chain: Chain,
         tx_id: &BidirectionalTxId,
-    ) -> Option<SignEntry<Bidirectional<Executing>>> {
+    ) -> Option<(SignEntry<Bidirectional<Executing>>, Arc<BidirectionalTx>)> {
         let watch = {
             let mut watchers = self.watchers(&chain).write().await;
-            watchers.remove(tx_id)?
+            let watch = watchers.remove(tx_id)?;
+            // Drop the request's other candidates too: they signed the same bytes
+            // and share this nonce, so none of them can be mined now.
+            let sign_id = watch.tx.sign_id();
+            watchers
+                .watchers
+                .retain(|_, other| other.tx.sign_id() != sign_id);
+            watch
         };
 
-        // Restore the observation time absent from backlog status.
-        self.get_by::<Bidirectional<Executing>>(watch.tx.source_chain, &watch.tx.sign_id())
-            .await
-            .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
+        // Restore the observation time absent from backlog status, and hand back
+        // the transaction that ran: the status keeps whichever signature was
+        // adopted first, which is not always this one.
+        let entry = self
+            .get_by::<Bidirectional<Executing>>(watch.tx.source_chain, &watch.tx.sign_id())
+            .await?
+            .with_respond_observed_at(watch.respond_observed_at);
+
+        Some((entry, watch.tx))
     }
 
     /// Set the processed block height for a specific chain.
@@ -507,7 +550,7 @@ impl Backlog {
                 restored_requests = restored_len,
                 "successfully recovered from checkpoint"
             );
-            pending.pending_executions(chain, self)
+            pending.pending_execution_watches()
         };
 
         // Replace this chain's watches, retaining wait start times for executions
@@ -522,9 +565,9 @@ impl Backlog {
                 observed.insert(*id, watch.respond_observed_at);
                 false
             });
-            for entry in &execution_to_watch {
-                let mut watch = entry.execution_watch();
+            for watch in &execution_to_watch {
                 if watch.tx.target_chain == destination_chain {
+                    let mut watch = watch.clone();
                     watch.respond_observed_at = observed.remove(&watch.tx.id).flatten();
                     watchers.insert(watch);
                 }

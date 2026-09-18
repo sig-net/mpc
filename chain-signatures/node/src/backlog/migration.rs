@@ -1,5 +1,5 @@
 use crate::backlog::{BacklogEntry, Publishing};
-use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+use crate::sign_bidirectional::{BidirectionalProgress, ExecutingTx, SignProgress, SignStatus};
 use mpc_primitives::{BidirectionalTx, IndexedSignRequest, SignKind};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -66,7 +66,9 @@ impl From<MigratableBacklogEntry> for BacklogEntry {
                 }
             },
             MigratableSignStatus::PendingExecution { tx } => {
-                SignStatus::Bidirectional(BidirectionalProgress::Executing(tx))
+                SignStatus::Bidirectional(BidirectionalProgress::Executing(ExecutingTx::new(
+                    tx,
+                )))
             }
             MigratableSignStatus::PendingGenerationBidirectional => {
                 SignStatus::Bidirectional(BidirectionalProgress::Final {
