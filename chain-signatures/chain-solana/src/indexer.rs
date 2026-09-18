@@ -487,9 +487,6 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         #[cfg(feature = "bench")]
         let started_at = Instant::now();
 
-        // Update indexed block metrics
-        self.telemetry.block_indexed(height);
-
         if let Some(transactions) = &block.transactions {
             for tx in transactions {
                 process_transaction(events_tx, &self.program_id, tx).await?;
@@ -497,6 +494,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         }
 
         events_tx.send(ChainEvent::Block(height)).await?;
+
+        // Indexed means emitted: catchup retries a failed block until it succeeds.
+        self.telemetry.block_indexed(height);
 
         #[cfg(feature = "bench")]
         {
