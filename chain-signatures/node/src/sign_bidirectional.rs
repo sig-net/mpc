@@ -2,6 +2,7 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address};
 use anyhow::Context as _;
 use k256::elliptic_curve::point::AffineCoordinates;
+use k256::elliptic_curve::scalar::IsHigh as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
@@ -280,9 +281,13 @@ pub fn sign_and_hash_transaction(
     unsigned_rlp: &[u8],
     signature: Signature,
 ) -> anyhow::Result<([u8; 32], u64)> {
+    // A chain includes only the low-s encoding, and negating s negates the
+    // recovered point, so the recovery id flips with it.
+    let negate = bool::from(signature.s.is_high());
+    let s_scalar = if negate { -signature.s } else { signature.s };
+    let y_parity = (signature.recovery_id == 1) ^ negate;
     let r = signature.big_r.x().as_slice().to_vec();
-    let s = signature.s.to_bytes().as_slice().to_vec();
-    let y_parity = signature.recovery_id == 1;
+    let s = s_scalar.to_bytes().as_slice().to_vec();
 
     if is_eip1559(unsigned_rlp) {
         sign_and_hash_eip1559_from_unsigned(unsigned_rlp, &r, &s, y_parity)
@@ -510,21 +515,61 @@ mod tests {
         assert_eq!(nonce, 3);
     }
 
+    fn legacy_tx(chain_id: u64) -> Vec<u8> {
+        let mut rlp = super::EthereumTxRlp::new_list(9);
+        for _ in 0..6 {
+            rlp.append_u64(0);
+        }
+        rlp.append_u64(chain_id);
+        rlp.append_u64(0);
+        rlp.append_u64(0);
+        rlp.into_vec()
+    }
+
+    /// The negated signature verifies too, so it has to name the transaction a
+    /// chain will actually include.
+    #[test]
+    fn a_high_s_signature_names_the_same_transaction_as_its_low_s_form() {
+        use k256::elliptic_curve::point::AffineCoordinates as _;
+        use k256::elliptic_curve::scalar::IsHigh as _;
+
+        let unsigned = legacy_tx(31_337);
+
+        let big_r = k256::ProjectivePoint::GENERATOR.to_affine();
+        let low = k256::Scalar::from(5u64);
+        let high = -low;
+        assert!(!bool::from(low.is_high()) && bool::from(high.is_high()));
+
+        let id_of = |s, recovery_id| {
+            super::sign_and_hash_transaction(
+                &unsigned,
+                mpc_primitives::Signature::new(big_r, s, recovery_id),
+            )
+            .unwrap()
+            .0
+        };
+
+        assert_eq!(id_of(low, 1), id_of(high, 0));
+
+        // The ids would also agree if we normalised the wrong way, so compare
+        // against the low-s encoding directly.
+        let expected = super::sign_and_hash_legacy_from_unsigned(
+            &unsigned,
+            Some(31_337),
+            big_r.x().as_slice(),
+            low.to_bytes().as_slice(),
+            false,
+        )
+        .unwrap()
+        .0;
+        assert_eq!(id_of(high, 1), expected);
+    }
+
     /// At `chain_id = (u64::MAX - 35) / 2` the legacy `v = 2c + 35 + y_parity`
     /// overflows only for parity 1. Admission must reject it, not admit a request
     /// that then fails at respond time whenever the signature draws parity 1.
     #[test]
     fn validate_rejects_the_legacy_chain_id_that_only_overflows_on_parity_one() {
-        let legacy_tx = |chain_id: u64| {
-            let mut rlp = super::EthereumTxRlp::new_list(9);
-            for _ in 0..6 {
-                rlp.append_u64(0);
-            }
-            rlp.append_u64(chain_id);
-            rlp.append_u64(0);
-            rlp.append_u64(0);
-            rlp.into_vec()
-        };
         let boundary = (u64::MAX - 35) / 2;
         assert!(super::validate_unsigned_transaction(&legacy_tx(boundary)).is_err());
         assert!(super::validate_unsigned_transaction(&legacy_tx(boundary - 1)).is_ok());
