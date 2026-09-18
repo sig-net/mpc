@@ -69,7 +69,7 @@ impl SignState {
 
         // Wedged requests rotate forever at the 600s ceiling; sampling every 10th
         // round emits roughly one heartbeat per 100 min instead of one per round.
-        if self.round == 0 || self.round % 10 == 0 {
+        if self.round == 0 || self.round.is_multiple_of(10) {
             tracing::warn!(
                 sign_id = ?self.entry.sign_id(),
                 round = self.round,
