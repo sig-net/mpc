@@ -453,7 +453,7 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
 }
 
 #[tokio::test]
-async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
+async fn test_stream_keeps_the_recovered_ethereum_entry_over_a_replay() {
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([100u8; 32]);
@@ -500,20 +500,21 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
         .expect("recv should not timeout")
-        .expect("replacement request should be requeued");
+        .expect("the recovered request should be requeued");
     match msg {
         SignCommand::Request(req) => {
             assert_eq!(req.sign_id(), sign_id);
-            assert_eq!(req.request().unix_timestamp_indexed, replayed_timestamp);
+            // The replay does not replace the entry, so the first index time stands.
+            assert_eq!(req.request().unix_timestamp_indexed, recovered_timestamp);
         }
-        other => panic!("expected replacement request after catchup, got {other:?}"),
+        other => panic!("expected the recovered request after catchup, got {other:?}"),
     }
 
     let entry = backlog
         .get(Chain::Ethereum, &sign_id)
         .await
-        .expect("replayed entry should remain in backlog");
-    assert_eq!(entry.request().unix_timestamp_indexed, replayed_timestamp);
+        .expect("recovered entry should remain in backlog");
+    assert_eq!(entry.request().unix_timestamp_indexed, recovered_timestamp);
 }
 
 #[tokio::test]
