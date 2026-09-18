@@ -276,7 +276,7 @@ impl Backlog {
             left.request()
                 .unix_timestamp_indexed
                 .cmp(&right.request().unix_timestamp_indexed)
-                .then_with(|| left.request_id().cmp(&right.request_id()))
+                .then_with(|| left.request_bytes().cmp(&right.request_bytes()))
         });
 
         requeueable
@@ -308,7 +308,7 @@ impl Backlog {
             left.request()
                 .unix_timestamp_indexed
                 .cmp(&right.request().unix_timestamp_indexed)
-                .then_with(|| left.request_id().cmp(&right.request_id()))
+                .then_with(|| left.request_bytes().cmp(&right.request_bytes()))
         });
 
         publishable

@@ -903,7 +903,7 @@ async fn test_insert_and_accessors() {
     assert!(is_new);
     assert_eq!(entry.chain(), chain);
     assert_eq!(entry.sign_id(), sign_id);
-    assert_eq!(entry.request_id(), sign_id.request_id);
+    assert_eq!(entry.request_bytes(), sign_id.request_id);
     assert_eq!(entry.request().id, sign_id);
     assert_eq!(entry.into_request().id, sign_id);
 

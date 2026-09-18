@@ -433,10 +433,10 @@ mod tests {
 
     #[test]
     fn sign_id_from_responded_log_extracts_request_id() {
-        let request_id = [0xabu8; 32];
-        let log = responded_log(request_id, vec![]);
+        let request_bytes = [0xabu8; 32];
+        let log = responded_log(request_bytes, vec![]);
         let sign_id = sign_id_from_signature_responded_log(&log).expect("well-formed log");
-        assert_eq!(sign_id.request_id, request_id);
+        assert_eq!(sign_id.request_id, request_bytes);
     }
 
     #[test]
