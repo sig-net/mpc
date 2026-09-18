@@ -72,7 +72,7 @@ pub async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEven
         let signature = MpcSignature::new(big_r, s, signature.recoveryId);
 
         let respond_event = SignatureRespondedEvent {
-            request_id: request_id.request_id,
+            request_id: request_id.bytes,
             signature,
             chain: Chain::Ethereum,
         };
@@ -93,7 +93,7 @@ fn request_id_from_signature_responded_log(log: &Log) -> Option<RequestId> {
 
     let request_topic = log.topics().get(1)?;
     let request_id: [u8; 32] = (*request_topic).into();
-    Some(RequestId { request_id })
+    Some(RequestId { bytes: request_id })
 }
 
 fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
@@ -436,7 +436,7 @@ mod tests {
         let request_bytes = [0xabu8; 32];
         let log = responded_log(request_bytes, vec![]);
         let request_id = request_id_from_signature_responded_log(&log).expect("well-formed log");
-        assert_eq!(request_id.request_id, request_bytes);
+        assert_eq!(request_id.bytes, request_bytes);
     }
 
     #[test]

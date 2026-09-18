@@ -466,7 +466,7 @@ impl ChainPublisher for SolanaClient {
         let program = self.client.program(self.program_id)?;
 
         let request_id = action.request.id;
-        let request_ids = vec![action.request.id.request_id];
+        let request_ids = vec![action.request.id.bytes];
         let big_r = mpc_sig.big_r.to_encoded_point(false);
         let signature = mpc_to_sol_signature(mpc_sig, big_r);
 

@@ -334,7 +334,7 @@ impl BatchPublisher {
         let responses: Vec<ChainSignatures::Response> = actions
             .iter()
             .map(|action| ChainSignatures::Response {
-                requestId: action.request.id.request_id.into(),
+                requestId: action.request.id.bytes.into(),
                 signature: (&action.signature).into(),
             })
             .collect();

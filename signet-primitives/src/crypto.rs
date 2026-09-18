@@ -57,21 +57,22 @@ pub static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     BorshDeserialize,
 )]
 pub struct RequestId {
-    #[serde(with = "serde_bytes")]
-    pub request_id: [u8; 32],
+    /// Named `request_id` on the wire: that is the NEAR contract's JSON ABI.
+    #[serde(rename = "request_id", with = "serde_bytes")]
+    pub bytes: [u8; 32],
 }
 
 impl std::fmt::Debug for RequestId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("RequestId")
-            .field(&hex::encode(self.request_id))
+            .field(&hex::encode(self.bytes))
             .finish()
     }
 }
 
 impl RequestId {
-    pub const fn new(request_id: [u8; 32]) -> Self {
-        Self { request_id }
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self { bytes }
     }
 
     pub fn from_parts(id: &str, payload: &[u8; 32], path: &str, key_version: u32) -> Self {
@@ -80,8 +81,8 @@ impl RequestId {
         hasher.update(payload);
         hasher.update(path.as_bytes());
         hasher.update(key_version.to_le_bytes());
-        let request_id: [u8; 32] = hasher.finalize().into();
-        Self { request_id }
+        let bytes: [u8; 32] = hasher.finalize().into();
+        Self { bytes }
     }
 
     pub const fn from_u8(byte: u8) -> Self {
@@ -90,8 +91,8 @@ impl RequestId {
 }
 
 impl From<[u8; 32]> for RequestId {
-    fn from(request_id: [u8; 32]) -> Self {
-        Self::new(request_id)
+    fn from(bytes: [u8; 32]) -> Self {
+        Self::new(bytes)
     }
 }
 

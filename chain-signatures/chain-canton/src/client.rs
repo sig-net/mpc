@@ -304,7 +304,7 @@ async fn check_response(
 impl ChainPublisher for CantonClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let request_id = action.request.id;
-        let request_id_hex = hex::encode(action.request.id.request_id);
+        let request_id_hex = hex::encode(action.request.id.bytes);
         let timestamp = action.timestamp;
         let signature = &action.signature;
 
@@ -524,7 +524,7 @@ mod tests {
             let duplicate = server
                 .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
                 .match_body(Matcher::PartialJson(json!({"commands": {
-                    "commandId": format!("{prefix}{}", hex::encode(action.request.id.request_id)),
+                    "commandId": format!("{prefix}{}", hex::encode(action.request.id.bytes)),
                     "userId": "test-user",
                     "actAs": ["test-party"],
                     "commands": [{"ExerciseCommand": {"choice": choice}}],

@@ -75,7 +75,7 @@ impl Checkpoint {
             self.block_height,
             self.pending_requests
                 .iter()
-                .map(|entry| entry.request_id().request_id),
+                .map(|entry| entry.request_id().bytes),
             self.cumulative_digest,
         )
     }
@@ -624,7 +624,7 @@ mod tests {
         assert!(!debug_str.contains("IndexedSignRequest"));
         assert!(!debug_str.contains("payload"));
         for entry in &cp.pending_requests {
-            assert!(debug_str.contains(&hex::encode(entry.request_id().request_id)));
+            assert!(debug_str.contains(&hex::encode(entry.request_id().bytes)));
         }
     }
 }

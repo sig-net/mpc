@@ -77,8 +77,7 @@ impl SignGenerator {
 
         let (presignature, dropper) = taken.take();
         let PresignOutput { big_r, k, sigma } = presignature.output;
-        let delta =
-            mpc_crypto::kdf::derive_delta(request.id.request_id, request.args.entropy, big_r);
+        let delta = mpc_crypto::kdf::derive_delta(request.id.bytes, request.args.entropy, big_r);
         // TODO: Check whether it is okay to use invert_vartime instead
         // `delta` is HKDF output, so a zero is only reachable by breaking the hash;
         // reject it rather than panicking mid-signing.

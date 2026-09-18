@@ -66,7 +66,7 @@ fn test_eth_bidirectional_tx(
         params: "{}".to_string(),
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        request_id: request_id.request_id,
+        request_id: request_id.bytes,
         from_address: **from_address,
         nonce,
     }
@@ -534,12 +534,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let resolved_args = test_sign_args(0x11);
     let resolved_sig = generate_signature(&root_sk, &resolved_args);
 
-    submit_respond_for_request_id(
-        responder_contract,
-        resolved_request_id.request_id,
-        resolved_sig,
-    )
-    .await?;
+    submit_respond_for_request_id(responder_contract, resolved_request_id.bytes, resolved_sig)
+        .await?;
     submit_eth_transfer(&ctx).await?;
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
@@ -1187,7 +1183,7 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     };
 
     let response = ChainSignatures::Response {
-        requestId: sign_req.id.request_id.into(),
+        requestId: sign_req.id.bytes.into(),
         signature,
     };
 
@@ -1217,7 +1213,7 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
         match stream.next_event_within(Duration::from_secs(10)).await? {
             ChainEvent::Respond(ev) => {
                 assert_eq!(ev.chain, mpc_primitives::Chain::Ethereum);
-                assert_eq!(ev.request_id, sign_req.id.request_id);
+                assert_eq!(ev.request_id, sign_req.id.bytes);
                 assert_eq!(ev.signature.big_r, expected_big_r);
                 assert_eq!(ev.signature.s, expected_s);
                 assert_eq!(ev.signature.recovery_id, expected_recovery_id);

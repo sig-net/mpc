@@ -31,7 +31,7 @@ async fn wait_for_completed_checkpoint(
                             && checkpoint
                                 .pending_requests
                                 .iter()
-                                .all(|pending| pending.request_id().request_id != request_id);
+                                .all(|pending| pending.request_id().bytes != request_id);
                     }
                     Err(_) => complete = false,
                 }
@@ -113,7 +113,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         else {
             unreachable!("filtered above")
         };
-        let request_id = request.id.request_id;
+        let request_id = request.id.bytes;
         let SignKind::SignBidirectional(sign_event) = &request.kind else {
             unreachable!("filtered above")
         };

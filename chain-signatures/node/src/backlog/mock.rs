@@ -150,7 +150,7 @@ pub fn mock_sign_request(id: RequestId, chain: Chain) -> Arc<IndexedSignRequest>
     Arc::new(IndexedSignRequest::new(
         id,
         SignArgs {
-            entropy: id.request_id,
+            entropy: id.bytes,
             epsilon: k256::Scalar::from(1u64),
             payload: k256::Scalar::from(2u64),
             path: "test".to_string(),
@@ -172,7 +172,7 @@ pub fn mock_bidi_request(id: RequestId, chain: Chain) -> Arc<IndexedSignRequest>
     Arc::new(IndexedSignRequest::sign_bidirectional(
         id,
         SignArgs {
-            entropy: id.request_id,
+            entropy: id.bytes,
             epsilon: k256::Scalar::from(1u64),
             payload: k256::Scalar::from(2u64),
             path: "test".to_string(),
@@ -206,7 +206,7 @@ pub fn mock_bidirectional_tx(id: RequestId, source_chain: Chain) -> Bidirectiona
         Chain::Ethereum
     };
     BidirectionalTx {
-        id: BidirectionalTxId(id.request_id),
+        id: BidirectionalTxId(id.bytes),
         sender: [0u8; 32],
         serialized_transaction: vec![1, 2, 3],
         source_chain,
@@ -220,7 +220,7 @@ pub fn mock_bidirectional_tx(id: RequestId, source_chain: Chain) -> Bidirectiona
         params: "{}".to_string(),
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        request_id: id.request_id,
+        request_id: id.bytes,
         from_address: [0u8; 20],
         nonce: 0,
     }
@@ -240,7 +240,7 @@ pub fn mock_bidi_response_request(
     Arc::new(IndexedSignRequest::respond_bidirectional(
         request_id,
         SignArgs {
-            entropy: request_id.request_id,
+            entropy: request_id.bytes,
             epsilon: k256::Scalar::from(1u64),
             payload: k256::Scalar::from(2u64),
             path: "test".to_string(),

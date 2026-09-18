@@ -346,7 +346,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
-        request_id: request_id.request_id,
+        request_id: request_id.bytes,
         signature: mpc_crypto::generate_signature(&root_sk, &args),
         chain: Chain::Ethereum,
     };
@@ -405,7 +405,7 @@ async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_adv
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let signature = mpc_crypto::generate_signature(&root_sk, &req.args);
     let event = SignatureRespondedEvent {
-        request_id: request_id.request_id,
+        request_id: request_id.bytes,
         signature,
         chain: Chain::Solana,
     };
@@ -568,7 +568,7 @@ async fn process_respond_event_rejects_invalid_signature() {
     invalid_signature.s += Scalar::ONE;
 
     let event = SignatureRespondedEvent {
-        request_id: request_id.request_id,
+        request_id: request_id.bytes,
         signature: invalid_signature,
         chain: Chain::Ethereum,
     };
@@ -670,7 +670,7 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
-        request_id: request_id.request_id,
+        request_id: request_id.bytes,
         signature: mpc_crypto::generate_signature(&root_sk, &entry.request().args),
         chain: Chain::Ethereum,
     };
@@ -763,7 +763,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
-        request_id: request_id.request_id,
+        request_id: request_id.bytes,
         signature: mpc_crypto::generate_signature(&root_sk, &args),
         chain: Chain::Ethereum,
     };

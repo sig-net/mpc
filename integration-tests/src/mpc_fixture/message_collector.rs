@@ -164,7 +164,7 @@ fn posit_id_num(posit_id: &PositProtocolId) -> u64 {
         PositProtocolId::Signature(sig_id, _presig_id, _round) => {
             // extract a 8-byte hash from a 32-byte hash
             let mut hash8: u64 = 0;
-            for chunk in sig_id.request_id.as_chunks::<8>().0 {
+            for chunk in sig_id.bytes.as_chunks::<8>().0 {
                 hash8 ^= u64::from_be_bytes(*chunk);
             }
             hash8

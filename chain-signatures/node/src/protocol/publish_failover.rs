@@ -55,7 +55,7 @@ pub fn max_publish_failover_delay(
 /// participant on chain at once (`E[responses]` of `m`, not `1 + d`).
 fn failover_jitter(request_id: &RequestId, me: &AccountId) -> f64 {
     let mut hasher = DefaultHasher::new();
-    (request_id.request_id, me.as_str()).hash(&mut hasher);
+    (request_id.bytes, me.as_str()).hash(&mut hasher);
     // Top 53 bits: exact in an f64, so the result stays strictly below 1.
     (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
 }

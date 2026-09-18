@@ -69,7 +69,7 @@ pub fn test_canton_sign_bidirectional_request(
         Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"));
     Arc::new(IndexedSignRequest::sign_bidirectional(
         request_id,
-        test_sign_args(request_id.request_id[0]),
+        test_sign_args(request_id.bytes[0]),
         Chain::Canton,
         current_unix_timestamp(),
         SignBidirectionalEvent {
@@ -92,7 +92,7 @@ pub fn test_canton_sign_bidirectional_request(
 
 pub fn respond_event(request_id: RequestId, signature: Signature) -> RespondBidirectionalEvent {
     RespondBidirectionalEvent {
-        request_id: request_id.request_id,
+        request_id: request_id.bytes,
         signature,
         chain: Chain::Solana,
     }
@@ -104,7 +104,7 @@ pub fn signature_responded_event(
     chain: Chain,
 ) -> SignatureRespondedEvent {
     SignatureRespondedEvent {
-        request_id: request_id.request_id,
+        request_id: request_id.bytes,
         signature,
         chain,
     }

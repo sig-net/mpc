@@ -212,7 +212,7 @@ impl HydrationClient {
 
     async fn call_respond(&self, id: &RequestId, response: &Signature) -> anyhow::Result<()> {
         let tx = HydrationRespondTx {
-            request_ids: BoundedVec(vec![id.request_id]),
+            request_ids: BoundedVec(vec![id.bytes]),
             signatures: BoundedVec(vec![Self::to_hydration_signature(response)?]),
         };
 
@@ -233,7 +233,7 @@ impl HydrationClient {
         response: &Signature,
     ) -> anyhow::Result<subxt::config::HashFor<HydradxConfig>> {
         let tx = HydrationRespondBidirectionalTx {
-            request_id: id.request_id,
+            request_id: id.bytes,
             serialized_output: BoundedVec(serialized_output),
             signature: Self::to_hydration_signature(response)?,
         };
@@ -256,7 +256,7 @@ impl ChainPublisher for HydrationClient {
         let signature = &action.signature;
         let chain = action.request.chain;
         let request_id = action.request.id;
-        let request_ids = [action.request.id.request_id];
+        let request_ids = [action.request.id.bytes];
 
         tracing::info!(
             ?request_id,

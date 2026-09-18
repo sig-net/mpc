@@ -224,7 +224,7 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
         action.request.chain
     );
     let signature = wire_signature(&action.signature)?;
-    let request_id = action.request.id.request_id;
+    let request_id = action.request.id.bytes;
 
     match &action.request.kind {
         SignKind::SignBidirectional(event) => {

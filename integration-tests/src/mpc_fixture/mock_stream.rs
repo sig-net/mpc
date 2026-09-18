@@ -170,7 +170,7 @@ impl InnerMockStream {
             }
 
             let respond_event = mpc_primitives::SignatureRespondedEvent {
-                request_id: publish_action.request.id.request_id,
+                request_id: publish_action.request.id.bytes,
                 signature: publish_action.signature,
                 chain: Chain::Solana,
             };
