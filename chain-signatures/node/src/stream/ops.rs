@@ -52,7 +52,7 @@ pub(crate) async fn requeue_pending_sign_requests(
             .await
             .with_context(|| {
                 format!(
-                    "failed to requeue sign request after catchup for sign id {request_id:?} on chain {source_chain}"
+                    "failed to requeue sign request after catchup for request id {request_id:?} on chain {source_chain}"
                 )
             })?;
     }
@@ -194,7 +194,7 @@ async fn advance_bidirectional_to_execution(
     )?);
 
     entry.advance(tx).await.with_context(|| {
-        format!("advance bidirectional tx to execution failed for sign id {request_id:?}")
+        format!("advance bidirectional tx to execution failed for request id {request_id:?}")
     })?;
 
     tracing::info!(
@@ -308,7 +308,7 @@ pub async fn process_execution_confirmed(
         .await
         .with_context(|| {
             format!(
-                "failed to transition pending tx to final response for sign id {request_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
+                "failed to transition pending tx to final response for request id {request_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
             )
         })?;
     tracing::info!(

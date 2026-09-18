@@ -51,7 +51,7 @@ pub fn max_publish_failover_delay(
 }
 
 /// This node's position in the schedule for one request: uniform in [0, 1) as a
-/// pure function of sign id and account id. Identical draws would put every
+/// pure function of request id and account id. Identical draws would put every
 /// participant on chain at once (`E[responses]` of `m`, not `1 + d`).
 fn failover_jitter(request_id: &RequestId, me: &AccountId) -> f64 {
     let mut hasher = DefaultHasher::new();

@@ -1059,7 +1059,7 @@ async fn live_block_votes_for_checkpoint() {
         .is_err());
 }
 
-/// The sweep fires each entry once, and the two legs share a sign id, so only
+/// The sweep fires each entry once, and the two legs share a request id, so only
 /// clearing the dispatch flag on re-entry keeps a fired leg 1 from suppressing
 /// leg 2.
 #[tokio::test]

@@ -251,7 +251,7 @@ impl<State> SignEntry<State> {
         )
         .with_context(|| {
             format!(
-                "respond event carried invalid signature for sign id {:?}",
+                "respond event carried invalid signature for request id {:?}",
                 self.request_id()
             )
         })

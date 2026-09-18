@@ -49,7 +49,7 @@ const VOTE_CHECKPOINT_RETRY: RetryConfig = RetryConfig {
 };
 
 /// Which response a publish carries. The two legs of a bidirectional request
-/// share a sign id, so this is what keeps the dispatch loop's in-flight set from
+/// share a request id, so this is what keeps the dispatch loop's in-flight set from
 /// treating a second leg as a duplicate of its first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PublishKind {
@@ -494,7 +494,7 @@ impl RpcExecutor {
         let checkpoint_votes = CheckpointVotes::default();
         // Keep track of in-flight publish requests to avoid duplicate publishes.
         // Keyed by publish kind too: the two legs of a bidirectional request share
-        // a sign id, and a first leg still retrying must not block its second.
+        // a request id, and a first leg still retrying must not block its second.
         let in_flight: Arc<DashSet<(Chain, RequestId, PublishKind)>> = Arc::new(DashSet::new());
         loop {
             let Some(action) = action_rx.recv().await else {

@@ -77,7 +77,7 @@ async fn test_stream_handles_sign_and_respond() {
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let root_pk = root_sk.public_key().to_projective().to_affine();
 
-    // Prepare a respond event that matches the sign id
+    // Prepare a respond event that matches the request id
     let mpc_sig = mpc_crypto::generate_signature(&root_sk, &request.args);
     let sig_responded = signature_responded_event(request_id, mpc_sig, Chain::Solana);
     let indexer = SolanaTestIndexer::new(vec![
@@ -388,7 +388,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
             assert_eq!(
                 req.request_id(),
                 request_id,
-                "follow-up request should reuse the sign id"
+                "follow-up request should reuse the request id"
             );
             match &req.request().kind {
                 SignKind::RespondBidirectional(rb) => {
