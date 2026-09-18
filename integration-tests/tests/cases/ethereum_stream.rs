@@ -518,13 +518,6 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let backlog = Backlog::persisted(storage.clone());
 
     let execution_sign_id = SignId::new([0x33; 32]);
-    let execution_tx = test_eth_bidirectional_tx(
-        mpc_primitives::BidirectionalTxId(B256::from([0x44; 32]).0),
-        execution_sign_id,
-        ctx.wallet,
-        checkpoint_nonce,
-    );
-    backlog.insert_mock_executing(&execution_tx).await;
 
     let responder_contract = ChainSignatures::new(ctx.contract_address, responder_signer.clone());
 
@@ -540,7 +533,18 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         resolved_sig,
     )
     .await?;
-    submit_eth_transfer(&ctx).await?;
+    // Watch a transaction that really mined: the follow-up has to come from an
+    // observed execution, since a nonce taken by something unwatched proves
+    // nothing about this request.
+    let executed_hash = submit_eth_transfer(&ctx).await?;
+    let execution_tx = test_eth_bidirectional_tx(
+        mpc_primitives::BidirectionalTxId(executed_hash.0),
+        execution_sign_id,
+        ctx.wallet,
+        checkpoint_nonce,
+    );
+    backlog.insert_mock_executing(&execution_tx).await;
+
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
 
@@ -683,8 +687,11 @@ async fn test_ethereum_stream_emits_blocks() -> Result<()> {
     Ok(())
 }
 
+/// A watcher whose nonce is taken by transactions this node does not watch
+/// learns only that the nonce is gone. That is consistent with a further
+/// signature over the same request having executed, so nothing is attested.
 #[test_log::test(tokio::test)]
-async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
+async fn test_ethereum_stream_unnamed_nonce_taker_attests_nothing() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
 
@@ -720,7 +727,10 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         }
     }
 
-    assert!(saw_execution, "did not observe ExecutionConfirmed event");
+    assert!(
+        !saw_execution,
+        "a nonce taken by an unwatched transaction proves no outcome"
+    );
     Ok(())
 }
 

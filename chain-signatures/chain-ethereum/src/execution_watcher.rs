@@ -22,8 +22,13 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
     SignId,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+/// How many recently taken (sender, nonce) slots to remember. A slot is only
+/// consulted while a watcher of the same sender is still pending, so this has
+/// to outlive the overlap between two transactions of one sender, no longer.
+const SLOT_TAKER_MEMORY: usize = 1024;
 
 /// Scheduling state for the watcher nonce gate. Persisted across blocks by the
 /// indexer (it borrows this) so first-appearance detection and retry tracking
@@ -34,6 +39,29 @@ pub(crate) struct WatcherGateState {
     prev: HashSet<BidirectionalTxId>,
     /// Watchers whose last RPC resolution attempt failed; retried every block.
     retry: HashSet<BidirectionalTxId>,
+    /// The transaction seen taking each (sender, nonce) slot, so a watcher that
+    /// loses its slot can tell what took it rather than guess.
+    slot_takers: HashMap<(Address, u64), (SignId, BidirectionalTxId)>,
+    /// Insertion order of `slot_takers`, for eviction at `SLOT_TAKER_MEMORY`.
+    slot_order: VecDeque<(Address, u64)>,
+}
+
+impl WatcherGateState {
+    fn record_slot_taker(
+        &mut self,
+        slot: (Address, u64),
+        taker: (SignId, BidirectionalTxId),
+    ) {
+        if self.slot_takers.insert(slot, taker).is_some() {
+            return;
+        }
+        self.slot_order.push_back(slot);
+        if self.slot_order.len() > SLOT_TAKER_MEMORY {
+            if let Some(evicted) = self.slot_order.pop_front() {
+                self.slot_takers.remove(&evicted);
+            }
+        }
+    }
 }
 
 /// A pending execution watcher entry from the state manager.
@@ -163,9 +191,15 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             .resolve_mined_watchers(mined_in_block, block_number)
             .await;
 
-        // Fail pending watchers replaced by a sibling tx mined in this block
-        let (sibling_events, unmined_watchers) =
-            Self::resolve_replaced_siblings(unmined_watchers, &consumed_slots, block_number);
+        // Resolve pending watchers whose nonce slot was taken by a transaction
+        // this node can name, here or in a recent block.
+        let (sibling_events, unmined_watchers) = {
+            let mut gate = self.lock_watcher_gate();
+            for (slot, taker) in consumed_slots {
+                gate.record_slot_taker(slot, taker);
+            }
+            Self::resolve_replaced_siblings(unmined_watchers, &gate.slot_takers, block_number)
+        };
 
         events.extend(sibling_events);
 
@@ -469,7 +503,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     }
 
     /// Resolves watched txs whose hash appears in this block. Returns emitted
-    /// events, the (sender, nonce) slots consumed by observed txs (input to
+    /// events, the request that took each (sender, nonce) slot (input to
     /// sibling correlation), and watchers whose RPC attempt failed.
     async fn resolve_mined_watchers(
         &self,
@@ -477,11 +511,11 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         block_number: u64,
     ) -> (
         Vec<ChainEvent>,
-        HashSet<(Address, u64)>,
+        HashMap<(Address, u64), (SignId, BidirectionalTxId)>,
         HashSet<BidirectionalTxId>,
     ) {
         let mut events = Vec::new();
-        let mut consumed_slots = HashSet::new();
+        let mut consumed_slots = HashMap::new();
         let mut failed = HashSet::new();
 
         for (tx_id, sign_id, pending_tx, result) in
@@ -491,8 +525,10 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                 Ok(BackfillOutcome::Observed { confirmation }) => {
                     // The tx mined regardless of extraction outcome, so its
                     // nonce slot is consumed either way.
-                    consumed_slots
-                        .insert((Address::from(pending_tx.from_address), pending_tx.nonce));
+                    consumed_slots.insert(
+                        (Address::from(pending_tx.from_address), pending_tx.nonce),
+                        (sign_id, tx_id),
+                    );
                     match confirmation {
                         ConfirmationOutcome::Confirmed(event) => events.push(event),
                         ConfirmationOutcome::RetryExtraction => {
@@ -516,40 +552,57 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         (events, consumed_slots, failed)
     }
 
-    /// Fails pending watchers whose (sender, nonce) slot was consumed by a
-    /// different tx mined in this block: since only the network can sign for
-    /// these sender addresses, the consuming tx is necessarily another
-    /// watcher, making replacement a pure function of block content + local
-    /// watcher state (no RPC, deterministic `block_height` across nodes).
-    /// Returns the events and the remaining unmined watchers.
+    /// Resolves pending watchers whose (sender, nonce) slot was taken by a
+    /// transaction this node watched. Only the network can sign for these
+    /// senders, so a named taker is always one of its own requests: the same
+    /// one, when several signatures were issued over it, or a different one.
+    ///
+    /// Every signature over a request id signs the same bytes, so the request's
+    /// own transactions share this slot and whichever mined already carries the
+    /// outcome. The losers stop being watched when that outcome is processed,
+    /// and attesting anything for them here would contradict it.
     fn resolve_replaced_siblings(
         unmined: Vec<WatcherEntry>,
-        consumed_slots: &HashSet<(Address, u64)>,
+        slot_takers: &HashMap<(Address, u64), (SignId, BidirectionalTxId)>,
         block_number: u64,
     ) -> (Vec<ChainEvent>, Vec<WatcherEntry>) {
-        let (replaced, remaining): (Vec<_>, Vec<_>) =
-            unmined.into_iter().partition(|(_, (_, tx))| {
-                consumed_slots.contains(&(Address::from(tx.from_address), tx.nonce))
-            });
+        let mut events = Vec::new();
+        let mut remaining = Vec::new();
 
-        let events = replaced
-            .into_iter()
-            .map(|(tx_id, (sign_id, tx))| {
-                tracing::info!(
-                    ?tx_id,
-                    ?sign_id,
-                    nonce = tx.nonce,
-                    "transaction replaced by sibling tx mined in this block"
-                );
-                ChainEvent::ExecutionConfirmed {
-                    tx_id,
-                    sign_id,
-                    source_chain: tx.source_chain,
-                    block_height: block_number,
-                    result: ExecutionOutcome::Failed,
+        for (tx_id, (sign_id, tx)) in unmined {
+            match slot_takers.get(&(Address::from(tx.from_address), tx.nonce)) {
+                // Unclaimed, or claimed by this very transaction: it mined and is
+                // only here because resolving its receipt has yet to succeed.
+                None => remaining.push((tx_id, (sign_id, tx))),
+                Some((_, taker_tx)) if *taker_tx == tx_id => {
+                    remaining.push((tx_id, (sign_id, tx)));
                 }
-            })
-            .collect();
+                Some((taker, _)) if *taker == sign_id => {
+                    tracing::info!(
+                        ?tx_id,
+                        ?sign_id,
+                        nonce = tx.nonce,
+                        "another signature of this request took its nonce; its receipt answers it"
+                    );
+                }
+                Some((taker, _)) => {
+                    tracing::warn!(
+                        ?tx_id,
+                        ?sign_id,
+                        taken_by = ?taker,
+                        nonce = tx.nonce,
+                        "nonce taken by another request; this transaction can never be included"
+                    );
+                    events.push(ChainEvent::ExecutionConfirmed {
+                        tx_id,
+                        sign_id,
+                        source_chain: tx.source_chain,
+                        block_height: block_number,
+                        result: ExecutionOutcome::Failed,
+                    });
+                }
+            }
+        }
 
         (events, remaining)
     }
@@ -599,31 +652,36 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             .collect();
 
         let mut events = Vec::new();
+        let mut takers = Vec::new();
         for (tx_id, sign_id, pending_tx, result) in self
             .fetch_watcher_receipts(consumed_txs, block_number)
             .await
         {
             match result {
-                Ok(BackfillOutcome::Observed { confirmation }) => match confirmation {
-                    ConfirmationOutcome::Confirmed(event) => events.push(event), // Late watcher pickup
-                    ConfirmationOutcome::RetryExtraction => {
-                        failed.insert(tx_id);
+                Ok(BackfillOutcome::Observed { confirmation }) => {
+                    // Picked up late: this transaction took its own slot, which is
+                    // how a watcher that lost the slot later learns who has it.
+                    takers.push((
+                        (Address::from(pending_tx.from_address), pending_tx.nonce),
+                        (sign_id, tx_id),
+                    ));
+                    match confirmation {
+                        ConfirmationOutcome::Confirmed(event) => events.push(event),
+                        ConfirmationOutcome::RetryExtraction => {
+                            failed.insert(tx_id);
+                        }
                     }
-                },
+                }
+                // The nonce is gone and nothing this node watched took it, so the
+                // taker may be a further signature over this same request that
+                // has yet to be indexed. Wait rather than attest a failure.
                 Ok(BackfillOutcome::NotObserved) => {
-                    tracing::info!(
+                    tracing::warn!(
                         ?tx_id,
                         ?sign_id,
                         expected_nonce = pending_tx.nonce,
-                        "transaction replaced or dropped (nonce consumed by another tx)"
+                        "nonce taken by an unidentified transaction; leaving the watcher pending"
                     );
-                    events.push(ChainEvent::ExecutionConfirmed {
-                        tx_id,
-                        sign_id,
-                        source_chain: pending_tx.source_chain,
-                        block_height: block_number,
-                        result: ExecutionOutcome::Failed,
-                    });
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -634,6 +692,13 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                     );
                     failed.insert(tx_id);
                 }
+            }
+        }
+
+        if !takers.is_empty() {
+            let mut gate = self.lock_watcher_gate();
+            for (slot, taker) in takers {
+                gate.record_slot_taker(slot, taker);
             }
         }
 
@@ -866,10 +931,9 @@ mod tests {
             .await
             .expect("should succeed");
 
-        assert_eq!(
-            events.len(),
-            2,
-            "Should emit 2 Failed events for consumed nonces"
+        assert!(
+            events.is_empty(),
+            "a consumed nonce with no named taker attests nothing"
         );
 
         nonce_mock.assert_async().await;
@@ -1415,7 +1479,7 @@ mod tests {
         failing_nonce_mock.remove_async().await;
 
         // Phase 2 (block 11, NOT a tick): retried via the nonce gate; nonce
-        // consumed, no receipt -> Failed at block 11
+        // consumed, no receipt, and no named taker -> nothing attested
         let nonce_mock = server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
@@ -1452,23 +1516,38 @@ mod tests {
             .await
             .expect("should succeed");
 
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            ChainEvent::ExecutionConfirmed {
-                tx_id,
-                block_height,
-                result,
-                ..
-            } => {
-                assert_eq!(tx_id.0, tx_hash.0);
-                assert_eq!(*block_height, 11);
-                assert!(matches!(result, ExecutionOutcome::Failed));
-            }
-            other => panic!("expected ExecutionConfirmed, got {other:?}"),
-        }
+        // The retry is what this test proves; the mocks below assert it happened.
+        // Nothing names the taker, so the watcher stays pending and attests nothing.
+        assert!(events.is_empty());
 
         nonce_mock.assert_async().await;
         receipt_mock.assert_async().await;
+    }
+
+    /// A reverted receipt for a tx mined in `block_number`. A revert carries its
+    /// own outcome, so extracting it needs no trace call.
+    fn reverted_receipt(
+        tx_hash: alloy::primitives::B256,
+        from_address: alloy::primitives::Address,
+        block_number: u64,
+    ) -> serde_json::Value {
+        let block_hash = b256!("6e4e53d1de650d5a5ebed19b38321db369ef1dc357904284ecf4d89b8834969c");
+        json!({
+            "transactionHash": format!("{tx_hash:#x}"),
+            "blockHash": format!("{block_hash:#x}"),
+            "blockNumber": format!("{block_number:#x}"),
+            "transactionIndex": "0x0",
+            "from": format!("{from_address:#x}"),
+            "to": format!("{from_address:#x}"),
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x3a29f0f8",
+            "contractAddress": null,
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "cumulativeGasUsed": "0x5208",
+            "type": "0x2",
+            "logs": [],
+            "status": "0x0"
+        })
     }
 
     /// A successful receipt for a tx mined in `block_number`.
@@ -2055,6 +2134,105 @@ mod tests {
         let mut expected = vec![tx_hash_a.0, tx_hash_b.0];
         expected.sort();
         assert_eq!(resolved, expected);
+
+        receipt_a_mock.assert_async().await;
+        receipt_b_mock.assert_async().await;
+    }
+
+    /// Two signatures over one request sign the same bytes, so the loser's nonce
+    /// is taken by the request's own execution. Attesting a failure for it would
+    /// contradict the receipt that just answered the request.
+    #[tokio::test]
+    async fn a_candidate_losing_its_nonce_to_its_own_request_attests_nothing() {
+        let mut server = Server::new_async().await;
+
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let tx_hash_a = b256!("7777777777777777777777777777777777777777777777777777777777777777");
+        let tx_hash_b = b256!("8888888888888888888888888888888888888888888888888888888888888888");
+        let sign_id = SignId::new([7; 32]);
+
+        let nonce_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x0" }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let receipt_a_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash_a:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": reverted_receipt(tx_hash_a, from_address, 5),
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let receipt_b_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash_b:#x}")]
+            })))
+            .expect(0)
+            .create_async()
+            .await;
+
+        let harness = test_utils::WatcherHarness::new(&server.url()).await;
+        for hash in [tx_hash_a, tx_hash_b] {
+            harness
+                .state_manager
+                .watch_execution(
+                    Chain::Ethereum,
+                    sign_id,
+                    test_watcher_tx(hash, from_address, 0),
+                )
+                .await;
+        }
+
+        let mut block4: Block = Block::default();
+        block4.header.number = 4;
+        block4.transactions = BlockTransactions::Hashes(Vec::new());
+        assert!(harness
+            .watcher()
+            .collect(&block4)
+            .await
+            .expect("should succeed")
+            .is_empty());
+        nonce_mock.assert_async().await;
+        nonce_mock.remove_async().await;
+
+        // Candidate A mines. B lost the same nonce, so it is dropped in silence.
+        let mut block5: Block = Block::default();
+        block5.header.number = 5;
+        block5.transactions = BlockTransactions::Hashes(vec![tx_hash_a]);
+
+        let events = harness
+            .watcher()
+            .collect(&block5)
+            .await
+            .expect("should succeed");
+
+        assert_eq!(events.len(), 1, "only the transaction that ran is attested");
+        match &events[0] {
+            ChainEvent::ExecutionConfirmed { tx_id, .. } => assert_eq!(tx_id.0, tx_hash_a.0),
+            other => panic!("expected ExecutionConfirmed, got {other:?}"),
+        }
 
         receipt_a_mock.assert_async().await;
         receipt_b_mock.assert_async().await;
