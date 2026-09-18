@@ -243,14 +243,21 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 event = events_rx.recv(), if ctx.backlog.checkpoints().has_slot(chain) => {
                     let Some(event) = event else {
                         run_finished = true;
-                        // `run()` exited on its own: Ok shuts the chain down,
-                        // Err (or panic) is treated as a crash and restarted.
-                        break match (&mut run_handle).await {
-                            Ok(Ok(())) => Exit::Shutdown,
-                            result => {
-                                // anyhow error or JoinError::Panic — both can
-                                // hot-loop, so back off before restarting.
-                                tracing::warn!(?result, %chain, "chain run() failed; restarting");
+                        // `run()` exited on its own: Ok shuts the chain down; an anyhow
+                        // error or JoinError::Panic is a crash — either can hot-loop,
+                        // so back off before restarting.
+                        let result = match (&mut run_handle).await {
+                            Ok(r) => r,
+                            Err(e) => Err(anyhow::Error::from(e)),
+                        };
+                        break match result {
+                            Ok(()) => Exit::Shutdown,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %format_args!("{e:#}"),
+                                    %chain,
+                                    "chain run() failed; restarting"
+                                );
                                 tokio::time::sleep(ERROR_RESTART_DELAY).await;
                                 Exit::Restart
                             }
@@ -262,7 +269,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                     if let Err(err) =
                         handle_chain_event(event, &mut ctx, &telemetry, root_pk, chain).await
                     {
-                        tracing::error!(?err, %chain, "failed to process chain event");
+                        tracing::error!(error = %format_args!("{err:#}"), %chain, "failed to process chain event");
                     }
                 }
                 result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
