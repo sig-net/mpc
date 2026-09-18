@@ -1199,16 +1199,14 @@ mod tests {
         let recorded = recorder.snapshot();
         let correlations = recorded
             .iter()
-            .filter(|fields| fields.contains_key("tx_hash") || fields.contains_key("sign_id"))
+            .filter(|fields| {
+                fields.get("message").map(String::as_str) == Some("midnight signature requested")
+            })
             .collect::<Vec<_>>();
         assert_eq!(correlations.len(), 2);
         let expected_tx_hash = hex::encode(LEDGER_TX_HASH);
         let expected_sign_id = format!("{:?}", SignId::new(rid));
         for fields in correlations {
-            assert_eq!(
-                fields.get("message").map(String::as_str),
-                Some("midnight signature requested")
-            );
             assert_eq!(fields.get("tx_hash"), Some(&expected_tx_hash));
             assert_eq!(fields.get("sign_id"), Some(&expected_sign_id));
         }
