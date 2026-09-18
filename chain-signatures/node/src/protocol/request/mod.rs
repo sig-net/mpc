@@ -128,13 +128,13 @@ struct SignEntry {
 }
 
 /// Router and lifecycle owner for all in-flight sign tasks: one task per
-/// `sign_id`, plus the posit mailboxes, delayed-response watchers, and dedup state
+/// `request_id`, plus the posit mailboxes, delayed-response watchers, and dedup state
 /// that outlive individual tasks. (TODO: needs refactoring)
 pub struct SignatureSpawner {
     contract: ContractStateWatcher,
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
-    /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
+    /// Consolidated signature tasks - one per request_id, each task is an async task handling complete lifecycle
     tasks: JoinMap<RequestId, Result<(), SignError>>,
     /// Per-sign posit mailboxes; also buffer messages that arrive before their
     /// task spawns.
@@ -196,15 +196,15 @@ impl SignatureSpawner {
         entry: backlog::SignEntry<Generating>,
         cfg: ProtocolConfig,
     ) {
-        let sign_id = entry.sign_id();
+        let request_id = entry.request_id();
         // Ensure we don't retain the dead tag from a prior incarnation of this
         // sign ID (e.g. after regression recovery re-queues a completed request).
-        self.dead_ids.pop(&sign_id);
+        self.dead_ids.pop(&request_id);
         let is_proposer = Arc::new(AtomicBool::new(false));
         let chain = entry.chain();
         let request = Arc::clone(entry.request());
         self.requests.insert(
-            sign_id,
+            request_id,
             SignEntry {
                 entry,
                 is_proposer: Arc::clone(&is_proposer),
@@ -219,7 +219,7 @@ impl SignatureSpawner {
         let remaining_time =
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
         self.delay_monitor.watch(
-            sign_id,
+            request_id,
             chain,
             request.request_kind(),
             unix_timestamp_indexed,
@@ -228,7 +228,10 @@ impl SignatureSpawner {
         );
 
         if !governance.is_running {
-            tracing::info!(?sign_id, "holding sign request until governance is running");
+            tracing::info!(
+                ?request_id,
+                "holding sign request until governance is running"
+            );
             return;
         }
         self.spawn_task(governance, request, cfg);
@@ -241,12 +244,12 @@ impl SignatureSpawner {
         request: Arc<IndexedSignRequest>,
         cfg: ProtocolConfig,
     ) {
-        let sign_id = request.id;
-        tracing::info!(?sign_id, "spawning signature task");
+        let request_id = request.id;
+        tracing::info!(?request_id, "spawning signature task");
 
         let (is_proposer, round, entry) = self
             .requests
-            .get(&sign_id)
+            .get(&request_id)
             .map(|q| {
                 (
                     Arc::clone(&q.is_proposer),
@@ -260,13 +263,13 @@ impl SignatureSpawner {
         // that arrived before this task spawned.
         let mailbox = Arc::clone(
             self.posit_mailboxes
-                .entry(sign_id)
+                .entry(request_id)
                 .or_insert_with(PositMailbox::new),
         );
 
         let task = SignTask {
             governance: governance.clone(),
-            sign_id,
+            request_id,
             presignatures: self.presignatures.clone(),
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
@@ -279,8 +282,10 @@ impl SignatureSpawner {
         };
 
         // Spawn the async task with organizing loop
-        self.tasks
-            .spawn(sign_id, task.run(entry, self.mesh_state.clone(), mailbox));
+        self.tasks.spawn(
+            request_id,
+            task.run(entry, self.mesh_state.clone(), mailbox),
+        );
     }
 
     /// Spawn a fresh incarnation for every retained request; the caller must
@@ -302,45 +307,51 @@ impl SignatureSpawner {
     }
 
     /// Handle a posit message - routes to existing task or buffers if task not yet created
-    fn handle_posit(&mut self, sign_id: RequestId, msg: SignPositMessage) {
+    fn handle_posit(&mut self, request_id: RequestId, msg: SignPositMessage) {
         // Drop late-arriving posits for already-completed/aborted sign IDs
         // to prevent re-creating orphan mailboxes.
-        if self.dead_ids.contains(&sign_id) {
+        if self.dead_ids.contains(&request_id) {
             return;
         }
         self.posit_mailboxes
-            .entry(sign_id)
+            .entry(request_id)
             .or_insert_with(PositMailbox::new)
             .push(msg);
     }
 
     /// A peer/chain reported this signature done: tear down and abort our task.
-    fn handle_completion(&mut self, sign_id: RequestId) {
-        if self.retire_task(sign_id, "completion") {
-            tracing::info!(?sign_id, "aborting signature task due to completion event");
+    fn handle_completion(&mut self, request_id: RequestId) {
+        if self.retire_task(request_id, "completion") {
+            tracing::info!(
+                ?request_id,
+                "aborting signature task due to completion event"
+            );
         } else {
-            tracing::info!(?sign_id, "task already completed or unable to be aborted");
+            tracing::info!(
+                ?request_id,
+                "task already completed or unable to be aborted"
+            );
         }
     }
 
     /// A task's `JoinMap` entry finished (or was cancelled): tear down and log.
     fn handle_task_exit(&mut self, result: Result<(RequestId, Result<(), SignError>), RequestId>) {
         self.observe_queue_size();
-        let (sign_id, result) = match result {
+        let (request_id, result) = match result {
             Ok(outcome) => outcome,
-            Err(sign_id) => {
-                tracing::warn!(?sign_id, "signature task interrupted");
-                self.retire_task(sign_id, "interruption");
+            Err(request_id) => {
+                tracing::warn!(?request_id, "signature task interrupted");
+                self.retire_task(request_id, "interruption");
                 return;
             }
         };
-        self.retire_task(sign_id, "task completion");
+        self.retire_task(request_id, "task completion");
         match result {
             Ok(()) => {
-                tracing::info!(?sign_id, "signature task completed successfully");
+                tracing::info!(?request_id, "signature task completed successfully");
             }
             Err(SignError::Aborted) => {
-                tracing::warn!(?sign_id, "signature task terminated");
+                tracing::warn!(?request_id, "signature task terminated");
             }
         }
     }
@@ -348,19 +359,19 @@ impl SignatureSpawner {
     /// Record a sign ID as dead so that late-arriving peer posits are dropped
     /// instead of recreating an orphan mailbox. Automatically LRU-evicts the
     /// stalest entry when the cache exceeds [`MAX_DEAD_IDS`].
-    fn mark_dead(&mut self, sign_id: RequestId) {
-        self.dead_ids.put(sign_id, ());
+    fn mark_dead(&mut self, request_id: RequestId) {
+        self.dead_ids.put(request_id, ());
     }
 
     /// Common teardown when a sign request ends: abort its task if one is still
     /// running, mark the id dead, forget the request, drop its mailbox and
     /// unwatch its delay monitoring. Returns whether a task was aborted.
-    fn retire_task(&mut self, sign_id: RequestId, reason: &'static str) -> bool {
-        let aborted = self.tasks.abort(sign_id);
-        self.mark_dead(sign_id);
-        self.requests.remove(&sign_id);
-        self.posit_mailboxes.remove(&sign_id);
-        self.delay_monitor.unwatch(sign_id, reason);
+    fn retire_task(&mut self, request_id: RequestId, reason: &'static str) -> bool {
+        let aborted = self.tasks.abort(request_id);
+        self.mark_dead(request_id);
+        self.requests.remove(&request_id);
+        self.posit_mailboxes.remove(&request_id);
+        self.delay_monitor.unwatch(request_id, reason);
         aborted
     }
 
@@ -371,8 +382,8 @@ impl SignatureSpawner {
         cfg: &ProtocolConfig,
     ) {
         match sign {
-            SignCommand::Completion(sign_id) => {
-                self.handle_completion(sign_id);
+            SignCommand::Completion(request_id) => {
+                self.handle_completion(request_id);
             }
             SignCommand::AbortChain(chain) => {
                 tracing::warn!(
@@ -385,19 +396,19 @@ impl SignatureSpawner {
                     .filter(|(_, q)| q.entry.chain() == chain)
                     .map(|(id, _)| *id)
                     .collect();
-                for sign_id in to_abort {
-                    self.retire_task(sign_id, "chain aborted");
+                for request_id in to_abort {
+                    self.retire_task(request_id, "chain aborted");
                 }
             }
             SignCommand::Request(entry) => {
-                let sign_id = entry.sign_id();
+                let request_id = entry.request_id();
 
                 // Skip requests we already track. Use the request map rather than
                 // the mailbox map, which may already hold buffered messages (e.g. a
                 // Propose arriving before the indexer notifies us), and rather than
                 // the task map, which is empty while requests are held for governance.
-                if self.requests.contains_key(&sign_id) {
-                    tracing::info!(?sign_id, "skipping duplicate sign request");
+                if self.requests.contains_key(&request_id) {
+                    tracing::info!(?request_id, "skipping duplicate sign request");
                     return;
                 }
 
@@ -441,8 +452,8 @@ impl SignatureSpawner {
                     };
                     self.handle_sign(&governance, sign, &protocol);
                 }
-                Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
-                    self.handle_posit(sign_id, SignPositMessage { presignature_id, round, from, action });
+                Some((request_id, presignature_id, round, from, action)) = posits.recv() => {
+                    self.handle_posit(request_id, SignPositMessage { presignature_id, round, from, action });
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     self.handle_task_exit(result);
@@ -472,19 +483,19 @@ impl SignatureSpawner {
 
 #[cfg(test)]
 impl SignatureSpawner {
-    fn test_dead_ids_contains(&self, sign_id: &RequestId) -> bool {
-        self.dead_ids.contains(sign_id)
+    fn test_dead_ids_contains(&self, request_id: &RequestId) -> bool {
+        self.dead_ids.contains(request_id)
     }
 
-    fn test_posit_mailboxes_contains(&self, sign_id: &RequestId) -> bool {
-        self.posit_mailboxes.contains_key(sign_id)
+    fn test_posit_mailboxes_contains(&self, request_id: &RequestId) -> bool {
+        self.posit_mailboxes.contains_key(request_id)
     }
 
-    fn test_tasks_contains(&self, sign_id: RequestId) -> bool {
-        self.tasks.contains_key(&sign_id)
+    fn test_tasks_contains(&self, request_id: RequestId) -> bool {
+        self.tasks.contains_key(&request_id)
     }
-    fn test_requests_contains(&self, sign_id: &RequestId) -> bool {
-        self.requests.contains_key(sign_id)
+    fn test_requests_contains(&self, request_id: &RequestId) -> bool {
+        self.requests.contains_key(request_id)
     }
 }
 
@@ -580,8 +591,8 @@ mod tests {
         let backlog = crate::backlog::Backlog::new();
 
         let cfg = ProtocolConfig::default();
-        let sign_id = RequestId::new([42u8; 32]);
-        let request = crate::backlog::mock::mock_sign_request(sign_id, Chain::Solana);
+        let request_id = RequestId::new([42u8; 32]);
+        let request = crate::backlog::mock::mock_sign_request(request_id, Chain::Solana);
 
         let probe_id = RequestId::new([43u8; 32]);
         let probe_request = crate::backlog::mock::mock_sign_request(probe_id, Chain::Solana);
@@ -610,24 +621,24 @@ mod tests {
         // Step 1: Spawn → mailbox created, request retained, not dead
         let entry = backlog::SignEntry::generating(Arc::clone(&request), &backlog);
         spawner.add_request(&governance, entry, cfg.clone());
-        assert!(spawner.test_tasks_contains(sign_id));
-        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
-        assert!(spawner.test_requests_contains(&sign_id));
-        assert!(!spawner.test_dead_ids_contains(&sign_id));
+        assert!(spawner.test_tasks_contains(request_id));
+        assert!(spawner.test_posit_mailboxes_contains(&request_id));
+        assert!(spawner.test_requests_contains(&request_id));
+        assert!(!spawner.test_dead_ids_contains(&request_id));
 
         // Step 2: Abort chain → mailbox removed, request dropped, marked dead
         spawner.handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg);
         tokio::time::timeout(Duration::from_secs(1), dropped.notified())
             .await
             .expect("aborting a chain should cancel its sign tasks");
-        assert!(!spawner.test_tasks_contains(sign_id));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
-        assert!(!spawner.test_requests_contains(&sign_id));
-        assert!(spawner.test_dead_ids_contains(&sign_id));
+        assert!(!spawner.test_tasks_contains(request_id));
+        assert!(!spawner.test_posit_mailboxes_contains(&request_id));
+        assert!(!spawner.test_requests_contains(&request_id));
+        assert!(spawner.test_dead_ids_contains(&request_id));
 
         // Step 3: Late posit → dropped (dead_id check), mailbox NOT recreated
         spawner.handle_posit(
-            sign_id,
+            request_id,
             SignPositMessage {
                 presignature_id: 0,
                 round: 0,
@@ -635,17 +646,17 @@ mod tests {
                 action: PositAction::Propose,
             },
         );
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
+        assert!(!spawner.test_posit_mailboxes_contains(&request_id));
 
         // Step 4: Re-spawn → dead cleared, request retained again
         let entry = backlog::SignEntry::generating(request, &backlog);
         spawner.add_request(&governance, entry, cfg.clone());
-        assert!(spawner.test_tasks_contains(sign_id));
-        assert!(!spawner.test_dead_ids_contains(&sign_id));
+        assert!(spawner.test_tasks_contains(request_id));
+        assert!(!spawner.test_dead_ids_contains(&request_id));
 
         // Step 5: Posit after re-spawn → accepted, mailbox re-created
         spawner.handle_posit(
-            sign_id,
+            request_id,
             SignPositMessage {
                 presignature_id: 0,
                 round: 0,
@@ -653,18 +664,18 @@ mod tests {
                 action: PositAction::Propose,
             },
         );
-        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
+        assert!(spawner.test_posit_mailboxes_contains(&request_id));
 
         // Step 6: Governance respawn → task swapped in place, nothing retired,
         // and the new incarnation resumes from the entry's carried round.
         let carried = Arc::new(AtomicUsize::new(7));
-        spawner.requests.get_mut(&sign_id).unwrap().round = Arc::clone(&carried);
+        spawner.requests.get_mut(&request_id).unwrap().round = Arc::clone(&carried);
         spawner.tasks.abort_all();
         spawner.spawn_tasks(&governance, &cfg);
-        assert!(spawner.test_tasks_contains(sign_id));
-        assert!(spawner.test_requests_contains(&sign_id));
-        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
-        assert!(!spawner.test_dead_ids_contains(&sign_id));
+        assert!(spawner.test_tasks_contains(request_id));
+        assert!(spawner.test_requests_contains(&request_id));
+        assert!(spawner.test_posit_mailboxes_contains(&request_id));
+        assert!(!spawner.test_dead_ids_contains(&request_id));
         assert!(
             Arc::strong_count(&carried) >= 3,
             "respawned task must share the entry's round, not a fresh one"

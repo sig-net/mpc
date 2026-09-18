@@ -91,11 +91,11 @@ impl HydrationSignatureRequestedEvent {
             &self.path,
         );
 
-        let sign_id = RequestId::new(self.generate_request_id());
-        tracing::info!(?sign_id, "hydration signature requested");
+        let request_id = RequestId::new(self.generate_request_id());
+        tracing::info!(?request_id, "hydration signature requested");
 
         Some(IndexedSignRequest::sign(
-            sign_id,
+            request_id,
             SignArgs {
                 entropy,
                 epsilon,
@@ -203,8 +203,8 @@ impl HydrationSignBidirectionalRequestedEvent {
             &self.path,
         );
 
-        let sign_id = RequestId::new(request_id);
-        tracing::info!(?sign_id, "hydration signature requested");
+        let request_id = RequestId::new(request_id);
+        tracing::info!(?request_id, "hydration signature requested");
         let unsigned_tx_hash = hash_payload(&self.serialized_transaction);
         let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| {
             tracing::warn!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
@@ -217,7 +217,7 @@ impl HydrationSignBidirectionalRequestedEvent {
         }
 
         Some(IndexedSignRequest::sign_bidirectional(
-            sign_id,
+            request_id,
             SignArgs {
                 entropy,
                 epsilon,

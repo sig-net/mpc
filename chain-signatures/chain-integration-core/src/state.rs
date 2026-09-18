@@ -68,7 +68,7 @@ impl MockStateManager {
     pub async fn watch_execution(
         &self,
         chain: Chain,
-        sign_id: RequestId,
+        request_id: RequestId,
         tx: Arc<BidirectionalTx>,
     ) {
         self.watchers
@@ -76,6 +76,6 @@ impl MockStateManager {
             .await
             .entry(chain)
             .or_default()
-            .insert(tx.id, (sign_id, tx));
+            .insert(tx.id, (request_id, tx));
     }
 }

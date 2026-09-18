@@ -33,11 +33,11 @@ tracing::warn!(?result, %chain, "chain run() failed; restarting");
 
 // good: rate-limited, carries the occurrence count
 if let Some(count) = mpc_utils::throttle::check("posit:presig-return-rejects") {
-    tracing::warn!(count, ?sign_id, "returning presignature to pool due to REJECTs");
+    tracing::warn!(count, ?request_id, "returning presignature to pool due to REJECTs");
 }
 
 // bad: one entry per occurrence
-tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
+tracing::warn!(?request_id, "returning presignature to pool due to REJECTs");
 ```
 
 ## Outputs

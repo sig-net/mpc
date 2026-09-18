@@ -162,7 +162,7 @@ impl<State> SignEntry<State> {
         self.chain
     }
 
-    pub fn sign_id(&self) -> RequestId {
+    pub fn request_id(&self) -> RequestId {
         self.request.id
     }
 
@@ -252,7 +252,7 @@ impl<State> SignEntry<State> {
         .with_context(|| {
             format!(
                 "respond event carried invalid signature for sign id {:?}",
-                self.sign_id()
+                self.request_id()
             )
         })
     }

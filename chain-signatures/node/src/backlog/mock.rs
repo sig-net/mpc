@@ -58,7 +58,7 @@ impl BacklogTestExt for Backlog {
         tx: &BidirectionalTx,
     ) -> SignEntry<Bidirectional<Executing>> {
         let bidi = self
-            .insert_mock_bidirectional(tx.sign_id(), tx.source_chain)
+            .insert_mock_bidirectional(tx.request_id(), tx.source_chain)
             .await;
         let (pk, output) = mock_signature_output(&bidi.request().args);
         bidi.advance(pk, &output, mock_participants(), true)
@@ -233,14 +233,14 @@ pub fn mock_tx(id: u8) -> BidirectionalTx {
 
 /// Create a mock bidirectional final response request.
 pub fn mock_bidi_response_request(
-    sign_id: RequestId,
+    request_id: RequestId,
     tx_id: BidirectionalTxId,
     chain: Chain,
 ) -> Arc<IndexedSignRequest> {
     Arc::new(IndexedSignRequest::respond_bidirectional(
-        sign_id,
+        request_id,
         SignArgs {
-            entropy: sign_id.request_id,
+            entropy: request_id.request_id,
             epsilon: k256::Scalar::from(1u64),
             payload: k256::Scalar::from(2u64),
             path: "test".to_string(),
@@ -259,7 +259,7 @@ pub fn mock_bidi_response_request(
 
 /// Create a mock bidirectional final response request from a [`BidirectionalTx`].
 pub fn mock_bidi_response(tx: &BidirectionalTx) -> Arc<IndexedSignRequest> {
-    mock_bidi_response_request(tx.sign_id(), tx.id, tx.source_chain)
+    mock_bidi_response_request(tx.request_id(), tx.id, tx.source_chain)
 }
 
 /// Helper to create a backlog entry with an arbitrary status for bidirectional requests.
@@ -279,9 +279,9 @@ pub fn mock_execution_entry_with_timestamp(
     unix_timestamp_indexed: u64,
 ) -> BacklogEntry {
     let request = if unix_timestamp_indexed == 0 {
-        mock_bidi_request(tx.sign_id(), chain)
+        mock_bidi_request(tx.request_id(), chain)
     } else {
-        let mut req = (*mock_bidi_request(tx.sign_id(), chain)).clone();
+        let mut req = (*mock_bidi_request(tx.request_id(), chain)).clone();
         req.unix_timestamp_indexed = unix_timestamp_indexed;
         Arc::new(req)
     };
@@ -292,7 +292,7 @@ pub fn mock_execution_entry_with_timestamp(
 /// Builds a checkpoint for a chain with exactly one backlog entry at height 100.
 pub fn single_entry_checkpoint(entry: BacklogEntry) -> Checkpoint {
     let mut pending = PendingRequests::new();
-    pending.insert(entry.sign_id(), entry);
+    pending.insert(entry.request_id(), entry);
     pending.set_processed_block(100);
     Checkpoints::snapshot(&pending, Chain::Ethereum)
 }

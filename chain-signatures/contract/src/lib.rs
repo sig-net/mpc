@@ -131,9 +131,9 @@ impl MpcContract {
             return Err(SignError::RequestLimitExceeded.into());
         }
         let predecessor = env::predecessor_account_id();
-        let sign_id =
+        let request_id =
             RequestId::from_parts(predecessor.as_str(), &payload_bytes, &path, key_version);
-        if self.contains_request(&sign_id) {
+        if self.contains_request(&request_id) {
             return Err(SignError::RequestCollision.into());
         }
 
@@ -146,10 +146,10 @@ impl MpcContract {
 
         // lock the request such that it can't be submitted again until released either by erroring out
         // or by finishing the request when the signature is submitted.
-        self.lock_request(sign_id, payload, epsilon);
+        self.lock_request(request_id, payload, epsilon);
 
         let request = InternalSignRequest {
-            id: sign_id,
+            id: request_id,
             requester: predecessor,
             deposit,
             required_deposit: NearToken::from_yoctonear(required_deposit),
@@ -215,6 +215,7 @@ impl MpcContract {
 #[near]
 impl MpcContract {
     #[handle_result]
+    // `sign_id` is the JSON argument name of the deployed contract ABI; it stays as is.
     pub fn respond(&mut self, sign_id: RequestId, signature: Signature) -> Result<(), Error> {
         let protocol_state = self.mutable_state();
         if !matches!(protocol_state, ProtocolContractState::Running(_)) {
@@ -1099,9 +1100,9 @@ impl MpcContract {
         self.pending_requests.contains_key(id)
     }
 
-    fn lock_request(&mut self, sign_id: RequestId, payload: Scalar, epsilon: Scalar) {
+    fn lock_request(&mut self, request_id: RequestId, payload: Scalar, epsilon: Scalar) {
         self.pending_requests.insert(
-            sign_id,
+            request_id,
             PendingRequest {
                 payload,
                 epsilon,
@@ -1114,15 +1115,15 @@ impl MpcContract {
         self.pending_requests.get(id)
     }
 
-    fn set_request_yield(&mut self, sign_id: &RequestId, data_id: CryptoHash) {
-        if let Some(request) = self.pending_requests.get_mut(sign_id) {
+    fn set_request_yield(&mut self, request_id: &RequestId, data_id: CryptoHash) {
+        if let Some(request) = self.pending_requests.get_mut(request_id) {
             request.index = Some(YieldIndex { data_id });
         }
     }
 
-    fn remove_request(&mut self, sign_id: &RequestId) -> Result<PendingRequest, Error> {
+    fn remove_request(&mut self, request_id: &RequestId) -> Result<PendingRequest, Error> {
         self.pending_requests
-            .remove(sign_id)
+            .remove(request_id)
             .ok_or(InvalidParameters::RequestNotFound.into())
     }
 

@@ -44,7 +44,7 @@ pub(crate) struct SignGenerator {
     participants: Vec<Participant>,
     /// Node that proposed this round (determines who publishes).
     proposer: Participant,
-    sign_id: RequestId,
+    request_id: RequestId,
     /// Start time, for the generation timeout and latency metrics.
     created: Instant,
     timeout: Duration,
@@ -67,10 +67,10 @@ impl SignGenerator {
         participants: Vec<Participant>,
     ) -> Result<Self, InitializationError> {
         let presignature_id = taken.artifact.id;
-        let sign_id = request.id;
+        let request_id = request.id;
         tracing::info!(
             me = ?ctx.governance.me,
-            ?sign_id,
+            ?request_id,
             ?presignature_id,
             "starting protocol to generate a new signature",
         );
@@ -84,7 +84,7 @@ impl SignGenerator {
         // reject it rather than panicking mid-signing.
         let Some(delta_inv) = Option::<k256::Scalar>::from(delta.invert()) else {
             return Err(InitializationError::BadParameters(format!(
-                "derived delta for {sign_id:?} is zero and cannot be inverted",
+                "derived delta for {request_id:?} is zero and cannot be inverted",
             )));
         };
         let output: PresignOutput<Secp256k1> = PresignOutput {
@@ -99,13 +99,16 @@ impl SignGenerator {
             output,
             request.args.payload,
         )?);
-        let inbox = ctx.msg.subscribe_signature(sign_id, presignature_id).await;
+        let inbox = ctx
+            .msg
+            .subscribe_signature(request_id, presignature_id)
+            .await;
         Ok(Self {
             protocol,
             dropper,
             participants,
             proposer,
-            sign_id,
+            request_id,
             created: Instant::now(),
             timeout: Duration::from_millis(ctx.cfg.signature.generation_timeout),
             inbox,
@@ -113,7 +116,7 @@ impl SignGenerator {
             #[cfg(feature = "debug-page")]
             debug_view: crate::web::debug::register_task(
                 ctx.node_account_id.to_string(),
-                format!("SignatureGenerator {sign_id:#?}"),
+                format!("SignatureGenerator {request_id:#?}"),
             ),
         })
     }
@@ -127,7 +130,7 @@ impl SignGenerator {
     /// Receive the next protocol message, erroring out on timeout. `seen` lists the
     /// participants already heard from, so an abort log can name who it waits on.
     async fn recv(&mut self, seen: &[Participant]) -> Result<SignatureMessage, SignError> {
-        let sign_id = self.sign_id;
+        let request_id = self.request_id;
         let presignature_id = self.dropper.id;
         match tokio::time::timeout(
             self.timeout.saturating_sub(self.created.elapsed()),
@@ -138,7 +141,7 @@ impl SignGenerator {
             Ok(Some(msg)) => Ok(msg),
             Ok(None) => {
                 tracing::warn!(
-                    ?sign_id,
+                    ?request_id,
                     ?presignature_id,
                     awaited = ?self.awaited(seen),
                     "signature generation aborted",
@@ -147,7 +150,7 @@ impl SignGenerator {
             }
             Err(_err) => {
                 tracing::warn!(
-                    ?sign_id,
+                    ?request_id,
                     ?presignature_id,
                     awaited = ?self.awaited(seen),
                     "signature generation timeout",
@@ -167,7 +170,7 @@ impl SignGenerator {
         let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
 
-        let sign_id = self.sign_id;
+        let request_id = self.request_id;
         let presignature_id = self.dropper.id;
 
         let mut total_wait = Duration::from_millis(0);
@@ -189,7 +192,7 @@ impl SignGenerator {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES.inc();
                     }
                     tracing::error!(
-                        ?sign_id,
+                        ?request_id,
                         ?err,
                         awaited = ?self.awaited(&seen),
                         "signature generation failed on protocol advancement",
@@ -229,7 +232,7 @@ impl SignGenerator {
                                 me,
                                 to,
                                 SignatureMessage {
-                                    id: sign_id,
+                                    id: request_id,
                                     proposer: self.proposer,
                                     presignature_id: self.dropper.id,
                                     epoch,
@@ -247,7 +250,7 @@ impl SignGenerator {
                             me,
                             to,
                             SignatureMessage {
-                                id: sign_id,
+                                id: request_id,
                                 proposer: self.proposer,
                                 presignature_id,
                                 epoch,
@@ -262,7 +265,7 @@ impl SignGenerator {
                     let big_r = output.big_r;
                     let s = output.s;
                     tracing::info!(
-                        ?sign_id,
+                        ?request_id,
                         ?me,
                         ?presignature_id,
                         big_r = ?big_r.to_base58(),
@@ -290,14 +293,14 @@ impl SignGenerator {
                         Ok(entry) => entry,
                         Err(BacklogError::InvalidSignature) => {
                             tracing::error!(
-                                ?sign_id,
+                                ?request_id,
                                 "failed to validate signature; trashing publish request",
                             );
                             break Ok(());
                         }
                         Err(err) => {
                             tracing::warn!(
-                                ?sign_id,
+                                ?request_id,
                                 ?err,
                                 "failed to mark publishing for sign request"
                             );
@@ -339,11 +342,11 @@ impl Drop for SignGenerator {
     /// Unsubscribe and drop any buffered messages for this signature.
     fn drop(&mut self) {
         let msg = self.msg.clone();
-        let sign_id = self.sign_id;
+        let request_id = self.request_id;
         let presignature_id = self.dropper.id;
         tokio::spawn(async move {
-            msg.unsubscribe_signature(sign_id, presignature_id).await;
-            msg.filter_sign(sign_id, presignature_id).await;
+            msg.unsubscribe_signature(request_id, presignature_id).await;
+            msg.filter_sign(request_id, presignature_id).await;
         });
     }
 }

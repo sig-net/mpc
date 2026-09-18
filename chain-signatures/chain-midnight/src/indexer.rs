@@ -164,7 +164,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                             {
                                 tracing::info!(
                                     tx_hash = %hex::encode(candidate.ledger_tx_hash),
-                                    sign_id = ?request.id,
+                                    request_id = ?request.id,
                                     "midnight signature requested"
                                 );
                                 events.push(ChainEvent::SignRequest {
@@ -1147,7 +1147,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn successful_request_logs_ledger_hash_and_sign_id_together() {
+    async fn successful_request_logs_ledger_hash_and_request_id_together() {
         let (record, rid) = named_record_and_rid(7);
         let absent_rid = [0x91; 32];
         let mut unsupported = notification(rid);
@@ -1205,10 +1205,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(correlations.len(), 2);
         let expected_tx_hash = hex::encode(LEDGER_TX_HASH);
-        let expected_sign_id = format!("{:?}", RequestId::new(rid));
+        let expected_request_id = format!("{:?}", RequestId::new(rid));
         for fields in correlations {
             assert_eq!(fields.get("tx_hash"), Some(&expected_tx_hash));
-            assert_eq!(fields.get("sign_id"), Some(&expected_sign_id));
+            assert_eq!(fields.get("request_id"), Some(&expected_request_id));
         }
     }
 

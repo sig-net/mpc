@@ -315,8 +315,8 @@ async fn test_reset_converges_divergent_nodes() {
     // which is exactly the state that makes post-reset digests disagree if a
     // reset preserves it.
     for (index, node) in network.nodes.iter().enumerate() {
-        let sign_id = RequestId::new([index as u8 + 1; 32]);
-        node.backlog.insert_mock_sign(sign_id, chain).await;
+        let request_id = RequestId::new([index as u8 + 1; 32]);
+        node.backlog.insert_mock_sign(request_id, chain).await;
         node.backlog
             .set_processed_block(chain, interval * (index as u64 + 3))
             .await;

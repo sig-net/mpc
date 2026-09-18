@@ -20,7 +20,7 @@ impl PositPhase {
         mailbox: &PositMailbox,
         proposer: Participant,
     ) -> Result<PresignatureId, Box<SignPhase>> {
-        let sign_id = ctx.sign_id;
+        let request_id = ctx.request_id;
         let remaining = state.budget.remaining();
         let outcome = tokio::time::timeout(remaining, async {
             loop {
@@ -74,7 +74,7 @@ impl PositPhase {
                                 // The id echoes the rejected message so the
                                 // sender knows which attempt we are answering.
                                 id: PositProtocolId::Signature(
-                                    sign_id,
+                                    request_id,
                                     *presignature_id,
                                     *peer_round,
                                 ),
@@ -113,7 +113,7 @@ impl PositPhase {
 
                 if from == &proposer {
                     tracing::info!(
-                        ?sign_id,
+                        ?request_id,
                         ?presignature_id,
                         ?from,
                         "deliberator received Propose"
@@ -122,7 +122,7 @@ impl PositPhase {
                     // Check if the presignature available in storage
                     if !ctx.presignatures.contains(*presignature_id).await {
                         tracing::warn!(
-                            ?sign_id,
+                            ?request_id,
                             presignature_id,
                             "deliberator does not have access to proposed presignature, rejecting"
                         );
@@ -132,7 +132,7 @@ impl PositPhase {
                                 proposer,
                                 PositMessage {
                                     id: PositProtocolId::Signature(
-                                        sign_id,
+                                        request_id,
                                         *presignature_id,
                                         state.round(),
                                     ),
@@ -149,7 +149,7 @@ impl PositPhase {
                     break *presignature_id;
                 } else {
                     tracing::warn!(
-                        ?sign_id,
+                        ?request_id,
                         ?from,
                         ?proposer,
                         "received Propose from non-proposer, rejecting"
@@ -161,7 +161,7 @@ impl PositPhase {
                             *from,
                             PositMessage {
                                 id: PositProtocolId::Signature(
-                                    sign_id,
+                                    request_id,
                                     *presignature_id,
                                     state.round(),
                                 ),
@@ -189,7 +189,7 @@ impl PositPhase {
                 ctx.governance.me,
                 proposer,
                 PositMessage {
-                    id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
+                    id: PositProtocolId::Signature(request_id, presignature_id, state.round()),
                     from: ctx.governance.me,
                     action: PositAction::Accept,
                 },
@@ -212,13 +212,13 @@ impl PositPhase {
         let mut presignature_id = self.presignature_id;
         let presignature = self.presignature.take();
 
-        let sign_id = ctx.sign_id;
+        let request_id = ctx.request_id;
         let round = state.round();
         let is_proposer = proposer == ctx.governance.me;
         let is_deliberator = !is_proposer;
 
         tracing::info!(
-            ?sign_id,
+            ?request_id,
             ?presignature_id,
             ?round,
             is_proposer,
@@ -227,7 +227,7 @@ impl PositPhase {
 
         if is_deliberator {
             tracing::info!(
-                ?sign_id,
+                ?request_id,
                 ?round,
                 ?proposer,
                 "deliberator waiting for Propose"
@@ -287,7 +287,7 @@ impl PositPhase {
                                     // The id echoes the rejected message so the
                                     // sender knows which attempt we are answering.
                                     id: PositProtocolId::Signature(
-                                        sign_id,
+                                        request_id,
                                         task_msg.presignature_id,
                                         peer_round,
                                     ),
@@ -320,7 +320,7 @@ impl PositPhase {
                     if is_deliberator {
                         if let PositAction::Start(participants) = action {
                             if from != proposer {
-                                tracing::warn!(?sign_id, ?round, ?from, ?proposer, "received Start from non-proposer, ignoring");
+                                tracing::warn!(?request_id, ?round, ?from, ?proposer, "received Start from non-proposer, ignoring");
                                 continue;
                             }
 
@@ -328,7 +328,7 @@ impl PositPhase {
                                 return state.reorganize("not enough Start participants");
                             }
 
-                            tracing::info!(?sign_id, participant = ?ctx.governance.me, ?participants, "deliberator received Start");
+                            tracing::info!(?request_id, participant = ?ctx.governance.me, ?participants, "deliberator received Start");
                             break participants;
                         }
                     } else {
@@ -347,7 +347,7 @@ impl PositPhase {
                                     .is_err()
                                 {
                                     tracing::warn!(
-                                        ?sign_id,
+                                        ?request_id,
                                         ?peer,
                                         "could not report desynced peer to mesh"
                                     );
@@ -355,7 +355,7 @@ impl PositPhase {
                             }
                             if let Some(_reservation) = presignature {
                                 if let Some(count) = mpc_utils::throttle::check("posit:presig-return-rejects") {
-                                    tracing::warn!(count, ?sign_id, "returning presignature to pool due to REJECTs");
+                                    tracing::warn!(count, ?request_id, "returning presignature to pool due to REJECTs");
                                 }
                             }
                             return state.reorganize(&format!(
@@ -379,7 +379,7 @@ impl PositPhase {
                                 ctx,
                                 state,
                                 counter,
-                                sign_id,
+                                request_id,
                                 presignature_id
                             ).await;
                             break participants;
@@ -390,7 +390,7 @@ impl PositPhase {
                     let reason = if is_proposer {
                         if presignature.is_some() {
                             if let Some(count) = mpc_utils::throttle::check("posit:presig-return-proposer-timeout") {
-                                tracing::warn!(count, ?sign_id, "returning presignature to pool due to proposer timeout");
+                                tracing::warn!(count, ?request_id, "returning presignature to pool due to proposer timeout");
                             }
                         }
                         format!(
@@ -411,7 +411,7 @@ impl PositPhase {
                             ctx,
                             state,
                             counter,
-                            sign_id,
+                            request_id,
                             presignature_id
                         ).await;
                         break participants;
@@ -434,11 +434,11 @@ impl PositPhase {
         ctx: &SignTask,
         state: &mut SignState,
         counter: SinglePositCounter,
-        sign_id: RequestId,
+        request_id: RequestId,
         presignature_id: PresignatureId,
     ) -> Vec<Participant> {
         let participants = counter.accepts.into_iter().collect::<Vec<_>>();
-        tracing::info!(?sign_id, round=?state.round(), me = ?ctx.governance.me, ?participants, "proposer broadcasting Start");
+        tracing::info!(?request_id, round=?state.round(), me = ?ctx.governance.me, ?participants, "proposer broadcasting Start");
 
         for &p in &participants {
             if p == ctx.governance.me {
@@ -449,7 +449,7 @@ impl PositPhase {
                     ctx.governance.me,
                     p,
                     PositMessage {
-                        id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
+                        id: PositProtocolId::Signature(request_id, presignature_id, state.round()),
                         from: ctx.governance.me,
                         action: PositAction::Start(participants.clone()),
                     },
@@ -504,7 +504,7 @@ pub(crate) mod tests {
 
         let ctx = SignTask {
             governance,
-            sign_id: RequestId::new([0u8; 32]),
+            request_id: RequestId::new([0u8; 32]),
             presignatures,
             msg: msg_channel,
             rpc: RpcChannel { tx: rpc_tx },
@@ -518,7 +518,7 @@ pub(crate) mod tests {
 
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let entry = backlog::SignEntry::generating(
-            crate::backlog::mock::mock_sign_request(ctx.sign_id, Chain::Ethereum),
+            crate::backlog::mock::mock_sign_request(ctx.request_id, Chain::Ethereum),
             &Backlog::new(),
         );
         let state = SignState::new(entry, mesh_rx, Arc::clone(&ctx.round));

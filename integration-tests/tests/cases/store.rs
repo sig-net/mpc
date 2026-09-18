@@ -364,7 +364,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     assert_eq!(latest.block_height, 10);
     assert_eq!(latest.pending_requests.len(), 1);
     assert_eq!(
-        latest.pending_requests[0].sign_id(),
+        latest.pending_requests[0].request_id(),
         RequestId::new([1u8; 32])
     );
 
@@ -383,7 +383,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     assert_eq!(latest.block_height, 20);
     assert_eq!(latest.pending_requests.len(), 1);
     assert_eq!(
-        latest.pending_requests[0].sign_id(),
+        latest.pending_requests[0].request_id(),
         RequestId::new([2u8; 32])
     );
 

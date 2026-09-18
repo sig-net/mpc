@@ -108,7 +108,7 @@ impl PendingRequests {
         let requests = checkpoint
             .pending_requests
             .iter()
-            .map(|entry| (entry.sign_id(), entry.clone()))
+            .map(|entry| (entry.request_id(), entry.clone()))
             .collect();
         Self {
             requests,
@@ -134,7 +134,7 @@ impl ExecutionWatchers {
     fn all(&self) -> HashMap<BidirectionalTxId, (RequestId, Arc<BidirectionalTx>)> {
         self.watchers
             .iter()
-            .map(|(id, watch)| (*id, (watch.tx.sign_id(), Arc::clone(&watch.tx))))
+            .map(|(id, watch)| (*id, (watch.tx.request_id(), Arc::clone(&watch.tx))))
             .collect()
     }
 }
@@ -350,7 +350,7 @@ impl Backlog {
         };
 
         // Restore the observation time absent from backlog status.
-        self.get_by::<Bidirectional<Executing>>(watch.tx.source_chain, &watch.tx.sign_id())
+        self.get_by::<Bidirectional<Executing>>(watch.tx.source_chain, &watch.tx.request_id())
             .await
             .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
     }
@@ -594,7 +594,7 @@ impl BacklogEntry {
         Self { request, status }
     }
 
-    pub fn sign_id(&self) -> RequestId {
+    pub fn request_id(&self) -> RequestId {
         self.request.id
     }
 

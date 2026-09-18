@@ -510,10 +510,10 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
 
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
-    let sign_id = RequestId::new([77u8; 32]);
+    let request_id = RequestId::new([77u8; 32]);
     let checkpoint_slot = solana.rpc_client.get_slot().await?;
     let entry = seeded_backlog
-        .insert_mock_sign(sign_id, Chain::Solana)
+        .insert_mock_sign(request_id, Chain::Solana)
         .await;
     let (pk, output) = mock_signature_output(&entry.request().args);
     let pub_entry = entry
@@ -597,7 +597,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
 
     while let Ok(Some(message)) = timeout(Duration::from_millis(50), sign_rx.recv()).await {
         if let SignCommand::Request(req) = &message {
-            if req.sign_id() == sign_id {
+            if req.request_id() == request_id {
                 anyhow::bail!("recovered publish request was incorrectly requeued for signing");
             }
         }
@@ -605,7 +605,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
 
     match action {
         RpcAction::Publish(action) => {
-            assert_eq!(action.request.id, sign_id);
+            assert_eq!(action.request.id, request_id);
             assert_eq!(action.request.chain, Chain::Solana);
             assert_eq!(action.signature, expected_sig);
             assert_eq!(action.participants, vec![Participant::from(0u32)]);
@@ -685,8 +685,9 @@ async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
     let config = solana.get_config(program_address);
     let mut indexer = run_solana_indexer(config.clone()).await?;
 
-    let sign_id = RequestId::new([9u8; 32]);
-    let request = mock_bidi_response_request(sign_id, BidirectionalTxId([1u8; 32]), Chain::Solana);
+    let request_id = RequestId::new([9u8; 32]);
+    let request =
+        mock_bidi_response_request(request_id, BidirectionalTxId([1u8; 32]), Chain::Solana);
 
     let publisher = SolanaClient::from_config(&config, Arc::new(NoopPublisherTelemetry));
     publisher
@@ -710,7 +711,7 @@ async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
     let ChainEvent::RespondBidirectional(responded) = event else {
         panic!("expected RespondBidirectional event, got {event:?}");
     };
-    assert_eq!(responded.request_id, sign_id.request_id);
+    assert_eq!(responded.request_id, request_id.request_id);
     assert_eq!(responded.chain, Chain::Solana);
     assert_eq!(responded.signature.big_r, AffinePoint::GENERATOR);
     assert_eq!(responded.signature.s, Scalar::ONE);
@@ -858,7 +859,7 @@ async fn test_solana_stream_resumes_gap_free_after_outage() -> Result<()> {
     let drain_until = Instant::now() + Duration::from_secs(3);
     while Instant::now() < drain_until {
         match timeout(drain_until - Instant::now(), sign_rx.recv()).await {
-            Ok(Some(SignCommand::Request(request))) => seen.push(request.sign_id()),
+            Ok(Some(SignCommand::Request(request))) => seen.push(request.request_id()),
             Ok(_) | Err(_) => break,
         }
     }

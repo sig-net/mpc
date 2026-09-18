@@ -27,12 +27,12 @@ impl NearIndexer {
         }
     }
 
-    fn seen_request(&self, sign_id: &RequestId) -> bool {
-        self.processed_requests.contains_key(sign_id)
+    fn seen_request(&self, request_id: &RequestId) -> bool {
+        self.processed_requests.contains_key(request_id)
     }
 
-    fn mark_request_seen(&mut self, sign_id: RequestId) {
-        self.processed_requests.insert(sign_id, Instant::now());
+    fn mark_request_seen(&mut self, request_id: RequestId) {
+        self.processed_requests.insert(request_id, Instant::now());
     }
 
     async fn cleanup_old_requests(&mut self) {
@@ -44,11 +44,11 @@ impl NearIndexer {
     fn completed_requests(&mut self, currently_pending: &HashSet<RequestId>) -> Vec<RequestId> {
         let mut completed = Vec::new();
 
-        self.processed_requests.retain(|sign_id, _| {
-            if currently_pending.contains(sign_id) {
+        self.processed_requests.retain(|request_id, _| {
+            if currently_pending.contains(request_id) {
                 true
             } else {
-                completed.push(*sign_id);
+                completed.push(*request_id);
                 false
             }
         });
@@ -72,7 +72,7 @@ impl NearIndexer {
     /// Convert contract pending request to indexed sign request
     fn convert_to_indexed_request(
         &self,
-        sign_id: RequestId,
+        request_id: RequestId,
         pending_request: PendingRequest,
     ) -> IndexedSignRequest {
         let payload = pending_request.payload;
@@ -80,14 +80,14 @@ impl NearIndexer {
 
         // no longer taking entropy from logs, but this is merely for integration tests, so
         // it doesn't matter as much as long as the IT nodes agree on the entropy.
-        let entropy = self.derive_entropy_from_sign_id(&sign_id);
+        let entropy = self.derive_entropy_from_request_id(&request_id);
         // NOTE: path is not used at all currently in signature.rs during signing, so hardcoding
         // it here won't matter.
         let path = "integration-tests".to_string();
         let key_version = 0u32;
 
         IndexedSignRequest::sign(
-            sign_id,
+            request_id,
             SignArgs {
                 entropy,
                 epsilon,
@@ -100,11 +100,11 @@ impl NearIndexer {
         )
     }
 
-    /// Derive entropy deterministically from sign_id
-    fn derive_entropy_from_sign_id(&self, sign_id: &RequestId) -> [u8; 32] {
+    /// Derive entropy deterministically from request_id
+    fn derive_entropy_from_request_id(&self, request_id: &RequestId) -> [u8; 32] {
         use k256::sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(format!("{:?}", sign_id).as_bytes());
+        hasher.update(format!("{:?}", request_id).as_bytes());
         hasher.finalize().into()
     }
 }
@@ -130,19 +130,19 @@ async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow:
     let mut new_requests = Vec::new();
     let mut current_pending = HashSet::new();
 
-    for (sign_id, pending_request) in pending_requests.into_iter() {
-        current_pending.insert(sign_id);
+    for (request_id, pending_request) in pending_requests.into_iter() {
+        current_pending.insert(request_id);
 
-        if ctx.indexer.seen_request(&sign_id) {
+        if ctx.indexer.seen_request(&request_id) {
             continue;
         }
 
         let indexed_request = ctx
             .indexer
-            .convert_to_indexed_request(sign_id, pending_request);
+            .convert_to_indexed_request(request_id, pending_request);
 
         tracing::info!(
-            sign_id = ?indexed_request.id,
+            request_id = ?indexed_request.id,
             payload = hex::encode(indexed_request.args.payload.to_bytes()),
             entropy = hex::encode(indexed_request.args.entropy),
             epsilon = hex::encode(indexed_request.args.epsilon.to_bytes()),
@@ -150,7 +150,7 @@ async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow:
         );
 
         new_requests.push(indexed_request);
-        ctx.indexer.mark_request_seen(sign_id);
+        ctx.indexer.mark_request_seen(request_id);
     }
 
     let completed_requests = ctx.indexer.completed_requests(&current_pending);
@@ -158,7 +158,7 @@ async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow:
     // Send all new requests
     for request in new_requests {
         tracing::info!(
-            sign_id = ?request.id,
+            request_id = ?request.id,
             "sending new sign request to processing queue"
         );
         if let Err(err) = ctx
@@ -170,12 +170,12 @@ async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow:
         }
     }
 
-    for sign_id in completed_requests {
-        tracing::info!(?sign_id, "detected completed NEAR sign request");
-        if let Err(err) = ctx.sign_tx.send(SignCommand::Completion(sign_id)).await {
+    for request_id in completed_requests {
+        tracing::info!(?request_id, "detected completed NEAR sign request");
+        if let Err(err) = ctx.sign_tx.send(SignCommand::Completion(request_id)).await {
             tracing::error!(
                 ?err,
-                ?sign_id,
+                ?request_id,
                 "failed to send completion event into sign queue"
             );
         }

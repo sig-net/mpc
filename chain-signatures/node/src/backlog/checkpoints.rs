@@ -30,7 +30,7 @@ impl fmt::Debug for Checkpoint {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 let mut list = f.debug_list();
                 for entry in self.0 {
-                    list.entry(&entry.sign_id());
+                    list.entry(&entry.request_id());
                 }
                 list.finish()
             }
@@ -75,7 +75,7 @@ impl Checkpoint {
             self.block_height,
             self.pending_requests
                 .iter()
-                .map(|entry| entry.sign_id().request_id),
+                .map(|entry| entry.request_id().request_id),
             self.cumulative_digest,
         )
     }
@@ -162,7 +162,7 @@ impl Checkpoints {
     /// Captures the current request state as a deterministic checkpoint.
     pub(crate) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
         let mut pending_requests = requests.requests.values().cloned().collect::<Vec<_>>();
-        pending_requests.sort_by_key(|entry| entry.sign_id());
+        pending_requests.sort_by_key(|entry| entry.request_id());
 
         let mut cumulative = sha3::Sha3_256::new();
         for entry in &pending_requests {
@@ -624,7 +624,7 @@ mod tests {
         assert!(!debug_str.contains("IndexedSignRequest"));
         assert!(!debug_str.contains("payload"));
         for entry in &cp.pending_requests {
-            assert!(debug_str.contains(&hex::encode(entry.sign_id().request_id)));
+            assert!(debug_str.contains(&hex::encode(entry.request_id().request_id)));
         }
     }
 }

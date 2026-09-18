@@ -71,15 +71,15 @@ impl_test_indexer!(EthereumTestIndexer, Chain::Ethereum);
 #[tokio::test]
 async fn test_stream_handles_sign_and_respond() {
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([1u8; 32]);
-    let request = mock_sign_request(sign_id, Chain::Solana);
+    let request_id = RequestId::new([1u8; 32]);
+    let request = mock_sign_request(request_id, Chain::Solana);
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let root_pk = root_sk.public_key().to_projective().to_affine();
 
     // Prepare a respond event that matches the sign id
     let mpc_sig = mpc_crypto::generate_signature(&root_sk, &request.args);
-    let sig_responded = signature_responded_event(sign_id, mpc_sig, Chain::Solana);
+    let sig_responded = signature_responded_event(request_id, mpc_sig, Chain::Solana);
     let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
@@ -125,7 +125,7 @@ async fn test_stream_handles_sign_and_respond() {
         .unwrap()
         .unwrap();
     match msg1 {
-        SignCommand::Request(req) => assert_eq!(req.sign_id(), sign_id),
+        SignCommand::Request(req) => assert_eq!(req.request_id(), request_id),
         _ => panic!("expected request"),
     }
 
@@ -134,7 +134,7 @@ async fn test_stream_handles_sign_and_respond() {
         .unwrap()
         .unwrap();
     match msg2 {
-        SignCommand::Completion(id) => assert_eq!(id, sign_id),
+        SignCommand::Completion(id) => assert_eq!(id, request_id),
         _ => panic!("expected completion"),
     }
 }
@@ -146,7 +146,7 @@ fn build_solana_to_ethereum_bidirectional_request(
 ) -> (Arc<IndexedSignRequest>, SignArgs, k256::SecretKey) {
     use mpc_primitives::SignBidirectionalEvent as SBE;
 
-    let sign_id = RequestId::new([seed; 32]);
+    let request_id = RequestId::new([seed; 32]);
     let args = test_sign_args(seed);
 
     // Minimal legacy unsigned Ethereum tx encoded as RLP so sign_and_hash can parse it
@@ -179,7 +179,7 @@ fn build_solana_to_ethereum_bidirectional_request(
     };
 
     let request = IndexedSignRequest::sign_bidirectional(
-        sign_id,
+        request_id,
         args.clone(),
         Chain::Solana,
         current_unix_timestamp(),
@@ -196,7 +196,7 @@ fn build_solana_to_ethereum_bidirectional_request(
 async fn test_bidirectional_sign_request_enqueues_command() {
     let backlog = Backlog::new();
     let (request, _args, root_sk) = build_solana_to_ethereum_bidirectional_request(42);
-    let sign_id = request.id;
+    let request_id = request.id;
     let root_pk = root_sk.public_key().to_projective().to_affine();
     let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
@@ -241,13 +241,13 @@ async fn test_bidirectional_sign_request_enqueues_command() {
         .unwrap();
 
     match msg {
-        SignCommand::Request(req) => assert_eq!(req.sign_id(), sign_id),
+        SignCommand::Request(req) => assert_eq!(req.request_id(), request_id),
         other => panic!("expected SignCommand::Request, got {other:?}"),
     }
 
     // The request should be persisted in the backlog after the sign request is processed
     let entry = backlog
-        .get(Chain::Solana, &sign_id)
+        .get(Chain::Solana, &request_id)
         .await
         .expect("bidirectional sign request should be tracked in the backlog");
 
@@ -264,7 +264,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
 async fn test_respond_event_advances_to_pending_execution() {
     let backlog = Backlog::new();
     let (request, args, root_sk) = build_solana_to_ethereum_bidirectional_request(7);
-    let sign_id = request.id;
+    let request_id = request.id;
     let root_pk = root_sk.public_key().into();
 
     // Pre-seed the backlog with the bidirectional entry and mark it as already
@@ -281,7 +281,7 @@ async fn test_respond_event_advances_to_pending_execution() {
         .await
         .unwrap();
 
-    let sig_responded = signature_responded_event(sign_id, mpc_sig, Chain::Solana);
+    let sig_responded = signature_responded_event(request_id, mpc_sig, Chain::Solana);
     let indexer = SolanaTestIndexer::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::Respond(sig_responded)),
@@ -320,7 +320,7 @@ async fn test_respond_event_advances_to_pending_execution() {
     // target chain (Ethereum).
     assert!(
         backlog
-            .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
+            .get_by::<Bidirectional<Executing>>(Chain::Solana, &request_id)
             .await
             .is_some(),
         "expected Bidirectional Executing in backlog"
@@ -328,8 +328,8 @@ async fn test_respond_event_advances_to_pending_execution() {
 
     let watchers = backlog.get_execution_watchers(Chain::Ethereum).await;
     assert_eq!(watchers.len(), 1, "expected exactly one execution watcher");
-    let (watched_sign_id, _watched_tx) = watchers.values().next().unwrap();
-    assert_eq!(*watched_sign_id, sign_id);
+    let (watched_request_id, _watched_tx) = watchers.values().next().unwrap();
+    assert_eq!(*watched_request_id, request_id);
 }
 
 /// `process_execution_confirmed` on a watched bidirectional tx should advance the
@@ -341,7 +341,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
 
     let backlog = Backlog::new();
     let seed = 42;
-    let sign_id = RequestId::new([seed; 32]);
+    let request_id = RequestId::new([seed; 32]);
 
     // Pre-seed the backlog with a bidirectional request
     let (request, _args, _root_sk) = build_solana_to_ethereum_bidirectional_request(seed);
@@ -386,8 +386,8 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
     match msg {
         SignCommand::Request(req) => {
             assert_eq!(
-                req.sign_id(),
-                sign_id,
+                req.request_id(),
+                request_id,
                 "follow-up request should reuse the sign id"
             );
             match &req.request().kind {
@@ -418,9 +418,9 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
 async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
-    let sign_id = RequestId::new([99u8; 32]);
+    let request_id = RequestId::new([99u8; 32]);
     let entry = seeded_backlog
-        .insert_mock_sign(sign_id, Chain::Ethereum)
+        .insert_mock_sign(request_id, Chain::Ethereum)
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, 100)
@@ -432,7 +432,7 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
     let root_pk = root_sk.public_key().to_projective().to_affine();
     let mpc_sig = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
 
-    let respond = signature_responded_event(sign_id, mpc_sig, Chain::Ethereum);
+    let respond = signature_responded_event(request_id, mpc_sig, Chain::Ethereum);
 
     let indexer = EthereumTestIndexer::new(vec![
         Some(ChainEvent::Respond(respond)),
@@ -449,21 +449,21 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
         Err(_) | Ok(None) => {}
         Ok(Some(msg)) => panic!("unexpected sign message during catchup: {msg:?}"),
     }
-    assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
+    assert!(backlog.get(Chain::Ethereum, &request_id).await.is_none());
 }
 
 #[tokio::test]
 async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
-    let sign_id = RequestId::new([100u8; 32]);
+    let request_id = RequestId::new([100u8; 32]);
     let args = test_sign_args(5);
     let recovered_timestamp = current_unix_timestamp();
     let replayed_timestamp = recovered_timestamp.saturating_add(1);
 
     seeded_backlog
         .insert(Arc::new(IndexedSignRequest::sign(
-            sign_id,
+            request_id,
             args.clone(),
             Chain::Ethereum,
             recovered_timestamp,
@@ -475,8 +475,12 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
         .unwrap();
     seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
 
-    let replacement =
-        IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
+    let replacement = IndexedSignRequest::sign(
+        request_id,
+        args.clone(),
+        Chain::Ethereum,
+        replayed_timestamp,
+    );
     let indexer = EthereumTestIndexer::new(vec![
         Some(ChainEvent::SignRequest {
             request: Arc::new(replacement),
@@ -503,14 +507,14 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
         .expect("replacement request should be requeued");
     match msg {
         SignCommand::Request(req) => {
-            assert_eq!(req.sign_id(), sign_id);
+            assert_eq!(req.request_id(), request_id);
             assert_eq!(req.request().unix_timestamp_indexed, replayed_timestamp);
         }
         other => panic!("expected replacement request after catchup, got {other:?}"),
     }
 
     let entry = backlog
-        .get(Chain::Ethereum, &sign_id)
+        .get(Chain::Ethereum, &request_id)
         .await
         .expect("replayed entry should remain in backlog");
     assert_eq!(entry.request().unix_timestamp_indexed, replayed_timestamp);
@@ -519,8 +523,8 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
 #[tokio::test]
 async fn test_stream_resumes_pending_publish_after_catchup() {
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([77u8; 32]);
-    let entry = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let request_id = RequestId::new([77u8; 32]);
+    let entry = backlog.insert_mock_sign(request_id, Chain::Solana).await;
     let (pk, output) = mock_signature_output(&entry.request().args);
 
     let pub_entry = entry
@@ -570,7 +574,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
         .expect("publish resume should enqueue an RPC action");
     match action {
         RpcAction::Publish(action) => {
-            assert_eq!(action.request.id, sign_id);
+            assert_eq!(action.request.id, request_id);
             assert_eq!(action.request.chain, Chain::Solana);
             assert_eq!(action.signature, expected_sig);
         }
@@ -588,8 +592,8 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
 #[tokio::test]
 async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup() {
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([88u8; 32]);
-    let entry = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let request_id = RequestId::new([88u8; 32]);
+    let entry = backlog.insert_mock_sign(request_id, Chain::Solana).await;
     let (pk, output) = mock_signature_output(&entry.request().args);
 
     entry

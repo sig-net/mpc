@@ -310,7 +310,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     async fn execution_confirmed_event(
         &self,
         tx_id: BidirectionalTxId,
-        sign_id: RequestId,
+        request_id: RequestId,
         pending_tx: &BidirectionalTx,
         block_number: u64,
         receipt: &TransactionReceipt,
@@ -319,7 +319,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
         tracing::info!(
             ?tx_id,
-            ?sign_id,
+            ?request_id,
             block_number,
             "bidirectional execution observed via rpc"
         );
@@ -332,7 +332,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                 Ok(serialized_output) => {
                     tracing::info!(
                         ?tx_id,
-                        ?sign_id,
+                        ?request_id,
                         "extracted transaction output for bidirectional tx"
                     );
                     ExecutionOutcome::Success {
@@ -346,7 +346,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                         ExtractionFailure::Retryable(err) => {
                             tracing::warn!(
                                 ?tx_id,
-                                ?sign_id,
+                                ?request_id,
                                 ?err,
                                 "failed to extract transaction output; retrying on the next block"
                             );
@@ -355,7 +355,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                         ExtractionFailure::Terminal(err) => {
                             tracing::error!(
                                 ?tx_id,
-                                ?sign_id,
+                                ?request_id,
                                 ?err,
                                 "unrecoverable transaction output extraction failure; \
                                  resolving bidirectional execution as failed"
@@ -371,7 +371,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
         ConfirmationOutcome::Confirmed(ChainEvent::ExecutionConfirmed {
             tx_id,
-            sign_id,
+            request_id,
             source_chain: pending_tx.source_chain,
             block_height: block_number,
             result,
@@ -381,7 +381,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     async fn backfill_execution_confirmation(
         &self,
         tx_id: BidirectionalTxId,
-        sign_id: RequestId,
+        request_id: RequestId,
         pending_tx: &BidirectionalTx,
         current_block_number: u64,
     ) -> anyhow::Result<BackfillOutcome> {
@@ -393,7 +393,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         let Some(mined_block_number) = receipt.block_number else {
             tracing::debug!(
                 ?tx_id,
-                ?sign_id,
+                ?request_id,
                 "late watcher backfill: transaction receipt has no block number"
             );
             return Ok(BackfillOutcome::NotObserved);
@@ -402,7 +402,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         if mined_block_number > current_block_number {
             tracing::debug!(
                 ?tx_id,
-                ?sign_id,
+                ?request_id,
                 mined_block_number,
                 current_block_number,
                 "skipping late watcher backfill for future ethereum block"
@@ -413,14 +413,14 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
         tracing::info!(
             ?tx_id,
-            ?sign_id,
+            ?request_id,
             mined_block_number,
             current_block_number,
             "backfilled execution confirmation for late ethereum watcher"
         );
 
         let confirmation = self
-            .execution_confirmed_event(tx_id, sign_id, pending_tx, mined_block_number, &receipt)
+            .execution_confirmed_event(tx_id, request_id, pending_tx, mined_block_number, &receipt)
             .await;
         Ok(BackfillOutcome::Observed { confirmation })
     }
@@ -435,11 +435,16 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         stream::iter(
             watchers
                 .into_iter()
-                .map(|(tx_id, (sign_id, pending_tx))| async move {
+                .map(|(tx_id, (request_id, pending_tx))| async move {
                     let result = self
-                        .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
+                        .backfill_execution_confirmation(
+                            tx_id,
+                            request_id,
+                            &pending_tx,
+                            block_number,
+                        )
                         .await;
-                    (tx_id, sign_id, pending_tx, result)
+                    (tx_id, request_id, pending_tx, result)
                 }),
         )
         .buffer_unordered(self.config.max_concurrent_watcher_rpcs)
@@ -484,7 +489,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         let mut consumed_slots = HashSet::new();
         let mut failed = HashSet::new();
 
-        for (tx_id, sign_id, pending_tx, result) in
+        for (tx_id, request_id, pending_tx, result) in
             self.fetch_watcher_receipts(mined, block_number).await
         {
             match result {
@@ -504,7 +509,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                 Err(err) => {
                     tracing::warn!(
                         ?tx_id,
-                        ?sign_id,
+                        ?request_id,
                         ?err,
                         "failed to fetch receipt for bidirectional tx mined in block"
                     );
@@ -534,16 +539,16 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
         let events = replaced
             .into_iter()
-            .map(|(tx_id, (sign_id, tx))| {
+            .map(|(tx_id, (request_id, tx))| {
                 tracing::info!(
                     ?tx_id,
-                    ?sign_id,
+                    ?request_id,
                     nonce = tx.nonce,
                     "transaction replaced by sibling tx mined in this block"
                 );
                 ChainEvent::ExecutionConfirmed {
                     tx_id,
-                    sign_id,
+                    request_id,
                     source_chain: tx.source_chain,
                     block_height: block_number,
                     result: ExecutionOutcome::Failed,
@@ -599,7 +604,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             .collect();
 
         let mut events = Vec::new();
-        for (tx_id, sign_id, pending_tx, result) in self
+        for (tx_id, request_id, pending_tx, result) in self
             .fetch_watcher_receipts(consumed_txs, block_number)
             .await
         {
@@ -613,13 +618,13 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                 Ok(BackfillOutcome::NotObserved) => {
                     tracing::info!(
                         ?tx_id,
-                        ?sign_id,
+                        ?request_id,
                         expected_nonce = pending_tx.nonce,
                         "transaction replaced or dropped (nonce consumed by another tx)"
                     );
                     events.push(ChainEvent::ExecutionConfirmed {
                         tx_id,
-                        sign_id,
+                        request_id,
                         source_chain: pending_tx.source_chain,
                         block_height: block_number,
                         result: ExecutionOutcome::Failed,
@@ -628,7 +633,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                 Err(err) => {
                     tracing::warn!(
                         ?tx_id,
-                        ?sign_id,
+                        ?request_id,
                         ?err,
                         "failed to fetch receipt for nonce-consumed bidirectional tx"
                     );
@@ -740,13 +745,13 @@ mod tests {
             .create_async()
             .await;
 
-        let sign_id = RequestId::new([0x55; 32]);
+        let request_id = RequestId::new([0x55; 32]);
         let tx = test_watcher_tx(tx_hash, from_address, 0);
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .watch_execution(Chain::Ethereum, request_id, tx)
             .await;
 
         // Construct mock block at height 10 (triggers modulo 10 check)
@@ -764,13 +769,13 @@ mod tests {
         match &events[0] {
             ChainEvent::ExecutionConfirmed {
                 tx_id: event_tx_id,
-                sign_id: event_sign_id,
+                request_id: event_request_id,
                 source_chain,
                 block_height,
                 result,
             } => {
                 assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash.0));
-                assert_eq!(*event_sign_id, sign_id);
+                assert_eq!(*event_request_id, request_id);
                 assert_eq!(*source_chain, Chain::Solana);
                 assert_eq!(*block_height, 2);
                 assert!(matches!(result, ExecutionOutcome::Failed));
@@ -925,13 +930,13 @@ mod tests {
             .create_async()
             .await;
 
-        let sign_id = RequestId::new([0x55; 32]);
+        let request_id = RequestId::new([0x55; 32]);
         let tx = test_watcher_tx(tx_hash, from_address, 0);
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .watch_execution(Chain::Ethereum, request_id, tx)
             .await;
 
         // Block height 5 (NOT a modulo 10 block), but contains tx_hash in block.transactions

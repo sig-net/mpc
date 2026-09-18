@@ -69,7 +69,8 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
 
     let msg = "hello world!";
     println!("submitting: {msg}");
-    let (payload_hash, sign_id, respond_resp) = create_response(alice.id(), msg, path, &sk).await;
+    let (payload_hash, request_id, respond_resp) =
+        create_response(alice.id(), msg, path, &sk).await;
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
@@ -92,7 +93,7 @@ async fn test_contract_sign_success_refund() -> anyhow::Result<()> {
     let respond = contract
         .call("respond")
         .args_json(serde_json::json!({
-            "sign_id": sign_id,
+            "sign_id": request_id,
             "signature": respond_resp
         }))
         .max_gas()
@@ -202,7 +203,8 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
 
     // Try to sign with no deposit, should fail.
     let msg = "without-deposit";
-    let (payload_hash, sign_id, signature) = create_response(predecessor_id, msg, path, &sk).await;
+    let (payload_hash, request_id, signature) =
+        create_response(predecessor_id, msg, path, &sk).await;
     let request = SignRequest {
         payload: payload_hash,
         path: path.into(),
@@ -224,7 +226,7 @@ async fn test_contract_sign_request_deposits() -> anyhow::Result<()> {
     let respond = contract
         .call("respond")
         .args_json(serde_json::json!({
-            "sign_id": sign_id,
+            "sign_id": request_id,
             "signature": signature
         }))
         .max_gas()
@@ -305,7 +307,7 @@ async fn test_contract_respond_rogue_signature() -> anyhow::Result<()> {
     let path = "test";
     let msg = "hello world";
 
-    let (payload_hash, sign_id, _valid_resp) =
+    let (payload_hash, request_id, _valid_resp) =
         create_response(predecessor_id, msg, path, &sk).await;
     let request = SignRequest {
         payload: payload_hash,
@@ -332,7 +334,7 @@ async fn test_contract_respond_rogue_signature() -> anyhow::Result<()> {
     let respond = contract
         .call("respond")
         .args_json(serde_json::json!({
-            "sign_id": sign_id,
+            "sign_id": request_id,
             "signature": rogue_signature,
         }))
         .max_gas()

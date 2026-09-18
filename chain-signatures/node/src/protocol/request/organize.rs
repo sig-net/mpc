@@ -29,7 +29,7 @@ impl OrganizingPhase {
         state: &mut SignState,
         threshold: usize,
     ) -> Option<BTreeSet<Participant>> {
-        let sign_id = ctx.sign_id;
+        let request_id = ctx.request_id;
         let mut once = true;
 
         loop {
@@ -44,7 +44,7 @@ impl OrganizingPhase {
 
             if once {
                 tracing::info!(
-                    ?sign_id,
+                    ?request_id,
                     active_count,
                     ?threshold,
                     "waiting for enough active participants"
@@ -61,7 +61,7 @@ impl OrganizingPhase {
     /// Returns `Posit` once a proposer is chosen, else loops back to
     /// `Organizing` on timeout / missing presignature / no slot.
     pub async fn advance(&mut self, ctx: &mut SignTask, state: &mut SignState) -> SignPhase {
-        let sign_id = ctx.sign_id;
+        let request_id = ctx.request_id;
         let threshold = ctx.governance.threshold;
         let me = ctx.governance.me;
         let entropy = state.request().args.entropy;
@@ -74,7 +74,7 @@ impl OrganizingPhase {
 
         ctx.is_proposer.store(false, Ordering::Relaxed);
 
-        tracing::info!(?sign_id, round = ?state.round(), "entering organizing phase");
+        tracing::info!(?request_id, round = ?state.round(), "entering organizing phase");
         let (active, proposer, is_proposer) = {
             let Some(active) = self
                 .wait_for_active_participants(ctx, state, threshold)
@@ -92,7 +92,7 @@ impl OrganizingPhase {
             ctx.is_proposer.store(is_proposer, Ordering::Relaxed);
 
             tracing::info!(
-                ?sign_id,
+                ?request_id,
                 round = ?state.round(),
                 ?proposer,
                 ?me,
@@ -107,7 +107,7 @@ impl OrganizingPhase {
         if is_proposer {
             let remaining = state.budget.remaining();
             tracing::info!(
-                ?sign_id,
+                ?request_id,
                 round = ?state.round(),
                 timeout = ?remaining,
                 limit = ctx.limiter.limit(),
@@ -120,7 +120,7 @@ impl OrganizingPhase {
                     return state.reorganize("proposer timeout waiting for concurrency slot");
                 }
                 Err(SignLimitError::Closed) => {
-                    tracing::error!(?sign_id, "proposer semaphore closed");
+                    tracing::error!(?request_id, "proposer semaphore closed");
                     return SignPhase::Complete(Err(SignError::Aborted));
                 }
             };
@@ -131,7 +131,7 @@ impl OrganizingPhase {
         }
 
         let (presignature_id, presignature, active) = if is_proposer {
-            tracing::info!(?sign_id, round = ?state.round(), "proposer waiting for presignature");
+            tracing::info!(?request_id, round = ?state.round(), "proposer waiting for presignature");
             let active = active.iter().copied().collect::<Vec<_>>();
             let remaining = state.budget.remaining();
             let fetch = tokio::time::timeout(remaining, async {
@@ -143,7 +143,7 @@ impl OrganizingPhase {
                         let participants = intersect_vec(&[holders, &active]);
                         if participants.len() < ctx.governance.threshold {
                             tracing::warn!(
-                                ?sign_id,
+                                ?request_id,
                                 id = reservation.id,
                                 ?holders,
                                 ?active,
@@ -170,7 +170,7 @@ impl OrganizingPhase {
 
             let presignature_id = reservation.id;
 
-            tracing::info!(?sign_id, ?presignature_id, "proposer got presignature");
+            tracing::info!(?request_id, ?presignature_id, "proposer got presignature");
 
             // broadcast to participants and let them reject if they don't have the presignature.
             for &p in &participants {
@@ -182,7 +182,11 @@ impl OrganizingPhase {
                         ctx.governance.me,
                         p,
                         PositMessage {
-                            id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
+                            id: PositProtocolId::Signature(
+                                request_id,
+                                presignature_id,
+                                state.round(),
+                            ),
                             from: ctx.governance.me,
                             action: PositAction::Propose,
                         },

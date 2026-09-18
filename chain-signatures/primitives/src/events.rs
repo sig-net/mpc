@@ -29,7 +29,7 @@ pub enum ChainEvent {
     /// carries either the serialized output (Success) or a failure indicator.
     ExecutionConfirmed {
         tx_id: BidirectionalTxId,
-        sign_id: RequestId,
+        request_id: RequestId,
         source_chain: Chain,
         block_height: u64,
         result: ExecutionOutcome,
@@ -62,14 +62,14 @@ impl std::fmt::Debug for ChainEvent {
             ChainEvent::Block(b) => write!(f, "Block({b})"),
             ChainEvent::ExecutionConfirmed {
                 tx_id,
-                sign_id,
+                request_id,
                 source_chain,
                 block_height,
                 result,
             } => f
                 .debug_struct("ExecutionConfirmed")
                 .field("tx_id", tx_id)
-                .field("sign_id", sign_id)
+                .field("request_id", request_id)
                 .field("source_chain", source_chain)
                 .field("block_height", block_height)
                 .field("result", result)

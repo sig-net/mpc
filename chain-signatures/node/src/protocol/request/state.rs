@@ -65,7 +65,7 @@ impl SignState {
     /// state machine.
     pub fn reorganize(&mut self, reason: &str) -> SignPhase {
         tracing::warn!(
-            sign_id = ?self.entry.sign_id(),
+            request_id = ?self.entry.request_id(),
             round = self.round,
             reason,
             "reorganizing sign request"

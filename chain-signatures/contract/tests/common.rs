@@ -218,7 +218,7 @@ pub async fn create_response(
 
     let s = signature.s();
     let (r_bytes, _s_bytes) = signature.split_bytes();
-    let sign_id = RequestId::from_parts(
+    let request_id = RequestId::from_parts(
         predecessor_id.as_str(),
         &payload_hash,
         path,
@@ -242,7 +242,7 @@ pub async fn create_response(
         recovery_id,
     };
 
-    (payload_hash, sign_id, respond_resp)
+    (payload_hash, request_id, respond_resp)
 }
 
 pub async fn sign_and_validate(
@@ -263,12 +263,12 @@ pub async fn sign_and_validate(
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    if let Some((sign_id, respond_resp)) = respond {
+    if let Some((request_id, respond_resp)) = respond {
         // Call `respond` as if we are the MPC network itself.
         let respond = contract
             .call("respond")
             .args_json(serde_json::json!({
-                "sign_id": sign_id,
+                "sign_id": request_id,
                 "signature": respond_resp
             }))
             .max_gas()

@@ -75,7 +75,7 @@ pub struct MessageInbox {
     presignature_posit: Subscriber<(FullPresignatureId, Participant, PositAction)>,
     /// Protocol messages per running signature generation.
     signature: HashMap<(RequestId, PresignatureId), Subscriber<SignatureMessage>>,
-    /// Posit conversations for all sign requests; demuxed per sign_id by the SignatureSpawner.
+    /// Posit conversations for all sign requests; demuxed per request_id by the SignatureSpawner.
     signature_posit: Subscriber<(RequestId, PresignatureId, Round, Participant, PositAction)>,
 }
 
@@ -132,9 +132,9 @@ impl MessageInbox {
                             .try_send_lossy((id, message.from, message.action));
                     self.presignature_posit.report_capacity_global();
                 }
-                PositProtocolId::Signature(sign_id, presignature_id, round) => {
+                PositProtocolId::Signature(request_id, presignature_id, round) => {
                     let _ = self.signature_posit.try_send_lossy((
-                        sign_id,
+                        request_id,
                         presignature_id,
                         round,
                         message.from,
@@ -341,21 +341,21 @@ impl MessageInbox {
                     set_inbox_count(PRESIGNATURE_TASK_LABEL, self.presignature.len());
                 }
             },
-            SubscribeId::Signature(sign_id, presignature_id) => match sub.action {
+            SubscribeId::Signature(request_id, presignature_id) => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let sub = self
                         .signature
-                        .entry((sign_id, presignature_id))
+                        .entry((request_id, presignature_id))
                         .or_insert_with(|| Subscriber::unsubscribed(SIGNATURE_TASK_LABEL));
                     let rx = sub.subscribe();
                     let _ = resp.send(SubscribeResponse::Signature(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
-                    if let Some(sub) = self.signature.remove(&(sign_id, presignature_id)) {
+                    if let Some(sub) = self.signature.remove(&(request_id, presignature_id)) {
                         sub.clear_capacity_global();
                     } else {
                         tracing::warn!(
-                            ?sign_id,
+                            ?request_id,
                             ?presignature_id,
                             "trying to unsub from an unknown signature subscription"
                         );
@@ -787,13 +787,13 @@ mod tests {
             _ => panic!("expected ready subscription"),
         };
 
-        let sign_id = RequestId::new([9; 32]);
+        let request_id = RequestId::new([9; 32]);
         let from = Participant::from(0);
         // Flood the signature posit channel beyond its capacity
         let mut messages = Vec::with_capacity(sub::MAX_MESSAGE_SUB_CHANNEL_SIZE + 2);
         for round in 0..=sub::MAX_MESSAGE_SUB_CHANNEL_SIZE {
             messages.push(Message::Posit(PositMessage {
-                id: PositProtocolId::Signature(sign_id, 77, round),
+                id: PositProtocolId::Signature(request_id, 77, round),
                 from,
                 action: PositAction::Accept,
             }));
@@ -816,6 +816,6 @@ mod tests {
             .recv()
             .await
             .expect("signature posit subscription unexpectedly closed");
-        assert_eq!(first_signature_posit.0, sign_id);
+        assert_eq!(first_signature_posit.0, request_id);
     }
 }

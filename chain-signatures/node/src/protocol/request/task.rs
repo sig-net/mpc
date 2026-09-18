@@ -59,10 +59,10 @@ impl GeneratingPhase {
         state: &mut SignState,
         mailbox: &PositMailbox,
     ) -> SignPhase {
-        let sign_id = ctx.sign_id;
+        let request_id = ctx.request_id;
 
         tracing::info!(
-            ?sign_id,
+            ?request_id,
             presignature_id = ?self.presignature_id,
             participants = ?self.accepted_participants,
             "posit complete, starting generation"
@@ -154,7 +154,7 @@ impl GeneratingPhase {
             PositRejectReason::AlreadyGenerating
         };
         tracing::info!(
-            sign_id = ?ctx.sign_id,
+            request_id = ?ctx.request_id,
             ?from,
             round,
             my_round = state.round(),
@@ -166,7 +166,7 @@ impl GeneratingPhase {
                 me,
                 from,
                 PositMessage {
-                    id: PositProtocolId::Signature(ctx.sign_id, presignature_id, round),
+                    id: PositProtocolId::Signature(ctx.request_id, presignature_id, round),
                     from: me,
                     action: PositAction::RejectWithReason(reason),
                 },
@@ -178,7 +178,7 @@ impl GeneratingPhase {
 /// Owns everything needed to fulfil one sign request; the context passed between phases of the state machine.
 pub struct SignTask {
     pub governance: GovernanceInfo,
-    pub sign_id: RequestId,
+    pub request_id: RequestId,
     pub presignatures: PresignatureStorage,
     pub msg: MessageChannel,
     pub rpc: RpcChannel,
@@ -202,8 +202,8 @@ impl SignTask {
         mesh_state: watch::Receiver<MeshState>,
         mailbox: Arc<PositMailbox>,
     ) -> Result<(), SignError> {
-        let sign_id = self.sign_id;
-        tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
+        let request_id = self.request_id;
+        tracing::info!(?request_id, governance = ?self.governance, "signature task starting...");
 
         let mut state = SignState::new(entry, mesh_state, Arc::clone(&self.round));
         let mut phase = SignPhase::Organizing(OrganizingPhase);

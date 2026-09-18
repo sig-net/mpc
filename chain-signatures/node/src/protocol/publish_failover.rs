@@ -53,9 +53,9 @@ pub fn max_publish_failover_delay(
 /// This node's position in the schedule for one request: uniform in [0, 1) as a
 /// pure function of sign id and account id. Identical draws would put every
 /// participant on chain at once (`E[responses]` of `m`, not `1 + d`).
-fn failover_jitter(sign_id: &RequestId, me: &AccountId) -> f64 {
+fn failover_jitter(request_id: &RequestId, me: &AccountId) -> f64 {
     let mut hasher = DefaultHasher::new();
-    (sign_id.request_id, me.as_str()).hash(&mut hasher);
+    (request_id.request_id, me.as_str()).hash(&mut hasher);
     // Top 53 bits: exact in an f64, so the result stays strictly below 1.
     (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
 }
@@ -76,14 +76,14 @@ fn failover_delay(participants: usize, jitter: f64, lag: Duration) -> Duration {
 /// carrying no stamp, which never fails over; see
 /// [`PublishState::publishing_since`].
 pub(crate) fn publish_deadline(
-    sign_id: &RequestId,
+    request_id: &RequestId,
     publish: &Publishing,
     me: &AccountId,
     lag: Duration,
 ) -> Option<u64> {
     let delay = failover_delay(
         publish.participants().len(),
-        failover_jitter(sign_id, me),
+        failover_jitter(request_id, me),
         lag,
     );
     Some(publish.publishing_since()? + delay.as_secs())
@@ -128,13 +128,13 @@ mod tests {
     /// two nodes reach different deadlines for the same entry.
     #[test]
     fn publish_deadline_follows_the_stamp_and_the_node() {
-        let sign_id = RequestId::new([1u8; 32]);
+        let request_id = RequestId::new([1u8; 32]);
         let lag = observe_lag(Chain::Solana, LAG).as_secs();
         let me = account("node0.near");
 
         let deadline = |since, who: &AccountId| {
             publish_deadline(
-                &sign_id,
+                &request_id,
                 &mock_publishing_since(3, since),
                 who,
                 observe_lag(Chain::Solana, LAG),

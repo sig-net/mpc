@@ -24,7 +24,7 @@ struct DelayEntry {
 
 enum DelayCommand {
     Watch {
-        sign_id: RequestId,
+        request_id: RequestId,
         chain: Chain,
         kind: RequestKind,
         unix_timestamp_indexed: u64,
@@ -33,7 +33,7 @@ enum DelayCommand {
         is_proposer: Arc<AtomicBool>,
     },
     Unwatch {
-        sign_id: RequestId,
+        request_id: RequestId,
         reason: &'static str,
     },
 }
@@ -62,7 +62,7 @@ impl DelayMonitor {
     /// Registers a sign request to be watched for deadline expiration.
     pub fn watch(
         &self,
-        sign_id: RequestId,
+        request_id: RequestId,
         chain: Chain,
         kind: RequestKind,
         unix_timestamp_indexed: u64,
@@ -70,13 +70,13 @@ impl DelayMonitor {
         is_proposer: Arc<AtomicBool>,
     ) {
         if remaining_time == Duration::ZERO {
-            tracing::warn!(?sign_id, "trying to watch for zero budget sign task");
+            tracing::warn!(?request_id, "trying to watch for zero budget sign task");
             return;
         }
         let expected_response_time_secs = chain.expected_response_time_secs();
         let deadline = Instant::now() + remaining_time;
         let _ = self.tx.send(DelayCommand::Watch {
-            sign_id,
+            request_id,
             chain,
             kind,
             unix_timestamp_indexed,
@@ -87,8 +87,8 @@ impl DelayMonitor {
     }
 
     /// Unwatches a completed or aborted sign request with a reason.
-    pub fn unwatch(&self, sign_id: RequestId, reason: &'static str) {
-        let _ = self.tx.send(DelayCommand::Unwatch { sign_id, reason });
+    pub fn unwatch(&self, request_id: RequestId, reason: &'static str) {
+        let _ = self.tx.send(DelayCommand::Unwatch { request_id, reason });
     }
 
     async fn run(mut rx: mpsc::UnboundedReceiver<DelayCommand>) {
@@ -104,13 +104,13 @@ impl DelayMonitor {
                     Self::handle_command(cmd, &mut entries, &mut queue);
                 }
                 Some(expired) = queue.next(), if !queue.is_empty() => {
-                    let sign_id = expired.into_inner();
-                    let Some(entry) = entries.remove(&sign_id) else {
+                    let request_id = expired.into_inner();
+                    let Some(entry) = entries.remove(&request_id) else {
                         continue;
                     };
                     let elapsed = unix_elapsed(entry.unix_timestamp_indexed);
                     tracing::warn!(
-                        ?sign_id,
+                        ?request_id,
                         chain = ?entry.chain,
                         kind = entry.kind.as_str(),
                         elapsed_secs = elapsed.as_secs(),
@@ -137,7 +137,7 @@ impl DelayMonitor {
     ) {
         match cmd {
             DelayCommand::Watch {
-                sign_id,
+                request_id,
                 chain,
                 kind,
                 unix_timestamp_indexed,
@@ -145,12 +145,12 @@ impl DelayMonitor {
                 deadline,
                 is_proposer,
             } => {
-                if let Some(old) = entries.remove(&sign_id) {
+                if let Some(old) = entries.remove(&request_id) {
                     queue.remove(&old.key);
                 }
-                let key = queue.insert_at(sign_id, deadline);
+                let key = queue.insert_at(request_id, deadline);
                 entries.insert(
-                    sign_id,
+                    request_id,
                     DelayEntry {
                         key,
                         chain,
@@ -161,12 +161,12 @@ impl DelayMonitor {
                     },
                 );
             }
-            DelayCommand::Unwatch { sign_id, reason } => {
-                if let Some(old) = entries.remove(&sign_id) {
+            DelayCommand::Unwatch { request_id, reason } => {
+                if let Some(old) = entries.remove(&request_id) {
                     queue.remove(&old.key);
-                    tracing::info!(?sign_id, %reason, "unwatching delayed request");
+                    tracing::info!(?request_id, %reason, "unwatching delayed request");
                 } else {
-                    tracing::debug!(?sign_id, %reason, "no delayed request to unwatch");
+                    tracing::debug!(?request_id, %reason, "no delayed request to unwatch");
                 }
             }
         }
@@ -177,7 +177,7 @@ impl DelayMonitor {
 mod tests {
     use super::*;
 
-    fn sample_sign_id(byte: u8) -> RequestId {
+    fn sample_request_id(byte: u8) -> RequestId {
         RequestId::new([byte; 32])
     }
 
@@ -194,11 +194,11 @@ mod tests {
         let kind = RequestKind::Sign;
         let initial_metric = read_delayed_metric(chain, kind);
 
-        let sign_id = sample_sign_id(1);
+        let request_id = sample_request_id(1);
         let is_proposer = Arc::new(AtomicBool::new(true));
 
         monitor.watch(
-            sign_id,
+            request_id,
             chain,
             kind,
             0,
@@ -222,11 +222,11 @@ mod tests {
         let kind = RequestKind::SignBidirectional;
         let initial_metric = read_delayed_metric(chain, kind);
 
-        let sign_id = sample_sign_id(2);
+        let request_id = sample_request_id(2);
         let is_proposer = Arc::new(AtomicBool::new(false));
 
         monitor.watch(
-            sign_id,
+            request_id,
             chain,
             kind,
             0,
@@ -246,11 +246,11 @@ mod tests {
         let kind = RequestKind::Sign;
         let initial_metric = read_delayed_metric(chain, kind);
 
-        let sign_id = sample_sign_id(3);
+        let request_id = sample_request_id(3);
         let is_proposer = Arc::new(AtomicBool::new(true));
 
         monitor.watch(
-            sign_id,
+            request_id,
             chain,
             kind,
             0,
@@ -260,7 +260,7 @@ mod tests {
 
         // Unwatch before deadline
         tokio::time::sleep(Duration::from_millis(5)).await;
-        monitor.unwatch(sign_id, "test completion");
+        monitor.unwatch(request_id, "test completion");
 
         // Wait past original deadline
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -274,9 +274,9 @@ mod tests {
         let kind = RequestKind::RespondBidirectional;
         let initial_metric = read_delayed_metric(chain, kind);
 
-        let id1 = sample_sign_id(10);
-        let id2 = sample_sign_id(20);
-        let id3 = sample_sign_id(30);
+        let id1 = sample_request_id(10);
+        let id2 = sample_request_id(20);
+        let id3 = sample_request_id(30);
 
         let is_proposer1 = Arc::new(AtomicBool::new(true));
         let is_proposer2 = Arc::new(AtomicBool::new(true));
@@ -313,7 +313,7 @@ mod tests {
         let initial_leg2 = read_delayed_metric(chain, leg2);
 
         monitor.watch(
-            sample_sign_id(40),
+            sample_request_id(40),
             chain,
             leg1,
             0,
@@ -321,7 +321,7 @@ mod tests {
             Arc::new(AtomicBool::new(true)),
         );
         monitor.watch(
-            sample_sign_id(41),
+            sample_request_id(41),
             chain,
             leg2,
             0,
@@ -337,11 +337,11 @@ mod tests {
     #[tokio::test]
     async fn test_delay_monitor_zero_remaining_time_ignored() {
         let monitor = DelayMonitor::spawn();
-        let sign_id = sample_sign_id(99);
+        let request_id = sample_request_id(99);
         let is_proposer = Arc::new(AtomicBool::new(true));
 
         monitor.watch(
-            sign_id,
+            request_id,
             Chain::Ethereum,
             RequestKind::Sign,
             0,

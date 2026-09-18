@@ -58,8 +58,8 @@ async fn recover_backlog_requeues_pending_signs() {
     // Prepare backlog with a single pending sign request on a chain that
     // should be marked for requeue during recovery.
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([9u8; 32]);
-    let entry = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let request_id = RequestId::new([9u8; 32]);
+    let entry = backlog.insert_mock_sign(request_id, Chain::Solana).await;
     let expected_args = entry.request().args.clone();
     let expected_timestamp = entry.request().unix_timestamp_indexed;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
@@ -85,7 +85,7 @@ async fn recover_backlog_requeues_pending_signs() {
 
     match msg.expect("sign_rx should contain a message") {
         SignCommand::Request(req) => {
-            assert_eq!(req.sign_id(), sign_id);
+            assert_eq!(req.request_id(), request_id);
             assert_eq!(req.request().args, expected_args);
             assert_eq!(req.chain(), Chain::Solana);
             assert_eq!(req.request().kind, SignKind::Sign);
@@ -118,7 +118,7 @@ async fn seed_executing_entry(
 async fn process_execution_confirmed_success_creates_respond_request() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(1, Chain::Solana, Chain::Ethereum);
-    let sign_id = tx.sign_id();
+    let request_id = tx.request_id();
     backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -146,7 +146,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
 
     // Source chain request should now wait for final bidirectional response.
     // inspect the transaction to provide more debugging info on failure
-    let maybe_tx = ctx.backlog.get(tx.source_chain, &sign_id).await;
+    let maybe_tx = ctx.backlog.get(tx.source_chain, &request_id).await;
     assert!(maybe_tx.is_some(), "expected sign tx to still exist");
     let tx_after = maybe_tx.unwrap();
     assert_matches!(
@@ -231,7 +231,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let storage = CheckpointStorage::in_memory();
     let backlog = Backlog::persisted(storage.clone());
     let tx = test_bidirectional_tx(9, Chain::Solana, Chain::Ethereum);
-    let sign_id = tx.sign_id();
+    let request_id = tx.request_id();
     backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, sign_rx) = mpsc::channel(4);
@@ -289,7 +289,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         .unwrap();
     match msg {
         SignCommand::Request(req) => {
-            assert_eq!(req.sign_id(), sign_id);
+            assert_eq!(req.request_id(), request_id);
             assert_matches!(req.request().kind, SignKind::RespondBidirectional(_));
         }
         other => panic!("expected recovered final respond request, got {other:?}"),
@@ -299,7 +299,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
 #[tokio::test]
 async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() {
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([11u8; 32]);
+    let request_id = RequestId::new([11u8; 32]);
     let args = SignArgs {
         entropy: [11u8; 32],
         epsilon: Scalar::from(1u64),
@@ -322,7 +322,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
 
     backlog
         .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
-            sign_id,
+            request_id,
             args.clone(),
             Chain::Ethereum,
             current_unix_timestamp(),
@@ -346,7 +346,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
-        request_id: sign_id.request_id,
+        request_id: request_id.request_id,
         signature: mpc_crypto::generate_signature(&root_sk, &args),
         chain: Chain::Ethereum,
     };
@@ -366,7 +366,10 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
         .await
         .expect("quarantining is not an error");
     assert!(
-        ctx.backlog.get(Chain::Ethereum, &sign_id).await.is_none(),
+        ctx.backlog
+            .get(Chain::Ethereum, &request_id)
+            .await
+            .is_none(),
         "an entry with an unknown target chain must leave the backlog"
     );
 }
@@ -374,9 +377,9 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
 #[tokio::test]
 async fn process_sign_request_rejects_respond_bidirectional_kind() {
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([12u8; 32]);
+    let request_id = RequestId::new([12u8; 32]);
     let tx_id = BidirectionalTxId(B256::from([12u8; 32]).0);
-    let request = mock_bidi_response_request(sign_id, tx_id, Chain::Solana);
+    let request = mock_bidi_response_request(request_id, tx_id, Chain::Solana);
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
@@ -393,8 +396,8 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
 #[tokio::test]
 async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_advance() {
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([23u8; 32]);
-    let req = mock_bidi_request(sign_id, Chain::Solana);
+    let request_id = RequestId::new([23u8; 32]);
+    let req = mock_bidi_request(request_id, Chain::Solana);
 
     // Inserted directly, as checkpoint recovery would: never passed admission.
     backlog.insert(req.clone()).await;
@@ -402,7 +405,7 @@ async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_adv
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let signature = mpc_crypto::generate_signature(&root_sk, &req.args);
     let event = SignatureRespondedEvent {
-        request_id: sign_id.request_id,
+        request_id: request_id.request_id,
         signature,
         chain: Chain::Solana,
     };
@@ -417,7 +420,7 @@ async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_adv
         .expect("quarantining is not an error");
 
     assert!(
-        ctx.backlog.get(Chain::Solana, &sign_id).await.is_none(),
+        ctx.backlog.get(Chain::Solana, &request_id).await.is_none(),
         "an entry that can never advance must leave the backlog"
     );
 }
@@ -450,8 +453,8 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
 #[tokio::test]
 async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([14u8; 32]);
-    let request = mock_bidi_request(sign_id, Chain::Solana);
+    let request_id = RequestId::new([14u8; 32]);
+    let request = mock_bidi_request(request_id, Chain::Solana);
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
@@ -460,7 +463,7 @@ async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
         .expect_err("undecodable serialized_transaction should be rejected at ingestion");
     assert!(format!("{err:#}").contains("undecodable serialized_transaction"));
     assert!(
-        backlog.get(Chain::Solana, &sign_id).await.is_none(),
+        backlog.get(Chain::Solana, &request_id).await.is_none(),
         "rejected request must not be stored in the backlog"
     );
 }
@@ -468,14 +471,14 @@ async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
 #[tokio::test]
 async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction() {
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([13u8; 32]);
+    let request_id = RequestId::new([13u8; 32]);
 
     // A bidirectional request with an empty `serialized_transaction`. If accepted
     // it would sit in the backlog and later panic in `sign_and_hash_transaction`
     // (empty RLP) when the respond event advances it to execution.
     let event = bidirectional_event(vec![]);
     let request = Arc::new(IndexedSignRequest::sign_bidirectional(
-        sign_id,
+        request_id,
         test_sign_args(13),
         Chain::Solana,
         current_unix_timestamp(),
@@ -491,7 +494,7 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
 
     // The poison-pill request must not have entered the backlog.
     assert!(
-        backlog.get(Chain::Solana, &sign_id).await.is_none(),
+        backlog.get(Chain::Solana, &request_id).await.is_none(),
         "rejected request must not be stored in the backlog"
     );
 }
@@ -499,8 +502,8 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
 #[tokio::test]
 async fn process_sign_request_duplicate_is_idempotent() {
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([9u8; 32]);
-    let request = mock_sign_request(sign_id, Chain::Ethereum);
+    let request_id = RequestId::new([9u8; 32]);
+    let request = mock_sign_request(request_id, Chain::Ethereum);
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
@@ -543,7 +546,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
         .expect("requeue should enqueue the pending request")
         .expect("sign channel open")
     {
-        SignCommand::Request(req) => assert_eq!(req.sign_id(), sign_id),
+        SignCommand::Request(req) => assert_eq!(req.request_id(), request_id),
         other => panic!("expected a single requeued request, got {other:?}"),
     }
     assert!(
@@ -557,15 +560,15 @@ async fn process_sign_request_duplicate_is_idempotent() {
 #[tokio::test]
 async fn process_respond_event_rejects_invalid_signature() {
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([15u8; 32]);
-    let entry = backlog.insert_mock_sign(sign_id, Chain::Ethereum).await;
+    let request_id = RequestId::new([15u8; 32]);
+    let entry = backlog.insert_mock_sign(request_id, Chain::Ethereum).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let mut invalid_signature = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
     invalid_signature.s += Scalar::ONE;
 
     let event = SignatureRespondedEvent {
-        request_id: sign_id.request_id,
+        request_id: request_id.request_id,
         signature: invalid_signature,
         chain: Chain::Ethereum,
     };
@@ -582,21 +585,25 @@ async fn process_respond_event_rejects_invalid_signature() {
         .await
         .expect_err("invalid signature should be rejected");
     assert!(err.to_string().contains("invalid signature"));
-    assert!(ctx.backlog.get(Chain::Ethereum, &sign_id).await.is_some());
+    assert!(ctx
+        .backlog
+        .get(Chain::Ethereum, &request_id)
+        .await
+        .is_some());
 }
 
 #[tokio::test]
 async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(13, Chain::Solana, Chain::Ethereum);
-    let sign_id = tx.sign_id();
+    let request_id = tx.request_id();
     let entry = backlog.insert_mock_final(&tx).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let signature = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
 
-    let duplicate_event0 = respond_event(sign_id, signature);
-    let duplicate_event1 = respond_event(sign_id, signature);
+    let duplicate_event0 = respond_event(request_id, signature);
+    let duplicate_event1 = respond_event(request_id, signature);
 
     let account_id: AccountId = "test.near".parse().unwrap();
     let public_key = root_sk.public_key().into();
@@ -619,7 +626,7 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
         .unwrap()
         .unwrap();
     match first {
-        SignCommand::Completion(id) => assert_eq!(id, sign_id),
+        SignCommand::Completion(id) => assert_eq!(id, request_id),
         other => panic!("expected completion, got {other:?}"),
     }
 
@@ -631,14 +638,14 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
 async fn process_respond_bidirectional_event_rejects_invalid_signature() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(16, Chain::Solana, Chain::Ethereum);
-    let sign_id = tx.sign_id();
+    let request_id = tx.request_id();
     let entry = backlog.insert_mock_final(&tx).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let mut invalid_signature = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
     invalid_signature.s += Scalar::ONE;
 
-    let event = respond_event(sign_id, invalid_signature);
+    let event = respond_event(request_id, invalid_signature);
 
     let account_id: AccountId = "test.near".parse().unwrap();
     let public_key = root_sk.public_key().into();
@@ -652,18 +659,18 @@ async fn process_respond_bidirectional_event_rejects_invalid_signature() {
         .await
         .expect_err("invalid signature should be rejected");
     assert!(err.to_string().contains("invalid signature"));
-    assert!(ctx.backlog.get(Chain::Solana, &sign_id).await.is_some());
+    assert!(ctx.backlog.get(Chain::Solana, &request_id).await.is_some());
 }
 
 #[tokio::test]
 async fn process_respond_event_duplicate_ethereum_is_idempotent() {
     let backlog = Backlog::new();
-    let sign_id = RequestId::new([3u8; 32]);
-    let entry = backlog.insert_mock_sign(sign_id, Chain::Ethereum).await;
+    let request_id = RequestId::new([3u8; 32]);
+    let entry = backlog.insert_mock_sign(request_id, Chain::Ethereum).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
-        request_id: sign_id.request_id,
+        request_id: request_id.request_id,
         signature: mpc_crypto::generate_signature(&root_sk, &entry.request().args),
         chain: Chain::Ethereum,
     };
@@ -686,7 +693,7 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
         .unwrap()
         .unwrap();
     match msg {
-        SignCommand::Completion(id) => assert_eq!(id, sign_id),
+        SignCommand::Completion(id) => assert_eq!(id, request_id),
         _ => panic!("expected completion"),
     }
 
@@ -710,7 +717,7 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
 async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Solana);
-    let sign_id = tx.sign_id();
+    let request_id = tx.request_id();
     let args = test_sign_args(14);
 
     let mut rlp_s = rlp::RlpStream::new_list(9);
@@ -726,7 +733,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     let unsigned_rlp = rlp_s.out().to_vec();
 
     let req = Arc::new(IndexedSignRequest::sign_bidirectional(
-        sign_id,
+        request_id,
         args.clone(),
         Chain::Ethereum,
         current_unix_timestamp(),
@@ -756,7 +763,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
-        request_id: sign_id.request_id,
+        request_id: request_id.request_id,
         signature: mpc_crypto::generate_signature(&root_sk, &args),
         chain: Chain::Ethereum,
     };
@@ -775,7 +782,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
 
     let entry = ctx
         .backlog
-        .get(Chain::Ethereum, &sign_id)
+        .get(Chain::Ethereum, &request_id)
         .await
         .expect("entry should remain in backlog");
     assert_matches!(
@@ -797,7 +804,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     let backlog = Backlog::new();
 
     let tx = test_bidirectional_tx(2, Chain::Solana, Chain::Ethereum);
-    let sign_id = tx.sign_id();
+    let request_id = tx.request_id();
     backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -820,11 +827,11 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     // Source chain should now wait for final bidirectional response.
     assert!(ctx
         .backlog
-        .get_by::<Bidirectional<Final<Generating>>>(tx.source_chain, &sign_id)
+        .get_by::<Bidirectional<Final<Generating>>>(tx.source_chain, &request_id)
         .await
         .is_some());
 
-    let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
+    let tx_after = ctx.backlog.get(tx.source_chain, &request_id).await.unwrap();
     assert_matches!(tx_after.request().kind, SignKind::RespondBidirectional(_));
 
     // A sign request should have been sent
@@ -886,10 +893,10 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
     let backlog = Backlog::new();
     let mut tx = test_bidirectional_tx(24, Chain::Canton, Chain::Ethereum);
     tx.sender = [7u8; 32];
-    let sign_id = tx.sign_id();
+    let request_id = tx.request_id();
     let sign_event_contract_id = "#sign-event-cid";
 
-    let request = test_canton_sign_bidirectional_request(sign_id, sign_event_contract_id);
+    let request = test_canton_sign_bidirectional_request(request_id, sign_event_contract_id);
     seed_executing_entry(&backlog, request, Arc::new(tx.clone())).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -916,7 +923,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         .get_execution_watchers(tx.target_chain)
         .await
         .is_empty());
-    let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
+    let tx_after = ctx.backlog.get(tx.source_chain, &request_id).await.unwrap();
     assert_matches!(
         tx_after.status(),
         SignStatus::Bidirectional(BidirectionalProgress::Final {
@@ -939,7 +946,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         .unwrap();
     match msg {
         SignCommand::Request(req) => {
-            assert_eq!(req.sign_id(), sign_id);
+            assert_eq!(req.request_id(), request_id);
             assert_eq!(req.chain(), tx.source_chain);
             match &req.request().kind {
                 SignKind::RespondBidirectional(res) => {
@@ -957,14 +964,14 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
 #[tokio::test]
 async fn requeue_pending_sign_requests_is_chain_scoped() {
     let backlog = Backlog::new();
-    let solana_sign_id = RequestId::new([7u8; 32]);
-    let ethereum_sign_id = RequestId::new([8u8; 32]);
+    let solana_request_id = RequestId::new([7u8; 32]);
+    let ethereum_request_id = RequestId::new([8u8; 32]);
 
     backlog
-        .insert_mock_sign(solana_sign_id, Chain::Solana)
+        .insert_mock_sign(solana_request_id, Chain::Solana)
         .await;
     backlog
-        .insert_mock_sign(ethereum_sign_id, Chain::Ethereum)
+        .insert_mock_sign(ethereum_request_id, Chain::Ethereum)
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -979,7 +986,7 @@ async fn requeue_pending_sign_requests_is_chain_scoped() {
         .unwrap()
         .unwrap();
     match msg {
-        SignCommand::Request(req) => assert_eq!(req.sign_id(), solana_sign_id),
+        SignCommand::Request(req) => assert_eq!(req.request_id(), solana_request_id),
         other => panic!("unexpected message: {other:?}"),
     }
 
@@ -1059,10 +1066,10 @@ async fn live_block_votes_for_checkpoint() {
 async fn publish_failover_fires_once_per_leg() {
     let backlog = Backlog::new();
     let tx = mock_tx(21);
-    let sign_id = tx.sign_id();
+    let request_id = tx.request_id();
 
     let bidi = backlog
-        .insert_mock_bidirectional(sign_id, Chain::Solana)
+        .insert_mock_bidirectional(request_id, Chain::Solana)
         .await;
     let (pk, output) = mock_signature_output(&bidi.request().args);
     let pub1 = bidi
@@ -1126,9 +1133,9 @@ async fn next_publish(rx: &mut mpsc::Receiver<RpcAction>) -> Option<RpcAction> {
 #[tokio::test]
 async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
     let backlog = Backlog::new();
-    let sign_id = mpc_primitives::RequestId::new([22u8; 32]);
+    let request_id = mpc_primitives::RequestId::new([22u8; 32]);
 
-    let sign = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let sign = backlog.insert_mock_sign(request_id, Chain::Solana).await;
     let (pk, output) = mock_signature_output(&sign.request().args);
     sign.advance(pk, &output, mock_participants(), true)
         .await
@@ -1158,8 +1165,8 @@ async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
 
 /// Put an entry in pending-publish with a deadline in the past, whatever the draw.
 async fn insert_publishable(backlog: &Backlog, seed: u8) {
-    let sign_id = mpc_primitives::RequestId::new([seed; 32]);
-    let sign = backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+    let request_id = mpc_primitives::RequestId::new([seed; 32]);
+    let sign = backlog.insert_mock_sign(request_id, Chain::Solana).await;
     let (pk, output) = mock_signature_output(&sign.request().args);
     sign.advance(pk, &output, mock_participants(), false)
         .await

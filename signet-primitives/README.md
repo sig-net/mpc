@@ -8,5 +8,5 @@ compiling against this crate are wire-correct by construction.
 ```rust
 use signet_primitives::{Chain, RequestId, Signature, LATEST_MPC_KEY_VERSION};
 
-let sign_id = RequestId::from_parts(requester, &payload, path, LATEST_MPC_KEY_VERSION);
+let request_id = RequestId::from_parts(requester, &payload, path, LATEST_MPC_KEY_VERSION);
 ```

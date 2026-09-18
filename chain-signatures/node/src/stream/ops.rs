@@ -45,14 +45,14 @@ pub(crate) async fn requeue_pending_sign_requests(
     source_chain: Chain,
 ) -> anyhow::Result<()> {
     for entry in ctx.backlog.requeueable_requests(source_chain).await {
-        let sign_id = entry.sign_id();
+        let request_id = entry.request_id();
         let source_chain = entry.chain();
         ctx.sign_tx
             .send(SignCommand::Request(entry))
             .await
             .with_context(|| {
                 format!(
-                    "failed to requeue sign request after catchup for sign id {sign_id:?} on chain {source_chain}"
+                    "failed to requeue sign request after catchup for sign id {request_id:?} on chain {source_chain}"
                 )
             })?;
     }
@@ -65,14 +65,14 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
             continue;
         }
 
-        let sign_id = entry.sign_id();
+        let request_id = entry.request_id();
         // This is the proposer's only retry for a publish that reported success but
         // never landed, so it republishes even if it already dispatched one. Marking
         // stops the sweep from putting a second copy on chain on the next block: the
         // deadline was anchored before the restart, so it is already past.
         entry.mark_publish_dispatched().await;
         ctx.rpc.publish(entry);
-        tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
+        tracing::info!(?request_id, %source_chain, "resumed pending publish request after catchup");
     }
 }
 
@@ -91,20 +91,20 @@ pub(crate) async fn publish_failover_due(ctx: &StreamContext, chain: Chain) {
         if entry.publish_dispatched() {
             continue;
         }
-        let Some(deadline) = publish_deadline(&entry.sign_id(), entry.publishing(), &me, lag)
+        let Some(deadline) = publish_deadline(&entry.request_id(), entry.publishing(), &me, lag)
         else {
             continue;
         };
         if now < deadline {
             continue;
         }
-        let sign_id = entry.sign_id();
+        let request_id = entry.request_id();
         if !entry.mark_publish_dispatched().await {
             continue;
         }
 
         tracing::warn!(
-            ?sign_id,
+            ?request_id,
             %chain,
             "proposer response not observed in time; publishing failover response"
         );
@@ -117,12 +117,12 @@ pub(crate) async fn process_respond_event(
     ctx: &StreamContext,
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
-    let sign_id = RequestId::new(respond_event.request_id);
+    let request_id = RequestId::new(respond_event.request_id);
     let source_chain = respond_event.chain;
 
-    let Some(entry) = ctx.backlog.get(source_chain, &sign_id).await else {
+    let Some(entry) = ctx.backlog.get(source_chain, &request_id).await else {
         tracing::info!(
-            ?sign_id,
+            ?request_id,
             ?source_chain,
             "respond event is already finalized or pruned; skipping"
         );
@@ -131,9 +131,9 @@ pub(crate) async fn process_respond_event(
 
     if let Some(entry) = entry.cast::<Sign<AnyProgress>>() {
         entry.verify_signature(root_pk, &respond_event.signature)?;
-        tracing::info!(?sign_id, "sign request completed successfully");
+        tracing::info!(?request_id, "sign request completed successfully");
         entry.complete().await;
-        ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
+        ctx.try_enqueue(SignCommand::Completion(request_id)).await?;
         return Ok(());
     }
 
@@ -144,7 +144,7 @@ pub(crate) async fn process_respond_event(
 
     if entry.is::<Bidirectional<Executing>>() {
         tracing::info!(
-            ?sign_id,
+            ?request_id,
             ?source_chain,
             "respond event backlog entry is already advanced; treating as processed"
         );
@@ -152,7 +152,7 @@ pub(crate) async fn process_respond_event(
     }
 
     tracing::info!(
-        ?sign_id,
+        ?request_id,
         ?source_chain,
         "respond event is already finalized or pruned; skipping"
     );
@@ -166,7 +166,7 @@ async fn advance_bidirectional_to_execution(
     respond_event: SignatureRespondedEvent,
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
-    let sign_id = entry.sign_id();
+    let request_id = entry.request_id();
     let source_chain = entry.chain();
     let event = entry.sign_bidirectional_event();
 
@@ -178,7 +178,7 @@ async fn advance_bidirectional_to_execution(
     // Removing it is deterministic across the network, so checkpoints stay aligned.
     if let Err(err) = event.validate() {
         tracing::error!(
-            ?sign_id,
+            ?request_id,
             ?source_chain,
             ?err,
             "quarantining bidirectional request that can never advance"
@@ -194,10 +194,13 @@ async fn advance_bidirectional_to_execution(
     )?);
 
     entry.advance(tx).await.with_context(|| {
-        format!("advance bidirectional tx to execution failed for sign id {sign_id:?}")
+        format!("advance bidirectional tx to execution failed for sign id {request_id:?}")
     })?;
 
-    tracing::info!(?sign_id, "advance bidirectional tx to execution successful");
+    tracing::info!(
+        ?request_id,
+        "advance bidirectional tx to execution successful"
+    );
     Ok(())
 }
 
@@ -206,16 +209,16 @@ pub(crate) async fn process_respond_bidirectional_event(
     ctx: &StreamContext,
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
-    let sign_id = RequestId::new(event.request_id);
+    let request_id = RequestId::new(event.request_id);
     let source_chain = event.chain;
-    tracing::info!(?sign_id, "processing RespondBidirectionalEvent");
+    tracing::info!(?request_id, "processing RespondBidirectionalEvent");
 
     let Some(entry) = ctx
         .backlog
-        .get_by::<Bidirectional<Final<AnyProgress>>>(source_chain, &sign_id)
+        .get_by::<Bidirectional<Final<AnyProgress>>>(source_chain, &request_id)
         .await
     else {
-        tracing::warn!(?sign_id, "bidirectional tx not found on completion");
+        tracing::warn!(?request_id, "bidirectional tx not found on completion");
         return Ok(());
     };
 
@@ -237,7 +240,7 @@ pub(crate) async fn process_respond_bidirectional_event(
                     elapsed,
                 ),
                 None => tracing::warn!(
-                    ?sign_id,
+                    ?request_id,
                     origin_indexed_at,
                     "skipping end-to-end latency: origin timestamp is ahead of local clock"
                 ),
@@ -246,8 +249,8 @@ pub(crate) async fn process_respond_bidirectional_event(
     }
 
     entry.complete().await;
-    tracing::info!(?sign_id, "bidirectional tx completed");
-    ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
+    tracing::info!(?request_id, "bidirectional tx completed");
+    ctx.try_enqueue(SignCommand::Completion(request_id)).await?;
 
     Ok(())
 }
@@ -284,11 +287,11 @@ pub async fn process_execution_confirmed(
         return Ok(());
     };
 
-    let sign_id = entry.sign_id();
+    let request_id = entry.request_id();
     let source_chain = entry.chain;
     tracing::info!(
         ?tx_id,
-        ?sign_id,
+        ?request_id,
         ?source_chain,
         ?target_chain,
         block_height,
@@ -305,12 +308,12 @@ pub async fn process_execution_confirmed(
         .await
         .with_context(|| {
             format!(
-                "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
+                "failed to transition pending tx to final response for sign id {request_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
             )
         })?;
     tracing::info!(
         ?tx_id,
-        ?sign_id,
+        ?request_id,
         ?source_chain,
         "transitioned transaction to final response"
     );

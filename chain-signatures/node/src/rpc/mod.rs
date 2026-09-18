@@ -510,11 +510,11 @@ impl RpcExecutor {
                         continue;
                     };
 
-                    let sign_id = action.request.id;
-                    let key = (chain, sign_id, PublishKind::of(&action.request.kind));
+                    let request_id = action.request.id;
+                    let key = (chain, request_id, PublishKind::of(&action.request.kind));
                     if !in_flight.insert(key) {
                         tracing::info!(
-                            ?sign_id,
+                            ?request_id,
                             ?chain,
                             "publish already in flight; skipping duplicate"
                         );
@@ -653,10 +653,10 @@ impl Drop for InFlightGuard {
 /// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
 pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: PublishAction) {
     let chain = action.request.chain;
-    let sign_id = action.request.id;
+    let request_id = action.request.id;
 
     tracing::info!(
-        ?sign_id,
+        ?request_id,
         ?chain,
         started_at = ?action.timestamp.elapsed(),
         "trying to publish signature",
@@ -675,7 +675,7 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
         // Log the error and retry attempt
         |attempt, err, sleep| {
             tracing::warn!(
-                ?sign_id,
+                ?request_id,
                 retry_count = attempt,
                 elapsed = ?action.timestamp.elapsed(),
                 ?chain,
@@ -690,7 +690,7 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
     // Log error if the publish failed after all retries
     if publish_res.is_err() {
         tracing::error!(
-            ?sign_id,
+            ?request_id,
             elapsed = ?action.timestamp.elapsed(),
             "exceeded max retries, trashing publish request"
         );
@@ -1457,7 +1457,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executor_dedupes_concurrent_publishes_with_the_same_sign_id() {
+    async fn executor_dedupes_concurrent_publishes_with_the_same_request_id() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(
@@ -1468,14 +1468,14 @@ mod tests {
         );
 
         let (tx, mut rx) = mpsc::channel(16);
-        let sign_id = RequestId::new([7u8; 32]);
+        let request_id = RequestId::new([7u8; 32]);
 
         // Multiple publishes for the SAME RequestId
         for _ in 0..5 {
             tx.send(RpcAction::Publish(make_publish_action(
                 Chain::Ethereum,
                 SignKind::Sign,
-                sign_id,
+                request_id,
             )))
             .await
             .unwrap();

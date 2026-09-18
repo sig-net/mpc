@@ -465,13 +465,13 @@ impl ChainPublisher for SolanaClient {
         let mpc_sig = &action.signature;
         let program = self.client.program(self.program_id)?;
 
-        let sign_id = action.request.id;
+        let request_id = action.request.id;
         let request_ids = vec![action.request.id.request_id];
         let big_r = mpc_sig.big_r.to_encoded_point(false);
         let signature = mpc_to_sol_signature(mpc_sig, big_r);
 
         tracing::debug!(
-            ?sign_id,
+            ?request_id,
             request_type = ?action.request.kind,
             "Solana publish signature: dispatching request"
         );
@@ -496,14 +496,14 @@ impl ChainPublisher for SolanaClient {
                     .await
                     .inspect_err(|err| {
                         tracing::error!(
-                            sign_id = ?action.request.id,
+                            request_id = ?action.request.id,
                             error = ?err,
                             "failed to publish solana signature"
                         );
                     })?;
 
                 tracing::info!(
-                    ?sign_id,
+                    ?request_id,
                     tx_hash = ?tx,
                     elapsed = ?timestamp.elapsed(),
                     "published solana signature successfully"
@@ -511,7 +511,7 @@ impl ChainPublisher for SolanaClient {
             }
             SignKind::RespondBidirectional(respond_bidirectional_tx) => {
                 tracing::debug!(
-                    ?sign_id,
+                    ?request_id,
                     request_id = ?request_ids[0],
                     serialized_output_len = respond_bidirectional_tx.output.len(),
                     "Solana publish signature: entering RespondBidirectional arm"
@@ -534,14 +534,14 @@ impl ChainPublisher for SolanaClient {
                     .await
                     .inspect_err(|err| {
                         tracing::error!(
-                            ?sign_id,
+                            ?request_id,
                             error = ?err,
                             "Solana publish signature: failed to publish respond bidirectional solana signature"
                         );
                     })?;
 
                 tracing::info!(
-                    ?sign_id,
+                    ?request_id,
                     tx_hash = ?tx,
                     elapsed = ?timestamp.elapsed(),
                     "published respond bidirectional solana signature successfully"

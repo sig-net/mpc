@@ -40,7 +40,7 @@ pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow
     let payload_hashed = alloy::primitives::keccak256(PAYLOAD);
     let path = "test";
 
-    let sign_id = RequestId::from_parts(
+    let request_id = RequestId::from_parts(
         caller_id.as_str(),
         &payload_hashed,
         path,
@@ -61,7 +61,7 @@ pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow
 
     let request_json = format!(
         "'{}'",
-        serde_json::to_string(&json!({"sign_id": sign_id, "signature": signature})).unwrap()
+        serde_json::to_string(&json!({"sign_id": request_id, "signature": signature})).unwrap()
     );
 
     Ok(format!(

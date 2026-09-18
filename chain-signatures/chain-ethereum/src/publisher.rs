@@ -196,7 +196,7 @@ impl BatchPublisher {
     async fn wait_for_transaction_receipt(
         &self,
         tx_hash: B256,
-        sign_ids: &[RequestId],
+        request_ids: &[RequestId],
     ) -> anyhow::Result<TransactionReceipt> {
         retry_rpc_gated!(
             self.config.receipt_timeout,
@@ -205,7 +205,7 @@ impl BatchPublisher {
             // Log the error and retry attempt
             |attempt, err, sleep| {
                 tracing::error!(
-                    ?sign_ids,
+                    ?request_ids,
                     attempt,
                     "failed to get eth signature respond transaction receipt: {err}, retrying in {sleep:?}"
                 );
@@ -220,7 +220,7 @@ impl BatchPublisher {
                 {
                     Ok(Some(receipt)) => {
                         tracing::info!(
-                            ?sign_ids,
+                            ?request_ids,
                             "eth signature respond transaction receipt found"
                         );
                         Ok(receipt)
@@ -236,7 +236,7 @@ impl BatchPublisher {
         &self,
         responses: Vec<ChainSignatures::Response>,
         gas: u64,
-        sign_ids: &[RequestId],
+        request_ids: &[RequestId],
     ) -> anyhow::Result<B256> {
         retry_rpc_gated!(
             self.config.send_timeout,
@@ -244,7 +244,7 @@ impl BatchPublisher {
             self.shared_backoff,
             |attempt, err, sleep| {
                 tracing::warn!(
-                    ?sign_ids,
+                    ?request_ids,
                     attempt,
                     "send eth tx failed: {err}, retrying in {sleep:?}"
                 );
@@ -262,8 +262,8 @@ impl BatchPublisher {
 
                 tracing::info!(
                     nonce,
-                    "will send eth tx with nonce {nonce} for sign_ids: {:?}",
-                    sign_ids
+                    "will send eth tx with nonce {nonce} for request_ids: {:?}",
+                    request_ids
                 );
 
                 self.contract
@@ -283,18 +283,20 @@ impl BatchPublisher {
         &self,
         responses: Vec<ChainSignatures::Response>,
         gas: u64,
-        sign_ids: &[RequestId],
+        request_ids: &[RequestId],
     ) -> anyhow::Result<()> {
-        let tx_hash = self.send_responses(responses, gas, sign_ids).await?;
-        let receipt = self.wait_for_transaction_receipt(tx_hash, sign_ids).await?;
+        let tx_hash = self.send_responses(responses, gas, request_ids).await?;
+        let receipt = self
+            .wait_for_transaction_receipt(tx_hash, request_ids)
+            .await?;
 
         if !receipt.status() {
-            tracing::error!(?sign_ids, ?tx_hash, "ethereum transaction failed");
+            tracing::error!(?request_ids, ?tx_hash, "ethereum transaction failed");
             anyhow::bail!("Ethereum transaction reverted");
         }
 
         tracing::info!(
-            ?sign_ids,
+            ?request_ids,
             ?tx_hash,
             "ethereum transaction published successfully"
         );
@@ -327,7 +329,7 @@ impl BatchPublisher {
 
     async fn batch_publish_signatures(&self, actions: &[PublishAction]) -> anyhow::Result<()> {
         let num_requests = actions.len();
-        let sign_ids: Vec<_> = actions.iter().map(|a| a.request.id).collect();
+        let request_ids: Vec<_> = actions.iter().map(|a| a.request.id).collect();
 
         let responses: Vec<ChainSignatures::Response> = actions
             .iter()
@@ -341,7 +343,7 @@ impl BatchPublisher {
             .estimate_batch_gas(&responses, num_requests as u64)
             .await;
 
-        self.execute_publish(responses, gas, &sign_ids).await?;
+        self.execute_publish(responses, gas, &request_ids).await?;
 
         tracing::info!(num_requests, "batch publish complete");
         Ok(())

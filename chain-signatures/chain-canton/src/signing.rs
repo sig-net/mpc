@@ -120,8 +120,8 @@ impl CantonSignBidirectionalRequestedEvent {
             anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
         };
 
-        let sign_id = RequestId::new(request_id);
-        tracing::info!(?sign_id, "canton signature requested");
+        let request_id = RequestId::new(request_id);
+        tracing::info!(?request_id, "canton signature requested");
 
         let ctx = CantonChainCtx {
             sign_event_contract_id: self.sign_event_contract_id.clone(),
@@ -130,7 +130,7 @@ impl CantonSignBidirectionalRequestedEvent {
             Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"));
 
         Ok(IndexedSignRequest::sign_bidirectional(
-            sign_id,
+            request_id,
             SignArgs {
                 entropy,
                 epsilon,

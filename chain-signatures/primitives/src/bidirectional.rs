@@ -26,7 +26,7 @@ pub struct BidirectionalTx {
 }
 
 impl BidirectionalTx {
-    pub const fn sign_id(&self) -> RequestId {
+    pub const fn request_id(&self) -> RequestId {
         RequestId::new(self.request_id)
     }
 }

@@ -35,7 +35,7 @@ pub fn parse_filtered_logs(logs: Vec<Log>) -> Vec<IndexedSignRequest> {
 
 pub async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) {
     for log in logs {
-        let Some(sign_id) = sign_id_from_signature_responded_log(log) else {
+        let Some(request_id) = request_id_from_signature_responded_log(log) else {
             continue;
         };
 
@@ -43,7 +43,7 @@ pub async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEven
             Ok(event) => event,
             Err(err) => {
                 tracing::warn!(
-                    ?sign_id,
+                    ?request_id,
                     ?err,
                     "failed to decode SignatureResponded event data"
                 );
@@ -60,30 +60,30 @@ pub async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEven
             false,
         );
         let Some(big_r) = K256AffinePoint::from_encoded_point(&encoded_r).into_option() else {
-            tracing::warn!(?sign_id, "ethereum respond event, invalid big_r point");
+            tracing::warn!(?request_id, "ethereum respond event, invalid big_r point");
             continue;
         };
 
         let Some(s) = Scalar::from_bytes(signature.s.to_be_bytes()) else {
-            tracing::warn!(?sign_id, "ethereum respond event, invalid s scalar");
+            tracing::warn!(?request_id, "ethereum respond event, invalid s scalar");
             continue;
         };
 
         let signature = MpcSignature::new(big_r, s, signature.recoveryId);
 
         let respond_event = SignatureRespondedEvent {
-            request_id: sign_id.request_id,
+            request_id: request_id.request_id,
             signature,
             chain: Chain::Ethereum,
         };
-        tracing::info!(?sign_id, "emitting SignatureResponded event");
+        tracing::info!(?request_id, "emitting SignatureResponded event");
         if let Err(err) = events_tx.send(ChainEvent::Respond(respond_event)).await {
             tracing::error!(?err, "failed to emit Respond event");
         }
     }
 }
 
-fn sign_id_from_signature_responded_log(log: &Log) -> Option<RequestId> {
+fn request_id_from_signature_responded_log(log: &Log) -> Option<RequestId> {
     if log
         .topic0()
         .is_none_or(|topic| *topic != ChainSignatures::SignatureResponded::SIGNATURE_HASH)
@@ -133,7 +133,7 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let tx_hash = log.transaction_hash.unwrap_or_default();
     let entropy = tx_hash;
 
-    let sign_id = RequestId::new(generate_request_id(
+    let request_id = RequestId::new(generate_request_id(
         event.requester,
         &event.payload_hash,
         &event.path,
@@ -143,10 +143,10 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
         &event.dest,
         &event.params,
     ));
-    tracing::info!(%tx_hash, ?sign_id, "eth signature requested");
+    tracing::info!(%tx_hash, ?request_id, "eth signature requested");
 
     Some(IndexedSignRequest::sign(
-        sign_id,
+        request_id,
         SignArgs {
             entropy: entropy.into(),
             epsilon,
@@ -432,27 +432,27 @@ mod tests {
     }
 
     #[test]
-    fn sign_id_from_responded_log_extracts_request_id() {
+    fn request_id_from_responded_log_extracts_request_id() {
         let request_bytes = [0xabu8; 32];
         let log = responded_log(request_bytes, vec![]);
-        let sign_id = sign_id_from_signature_responded_log(&log).expect("well-formed log");
-        assert_eq!(sign_id.request_id, request_bytes);
+        let request_id = request_id_from_signature_responded_log(&log).expect("well-formed log");
+        assert_eq!(request_id.request_id, request_bytes);
     }
 
     #[test]
-    fn sign_id_from_responded_log_rejects_wrong_topic0() {
+    fn request_id_from_responded_log_rejects_wrong_topic0() {
         let mut log = responded_log([0xabu8; 32], vec![]);
         log.topics_mut()[0] = ChainSignatures::SignatureRequested::SIGNATURE_HASH;
-        assert!(sign_id_from_signature_responded_log(&log).is_none());
+        assert!(request_id_from_signature_responded_log(&log).is_none());
     }
 
     #[test]
-    fn sign_id_from_responded_log_rejects_missing_topics() {
+    fn request_id_from_responded_log_rejects_missing_topics() {
         let no_topics = Log {
             inner: PrimitiveLog::new_unchecked(Address::ZERO, vec![], vec![].into()),
             ..Default::default()
         };
-        assert!(sign_id_from_signature_responded_log(&no_topics).is_none());
+        assert!(request_id_from_signature_responded_log(&no_topics).is_none());
 
         let only_topic0 = Log {
             inner: PrimitiveLog::new_unchecked(
@@ -462,7 +462,7 @@ mod tests {
             ),
             ..Default::default()
         };
-        assert!(sign_id_from_signature_responded_log(&only_topic0).is_none());
+        assert!(request_id_from_signature_responded_log(&only_topic0).is_none());
     }
 
     #[test]

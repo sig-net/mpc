@@ -171,9 +171,9 @@ impl ChainPublisher for MidnightPublisher {
         }
         let _flow = self.flow.lock().await;
         let central_address = self.central_address.to_hex();
-        let sign_id = action.request.id;
+        let request_id = action.request.id;
         tracing::info!(
-            ?sign_id,
+            ?request_id,
             circuit = call.circuit.wire_name(),
             central = %central_address,
             request_id = %hex::encode(call.request_id),
@@ -203,7 +203,7 @@ impl ChainPublisher for MidnightPublisher {
         })?;
 
         tracing::info!(
-            ?sign_id,
+            ?request_id,
             circuit = call.circuit.wire_name(),
             at_hash = %chain.at_hash,
             receipt = %receipt,

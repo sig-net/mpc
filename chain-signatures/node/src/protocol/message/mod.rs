@@ -162,8 +162,8 @@ impl MessageChannel {
         }
     }
 
-    pub async fn filter_sign(&self, sign_id: RequestId, presignature_id: PresignatureId) {
-        self.filter(&(sign_id, presignature_id)).await;
+    pub async fn filter_sign(&self, request_id: RequestId, presignature_id: PresignatureId) {
+        self.filter(&(request_id, presignature_id)).await;
     }
 
     async fn subscribe(&self, id: SubscribeId) -> Option<SubscribeResponse> {
@@ -271,19 +271,23 @@ impl MessageChannel {
 
     pub async fn subscribe_signature(
         &self,
-        sign_id: RequestId,
+        request_id: RequestId,
         presignature_id: PresignatureId,
     ) -> mpsc::Receiver<SignatureMessage> {
         self.subscribe_or_closed(
-            SubscribeId::Signature(sign_id, presignature_id),
+            SubscribeId::Signature(request_id, presignature_id),
             "signature",
         )
         .await
     }
 
-    pub async fn unsubscribe_signature(&self, sign_id: RequestId, presignature_id: PresignatureId) {
+    pub async fn unsubscribe_signature(
+        &self,
+        request_id: RequestId,
+        presignature_id: PresignatureId,
+    ) {
         self.send_unsubscribe(
-            SubscribeId::Signature(sign_id, presignature_id),
+            SubscribeId::Signature(request_id, presignature_id),
             "signature",
         )
         .await;

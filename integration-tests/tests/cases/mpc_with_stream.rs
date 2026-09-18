@@ -346,7 +346,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
     /// Tracks the number of posit and signature messages observed for each participant and sign request.
     #[derive(Default)]
     struct SignatureTracker {
-        /// Keyed by (participant, sign_id) to count messages per participant and request.
+        /// Keyed by (participant, request_id) to count messages per participant and request.
         counts: Arc<std::sync::Mutex<HashMap<(Participant, RequestId), MessageCounts>>>,
         /// Notifies when a posit message has been observed, so the test can wait for it.
         posit_delivered: Arc<Notify>,
@@ -361,11 +361,11 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             let SendMessage { message, from, .. } = msg;
             match message {
                 Message::Posit(posit_msg) => {
-                    if let PositProtocolId::Signature(sign_id, ..) = posit_msg.id {
+                    if let PositProtocolId::Signature(request_id, ..) = posit_msg.id {
                         self.counts
                             .lock()
                             .unwrap()
-                            .entry((*from, sign_id))
+                            .entry((*from, request_id))
                             .or_default()
                             .posit += 1;
                         self.posit_delivered.notify_one();
@@ -414,7 +414,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
     let node_1 = Participant::from(1);
     let node_2 = Participant::from(2);
     let bad_request_seed = 3u32;
-    let bad_sign_id = sign_request(bad_request_seed).id;
+    let bad_request_id = sign_request(bad_request_seed).id;
     let signature_timeout_ms = 5_000;
 
     let tracker = SignatureTracker::default();
@@ -432,8 +432,8 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             Box::new(move |msg: &SendMessage| {
                 let SendMessage { message, .. } = msg;
                 if let Message::Posit(posit_msg) = message {
-                    if let PositProtocolId::Signature(sign_id, ..) = posit_msg.id {
-                        if sign_id == bad_sign_id
+                    if let PositProtocolId::Signature(request_id, ..) = posit_msg.id {
+                        if request_id == bad_request_id
                             && matches!(
                                 posit_msg.action,
                                 mpc_node::protocol::posit::PositAction::Accept
@@ -453,7 +453,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             2,
             Box::new(move |event: &ChainEvent| {
                 if let ChainEvent::Respond(respond) = event {
-                    if respond.request_id == bad_sign_id.request_id {
+                    if respond.request_id == bad_request_id.request_id {
                         return EventDelivery::Drop;
                     }
                 }
@@ -498,11 +498,11 @@ async fn run_stale_task_test(drop_respond_event: bool) {
                     &tracker_counts,
                     &posit_delivered,
                     node_2,
-                    bad_sign_id,
+                    bad_request_id,
                     stale_posit_timeout,
                 )
                 .await,
-                "node 2's stale task never proposed for {bad_sign_id:?} \
+                "node 2's stale task never proposed for {bad_request_id:?} \
                  within {stale_posit_timeout:?}"
             );
         }
@@ -520,19 +520,19 @@ async fn run_stale_task_test(drop_respond_event: bool) {
         let n0_bad = tracker_counts
             .lock()
             .unwrap()
-            .get(&(node_0, bad_sign_id))
+            .get(&(node_0, bad_request_id))
             .cloned()
             .unwrap_or_default();
         let n1_bad = tracker_counts
             .lock()
             .unwrap()
-            .get(&(node_1, bad_sign_id))
+            .get(&(node_1, bad_request_id))
             .cloned()
             .unwrap_or_default();
         let n2_bad = tracker_counts
             .lock()
             .unwrap()
-            .get(&(node_2, bad_sign_id))
+            .get(&(node_2, bad_request_id))
             .cloned()
             .unwrap_or_default();
         assert!(

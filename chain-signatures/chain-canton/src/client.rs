@@ -303,13 +303,13 @@ async fn check_response(
 #[async_trait::async_trait]
 impl ChainPublisher for CantonClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let sign_id = action.request.id;
+        let request_id = action.request.id;
         let request_id_hex = hex::encode(action.request.id.request_id);
         let timestamp = action.timestamp;
         let signature = &action.signature;
 
         tracing::info!(
-            ?sign_id,
+            ?request_id,
             chain = ?action.request.chain,
             elapsed = ?timestamp.elapsed(),
             request_id = %request_id_hex,
@@ -368,7 +368,7 @@ impl ChainPublisher for CantonClient {
             .await
             .inspect_err(|err| {
                 tracing::error!(
-                    ?sign_id,
+                    ?request_id,
                     choice,
                     request_id = %request_id_hex,
                     error = %err,
@@ -379,7 +379,7 @@ impl ChainPublisher for CantonClient {
         match outcome {
             SubmissionOutcome::Transaction(_) => {
                 tracing::info!(
-                    ?sign_id,
+                    ?request_id,
                     choice,
                     elapsed = ?timestamp.elapsed(),
                     "published canton {choice} successfully"
@@ -388,7 +388,7 @@ impl ChainPublisher for CantonClient {
             }
             SubmissionOutcome::AlreadyAccepted => {
                 tracing::info!(
-                    ?sign_id,
+                    ?request_id,
                     choice,
                     "canton {choice} already accepted; stopped submission retries"
                 );

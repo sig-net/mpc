@@ -84,7 +84,7 @@ impl ChainPublisher for NearClient {
         .map_err(|e| anyhow::anyhow!("near rpc error: {e}"))
         .inspect_err(|err| {
             tracing::error!(
-                sign_id = ?action.request.id,
+                request_id = ?action.request.id,
                 ?err,
                 "failed to publish signature",
             );
@@ -95,7 +95,7 @@ impl ChainPublisher for NearClient {
             .map_err(|e| anyhow::anyhow!("contract rejected response: {e}"))
             .inspect_err(|err| {
                 tracing::error!(
-                    sign_id = ?action.request.id,
+                    request_id = ?action.request.id,
                     big_r = signature.big_r.to_base58(),
                     s = ?signature.s,
                     ?err,
@@ -104,7 +104,7 @@ impl ChainPublisher for NearClient {
             })?;
 
         tracing::info!(
-            sign_id = ?action.request.id,
+            request_id = ?action.request.id,
             big_r = signature.big_r.to_base58(),
             s = ?signature.s,
             elapsed = ?timestamp.elapsed(),

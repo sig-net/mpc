@@ -49,10 +49,10 @@ pub fn make_indexed(
     epsilon: k256::Scalar,
     payload: k256::Scalar,
     kind: SignKind,
-    sign_id: RequestId,
+    request_id: RequestId,
 ) -> IndexedSignRequest {
     IndexedSignRequest {
-        id: sign_id,
+        id: request_id,
         args: SignArgs {
             entropy: [0u8; 32],
             epsilon,
@@ -67,29 +67,29 @@ pub fn make_indexed(
 }
 
 /// Build a `PublishAction` with fixed epsilon/payload; see [`make_publish_action_for`].
-pub fn make_publish_action(chain: Chain, kind: SignKind, sign_id: RequestId) -> PublishAction {
+pub fn make_publish_action(chain: Chain, kind: SignKind, request_id: RequestId) -> PublishAction {
     make_publish_action_for(
         chain,
         kind,
-        sign_id,
+        request_id,
         scalar(&[1u8; 32]),
         scalar(&[42u8; 32]),
     )
 }
 
-/// Build a `PublishAction` targeting an arbitrary `sign_id`
+/// Build a `PublishAction` targeting an arbitrary `request_id`
 /// with provided epsilon/payload and a generated signing key.
 pub fn make_publish_action_for(
     chain: Chain,
     kind: SignKind,
-    sign_id: RequestId,
+    request_id: RequestId,
     epsilon: k256::Scalar,
     payload: k256::Scalar,
 ) -> PublishAction {
     let sk = k256::SecretKey::random(&mut rand::thread_rng());
     let pk: AffinePoint = sk.public_key().into();
     let output = make_signature(&sk, epsilon, payload);
-    let request = make_indexed(chain, epsilon, payload, kind, sign_id);
+    let request = make_indexed(chain, epsilon, payload, kind, request_id);
     PublishAction::new(pk, Arc::new(request), output, vec![])
         .expect("valid signature should produce a publish action")
 }

@@ -255,11 +255,11 @@ impl ChainPublisher for HydrationClient {
         let timestamp = action.timestamp;
         let signature = &action.signature;
         let chain = action.request.chain;
-        let sign_id = action.request.id;
+        let request_id = action.request.id;
         let request_ids = [action.request.id.request_id];
 
         tracing::info!(
-            ?sign_id,
+            ?request_id,
             ?chain,
             elapsed = ?timestamp.elapsed(),
             request_id = ?request_ids[0],
@@ -271,11 +271,11 @@ impl ChainPublisher for HydrationClient {
                 self.call_respond(&action.request.id, signature)
                     .await
                     .inspect_err(|e| {
-                        tracing::error!(?sign_id, ?e, "Hydration: failed to publish signature")
+                        tracing::error!(?request_id, ?e, "Hydration: failed to publish signature")
                     })?;
 
                 tracing::info!(
-                    ?sign_id,
+                    ?request_id,
                     elapsed = ?timestamp.elapsed(),
                     "published hydration signature successfully"
                 );
@@ -283,7 +283,7 @@ impl ChainPublisher for HydrationClient {
             SignKind::RespondBidirectional(respond_bidirectional_tx) => {
                 let serialized_output = respond_bidirectional_tx.output.clone();
                 tracing::debug!(
-                    ?sign_id,
+                    ?request_id,
                     request_id = ?request_ids[0],
                     serialized_output_len = serialized_output.len(),
                     "Hydration publish signature: entering RespondBidirectional arm"
@@ -293,14 +293,14 @@ impl ChainPublisher for HydrationClient {
                     .await
                     .inspect_err(|e| {
                         tracing::error!(
-                            ?sign_id,
+                            ?request_id,
                             ?e,
                             "Hydration publish signature: failed to publish respond bidirectional signature"
                         )
                     })?;
 
                 tracing::info!(
-                    ?sign_id,
+                    ?request_id,
                     tx_hash = ?tx_hash,
                     elapsed = ?timestamp.elapsed(),
                     "Hydration publish signature: published respond bidirectional signature successfully"
