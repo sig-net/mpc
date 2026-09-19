@@ -151,10 +151,9 @@ where
     /// Reaps the next finished task, as `Ok((key, output))`, or `Err(key)` if it
     /// panicked or was cancelled. `None` means no tasks are left.
     ///
-    /// A task whose key was aborted or replaced keeps running until it is
-    /// reaped, but its mapping is already gone, so it carries nothing a caller
-    /// can act on: skip it and keep polling rather than reporting it as an
-    /// empty set, which would hide the completions queued behind it.
+    /// A task whose key was aborted or replaced runs until reaped, but its
+    /// mapping is gone and it carries nothing to report: skip it and keep
+    /// polling, so `None` describes the set rather than one stale task.
     pub async fn join_next(&mut self) -> Option<Result<(T, U), T>> {
         loop {
             let outcome = self.tasks.join_next_with_id().await?;
@@ -206,8 +205,8 @@ mod tests {
         assert_eq!(map.join_next().await, None, "no tasks are left");
     }
 
-    /// The caller selects on `join_next` alongside its other work, so skipping a
-    /// stale completion must not hold up the branches beside it.
+    /// Callers select on `join_next` alongside other work: skipping a stale
+    /// completion must not hold up the branches beside it.
     #[tokio::test]
     async fn join_next_leaves_sibling_select_branches_responsive() {
         let mut map: JoinMap<u8, u8> = JoinMap::new();
