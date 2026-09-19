@@ -169,6 +169,7 @@ pub struct ClusterSpawner {
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
+    pub ethereum_fork: Option<(String, u64)>,
     pub use_midnight: bool,
     /// Tracks which binary source to use for each node index
     pub node_binary_sources: Vec<NodeBinarySource>,
@@ -211,6 +212,7 @@ impl Default for ClusterSpawner {
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
+            ethereum_fork: None,
             use_midnight: false,
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
@@ -325,6 +327,13 @@ impl ClusterSpawner {
 
     pub fn ethereum(mut self) -> Self {
         self.use_ethereum = true;
+        self
+    }
+
+    /// Start Anvil at a fixed upstream block before deploying local contracts.
+    pub fn ethereum_fork(mut self, rpc_url: String, block: u64) -> Self {
+        self.use_ethereum = true;
+        self.ethereum_fork = Some((rpc_url, block));
         self
     }
 

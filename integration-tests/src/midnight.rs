@@ -72,6 +72,25 @@ pub struct SignedEvmTransaction {
     pub chain_id: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultOperationResult {
+    pub operation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    pub succeeded: bool,
+    #[serde(flatten)]
+    pub details: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultRunResult {
+    pub operations: Vec<VaultOperationResult>,
+    #[serde(flatten)]
+    pub details: serde_json::Map<String, serde_json::Value>,
+}
+
 pub struct MidnightContext {
     _stack: MidnightStack,
     pub output_storage: crate::gcs::GcsEmulator,
@@ -92,6 +111,10 @@ impl MidnightContext {
                 "op": "bootstrap",
                 "config": DriverConfig::new(&stack),
                 "artifactDir": stack.artifact_dir,
+                "mpcPublicKey": format!(
+                    "0x{}",
+                    hex::encode(root_public_key.to_encoded_point(false).as_bytes())
+                ),
             }))
             .await
             .context("bootstrapping fresh Midnight wallets and contracts")?;
@@ -165,6 +188,26 @@ impl MidnightContext {
             }))
             .await?;
         Ok(())
+    }
+
+    pub async fn drive_vault(&self, evm_rpc_url: &str) -> anyhow::Result<VaultRunResult> {
+        let mut driver = self.driver.lock().await;
+        let result = driver
+            .request(&serde_json::json!({
+                "op": "runVault",
+                "evmRpcUrl": evm_rpc_url,
+            }))
+            .await?;
+        std::fs::write(
+            self._stack.artifact_dir.join("vault-result.json"),
+            serde_json::to_vec_pretty(&result)?,
+        )
+        .context("saving the vault operation results")?;
+        Ok(result)
+    }
+
+    pub fn artifact_dir(&self) -> &Path {
+        &self._stack.artifact_dir
     }
 
     pub async fn signed_evm_transaction(
@@ -303,17 +346,31 @@ struct MidnightDriver {
 impl MidnightDriver {
     async fn spawn(artifact_dir: &Path) -> anyhow::Result<Self> {
         let package_dir = publisher_package_dir()?;
-        let executable = package_dir.join("node_modules/.bin/tsx");
-        let source = package_dir.join("devtools/real-stack/driver.ts");
+        let source = match std::env::var_os("MIDNIGHT_VAULT_DRIVER") {
+            Some(source) => {
+                let source = PathBuf::from(source);
+                anyhow::ensure!(
+                    source.is_absolute(),
+                    "MIDNIGHT_VAULT_DRIVER must be absolute"
+                );
+                source
+            }
+            None => package_dir.join("devtools/real-stack/driver.ts"),
+        };
         anyhow::ensure!(
-            executable.is_file(),
-            "tsx executable {} is missing; run npm ci in {}",
-            executable.display(),
-            package_dir.display()
+            source.is_file(),
+            "Midnight driver {} is missing",
+            source.display()
         );
         let stderr = std::fs::File::create(artifact_dir.join("driver.log"))?;
-        let mut child = Command::new(&executable)
+        let mut child = Command::new(node_executable()?)
+            .args(["--import", "tsx"])
             .arg(&source)
+            .current_dir(
+                source
+                    .parent()
+                    .context("Midnight driver has no parent directory")?,
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr))
