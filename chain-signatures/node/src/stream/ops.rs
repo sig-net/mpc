@@ -200,13 +200,15 @@ async fn advance_bidirectional_to_execution(
     })?;
 
     tracing::info!(?sign_id, "advance bidirectional tx to execution successful");
-    // This leg is done, but its task keeps running until told otherwise, and it
-    // holds the sign id that the second leg reuses.
-    ctx.try_enqueue(SignCommand::LegCompleted {
-        sign_id,
-        kind: leg_kind,
-    })
-    .await?;
+    // The leg's task runs until told to stop, holding the sign id the next leg
+    // reuses. Bypasses the catchup gate: nothing replays a stop event.
+    ctx.sign_tx
+        .send(SignCommand::LegCompleted {
+            sign_id,
+            kind: leg_kind,
+        })
+        .await
+        .context("sign command channel closed")?;
 
     Ok(())
 }

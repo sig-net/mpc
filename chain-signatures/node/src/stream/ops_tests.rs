@@ -767,9 +767,9 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
-    // Caught up, so the leg completion reaches the sign queue rather than being
-    // dropped until catchup finishes.
-    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+    // Not caught up: a leg completion stops work, so it is not subject to the
+    // gate that holds back new requests during catchup.
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
 
     process_respond_event(event, &ctx, public_key)
         .await
