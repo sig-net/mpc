@@ -21,7 +21,7 @@
     "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "compile:real-stack-caller": "node devtools/real-stack/compile-caller.mjs",
+    "compile:real-stack-vault": "node devtools/real-stack/compile-vault.mjs",
     "typecheck:real-stack": "tsc --noEmit -p tsconfig.real-stack.json",
     "gen:initial-state": "tsx devtools/gen-initial-state.ts",
     "gen:midnight-respond-vectors": "tsx devtools/generate-midnight-respond-vectors.ts"
@@ -47,7 +47,7 @@
     "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0-beta.6",
     "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.6",
     "@midnightntwrk/wallet-sdk-facade": "5.0.0-beta.2",
-    "@sig-net/midnight": "0.21.0-rc.9",
+    "@sig-net/midnight": "0.22.0-rc.1",
     "@types/node": "^22.20.1",
     "@vitest/eslint-plugin": "^1.6.26",
     "eslint": "^10.8.0",

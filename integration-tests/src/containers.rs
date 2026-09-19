@@ -428,11 +428,17 @@ impl EthereumSandbox {
 
     pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Self> {
         let chain_id_arg = Self::DEFAULT_CHAIN_ID.to_string();
-        let command = format!(
+        let mut command = format!(
             "anvil --host 0.0.0.0 --chain-id {} --mnemonic '{}' --block-time 1",
             chain_id_arg,
             Self::DEFAULT_MNEMONIC,
         );
+        if let Some((rpc_url, block)) = &spawner.ethereum_fork {
+            command.push_str(&format!(
+                " --fork-url {} --fork-block-number {block} --compute-units-per-second 20 --fork-retry-backoff 3000 --retries 20",
+                shell_escape::escape(rpc_url.as_str().into()),
+            ));
+        }
 
         let container = start_container_with_network_retry(
             || {

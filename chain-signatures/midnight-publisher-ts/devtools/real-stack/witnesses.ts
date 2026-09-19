@@ -1,13 +1,14 @@
-import type { Witnesses } from "./managed/caller/contract/index.js";
+import type { Witnesses } from "./managed/erc20-vault/contract/index.js";
 
-export interface CallerPrivateState {
+export interface VaultPrivateState {
   readonly secretKey: Uint8Array;
 }
 
-export const createCallerPrivateState = (secretKey: Uint8Array): CallerPrivateState => ({
-  secretKey,
-});
+export const createPrivateState = (secretKey: Uint8Array): VaultPrivateState => ({ secretKey });
 
-export const witnesses: Witnesses<CallerPrivateState> = {
-  deployerSecretKey: ({ privateState }) => [privateState, privateState.secretKey],
+export const witnesses: Witnesses<VaultPrivateState> = {
+  callerSecretKey: ({ privateState }): [VaultPrivateState, Uint8Array] => [
+    privateState,
+    privateState.secretKey,
+  ],
 };

@@ -10,3 +10,5 @@ package-lock.json
 *.md
 *.yml
 *.yaml
+
+devtools/real-stack/managed/

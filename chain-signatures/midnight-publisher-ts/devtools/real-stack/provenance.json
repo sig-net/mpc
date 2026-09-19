@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/sig-net/midnight-examples",
+  "commit": "8bcb9ee851299a1f658ebe05681017006291bd06",
+  "compiler": "0.33.0-rc.2",
+  "files": [
+    {
+      "source": "examples/erc20-vault/contract/src/erc20-vault.compact",
+      "destination": "erc20-vault.compact",
+      "sha256": "3421d652b2305a80cc8b102a228539f041a55c5778c9c27cafa3d6a4d9d30321"
+    }
+  ]
+}
