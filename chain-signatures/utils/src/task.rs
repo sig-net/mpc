@@ -206,6 +206,44 @@ mod tests {
         assert_eq!(map.join_next().await, None, "no tasks are left");
     }
 
+    /// The caller selects on `join_next` alongside its other work, so skipping a
+    /// stale completion must not hold up the branches beside it.
+    #[tokio::test]
+    async fn join_next_leaves_sibling_select_branches_responsive() {
+        let mut map: JoinMap<u8, u8> = JoinMap::new();
+        // Finishes first and is untracked when reaped, so join_next skips it.
+        map.spawn(1, async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            1
+        });
+        // Tracked, but outlives the test: join_next parks on it after skipping.
+        map.spawn(2, async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            2
+        });
+        map.abort(1);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = tx.send("sibling event").await;
+        });
+
+        let started = std::time::Instant::now();
+        let event = tokio::select! {
+            Some(result) = map.join_next(), if !map.is_empty() => {
+                panic!("no tracked task should be reported: {result:?}")
+            }
+            Some(event) = rx.recv() => event,
+        };
+
+        assert_eq!(event, "sibling event");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "sibling branch waited on the skipped completion"
+        );
+    }
+
     #[tokio::test]
     async fn join_next_reports_tasks_spawned_after_abort_all() {
         let mut map: JoinMap<u8, u8> = JoinMap::new();
