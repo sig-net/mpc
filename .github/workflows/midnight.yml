@@ -16,7 +16,7 @@ jobs:
   midnight-real-stack:
     name: Midnight Real Stack
     runs-on: warp-ubuntu-latest-x64-4x
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v6
@@ -50,7 +50,9 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: chain-signatures/midnight-publisher-ts/package-lock.json
+          cache-dependency-path: |
+            chain-signatures/midnight-publisher-ts/package-lock.json
+            integration-tests/fixtures/midnight-vault/package-lock.json
 
       - name: Restore Compact toolchain
         uses: actions/cache@v6
@@ -129,9 +131,10 @@ jobs:
 
       # nextest fails on an empty selection, so a renamed test cannot turn this
       # step into a silent no-op.
-      - name: Test Midnight end-to-end stream
+      - name: Test vault deposit, withdraw, swap, and yield through MPC
         run: just test-midnight
         env:
+          MIDNIGHT_VAULT_FORK_URL: ${{ vars.MIDNIGHT_VAULT_FORK_URL || 'https://ethereum-sepolia-rpc.blockreq.com/v1/rpc/public' }}
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
 

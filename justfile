@@ -97,7 +97,7 @@ alias ts := test-seq
 
 # Build artifacts: `just build` = whole Rust workspace (via setup),
 # `just build eth` = EVM artifacts, `just build contract` = NEAR contract wasm,
-# `just build midnight` = midnight-publisher-ts fixtures,
+# `just build midnight` = Midnight publisher and vault fixtures,
 # `just build tests` = integration test binaries without running them,
 # `just build compat` = historical prod-compat node binaries
 # Usage: just build [target] [helios=1] (target="" | eth | contract | midnight | tests | compat)
@@ -107,7 +107,7 @@ build target="" helios="":
     elif [ "{{target}}" = "contract" ]; then \
       ./build-contract.sh && mkdir -p target/wasm32-unknown-unknown/release && cp target/near/mpc_contract/mpc_contract.wasm target/wasm32-unknown-unknown/release/mpc_contract.wasm; \
     elif [ "{{target}}" = "midnight" ]; then \
-      cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-caller && npm run typecheck:real-stack; \
+      (cd chain-signatures/midnight-publisher-ts && npm ci && npm run build) && (cd integration-tests/fixtures/midnight-vault && npm ci && npm run compile && npm run typecheck && npm run lint && npm run format:check && npm test); \
     elif [ "{{target}}" = "tests" ]; then \
       cargo build -p integration-tests --tests{{ if helios != "" { " --features helios" } else { "" } }}; \
     elif [ "{{target}}" = "compat" ]; then \
@@ -132,9 +132,10 @@ lint-eth: (build "eth")
 test-eth-unit:
     cd chain-signatures/contract-eth && npx hardhat test
 
-# Midnight real-stack test (ignored by default; needs Midnight node/indexer/proof-server + anvil)
+# Vault deposit/withdraw/swap/supply/redeem through real MPC (requires `just build midnight`).
+# MIDNIGHT_VAULT_FORK_URL must provide Sepolia archive reads; no transactions are sent upstream.
 test-midnight: (setup "")
-    cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
+    CHECKPOINT_INTERVAL_ETHEREUM=1 MIDNIGHT_VAULT_FORK_BLOCK=11731746 cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_vault_operations_complete_with_real_mpc)'
 
 # Midnight TS/Rust seam differential (needs dist/ built via npm test in midnight-publisher-ts)
 test-midnight-seam:

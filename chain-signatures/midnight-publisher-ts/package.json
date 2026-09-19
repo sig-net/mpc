@@ -21,8 +21,6 @@
     "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "compile:real-stack-caller": "node devtools/real-stack/compile-caller.mjs",
-    "typecheck:real-stack": "tsc --noEmit -p tsconfig.real-stack.json",
     "gen:initial-state": "tsx devtools/gen-initial-state.ts",
     "gen:midnight-respond-vectors": "tsx devtools/generate-midnight-respond-vectors.ts"
   },

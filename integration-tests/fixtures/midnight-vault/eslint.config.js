@@ -5,10 +5,10 @@ import { defineConfig, globalIgnores } from "eslint/config";
 import tseslint from "typescript-eslint";
 
 export default defineConfig([
-  globalIgnores(["dist/**"]),
+  globalIgnores(["contract/src/managed/**"]),
 
   {
-    name: "midnight-publisher/typescript",
+    name: "midnight-vault/typescript",
     files: ["**/*.ts"],
     extends: [js.configs.recommended, tseslint.configs.recommended],
     languageOptions: {
@@ -41,7 +41,7 @@ export default defineConfig([
   },
 
   {
-    name: "midnight-publisher/tests",
+    name: "midnight-vault/tests",
     files: ["tests/**/*.ts", "**/*.test.ts"],
     extends: [vitest.configs.recommended],
     rules: {
@@ -53,7 +53,7 @@ export default defineConfig([
   },
 
   {
-    name: "midnight-publisher/config-files",
+    name: "midnight-vault/config-files",
     files: ["**/*.js", "**/*.mjs"],
     extends: [js.configs.recommended],
   },

@@ -61,17 +61,6 @@ struct BootstrapResult {
     publisher_seed: String,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SignedEvmTransaction {
-    pub serialized: String,
-    pub unsigned_hash: String,
-    pub from: String,
-    pub to: String,
-    pub data: String,
-    pub chain_id: String,
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultOperationResult {
@@ -93,7 +82,7 @@ pub struct VaultRunResult {
 
 pub struct MidnightContext {
     _stack: MidnightStack,
-    pub output_storage: crate::gcs::GcsEmulator,
+    _output_storage: crate::gcs::GcsEmulator,
     pub config: MidnightConfig,
     driver: Mutex<MidnightDriver>,
 }
@@ -164,30 +153,10 @@ impl MidnightContext {
         config.validate()?;
         Ok(Self {
             _stack: stack,
-            output_storage,
+            _output_storage: output_storage,
             config,
             driver: Mutex::new(driver),
         })
-    }
-
-    pub async fn submit_is_even(
-        &self,
-        nonce: u64,
-        target: [u8; 20],
-        argument: [u8; 32],
-        output_type: &str,
-    ) -> anyhow::Result<()> {
-        let mut driver = self.driver.lock().await;
-        let _: serde_json::Value = driver
-            .request(&serde_json::json!({
-                "op": "submitIsEven",
-                "nonce": nonce.to_string(),
-                "target": hex::encode(target),
-                "argument": hex::encode(argument),
-                "outputType": output_type,
-            }))
-            .await?;
-        Ok(())
     }
 
     pub async fn drive_vault(&self, evm_rpc_url: &str) -> anyhow::Result<VaultRunResult> {
@@ -208,55 +177,6 @@ impl MidnightContext {
 
     pub fn artifact_dir(&self) -> &Path {
         &self._stack.artifact_dir
-    }
-
-    pub async fn signed_evm_transaction(
-        &self,
-        request_id: [u8; 32],
-        expected_signer: &str,
-    ) -> anyhow::Result<SignedEvmTransaction> {
-        let mut driver = self.driver.lock().await;
-        driver
-            .request(&serde_json::json!({
-                "op": "signedTransaction",
-                "requestId": format!("0x{}", hex::encode(request_id)),
-                "expectedSigner": expected_signer,
-            }))
-            .await
-    }
-
-    pub async fn stored_output(&self, request_id: [u8; 32]) -> anyhow::Result<Vec<u8>> {
-        let object = format!(
-            "{}/{}/{}/{}.bin",
-            self.config
-                .publisher
-                .output_storage
-                .as_ref()
-                .context("Midnight output storage is disabled")?
-                .prefix,
-            self._stack.network_id,
-            self.config.central_address.to_hex(),
-            hex::encode(request_id),
-        );
-        self.output_storage.read_object(&object).await
-    }
-
-    pub async fn settle_response(
-        &self,
-        request_id: [u8; 32],
-        serialized_output: &[u8],
-        reject_padded_replay: bool,
-    ) -> anyhow::Result<()> {
-        let mut driver = self.driver.lock().await;
-        let _: serde_json::Value = driver
-            .request(&serde_json::json!({
-                "op": "settleResponse",
-                "serializedOutput": hex::encode(serialized_output),
-                "rejectPaddedReplay": reject_padded_replay,
-                "requestId": format!("0x{}", hex::encode(request_id)),
-            }))
-            .await?;
-        Ok(())
     }
 
     pub async fn shutdown(&self) -> anyhow::Result<()> {
@@ -345,18 +265,8 @@ struct MidnightDriver {
 
 impl MidnightDriver {
     async fn spawn(artifact_dir: &Path) -> anyhow::Result<Self> {
-        let package_dir = publisher_package_dir()?;
-        let source = match std::env::var_os("MIDNIGHT_VAULT_DRIVER") {
-            Some(source) => {
-                let source = PathBuf::from(source);
-                anyhow::ensure!(
-                    source.is_absolute(),
-                    "MIDNIGHT_VAULT_DRIVER must be absolute"
-                );
-                source
-            }
-            None => package_dir.join("devtools/real-stack/driver.ts"),
-        };
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/midnight-vault/driver.ts");
         anyhow::ensure!(
             source.is_file(),
             "Midnight driver {} is missing",

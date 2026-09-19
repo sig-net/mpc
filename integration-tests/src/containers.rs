@@ -435,7 +435,7 @@ impl EthereumSandbox {
         );
         if let Some((rpc_url, block)) = &spawner.ethereum_fork {
             command.push_str(&format!(
-                " --fork-url {} --fork-block-number {block}",
+                " --fork-url {} --fork-block-number {block} --compute-units-per-second 20 --fork-retry-backoff 1000",
                 shell_escape::escape(rpc_url.as_str().into()),
             ));
         }
