@@ -20,7 +20,7 @@ use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
 use crate::config::{MidnightConfig, RpcConfig};
-use crate::emissions::{emissions_in, DecodedTransaction, UnsupportedFallibleCall};
+use crate::emissions::{emissions_in, DecodedTransaction};
 use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
 
@@ -127,6 +127,57 @@ struct TxApplied(TxAppliedDetails);
 impl subxt::events::StaticEvent for TxApplied {
     const PALLET: &'static str = "Midnight";
     const EVENT: &'static str = "TxApplied";
+}
+
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct TxPartialSuccess(TxAppliedDetails);
+
+impl subxt::events::StaticEvent for TxPartialSuccess {
+    const PALLET: &'static str = "Midnight";
+    const EVENT: &'static str = "TxPartialSuccess";
+}
+
+/// Accept only one unambiguous full-success status from this extrinsic.
+/// These are RPC-reported events; this check does not verify their inclusion.
+fn fully_applied_hash(
+    events: &subxt::blocks::ExtrinsicEvents<SubstrateConfig>,
+) -> anyhow::Result<Option<[u8; 32]>> {
+    let mut applied = None;
+    let mut partial = None;
+    for event in events.iter() {
+        let event = event.context("Midnight status events did not match metadata")?;
+        if let Some(TxApplied(details)) = event.as_event::<TxApplied>()? {
+            anyhow::ensure!(
+                applied.replace(details.tx_hash).is_none(),
+                "duplicate TxApplied status"
+            );
+        }
+        if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()? {
+            anyhow::ensure!(
+                partial.replace(details.tx_hash).is_none(),
+                "duplicate TxPartialSuccess status"
+            );
+        }
+    }
+    anyhow::ensure!(
+        applied.is_none() || partial.is_none(),
+        "conflicting Midnight statuses"
+    );
+    Ok(applied)
+}
+
+fn decode_applied_transaction(
+    bytes: &[u8],
+    expected_hash: [u8; 32],
+) -> anyhow::Result<DecodedTransaction> {
+    let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(&mut &bytes[..])
+        .context("candidate ledger transaction did not decode")?;
+    anyhow::ensure!(
+        tx.transaction_hash().0 .0 == expected_hash,
+        "TxApplied hash does not match the candidate ledger transaction"
+    );
+    Ok(tx)
 }
 
 /// One finalized block as plain data: the number plus the `0x`-prefixed hashes
@@ -315,61 +366,49 @@ impl MidnightRpc {
             scale_system_events
                 .get_or_insert_with(|| events.all_events_in_block().bytes().to_vec());
 
-            let applied = events.find_first::<TxApplied>().map_err(|err| {
-                BlockHold::new(
-                    "emission-schema-hold",
-                    height,
-                    anyhow::Error::new(err).context("TxApplied did not match metadata"),
-                )
-            })?;
-            let Some(TxApplied(details)) = applied else {
+            let applied = fully_applied_hash(&events)
+                .map_err(|err| BlockHold::new("emission-schema-hold", height, err))?;
+            let Some(ledger_tx_hash) = applied else {
+                let partial = events.find_first::<TxPartialSuccess>()?;
                 tracing::warn!(
                     reason = "unsupported-midnight-status",
+                    status = if partial.is_some() { "TxPartialSuccess" } else { "NoTxApplied" },
+                    tx_hash = partial.map(|event| hex::encode(event.0.tx_hash)),
                     height,
+                    block_hash = %block_ref.hash,
                     extrinsic_index = found.details.index(),
                     "midnight transaction skipped: only TxApplied is supported"
                 );
                 continue;
             };
-            let tx: DecodedTransaction = midnight_serialize::tagged_deserialize(
-                &mut &found.value.midnight_tx[..],
-            )
-            .map_err(|err| {
+            let tx = decode_applied_transaction(&found.value.midnight_tx, ledger_tx_hash).map_err(
+                |err| {
+                    BlockHold::new(
+                        "singleton-tx-undecodable",
+                        height,
+                        err.context(format!(
+                            "candidate extrinsic {} ledger transaction {}",
+                            found.details.index(),
+                            hex::encode(ledger_tx_hash)
+                        )),
+                    )
+                },
+            )?;
+            // TxApplied covers both logical phases. Partial results cannot identify
+            // committed fallible segments through this node's status events.
+            let calls = emissions_in(&tx, singleton).map_err(|err| {
                 BlockHold::new(
-                    "singleton-tx-undecodable",
+                    "emission-schema-hold",
                     height,
-                    anyhow::Error::new(err).context(format!(
-                        "candidate extrinsic {} ledger transaction",
-                        found.details.index()
+                    err.context(format!(
+                        "candidate extrinsic {} transaction {} singleton emissions",
+                        found.details.index(),
+                        hex::encode(ledger_tx_hash)
                     )),
                 )
             })?;
-            let calls = match emissions_in(&tx, singleton) {
-                Ok(calls) => calls,
-                Err(err) => {
-                    if let Some(unsupported) = err.downcast_ref::<UnsupportedFallibleCall>() {
-                        tracing::warn!(
-                            reason = "unsupported-fallible-singleton-call",
-                            height,
-                            extrinsic_index = found.details.index(),
-                            call_index = unsupported.call_index,
-                            "midnight transaction skipped: fallible singleton calls are unsupported"
-                        );
-                        continue;
-                    }
-                    return Err(BlockHold::new(
-                        "emission-schema-hold",
-                        height,
-                        err.context(format!(
-                            "candidate extrinsic {} singleton emissions",
-                            found.details.index()
-                        )),
-                    )
-                    .into());
-                }
-            };
             decoded_candidates.push(CandidateTransactionEmissions {
-                ledger_tx_hash: details.tx_hash,
+                ledger_tx_hash,
                 extrinsic_index: found.details.index(),
                 calls,
             });
@@ -780,6 +819,447 @@ mod tests {
     impl subxt::events::StaticEvent for CaptureContractCall {
         const PALLET: &'static str = "Midnight";
         const EVENT: &'static str = "ContractCall";
+    }
+
+    fn captured_status_events(
+        bytes: Vec<u8>,
+        extrinsic: u32,
+    ) -> subxt::blocks::ExtrinsicEvents<SubstrateConfig> {
+        let metadata = subxt::Metadata::decode_all(
+            &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
+        )
+        .expect("captured node metadata");
+        subxt::blocks::ExtrinsicEvents::new(
+            H256::zero(),
+            extrinsic,
+            subxt::events::Events::decode_from(bytes, metadata),
+        )
+    }
+
+    fn encode_status_records(records: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = subxt::ext::codec::Compact(records.len() as u32).encode();
+        for record in records {
+            bytes.extend_from_slice(record);
+        }
+        bytes
+    }
+
+    #[test]
+    fn full_success_gate_uses_the_captured_extrinsic_status() {
+        let raw = include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec();
+        let events = captured_status_events(raw.clone(), 4);
+        let hash = fully_applied_hash(&events)
+            .expect("valid status")
+            .expect("TxApplied");
+        let tx = decode_applied_transaction(
+            include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
+            hash,
+        )
+        .expect("captured transaction matches status");
+        let singleton = crate::test_utils::hex_32(
+            "4daa9701226222a9db302dfb6f347f48c947278a4dc93812a79494f4086a0172",
+        );
+        let calls = emissions_in(&tx, &singleton).expect("successful fallible transcript decodes");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].phase, crate::emissions::TranscriptPhase::Fallible);
+        assert_eq!(calls[0].physical_segment, 49592);
+        assert_eq!(calls[0].emissions.len(), 1);
+        assert_eq!(
+            fully_applied_hash(&captured_status_events(raw, 0)).unwrap(),
+            None
+        );
+        let mut wrong_hash = hash;
+        wrong_hash[0] ^= 1;
+        assert!(decode_applied_transaction(
+            include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
+            wrong_hash,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("hash does not match"));
+    }
+
+    #[test]
+    fn full_success_gate_rejects_partial_and_ambiguous_statuses() {
+        let events = captured_status_events(
+            include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
+            4,
+        );
+        let applied = events
+            .iter()
+            .map(Result::unwrap)
+            .find(|event| event.as_event::<TxApplied>().unwrap().is_some())
+            .expect("capture has TxApplied");
+        let mut partial = applied.bytes().to_vec();
+        // Synthetic status cases retain the captured producer's SCALE layout:
+        // ApplyExtrinsic(u32), Midnight pallet, then its event discriminant.
+        assert_eq!(&partial[..7], &[0, 4, 0, 0, 0, 5, 2]);
+        partial[6] = 7; // TxPartialSuccess in the captured metadata.
+        assert!(
+            captured_status_events(encode_status_records(&[partial.clone()]), 4)
+                .find_first::<TxPartialSuccess>()
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            fully_applied_hash(&captured_status_events(
+                encode_status_records(&[partial.clone()]),
+                4,
+            ))
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            fully_applied_hash(&captured_status_events(encode_status_records(&[]), 4,)).unwrap(),
+            None
+        );
+        for records in [
+            vec![applied.bytes().to_vec(), partial.clone()],
+            vec![applied.bytes().to_vec(), applied.bytes().to_vec()],
+            vec![partial.clone(), partial],
+        ] {
+            assert!(
+                fully_applied_hash(&captured_status_events(encode_status_records(&records), 4,))
+                    .is_err(),
+                "ambiguous outcome must hold"
+            );
+        }
+        assert!(
+            fully_applied_hash(&captured_status_events(
+                encode_status_records(&[applied.bytes()[..12].to_vec()]),
+                4,
+            ))
+            .is_err(),
+            "truncated outcome must hold"
+        );
+    }
+
+    async fn read_fallible_capture(events: Vec<u8>) -> anyhow::Result<Option<BlockEmissions>> {
+        read_fallible_transaction(
+            events,
+            include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
+        )
+        .await
+    }
+
+    async fn read_fallible_transaction(
+        events: Vec<u8>,
+        transaction: &[u8],
+    ) -> anyhow::Result<Option<BlockEmissions>> {
+        let metadata = subxt::Metadata::decode_all(
+            &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
+        )?;
+        let server = ServerBuilder::default().build("127.0.0.1:0").await?;
+        let mut config = http_config(server.local_addr()?);
+        config.rpc.retry = attempts(0);
+        let transport = connect_http(&config)?;
+        // The header and extrinsic wrappers are synthetic, encoded against captured
+        // metadata. Most cases use unchanged captured transaction/status bytes;
+        // variants explicitly alter them. This is not an inclusion proof.
+        let client = OnlineClient::<SubstrateConfig>::from_rpc_client_with(
+            H256([0x11; 32]),
+            subxt::client::RuntimeVersion {
+                spec_version: 1,
+                transaction_version: 1,
+            },
+            metadata,
+            transport.clone(),
+        )?;
+        let filler = client.tx().create_unsigned(&subxt::dynamic::tx(
+            "System",
+            "remark",
+            vec![subxt::dynamic::Value::from_bytes([])],
+        ))?;
+        let candidate = client.tx().create_unsigned(&subxt::dynamic::tx(
+            "Midnight",
+            "send_mn_transaction",
+            vec![subxt::dynamic::Value::from_bytes(transaction)],
+        ))?;
+        // Preserve the captured candidate's extrinsic index, including preceding
+        // unrelated calls, so status association is exercised by Subxt itself.
+        let mut body = vec![format!("0x{}", hex::encode(filler.encoded())); 4];
+        body.push(format!("0x{}", hex::encode(candidate.encoded())));
+        let header = json!({
+            "parentHash": hash_of_byte(0x42),
+            "number": "0x1b0",
+            "stateRoot": hash_of_byte(0x44),
+            "extrinsicsRoot": hash_of_byte(0x45),
+            "digest": { "logs": [] }
+        });
+        let mut module = RpcModule::new(());
+        let response_header = header.clone();
+        module.register_method("chain_getHeader", move |params, _, _| {
+            assert_eq!(params.parse::<Vec<String>>().unwrap(), [hash_of_byte(0x43)]);
+            response_header.clone()
+        })?;
+        module.register_method("chain_getBlock", move |params, _, _| {
+            assert_eq!(params.parse::<Vec<String>>().unwrap(), [hash_of_byte(0x43)]);
+            json!({ "block": { "header": header, "extrinsics": body }, "justifications": null })
+        })?;
+        let events_key = client.storage().address_bytes(&subxt::dynamic::storage(
+            "System",
+            "Events",
+            Vec::<subxt::dynamic::Value>::new(),
+        ))?;
+        module.register_method("state_getStorage", move |params, _, _| {
+            assert_eq!(
+                params.parse::<Vec<String>>().unwrap(),
+                [
+                    format!("0x{}", hex::encode(&events_key)),
+                    hash_of_byte(0x43)
+                ]
+            );
+            format!("0x{}", hex::encode(&events))
+        })?;
+        let handle = server.start(module);
+        let rpc = MidnightRpc {
+            client,
+            reads: Reads::new(transport, config.rpc.request_timeout, config.rpc.retry),
+        };
+        let block = BlockRef {
+            number: 432,
+            hash: hash_of_byte(0x43),
+            parent_hash: hash_of_byte(0x42),
+        };
+        let singleton = crate::test_utils::hex_32(
+            "4daa9701226222a9db302dfb6f347f48c947278a4dc93812a79494f4086a0172",
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            rpc.block_emissions(&block, &singleton),
+        )
+        .await;
+        handle.stop()?;
+        handle.stopped().await;
+        result.context("block reader timed out")?
+    }
+
+    #[tokio::test]
+    async fn block_reader_extracts_captured_applied_fallible_notification() {
+        let events = include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec();
+        let block = read_fallible_capture(events.clone())
+            .await
+            .expect("read captured fallible transaction")
+            .expect("block contains a singleton candidate");
+        assert_eq!(block.proof_seed.reported_block_number, 432);
+        assert_eq!(block.proof_seed.reported_block_hash, [0x43; 32]);
+        assert_eq!(block.proof_seed.scale_body.len(), 5);
+        assert_eq!(block.proof_seed.scale_system_events, events);
+        assert_eq!(block.candidates.len(), 1);
+        let candidate = &block.candidates[0];
+        assert_eq!(candidate.extrinsic_index, 4);
+        assert_eq!(
+            candidate.ledger_tx_hash,
+            crate::test_utils::hex_32(
+                "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d"
+            )
+        );
+        assert_eq!(candidate.calls.len(), 1);
+        let call = &candidate.calls[0];
+        assert_eq!(call.call_index, 1);
+        assert_eq!(call.physical_segment, 49592);
+        assert_eq!(call.phase, crate::emissions::TranscriptPhase::Fallible);
+        assert_eq!(call.emissions.len(), 1);
+        assert_eq!(
+            call.emissions[0].kind,
+            crate::emissions::EmissionKind::SignBidirectional
+        );
+        assert_eq!(
+            call.emissions[0].payload[1..33],
+            crate::test_utils::hex_32(
+                "ee3385dda706877d30e802a0df57c228310016889104b8fb361c830a58d1e500"
+            )
+        );
+    }
+
+    fn captured_applied_status_record() -> Vec<u8> {
+        captured_status_events(
+            include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
+            4,
+        )
+        .iter()
+        .map(Result::unwrap)
+        .find(|event| event.as_event::<TxApplied>().unwrap().is_some())
+        .expect("captured applied status")
+        .bytes()
+        .to_vec()
+    }
+
+    #[tokio::test]
+    async fn block_reader_extracts_fallible_notification_with_zero_noop() {
+        use midnight_ledger_v9::structure::ContractAction;
+        use midnight_onchain_runtime::{
+            context::QueryContext,
+            cost_model::INITIAL_COST_MODEL,
+            ops::Op,
+            state::{ChargedState, StateValue},
+        };
+        use midnight_storage::{arena::Sp, storage::Array};
+
+        let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
+        let tx: DecodedTransaction =
+            midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
+        let (segment, original) = tx.calls().nth(1).unwrap();
+        let context = QueryContext::new(
+            ChargedState::new(StateValue::Array(Array::new())),
+            original.address,
+        );
+        let mut transcript = original.fallible_transcript.as_deref().unwrap().clone();
+        let before = context
+            .run_transcript(&transcript, &INITIAL_COST_MODEL)
+            .unwrap();
+        let mut program = Vec::from(&transcript.program);
+        program.push(Op::Noop { n: 0 });
+        transcript.program = program.into();
+        let after = context
+            .run_transcript(&transcript, &INITIAL_COST_MODEL)
+            .expect("zero noop executes within the original declared gas");
+        assert_eq!(before.events, after.events);
+        assert_eq!(before.context.effects, after.context.effects);
+
+        let DecodedTransaction::Standard(mut tx) = tx else {
+            panic!("standard captured transaction");
+        };
+        let mut intent = (*tx.intents.get(&segment).unwrap()).clone();
+        let mut modified = original.clone();
+        modified.fallible_transcript = Some(Sp::new(transcript));
+        let binding = intent.binding_commitment.clone().into();
+        assert_eq!(
+            original.public_inputs(binding),
+            modified.public_inputs(binding),
+            "fallible Noop(0) leaves the existing contract proof inputs unchanged"
+        );
+        let mut actions = Vec::from(&intent.actions);
+        let action = actions
+            .iter_mut()
+            .find(|action| matches!(action, ContractAction::Call(call) if call.address == original.address))
+            .unwrap();
+        *action = ContractAction::Call(Sp::new(modified));
+        intent.actions = actions.into();
+        tx.intents = tx.intents.insert(segment, intent);
+        let tx = DecodedTransaction::Standard(tx);
+        let mut bytes = Vec::new();
+        midnight_serialize::tagged_serialize(&tx, &mut bytes).unwrap();
+        let hash = tx.transaction_hash().0 .0;
+        let mut applied = captured_applied_status_record();
+        assert_eq!(&applied[..7], &[0, 4, 0, 0, 0, 5, 2]);
+        applied[7..39].copy_from_slice(&hash);
+
+        // This reader fixture does not reseal the outer intent or pay changed fees.
+        // Its matching status is synthetic; the assertions above establish the
+        // contract-proof inputs and VM behavior, not acceptance by a live node.
+        let block = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
+            .await
+            .expect("a harmless noop must not hold block processing")
+            .unwrap();
+        assert_eq!(block.candidates.len(), 1);
+        assert_eq!(block.candidates[0].ledger_tx_hash, hash);
+        let calls = &block.candidates[0].calls;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call_index, 1);
+        assert_eq!(calls[0].physical_segment, segment);
+        assert_eq!(calls[0].phase, crate::emissions::TranscriptPhase::Fallible);
+        assert_eq!(calls[0].emissions.len(), 1);
+        assert_eq!(
+            calls[0].emissions[0].kind,
+            crate::emissions::EmissionKind::SignBidirectional
+        );
+        assert_eq!(
+            calls[0].emissions[0].payload[1..33],
+            crate::test_utils::hex_32(
+                "ee3385dda706877d30e802a0df57c228310016889104b8fb361c830a58d1e500"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn block_reader_extracts_fallible_notification_with_checkpoints() {
+        use midnight_ledger_v9::structure::ContractAction;
+        use midnight_onchain_runtime::ops::Op;
+        use midnight_storage::arena::Sp;
+
+        let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
+        let tx: DecodedTransaction =
+            midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
+        let (segment, mut call) = tx.calls().nth(1).unwrap();
+        let singleton = call.address.0 .0;
+        let expected = emissions_in(&tx, &singleton).unwrap();
+        let mut transcript = call.fallible_transcript.as_deref().unwrap().clone();
+        let original = Vec::from(&transcript.program);
+        assert!(matches!(
+            original.as_slice(),
+            [Op::Push { storage: false, .. }, Op::Log]
+        ));
+        transcript.program = vec![
+            Op::Ckpt,
+            original[0].clone(),
+            Op::Ckpt,
+            Op::Noop { n: 0 },
+            Op::Ckpt,
+            original[1].clone(),
+            Op::Ckpt,
+        ]
+        .into();
+        call.fallible_transcript = Some(Sp::new(transcript));
+        let DecodedTransaction::Standard(mut tx) = tx else {
+            panic!("standard captured transaction");
+        };
+        let mut intent = (*tx.intents.get(&segment).unwrap()).clone();
+        let mut actions = Vec::from(&intent.actions);
+        let action = actions
+            .iter_mut()
+            .find(|action| matches!(action, ContractAction::Call(call) if call.address.0 .0 == singleton))
+            .unwrap();
+        *action = ContractAction::Call(Sp::new(call));
+        intent.actions = actions.into();
+        tx.intents = tx.intents.insert(segment, intent);
+        let tx = DecodedTransaction::Standard(tx);
+        let mut bytes = Vec::new();
+        midnight_serialize::tagged_serialize(&tx, &mut bytes).unwrap();
+        let hash = tx.transaction_hash().0 .0;
+        let mut applied = captured_applied_status_record();
+        applied[7..39].copy_from_slice(&hash);
+
+        // Modified program and matching status are synthetic. This exercises the
+        // production reader, not proof validity, gas admission or node acceptance.
+        let block = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
+            .await
+            .expect("checkpoints must not hide the captured event")
+            .unwrap();
+        assert_eq!(block.candidates.len(), 1);
+        assert_eq!(block.candidates[0].ledger_tx_hash, hash);
+        assert_eq!(block.candidates[0].calls, expected);
+    }
+
+    #[tokio::test]
+    async fn block_reader_skips_partial_success_and_other_extrinsics_statuses() {
+        let applied = captured_applied_status_record();
+        assert_eq!(&applied[..7], &[0, 4, 0, 0, 0, 5, 2]);
+        let mut partial = applied.clone();
+        partial[6] = 7; // TxPartialSuccess in the captured metadata.
+        let mut other_extrinsic = applied;
+        other_extrinsic[1..5].copy_from_slice(&0u32.to_le_bytes());
+        for records in [vec![partial.clone()], vec![other_extrinsic, partial]] {
+            let block = read_fallible_capture(encode_status_records(&records))
+                .await
+                .expect("unsupported outcome is skipped")
+                .expect("candidate is present in the block body");
+            assert!(block.candidates.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn block_reader_holds_when_applied_hash_does_not_match_transaction() {
+        let mut applied = captured_applied_status_record();
+        assert_eq!(&applied[..7], &[0, 4, 0, 0, 0, 5, 2]);
+        applied[7] ^= 1; // First byte of TxAppliedDetails.tx_hash.
+        let err = read_fallible_capture(encode_status_records(&[applied]))
+            .await
+            .expect_err("a different transaction's status must hold the block");
+        let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
+        assert_eq!(hold.height, 432);
+        assert_eq!(hold.reason, "singleton-tx-undecodable");
+        assert!(format!("{:#}", hold.cause).contains("hash does not match"));
     }
 
     fn capture_output_dir(value: &str) -> anyhow::Result<PathBuf> {
