@@ -169,6 +169,7 @@ async fn advance_bidirectional_to_execution(
 ) -> anyhow::Result<()> {
     let sign_id = entry.sign_id();
     let source_chain = entry.chain();
+    let leg_kind = entry.request().request_kind();
     let event = entry.sign_bidirectional_event();
 
     // Admission validates the same derivations, but entries can enter the backlog
@@ -201,7 +202,11 @@ async fn advance_bidirectional_to_execution(
     tracing::info!(?sign_id, "advance bidirectional tx to execution successful");
     // This leg is done, but its task keeps running until told otherwise, and it
     // holds the sign id that the second leg reuses.
-    ctx.try_enqueue(SignCommand::LegCompleted(sign_id)).await?;
+    ctx.try_enqueue(SignCommand::LegCompleted {
+        sign_id,
+        kind: leg_kind,
+    })
+    .await?;
 
     Ok(())
 }

@@ -781,7 +781,10 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         .try_recv()
         .expect("leg completion should be enqueued")
     {
-        SignCommand::LegCompleted(id) => assert_eq!(id, sign_id),
+        SignCommand::LegCompleted { sign_id: id, kind } => {
+            assert_eq!(id, sign_id);
+            assert_eq!(kind, RequestKind::SignBidirectional);
+        }
         other => panic!("unexpected sign command: {other:?}"),
     }
 
