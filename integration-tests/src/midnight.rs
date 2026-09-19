@@ -265,8 +265,8 @@ struct MidnightDriver {
 
 impl MidnightDriver {
     async fn spawn(artifact_dir: &Path) -> anyhow::Result<Self> {
-        let source =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/midnight-vault/driver.ts");
+        let package_dir = publisher_package_dir()?;
+        let source = package_dir.join("devtools/real-stack/driver.ts");
         anyhow::ensure!(
             source.is_file(),
             "Midnight driver {} is missing",
@@ -276,11 +276,7 @@ impl MidnightDriver {
         let mut child = Command::new(node_executable()?)
             .args(["--import", "tsx"])
             .arg(&source)
-            .current_dir(
-                source
-                    .parent()
-                    .context("Midnight driver has no parent directory")?,
-            )
+            .current_dir(&package_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr))

@@ -159,6 +159,10 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
     );
     let fork_url =
         std::env::var("MIDNIGHT_VAULT_FORK_URL").context("MIDNIGHT_VAULT_FORK_URL is required")?;
+    anyhow::ensure!(
+        !fork_url.trim().is_empty(),
+        "MIDNIGHT_VAULT_FORK_URL must provide archive access to the pinned Sepolia block"
+    );
     let fork_block = std::env::var("MIDNIGHT_VAULT_FORK_BLOCK")
         .context("MIDNIGHT_VAULT_FORK_BLOCK is required")?
         .parse::<u64>()

@@ -107,7 +107,7 @@ build target="" helios="":
     elif [ "{{target}}" = "contract" ]; then \
       ./build-contract.sh && mkdir -p target/wasm32-unknown-unknown/release && cp target/near/mpc_contract/mpc_contract.wasm target/wasm32-unknown-unknown/release/mpc_contract.wasm; \
     elif [ "{{target}}" = "midnight" ]; then \
-      (cd chain-signatures/midnight-publisher-ts && npm ci && npm run build) && (cd integration-tests/fixtures/midnight-vault && npm ci && npm run compile && npm run typecheck && npm run lint && npm run format:check && npm test); \
+      cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-vault && npm run typecheck:real-stack; \
     elif [ "{{target}}" = "tests" ]; then \
       cargo build -p integration-tests --tests{{ if helios != "" { " --features helios" } else { "" } }}; \
     elif [ "{{target}}" = "compat" ]; then \

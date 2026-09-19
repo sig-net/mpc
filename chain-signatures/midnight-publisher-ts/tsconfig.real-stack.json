@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["devtools/real-stack/**/*.ts"],
+  "exclude": []
+}

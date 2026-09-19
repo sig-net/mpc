@@ -1,23 +1,19 @@
 import {
   deriveAccountKeys,
   deriveWalletAddresses,
-  type FacadeState,
   GENESIS_MINT_WALLET_SEED,
   isLocalStandaloneNetwork,
-  type MidnightNodeConfig,
   registerNightForDustGeneration,
   transferNight,
   waitForSpendableDust,
   withSyncedWalletFacade,
+  type FacadeState,
+  type MidnightNodeConfig,
 } from "@sig-net/midnight-contract-deploy";
 
-/** Local standalone deployer seed. */
 export const DEPLOYER_SEED = "02".repeat(32);
-/** Local standalone vault user seed. */
 export const USER_SEED = "03".repeat(32);
-/** Local standalone MPC publisher seed. */
 export const PUBLISHER_SEED = "04".repeat(32);
-const diagnostics = console.error;
 
 // `assertRootFunded` returns as soon as root's spendable DUST is positive, but a
 // transfer's fee may exceed that first sliver until a few more blocks of DUST
@@ -39,18 +35,12 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 // root facade re-syncs from genesis once (that re-sync dominates wall time),
 // funds every role wallet sequentially from that live facade, and the
 // independent child verifications run concurrently afterwards.
-/**
- * Fund and register the three local role wallets from the standalone genesis wallet.
- *
- * @param config - Endpoints of the owned standalone Midnight stack.
- * @throws If funding, synchronization or DUST registration fails.
- */
 export async function fundRoles(config: MidnightNodeConfig): Promise<void> {
   const networkId = config.networkId;
   const rootKeys = deriveAccountKeys(GENESIS_MINT_WALLET_SEED, networkId);
   const roles = [
     ["deployer", DEPLOYER_SEED],
-    ["invoker", USER_SEED],
+    ["user", USER_SEED],
     ["publisher", PUBLISHER_SEED],
   ] as const;
 
@@ -68,7 +58,7 @@ export async function fundRoles(config: MidnightNodeConfig): Promise<void> {
     const amount = totalNight(state) / 5n;
     if (amount === 0n) throw new Error("local genesis wallet cannot fund role wallets");
     await registerNightForDustGeneration(rootFacade, rootKeys, state);
-    if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade, 1n);
+    if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade);
 
     // Sequential: every transfer spends root UTXOs selected from `state`.
     for (const [name, seed] of roles) {
@@ -80,8 +70,8 @@ export async function fundRoles(config: MidnightNodeConfig): Promise<void> {
           break;
         } catch (error) {
           if (attempt >= 11 || !isDustBalancingShortfall(error)) throw error;
-          diagnostics(
-            `root DUST is not yet enough to cover the ${name} transfer; retrying (attempt ${String(attempt + 1)})`,
+          console.error(
+            `root DUST is not yet enough to cover the ${name} transfer; retrying (attempt ${attempt + 1})`,
           );
           await sleep(5_000);
           state = await rootFacade.waitForSyncedState();
@@ -90,7 +80,7 @@ export async function fundRoles(config: MidnightNodeConfig): Promise<void> {
       // Let the transfer block land before selecting UTXOs for the next one.
       await sleep(3_000);
       state = await rootFacade.waitForSyncedState();
-      diagnostics(`funded ${name} wallet in ${String(Date.now() - startedAt)}ms`);
+      console.error(`funded ${name} wallet in ${Date.now() - startedAt}ms`);
     }
   });
 
@@ -109,9 +99,9 @@ export async function fundRoles(config: MidnightNodeConfig): Promise<void> {
           throw new Error(`${name} wallet shows no NIGHT after funding from root`);
         }
         await registerNightForDustGeneration(facade, keys, state);
-        if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade, 1n);
+        if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade);
       });
-      diagnostics(`verified ${name} wallet in ${String(Date.now() - startedAt)}ms`);
+      console.error(`verified ${name} wallet in ${Date.now() - startedAt}ms`);
     }),
   );
 }
