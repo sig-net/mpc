@@ -323,15 +323,14 @@ impl SignatureSpawner {
         }
     }
 
-    /// A bidirectional leg's response is on chain: drop its task so the next
-    /// leg, which reuses this sign id, is not skipped as a duplicate.
+    /// A bidirectional leg responded: drop its task, keeping the sign id live
+    /// for the next leg, which reuses it.
     fn handle_leg_completed(&mut self, sign_id: SignId, kind: RequestKind) {
         let Some(tracked) = self.requests.get(&sign_id) else {
             return;
         };
-        // The next leg may already be running: this completion comes from the
-        // source chain's stream and that leg's request from the target chain's,
-        // so the two can arrive out of order.
+        // This completion and the next leg's request come from different
+        // chains' streams, so they can arrive out of order.
         let tracked_kind = tracked.entry.request().request_kind();
         if tracked_kind != kind {
             tracing::info!(
@@ -433,10 +432,9 @@ impl SignatureSpawner {
                 // Propose arriving before the indexer notifies us), and rather than
                 // the task map, which is empty while requests are held for governance.
                 //
-                // A bidirectional request's second leg carries the same sign id as
-                // its first, so a change of kind is the next leg superseding the
-                // one we track, not a duplicate. Skipping it would strand the round
-                // trip whenever the first leg's task outlives its response.
+                // A bidirectional request's second leg carries its first leg's
+                // sign id, so a change of kind is the next leg superseding the
+                // tracked one, not a duplicate.
                 if let Some(tracked) = self.requests.get(&sign_id) {
                     let tracked_kind = tracked.entry.request().request_kind();
                     let incoming_kind = entry.request().request_kind();
@@ -724,9 +722,8 @@ mod tests {
         assert!(carried.load(Ordering::Relaxed) >= 7);
     }
 
-    /// A bidirectional request's second leg reuses the first leg's sign id. If
-    /// the first leg's task is still tracked when it arrives, the duplicate
-    /// guard drops it and the round trip never finishes.
+    /// The second leg reuses its first leg's sign id, so retiring the first
+    /// must leave that id admissible.
     #[tokio::test]
     async fn test_leg_completed_admits_the_next_leg() {
         let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
@@ -799,9 +796,8 @@ mod tests {
         assert!(spawner.test_tasks_contains(sign_id));
     }
 
-    /// The second leg reuses its first leg's sign id, so the duplicate guard has
-    /// to admit it even while the first leg's task is still tracked; a request of
-    /// the same kind stays a duplicate.
+    /// The duplicate guard admits a next leg over the leg it supersedes, while
+    /// a request of the same kind stays a duplicate.
     #[tokio::test]
     async fn test_next_leg_supersedes_tracked_request() {
         let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
@@ -879,8 +875,8 @@ mod tests {
         assert!(!spawner.test_dead_ids_contains(&sign_id));
     }
 
-    /// During catchup the request is held back while the completion is not, so
-    /// a completion can arrive for a sign id this node does not track.
+    /// A completion can name a sign id this node does not track: catchup holds
+    /// back requests but not stop events.
     #[tokio::test]
     async fn test_leg_completion_for_an_untracked_id_is_a_no_op() {
         let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
@@ -943,9 +939,8 @@ mod tests {
         assert!(spawner.test_tasks_contains(sign_id));
     }
 
-    /// The first leg's completion and the second leg's request travel from
-    /// different chains' streams, so a completion can land after the leg it
-    /// would retire has already been replaced.
+    /// Completions and requests travel from different chains' streams, so one
+    /// can land after the leg it would retire has been replaced.
     #[tokio::test]
     async fn test_late_leg_completion_spares_the_running_leg() {
         let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
