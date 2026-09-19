@@ -37,6 +37,12 @@ The three `fallible-*.mn` fixtures are unchanged proven transaction bytes extrac
 
 All three events have native call index 1, fallible phase, emission index 0, and kind `SignBidirectionalEvent`. The corresponding vault entrypoints are `startDeposit`, `startWithdraw`, and `startSupply`.
 
-`fallible-block-432-metadata.scale` and `fallible-block-432-events.scale` are the captured node's raw `state_getMetadata` and `System.Events` storage bytes for block 432. They allow the reader tests to decode the actual `TxApplied` association at extrinsic 4. Tests that replace the terminal event with `TxPartialSuccess`, `TxDiscarded`, or another hash are explicitly synthetic status-selection cases; they are not claimed to be accepted chain transactions.
+`fallible-block-432-metadata.scale` and `fallible-block-432-events.scale` are the captured node's raw `state_getMetadata` and `System.Events` storage bytes for block 432. They allow the reader tests to decode the actual `TxApplied` association at extrinsic 4. Tests that substitute `TxPartialSuccess` or change the status event's transaction hash use synthetic status records; they do not demonstrate node acceptance of those combinations.
+
+The `Noop(0)` regression test appends a no-op to the captured singleton's fallible transcript and updates the synthetic `TxApplied` hash. It verifies that execution within the original gas limit produces the same events and effects, and that the contract proof's public inputs remain unchanged.
+
+The checkpoint regression test inserts `Ckpt` markers before, between and after the captured event instructions, then updates the synthetic `TxApplied` hash. It verifies that the reader recovers the same event and call location. It does not assert that the modified program preserves proof inputs or satisfies the original gas limit.
+
+Both tests exercise the production reader with modified copies of the captured transaction. They do not reseal the intent, pay changed fees or establish node acceptance. The checked-in capture files remain unchanged.
 
 To recapture, run the real vault integration suite, record the node block hash, block body, metadata and `System.Events` at the selected hash, decode `Midnight.send_mn_transaction` using that metadata, and save the argument bytes without reserialization. Confirm the node event status, ledger transaction hash, singleton address, native call ordinal, physical segment and payload against the same capture. These files contain neither GRANDPA finality proofs nor storage read proofs.

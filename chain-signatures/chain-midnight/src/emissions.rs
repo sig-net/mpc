@@ -68,20 +68,22 @@ fn log_items<P: ProofKind<DefaultDB>>(
     transcript: &Transcript<DefaultDB>,
 ) -> anyhow::Result<Vec<VersionedLogItem<DefaultDB>>> {
     let program = Vec::from(&transcript.program);
-    // A leading checkpoint marks a phase boundary and only charges gas in the VM.
-    // The remaining singleton program emits literal logs without reading state or
-    // call context. Reject other programs: empty-state replay is valid only here.
-    let log_program = match program.as_slice() {
-        [Op::Ckpt, rest @ ..] => rest,
-        rest => rest,
-    };
+    // Live ingestion establishes TxApplied first; transaction normalization is
+    // the ledger's responsibility. Only constrain what we can replay correctly.
+    // Noops and checkpoints only consume gas during VM execution; they cannot
+    // observe or change the stack, state, effects or logs. Ignore them for shape
+    // validation, but replay the original program, preserving its gas charges.
+    let log_program = program
+        .iter()
+        .filter(|op| !matches!(op, Op::Noop { .. } | Op::Ckpt))
+        .collect::<Vec<_>>();
     let (pairs, remainder) = log_program.as_chunks::<2>();
     anyhow::ensure!(
         remainder.is_empty()
-            && pairs.iter().all(|pair| matches!(
-                pair, [Op::Push { storage: false, .. }, Op::Log]
-            )),
-        "unsupported-singleton-transcript: expected optional leading Ckpt and literal non-storage Push/Log pairs"
+            && pairs
+                .iter()
+                .all(|pair| matches!(pair, [Op::Push { storage: false, .. }, Op::Log])),
+        "unsupported-singleton-transcript: expected literal non-storage Push/Log pairs with Noops and checkpoints"
     );
     anyhow::ensure!(
         transcript.effects == Effects::default(),
@@ -617,6 +619,103 @@ mod tests {
     }
 
     #[test]
+    fn decodes_noops_without_revalidating_normalization_in_either_phase() {
+        let [push, log]: [TestOp; 2] = emit_ops(SIGN_BIDIRECTIONAL_EVENT, GUARANTEED)
+            .try_into()
+            .unwrap();
+        for checkpoint in [false, true] {
+            let mut program = vec![];
+            if checkpoint {
+                program.push(Op::Ckpt);
+            }
+            program.extend([
+                Op::Noop { n: 0 },
+                // Deliberately adjacent: transaction normalization belongs to the
+                // ledger. This decoder fixture is not a ledger-valid transaction.
+                Op::Noop { n: 2 },
+                push.clone(),
+                Op::Noop { n: 3 },
+                log.clone(),
+                Op::Noop { n: 0 },
+            ]);
+            for fallible in [false, true] {
+                let call = if fallible {
+                    call(SINGLETON, None, Some(program.clone()))
+                } else {
+                    call(SINGLETON, Some(program.clone()), None)
+                };
+                assert_eq!(
+                    emissions_of_call(&call).unwrap(),
+                    vec![Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: GUARANTEED,
+                    }]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decodes_checkpoints_anywhere_in_either_phase() {
+        // These are decoder/VM fixtures, not proven transactions. Full transaction
+        // validity and the actual phase boundary are established before extraction.
+        let first = emit_ops(SIGN_BIDIRECTIONAL_EVENT, GUARANTEED);
+        let second = emit_ops(SIGNATURE_RESPONDED_EVENT, FALLIBLE);
+        let original = [first, second].concat();
+        let expected = vec![
+            Emission {
+                kind: EmissionKind::SignBidirectional,
+                payload: GUARANTEED,
+            },
+            Emission {
+                kind: EmissionKind::SignatureResponded,
+                payload: FALLIBLE,
+            },
+        ];
+        // Before, inside and between Push/Log pairs, and after the last Log.
+        let mut programs: Vec<_> = (0..=original.len())
+            .map(|position| {
+                let mut program = original.clone();
+                program.insert(position, Op::Ckpt);
+                program
+            })
+            .collect();
+        programs.push(vec![
+            Op::Ckpt,
+            Op::Ckpt,
+            original[0].clone(),
+            Op::Noop { n: 0 },
+            Op::Ckpt,
+            original[1].clone(),
+            Op::Ckpt,
+            original[2].clone(),
+            Op::Ckpt,
+            Op::Noop { n: 2 },
+            original[3].clone(),
+            Op::Ckpt,
+        ]);
+        for program in programs {
+            for fallible in [false, true] {
+                let call = if fallible {
+                    call(SINGLETON, None, Some(program.clone()))
+                } else {
+                    call(SINGLETON, Some(program.clone()), None)
+                };
+                assert_eq!(emissions_of_call(&call).unwrap(), expected);
+            }
+        }
+        for fallible in [false, true] {
+            let program = vec![Op::Ckpt, Op::Noop { n: 0 }, Op::Ckpt];
+            let call = if fallible {
+                call(SINGLETON, None, Some(program))
+            } else {
+                call(SINGLETON, Some(program), None)
+            };
+            assert!(emissions_of_call(&call).unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn rejects_context_dependent_programs_in_either_phase() {
         let good = emit_ops(SIGN_BIDIRECTIONAL_EVENT, GUARANTEED);
         let mut storage_push = good.clone();
@@ -625,18 +724,12 @@ mod tests {
         }
         for program in [
             vec![Op::Root, Op::Log],
-            vec![Op::Ckpt, Op::Ckpt],
+            vec![Op::Ckpt, Op::Root, Op::Ckpt, Op::Log],
             vec![Op::Log],
             storage_push,
             {
                 let mut ops = good.clone();
                 ops.push(Op::Pop);
-                ops
-            },
-            {
-                let mut ops = good.clone();
-                ops.push(Op::Noop { n: 0 });
-                ops.push(Op::Noop { n: 0 });
                 ops
             },
         ] {

@@ -22,9 +22,13 @@ The process memoizes one wallet facade, including while it is starting. A single
 
 ## Supported event transactions
 
-The MPC reader accepts events only from finalized, fully successful `TxApplied` transactions whose decoded transaction hash matches the status event. It decodes both guaranteed and fallible transcripts of calls to the configured Signet singleton, processing all guaranteed phases before fallible phases in ledger execution order. Partial-success transactions and other candidates without `TxApplied` are logged and skipped; malformed, duplicate or conflicting statuses hold block processing.
+The MPC reader processes events from finalized transactions with one unambiguous `TxApplied` (full success) status and a matching transaction hash. It reads both guaranteed and fallible transcripts of calls to the configured Signet singleton, processing all guaranteed phases before fallible phases in ledger execution order.
 
-Supported singleton transcripts contain only an optional leading `Ckpt` followed by literal, non-storage `Push`/`Log` pairs, with empty declared effects and supported Signet event schemas. Malformed or unsupported singleton transcripts in fully applied candidate transactions hold block processing. Integrations do not need to enforce `{ tag: "guaranteedOnly" }` or reject `partitionedTranscript[1]` solely because a fallible transcript is present; both phases must satisfy the supported transcript and event schemas.
+A `TxPartialSuccess` result causes the reader to skip every event from that transaction, including guaranteed events and events from successful fallible segments. This does not undo any effects committed by Midnight. Other candidates without `TxApplied` are also logged and skipped. Malformed status data, duplicate `TxApplied` or `TxPartialSuccess` events, conflicting statuses, and transaction hash mismatches stop processing at that block.
+
+Supported singleton programs consist of literal, non-storage `Push`/`Log` pairs: `Push` places the encoded event on the execution stack, and `Log` emits it. `Noop` (no-op) and `Ckpt` (checkpoint) instructions may appear before, between or after those instructions. During VM execution, they only charge gas and do not change the recovered events. The reader ignores them when checking the instruction pattern, but replays the original program.
+
+The node validates the transaction structure; the reader checks whether it can reconstruct events without the original contract state. Declared effects must be empty, and events must use a supported Signet schema. Unsupported instructions or event schemas stop processing at that block. A fallible transcript alone is not a reason to reject a call: it is supported when the whole transaction succeeds. Caller record and signature validation still apply after decoding.
 
 ## Deadlines and retry policy
 

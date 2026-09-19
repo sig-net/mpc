@@ -155,6 +155,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     match emission.kind {
                         EmissionKind::SignBidirectional => {
                             let notification = decode_notification(&emission.payload);
+                            let request_id = hex::encode(notification.request_id);
                             let indexed_ts = *indexed_ts.get_or_insert_with(current_unix_timestamp);
                             if let Some(request) = self
                                 .process_entry(
@@ -164,9 +165,20 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     block.number,
                                     indexed_ts,
                                 )
-                                .await?
+                                .await
+                                .with_context(|| format!(
+                                    "midnight notification tx_hash={} request_id={request_id} height={} extrinsic_index={} call_index={call_index} segment={physical_segment} phase={phase:?}",
+                                    hex::encode(candidate.ledger_tx_hash), block.number, candidate.extrinsic_index,
+                                ))?
                             {
                                 tracing::info!(
+                                    request_id,
+                                    height = block.number,
+                                    block_hash = %block.hash,
+                                    extrinsic_index = candidate.extrinsic_index,
+                                    call_index,
+                                    physical_segment,
+                                    ?phase,
                                     tx_hash = %hex::encode(candidate.ledger_tx_hash),
                                     sign_id = ?request.id,
                                     "midnight signature requested"
@@ -175,6 +187,19 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     request: Arc::new(request),
                                     block_timestamp: None,
                                 });
+                            } else {
+                                tracing::warn!(
+                                    reason = "notification-not-indexed",
+                                    tx_hash = %hex::encode(candidate.ledger_tx_hash),
+                                    request_id,
+                                    height = block.number,
+                                    block_hash = %block.hash,
+                                    extrinsic_index = candidate.extrinsic_index,
+                                    call_index,
+                                    physical_segment,
+                                    ?phase,
+                                    "midnight notification produced no sign request; see request reason"
+                                );
                             }
                         }
                         EmissionKind::SignatureResponded => {
@@ -321,7 +346,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             Resolved::Found(record) => *record,
             Resolved::Absent => {
                 // Not a fault: the id is absent from the caller's own index.
-                tracing::debug!(
+                tracing::warn!(
                     reason = "request-absent",
                     height,
                     request_id = %hex::encode(rid),
@@ -1211,7 +1236,7 @@ mod tests {
         let recorded = recorder.snapshot();
         let correlations = recorded
             .iter()
-            .filter(|fields| fields.contains_key("tx_hash") || fields.contains_key("sign_id"))
+            .filter(|fields| fields.contains_key("sign_id"))
             .collect::<Vec<_>>();
         assert_eq!(correlations.len(), 2);
         let expected_tx_hash = hex::encode(LEDGER_TX_HASH);
@@ -1223,6 +1248,29 @@ mod tests {
             );
             assert_eq!(fields.get("tx_hash"), Some(&expected_tx_hash));
             assert_eq!(fields.get("sign_id"), Some(&expected_sign_id));
+            assert_eq!(
+                fields.get("request_id"),
+                Some(&format!("{:?}", hex::encode(rid)))
+            );
+            assert_eq!(fields.get("height").map(String::as_str), Some("9"));
+            assert_eq!(fields.get("phase").map(String::as_str), Some("Guaranteed"));
+        }
+        let skipped = recorded
+            .iter()
+            .filter(|fields| {
+                fields.get("reason").map(String::as_str) == Some("\"notification-not-indexed\"")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(skipped.len(), 2);
+        for (fields, request_id) in skipped.into_iter().zip([absent_rid, rid]) {
+            assert_eq!(fields.get("tx_hash"), Some(&expected_tx_hash));
+            assert_eq!(
+                fields.get("request_id"),
+                Some(&format!("{:?}", hex::encode(request_id)))
+            );
+            assert_eq!(fields.get("height").map(String::as_str), Some("9"));
+            assert_eq!(fields.get("call_index").map(String::as_str), Some("1"));
+            assert_eq!(fields.get("phase").map(String::as_str), Some("Guaranteed"));
         }
     }
 

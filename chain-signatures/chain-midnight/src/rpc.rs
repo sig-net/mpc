@@ -369,9 +369,13 @@ impl MidnightRpc {
             let applied = fully_applied_hash(&events)
                 .map_err(|err| BlockHold::new("emission-schema-hold", height, err))?;
             let Some(ledger_tx_hash) = applied else {
+                let partial = events.find_first::<TxPartialSuccess>()?;
                 tracing::warn!(
                     reason = "unsupported-midnight-status",
+                    status = if partial.is_some() { "TxPartialSuccess" } else { "NoTxApplied" },
+                    tx_hash = partial.map(|event| hex::encode(event.0.tx_hash)),
                     height,
+                    block_hash = %block_ref.hash,
                     extrinsic_index = found.details.index(),
                     "midnight transaction skipped: only TxApplied is supported"
                 );
@@ -383,8 +387,9 @@ impl MidnightRpc {
                         "singleton-tx-undecodable",
                         height,
                         err.context(format!(
-                            "candidate extrinsic {} ledger transaction",
-                            found.details.index()
+                            "candidate extrinsic {} ledger transaction {}",
+                            found.details.index(),
+                            hex::encode(ledger_tx_hash)
                         )),
                     )
                 },
@@ -396,8 +401,9 @@ impl MidnightRpc {
                     "emission-schema-hold",
                     height,
                     err.context(format!(
-                        "candidate extrinsic {} singleton emissions",
-                        found.details.index()
+                        "candidate extrinsic {} transaction {} singleton emissions",
+                        found.details.index(),
+                        hex::encode(ledger_tx_hash)
                     )),
                 )
             })?;
@@ -929,6 +935,17 @@ mod tests {
     }
 
     async fn read_fallible_capture(events: Vec<u8>) -> anyhow::Result<Option<BlockEmissions>> {
+        read_fallible_transaction(
+            events,
+            include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
+        )
+        .await
+    }
+
+    async fn read_fallible_transaction(
+        events: Vec<u8>,
+        transaction: &[u8],
+    ) -> anyhow::Result<Option<BlockEmissions>> {
         let metadata = subxt::Metadata::decode_all(
             &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
         )?;
@@ -937,8 +954,8 @@ mod tests {
         config.rpc.retry = attempts(0);
         let transport = connect_http(&config)?;
         // The header and extrinsic wrappers are synthetic, encoded against captured
-        // metadata. The ledger transaction and successful events are captured bytes;
-        // negative cases alter status records explicitly. This is not an inclusion proof.
+        // metadata. Most cases use unchanged captured transaction/status bytes;
+        // variants explicitly alter them. This is not an inclusion proof.
         let client = OnlineClient::<SubstrateConfig>::from_rpc_client_with(
             H256([0x11; 32]),
             subxt::client::RuntimeVersion {
@@ -956,9 +973,7 @@ mod tests {
         let candidate = client.tx().create_unsigned(&subxt::dynamic::tx(
             "Midnight",
             "send_mn_transaction",
-            vec![subxt::dynamic::Value::from_bytes(include_bytes!(
-                "../fixtures/fallible-deposit-tx-432.mn"
-            ))],
+            vec![subxt::dynamic::Value::from_bytes(transaction)],
         ))?;
         // Preserve the captured candidate's extrinsic index, including preceding
         // unrelated calls, so status association is exercised by Subxt itself.
@@ -1068,6 +1083,152 @@ mod tests {
         .expect("captured applied status")
         .bytes()
         .to_vec()
+    }
+
+    #[tokio::test]
+    async fn block_reader_extracts_fallible_notification_with_zero_noop() {
+        use midnight_ledger_v9::structure::ContractAction;
+        use midnight_onchain_runtime::{
+            context::QueryContext,
+            cost_model::INITIAL_COST_MODEL,
+            ops::Op,
+            state::{ChargedState, StateValue},
+        };
+        use midnight_storage::{arena::Sp, storage::Array};
+
+        let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
+        let tx: DecodedTransaction =
+            midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
+        let (segment, original) = tx.calls().nth(1).unwrap();
+        let context = QueryContext::new(
+            ChargedState::new(StateValue::Array(Array::new())),
+            original.address,
+        );
+        let mut transcript = original.fallible_transcript.as_deref().unwrap().clone();
+        let before = context
+            .run_transcript(&transcript, &INITIAL_COST_MODEL)
+            .unwrap();
+        let mut program = Vec::from(&transcript.program);
+        program.push(Op::Noop { n: 0 });
+        transcript.program = program.into();
+        let after = context
+            .run_transcript(&transcript, &INITIAL_COST_MODEL)
+            .expect("zero noop executes within the original declared gas");
+        assert_eq!(before.events, after.events);
+        assert_eq!(before.context.effects, after.context.effects);
+
+        let DecodedTransaction::Standard(mut tx) = tx else {
+            panic!("standard captured transaction");
+        };
+        let mut intent = (*tx.intents.get(&segment).unwrap()).clone();
+        let mut modified = original.clone();
+        modified.fallible_transcript = Some(Sp::new(transcript));
+        let binding = intent.binding_commitment.clone().into();
+        assert_eq!(
+            original.public_inputs(binding),
+            modified.public_inputs(binding),
+            "fallible Noop(0) leaves the existing contract proof inputs unchanged"
+        );
+        let mut actions = Vec::from(&intent.actions);
+        let action = actions
+            .iter_mut()
+            .find(|action| matches!(action, ContractAction::Call(call) if call.address == original.address))
+            .unwrap();
+        *action = ContractAction::Call(Sp::new(modified));
+        intent.actions = actions.into();
+        tx.intents = tx.intents.insert(segment, intent);
+        let tx = DecodedTransaction::Standard(tx);
+        let mut bytes = Vec::new();
+        midnight_serialize::tagged_serialize(&tx, &mut bytes).unwrap();
+        let hash = tx.transaction_hash().0 .0;
+        let mut applied = captured_applied_status_record();
+        assert_eq!(&applied[..7], &[0, 4, 0, 0, 0, 5, 2]);
+        applied[7..39].copy_from_slice(&hash);
+
+        // This reader fixture does not reseal the outer intent or pay changed fees.
+        // Its matching status is synthetic; the assertions above establish the
+        // contract-proof inputs and VM behavior, not acceptance by a live node.
+        let block = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
+            .await
+            .expect("a harmless noop must not hold block processing")
+            .unwrap();
+        assert_eq!(block.candidates.len(), 1);
+        assert_eq!(block.candidates[0].ledger_tx_hash, hash);
+        let calls = &block.candidates[0].calls;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call_index, 1);
+        assert_eq!(calls[0].physical_segment, segment);
+        assert_eq!(calls[0].phase, crate::emissions::TranscriptPhase::Fallible);
+        assert_eq!(calls[0].emissions.len(), 1);
+        assert_eq!(
+            calls[0].emissions[0].kind,
+            crate::emissions::EmissionKind::SignBidirectional
+        );
+        assert_eq!(
+            calls[0].emissions[0].payload[1..33],
+            crate::test_utils::hex_32(
+                "ee3385dda706877d30e802a0df57c228310016889104b8fb361c830a58d1e500"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn block_reader_extracts_fallible_notification_with_checkpoints() {
+        use midnight_ledger_v9::structure::ContractAction;
+        use midnight_onchain_runtime::ops::Op;
+        use midnight_storage::arena::Sp;
+
+        let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
+        let tx: DecodedTransaction =
+            midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
+        let (segment, mut call) = tx.calls().nth(1).unwrap();
+        let singleton = call.address.0 .0;
+        let expected = emissions_in(&tx, &singleton).unwrap();
+        let mut transcript = call.fallible_transcript.as_deref().unwrap().clone();
+        let original = Vec::from(&transcript.program);
+        assert!(matches!(
+            original.as_slice(),
+            [Op::Push { storage: false, .. }, Op::Log]
+        ));
+        transcript.program = vec![
+            Op::Ckpt,
+            original[0].clone(),
+            Op::Ckpt,
+            Op::Noop { n: 0 },
+            Op::Ckpt,
+            original[1].clone(),
+            Op::Ckpt,
+        ]
+        .into();
+        call.fallible_transcript = Some(Sp::new(transcript));
+        let DecodedTransaction::Standard(mut tx) = tx else {
+            panic!("standard captured transaction");
+        };
+        let mut intent = (*tx.intents.get(&segment).unwrap()).clone();
+        let mut actions = Vec::from(&intent.actions);
+        let action = actions
+            .iter_mut()
+            .find(|action| matches!(action, ContractAction::Call(call) if call.address.0 .0 == singleton))
+            .unwrap();
+        *action = ContractAction::Call(Sp::new(call));
+        intent.actions = actions.into();
+        tx.intents = tx.intents.insert(segment, intent);
+        let tx = DecodedTransaction::Standard(tx);
+        let mut bytes = Vec::new();
+        midnight_serialize::tagged_serialize(&tx, &mut bytes).unwrap();
+        let hash = tx.transaction_hash().0 .0;
+        let mut applied = captured_applied_status_record();
+        applied[7..39].copy_from_slice(&hash);
+
+        // Modified program and matching status are synthetic. This exercises the
+        // production reader, not proof validity, gas admission or node acceptance.
+        let block = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
+            .await
+            .expect("checkpoints must not hide the captured event")
+            .unwrap();
+        assert_eq!(block.candidates.len(), 1);
+        assert_eq!(block.candidates[0].ledger_tx_hash, hash);
+        assert_eq!(block.candidates[0].calls, expected);
     }
 
     #[tokio::test]
