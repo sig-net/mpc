@@ -8,9 +8,9 @@ use crate::backlog::mock::{
     mock_publishing_with_proposer, mock_sign_request, mock_signature_output, mock_tx,
     pending_execution_status, single_entry_checkpoint, BacklogTestExt,
 };
-use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+use crate::sign_bidirectional::{BidirectionalProgress, ExecutingTx, SignProgress, SignStatus};
 use mpc_chain_integration_core::StateManager;
-use mpc_primitives::{Chain, ChainConfig as _, ExecutionOutcome, SignId, SignKind};
+use mpc_primitives::{BidirectionalTxId, Chain, ChainConfig as _, ExecutionOutcome, SignId, SignKind};
 use std::sync::Arc;
 
 fn digest_hex(hex_str: &str) -> [u8; 32] {
@@ -589,8 +589,9 @@ async fn test_bidirectional_typestate_lifecycle() {
         .is_none());
 
     // 4. Advance to Final Generating
+    let executed = Arc::clone(exec_entry.execution_tx());
     let final_entry = exec_entry
-        .advance(ExecutionOutcome::Success { output: vec![] })
+        .advance(executed, ExecutionOutcome::Success { output: vec![] })
         .await
         .expect("should advance to final");
     assert_eq!(final_entry.request().id, sign_id);
@@ -631,10 +632,10 @@ async fn test_bidirectional_typestate_lifecycle() {
         .advance(cpk1, &cout1, mock_participants(), true)
         .await
         .expect("chained advance to publishing")
-        .advance(tx2)
+        .advance(Arc::clone(&tx2))
         .await
         .expect("chained advance to executing")
-        .advance(ExecutionOutcome::Success { output: vec![] })
+        .advance(tx2, ExecutionOutcome::Success { output: vec![] })
         .await
         .expect("chained advance to final generating");
 
@@ -660,9 +661,12 @@ async fn test_bidirectional_executing_advance_outcomes() {
 
     // Test Success outcome
     let success_entry = entry
-        .advance(ExecutionOutcome::Success {
-            output: vec![0x01, 0x02],
-        })
+        .advance(
+            Arc::new(tx.clone()),
+            ExecutionOutcome::Success {
+                output: vec![0x01, 0x02],
+            },
+        )
         .await
         .expect("advance success");
 
@@ -680,7 +684,7 @@ async fn test_bidirectional_executing_advance_outcomes() {
     let sign_id2 = tx2.sign_id();
     let entry2 = backlog.insert_mock_executing(&tx2).await;
     let failed_entry = entry2
-        .advance(ExecutionOutcome::Failed)
+        .advance(Arc::new(tx2.clone()), ExecutionOutcome::Failed)
         .await
         .expect("advance failed");
 
@@ -702,12 +706,12 @@ async fn test_watch_unwatch_and_respond() {
     backlog.insert_mock_executing(&tx).await;
 
     // Unwatch returns the executing SignEntry (automatically registered on advance to executing)
-    let executing_entry = backlog
+    let (executing_entry, executed) = backlog
         .unwatch_execution(tx.target_chain, &tx.id)
         .await
         .expect("watcher present");
     assert_eq!(executing_entry.sign_id(), sign_id);
-    assert_eq!(executing_entry.execution_tx().id, tx.id);
+    assert_eq!(executed.id, tx.id);
 
     // Watch execution on target chain using typed SignEntry
     backlog.watch_execution(&executing_entry).await;
@@ -715,16 +719,16 @@ async fn test_watch_unwatch_and_respond() {
     // Also verify entry.watch_execution() method
     executing_entry.watch_execution().await;
 
-    let executing_entry = backlog
+    let (executing_entry, executed) = backlog
         .unwatch_execution(tx.target_chain, &tx.id)
         .await
         .expect("watcher present");
     assert_eq!(executing_entry.sign_id(), sign_id);
-    assert_eq!(executing_entry.execution_tx().id, tx.id);
+    assert_eq!(executed.id, tx.id);
 
     // Advance executing entry to final response signing
     executing_entry
-        .advance(ExecutionOutcome::Success { output: vec![] })
+        .advance(executed, ExecutionOutcome::Success { output: vec![] })
         .await
         .expect("respond should transition to final generating");
     assert!(backlog
@@ -1018,7 +1022,9 @@ async fn test_advance_rejects_invalid_publish_transition() {
         let mut pending = backlog.pending(&Chain::Solana).write().await;
         let storage_entry = pending.requests.get_mut(&sign_id).unwrap();
         storage_entry.status =
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(Arc::clone(&tx)));
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(ExecutingTx::new(
+                Arc::clone(&tx),
+            )));
     }
 
     // Now the stale handle tries to advance to Publishing
@@ -1057,7 +1063,7 @@ async fn respond_observed_at_survives_the_unwatch_lookup() {
     let tx = mock_bidirectional_tx(SignId::new([71; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
 
-    let entry = backlog
+    let (entry, _) = backlog
         .unwatch_execution(tx.target_chain, &tx.id)
         .await
         .expect("watch must resolve to the executing entry");
@@ -1115,13 +1121,13 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
 
     backlog.regress(&checkpoint).await.unwrap();
 
-    let entry = backlog
+    let (entry, _) = backlog
         .unwatch_execution(retained.target_chain, &retained.id)
         .await
         .expect("matching execution must remain watched");
     assert_eq!(entry.respond_observed_at(), Some(observed_at));
     assert!(entry.awaiting_execution().unwrap() >= std::time::Duration::from_secs(120));
-    let entry = backlog
+    let (entry, _) = backlog
         .unwatch_execution(restored.target_chain, &restored.id)
         .await
         .expect("checkpoint execution must be re-watched");
@@ -1130,11 +1136,54 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
         .unwatch_execution(stale.target_chain, &stale.id)
         .await
         .is_none());
-    let entry = backlog
+    let (entry, _) = backlog
         .unwatch_execution(unrelated.target_chain, &unrelated.id)
         .await
         .expect("other source chain must remain watched");
     assert_eq!(entry.respond_observed_at(), unrelated_observed_at);
+}
+
+/// The candidates of a request signed more than once live in its status, so a
+/// checkpoint carries them and recovery watches every one. Watching only the
+/// first would leave the execution unfindable whenever another signature ran.
+#[tokio::test]
+async fn recovery_rewatches_every_candidate_of_a_request() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::new([91; 32]), Chain::Solana);
+    backlog.insert_mock_executing(&tx).await;
+    let sibling = BidirectionalTxId([42; 32]);
+
+    let entry = backlog
+        .get_by::<Bidirectional<Executing>>(tx.source_chain, &tx.sign_id())
+        .await
+        .expect("the executing entry must exist");
+    assert!(entry.record_sibling(sibling).await.unwrap());
+    assert!(
+        !entry.record_sibling(sibling).await.unwrap(),
+        "a repeated signature is not a new candidate"
+    );
+
+    let checkpoint = backlog
+        .checkpoint(Chain::Solana)
+        .await
+        .expect("checkpoint must snapshot");
+    let recovered = Backlog::new();
+    recovered.recover_by_checkpoint(&checkpoint).await;
+
+    let watched = recovered.get_execution_watchers(tx.target_chain).await;
+    assert!(watched.contains_key(&tx.id));
+    assert!(watched.contains_key(&sibling));
+
+    // Resolving one candidate retires the rest: they share its nonce, so none of
+    // them can be mined afterwards.
+    assert!(recovered
+        .unwatch_execution(tx.target_chain, &sibling)
+        .await
+        .is_some());
+    assert!(recovered
+        .get_execution_watchers(tx.target_chain)
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -1150,7 +1199,7 @@ async fn recovered_executing_entry_has_no_wait_start() {
     let recovered = Backlog::new();
     recovered.recover_by_checkpoint(&checkpoint).await;
 
-    let entry = recovered
+    let (entry, _) = recovered
         .unwatch_execution(tx.target_chain, &tx.id)
         .await
         .expect("recovery must re-register the watch");
@@ -1170,8 +1219,9 @@ async fn advance_carries_the_origin_into_the_final_response() {
     let executing = backlog.insert_mock_executing(&tx).await;
     let origin = executing.request().unix_timestamp_indexed;
 
+    let executed = Arc::clone(executing.execution_tx());
     let entry = executing
-        .advance(ExecutionOutcome::Success { output: vec![] })
+        .advance(executed, ExecutionOutcome::Success { output: vec![] })
         .await
         .expect("advance to final generating");
 

@@ -1,13 +1,13 @@
 use super::{Backlog, BacklogError};
 use crate::respond_bidirectional::CompletedTx;
-use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+use crate::sign_bidirectional::{BidirectionalProgress, ExecutingTx, SignProgress, SignStatus};
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_crypto::{derive_key, reconstruct_signature};
 use mpc_primitives::{
-    BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey,
+    BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey,
     SignBidirectionalEvent, SignId, SignKind, Signature,
 };
 use serde::{Deserialize, Serialize};
@@ -208,7 +208,8 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
-        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing(tx));
+        entry.status =
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(ExecutingTx::new(tx)));
         Ok(())
     }
 
@@ -522,6 +523,30 @@ impl<P> SignEntry<Bidirectional<Initial<P>>> {
 }
 
 impl SignEntry<Bidirectional<Executing>> {
+    /// Record another signature's transaction id on this request and report
+    /// whether it was new. The id belongs in the status, not just in the watcher
+    /// map, so a restart restores every candidate rather than the first one only.
+    pub async fn record_sibling(&self, tx_id: BidirectionalTxId) -> Result<bool, BacklogError> {
+        let mut pending = self.backlog.pending(&self.chain).write().await;
+        let entry = pending
+            .requests
+            .get_mut(&self.request.id)
+            .ok_or(BacklogError::NotFound {
+                chain: self.chain,
+                id: self.request.id,
+            })?;
+        let SignStatus::Bidirectional(BidirectionalProgress::Executing(executing)) =
+            &mut entry.status
+        else {
+            return Err(BacklogError::InvalidPublishTransition);
+        };
+        if executing.tx.id == tx_id || executing.siblings.contains(&tx_id) {
+            return Ok(false);
+        }
+        executing.siblings.push(tx_id);
+        Ok(true)
+    }
+
     pub fn execution_tx(&self) -> &Arc<BidirectionalTx> {
         &self.state.0 .0.tx
     }
@@ -558,8 +583,12 @@ impl SignEntry<Bidirectional<Executing>> {
     /// The response sign request is constructed directly from the entry's execution
     /// transaction and original sign request context, guaranteeing by construction
     /// that the sign ID, chain, and `RespondBidirectional` kind match.
+    /// `executed` is the transaction the outcome belongs to. With several
+    /// signatures it is not always the one the status holds, and the response has
+    /// to name it so every node derives the same follow-up request.
     pub async fn advance(
         self,
+        executed: Arc<BidirectionalTx>,
         outcome: ExecutionOutcome,
     ) -> anyhow::Result<SignEntry<Bidirectional<Final<Generating>>>> {
         let chain_ctx = match &self.request.kind {
@@ -572,11 +601,7 @@ impl SignEntry<Bidirectional<Executing>> {
         // follow-up request stamps itself with "now", so it must be carried.
         let origin_indexed_at = Some(self.request.unix_timestamp_indexed);
 
-        let completed_tx = CompletedTx::new(
-            Arc::clone(self.execution_tx()),
-            chain_ctx,
-            origin_indexed_at,
-        );
+        let completed_tx = CompletedTx::new(executed, chain_ctx, origin_indexed_at);
         let sign_request = match outcome {
             ExecutionOutcome::Success { output } => {
                 completed_tx.create_sign_request_from_serialized_output(output)?
@@ -718,9 +743,9 @@ impl SignState for Bidirectional<Initial<Publishing>> {
 impl SignState for Bidirectional<Executing> {
     fn try_from_status(status: &SignStatus) -> Option<Self> {
         match status {
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(tx)) => Some(Bidirectional(
-                Executing(ExecutionWatch::new(Arc::clone(tx), None)),
-            )),
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(executing)) => Some(
+                Bidirectional(Executing(ExecutionWatch::new(Arc::clone(&executing.tx), None))),
+            ),
             _ => None,
         }
     }

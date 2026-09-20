@@ -6,14 +6,14 @@ use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::is_failed_execution_output;
-use crate::sign_bidirectional::SignBidirectionalEventExt;
+use crate::sign_bidirectional::{sign_and_hash_transaction, SignBidirectionalEventExt};
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    Chain, ExecutionOutcome, IndexedSignRequest, RequestKind, RespondBidirectionalEvent, SignId,
-    SignKind, SignatureRespondedEvent,
+    BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, RequestKind,
+    RespondBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
 };
 use mpc_utils::time::unix_elapsed_checked;
 
@@ -142,13 +142,9 @@ pub(crate) async fn process_respond_event(
         return advance_bidirectional_to_execution(entry, respond_event, root_pk).await;
     }
 
-    if entry.is::<Bidirectional<Executing>>() {
-        tracing::info!(
-            ?sign_id,
-            ?source_chain,
-            "respond event backlog entry is already advanced; treating as processed"
-        );
-        return Ok(());
+    if let Some(entry) = entry.cast::<Bidirectional<Executing>>() {
+        entry.verify_signature(root_pk, &respond_event.signature)?;
+        return watch_further_signature(entry, &respond_event).await;
     }
 
     tracing::info!(
@@ -156,6 +152,46 @@ pub(crate) async fn process_respond_event(
         ?source_chain,
         "respond event is already finalized or pruned; skipping"
     );
+    Ok(())
+}
+
+/// Watch the transaction of a further signature over an executing request: the node
+/// adopts one signature, and an execution is only found by an id it watches.
+async fn watch_further_signature(
+    entry: SignEntry<Bidirectional<Executing>>,
+    respond_event: &SignatureRespondedEvent,
+) -> anyhow::Result<()> {
+    let sign_id = entry.sign_id();
+    let executing = entry.execution_tx();
+    let (signed_tx_hash, _) =
+        sign_and_hash_transaction(&executing.serialized_transaction, respond_event.signature)
+            .with_context(|| format!("signature cannot name a transaction for {sign_id:?}"))?;
+
+    let tx_id = BidirectionalTxId(signed_tx_hash);
+    if tx_id == executing.id {
+        tracing::info!(
+            ?sign_id,
+            "respond event repeats a transaction already watched"
+        );
+        return Ok(());
+    }
+
+    if !entry.record_sibling(tx_id).await? {
+        tracing::info!(?sign_id, ?tx_id, "further signature already recorded");
+        return Ok(());
+    }
+
+    let tx = Arc::new(BidirectionalTx {
+        id: tx_id,
+        ..(**executing).clone()
+    });
+    tracing::info!(
+        ?sign_id,
+        ?tx_id,
+        watched = ?executing.id,
+        "watching a second transaction for this request"
+    );
+    entry.backlog().watch_beside(&executing.id, tx).await;
     Ok(())
 }
 
@@ -276,7 +312,7 @@ pub async fn process_execution_confirmed(
         "received execution confirmation event"
     );
 
-    let Some(entry) = ctx.backlog.unwatch_execution(target_chain, &tx_id).await else {
+    let Some((entry, executed)) = ctx.backlog.unwatch_execution(target_chain, &tx_id).await else {
         tracing::warn!(
             ?tx_id,
             "executing bidirectional entry not found (maybe already processed)"
@@ -301,7 +337,7 @@ pub async fn process_execution_confirmed(
     let execution_failed = matches!(result, ExecutionOutcome::Failed);
 
     let entry = entry
-        .advance(result)
+        .advance(executed, result)
         .await
         .with_context(|| {
             format!(

@@ -37,13 +37,51 @@ impl SignProgress {
     }
 }
 
+/// A request's destination-chain transaction and the ids of any further
+/// signatures issued for it.
+///
+/// Every signature over one request id signs the same bytes, so the candidates
+/// share a sender and a nonce and differ only in hash: at most one of them can
+/// be mined. Recording the others here is what lets a restart watch all of them
+/// and tell the request's own execution from a stranger taking its nonce.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutingTx {
+    /// Flattened so checkpoints written before `siblings` existed still decode.
+    #[serde(flatten)]
+    pub tx: Arc<BidirectionalTx>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub siblings: Vec<BidirectionalTxId>,
+}
+
+impl ExecutingTx {
+    pub fn new(tx: Arc<BidirectionalTx>) -> Self {
+        Self {
+            tx,
+            siblings: Vec::new(),
+        }
+    }
+
+    /// Every transaction that could carry this request's execution: the one the
+    /// status holds plus a copy per further signature.
+    pub fn candidates(&self) -> Vec<Arc<BidirectionalTx>> {
+        std::iter::once(Arc::clone(&self.tx))
+            .chain(self.siblings.iter().map(|id| {
+                Arc::new(BidirectionalTx {
+                    id: *id,
+                    ..(*self.tx).clone()
+                })
+            }))
+            .collect()
+    }
+}
+
 /// Lifecycle stages of a two-phase bidirectional transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BidirectionalProgress {
     /// Phase 1: Signing the initial transaction for the source chain.
     Initial(SignProgress),
     /// Awaiting execution on the target chain.
-    Executing(Arc<BidirectionalTx>),
+    Executing(ExecutingTx),
     /// Phase 2: Signing the completion/respond transaction for the source chain.
     Final {
         respond_request: Arc<IndexedSignRequest>,
@@ -81,7 +119,9 @@ impl SignStatus {
 
     pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
         match self {
-            Self::Bidirectional(BidirectionalProgress::Executing(tx)) => Some(tx),
+            Self::Bidirectional(BidirectionalProgress::Executing(executing)) => {
+                Some(&executing.tx)
+            }
             _ => None,
         }
     }
@@ -530,6 +570,53 @@ mod tests {
         assert!(super::validate_unsigned_transaction(&legacy_tx(boundary - 1)).is_ok());
     }
 
+    /// A checkpoint written before `siblings` existed holds the transaction
+    /// alone, so the flattened field has to decode as empty rather than fail.
+    #[test]
+    fn executing_status_decodes_a_checkpoint_written_without_siblings() {
+        use super::{BidirectionalProgress, ExecutingTx, SignStatus};
+        use crate::backlog::mock::mock_tx;
+        use mpc_primitives::{BidirectionalTx, BidirectionalTxId};
+
+        #[derive(serde::Serialize)]
+        enum LegacyProgress {
+            #[allow(dead_code)]
+            Initial(u8),
+            Executing(Arc<BidirectionalTx>),
+        }
+        #[derive(serde::Serialize)]
+        enum LegacyStatus {
+            #[allow(dead_code)]
+            Sign(u8),
+            Bidirectional(LegacyProgress),
+        }
+
+        let tx = Arc::new(mock_tx(1));
+        let mut legacy = Vec::new();
+        ciborium::into_writer(
+            &LegacyStatus::Bidirectional(LegacyProgress::Executing(Arc::clone(&tx))),
+            &mut legacy,
+        )
+        .unwrap();
+
+        let decoded: SignStatus = ciborium::from_reader(legacy.as_slice()).unwrap();
+        let SignStatus::Bidirectional(BidirectionalProgress::Executing(executing)) = &decoded else {
+            panic!("legacy executing status did not decode as executing");
+        };
+        assert_eq!(executing.tx, tx);
+        assert!(executing.siblings.is_empty());
+
+        let sibling = BidirectionalTxId([7u8; 32]);
+        let status = SignStatus::Bidirectional(BidirectionalProgress::Executing(ExecutingTx {
+            tx,
+            siblings: vec![sibling],
+        }));
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&status, &mut bytes).unwrap();
+        let round_tripped: SignStatus = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(round_tripped, status);
+    }
+
     #[test]
     fn test_checkpoint_consensus_bytes_deterministic_across_publish_states() {
         use super::{BidirectionalProgress, SignProgress, SignStatus};
@@ -555,7 +642,10 @@ mod tests {
         // Post-initial phase: target-chain execution and the final response
         // generation/publish are indistinguishable at the source-chain height.
         let execution_tag =
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(dummy_tx)).consensus_tag();
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(super::ExecutingTx::new(
+                dummy_tx,
+            )))
+            .consensus_tag();
         let gen_bidi_tag = SignStatus::Bidirectional(BidirectionalProgress::Final {
             respond_request: Arc::clone(&dummy_respond_req),
             progress: SignProgress::Generating,

@@ -177,6 +177,55 @@ async fn process_execution_confirmed_success_creates_respond_request() {
 }
 
 #[tokio::test]
+async fn process_execution_confirmed_responds_for_the_transaction_that_executed() {
+    let backlog = Backlog::new();
+    let adopted = test_bidirectional_tx(17, Chain::Solana, Chain::Ethereum);
+    backlog.insert_mock_executing(&adopted).await;
+
+    // A second signature over the same bytes gives the request a second
+    // transaction, watched alongside the one adopted first.
+    let executed = Arc::new(BidirectionalTx {
+        id: BidirectionalTxId([0x5e; 32]),
+        ..adopted.clone()
+    });
+    backlog
+        .watch_beside(&adopted.id, Arc::clone(&executed))
+        .await;
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+    process_execution_confirmed(
+        executed.id,
+        123u64,
+        ExecutionOutcome::Success { output: vec![] },
+        &ctx,
+        adopted.target_chain,
+    )
+    .await
+    .unwrap();
+
+    let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let SignCommand::Request(req) = msg else {
+        panic!("Expected SignCommand::Request");
+    };
+    let mpc_primitives::SignKind::RespondBidirectional(respond) = &req.request().kind else {
+        panic!("Expected RespondBidirectional request");
+    };
+    assert_eq!(
+        respond.tx_id, executed.id,
+        "the response names the transaction that ran, not the one adopted first"
+    );
+    assert_eq!(
+        req.request().args.entropy,
+        executed.id.0,
+        "every node derives the follow-up from what the chain executed"
+    );
+}
+
+#[tokio::test]
 async fn process_execution_confirmed_is_idempotent_after_first_processing() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(7, Chain::Solana, Chain::Ethereum);
@@ -706,12 +755,12 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
     );
 }
 
-#[tokio::test]
-async fn process_respond_event_advances_bidirectional_from_pending_publish() {
-    let backlog = Backlog::new();
-    let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Solana);
+/// A bidirectional request whose serialized transaction is a signable legacy
+/// transaction, so the respond path can derive a transaction id from it.
+fn bidirectional_request(seed: u8) -> (Arc<IndexedSignRequest>, SignId, SignArgs) {
+    let tx = test_bidirectional_tx(seed, Chain::Ethereum, Chain::Solana);
     let sign_id = tx.sign_id();
-    let args = test_sign_args(14);
+    let args = test_sign_args(seed);
 
     let mut rlp_s = rlp::RlpStream::new_list(9);
     rlp_s.append(&0u64);
@@ -723,7 +772,6 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     rlp_s.append(&1u64);
     rlp_s.append(&0u64);
     rlp_s.append(&0u64);
-    let unsigned_rlp = rlp_s.out().to_vec();
 
     let req = Arc::new(IndexedSignRequest::sign_bidirectional(
         sign_id,
@@ -732,7 +780,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         current_unix_timestamp(),
         SignBidirectionalEvent {
             sender: Default::default(),
-            serialized_transaction: unsigned_rlp,
+            serialized_transaction: rlp_s.out().to_vec(),
             dest: tx.dest.clone(),
             caip2_id: tx.caip2_id.clone(),
             key_version: tx.key_version,
@@ -746,6 +794,42 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
             respond_serialization_schema: tx.respond_serialization_schema.clone(),
         },
     ));
+
+    (req, sign_id, args)
+}
+
+/// A second valid signature over the same payload, from a chosen ephemeral
+/// scalar. `generate_signature` is deterministic, so this is the only way to
+/// give one request two transactions.
+fn signature_with_nonce(root_sk: &k256::SecretKey, args: &SignArgs, k: u64) -> Signature {
+    use k256::elliptic_curve::ops::Reduce;
+    use k256::elliptic_curve::point::AffineCoordinates;
+    use k256::{ProjectivePoint, Scalar};
+
+    let d = *mpc_crypto::kdf::derive_secret_key(root_sk, args.epsilon)
+        .to_nonzero_scalar()
+        .as_ref();
+    let mut k = Scalar::from(k);
+    let mut big_r = (ProjectivePoint::GENERATOR * k).to_affine();
+    let r = <Scalar as Reduce<k256::U256>>::reduce_bytes(&big_r.x());
+    let mut s = k.invert().unwrap() * (args.payload + r * d);
+    // Negating the ephemeral scalar keeps r and negates s, which is how the
+    // low-s form is reached without changing the transaction it names.
+    if bool::from(k256::elliptic_curve::scalar::IsHigh::is_high(&s)) {
+        k = -k;
+        big_r = (ProjectivePoint::GENERATOR * k).to_affine();
+        s = -s;
+    }
+    let public_key = mpc_crypto::kdf::derive_key(root_sk.public_key().into(), args.epsilon);
+
+    mpc_crypto::kdf::reconstruct_signature(&public_key, &big_r, &s, args.payload)
+        .expect("a hand-rolled signature should reconstruct")
+}
+
+#[tokio::test]
+async fn process_respond_event_advances_bidirectional_from_pending_publish() {
+    let backlog = Backlog::new();
+    let (req, sign_id, args) = bidirectional_request(14);
     let (pk, output) = mock_signature_output(&req.args);
     backlog
         .insert_bidirectional(req)
@@ -790,6 +874,129 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     let watchers = ctx.backlog.get_execution_watchers(Chain::Solana).await;
     assert_eq!(watchers.len(), 1);
     assert!(watchers.contains_key(&execution_tx_id));
+}
+
+#[tokio::test]
+async fn process_respond_event_watches_every_signature_over_one_request() {
+    let backlog = Backlog::new();
+    let (req, sign_id, args) = bidirectional_request(15);
+    let (pk, output) = mock_signature_output(&req.args);
+    backlog
+        .insert_bidirectional(req)
+        .await
+        .advance(pk, &output, vec![], true)
+        .await
+        .unwrap();
+
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let public_key = root_sk.public_key().into();
+    let account_id: AccountId = "test.near".parse().unwrap();
+    let (_contract_watcher, _tx) =
+        ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+
+    let first = SignatureRespondedEvent {
+        request_id: sign_id.request_id,
+        signature: mpc_crypto::generate_signature(&root_sk, &args),
+        chain: Chain::Ethereum,
+    };
+    process_respond_event(first.clone(), &ctx, public_key)
+        .await
+        .expect("the first signature should advance the entry");
+
+    process_respond_event(first, &ctx, public_key)
+        .await
+        .expect("a repeated signature should be accepted");
+    assert_eq!(
+        ctx.backlog
+            .get_execution_watchers(Chain::Solana)
+            .await
+            .len(),
+        1,
+        "the same signature names the transaction already watched"
+    );
+
+    let second = SignatureRespondedEvent {
+        request_id: sign_id.request_id,
+        signature: signature_with_nonce(&root_sk, &args, 7),
+        chain: Chain::Ethereum,
+    };
+    process_respond_event(second, &ctx, public_key)
+        .await
+        .expect("a second signature should be watched too");
+
+    let watchers = ctx.backlog.get_execution_watchers(Chain::Solana).await;
+    assert_eq!(
+        watchers.len(),
+        2,
+        "a second signature names a second transaction that could execute"
+    );
+    for (watched_id, (watched_sign_id, tx)) in &watchers {
+        assert_eq!(*watched_sign_id, sign_id, "both resolve to one request");
+        assert_eq!(
+            tx.id, *watched_id,
+            "each watch carries its own transaction id"
+        );
+    }
+}
+
+#[tokio::test]
+async fn process_respond_event_does_not_watch_an_invalid_signature() {
+    let backlog = Backlog::new();
+    let (req, sign_id, args) = bidirectional_request(16);
+    let (pk, output) = mock_signature_output(&req.args);
+    backlog
+        .insert_bidirectional(req)
+        .await
+        .advance(pk, &output, vec![], true)
+        .await
+        .unwrap();
+
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let public_key = root_sk.public_key().into();
+    let account_id: AccountId = "test.near".parse().unwrap();
+    let (_contract_watcher, _tx) =
+        ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+
+    let signature = mpc_crypto::generate_signature(&root_sk, &args);
+    process_respond_event(
+        SignatureRespondedEvent {
+            request_id: sign_id.request_id,
+            signature,
+            chain: Chain::Ethereum,
+        },
+        &ctx,
+        public_key,
+    )
+    .await
+    .expect("the first signature should advance the entry");
+
+    // Verification is the only gate on who can add a watcher.
+    let mut invalid = signature;
+    invalid.s += Scalar::ONE;
+    process_respond_event(
+        SignatureRespondedEvent {
+            request_id: sign_id.request_id,
+            signature: invalid,
+            chain: Chain::Ethereum,
+        },
+        &ctx,
+        public_key,
+    )
+    .await
+    .expect_err("an invalid signature must be rejected");
+
+    assert_eq!(
+        ctx.backlog
+            .get_execution_watchers(Chain::Solana)
+            .await
+            .len(),
+        1,
+        "a rejected signature names no transaction to watch"
+    );
 }
 
 #[tokio::test]
@@ -1093,9 +1300,10 @@ async fn publish_failover_fires_once_per_leg() {
     );
 
     // Advance through execution into final response publishing (leg 2)
-    let exec = pub1.advance(Arc::new(tx)).await.unwrap();
+    let executed = Arc::new(tx);
+    let exec = pub1.advance(Arc::clone(&executed)).await.unwrap();
     let fin_gen = exec
-        .advance(ExecutionOutcome::Success { output: vec![] })
+        .advance(executed, ExecutionOutcome::Success { output: vec![] })
         .await
         .unwrap();
     let (pk2, output2) = mock_signature_output(&fin_gen.request().args);
