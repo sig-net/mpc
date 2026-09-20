@@ -175,6 +175,34 @@ $ cd integration-tests
 $ cargo run -- setup-env --nodes 3 --threshold 2
 ```
 
+### How do I keep an MPC running against a Midnight chain?
+
+`setup-env` takes the same prerequisites as the [Midnight real-stack test](#midnight-real-stack-test) (`just build midnight`, then `just setup`) and stays up until Ctrl-C. It prints a `Midnight:` block with the node, indexer and proof server URLs, the central contract address, the MPC root public key, and the URL of the output cache the nodes write `respondBidirectional` outputs to.
+
+To get a self-contained playground, let it start its own Midnight node, indexer and proof server, fund the wallets, and deploy a central contract plus a test caller contract:
+
+```bash
+$ cd integration-tests
+$ cargo run -- setup-env --midnight
+```
+
+To respond on a Midnight stack and central contract you run yourself, pass their coordinates. The funding seed is the hex seed of a wallet on that chain that holds DUST, and it is read from `MPC_MIDNIGHT_FUNDING_SEED` so it stays out of the shell history:
+
+```bash
+$ cd integration-tests
+$ export MPC_MIDNIGHT_FUNDING_SEED CENTRAL_ADDRESS
+$ cargo run -- setup-env \
+    --midnight-node-url http://127.0.0.1:9944 \
+    --midnight-indexer-url http://127.0.0.1:8088/api/v3/graphql \
+    --midnight-indexer-ws-url ws://127.0.0.1:8088/api/v3/graphql/ws \
+    --midnight-proof-server-url http://127.0.0.1:6300 \
+    --midnight-central-address "$CENTRAL_ADDRESS"
+```
+
+The central contract must be built from the same circuits as the `@sig-net/midnight-contract` version pinned in `chain-signatures/midnight-publisher-ts/package.json`, as the nodes prove their responses with that package's keys. Point `--eth-execution-rpc-http-url` and `--eth-consensus-rpc-http-url` at the EVM chain your requests target (both default to `http://localhost:8545`).
+
+Both modes use the pregenerated MPC key shares, which exist for 3 nodes with threshold 2 and for 5 nodes with threshold 4, so the root public key is the same on every run.
+
 ### I'm getting "Error: error trying to connect: No such file or directory (os error 2)"
 
 It's a known issue on MacOS. Try executing the following command:

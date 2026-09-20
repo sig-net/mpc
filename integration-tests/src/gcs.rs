@@ -34,7 +34,28 @@ impl GcsEmulator {
             client: Client::builder().timeout(Duration::from_secs(5)).build()?,
         };
         emulator.create_bucket().await?;
+        emulator
+            .serve_public_urls(&format!("{host}:{host_port}"))
+            .await?;
         Ok(emulator)
+    }
+
+    /// The emulator answers `{endpoint}/{bucket}/{object}` only for requests
+    /// whose Host header equals its configured public host.
+    async fn serve_public_urls(&self, public_host: &str) -> anyhow::Result<()> {
+        self.client
+            .put(format!("{}/_internal/config", self.endpoint))
+            .json(&serde_json::json!({ "publicHost": public_host }))
+            .send()
+            .await?
+            .error_for_status()
+            .context("setting the GCS emulator public host")?;
+        Ok(())
+    }
+
+    /// Base URL under which a plain HTTP GET downloads `{prefix}/...` objects.
+    pub fn public_url(&self, prefix: &str) -> String {
+        format!("{}/{}/{prefix}", self.endpoint, self.bucket)
     }
 
     async fn create_bucket(&self) -> anyhow::Result<()> {

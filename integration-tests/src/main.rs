@@ -3,10 +3,15 @@ use std::io::Write;
 use std::str::FromStr;
 use std::vec;
 
+use anyhow::Context as _;
 use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
+use integration_tests::gcs::GcsEmulator;
+use integration_tests::midnight::{ExternalMidnight, MidnightContext, MidnightEndpoints};
 use integration_tests::NodeConfig;
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_ethereum::EthConfig;
+use mpc_chain_midnight::MidnightConfig;
 use near_account_id::AccountId;
 use near_crypto::PublicKey;
 use serde_json::json;
@@ -39,11 +44,93 @@ enum Cli {
         eth_helios_data_path: String,
         #[arg(long, default_value = "10000")]
         eth_refresh_finalized_interval: u64,
+        #[command(flatten)]
+        midnight: Box<MidnightSetup>,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
     /// Generate example commands to interact with the contract
     ContractCommands,
+}
+
+#[derive(clap::Args, Debug)]
+struct MidnightSetup {
+    /// Start a local Midnight node, indexer and proof server, fund its
+    /// wallets, and deploy a central contract plus a test caller contract
+    #[arg(long, conflicts_with = "midnight_node_url")]
+    midnight: bool,
+    /// HTTP RPC URL of a running Midnight node whose central contract the
+    /// nodes respond on
+    #[arg(
+        long,
+        requires_all = [
+            "midnight_indexer_url",
+            "midnight_indexer_ws_url",
+            "midnight_proof_server_url",
+            "midnight_central_address",
+            "midnight_funding_seed",
+        ]
+    )]
+    midnight_node_url: Option<String>,
+    #[arg(long, requires = "midnight_node_url")]
+    midnight_indexer_url: Option<String>,
+    #[arg(long, requires = "midnight_node_url")]
+    midnight_indexer_ws_url: Option<String>,
+    #[arg(long, requires = "midnight_node_url")]
+    midnight_proof_server_url: Option<String>,
+    /// Address of the deployed central contract: 64 hex characters
+    #[arg(long, requires = "midnight_node_url")]
+    midnight_central_address: Option<String>,
+    /// Hex seed of a DUST-funded wallet that pays for respond transactions
+    #[arg(long, env("MPC_MIDNIGHT_FUNDING_SEED"), hide_env_values = true)]
+    midnight_funding_seed: Option<String>,
+}
+
+impl MidnightSetup {
+    fn external(&self) -> Option<ExternalMidnight> {
+        Some(ExternalMidnight {
+            endpoints: MidnightEndpoints {
+                node_http_url: self.midnight_node_url.clone()?,
+                indexer_url: self.midnight_indexer_url.clone()?,
+                indexer_ws_url: self.midnight_indexer_ws_url.clone()?,
+                proof_server_url: self.midnight_proof_server_url.clone()?,
+            },
+            central_address: self
+                .midnight_central_address
+                .clone()?
+                .trim_start_matches("0x")
+                .to_string(),
+            funding_seed: self.midnight_funding_seed.clone()?,
+        })
+    }
+}
+
+/// What a Midnight client needs to talk to this environment's MPC.
+fn print_midnight(
+    config: &MidnightConfig,
+    root_public_key: mpc_crypto::PublicKey,
+    output_storage: &GcsEmulator,
+    caller_address: Option<&str>,
+) {
+    println!("\nMidnight:");
+    println!("  node:             {}", config.node_url);
+    println!("  indexer:          {}", config.publisher.indexer_url);
+    println!("  indexer ws:       {}", config.publisher.indexer_ws_url);
+    println!("  proof server:     {}", config.publisher.proof_server_url);
+    println!("  central contract: {}", config.central_address.to_hex());
+    if let Some(caller_address) = caller_address {
+        println!("  caller contract:  {caller_address}");
+    }
+    println!(
+        "  mpc root public key (compressed secp256k1): 0x{}",
+        hex::encode(root_public_key.to_encoded_point(true).as_bytes())
+    );
+    if let Some(storage) = &config.publisher.output_storage {
+        println!(
+            "  output cache:     {}",
+            output_storage.public_url(&storage.prefix)
+        );
+    }
 }
 
 #[tokio::main]
@@ -61,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
             eth_network,
             eth_helios_data_path,
             eth_refresh_finalized_interval,
+            midnight,
         } => {
             println!("Setting up an environment with {nodes} nodes, {threshold} threshold ...");
             let config = NodeConfig {
@@ -95,6 +183,30 @@ async fn main() -> anyhow::Result<()> {
                 .init_network()
                 .await?;
 
+            // Both Midnight resources hold containers that must outlive the nodes.
+            let mut midnight_context = None;
+            let mut midnight_output_storage = None;
+            if midnight.midnight || midnight.midnight_node_url.is_some() {
+                let root_public_key = spawner.pregenerated_keys.public_key().context(
+                    "Midnight needs pregenerated MPC keys, which exist for 3 nodes with threshold 2 and 5 nodes with threshold 4",
+                )?;
+                let (output_storage, caller_address) = if let Some(external) = midnight.external() {
+                    let output_storage = GcsEmulator::run().await?;
+                    spawner.cfg.midnight = Some(external.node_config(&output_storage)?);
+                    (&*midnight_output_storage.insert(output_storage), None)
+                } else {
+                    let context = MidnightContext::run(&spawner, root_public_key).await?;
+                    spawner.cfg.midnight = Some(context.config.clone());
+                    let context = &*midnight_context.insert(context);
+                    (
+                        &context.output_storage,
+                        Some(context.caller_address.as_str()),
+                    )
+                };
+                let config = spawner.cfg.midnight.as_ref().expect("set above");
+                print_midnight(config, root_public_key, output_storage, caller_address);
+            }
+
             let nodes = spawner.run().await?;
             let ctx = nodes.ctx();
             let urls: Vec<_> = (0..spawner.cfg.nodes).map(|i| nodes.url(i)).collect();
@@ -122,6 +234,8 @@ async fn main() -> anyhow::Result<()> {
 
             signal::ctrl_c().await.expect("Failed to listen for event");
             println!("Received Ctrl-C");
+            drop(midnight_context);
+            drop(midnight_output_storage);
             println!("Clean up finished");
         }
         Cli::DepServices => {

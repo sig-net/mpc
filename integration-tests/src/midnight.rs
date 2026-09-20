@@ -37,11 +37,35 @@ const INDEXER_SECRET: &str = "30313233343536373839303132333435363738393031323334
 const SIDECHAIN_BLOCK_BENEFICIARY: &str =
     "04bcf7ad3be7a5c790460be82a713af570f22e0f801f6659ab8e84a52be6969e";
 
-struct MidnightEndpoints {
-    node_http_url: String,
-    indexer_url: String,
-    indexer_ws_url: String,
-    proof_server_url: String,
+pub struct MidnightEndpoints {
+    pub node_http_url: String,
+    pub indexer_url: String,
+    pub indexer_ws_url: String,
+    pub proof_server_url: String,
+}
+
+/// A Midnight stack and central contract that outlive the harness: the MPC
+/// nodes respond on it, and its owner deploys and funds everything on it.
+pub struct ExternalMidnight {
+    pub endpoints: MidnightEndpoints,
+    pub central_address: String,
+    pub funding_seed: String,
+}
+
+impl ExternalMidnight {
+    pub fn node_config(
+        &self,
+        output_storage: &crate::gcs::GcsEmulator,
+    ) -> anyhow::Result<MidnightConfig> {
+        let config = responder_config(
+            &self.endpoints,
+            &self.central_address,
+            &self.funding_seed,
+            Some(emulated_output_storage(output_storage)),
+        )?;
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 struct MidnightStack {
@@ -76,6 +100,7 @@ pub struct MidnightContext {
     _stack: MidnightStack,
     pub output_storage: crate::gcs::GcsEmulator,
     pub config: MidnightConfig,
+    pub caller_address: String,
     driver: Mutex<MidnightDriver>,
 }
 
@@ -119,30 +144,18 @@ impl MidnightContext {
             }))
             .await
             .context("initialising the Midnight caller with the MPC response key")?;
-        let publisher_entrypoint = publisher_package_dir()?.join("dist/main.js");
-        anyhow::ensure!(
-            publisher_entrypoint.is_file(),
-            "Midnight publisher entry point {} is missing; run npm run build in {}",
-            publisher_entrypoint.display(),
-            publisher_package_dir()?.display()
-        );
         let config = responder_config(
             &stack.endpoints,
-            &bootstrap,
-            node_executable()?,
-            publisher_entrypoint,
-            Some(OutputStorageConfig {
-                bucket: output_storage.bucket.clone(),
-                prefix: format!("integration-tests/{}", uuid::Uuid::new_v4()),
-                timeout: Duration::from_secs(30),
-                emulator_endpoint: Some(output_storage.endpoint.clone()),
-            }),
+            &bootstrap.central_address,
+            &bootstrap.publisher_seed,
+            Some(emulated_output_storage(&output_storage)),
         )?;
         config.validate()?;
         Ok(Self {
             _stack: stack,
             output_storage,
             config,
+            caller_address: bootstrap.caller_address,
             driver: Mutex::new(driver),
         })
     }
@@ -247,24 +260,39 @@ impl<'a> DriverConfig<'a> {
     }
 }
 
+fn emulated_output_storage(emulator: &crate::gcs::GcsEmulator) -> OutputStorageConfig {
+    OutputStorageConfig {
+        bucket: emulator.bucket.clone(),
+        prefix: format!("integration-tests/{}", uuid::Uuid::new_v4()),
+        timeout: Duration::from_secs(30),
+        emulator_endpoint: Some(emulator.endpoint.clone()),
+    }
+}
+
 fn responder_config(
     endpoints: &MidnightEndpoints,
-    bootstrap: &BootstrapResult,
-    node_executable: String,
-    publisher_entrypoint: PathBuf,
+    central_address: &str,
+    funding_seed: &str,
     output_storage: Option<OutputStorageConfig>,
 ) -> anyhow::Result<MidnightConfig> {
+    let publisher_entrypoint = publisher_package_dir()?.join("dist/main.js");
+    anyhow::ensure!(
+        publisher_entrypoint.is_file(),
+        "Midnight publisher entry point {} is missing; run npm run build in {}",
+        publisher_entrypoint.display(),
+        publisher_package_dir()?.display()
+    );
     Ok(MidnightConfig {
         node_url: endpoints.node_http_url.clone(),
-        central_address: MidnightAddress::from_hex(&bootstrap.central_address)
+        central_address: MidnightAddress::from_hex(central_address)
             .context("decoding Midnight central address")?,
         publisher: PublisherConfig {
             output_storage,
             intent_gen_command: vec![
-                node_executable,
+                node_executable()?,
                 publisher_entrypoint.to_string_lossy().into_owned(),
             ],
-            funding_seed: bootstrap.publisher_seed.clone(),
+            funding_seed: funding_seed.to_string(),
             proof_server_url: endpoints.proof_server_url.clone(),
             indexer_url: endpoints.indexer_url.clone(),
             indexer_ws_url: endpoints.indexer_ws_url.clone(),
