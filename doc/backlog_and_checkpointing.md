@@ -45,8 +45,9 @@ Vocabulary, per node per source chain:
   fact about the source chain. 
 
 * **Boundary**: a height at which a checkpoint is due, the chain's start
-  height plus a multiple of a constant interval. Both are per chain, and
-  every node computes the same grid from them.
+  height plus a multiple of a constant interval, whether or not a block is
+  delivered there. Both are per chain, and every node computes the same grid
+  from them.
 
 * **Checkpoint**: a height and the backlog at that height. Its *digest* binds
   the chain, the height and the entries over a canonical encoding (section 2).
@@ -154,7 +155,9 @@ backlog and indexing on from it, given a reachable node holding one.
 ## 4. Design
 
 Described for one node, one source chain. `commit` is a single durable
-write, so the three fields an install replaces cannot be left part replaced.
+write, so an install cannot leave `base` replaced and `voted` not, or the
+other way round. `acted_through` is neither, and an install leaves it where
+it is.
 
 The backlogs recorded in `crossed` and `voted` are snapshots, not the
 live map, so what was hashed is what is still there. Serving
@@ -171,30 +174,32 @@ behind a digest the node voted, or from a peer.
 Cap: how many boundaries beyond the base a node derives before it waits,
 which is `len(crossed)`. It is
 how far the network will go on signing from state nobody has agreed to, and
-only incidentally a bound on what `crossed` holds.
+only incidentally a bound on what `crossed` holds. One block crossing
+several boundaries takes it past the cap, and the cursor stops on the next
+block rather than at an exact count.
 
 Note that signatures and attestations a node produces are persisted too, 
 however, they don't need to be in the backlog, therefore we don't talk about
 them in detail here. 
 
-### State
+### Per-chain Node State
 
 ```
 persistent:
-    base             (Height, Digest, Backlog)   // everything derives
-                                                 // from this one
+    base             (Height, Digest, Backlog)   // from governance contract
     voted            {Digest -> Backlog}         // every digest we have voted
                                                  // at the open height, held
                                                  // until that height is
-                                                 // installed, KEEP = 10
-    acted_through    Height                      // acting is done up to and
-                                                 // including this height
+                                                 // installed
+    acted_through    Height                      // acting (signing, attesting, 
+                                                 // publishing) is done up to 
+                                                 // and including this height
 
 in memory:
     backlog       RequestId -> Entry          
     watermark     Height
-    crossed       Height -> (Digest, Backlog)     // checkpoints above base
-    want          (Height, Digest)?             // a settled checkpoint we
+    crossed       Height -> (Digest, Backlog)    // checkpoints above base
+    want          (Height, Digest)?              // a settled checkpoint we
                                                  // have read and do not
                                                  // hold; unset on start, so
                                                  // a crash lifts the hold
@@ -204,57 +209,11 @@ in memory:
 
 ```
 on start:
-  base = the one held, or the chain's genesis
   rebase()
-  reconcile()
-  
+```
+Governance contract polling
+```
 on settlement poll period expiry:
-  reconcile()
-
-on receiving a peer's reply (h, d, backlog) to what we asked for:
-  if want == (h, d) and digest(h, backlog) == d:
-    install(h, d, backlog)
-
-on block b finalised, the next one above the watermark:       //indexing
-  if want is set or len(crossed) >= CAP:
-    return                           
-  backlog.update(b)                  // add/change/remove entries, idempotent
-  watermark = height(b)
-  if at boundary:
-    crossed[height(b)] = (digest(height(b), backlog), backlog)
-    vote_if_ready(height(b))
-  if watermark > acted_through:
-    act on backlog                 // Sign, watch, attest, publish
-    acted_through = watermark      // and not repeated over a replay
-```
-
-No two handlers run their bodies at once, and none runs against itself.
-Nothing here blocks: asking peers is not part of any handler, so no handler
-is long enough to need interrupting. `want` is what a poll leaves behind
-when the body is not held, and the next poll simply overwrites it with
-whatever is settled then, so retargeting is an assignment rather than a
-cancellation. A reply to a `want` the node has moved on from does not hash
-to the current one and is dropped.
-
-`backlog.update` changes state and nothing else; effects (signing,
-publishing, attesting) only happen later if at all.
-
-`acted_through` is written lazily, so it is a lower bound: a crash loses the
-last of it and the replay acts twice, which is the case the destination
-already has to absorb. It is not reset by a `rebase`, a rebase being about
-what the node believes rather than what it has already done.
-
-### Rebase and reconcile
-
-```
-rebase():
-  backlog, watermark = base
-  crossed = {}                     // which also puts the cap back under its
-                                   // bound
-```
-
-```
-reconcile():
   h, d = contract.latest_checkpoint(chain)
   if h == base.height:
     rebase_if_stuck()
@@ -266,20 +225,76 @@ reconcile():
     want = (h, d)               // S3(i): the cursor stops until we hold it
     return                      // asking peers is section 2's get_checkpoint
   install(h, d, body)
+```
+Interacting with peers
+```
+on receiving a peer's reply (h, d, backlog) to what we asked for:
+  if want == (h, d) and digest(h, backlog) == d:
+    install(h, d, backlog)
+```
+Indexing
+```
+on block b finalised, the next one above the watermark:       //indexing
+  if want is set or len(crossed) >= CAP:
+    return                           
+  for each boundary B with watermark < B < height(b):
+    crossed[B] = (digest(B, backlog), backlog)   // nothing between the
+                                     // watermark and B changed the backlog,
+                                     // or that block would be this one
+  backlog.update(b)                  // add/change/remove entries, idempotent
+  watermark = height(b)
+  if height(b) is a boundary:
+    crossed[height(b)] = (digest(height(b), backlog), backlog)
+  if a boundary was crossed:
+    vote_if_ready(open height)
+  if watermark > acted_through:
+    act on backlog                 // Sign, watch, attest, publish
+    acted_through = watermark      // and not repeated over a replay
+```
 
+No two handlers run their bodies at once, and none runs against itself.
+
+A boundary is not a block. Where only blocks carrying requests or responses
+are delivered, the cursor can go from 119 to 500 with 120 a boundary nobody
+observed, so a checkpoint is recorded at the boundary and never at the block
+that crossed it. The backlog to bind there is the one in hand: a block
+between the watermark and the boundary that changed the backlog would have
+been delivered before this one. That is why a skipped boundary is recorded
+before the block is applied and a delivered one after.
+
+`backlog.update` changes state and nothing else; effects (signing,
+publishing, attesting) only happen later if at all.
+
+`acted_through` is written lazily, so it is a lower bound: a crash loses the
+last of it and the replay acts twice, which is the case the destination
+already has to absorb. It is not reset by a `rebase`, a rebase being about
+what the node believes rather than what it has already done.
+
+Instead of `len(crossed) >= CAP` and `watermark > acted_through` alternative
+conditions can be defined without changing the properties materially.
+
+### Rebase and install
+
+```
+rebase():
+  backlog, watermark = base
+  crossed = {}                     // which also puts the cap back under its
+                                   // bound
+```
+```
 install(h, d, body):
   mine = crossed[h].digest == d // the cursor derived it this run
-  base = (h, d, body) ; voted = {} ; want = none ; commit
+  base = (h, d, body) ; voted = {} ; commit
                                 // one write: a crash partway would leave the
                                 // old base with no body for what we voted,
                                 // and the f+1 holders one short
+  want = none                   // in memory, so outside the write
   if mine and watermark > h:    // only the cursor's own reading lets it keep
     crossed.remove_below(h+1)   // remove entries no longer needed
     vote_if_ready(open height)  // open height moved with h
   else:                         // read h differently, or has not reached it
     rebase()
 ```
-
 ```
 rebase_if_stuck():
   if not crossed[open height]:   // still replaying towards it, so we have no
@@ -297,8 +312,8 @@ height, so seeing it means several nodes read the chain differently and this
 one rebases on the chance that it is among them and rebasing may help. 
 The tally is not scrutinized to find a
 digest worth rebasing towards: at f+1 such a digest has settled by the time
-we could see it, and the node learns it is wrong from `reconcile` finding the
-settled digest is not the one it recorded.
+we could see it, and the node learns it is wrong from the settlement poll
+finding the settled digest is not the one it recorded.
 
 Who it serves is the node whose reading of a block is not reproducible.
 Crossing the open height is what makes a node vote, and absent a settlement
@@ -306,20 +321,6 @@ a rebase is the only thing that makes it cross again, so without this a
 second reading never reaches the contract and a flaky network never takes a
 second draw. Where readings are reproducible it re-derives the same digest
 and re-casts the same vote, and the backoff is what makes that cheap.
-
-### Asking peers
-
-While `want` is set the node asks peers for `get_checkpoint(chain, want)`,
-and a reply that hashes to its digest installs. This is not a call anything
-waits on: it has no result to return and no run to abandon, so nothing has
-to decide when to give up on it.
-
-Asking for a superseded height goes unanswered, since every holder of that
-digest cleared its `voted` on installing a later one. That costs nothing
-here: the next poll reads the contract and overwrites `want` with whatever
-is settled then, so the poll period bounds how long the node asks the wrong
-question.
-
 ### Voting
 
 ```
@@ -339,13 +340,29 @@ vote_if_ready(h):
   contract.vote_checkpoint(h, d)       // network settles, somebody holds
 ```
 
+### Asking peers
+
+While `want` is set the node asks peers for `get_checkpoint(chain, want)`,
+and a reply that hashes to its digest installs. This is not a call anything
+waits on: it has no result to return and no run to abandon, so nothing has
+to decide when to give up on it.
+
+Asking for a superseded height goes unanswered, since every holder of that
+digest cleared its `voted` on installing a later one. That costs nothing
+here: the next poll reads the contract and overwrites `want` with whatever
+is settled then, so the poll period bounds how long the node asks the wrong
+question.
+
+
+
 
 Rules the code does not show:
 
 * A cursor pauses for two reasons and reads no block either way, so it
   crosses nothing, votes nowhere and does not act. The cap releases itself
   when `crossed` shrinks, which an install and a `rebase` both do. The
-  install hold releases when `reconcile` returns, either way it went.
+  install hold releases on the install, and the next poll overwrites `want`
+  if something else settled meanwhile.
 
 ## 5. Why the properties hold
 
@@ -516,6 +533,7 @@ backwards.
 | a vote that does not settle | nothing retries it | re-cast on a backoff | 9 |
 | a node catching up | votes at no boundary | votes on reaching the open height | 3 |
 | the boundary grid | node configuration | the contract, with the start height | 7 |
+| a checkpoint's height | the observed height that crossed the interval | the boundary | 7 |
 | a full checkpoint store | halts event consumption | declines to vote | 1 |
 
 Small. Steps 1 and 3 stand alone; step 2 waits for step 5 and step 4 for
@@ -572,7 +590,13 @@ Larger, step 7 excepted:
 
 7. Move the anchors and intervals into the governance contract and index from
    an anchor rather than the live head. Ethereum has an issue for the start
-   height; the interval has to travel with it. Step 6 needs it.
+   height; the interval has to travel with it. Step 6 needs it. The same step
+   settles what a checkpoint's height is: today it is the observed height
+   that crossed the bucket, `height / interval`, kept that way because
+   Solana's indexer sees only slots carrying relevant transactions and may
+   jump from 119 to 500. Two nodes crossing one bucket at different heights
+   then hash different heights over the same backlog, so here the height is
+   the boundary and the crossing block only triggers the record.
 8. Take an entry's timestamp from the block that finalised the request. Only
    Ethereum carries a block timestamp into its events today, so this touches
    every chain's event plumbing.
@@ -585,7 +609,7 @@ Larger, step 7 excepted:
     `find_consensus_checkpoint` retries for ever inside the recovery the
     supervisor runs before spawning the indexer, so a node nobody answers
     never starts. Here the same call blocks, which is the deliberate trade of
-    section 6, but `reconcile` reaches it only when there is a settled height
+    section 6, but the poll reaches it only when there is a settled height
     the node does not hold, and then one answer beats indexing the gap.
 11. Stop storing what can be derived. That deletes the pending cap and the
     store's growth through an outage. It needs the
