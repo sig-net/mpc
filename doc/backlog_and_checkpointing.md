@@ -411,7 +411,8 @@ is promoting a later checkpoint, by which time the settlement the fetcher is
 chasing has moved too and its next poll asks for that one instead. There is
 no escape by voting again at the same height, which would drop what the voter
 had and, where a node's reading of a block is not reproducible, could take
-the last copy of a digest the network had just settled. One guaranteed holder is thin, and it is what the threshold costs.
+the last copy of a digest the network had just settled. One guaranteed
+holder is thin, and it is what the threshold costs.
 Where no node can produce it at all there is no recovery here, which section
 6 owns.
 
