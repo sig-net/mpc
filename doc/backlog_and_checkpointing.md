@@ -65,12 +65,11 @@ Vocabulary, per node per source chain:
   * **Genesis checkpoint**: an empty backlog at the chain's start height,
     which the contract holds.
 
-Signing needs a threshold of t = n - f. Settling a checkpoint requires 
-a threshold of f+1 to guarantee that at least one correct node holds 
-the checkpoint. Guaranteeing  a majority of at least f+1 *correct* nodes hold
-a settled checkpoint needs a threshold of 2f+1, which makes settling under 
-a buggy non-deterministic implementation harder, needing more nodes to have
-reached the same backlog for a given height. 
+Settling a checkpoint requires a threshold of f+1 to guarantee that at least
+one correct node holds the checkpoint. Guaranteeing a majority of at least
+f+1 *correct* nodes hold a settled checkpoint needs a threshold of 2f+1,
+which makes settling under a buggy non-deterministic implementation harder,
+needing more nodes to have reached the same backlog for a given height.
 
 ## 2. Digest and interfaces
 
@@ -354,7 +353,8 @@ Effects sit outside it. This design does not solve the output commit problem;
 it acts ahead of agreement and requires the duplicate to be harmless. It does
 not produce duplicates gratuitously either: #1301 signs on admission and has
 no tip gate, so a replay would open a signing round for every request in the
-range, each pulling in t participants, which is why `acted_through` exists.
+range, each pulling in the nodes a signing round takes, which is why
+`acted_through` exists.
 What it cannot prevent is the range a crash loses, so the duplicate still has
 to be harmless. On the source chain the contract emits the event either way
 and the receiving library drops a response whose request it no longer has
@@ -410,9 +410,10 @@ nobody broadcasts produces no event and stays, which is #1301's open point.
 
 What is here is whether the entry can be signed at all. Admission is a
 function of the block, so anything in one correct node's backlog is in all of
-them, which is t = n - f holders. Signing needs t of them acting at once,
-and the budget for a correct node not acting is f, shared with the nodes
-that are faulty, so it is zero exactly when the model is at its limit.
+them, which is n - f holders, exactly the t that signing takes. It needs t of
+them acting at once, and the budget for a correct node not acting is f,
+shared with the nodes that are faulty, so it is zero exactly when the model
+is at its limit.
 Section 1 gives that each correct node keeps up, not that all are up
 together. Three things here stop a node acting: it has rebased and is
 replaying back to `acted_through`, it is paused at the cap, or it is holding
