@@ -9,13 +9,20 @@ Checkpointing keeps those maps in sync across restarts without silently
 diverging, and lets a joining or rejoining node catch up without replaying
 every block.
 
-Approach: 
-The governance contract decides on the next highest checkpoint, based on
-votes from the nodes. The nodes keep polling for the latest checkpoint, 
-if nothing new has settled and this node has already crossed the 
-next height, on a growing backoff: 
-read the vote counts, and if 2f+1 nodes have voted with nothing settled, 
-throw away everything derived above the latest checkpoint and try again.
+Approach. Checkpoints are due at fixed heights, the same grid for every
+node. A node reaching one votes in the governance contract for a digest of
+its backlog there, and the contract settles that height once f+1 nodes have
+voted for the same digest, enough that at least one correct node holds the
+body behind it. Every node polls for what settled. A node that derived that
+digest itself carries on indexing; any other fetches the body from a peer
+and installs it, and everything it derives from then on hangs off that
+checkpoint.
+
+A node that has passed the height under vote and sees nothing settle there
+reads the vote counts, on a growing backoff. If 2f+1 have voted with nothing
+settled, it throws away everything it derived above the checkpoint it holds
+and indexes that stretch again, on the chance that its own reading of a
+block was the odd one.
 
 This is a design doc. Section 7 says what it would take to get there.
 
