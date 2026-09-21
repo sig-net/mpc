@@ -154,7 +154,7 @@ backlog and indexing on from it, given a reachable node holding one.
 ## 4. Design
 
 Described for one node, one source chain. `commit` is a single durable
-write, so the two fields an install replaces cannot be left part replaced.
+write, so the three fields an install replaces cannot be left part replaced.
 
 The backlogs recorded in `crossed` and `voted` are snapshots, not the
 live map, so what was hashed is what is still there. Serving
@@ -180,12 +180,18 @@ them in detail here.
 ### State
 
 ```
-persistent:                                      
+persistent:                                      // `commit` is what makes a
+                                                 // write durable on top of
+                                                 // this; acted_through has
+                                                 // no commit and is a lower
+                                                 // bound after a crash
     local_checkpoint (Height, Digest, Backlog)   // the base
     voted            {Digest -> Backlog}         // every digest we have voted
                                                  // at the open height, held
                                                  // until that height is
                                                  // installed, KEEP = 10
+    acted_through    Height                      // acting is done up to and
+                                                 // including this height
 
 in memory:
     backlog       RequestId -> Entry          
@@ -208,7 +214,7 @@ on start:
 on settlement poll period expiry:
   reconcile()
 
-on receiving a peer's reply (h, backlog) to get_checkpoint(..):
+on receiving a peer's reply (h, d, backlog) to what we asked for:
   if want == (h, d) and digest(h, backlog) == d:
     install(h, d, backlog)
 
@@ -220,13 +226,26 @@ on block b finalised, the next one above the watermark:       //indexing
   if at boundary:
     crossed[height(b)] = (digest(height(b), backlog), backlog)
     vote_if_ready(height(b))
-  act on backlog                     // Sign, watch, attest, publish
+  if watermark > acted_through:
+    act on backlog                 // Sign, watch, attest, publish
+    acted_through = watermark      // and not repeated over a replay
 ```
 
-No two handlers run their bodies at once.
+No two handlers run their bodies at once, and none runs against itself.
+Nothing here blocks: asking peers is not part of any handler, so no handler
+is long enough to need interrupting. `want` is what a poll leaves behind
+when the body is not held, and the next poll simply overwrites it with
+whatever is settled then, so retargeting is an assignment rather than a
+cancellation. A reply to a `want` the node has moved on from does not hash
+to the current one and is dropped.
 
 `backlog.update` changes state and nothing else; effects (signing,
 publishing, attesting) only happen later if at all.
+
+`acted_through` is written lazily, so it is a lower bound: a crash loses the
+last of it and the replay acts twice, which is the case the destination
+already has to absorb. It is not reset by a `rebase`, a rebase being about
+what the node believes rather than what it has already done.
 
 ### Rebase and reconcile
 
@@ -340,11 +359,12 @@ local, which keeps the induction closed.
 
 Effects sit outside it. This design does not solve the output commit problem;
 it acts ahead of agreement and requires the duplicate to be harmless. It does
-A node acts as it indexes rather than only once it is
-current, and #1301 signs on admission with no tip gate, so a replay opens a
-signing round for every request in the range it replays, each pulling in the
-nodes a signing round takes. The design leans on those being harmless rather
-than on not producing them. On the source chain the contract emits the event either way
+not produce duplicates gratuitously either: #1301 signs on admission and has
+no tip gate, so a replay would open a signing round for every request in the
+range, each pulling in the nodes a signing round takes, which is why
+`acted_through` exists.
+What it cannot prevent is the range a crash loses, so the duplicate still has
+to be harmless. On the source chain the contract emits the event either way
 and the receiving library drops a response whose request it no longer has
 outstanding; on a destination chain the effect is the same signed transaction
 arriving twice.
@@ -403,9 +423,9 @@ them acting at once, and the budget for a correct node not acting is f,
 shared with the nodes that are faulty, so it is zero exactly when the model
 is at its limit.
 Section 1 gives that each correct node keeps up, not that all are up
-together. Three things here keep a node from signing the newest entries: it
-has rebased and is replaying, so it does not hold them yet; it is paused at
-the cap; or it is holding a `want` it has not installed. The cap is the one that spends no budget at all, because it
+together. Three things here stop a node acting: it has rebased and is
+replaying back to `acted_through`, it is paused at the cap, or it is holding
+for an install. The cap is the one that spends no budget at all, because it
 spends the lot: it counts from the base, which is the settled height and so
 the same on every node up to a poll, so a vote-settle-install round trip
 slower than the boundary interval leaves every node at the cap at once.
@@ -592,8 +612,8 @@ checkpoint sync.
 S1, S2 and L1 are consensus's agreement, validity and termination; S1 and L2
 are self-stabilisation's closure and convergence (Dijkstra 1974). The fault
 model is the crash-recovery one of Aguilera, Chen and Toueg (DISC 1998), whose
-question, what a node must keep in stable storage, is section 4's two
-persistent fields. What that literature carries and this does not is a stabilisation-time
+question, what a node must keep in stable storage, is section 4's three
+durable fields. What that literature carries and this does not is a stabilisation-time
 bound (open point 4); what the design does have is fault containment, a
 diverged node stopping rather than spreading, though only until it
 restarts.
