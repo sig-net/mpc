@@ -2,7 +2,7 @@ use cait_sith::protocol::{Action, InitializationError, MessageData, Participant,
 use cait_sith::{protocol::Protocol, KeygenOutput};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
-use mpc_primitives::{Chain, CheckpointDigest, SignId};
+use mpc_primitives::{Chain, CheckpointDigest, RequestKind, SignId};
 use tokio::sync::watch;
 
 use crate::backlog::{Generating, SignEntry};
@@ -30,6 +30,18 @@ pub type CheckpointWatcher = watch::Receiver<Option<CheckpointDigest>>;
 pub enum SignCommand {
     Request(SignEntry<Generating>),
     Completion(SignId),
+    /// A bidirectional leg's response landed on chain, so its task has nothing
+    /// left to do. Unlike [`SignCommand::Completion`] the sign id stays live:
+    /// the next leg reuses it and must not be dropped as already finished.
+    ///
+    /// Carries the kind of the leg that finished. The next leg is enqueued by
+    /// the target chain's stream while this comes from the source chain's, so
+    /// the two can arrive out of order, and retiring by sign id alone could
+    /// drop a second leg that is already running.
+    LegCompleted {
+        sign_id: SignId,
+        kind: RequestKind,
+    },
     AbortChain(Chain),
 }
 
