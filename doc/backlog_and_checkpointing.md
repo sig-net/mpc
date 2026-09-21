@@ -180,7 +180,11 @@ them in detail here.
 ### State
 
 ```
-durable:
+persistent:                                      // `commit` is what makes a
+                                                 // write durable on top of
+                                                 // this; acted_through has
+                                                 // no commit and is a lower
+                                                 // bound after a crash
     local_checkpoint (Height, Digest, Backlog)   // the base
     voted            {Digest -> Backlog}         // every digest we have voted
                                                  // at the open height, held
@@ -193,10 +197,10 @@ in memory:
     backlog       RequestId -> Entry          
     watermark     Height
     crossed       Height -> (Digest, Backlog)     // checkpoints above base
-    want          (Height, Digest)?              // a settled checkpoint we
-                                                  // have read and do not
-                                                  // hold; unset on start, so
-                                                  // a crash lifts the hold
+    want          (Height, Digest)?             // a settled checkpoint we
+                                                 // have read and do not
+                                                 // hold; unset on start, so
+                                                 // a crash lifts the hold
 ```
 
 ### Event Handlers
@@ -210,8 +214,9 @@ on start:
 on settlement poll period expiry:
   reconcile()
 
-on a peer's reply to `want`, if it hashes to `want`.digest:
-  install(want.height, want.digest, the reply's backlog)
+on receiving a peer's reply (h, d, backlog) to what we asked for:
+  if want == (h, d) and digest(h, backlog) == d:
+    install(h, d, backlog)
 
 on block b finalised, the next one above the watermark:       //indexing
   if want is set or len(crossed) >= CAP:
@@ -222,7 +227,7 @@ on block b finalised, the next one above the watermark:       //indexing
     crossed[height(b)] = (digest(height(b), backlog), backlog)
     vote_if_ready(height(b))
   if watermark > acted_through:
-    act on backlog                 // #1301's. Here only that it is per block
+    act on backlog                 // Sign, watch, attest, publish
     acted_through = watermark      // and not repeated over a replay
 ```
 
