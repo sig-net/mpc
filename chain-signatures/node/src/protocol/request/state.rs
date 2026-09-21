@@ -3,7 +3,6 @@ use super::organize::OrganizingPhase;
 use super::task::SignPhase;
 use super::*;
 use crate::backlog::{Generating, SignEntry};
-use crate::metrics::protocols;
 
 pub struct SignState {
     round: usize,
@@ -69,9 +68,6 @@ impl SignState {
     /// machine from the Organizing phase. The single back-edge of the sign
     /// state machine.
     pub fn reorganize(&mut self, reason: &str) -> SignPhase {
-        protocols::SIGN_REORGANIZES.inc();
-        protocols::SIGN_REORGANIZE_ROUND.observe(self.round as f64);
-
         // Wedged requests rotate forever; a watermark on the last warned round
         // keeps the warn rate at ~1 per 10 rounds even when StaleRound jumps
         // `bump_round` past whole decades.
