@@ -403,21 +403,21 @@ Where no node can produce it at all there is no recovery here, which section
   the cost of the tally and the two rebase triggers it fed.
 * Stalling
   * Settlement stalled with nobody disagreeing, which takes more than f nodes
-  down or slow. The cap on `pending` is what keeps the node from running
-  ahead, at the price that it counts from the settled height, so nodes reach
-  it together and the network signs nothing until settlement catches up. An
-  operator has to notice.
+    down or slow. The cap on `pending` is what keeps the node from running
+    ahead, at the price that it counts from the settled height, so nodes
+    reach it together and the network signs nothing until settlement catches
+    up. An operator has to notice.
   * Settlement stalled with everyone disagreeing too finely to resolve, no
-  digest able to reach f+1. Out of model twice over, since correct nodes
-  agree and there are n - f of them, so at n = 9 it takes five distinct
-  readings. Every node sees the stall in the tally and rebases, and if their
-  readings are stable they land on the same split and go round again on a
-  growing backoff.
+    digest able to reach f+1. Out of model twice over, since correct nodes
+    agree and there are n - f of them, so at n = 9 it takes five distinct
+    readings. Every node sees the stall in the tally and rebases, and if
+    their readings are stable they land on the same split and go round again
+    on a growing backoff.
   * Every copy of the settled backlog lost: nothing here recovers, a peer
-  being the only source of a body. What makes it unlikely is `voted` being
-  durable, and a new vote never evicting the body behind an earlier one, so
-  the f+1 behind a settled digest still hold a copy across a restart, one of
-  them correct.
+    being the only source of a body. What makes it unlikely is `voted` being
+    durable, and a new vote never evicting the body behind an earlier one, so
+    the f+1 behind a settled digest still hold a copy across a restart, one
+    of them correct.
 * A node whose votes never reach the contract runs ahead to the cap and
   pauses there, and nothing re-casts for it. Section 1 assumes the governance
   chain live and readable, so this is a node with its own problem.
