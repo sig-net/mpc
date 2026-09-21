@@ -86,7 +86,7 @@ pub enum ExecutionOutcome {
 
 #[derive(Clone, Debug)]
 pub struct SignatureRespondedEvent {
-    pub request_id: [u8; 32],
+    pub request_id: RequestId,
     pub signature: Signature,
     pub chain: Chain,
 }

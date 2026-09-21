@@ -9,7 +9,7 @@ use k256::{
     },
     Scalar, Secp256k1, SecretKey,
 };
-use mpc_primitives::{Chain, Signature as MpcSignature};
+use mpc_primitives::{Chain, RequestId, Signature as MpcSignature};
 use near_account_id::AccountId;
 use signet_crypto::KeyVersion;
 
@@ -183,10 +183,10 @@ pub fn generate_signature(
 ///
 /// In case there are multiple requests in the same block (hence same entropy), we need to ensure
 /// that we generate different random scalars as delta tweaks.
-/// Receipt ID should be unique inside of a block, so it serves us as the request identifier.
+/// The request id is unique inside of a block, so it serves us as the request identifier.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn derive_delta(
-    request_id: [u8; 32],
+    request_id: RequestId,
     entropy: [u8; 32],
     presignature_big_r: k256::AffinePoint,
 ) -> Scalar {
@@ -198,7 +198,7 @@ pub fn derive_delta(
     const DELTA_DERIVATION_PREFIX: &str = "near-mpc-recovery v0.1.0 delta derivation:";
 
     let hk = Hkdf::<Sha3_256>::new(None, &entropy);
-    let info = format!("{DELTA_DERIVATION_PREFIX}:{}", CryptoHash(request_id));
+    let info = format!("{DELTA_DERIVATION_PREFIX}:{}", CryptoHash(request_id.bytes));
     let mut okm = [0u8; 32];
     // Both the request identifier (`info`) and the presignature's `big_r` must feed the
     // derivation. A single `expand` per input would overwrite the buffer each time, so we
@@ -443,8 +443,8 @@ mod tests {
         // Same block => same entropy and same presignature `big_r`.
         let entropy = [0x44; 32];
 
-        let delta_a = derive_delta([0x01; 32], entropy, big_r);
-        let delta_b = derive_delta([0x02; 32], entropy, big_r);
+        let delta_a = derive_delta(RequestId::from_u8(0x01), entropy, big_r);
+        let delta_b = derive_delta(RequestId::from_u8(0x02), entropy, big_r);
 
         assert_ne!(
             delta_a, delta_b,
@@ -452,7 +452,10 @@ mod tests {
         );
 
         // Sanity: derivation is deterministic for identical inputs.
-        assert_eq!(delta_a, derive_delta([0x01; 32], entropy, big_r));
+        assert_eq!(
+            delta_a,
+            derive_delta(RequestId::from_u8(0x01), entropy, big_r)
+        );
     }
 
     #[test]
@@ -462,7 +465,7 @@ mod tests {
             .public_key()
             .into();
 
-        let delta = derive_delta([0x01; 32], [0x44; 32], big_r);
+        let delta = derive_delta(RequestId::from_u8(0x01), [0x44; 32], big_r);
 
         let expected = [
             201, 189, 221, 160, 229, 175, 219, 17, 168, 142, 248, 183, 27, 177, 126, 76, 212, 79,
@@ -482,7 +485,7 @@ mod tests {
             .public_key()
             .into();
 
-        let request_id = [0x01; 32];
+        let request_id = RequestId::from_u8(0x01);
         let entropy = [0x44; 32];
 
         assert_ne!(
@@ -499,7 +502,7 @@ mod tests {
             .public_key()
             .into();
 
-        let request_id = [0x01; 32];
+        let request_id = RequestId::from_u8(0x01);
 
         assert_ne!(
             derive_delta(request_id, [0x44; 32], big_r),
