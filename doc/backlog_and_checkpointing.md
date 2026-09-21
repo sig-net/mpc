@@ -9,6 +9,7 @@ Checkpointing keeps those maps in sync across restarts without silently
 diverging, and lets a joining or rejoining node catch up without replaying
 every block.
 
+Approach: 
 The governance contract decides on the next highest checkpoint, based on
 votes from the nodes. The nodes keep polling for the latest checkpoint, 
 if nothing new has settled and this node has already crossed the 
@@ -16,7 +17,7 @@ next height, on a growing backoff:
 read the vote counts, and if 2f+1 nodes have voted with nothing settled, 
 throw away everything derived above the latest checkpoint and try again.
 
-This is intended design. Section 7 says what it would take to get there.
+This is a design doc. Section 7 says what it would take to get there.
 
 ## 1. Background
 
@@ -35,8 +36,6 @@ Vocabulary, per node per source chain:
 
 * **Watermark**: the height the cursor has reached, inclusive. Adopting a
   checkpoint may move it, back or forward.
-
-* **At the tip**: the watermark is at the chain's finalised head.
 
 * **Backlog**: one *entry* per request admitted and not finished, holding the
   request id as its key, the request as the chain gave it, the contract that
@@ -273,8 +272,34 @@ reconcile():
   else:                         // read h differently, or 
     rebase()
   installing = false
-  
 ```
+
+```
+rebase_if_stuck():
+  if not crossed[open height]:   // still replaying towards it, so we have no
+    return                       // vote there and a rebase would only lose
+                                 // the replay
+  if backoff not met yet: return // prevent spinning
+  increase backoff for this height
+  if contract.checkpoint_votes() shows 2f+1 voted with nothing settled:
+    rebase()
+```
+
+The tally is read for one thing, 2f+1 having voted with nothing settled. In
+model that cannot happen, since correct nodes agree and f+1 of them settle a
+height, so seeing it means several nodes read the chain differently and this
+one rebases on the chance that it is among them and rebasing may help. 
+The tally is not scrutinized to find a
+digest worth rebasing towards: at f+1 such a digest has settled by the time
+we could see it, and the node learns it is wrong from `reconcile` finding the
+settled digest is not the one it recorded.
+
+Who it serves is the node whose reading of a block is not reproducible.
+Crossing the open height is what makes a node vote, and absent a settlement
+a rebase is the only thing that makes it cross again, so without this a
+second reading never reaches the contract and a flaky network never takes a
+second draw. Where readings are reproducible it re-derives the same digest
+and re-casts the same vote, and the backoff is what makes that cheap.
 
 ### Fetch
 
@@ -309,35 +334,6 @@ vote_if_ready(h):
   voted[d] = crossed[h].backlog        // before the vote, so anything the
   contract.vote_checkpoint(h, d)       // network settles, somebody holds
 ```
-
-### Rebase if stuck
-
-```
-rebase_if_stuck():
-  if not crossed[open height]:   // still replaying towards it, so we have no
-    return                       // vote there and a rebase would only lose
-                                 // the replay
-  if backoff not met yet: return // prevent spinning
-  increase backoff for this height
-  if contract.checkpoint_votes() shows 2f+1 voted with nothing settled:
-    rebase()
-```
-
-The tally is read for one thing, 2f+1 having voted with nothing settled. In
-model that cannot happen, since correct nodes agree and f+1 of them settle a
-height, so seeing it means several nodes read the chain differently and this
-one rebases on the chance that it is among them and rebasing may help. 
-The tally is not scrutinized to find a
-digest worth rebasing towards: at f+1 such a digest has settled by the time
-we could see it, and the node learns it is wrong from `reconcile` finding the
-settled digest is not the one it recorded.
-
-Who it serves is the node whose reading of a block is not reproducible.
-Crossing the open height is what makes a node vote, and absent a settlement
-a rebase is the only thing that makes it cross again, so without this a
-second reading never reaches the contract and a flaky network never takes a
-second draw. Where readings are reproducible it re-derives the same digest
-and re-casts the same vote, and the backoff is what makes that cheap.
 
 
 Rules the code does not show:
@@ -414,15 +410,16 @@ nobody broadcasts produces no event and stays, which is #1301's open point.
 
 What is here is whether the entry can be signed at all. Admission is a
 function of the block, so anything in one correct node's backlog is in all of
-them, which is t = n - f holders. Signing needs them at the tip together, and
-the budget for being off it is f, shared with the nodes that are faulty, so
-it is zero exactly when the model is at its limit. Section 1 gives that each
-correct node keeps up, not that all are up together, and a node that has
-rebased is off the tip until it is back. The cap is a third way off the tip
-and the one that spends no budget at all, because it spends the lot: it
-counts from the base, which is the settled height and so the same on every
-node up to a poll, so a vote-settle-install round trip slower than the
-boundary interval leaves every node at the cap at once.
+them, which is t = n - f holders. Signing needs t of them acting at once,
+and the budget for a correct node not acting is f, shared with the nodes
+that are faulty, so it is zero exactly when the model is at its limit.
+Section 1 gives that each correct node keeps up, not that all are up
+together. Three things here stop a node acting: it has rebased and is
+replaying back to `acted_through`, it is paused at the cap, or it is holding
+for an install. The cap is the one that spends no budget at all, because it
+spends the lot: it counts from the base, which is the settled height and so
+the same on every node up to a poll, so a vote-settle-install round trip
+slower than the boundary interval leaves every node at the cap at once.
 
 Closure and convergence, self-stabilisation's two halves, are S1 and L2 here,
 so the weight falls on S1 being checkable: every defect this design has had
