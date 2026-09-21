@@ -51,8 +51,10 @@ Vocabulary, per node per source chain:
   finished signature generation or published one. Nothing else, and every field a
   fact about the source chain. 
 
-* **Boundary**: a height at which a next checkpoint is due, e.g., the chain's 
-start height plus a multiple of a constant interval. 
+* **Boundary**: a height at which a next checkpoint is due, e.g., the
+  chain's start height plus a multiple of a constant interval. Every node
+  computes the same ones, and one falls due whether or not a block is
+  delivered at that height.
 
 * **Checkpoint**: a height and the backlog at that height. Its *digest* binds
   the chain, the height and the entries over a canonical encoding (section 2).
@@ -167,6 +169,11 @@ live map. `pending` is derived: indexing fills it again on the way back up,
 and a restart drops it. A checkpoint is persisted when a vote is cast,
 not when crossing a boundary.
 
+`CAP` is how many boundaries beyond the base a node derives before it
+waits, which bounds how far the network signs from state nobody has agreed
+to. One block crossing several boundaries takes it past the cap, and
+indexing stops at the next one.
+
 Note that signatures and attestations a node produces are persisted too, 
 however, they don't need to be in the backlog, therefore we don't talk about
 them in detail here. 
@@ -244,6 +251,11 @@ on block b finalised, the next one above the processed height:
 
 No two handlers run their bodies at once, and none runs against itself.
 
+Where only blocks carrying requests or responses are delivered a boundary
+can pass unobserved, so a checkpoint is recorded at the boundary and never
+at the block that crossed it. The backlog to bind there is the one in hand,
+a block in between that changed it having been delivered first.
+
 `backlog.update` changes state and nothing else; effects (signing,
 publishing, attesting) only happen later if at all.
 
@@ -318,9 +330,7 @@ here: the next poll reads the contract and overwrites `want` with whatever
 is settled then, so the poll period bounds how long the node asks the wrong
 question.
 
-###
-
-Rules the code does not show:
+### Rules the code does not show
 
 * A cursor pauses for two reasons and reads no block either way, so it
   crosses nothing, votes nowhere and does not act. The cap releases itself
