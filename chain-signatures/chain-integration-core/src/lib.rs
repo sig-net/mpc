@@ -13,6 +13,7 @@ pub use telemetry::{
     ChainTelemetry, ExtractionFailureKind, NoopChainTelemetry, NoopPublisherTelemetry,
     PublisherTelemetry,
 };
+pub use utils::request_id::EvmRequestId;
 
 // Re-export backon because `retry_rpc!` uses `Retryable` trait internally
 #[doc(hidden)]
