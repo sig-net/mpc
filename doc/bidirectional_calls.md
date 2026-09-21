@@ -17,7 +17,7 @@ Organization:
   chains.
 * Section 4 describes the library, signet contract and MPC nodes.
 * Section 5 argues that Section 4 delivers Section 3.
-* Section 6 lists what is open.
+* Section 6 collects notes: limits of the design and what is still open.
 
 ## 1. Entities and happy path
 
