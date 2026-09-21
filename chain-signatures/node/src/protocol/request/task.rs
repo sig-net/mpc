@@ -6,9 +6,11 @@ use super::organize::OrganizingPhase;
 use super::posit::PositPhase;
 use super::state::SignState;
 use super::*;
-use crate::backlog::{Generating, SignEntry};
-
+use crate::backlog::{BacklogError, Generating, SignEntry};
 use crate::storage::presignature_storage::PresignatureTaken;
+
+use cait_sith::FullSignature;
+use k256::Secp256k1;
 
 /// Generating phase — see [`SignPhase::Generating`].
 pub struct GeneratingPhase {
@@ -32,7 +34,10 @@ pub enum SignPhase {
     /// Take the agreed presignature (commit our reservation, or take our share
     /// from storage) and run the signing protocol to completion.
     Generating(GeneratingPhase),
-    /// Terminal: the request finished (`Ok`) or aborted (`Err`).
+    /// Terminal. `Ok` means generation finished and the signature was handed
+    /// off to the backlog and the RPC queue; it does not mean a response is on
+    /// chain, which the backlog state and the chain streams track. `Err` means
+    /// the request aborted.
     Complete(Result<(), SignError>),
 }
 
@@ -95,7 +100,7 @@ impl GeneratingPhase {
         // Drive generation while answering posit traffic: peers proposing this
         // signature get a Reject so they don't wait for us. The generator itself
         // knows nothing about posits.
-        let generation = generator.run(&gen_ctx, state.entry.clone());
+        let generation = generator.run(&gen_ctx);
         tokio::pin!(generation);
         let result = loop {
             tokio::select! {
@@ -107,8 +112,50 @@ impl GeneratingPhase {
         };
 
         match result {
-            Ok(()) => SignPhase::Complete(Ok(())),
+            Ok(output) => {
+                self.hand_off(ctx, state, output).await;
+                SignPhase::Complete(Ok(()))
+            }
             Err(err) => state.reorganize(&format!("signature generation failed: {err:?}")),
+        }
+    }
+
+    /// Hand the finished signature on. This is not the on-chain publish: every
+    /// participant advances the backlog entry to publishing, the record that
+    /// publish failover works from, and the proposer queues a publish for the
+    /// RPC worker, which submits and retries on its own. Neither outcome is
+    /// reported back here.
+    async fn hand_off(&self, ctx: &SignTask, state: &SignState, output: FullSignature<Secp256k1>) {
+        let sign_id = ctx.sign_id;
+        let is_proposer = self.proposer == ctx.governance.me;
+
+        let entry = match state
+            .entry
+            .clone()
+            .advance(
+                ctx.governance.public_key,
+                &output,
+                self.accepted_participants.clone(),
+                is_proposer,
+            )
+            .await
+        {
+            Ok(entry) => entry,
+            Err(BacklogError::InvalidSignature) => {
+                tracing::error!(
+                    ?sign_id,
+                    "generated signature does not verify against the derived key; dropping it"
+                );
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(?sign_id, ?err, "failed to mark publishing for sign request");
+                return;
+            }
+        };
+
+        if is_proposer {
+            ctx.rpc.publish(entry);
         }
     }
 
@@ -247,7 +294,6 @@ impl SignTask {
         GenerateCtx {
             governance: self.governance.clone(),
             msg: self.msg.clone(),
-            rpc: self.rpc.clone(),
             cfg: self.cfg.clone(),
             node_account_id: self.node_account_id.clone(),
         }

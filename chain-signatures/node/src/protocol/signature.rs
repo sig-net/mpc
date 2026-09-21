@@ -1,14 +1,13 @@
 //! Signature generation: runs the cait-sith signing protocol once a posit round agrees on a presignature and participant set.
 
-use crate::backlog::{BacklogError, Generating, SignEntry};
 use crate::protocol::message::{MessageChannel, SignatureMessage};
-use crate::rpc::{GovernanceInfo, RpcChannel};
+use crate::rpc::GovernanceInfo;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::types::SignatureProtocol;
 use mpc_chain_near::AffinePointExt as _;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
-use cait_sith::PresignOutput;
+use cait_sith::{FullSignature, PresignOutput};
 use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
@@ -24,11 +23,12 @@ pub(crate) enum SignError {
     Aborted,
 }
 
+/// What the signing protocol needs to run. Publishing the result is the
+/// caller's job: the generator returns the signature and knows nothing about
+/// the chain or the backlog.
 pub(crate) struct GenerateCtx {
     pub governance: GovernanceInfo,
     pub msg: MessageChannel,
-    /// Publishes the finished signature (proposer only).
-    pub rpc: RpcChannel,
     pub cfg: ProtocolConfig,
     /// Only used to label the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
@@ -157,13 +157,12 @@ impl SignGenerator {
         }
     }
 
-    /// Poke-drive the protocol to completion: relay messages, and on `Return`
-    /// publish the signature (proposer) and mark the request publishing.
+    /// Poke-drive the protocol to completion, relaying messages, and return the
+    /// finished signature. The caller publishes it.
     pub(crate) async fn run(
         mut self,
         ctx: &GenerateCtx,
-        entry: SignEntry<Generating>,
-    ) -> Result<(), SignError> {
+    ) -> Result<FullSignature<Secp256k1>, SignError> {
         let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
 
@@ -277,40 +276,11 @@ impl SignGenerator {
                     crate::metrics::protocols::SIGN_GENERATION_LATENCY
                         .observe(self.created.elapsed().as_secs_f64());
                     crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS.inc();
-                    let is_proposer = self.proposer == me;
-                    let entry = match entry
-                        .advance(
-                            ctx.governance.public_key,
-                            &output,
-                            self.participants.clone(),
-                            is_proposer,
-                        )
-                        .await
-                    {
-                        Ok(entry) => entry,
-                        Err(BacklogError::InvalidSignature) => {
-                            tracing::error!(
-                                ?sign_id,
-                                "failed to validate signature; trashing publish request",
-                            );
-                            break Ok(());
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                ?sign_id,
-                                ?err,
-                                "failed to mark publishing for sign request"
-                            );
-                            break Ok(());
-                        }
-                    };
-
-                    if is_proposer {
+                    if self.proposer == me {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
-                        ctx.rpc.publish(entry);
                     }
 
-                    break Ok(());
+                    break Ok(output);
                 }
             }
         }
