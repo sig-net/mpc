@@ -4,8 +4,7 @@
 #
 # The Rust half of the seam (`chain-midnight`'s IntentGen spawning `dist/main.js`)
 # runs here too: the `intent_seam` differential drives the freshly built entry point
-# with the real client, which is what catches the two sides drifting apart, and is
-# why the `chain-midnight` path filter below is among the triggers.
+# with the real client, which is what catches the two sides drifting apart.
 #
 # The required live end-to-end path runs in the Integration workflow's
 # Midnight Real Stack job; this workflow keeps the package and Rust seam fast.
@@ -16,12 +15,7 @@ on:
   merge_group:
 
 jobs:
-  changes:
-    uses: ./.github/workflows/_ci-changes.yml
-
   test:
-    needs: [changes]
-    if: needs.changes.outputs.midnight_ts == 'true' || needs.changes.outputs.core == 'true'
     name: Midnight Publisher TS Tests
     runs-on: ubuntu-latest
     defaults:
@@ -65,17 +59,26 @@ jobs:
         run: docker build --target midnight-publisher-runtime .
 
       - name: Install Rust (1.93.0)
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.93.0
+        uses: dtolnay/rust-toolchain@1.93.0
+
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
+
+      # Cache policy: doc/ci-caching.md
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: midnight-seam
+          shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.event_name == 'merge_group' }}
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       # The filter names the test binary: the seam tests live in

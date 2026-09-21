@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{Chain, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -10,13 +8,32 @@ pub enum SignKind {
     RespondBidirectional(RespondBidirectionalTx),
 }
 
-/// Messages sent into the node's sign-request processing queue.
-#[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::large_enum_variant)]
-pub enum SignCommand {
-    Request(Arc<IndexedSignRequest>),
-    Completion(SignId),
-    AbortChain(Chain),
+/// Payload-free projection of [`SignKind`], used as a metric label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RequestKind {
+    Sign,
+    SignBidirectional,
+    RespondBidirectional,
+}
+
+impl RequestKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sign => "sign",
+            Self::SignBidirectional => "sign_bidirectional",
+            Self::RespondBidirectional => "respond_bidirectional",
+        }
+    }
+}
+
+impl SignKind {
+    pub fn request_kind(&self) -> RequestKind {
+        match self {
+            Self::Sign => RequestKind::Sign,
+            Self::SignBidirectional(_) => RequestKind::SignBidirectional,
+            Self::RespondBidirectional(_) => RequestKind::RespondBidirectional,
+        }
+    }
 }
 
 /// All relevant info pertaining to an indexed sign request.
@@ -46,6 +63,11 @@ impl IndexedSignRequest {
             unix_timestamp_indexed,
             kind,
         }
+    }
+
+    /// Metric-label kind of this request. See [`RequestKind`].
+    pub fn request_kind(&self) -> RequestKind {
+        self.kind.request_kind()
     }
 
     pub fn sign(id: SignId, args: SignArgs, chain: Chain, unix_timestamp_indexed: u64) -> Self {
@@ -82,5 +104,25 @@ impl IndexedSignRequest {
             unix_timestamp_indexed,
             SignKind::RespondBidirectional(tx),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The label strings are a metrics contract: dashboards and alerts select on
+    /// them, so a rename here silently breaks queries rather than the build.
+    #[test]
+    fn request_kind_labels_are_stable() {
+        assert_eq!(RequestKind::Sign.as_str(), "sign");
+        assert_eq!(
+            RequestKind::SignBidirectional.as_str(),
+            "sign_bidirectional"
+        );
+        assert_eq!(
+            RequestKind::RespondBidirectional.as_str(),
+            "respond_bidirectional"
+        );
     }
 }

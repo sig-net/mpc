@@ -60,9 +60,10 @@ test-keep filter="" helios="": (setup helios)
     TESTCONTAINERS=keep cargo nextest run -p integration-tests {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias tk := test-keep
 
-# Run clippy (mirrors CI: cargo clippy --tests -- -Dclippy::all)
+# Run clippy (mirrors CI). --all-features/--all-targets so dead code behind
+# feature gates (bench, test-feature, debug-page, helios, ...) is checked too.
 lint:
-    cargo clippy --tests -- -Dclippy::all
+    cargo clippy --workspace --all-targets --all-features -- -Dclippy::all
 
 # Check formatting without modifying files (mirrors CI)
 fmt-check:
@@ -142,10 +143,6 @@ test-midnight-seam:
 # Canton tests (default: stream; e2e via `just test-canton cases::canton`)
 test-canton filter="canton_stream": (setup "")
     cargo test -p integration-tests --test lib -- {{filter}} --ignored --nocapture --test-threads 1
-
-# Nightly helios suite
-test-nightly: (setup "1")
-    cargo test -p integration-tests --features helios --test lib -- cases::nightly --show-output --ignored
 
 # Prod-compat suite (needs `just build compat` output)
 test-compat:

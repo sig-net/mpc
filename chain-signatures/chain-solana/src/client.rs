@@ -17,9 +17,10 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
 use solana_client::rpc_config::RpcBlockConfig;
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::signature::Signer as SolanaSigner;
 use solana_sdk::signer::keypair::Keypair;
-use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
+use solana_sdk::{pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::{TransactionDetails, UiConfirmedBlock, UiTransactionEncoding};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
@@ -192,6 +193,8 @@ impl SolanaClient {
             self.shared_backoff,
             "get_slot_finalized",
             {
+                #[cfg(feature = "bench")]
+                crate::bench::rpc_inc("getSlot");
                 self.rpc_client
                     .get_slot_with_commitment(CommitmentConfig::finalized())
                     .await
@@ -219,6 +222,8 @@ impl SolanaClient {
                 );
             },
             {
+                #[cfg(feature = "bench")]
+                crate::bench::rpc_inc("getBlock(refetch)");
                 self.rpc_client
                     .get_block_with_config(slot, Self::block_fetch_config())
                     .await
@@ -249,6 +254,8 @@ impl SolanaClient {
                 );
             },
             {
+                #[cfg(feature = "bench")]
+                crate::bench::rpc_inc_n("getBlock(batch)", slots.len() as u64);
                 let mut requests = Vec::new();
                 for (i, &slot) in slots.iter().enumerate() {
                     let config = Self::block_fetch_config();
@@ -318,6 +325,8 @@ impl SolanaClient {
                 );
             },
             {
+                #[cfg(feature = "bench")]
+                crate::bench::rpc_inc("getSignaturesForAddress");
                 let config = GetConfirmedSignaturesForAddress2Config {
                     before,
                     until: None,
@@ -328,6 +337,11 @@ impl SolanaClient {
                     .get_signatures_for_address_with_config(address, config)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))
+                    .inspect(|batch| {
+                        let _ = batch;
+                        #[cfg(feature = "bench")]
+                        crate::bench::inc_sig_page(batch.len() as u64);
+                    })
             }
         )
     }
@@ -408,6 +422,8 @@ impl SolanaClient {
         slots: BTreeSet<u64>,
     ) -> BTreeMap<u64, SolanaCatchupBlock> {
         tracing::trace!(total_slots = slots.len(), "fetching blocks for slots...");
+        #[cfg(feature = "bench")]
+        let started_at = std::time::Instant::now();
         let slots_vec: Vec<u64> = slots.into_iter().collect();
         let chunks: Vec<Vec<u64>> = slots_vec
             .chunks(MAX_CHUNK_SIZE)
@@ -434,6 +450,9 @@ impl SolanaClient {
                 blocks_by_height.insert(slot, catchup_item);
             }
         }
+
+        #[cfg(feature = "bench")]
+        crate::bench::add_batch_fetch_time(started_at.elapsed());
 
         blocks_by_height
     }
@@ -464,7 +483,6 @@ impl ChainPublisher for SolanaClient {
             SignKind::Sign | SignKind::SignBidirectional(_) => {
                 let tx = program
                     .request()
-                    .signer(self.payer.clone())
                     .accounts(SolanaRespondAccount {
                         responder: self.payer.pubkey(),
                         event_authority,
@@ -502,7 +520,6 @@ impl ChainPublisher for SolanaClient {
                     respond_bidirectional_tx.output.clone();
                 let tx = program
                     .request()
-                    .signer(self.payer.clone())
                     .accounts(SolanaRespondBidirectionalAccount {
                         responder: self.payer.pubkey(),
                         event_authority,
@@ -585,7 +602,7 @@ mod tests {
         assert_eq!(config.rewards, Some(false));
         assert_eq!(
             config.commitment.map(|c| c.commitment),
-            Some(solana_sdk::commitment_config::CommitmentLevel::Finalized)
+            Some(solana_commitment_config::CommitmentLevel::Finalized)
         );
         assert_eq!(config.max_supported_transaction_version, Some(1));
     }

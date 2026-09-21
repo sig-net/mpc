@@ -1,96 +1,112 @@
-use crate::protocol::Chain;
+use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address};
 use anyhow::Context as _;
-use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-pub use mpc_primitives::{BidirectionalTx, ChainFromError, SignBidirectionalEvent, Signature};
+pub use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
+};
 use rlp::{Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
 
+use crate::backlog::Publishing;
+
+/// Progress of an active Cait-Sith MPC signing round.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublishState {
-    pub signature: Signature,
-    pub participants: Vec<Participant>,
-    pub is_proposer: bool,
-    /// Unix seconds at which this entry entered pending-publish on this node.
-    /// On the proposer this is when it dispatched its publish and elsewhere is
-    /// when that node finished generation.
-    ///
-    /// `None` on entries written before this field existed, which never fail over:
-    /// a numeric default would put every entry already stuck in pending-publish
-    /// past its deadline at once, and jitter cannot spread deadlines in the past.
-    #[serde(default)]
-    pub publishing_since: Option<u64>,
+pub enum SignProgress {
+    /// Actively running or awaiting MPC signing.
+    Generating,
+    /// Signature produced; ready to publish or awaiting on-chain inclusion.
+    Publishing(Publishing),
 }
 
-impl PublishState {
-    pub fn new(signature: Signature, participants: Vec<Participant>, is_proposer: bool) -> Self {
-        Self {
-            signature,
-            participants,
-            is_proposer,
-            publishing_since: Some(mpc_utils::time::current_unix_timestamp()),
+impl SignProgress {
+    pub fn is_generating(&self) -> bool {
+        matches!(self, Self::Generating)
+    }
+
+    pub fn publishing(&self) -> Option<&Publishing> {
+        match self {
+            Self::Publishing(publish) => Some(publish),
+            Self::Generating => None,
         }
     }
 }
 
+/// Lifecycle stages of a two-phase bidirectional transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BidirectionalProgress {
+    /// Phase 1: Signing the initial transaction for the source chain.
+    Initial(SignProgress),
+    /// Awaiting execution on the target chain.
+    Executing(Arc<BidirectionalTx>),
+    /// Phase 2: Signing the completion/respond transaction for the source chain.
+    Final {
+        respond_request: Arc<IndexedSignRequest>,
+        progress: SignProgress,
+    },
+}
+
+/// Overall status of any request held in the backlog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignStatus {
-    PendingGeneration,
-    PendingPublish { publish: Arc<PublishState> },
-    PendingExecution { tx: Arc<BidirectionalTx> },
-    PendingGenerationBidirectional,
-    PendingPublishBidirectional { publish: Arc<PublishState> },
+    Sign(SignProgress),
+    Bidirectional(BidirectionalProgress),
 }
 
 impl SignStatus {
     pub fn is_pending_generation(&self) -> bool {
-        matches!(
-            self,
-            SignStatus::PendingGeneration | SignStatus::PendingGenerationBidirectional
-        )
+        match self {
+            Self::Sign(progress) => progress.is_generating(),
+            Self::Bidirectional(BidirectionalProgress::Initial(progress)) => {
+                progress.is_generating()
+            }
+            Self::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
+                progress.is_generating()
+            }
+            Self::Bidirectional(BidirectionalProgress::Executing(_)) => false,
+        }
     }
 
     pub fn is_pending_execution(&self) -> bool {
-        matches!(self, SignStatus::PendingExecution { .. })
-    }
-
-    /// Project this status onto what is observable at a checkpoint's own chain height.
-    ///
-    /// A source-chain checkpoint cannot observe either of the distinguishing axes
-    /// below, so the status collapses into one of two phases:
-    ///
-    /// * `0` — the initial source-chain phase (`PendingGeneration` /
-    ///   `PendingPublish`). Generation and publication are local attempts to reach
-    ///   the initial on-chain response: only a signature's participants advance to
-    ///   publishing, so nodes cannot be required to agree on which of the two a
-    ///   request is in.
-    /// * `1` — the post-initial phase (`PendingExecution`,
-    ///   `PendingGenerationBidirectional`, `PendingPublishBidirectional`). Once the
-    ///   initial response has been produced, the remaining progress — awaiting
-    ///   target-chain execution and then signing/publishing the final response — is
-    ///   not observable at the source-chain checkpoint height. Nodes therefore
-    ///   cannot be required to agree on whether a request is still awaiting
-    ///   execution or already in the final-response generation/publish step, so all
-    ///   of these statuses share a single tag.
-    pub fn consensus_tag(&self) -> u8 {
-        match self {
-            SignStatus::PendingGeneration | SignStatus::PendingPublish { .. } => 0,
-            SignStatus::PendingExecution { .. }
-            | SignStatus::PendingGenerationBidirectional
-            | SignStatus::PendingPublishBidirectional { .. } => 1,
-        }
+        matches!(
+            self,
+            Self::Bidirectional(BidirectionalProgress::Executing(_))
+        )
     }
 
     pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
         match self {
-            SignStatus::PendingExecution { tx } => Some(tx),
+            Self::Bidirectional(BidirectionalProgress::Executing(tx)) => Some(tx),
             _ => None,
+        }
+    }
+
+    pub fn publishing(&self) -> Option<&Publishing> {
+        match self {
+            Self::Sign(progress) => progress.publishing(),
+            Self::Bidirectional(BidirectionalProgress::Initial(progress)) => progress.publishing(),
+            Self::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
+                progress.publishing()
+            }
+            Self::Bidirectional(BidirectionalProgress::Executing(_)) => None,
+        }
+    }
+
+    /// Project this status onto what is observable at a checkpoint's own chain height.
+    ///
+    /// * `0` — the initial source-chain phase (standard Sign or initial Bidirectional).
+    /// * `1` — the post-initial phase (Bidirectional awaiting target execution or final response).
+    pub fn consensus_tag(&self) -> u8 {
+        match self {
+            Self::Sign(_) | Self::Bidirectional(BidirectionalProgress::Initial(_)) => 0,
+            Self::Bidirectional(
+                BidirectionalProgress::Executing(_) | BidirectionalProgress::Final { .. },
+            ) => 1,
         }
     }
 }
@@ -106,6 +122,14 @@ pub trait SignBidirectionalEventExt {
     /// path's failure handling (quarantine): both must agree on what "can never
     /// advance" means.
     fn validate(&self) -> anyhow::Result<()>;
+
+    /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
+    fn to_bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        mpc_sig: Signature,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx>;
 }
 
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
@@ -157,6 +181,41 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         validate_unsigned_transaction(&self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         Ok(())
+    }
+
+    fn to_bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        mpc_sig: Signature,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx> {
+        let target_chain = self.target_chain().with_context(|| {
+            format!("failed to determine target chain for request: {request_id:?}")
+        })?;
+        let epsilon = self.epsilon()?;
+        let from_address = derive_user_address(root_pk, epsilon);
+        let (signed_tx_hash, nonce) =
+            sign_and_hash_transaction(&self.serialized_transaction, mpc_sig)?;
+
+        Ok(BidirectionalTx {
+            id: BidirectionalTxId(signed_tx_hash),
+            sender: self.sender,
+            serialized_transaction: self.serialized_transaction.clone(),
+            source_chain: self.chain,
+            target_chain,
+            caip2_id: self.caip2_id.clone(),
+            key_version: self.key_version,
+            deposit: self.deposit,
+            path: self.path.clone(),
+            algo: self.algo.clone(),
+            dest: self.dest.clone(),
+            params: self.params.clone(),
+            output_deserialization_schema: self.output_deserialization_schema.clone(),
+            respond_serialization_schema: self.respond_serialization_schema.clone(),
+            request_id,
+            from_address: **from_address,
+            nonce,
+        })
     }
 }
 
@@ -473,56 +532,48 @@ mod tests {
 
     #[test]
     fn test_checkpoint_consensus_bytes_deterministic_across_publish_states() {
-        use super::{PublishState, SignStatus};
-        use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, Signature};
+        use super::{BidirectionalProgress, SignProgress, SignStatus};
+        use crate::backlog::mock::{mock_bidi_response, mock_publishing, mock_tx};
 
-        let dummy_sig = Signature {
-            big_r: k256::ProjectivePoint::GENERATOR.to_affine(),
-            s: k256::Scalar::ONE,
-            recovery_id: 0,
-        };
-        let dummy_tx = Arc::new(BidirectionalTx {
-            id: BidirectionalTxId([1u8; 32]),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: String::new(),
-            key_version: 0,
-            deposit: 0,
-            path: String::new(),
-            algo: String::new(),
-            dest: String::new(),
-            params: String::new(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
-            request_id: [1u8; 32],
-            from_address: [0u8; 20],
-            nonce: 0,
-        });
-        let publish = || Arc::new(PublishState::new(dummy_sig, vec![], true));
+        let dummy_tx = Arc::new(mock_tx(1));
+        let dummy_respond_req = mock_bidi_response(&dummy_tx);
 
-        let generation_tag = SignStatus::PendingGeneration.consensus_tag();
-        let publish_tag = SignStatus::PendingPublish { publish: publish() }.consensus_tag();
+        let generation_tag = SignStatus::Sign(SignProgress::Generating).consensus_tag();
+        let publish_tag =
+            SignStatus::Sign(SignProgress::Publishing(mock_publishing())).consensus_tag();
         assert_eq!(
             generation_tag, publish_tag,
-            "PendingGeneration and PendingPublish must produce identical consensus tags"
+            "Generating and Publishing must produce identical consensus tags"
         );
+
+        // Initial bidirectional phase matches standard sign
+        let bidi_initial_gen_tag =
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Generating))
+                .consensus_tag();
+        assert_eq!(generation_tag, bidi_initial_gen_tag);
 
         // Post-initial phase: target-chain execution and the final response
         // generation/publish are indistinguishable at the source-chain height.
-        let execution_tag = SignStatus::PendingExecution { tx: dummy_tx }.consensus_tag();
-        let gen_bidi_tag = SignStatus::PendingGenerationBidirectional.consensus_tag();
-        let pub_bidi_tag =
-            SignStatus::PendingPublishBidirectional { publish: publish() }.consensus_tag();
+        let execution_tag =
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(dummy_tx)).consensus_tag();
+        let gen_bidi_tag = SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request: Arc::clone(&dummy_respond_req),
+            progress: SignProgress::Generating,
+        })
+        .consensus_tag();
+        let pub_bidi_tag = SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request: dummy_respond_req,
+            progress: SignProgress::Publishing(mock_publishing()),
+        })
+        .consensus_tag();
         assert_eq!(
             execution_tag, gen_bidi_tag,
-            "PendingExecution and PendingGenerationBidirectional must share a consensus tag \
+            "Executing and Final Generating must share a consensus tag \
              (target-chain execution is not observable at the source-chain height)"
         );
         assert_eq!(
             gen_bidi_tag, pub_bidi_tag,
-            "PendingGenerationBidirectional and PendingPublishBidirectional must produce identical consensus tags"
+            "Final Generating and Final Publishing must produce identical consensus tags"
         );
 
         // The initial source-chain phase is observable at this checkpoint's height,

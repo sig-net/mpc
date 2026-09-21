@@ -3,9 +3,7 @@ use std::sync::Arc;
 
 use alloy::sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
-use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
-use anyhow::Context;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::utils::hashing::{compute_request_id, hash_payload};
@@ -16,6 +14,7 @@ use mpc_primitives::{
     MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
+use sha3::Digest as _;
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
     SignatureRespondedEvent,
@@ -87,7 +86,7 @@ impl SolanaSignEvent {
                 )
                     .abi_encode_packed();
 
-                keccak::hash(&encoded).to_bytes()
+                sha3::Keccak256::digest(&encoded).into()
             }
         }
     }
@@ -463,8 +462,17 @@ pub async fn emit_events(
             responded,
         } => {
             for ev in bidirectional {
-                let signature =
-                    to_mpc_signature(&ev.signature).context("failed to parse Solana signature")?;
+                let signature = match to_mpc_signature(&ev.signature) {
+                    Ok(sig) => sig,
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            ?ev.request_id,
+                            "ignoring malformed signature in RespondBidirectional event"
+                        );
+                        continue;
+                    }
+                };
                 events_tx
                     .send(ChainEvent::RespondBidirectional(
                         mpc_primitives::RespondBidirectionalEvent {
@@ -477,8 +485,17 @@ pub async fn emit_events(
             }
 
             for ev in responded {
-                let signature =
-                    to_mpc_signature(&ev.signature).context("failed to parse Solana signature")?;
+                let signature = match to_mpc_signature(&ev.signature) {
+                    Ok(sig) => sig,
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            ?ev.request_id,
+                            "ignoring malformed signature in SignatureResponded event"
+                        );
+                        continue;
+                    }
+                };
                 events_tx
                     .send(ChainEvent::Respond(
                         mpc_primitives::SignatureRespondedEvent {
@@ -589,5 +606,18 @@ mod tests {
             hex::encode(SolanaSignEvent::SignatureRequested(event).generate_request_id()),
             "7f7aee49c2a994cc17f85058f7e0b19a44603d619a7e738522f9aa329e457879"
         );
+    }
+
+    #[test]
+    fn to_mpc_signature_rejects_invalid_curve_point() {
+        let sig = signet_program::Signature {
+            big_r: signet_program::AffinePoint {
+                x: [0x11; 32],
+                y: [0x22; 32],
+            },
+            s: [0x33; 32],
+            recovery_id: 0,
+        };
+        assert!(to_mpc_signature(&sig).is_err());
     }
 }
