@@ -143,7 +143,7 @@ jobs:
           actual=$(sha256sum /tmp/cargo-near.tar.gz | awk '{print $1}')
           [ "$expected" = "$actual" ] || { echo "cargo-near checksum mismatch" >&2; exit 1; }
           tar xzf /tmp/cargo-near.tar.gz -C /tmp
-          find /tmp -maxdepth 3 -type f -name cargo-near -exec install -m755 {} "$HOME/.cargo/bin/" \;
+          install -m755 /tmp/cargo-near-x86_64-unknown-linux-gnu/cargo-near "$HOME/.cargo/bin/"
 
       # Seeded from develop; a static key means PRs always restore it without
       # uploading branch-scoped copies.
