@@ -321,8 +321,8 @@ vote_if_ready(h):
 ### Asking peers
 
 While `want` is set the node asks peers for `get_checkpoint(chain, want)`,
-repeatedly and a reply that hashes to its digest is promoted via the handler described
-above. 
+repeatedly and a reply that hashes to its digest is promoted via the handler 
+described above. 
 
 Asking for a superseded height goes unanswered, since every holder of that
 digest cleared its `voted` on promoting a later one. That costs nothing
@@ -330,13 +330,6 @@ here: the next poll reads the contract and overwrites `want` with whatever
 is settled then, so the poll period bounds how long the node asks the wrong
 question.
 
-### Rules the code does not show
-
-* A cursor pauses for two reasons and reads no block either way, so it
-  crosses nothing, votes nowhere and does not act. The cap releases itself
-  when `pending` shrinks, which a promotion and a `rebase` both do. The
-  `want` hold releases when the body arrives and is promoted, and the next
-  poll overwrites `want` if something else settled meanwhile.
 
 ## 5. Why the properties hold
 
@@ -403,35 +396,31 @@ Where no node can produce it at all there is no recovery here, which section
 
 ## 6. Limits and failure modes
 
-* A provider that keeps changing its mind makes the node repair endlessly
-  without being repaired. Such a node is faulty by section 1, and wants
-  repair or removal rather than another rebase.
-* A node needing a body it does not hold depends on a peer answering, the one
-  place something outside the node decides how long it stays out.
 * One correct node reading wrongly for one round is enough to settle its
   reading, the f faulty supplying the rest. f+1 is what the agreement needs
   and no more, so a transient bad provider on any single node is inside the
   settling threshold rather than outside it. 2f+1 would put it outside, at
   the cost of the tally and the two rebase triggers it fed.
-* Settlement stalled with nobody disagreeing, which takes more than f nodes
+* Stalling
+  * Settlement stalled with nobody disagreeing, which takes more than f nodes
   down or slow. The cap on `pending` is what keeps the node from running
   ahead, at the price that it counts from the settled height, so nodes reach
   it together and the network signs nothing until settlement catches up. An
   operator has to notice.
-* Settlement stalled with everyone disagreeing too finely to resolve, no
+  * Settlement stalled with everyone disagreeing too finely to resolve, no
   digest able to reach f+1. Out of model twice over, since correct nodes
   agree and there are n - f of them, so at n = 9 it takes five distinct
   readings. Every node sees the stall in the tally and rebases, and if their
   readings are stable they land on the same split and go round again on a
   growing backoff.
-* A node whose votes never reach the contract runs ahead to the cap and
-  pauses there, and nothing re-casts for it. Section 1 assumes the governance
-  chain live and readable, so this is a node with its own problem.
-* Every copy of the settled backlog lost: nothing here recovers, a peer
-  being the only source of a body. What makes it remote is `voted` being
+  * Every copy of the settled backlog lost: nothing here recovers, a peer
+  being the only source of a body. What makes it unlikely is `voted` being
   durable, and a new vote never evicting the body behind an earlier one, so
   the f+1 behind a settled digest still hold a copy across a restart, one of
   them correct.
+* A node whose votes never reach the contract runs ahead to the cap and
+  pauses there, and nothing re-casts for it. Section 1 assumes the governance
+  chain live and readable, so this is a node with its own problem.
 * A node that has voted `KEEP` distinct digests at one height votes no more
   there, and the last one it cast stands. It goes on indexing and acting; it
   has simply run out of room to claim anything new, which a node whose
@@ -447,33 +436,8 @@ Where no node can produce it at all there is no recovery here, which section
   above. Staged migration is a last resort, and the batch is not a clean f:
   t = n - f leaves no slack, so every node already out comes from the same
   budget.
+* `voted` containing more than one entry: non-determinism in the implementation.
 
-Three things to watch:
-
-* the processed height stops moving while `pending` is under the cap: the
-  node cannot index, and nothing in this design is holding it back;
-* a rebase follows a rebase: the node repairs and diverges again;
-* the settled height stands still while the chain tips move on: the network
-  cannot agree.
-
-The first two are the node's own reports, and a node whose reading of a
-block is in question is the wrong witness for them. The contract's vote
-counts are what say which nodes a stall comes from.
-
-Beyond the model, where more than f nodes are wrong, the design has nothing to
-offer: enough nodes hold backlogs nobody shares that no digest reaches f+1.
-August 2026 came close, twelve nodes with eight against four, which is f = 4
-against a model allowing three, and yet the eight were a clear majority. Under
-this design they would have settled long before that and the four would have
-promoted them, which says what the bar costs and nothing about safety.
-
-Whether such a split heals turns on the requests dividing it. A request fewer
-than t nodes admitted can never be signed, so it separates their digests for
-ever; one held by t nodes across several groups can be signed, and then it
-stops dividing them. The cap makes it permanent either way: a paused cursor
-signs nothing. August had no in-band recovery at all, and what it took was
-pausing traffic and restarting every node from an empty backlog, which is what
-this design exists to avoid.
 
 ## 7. Getting there from here
 
@@ -576,60 +540,3 @@ Larger, step 7 excepted:
     of the key prefixes, since a bump empties every node at once.
 
 Not needed: reconciling entry by entry, and any new peer call.
-
-## 8. Prior art
-
-The shape is PBFT's (Castro and Liskov, OSDI 1999): periodic checkpoints,
-stable once a threshold of matching digests arrive, a lagging replica caught
-up by state transfer validated against the stable digest. Two borrowings are
-explicit: the digest covers the whole state rather than identifiers into it
-(S2), and one mechanism repairs both a lagging node and a diverged one. Their
-water marks are not borrowed. The availability rule, that a node votes only
-for a checkpoint it holds, is Narwhal's dissemination/ordering split (EuroSys
-2022). S1 above a genesis checkpoint is weak subjectivity and promoting is
-checkpoint sync.
-
-S1, S2 and L1 are consensus's agreement, validity and termination; S1 and L2
-are self-stabilisation's closure and convergence (Dijkstra 1974). The fault
-model is the crash-recovery one of Aguilera, Chen and Toueg (DISC 1998), whose
-question, what a node must keep in stable storage, is section 4's three
-durable fields. What that literature carries and this does not is a stabilisation-time
-bound (open point 4); what the design does have is fault containment, a
-diverged node stopping rather than spreading, though only until it
-restarts.
-
-The alternative not taken is a settled checkpoint as a bare anchor, with a
-diverged node rebasing and replaying rather than fetching a backlog. That
-deletes the peer call and the coordinated switch, and fails on the case that
-matters: with no backlog at the anchor, a node whose provider skipped a block
-re-derives the same wrong backlog from the same provider.
-
-From the rollback-recovery literature (Elnozahy, Alvisi, Wang and Johnson, ACM
-Computing Surveys 2002) most does not apply, its checkpoints being a cut
-across concurrent processes and ours a function of a single ordered log at
-agreed heights: no orphans, no domino effect, no recovery line, no zigzag
-paths. Two things do. Log-based recovery rests on the piecewise deterministic
-assumption; S1 is that assumption with the set of nondeterministic events
-empty, which is why nothing logs determinants. And the output commit problem
-is the one this design declines to solve.
-
-## 9. Open
-
-1. **Whether an entry should record where its response was.** `signature_finalized`
-   is a bit, so re-arming a target-chain watcher means finding a
-   `Respond` the node may never have indexed. Replacing the bit with the
-   height that set it costs no extra field and turns that search into one
-   block fetch; against it, a height in the digest is a height every node has
-   to agree on exactly.
-2. **How far ahead, how much to keep, and the two periods.** The cap on
-   `pending` is how far ahead of agreement a node may run before it waits,
-   `KEEP` is 10 until something says otherwise, a node needing more being
-   one whose readings are not reproducible. Nodes reach the cap together, counting from the settled height, so it is the network that
-   waits. The poll is the other period and cannot grow: convergence and
-   S3(i) both rest on it.
-3. **Per-block work**, which grows with the backlog unless entries are
-   revisited on a schedule. Bounded waste is acceptable, so the schedule may
-   be heuristic.
-4. **A stabilisation bound.** L2 says a diverged node converges and not how
-   long, which is what an operator would watch.
-5. **Membership changes and upgrades**, which section 1 sets aside.
