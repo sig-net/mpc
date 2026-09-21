@@ -8,19 +8,7 @@ use std::time::Duration;
 use test_log::test;
 
 fn sign_request(seed: u32) -> IndexedSignRequest {
-    let bytes = [
-        seed.to_be_bytes()[0],
-        seed.to_be_bytes()[1],
-        seed.to_be_bytes()[2],
-        seed.to_be_bytes()[3],
-    ]
-    .repeat(8);
-    IndexedSignRequest::sign(
-        SignId::new(bytes.try_into().unwrap()),
-        super::helpers::test_sign_arg(seed),
-        Chain::Solana,
-        0,
-    )
+    super::helpers::sign_request(seed, Chain::Solana)
 }
 
 /// Simple test, mostly just here to check the MockStream setup is working.

@@ -5,7 +5,7 @@ use alloy::primitives::Address;
 use alloy::primitives::Bytes;
 use alloy::rpc::types::Log;
 use futures_util::future::join_all;
-use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
+use helios_ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;

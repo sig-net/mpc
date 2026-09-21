@@ -4,9 +4,9 @@ use crate::protocol::sync::SyncUpdate;
 use crate::protocol::Chain;
 use crate::web::{CheckpointResponse, StateView, StatusResponse};
 
-use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
 use reqwest::IntoUrl;
+use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use url::Url;
@@ -19,15 +19,15 @@ use std::time::Duration;
 #[group(id = "message_options")]
 pub struct Options {
     /// Default timeout used for all outbound requests to other nodes.
-    #[clap(long, env("MPC_NODE_TIMEOUT"), default_value = "1000")]
+    #[arg(long, env("MPC_NODE_TIMEOUT"), default_value = "1000")]
     pub timeout: u64,
 
     /// Timeout used for fetching the state of a node.
-    #[clap(long, env("MPC_NODE_STATE_TIMEOUT"), default_value = "1000")]
+    #[arg(long, env("MPC_NODE_STATE_TIMEOUT"), default_value = "1000")]
     pub state_timeout: u64,
 
     /// Timeout used for sync requests to other nodes.
-    #[clap(long, env("MPC_NODE_SYNC_TIMEOUT"), default_value = "60000")]
+    #[arg(long, env("MPC_NODE_SYNC_TIMEOUT"), default_value = "60000")]
     pub sync_timeout: u64,
 }
 

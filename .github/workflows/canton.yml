@@ -1,38 +1,7 @@
 name: Canton Integration Tests
 
 on:
-  push:
-    branches:
-      - develop
-    paths:
-      - integration-tests/**
-      - chain-signatures/**
-  # PRs run only on Canton or shared-core changes; merge_group stays
-  # unfiltered as the safety net. Keep core in sync with other chain workflows.
   pull_request:
-    paths:
-      - ".github/workflows/canton.yml"
-      # Shared core: changes here trigger every chain workflow.
-      - "chain-signatures/chain-integration-core/**"
-      - "chain-signatures/primitives/**"
-      - "chain-signatures/crypto/**"
-      - "chain-signatures/keys/**"
-      - "chain-signatures/utils/**"
-      - "chain-signatures/compact-hashing/**"
-      - "chain-signatures/node/**"
-      - "signet-crypto/**"
-      - "signet-primitives/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "justfile"
-      - ".config/nextest.toml"
-      # Canton crate, tests, and fixtures (matches any *canton* file at any depth).
-      - "chain-signatures/chain-canton/**"
-      - "integration-tests/{src,fixtures,tests}/**canton**"
-      # Shared integration-test harness.
-      - "integration-tests/{Cargo.toml,src/lib.rs,src/cluster/**,src/mpc_fixture/**,tests/lib.rs,tests/cases/mod.rs}"
-      # Canton tests cross-sign over Ethereum via anvil + the eth contract.
-      - "chain-signatures/contract-eth/**"
   merge_group:
 
 env:
@@ -48,10 +17,8 @@ jobs:
         suite:
           - name: Stream
             filter: canton_stream
-            cache-key: canton-test
           - name: E2E
             filter: cases::canton
-            cache-key: canton-e2e-test
 
     steps:
       - uses: actions/checkout@v6
@@ -69,8 +36,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Redis
-        run: docker pull redis:7.4.2
+      # Pull the images in parallel. The images are used in Canton test harness
+      - name: Pull Redis and Foundry images
+        run: |
+          printf '%s\n' redis:7.4.2 ghcr.io/foundry-rs/foundry:nightly \
+            | xargs -P "$(nproc)" -n 1 docker pull
 
       - name: Install Java 21
         uses: actions/setup-java@v4
@@ -88,11 +58,9 @@ jobs:
           dpm --version
 
       - name: Install Rust (1.93.0)
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@1.93.0
         with:
-          profile: minimal
-          toolchain: 1.93.0
-          target: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -112,14 +80,24 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+ 
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
 
+      # Cache policy: doc/ci-caching.md
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.suite.cache-key }}
+          shared-key: workspace-full
           cache-targets: true
           cache-on-failure: false
-          # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
       - name: Build eth contract
         run: just build eth

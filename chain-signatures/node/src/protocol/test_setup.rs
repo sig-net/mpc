@@ -1,11 +1,11 @@
-use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::request::SignatureSpawnerTask;
+use crate::protocol::request::{SignatureSpawner, SignatureSpawnerTask};
 use crate::protocol::{MessageChannel, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::{PresignatureStorage, TripleStorage};
+use crate::types::SignCommand;
 use near_sdk::AccountId;
 use tokio::sync::{mpsc, watch};
 
@@ -16,7 +16,7 @@ pub struct TestProtocolStorage {
 }
 
 pub struct TestProtocolChannels {
-    pub sign_rx: mpsc::Receiver<mpc_primitives::SignCommand>,
+    pub sign_rx: mpsc::Receiver<SignCommand>,
     pub msg_channel: MessageChannel,
     pub rpc_channel: RpcChannel,
     pub config: watch::Receiver<Config>,
@@ -29,7 +29,6 @@ impl MpcSignProtocol {
         storage: TestProtocolStorage,
         channels: TestProtocolChannels,
         contract: ContractStateWatcher,
-        backlog: Backlog,
     ) -> Self {
         let generating = channels.msg_channel.subscribe_generation().await;
         let resharing = channels.msg_channel.subscribe_resharing().await;
@@ -37,18 +36,17 @@ impl MpcSignProtocol {
         // Nothing in tests observes sync-status reports, so the receiving end is
         // dropped immediately.
         let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-        let sign_task = SignatureSpawnerTask::run(
+        let spawner = SignatureSpawner::new(
             my_account_id.clone(),
-            channels.sign_rx,
             contract.clone(),
-            channels.config.clone(),
             storage.presignature_storage.clone(),
             channels.mesh_state.clone(),
             channels.msg_channel.clone(),
             channels.rpc_channel.clone(),
-            backlog,
             sync_report_tx,
         );
+        let sign_task =
+            SignatureSpawnerTask::run(spawner, channels.sign_rx, channels.config.clone());
         Self {
             my_account_id,
             secret_storage: storage.secret_storage,

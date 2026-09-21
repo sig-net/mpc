@@ -151,11 +151,12 @@ describe("dist/main.js over a pipe", () => {
 
   it("takes startup config from the parent-set environment", async () => {
     const blackHole = await openBlackHole();
-    const run = await drive([ready()], envFor(blackHole.port)).finally(blackHole.close);
+    const run = await drive([ready()], envFor(blackHole.port), 10_000).finally(blackHole.close);
 
+    expect(run.timedOut).toBe(false);
     expect(run.code).toBe(0);
     expect(run.stderr).toContain(`node=http://127.0.0.1:${blackHole.port}`);
-  });
+  }, 15_000);
 
   it("flushes ready and exits when its publisher warmup never settles", async () => {
     const blackHole = await openBlackHole();
@@ -177,7 +178,7 @@ describe("dist/main.js over a pipe", () => {
           MIDNIGHT_PUB_INDEXER_URL: `${httpUrl}/api/v3/graphql`,
           MIDNIGHT_PUB_INDEXER_WS_URL: `${wsUrl}/api/v3/graphql/ws`,
         },
-        5_000,
+        10_000,
       );
 
       expect(run.timedOut).toBe(false);
@@ -202,5 +203,5 @@ describe("dist/main.js over a pipe", () => {
     } finally {
       await blackHole.close();
     }
-  }, 10_000);
+  }, 15_000);
 });

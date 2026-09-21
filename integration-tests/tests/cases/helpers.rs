@@ -172,3 +172,8 @@ pub fn test_sign_arg(seed: impl Into<u32>) -> SignArgs {
         key_version: LATEST_MPC_KEY_VERSION,
     }
 }
+
+pub(crate) fn sign_request(seed: u32, chain: Chain) -> IndexedSignRequest {
+    let bytes: [u8; 32] = seed.to_be_bytes().repeat(8).try_into().unwrap();
+    IndexedSignRequest::sign(SignId::new(bytes), test_sign_arg(seed), chain, 0)
+}

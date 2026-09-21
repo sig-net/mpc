@@ -1,22 +1,24 @@
 mod near_governance;
 
+use crate::backlog::{Publishing, SignEntry};
 use crate::config::Config;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
-use crate::sign_bidirectional::PublishState;
+use crate::types::CheckpointWatcher;
 use enum_map::EnumMap;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub use mpc_chain_hydration::HydrationClient;
 pub use near_governance::{CheckpointVoteOutcome, NearGovernanceClient};
 
 use cait_sith::protocol::Participant;
-use dashmap::DashSet;
+use dashmap::{mapref::entry::Entry, DashMap, DashSet};
 use k256::AffinePoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, RetryConfig},
+    utils::retry::{retry_rpc, retry_rpc_gated, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
@@ -66,6 +68,85 @@ impl PublishKind {
     }
 }
 
+/// Checkpoint votes admitted by the dispatch loop: each digest maps to the
+/// ticket of the one task voting it.
+///
+/// A digest is admitted at most once and only above the last observed
+/// consensus height; entries at or below that height are pruned. An entry is
+/// kept once the contract answers its vote, so the same digest is not
+/// submitted again, and released when its task stops without an answer.
+#[derive(Clone, Default)]
+struct CheckpointVotes {
+    tickets: Arc<DashMap<CheckpointDigest, u64>>,
+    next_ticket: Arc<AtomicU64>,
+}
+
+impl CheckpointVotes {
+    /// Admits `checkpoint` and returns its ticket, or `None` if the digest is
+    /// already admitted or at or below `settled_height`.
+    fn admit(&self, checkpoint: CheckpointDigest, settled_height: Option<u64>) -> Option<u64> {
+        if let Some(settled) = settled_height {
+            self.tickets.retain(|admitted, _| {
+                admitted.chain != checkpoint.chain || admitted.height > settled
+            });
+            if checkpoint.height <= settled {
+                return None;
+            }
+        }
+        match self.tickets.entry(checkpoint) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(vacant) => {
+                let ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
+                vacant.insert(ticket);
+                Some(ticket)
+            }
+        }
+    }
+
+    /// Releases `checkpoint` for re-admission if `ticket` still holds it, so a
+    /// task outliving its entry cannot release a replacement's.
+    fn release(&self, checkpoint: &CheckpointDigest, ticket: u64) {
+        self.tickets
+            .remove_if(checkpoint, |_, held| *held == ticket);
+    }
+
+    /// Forgets every vote for `chain`; its tasks are cancelled separately.
+    fn abort(&self, chain: Chain) {
+        self.tickets.retain(|admitted, _| admitted.chain != chain);
+    }
+
+    #[cfg(test)]
+    fn ticket(&self, checkpoint: &CheckpointDigest) -> Option<u64> {
+        self.tickets.get(checkpoint).map(|ticket| *ticket)
+    }
+}
+
+/// A chain's checkpoint-vote cancellation state; both fields change together on abort.
+#[derive(Default)]
+struct CheckpointVoteScope {
+    /// Cancels every vote task spawned in this scope.
+    cancellation: CancellationToken,
+    /// When the previous scope was aborted.
+    aborted_at: Option<Instant>,
+}
+
+impl CheckpointVoteScope {
+    /// Whether a vote created at `created_at` predates the last abort.
+    fn is_stale(&self, created_at: Instant) -> bool {
+        self.aborted_at
+            .is_some_and(|aborted_at| aborted_at >= created_at)
+    }
+
+    /// Cancels this scope's vote tasks and starts a fresh scope.
+    fn abort(&mut self) {
+        self.cancellation.cancel();
+        *self = Self {
+            cancellation: CancellationToken::new(),
+            aborted_at: Some(Instant::now()),
+        };
+    }
+}
+
 // `PublishAction` makes this enum relatively large, but boxing it is not worth
 // the indirection: the RPC channel is bounded to 1024 actions (under 1 MiB of
 // enum storage), and these values are not copied on a performance-critical path.
@@ -95,20 +176,17 @@ pub struct RpcChannel {
 }
 
 impl RpcChannel {
-    pub fn vote_checkpoint(&self, checkpoint: CheckpointDigest) {
-        let tx = self.tx.clone();
-        let created_at = Instant::now();
-        tokio::spawn(async move {
-            if let Err(err) = tx
-                .send(RpcAction::VoteCheckpoint {
-                    checkpoint,
-                    created_at,
-                })
-                .await
-            {
-                tracing::error!(%err, ?checkpoint, "failed to send checkpoint vote");
-            }
-        });
+    /// Enqueues a vote for `checkpoint`. Fails only if the dispatcher is gone.
+    pub async fn vote_checkpoint(&self, checkpoint: CheckpointDigest) -> anyhow::Result<()> {
+        self.tx
+            .send(RpcAction::VoteCheckpoint {
+                checkpoint,
+                created_at: Instant::now(),
+            })
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("rpc channel closed; vote for {checkpoint:?} not enqueued")
+            })
     }
 
     pub async fn abort_checkpoints(&self, chain: Chain) {
@@ -117,7 +195,12 @@ impl RpcChannel {
         }
     }
 
-    pub fn publish_signature(
+    pub fn publish(&self, entry: SignEntry<Publishing>) {
+        let request = Arc::clone(entry.request());
+        self.publish_signature(request, *entry.signature(), entry.participants().to_vec());
+    }
+
+    fn publish_signature(
         &self,
         request: Arc<IndexedSignRequest>,
         signature: Signature,
@@ -138,10 +221,6 @@ impl RpcChannel {
                 tracing::error!(%err, "failed to send publish action");
             }
         });
-    }
-
-    pub fn publish_with_state(&self, request: Arc<IndexedSignRequest>, publish: &PublishState) {
-        self.publish_signature(request, publish.signature, publish.participants.clone());
     }
 }
 
@@ -377,6 +456,9 @@ impl RpcExecutor {
         config: watch::Sender<Config>,
         checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
     ) {
+        // Checkpoint votes stop once the contract's consensus checkpoint reaches them.
+        let consensus = EnumMap::from_fn(|chain| checkpoints[chain].subscribe());
+
         // Spin up update task for updating contract state, config and checkpoints
         let near = self.near.clone();
         tokio::spawn(async move {
@@ -395,6 +477,7 @@ impl RpcExecutor {
         Self::dispatch_loop(
             &self.publishers,
             Some(self.near.clone()),
+            &consensus,
             &mut self.action_rx,
         )
         .await;
@@ -404,10 +487,11 @@ impl RpcExecutor {
     async fn dispatch_loop(
         publishers: &HashMap<Chain, Arc<dyn ChainPublisher>>,
         near: Option<NearGovernanceClient>,
+        consensus: &EnumMap<Chain, CheckpointWatcher>,
         action_rx: &mut mpsc::Receiver<RpcAction>,
     ) {
-        let mut checkpoint_cancellation_tokens = HashMap::<Chain, CancellationToken>::new();
-        let mut checkpoint_abort_times = HashMap::<Chain, Instant>::new();
+        let mut vote_scopes = EnumMap::<Chain, CheckpointVoteScope>::default();
+        let checkpoint_votes = CheckpointVotes::default();
         // Keep track of in-flight publish requests to avoid duplicate publishes.
         // Keyed by publish kind too: the two legs of a bidirectional request share
         // a sign id, and a first leg still retrying must not block its second.
@@ -449,10 +533,7 @@ impl RpcExecutor {
                     created_at,
                 } => {
                     let chain = checkpoint.chain;
-                    if checkpoint_abort_times
-                        .get(&chain)
-                        .is_some_and(|abort_time| *abort_time >= created_at)
-                    {
+                    if vote_scopes[chain].is_stale(created_at) {
                         tracing::info!(?chain, ?checkpoint, "discarding stale checkpoint vote");
                         continue;
                     }
@@ -462,26 +543,28 @@ impl RpcExecutor {
                         continue;
                     };
 
-                    let cancellation = checkpoint_cancellation_tokens
-                        .entry(chain)
-                        .or_default()
-                        .clone();
-                    tokio::spawn(async move {
-                        tokio::select! {
-                            _ = cancellation.cancelled() => {
-                                tracing::info!(?chain, ?checkpoint, "cancelled checkpoint vote");
-                            }
-                            _ = execute_vote_checkpoint(near, checkpoint) => {}
-                        }
-                    });
+                    let settled_height = consensus[chain].borrow().map(|latest| latest.height);
+                    let Some(ticket) = checkpoint_votes.admit(checkpoint, settled_height) else {
+                        tracing::debug!(
+                            ?checkpoint,
+                            ?settled_height,
+                            "skipping checkpoint vote: already admitted or settled by consensus"
+                        );
+                        continue;
+                    };
+
+                    tokio::spawn(run_checkpoint_vote(
+                        checkpoint_votes.clone(),
+                        checkpoint,
+                        ticket,
+                        vote_scopes[chain].cancellation.clone(),
+                        consensus[chain].clone(),
+                        execute_vote_checkpoint(near, checkpoint),
+                    ));
                 }
                 RpcAction::AbortCheckpoints(chain) => {
-                    checkpoint_abort_times.insert(chain, Instant::now());
-                    checkpoint_cancellation_tokens
-                        .entry(chain)
-                        .or_default()
-                        .cancel();
-                    checkpoint_cancellation_tokens.insert(chain, CancellationToken::new());
+                    vote_scopes[chain].abort();
+                    checkpoint_votes.abort(chain);
                     tracing::info!(?chain, "cancelled checkpoint vote tasks");
                 }
             }
@@ -614,29 +697,78 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
     }
 }
 
-async fn execute_vote_checkpoint(near: NearGovernanceClient, checkpoint: CheckpointDigest) {
+/// Runs one admitted checkpoint vote until the contract answers it, it is
+/// cancelled, or consensus reaches its height. Only an answer keeps the digest
+/// admitted; any other ending releases it.
+async fn run_checkpoint_vote<Fut>(
+    votes: CheckpointVotes,
+    checkpoint: CheckpointDigest,
+    ticket: u64,
+    cancellation: CancellationToken,
+    consensus: CheckpointWatcher,
+    vote: Fut,
+) where
+    Fut: std::future::Future<Output = anyhow::Result<CheckpointVoteOutcome>>,
+{
+    let answered = tokio::select! {
+        _ = cancellation.cancelled() => {
+            tracing::info!(?checkpoint, "cancelled checkpoint vote");
+            false
+        }
+        _ = consensus_reaches(consensus, checkpoint.height) => {
+            tracing::info!(?checkpoint, "consensus reached checkpoint height; dropping vote");
+            false
+        }
+        outcome = vote => outcome.is_ok(),
+    };
+    if !answered {
+        votes.release(&checkpoint, ticket);
+    }
+}
+
+/// Resolves once the consensus checkpoint is at or above `height`. Never
+/// resolves if the consensus feed closes, which is not evidence of progress.
+async fn consensus_reaches(mut consensus: CheckpointWatcher, height: u64) {
+    if consensus
+        .wait_for(|latest| latest.is_some_and(|latest| latest.height >= height))
+        .await
+        .is_err()
+    {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn execute_vote_checkpoint(
+    near: NearGovernanceClient,
+    checkpoint: CheckpointDigest,
+) -> anyhow::Result<CheckpointVoteOutcome> {
     vote_checkpoint_with_retry(
         &checkpoint,
         VOTE_CHECKPOINT_TIMEOUT,
         VOTE_CHECKPOINT_RETRY,
+        near.provider_gate(),
         || near.vote_checkpoint(&checkpoint),
     )
     .await
 }
 
-/// Submit a checkpoint vote under a bounded retry policy.
+/// Submit a checkpoint vote under a bounded retry policy, waiting out the NEAR
+/// endpoint's shared cooldown before each attempt.
 async fn vote_checkpoint_with_retry<F, Fut>(
     checkpoint: &CheckpointDigest,
     timeout: Duration,
     retry_config: RetryConfig,
+    gate: &SharedBackoff,
     vote: F,
-) where
+) -> anyhow::Result<CheckpointVoteOutcome>
+where
     F: Fn() -> Fut + Send + Sync,
     Fut: std::future::Future<Output = anyhow::Result<CheckpointVoteOutcome>> + Send,
 {
-    let result = retry_rpc!(
+    let result = retry_rpc_gated!(
         timeout,
         retry_config,
+        gate,
         |attempt, err, sleep| {
             tracing::warn!(
                 ?checkpoint,
@@ -649,7 +781,7 @@ async fn vote_checkpoint_with_retry<F, Fut>(
         { vote().await }
     );
 
-    match result {
+    match &result {
         Ok(CheckpointVoteOutcome::Submitted { threshold_reached }) => {
             tracing::info!(?checkpoint, threshold_reached, "checkpoint vote submitted");
         }
@@ -669,6 +801,7 @@ async fn vote_checkpoint_with_retry<F, Fut>(
             tracing::error!(?checkpoint, ?err, "checkpoint vote failed permanently");
         }
     }
+    result
 }
 
 #[cfg(test)]
@@ -709,10 +842,263 @@ mod tests {
             jitter: false,
         };
 
-        vote_checkpoint_with_retry(&checkpoint, timeout, retry, vote).await;
+        let result =
+            vote_checkpoint_with_retry(&checkpoint, timeout, retry, &SharedBackoff::new(), vote)
+                .await;
+        assert!(result.is_err());
 
         // 1 initial attempt + 2 retries, each cut off by the per-attempt timeout.
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    /// Consensus feeds whose senders are gone: nothing is ever settled.
+    fn no_consensus() -> EnumMap<Chain, CheckpointWatcher> {
+        EnumMap::from_fn(|_| watch::channel(None).1)
+    }
+
+    fn checkpoint_digest(chain: Chain, height: u64, digest: u8) -> CheckpointDigest {
+        CheckpointDigest {
+            chain,
+            height,
+            digest: [digest; 32],
+        }
+    }
+
+    fn test_governance_client(url: &str) -> NearGovernanceClient {
+        let account_id: AccountId = "node.testnet".parse().unwrap();
+        let sign_sk = near_crypto::SecretKey::from_seed(
+            near_crypto::KeyType::ED25519,
+            "rpc-cancellation-test",
+        );
+        let signer =
+            match near_crypto::InMemorySigner::from_secret_key(account_id.clone(), sign_sk.clone())
+            {
+                near_crypto::Signer::InMemory(s) => s,
+                _ => unreachable!(),
+            };
+        let cipher_sk = mpc_keys::hpke::SecretKey::from_bytes(&[0; 32]);
+        let my_addr = "http://127.0.0.1:3000".parse().unwrap();
+        let contract_id: AccountId = "contract.testnet".parse().unwrap();
+        NearGovernanceClient::new(
+            near_fetch::Client::new(url),
+            &my_addr,
+            &sign_sk,
+            &cipher_sk,
+            &contract_id,
+            signer,
+            mpc_chain_near::NearRpcGates::new(SharedBackoff::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn vote_surfaces_provider_errors_and_engages_the_shared_gate() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(402)
+            .expect(2)
+            .create_async()
+            .await;
+        let near = test_governance_client(&server.url());
+        let checkpoint = checkpoint_digest(Chain::Ethereum, 10, 1);
+
+        // One send, and its real error, not a timeout hiding it.
+        let err = near
+            .vote_checkpoint(&checkpoint)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("402"), "unexpected error: {err}");
+
+        // Through the retry loop, the 402 engages the shared NEAR gate.
+        let single_attempt = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_times: 0,
+            jitter: false,
+        };
+        let result = vote_checkpoint_with_retry(
+            &checkpoint,
+            Duration::from_secs(5),
+            single_attempt,
+            near.provider_gate(),
+            || near.vote_checkpoint(&checkpoint),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!near.provider_gate().remaining().is_zero());
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn checkpoint_votes_admit_each_digest_once() {
+        let votes = CheckpointVotes::default();
+        let checkpoint = checkpoint_digest(Chain::Ethereum, 10, 1);
+
+        let ticket = votes.admit(checkpoint, None).expect("first admission");
+        assert_eq!(
+            votes.admit(checkpoint, None),
+            None,
+            "duplicate is not admitted"
+        );
+
+        // A vote that stops without an answer releases the digest for a later retry.
+        votes.release(&checkpoint, ticket);
+        assert!(votes.admit(checkpoint, None).is_some());
+    }
+
+    #[test]
+    fn checkpoint_votes_reject_and_prune_settled_heights() {
+        let votes = CheckpointVotes::default();
+        let settled = checkpoint_digest(Chain::Ethereum, 10, 1);
+        let pending = checkpoint_digest(Chain::Ethereum, 20, 2);
+        let other_chain = checkpoint_digest(Chain::Solana, 5, 3);
+        votes.admit(settled, None).unwrap();
+        votes.admit(pending, None).unwrap();
+        votes.admit(other_chain, None).unwrap();
+
+        let behind = checkpoint_digest(Chain::Ethereum, 10, 4);
+        assert_eq!(votes.admit(behind, Some(10)), None);
+        assert_eq!(votes.ticket(&settled), None, "settled height is pruned");
+        assert!(
+            votes.ticket(&pending).is_some(),
+            "height above consensus is kept"
+        );
+        assert!(
+            votes.ticket(&other_chain).is_some(),
+            "other chains are unaffected"
+        );
+    }
+
+    #[test]
+    fn checkpoint_votes_admit_a_replacement_digest_at_the_same_height() {
+        let votes = CheckpointVotes::default();
+        assert!(votes
+            .admit(checkpoint_digest(Chain::Ethereum, 10, 1), None)
+            .is_some());
+        assert!(votes
+            .admit(checkpoint_digest(Chain::Ethereum, 10, 2), None)
+            .is_some());
+    }
+
+    #[test]
+    fn stale_vote_task_cannot_release_its_replacement() {
+        let votes = CheckpointVotes::default();
+        let checkpoint = checkpoint_digest(Chain::Ethereum, 10, 1);
+
+        let stale = votes.admit(checkpoint, None).unwrap();
+        votes.abort(Chain::Ethereum);
+        let replacement = votes.admit(checkpoint, None).unwrap();
+
+        votes.release(&checkpoint, stale);
+        assert_eq!(votes.ticket(&checkpoint), Some(replacement));
+    }
+
+    #[test]
+    fn consensus_reaches_resolves_only_at_or_above_the_height() {
+        use futures_util::FutureExt as _;
+
+        let (consensus_tx, consensus_rx) = watch::channel(None);
+        let mut reached = Box::pin(consensus_reaches(consensus_rx, 10));
+        assert!((&mut reached).now_or_never().is_none());
+
+        consensus_tx.send_replace(Some(checkpoint_digest(Chain::Ethereum, 9, 9)));
+        assert!((&mut reached).now_or_never().is_none());
+
+        consensus_tx.send_replace(Some(checkpoint_digest(Chain::Ethereum, 10, 9)));
+        assert!((&mut reached).now_or_never().is_some());
+    }
+
+    #[test]
+    fn consensus_reaches_never_resolves_when_the_feed_closes() {
+        use futures_util::FutureExt as _;
+
+        let (consensus_tx, consensus_rx) = watch::channel(None);
+        let mut reached = Box::pin(consensus_reaches(consensus_rx, 10));
+        drop(consensus_tx);
+        assert!((&mut reached).now_or_never().is_none());
+    }
+
+    #[tokio::test]
+    async fn vote_task_releases_its_digest_once_consensus_reaches_it() {
+        let votes = CheckpointVotes::default();
+        let checkpoint = checkpoint_digest(Chain::Ethereum, 10, 1);
+        let ticket = votes.admit(checkpoint, None).unwrap();
+        let (_consensus_tx, consensus_rx) =
+            watch::channel(Some(checkpoint_digest(Chain::Ethereum, 10, 9)));
+
+        run_checkpoint_vote(
+            votes.clone(),
+            checkpoint,
+            ticket,
+            CancellationToken::new(),
+            consensus_rx,
+            std::future::pending::<anyhow::Result<CheckpointVoteOutcome>>(),
+        )
+        .await;
+        assert_eq!(votes.ticket(&checkpoint), None);
+    }
+
+    #[tokio::test]
+    async fn vote_task_keeps_its_digest_after_either_submitted_outcome() {
+        for threshold_reached in [false, true] {
+            let votes = CheckpointVotes::default();
+            let checkpoint = checkpoint_digest(Chain::Ethereum, 10, 1);
+            let ticket = votes.admit(checkpoint, None).unwrap();
+
+            run_checkpoint_vote(
+                votes.clone(),
+                checkpoint,
+                ticket,
+                CancellationToken::new(),
+                watch::channel(None).1,
+                async move { Ok(CheckpointVoteOutcome::Submitted { threshold_reached }) },
+            )
+            .await;
+
+            assert_eq!(votes.ticket(&checkpoint), Some(ticket));
+            assert_eq!(
+                votes.admit(checkpoint, None),
+                None,
+                "an answered vote is not resubmitted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_skips_votes_consensus_already_settled() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (_consensus_tx, consensus_rx) =
+            watch::channel(Some(checkpoint_digest(Chain::Ethereum, 20, 9)));
+        let mut consensus = no_consensus();
+        consensus[Chain::Ethereum] = consensus_rx;
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let near = test_governance_client(&server.url());
+        for height in [10, 20] {
+            tx.send(RpcAction::VoteCheckpoint {
+                checkpoint: checkpoint_digest(Chain::Ethereum, height, 1),
+                created_at: Instant::now(),
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+
+        // Returns once the channel drains. A wrongly admitted vote would already
+        // be spawned; the short wait gives it time to reach the server. It bounds
+        // a negative check, so a slow run can only pass, never fail spuriously.
+        RpcExecutor::dispatch_loop(&HashMap::new(), Some(near), &consensus, &mut rx).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        mock.assert_async().await;
     }
 
     /// Vote churn must be absorbed without completing; real governance changes
@@ -889,7 +1275,7 @@ mod tests {
         // Closing the channel will cause dispatch_loop to return
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &no_consensus(), &mut rx).await;
 
         // Give spawned tasks a chance to complete
         tokio::task::yield_now().await;
@@ -923,7 +1309,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &no_consensus(), &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 0);
@@ -963,7 +1349,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &no_consensus(), &mut rx).await;
 
         // Yield enough times to let both spawned tasks complete.
         // Each task calls publish_signature once and returns immediately.
@@ -1023,7 +1409,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &no_consensus(), &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);
@@ -1041,28 +1427,12 @@ mod tests {
             .create_async()
             .await;
 
-        let account_id: AccountId = "node.testnet".parse().unwrap();
-        let sign_sk = near_crypto::SecretKey::from_seed(
-            near_crypto::KeyType::ED25519,
-            "rpc-cancellation-test",
-        );
-        let signer =
-            match near_crypto::InMemorySigner::from_secret_key(account_id.clone(), sign_sk.clone())
-            {
-                near_crypto::Signer::InMemory(s) => s,
-                _ => unreachable!(),
-            };
-        let cipher_sk = mpc_keys::hpke::SecretKey::from_bytes(&[0; 32]);
-        let my_addr = "http://127.0.0.1:3000".parse().unwrap();
-        let contract_id: AccountId = "contract.testnet".parse().unwrap();
-        let near = near_fetch::Client::new(&server.url());
-        let near =
-            NearGovernanceClient::new(near, &my_addr, &sign_sk, &cipher_sk, &contract_id, signer);
+        let near = test_governance_client(&server.url());
 
         let (tx, mut rx) = mpsc::channel(16);
         let publishers = HashMap::new();
         let dispatch = tokio::spawn(async move {
-            RpcExecutor::dispatch_loop(&publishers, Some(near), &mut rx).await;
+            RpcExecutor::dispatch_loop(&publishers, Some(near), &no_consensus(), &mut rx).await;
         });
 
         tx.send(RpcAction::VoteCheckpoint {
@@ -1113,7 +1483,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, &no_consensus(), &mut rx).await;
 
         // Let the single in-flight publish finish.
         tokio::task::yield_now().await;

@@ -22,7 +22,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 #[derive(Debug, Clone, clap::Parser)]
 pub struct Options {
-    #[clap(
+    #[arg(
         long,
         env("MPC_OPENTELEMETRY_LEVEL"),
         value_enum,
@@ -30,14 +30,14 @@ pub struct Options {
     )]
     pub opentelemetry_level: OpenTelemetryLevel,
 
-    #[clap(
+    #[arg(
         long,
         env("MPC_OTLP_ENDPOINT"),
         default_value = "http://localhost:4318"
     )]
     pub otlp_endpoint: String,
 
-    #[clap(long, env("MPC_DISABLE_GCP_LOGS"), default_value = "false")]
+    #[arg(long, env("MPC_DISABLE_GCP_LOGS"), default_value = "false")]
     pub disable_gcp_logs: bool,
 }
 
@@ -222,7 +222,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
     let tracer_otlp_provider = init_otlp_traces(env, node_id, options.otlp_endpoint.as_str()).await;
     let tracer_otlp = tracer_otlp_provider.tracer("mpc");
 
-    if is_running_on_gcp().await && !options.disable_gcp_logs {
+    if !options.disable_gcp_logs && is_running_on_gcp().await {
         let log_stackdriver_layer = stackdriver_layer()
             .with_writer(std::io::stderr)
             .with_filter(EnvFilter::from_default_env());

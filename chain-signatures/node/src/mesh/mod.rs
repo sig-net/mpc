@@ -20,7 +20,7 @@ pub use state::MeshState;
 pub struct Options {
     /// The interval in milliseconds between pings to participants to check their aliveness
     /// within the MPC network. 1s is normally good enough.
-    #[clap(long, env("MPC_MESH_PING_INTERVAL"), default_value = "1000")]
+    #[arg(long, env("MPC_MESH_PING_INTERVAL"), default_value = "1000")]
     pub ping_interval: u64,
 }
 

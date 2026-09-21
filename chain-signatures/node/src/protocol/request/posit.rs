@@ -119,7 +119,7 @@ impl PositPhase {
                         "deliberator received Propose"
                     );
 
-                    // Check if we have access to this presignature (in storage or generating)
+                    // Check if the presignature available in storage
                     if !ctx.presignatures.contains(*presignature_id).await {
                         tracing::warn!(
                             ?sign_id,
@@ -354,7 +354,9 @@ impl PositPhase {
                                 }
                             }
                             if let Some(_reservation) = presignature {
-                                tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
+                                if let Some(count) = mpc_utils::throttle::check("posit:presig-return-rejects") {
+                                    tracing::warn!(count, ?sign_id, "returning presignature to pool due to REJECTs");
+                                }
                             }
                             return state.reorganize(&format!(
                                 "received enough rejects: {:?}",
@@ -387,7 +389,9 @@ impl PositPhase {
                 _ = &mut posit_deadline => {
                     let reason = if is_proposer {
                         if presignature.is_some() {
-                            tracing::warn!(?sign_id, "returning presignature to pool due to proposer timeout");
+                            if let Some(count) = mpc_utils::throttle::check("posit:presig-return-proposer-timeout") {
+                                tracing::warn!(count, ?sign_id, "returning presignature to pool due to proposer timeout");
+                            }
                         }
                         format!(
                             "proposer posit deadline reached ({} accepts, threshold {})",
@@ -459,12 +463,12 @@ impl PositPhase {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::backlog::Backlog;
     use crate::protocol::message::{Message, MessageInbox, MessageOutbox};
     use crate::protocol::presignature::Presignature;
     use crate::protocol::sync::SyncReportReceiver;
     use crate::rpc::RpcAction;
     use deadpool_redis::Runtime;
-    use mpc_primitives::SignKind;
 
     /// A posit-phase harness; the unused channel ends are held alive so sends
     /// keep working. The redis pool is lazy and never actually connected.
@@ -504,7 +508,6 @@ pub(crate) mod tests {
             presignatures,
             msg: msg_channel,
             rpc: RpcChannel { tx: rpc_tx },
-            backlog: Backlog::new(),
             cfg: ProtocolConfig::default(),
             is_proposer: Arc::new(AtomicBool::new(false)),
             round: Arc::new(AtomicUsize::new(0)),
@@ -513,21 +516,12 @@ pub(crate) mod tests {
             sync_report_tx,
         };
 
-        let request = IndexedSignRequest::new(
-            ctx.sign_id,
-            mpc_primitives::SignArgs {
-                entropy: [0u8; 32],
-                epsilon: k256::Scalar::from(1u64),
-                payload: k256::Scalar::from(2u64),
-                path: "test".to_string(),
-                key_version: 0,
-            },
-            Chain::Ethereum,
-            0,
-            SignKind::Sign,
-        );
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let state = SignState::new(Arc::new(request), mesh_rx, Arc::clone(&ctx.round));
+        let entry = backlog::SignEntry::generating(
+            crate::backlog::mock::mock_sign_request(ctx.sign_id, Chain::Ethereum),
+            &Backlog::new(),
+        );
+        let state = SignState::new(entry, mesh_rx, Arc::clone(&ctx.round));
 
         TestSetup {
             ctx,

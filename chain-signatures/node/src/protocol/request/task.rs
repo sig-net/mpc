@@ -6,8 +6,9 @@ use super::organize::OrganizingPhase;
 use super::posit::PositPhase;
 use super::state::SignState;
 use super::*;
+use crate::backlog::{BacklogError, Generating, SignEntry};
+use crate::storage::presignature_storage::PresignatureTaken;
 
-use crate::sign_bidirectional::PublishState;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
 
@@ -15,6 +16,8 @@ use k256::Secp256k1;
 pub struct GeneratingPhase {
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
+    /// Our reservation when we are the proposer; `None` for a deliberator,
+    /// whose share is taken from storage when generation starts.
     pub presignature: Option<PresignatureReservation>,
     pub accepted_participants: Vec<Participant>,
 }
@@ -28,7 +31,8 @@ pub enum SignPhase {
     /// Agree on the presignature and participant set: the proposer collects
     /// Accepts and broadcasts Start; each deliberator does Propose -> Accept -> Start.
     Posit(PositPhase),
-    /// Commit the reserved presignature and run the signing protocol to completion.
+    /// Take the agreed presignature (commit our reservation, or take our share
+    /// from storage) and run the signing protocol to completion.
     Generating(GeneratingPhase),
     /// Terminal. `Ok` means generation finished and the signature was handed
     /// off to the backlog and the RPC queue; it does not mean a response is on
@@ -69,20 +73,9 @@ impl GeneratingPhase {
             "posit complete, starting generation"
         );
 
-        let presignature_pending = if let Some(reservation) = self.presignature.take() {
-            // Commit: actually remove from Redis now that posit succeeded and generation starts
-            match reservation.commit().await {
-                Some(taken) => PendingPresignature::Available(Box::new(taken)),
-                None => {
-                    return state.reorganize("failed to commit presignature reservation");
-                }
-            }
-        } else {
-            PendingPresignature::InStorage(
-                self.presignature_id,
-                self.proposer,
-                ctx.presignatures.clone(),
-            )
+        let taken = match self.take_presignature(ctx).await {
+            Ok(taken) => taken,
+            Err(reason) => return state.reorganize(&reason),
         };
 
         // Create and run signature generator, which will drive the protocol to completion.
@@ -90,8 +83,8 @@ impl GeneratingPhase {
         let generator = match SignGenerator::new(
             &gen_ctx,
             self.proposer,
-            Arc::clone(&state.request),
-            presignature_pending,
+            state.entry.request(),
+            taken,
             self.accepted_participants.clone(),
         )
         .await
@@ -128,54 +121,59 @@ impl GeneratingPhase {
     }
 
     /// Hand the finished signature on. This is not the on-chain publish: every
-    /// participant moves the backlog entry to pending-publish, the record that
+    /// participant advances the backlog entry to publishing, the record that
     /// publish failover works from, and the proposer queues a publish for the
     /// RPC worker, which submits and retries on its own. Neither outcome is
     /// reported back here.
     async fn hand_off(&self, ctx: &SignTask, state: &SignState, output: FullSignature<Secp256k1>) {
         let sign_id = ctx.sign_id;
-        let request = &state.request;
         let is_proposer = self.proposer == ctx.governance.me;
 
-        let expected_public_key =
-            mpc_crypto::derive_key(ctx.governance.public_key, request.args.epsilon);
-        let signature = match mpc_crypto::reconstruct_signature(
-            &expected_public_key,
-            &output.big_r,
-            &output.s,
-            request.args.payload,
-        ) {
-            Ok(signature) => signature,
-            Err(err) => {
+        let entry = match state
+            .entry
+            .clone()
+            .advance(
+                ctx.governance.public_key,
+                &output,
+                self.accepted_participants.clone(),
+                is_proposer,
+            )
+            .await
+        {
+            Ok(entry) => entry,
+            Err(BacklogError::InvalidSignature) => {
                 tracing::error!(
                     ?sign_id,
-                    ?err,
                     "generated signature does not verify against the derived key; dropping it"
                 );
                 return;
             }
+            Err(err) => {
+                tracing::warn!(?sign_id, ?err, "failed to mark publishing for sign request");
+                return;
+            }
         };
 
-        let publish = Arc::new(PublishState::new(
-            signature,
-            self.accepted_participants.clone(),
-            is_proposer,
-        ));
-        if let Err(err) = ctx
-            .backlog
-            .mark_publishing(request.chain, &sign_id, publish)
-            .await
-        {
-            tracing::warn!(?sign_id, ?err, "failed to mark publishing for sign request");
+        if is_proposer {
+            ctx.rpc.publish(entry);
+        }
+    }
+
+    /// The proposer commits its reservation. A deliberator takes its share from
+    /// storage. Reorganize in case of a failure.
+    async fn take_presignature(&mut self, ctx: &SignTask) -> Result<PresignatureTaken, String> {
+        if let Some(reservation) = self.presignature.take() {
+            return reservation
+                .commit()
+                .await
+                .ok_or_else(|| "failed to commit presignature reservation".to_string());
         }
 
-        if is_proposer {
-            ctx.rpc.publish_signature(
-                Arc::clone(request),
-                signature,
-                self.accepted_participants.clone(),
-            );
-        }
+        let id = self.presignature_id;
+        ctx.presignatures
+            .take(id, self.proposer)
+            .await
+            .ok_or_else(|| format!("failed to take presignature {id} from storage"))
     }
 
     /// Reject a `Propose` that arrives while we are already generating; drop
@@ -231,7 +229,6 @@ pub struct SignTask {
     pub presignatures: PresignatureStorage,
     pub msg: MessageChannel,
     pub rpc: RpcChannel,
-    pub backlog: Backlog,
     pub cfg: ProtocolConfig,
     pub is_proposer: Arc<AtomicBool>,
     /// Posit round, shared with `SignEntry` so it survives a respawn.
@@ -248,14 +245,14 @@ impl SignTask {
     /// Drive the signature generation state machine to completion
     pub async fn run(
         mut self,
-        request: Arc<IndexedSignRequest>,
+        entry: SignEntry<Generating>,
         mesh_state: watch::Receiver<MeshState>,
         mailbox: Arc<PositMailbox>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
         tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
 
-        let mut state = SignState::new(request, mesh_state, Arc::clone(&self.round));
+        let mut state = SignState::new(entry, mesh_state, Arc::clone(&self.round));
         let mut phase = SignPhase::Organizing(OrganizingPhase);
 
         // Sum per-phase time across loop attempts; emit on Complete(Ok) only.
@@ -283,7 +280,7 @@ impl SignTask {
             match new_phase {
                 SignPhase::Complete(result) => {
                     if result.is_ok() {
-                        durations.emit(state.request().chain);
+                        durations.emit(state.request().chain, state.request().request_kind());
                     }
                     return result;
                 }

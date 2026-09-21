@@ -2,10 +2,11 @@ use super::limiter::SignPermit;
 use super::organize::OrganizingPhase;
 use super::task::SignPhase;
 use super::*;
+use crate::backlog::{Generating, SignEntry};
 
 pub struct SignState {
     round: usize,
-    pub request: Arc<IndexedSignRequest>,
+    pub entry: SignEntry<Generating>,
     pub mesh_state: watch::Receiver<MeshState>,
     /// Budget for the current organizing+posit attempt.
     pub budget: TimeoutBudget,
@@ -28,13 +29,13 @@ pub struct SignState {
 
 impl SignState {
     pub fn new(
-        request: Arc<IndexedSignRequest>,
+        entry: SignEntry<Generating>,
         mesh_state: watch::Receiver<MeshState>,
         carried_round: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             round: carried_round.load(Ordering::Relaxed),
-            request,
+            entry,
             mesh_state,
             budget: TimeoutBudget::new(round_timeout(0)),
             permit: None,
@@ -55,7 +56,7 @@ impl SignState {
     }
 
     pub fn request(&self) -> &IndexedSignRequest {
-        &self.request
+        self.entry.request()
     }
 
     /// Abandon the current attempt: advance to the next round (releasing the
@@ -64,7 +65,7 @@ impl SignState {
     /// state machine.
     pub fn reorganize(&mut self, reason: &str) -> SignPhase {
         tracing::warn!(
-            sign_id = ?self.request.id,
+            sign_id = ?self.entry.sign_id(),
             round = self.round,
             reason,
             "reorganizing sign request"
@@ -126,21 +127,8 @@ impl SignState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn request() -> IndexedSignRequest {
-        IndexedSignRequest::sign(
-            SignId::new([0u8; 32]),
-            mpc_primitives::SignArgs {
-                entropy: [0u8; 32],
-                epsilon: k256::Scalar::from(1u64),
-                payload: k256::Scalar::from(2u64),
-                path: "test".to_string(),
-                key_version: 0,
-            },
-            Chain::Ethereum,
-            0,
-        )
-    }
+    use crate::backlog::mock::mock_sign_request;
+    use crate::backlog::Backlog;
 
     /// A respawn rebuilds `SignState`; the round must resume from the carried
     /// value, not restart at 0 — peers read a round reset as time travel.
@@ -148,8 +136,13 @@ mod tests {
     fn round_survives_a_respawn() {
         let carried = Arc::new(AtomicUsize::new(0));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let backlog = Backlog::new();
+        let entry = SignEntry::generating(
+            mock_sign_request(SignId::new([0u8; 32]), Chain::Ethereum),
+            &backlog,
+        );
 
-        let mut state = SignState::new(Arc::new(request()), mesh_rx.clone(), Arc::clone(&carried));
+        let mut state = SignState::new(entry.clone(), mesh_rx.clone(), Arc::clone(&carried));
         state.reorganize("test");
         state.highest_seen_round = 9;
         state.reorganize("test");
@@ -157,7 +150,7 @@ mod tests {
 
         // The task is aborted and a new incarnation takes over.
         drop(state);
-        let respawned = SignState::new(Arc::new(request()), mesh_rx, carried);
+        let respawned = SignState::new(entry, mesh_rx, carried);
         assert_eq!(respawned.round(), 9);
     }
 }
