@@ -82,8 +82,9 @@ digest(height, backlog) = H(
 ```
 
 Encoding for digest must be canonical so it's one byte string per checkpoint,
-no two checkpoints reaching the same one. 
-Request id order is ensures no node-local information is used for the order
+no two checkpoints reaching the same one. Request id order is design rather
+than encoding: insertion order is node-local, and a digest taken over it
+would differ between nodes holding the same backlog.
 
 ### Governance contract
 
@@ -152,10 +153,8 @@ backlog and indexing on from it, given a reachable node holding one.
 
 ## 4. Design
 
-Described for one node, one source chain. 
-
-`commit` defines a single durable write, so the two fields an install replaces
-cannot be left half replaced. 
+Described for one node, one source chain. `commit` is a single durable
+write, so the three fields an install replaces cannot be left part replaced.
 
 The backlogs recorded in `crossed` and `voted` are snapshots, not the
 live map, so what was hashed is what is still there. Serving
@@ -194,12 +193,10 @@ in memory:
     backlog       RequestId -> Entry          
     watermark     Height
     crossed       Height -> (Digest, Backlog)     // checkpoints above base
-    installing    bool                            // reconcile has read a
-                                                  // settled height it has
-                                                  // not installed yet;
-                                                  // false on start, so a
-                                                  // crash mid-install lifts
-                                                  // the hold
+    want          (Height, Digest)?              // a settled checkpoint we
+                                                  // have read and do not
+                                                  // hold; unset on start, so
+                                                  // a crash lifts the hold
 ```
 
 ### Event Handlers
@@ -213,8 +210,11 @@ on start:
 on settlement poll period expiry:
   reconcile()
 
+on a peer's reply to `want`, if it hashes to `want`.digest:
+  install(want.height, want.digest, the reply's backlog)
+
 on block b finalised, the next one above the watermark:       //indexing
-  if installing or len(crossed) >= CAP:
+  if want is set or len(crossed) >= CAP:
     return                           
   backlog.update(b)                  // add/change/remove entries, idempotent
   watermark = height(b)
@@ -226,12 +226,13 @@ on block b finalised, the next one above the watermark:       //indexing
     acted_through = watermark      // and not repeated over a replay
 ```
 
-No two start and indexing handlers run their bodies at once.
-Reconciliation poll handlers may interleave because fetching can take and
-unbounded time. It sets `installing` before releasing, so a if newer handler
-starting meanwhile sees the flag and returns having touched nothing, and a 
-later `reconcile` supersedes it, dropping the fetch and the rest of that run with
-it. So the only overlap is a handler that does nothing.
+No two handlers run their bodies at once, and none runs against itself.
+Nothing here blocks: asking peers is not part of any handler, so no handler
+is long enough to need interrupting. `want` is what a poll leaves behind
+when the body is not held, and the next poll simply overwrites it with
+whatever is settled then, so retargeting is an assignment rather than a
+cancellation. A reply to a `want` the node has moved on from does not hash
+to the current one and is dropped.
 
 `backlog.update` changes state and nothing else; effects (signing,
 publishing, attesting) only happen later if at all.
@@ -256,22 +257,25 @@ reconcile():
   if h == local_checkpoint.height:
     rebase_if_stuck()
     return
-  installing = true             // S3(i): do not act on a backlog we already
-                                // know is superseded
-  mine = crossed[h].digest == d // the cursor derived it this run
-  body = crossed[h].backlog if mine else voted[d] or fetch(h, d)
+  body = crossed[h].backlog if crossed[h].digest == d else voted[d]
                                 // a digest binds its height, so voted cannot
                                 // answer for the wrong one
-  local_checkpoint = (h, d, body) ; voted = {} ; commit
-                                // one write: a crash between them would
-                                // leave the old base with no body for what
-                                // we voted, and the f+1 holders one short
+  if body is none:
+    want = (h, d)               // S3(i): the cursor stops until we hold it
+    return                      // asking peers is section 2's get_checkpoint
+  install(h, d, body)
+
+install(h, d, body):
+  mine = crossed[h].digest == d // the cursor derived it this run
+  local_checkpoint = (h, d, body) ; voted = {} ; want = none ; commit
+                                // one write: a crash partway would leave the
+                                // old base with no body for what we voted,
+                                // and the f+1 holders one short
   if mine and watermark > h:    // only the cursor's own reading lets it keep
     crossed.remove_below(h+1)   // remove entries no longer needed
     vote_if_ready(open height)  // open height moved with h
-  else:                         // read h differently, or 
+  else:                         // read h differently, or has not reached it
     rebase()
-  installing = false
 ```
 
 ```
@@ -301,20 +305,18 @@ second reading never reaches the contract and a flaky network never takes a
 second draw. Where readings are reproducible it re-derives the same digest
 and re-casts the same vote, and the backoff is what makes that cheap.
 
-### Fetch
+### Asking peers
 
-```
-fetch(h, d):
-  ask peers for get_checkpoint(chain, h, d) until one replies with a
-    checkpoint hashing to d
-```
+While `want` is set the node asks peers for `get_checkpoint(chain, want)`,
+and a reply that hashes to its digest installs. This is not a call anything
+waits on: it has no result to return and no run to abandon, so nothing has
+to decide when to give up on it.
 
-A fetch does not give up by itself. Once every holder of `d` has installed a
-later height, its `voted` is cleared and nothing can answer, so a fetch for a
-superseded height waits for ever. What ends it is the next poll, whose
-`reconcile` drops this run and fetches the height that did settle. So
-supersession rather than success is what terminates a fetch that has fallen
-behind, and the poll period bounds how long that takes.
+Asking for a superseded height goes unanswered, since every holder of that
+digest cleared its `voted` on installing a later one. That costs nothing
+here: the next poll reads the contract and overwrites `want` with whatever
+is settled then, so the poll period bounds how long the node asks the wrong
+question.
 
 ### Voting
 
