@@ -24,6 +24,7 @@ mod tx;
 pub use config::{
     IndexerConfig, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig, RpcConfig,
 };
+pub use hashing::MidnightRequestId;
 pub use indexer::MidnightIndexer;
 pub use intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
 pub use publisher::MidnightPublisher;

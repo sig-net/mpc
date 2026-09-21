@@ -24,7 +24,7 @@ const DEST_UNUSED: u8 = 0;
 pub fn generate_sign_request(
     record: &SignBidirectionalRecord,
     read_address: &[u8; 32],
-    request_id: [u8; 32],
+    request_id: RequestId,
     indexed_ts: u64,
 ) -> anyhow::Result<IndexedSignRequest> {
     // The security gate, first: `sender` is caller-controlled record data, so it may
@@ -71,10 +71,10 @@ pub fn generate_sign_request(
     // The one render of the requester.
     let requester = hex::encode(read_address);
     let epsilon = mpc_crypto::kdf::derive_epsilon_midnight(key_version, &requester, &path);
-    let entropy = hash_payload(&request_id);
+    let entropy = hash_payload(request_id.as_bytes());
 
     Ok(IndexedSignRequest::sign_bidirectional(
-        RequestId::new(request_id),
+        request_id,
         SignArgs {
             entropy,
             epsilon,
@@ -128,12 +128,13 @@ fn render_padded_ascii(bytes: &[u8], field: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hashing::MidnightRequestId;
     use crate::records::SignBidirectionalRecord;
     use crate::test_utils::ascii_padded;
     use mpc_primitives::{Chain, SignKind};
 
     const READ_ADDRESS: [u8; 32] = [0xab; 32];
-    const REQUEST_ID: [u8; 32] = [0x77; 32];
+    const SIGN_ID: RequestId = RequestId::from_u8(0x77);
     const INDEXED_TS: u64 = 1_753_000_000;
 
     fn caller_record() -> SignBidirectionalRecord {
@@ -143,7 +144,7 @@ mod tests {
     #[test]
     fn generate_sign_request_maps_every_event_field() {
         let record = caller_record();
-        let request = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let request = generate_sign_request(&record, &READ_ADDRESS, SIGN_ID, INDEXED_TS)
             .expect("the caller record converts");
         let SignKind::SignBidirectional(event) = request.kind else {
             panic!("expected SignBidirectional kind");
@@ -179,9 +180,8 @@ mod tests {
         record.output_deserialization_schema = [output_json.as_slice(), b"\0junk\0\0"].concat();
         record.respond_serialization_schema =
             [respond_json.as_slice(), b"\0nonzero-suffix\0"].concat();
-        let request_id_before = crate::hashing::compute_request_id(
-            &crate::test_utils::aligned_value_from_record(&record),
-        );
+        let request_id_before =
+            RequestId::from_midnight_record(&crate::test_utils::aligned_value_from_record(&record));
 
         let request = generate_sign_request(&record, &READ_ADDRESS, request_id_before, INDEXED_TS)
             .expect("the caller record converts");
@@ -189,15 +189,14 @@ mod tests {
         forwarded_record.output_deserialization_schema = output_json.clone();
         forwarded_record.respond_serialization_schema = respond_json.clone();
         assert_ne!(
-            crate::hashing::compute_request_id(&crate::test_utils::aligned_value_from_record(
+            RequestId::from_midnight_record(&crate::test_utils::aligned_value_from_record(
                 &forwarded_record,
             )),
             request_id_before,
             "request ID must remain bound to the full schema buffers, not the forwarded prefixes"
         );
         assert_eq!(
-            request.id,
-            mpc_primitives::RequestId::new(request_id_before),
+            request.id, request_id_before,
             "the generated request must retain the ID verified from the full record bytes"
         );
         let SignKind::SignBidirectional(event) = request.kind else {
@@ -215,7 +214,7 @@ mod tests {
         // derived key space follows the requester.
         let record = caller_record();
         let elsewhere = [0xcd; 32];
-        let err = generate_sign_request(&record, &elsewhere, REQUEST_ID, INDEXED_TS)
+        let err = generate_sign_request(&record, &elsewhere, SIGN_ID, INDEXED_TS)
             .expect_err("a sender mismatch must drop the request")
             .to_string();
         assert!(
@@ -230,7 +229,7 @@ mod tests {
         // derivation rather than the v2 caip2 one.
         let mut record = caller_record();
         record.key_version = 0;
-        let legacy = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let legacy = generate_sign_request(&record, &READ_ADDRESS, SIGN_ID, INDEXED_TS)
             .expect("key_version 0 is accepted");
         assert_eq!(
             legacy.args.epsilon,
@@ -244,7 +243,7 @@ mod tests {
 
         let mut record = caller_record();
         record.key_version = 2;
-        let err = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let err = generate_sign_request(&record, &READ_ADDRESS, SIGN_ID, INDEXED_TS)
             .expect_err("a key_version above LATEST must be rejected")
             .to_string();
         assert!(err.contains("key_version"), "err: {err}");
@@ -255,14 +254,14 @@ mod tests {
         // A raw commitment hash is the common path; it must convert, not drop.
         let mut record = caller_record();
         record.path = [0xff; 32];
-        let request = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let request = generate_sign_request(&record, &READ_ADDRESS, SIGN_ID, INDEXED_TS)
             .expect("opaque path bytes convert");
         assert_eq!(request.args.path, "ff".repeat(32));
 
         // No trimming: an all-NUL path is 64 zeros, distinct from any trimmed twin.
         let mut record = caller_record();
         record.path = [0u8; 32];
-        let request = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let request = generate_sign_request(&record, &READ_ADDRESS, SIGN_ID, INDEXED_TS)
             .expect("all-NUL path converts");
         assert_eq!(request.args.path, "00".repeat(32));
     }
@@ -285,7 +284,7 @@ mod tests {
     fn generate_sign_request_requires_blank_params() {
         let mut record = caller_record();
         record.params[0] = 1;
-        let err = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+        let err = generate_sign_request(&record, &READ_ADDRESS, SIGN_ID, INDEXED_TS)
             .expect_err("params is reserved: non-blank bytes must fail closed")
             .to_string();
         assert!(err.contains("params"), "err: {err}");

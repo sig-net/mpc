@@ -9,6 +9,7 @@ use midnight_base_crypto::fab::{
 use midnight_onchain_state::state::StateValue;
 use midnight_storage::storage::{Array, HashMap};
 use midnight_storage::DefaultDB;
+use mpc_primitives::RequestId;
 
 use crate::reader::Node;
 
@@ -20,7 +21,7 @@ pub(crate) fn hex_32(value: &str) -> [u8; 32] {
 
 pub(crate) fn notification_payload(
     version: u8,
-    request_id: [u8; 32],
+    request_id: RequestId,
     caller_address: [u8; 32],
     requests_path: &[u8],
 ) -> [u8; crate::emissions::MISC_PAYLOAD_LEN] {
@@ -30,7 +31,7 @@ pub(crate) fn notification_payload(
     );
     let mut payload = [0u8; crate::emissions::MISC_PAYLOAD_LEN];
     payload[0] = version;
-    payload[1..33].copy_from_slice(&request_id);
+    payload[1..33].copy_from_slice(request_id.as_bytes());
     payload[33..65].copy_from_slice(&caller_address);
     payload[65] = requests_path.len() as u8;
     payload[66..66 + requests_path.len()].copy_from_slice(requests_path);
@@ -38,14 +39,14 @@ pub(crate) fn notification_payload(
 }
 
 pub(crate) fn response_payload(
-    request_id: [u8; 32],
+    request_id: RequestId,
     x: [u8; 32],
     y: [u8; 32],
     s: [u8; 32],
     recovery_id: u8,
 ) -> [u8; crate::emissions::MISC_PAYLOAD_LEN] {
     let mut payload = [0u8; crate::emissions::MISC_PAYLOAD_LEN];
-    payload[..32].copy_from_slice(&request_id);
+    payload[..32].copy_from_slice(request_id.as_bytes());
     payload[32..64].copy_from_slice(&x);
     payload[64..96].copy_from_slice(&y);
     payload[96..128].copy_from_slice(&s);
@@ -185,9 +186,9 @@ pub(crate) fn aligned_value_from_record(record: &SignBidirectionalRecord) -> Ali
     }
 }
 
-/// A `Bytes<32>` map key, the shape both counter maps and a caller's request index use.
-pub(crate) fn key_of(bytes: [u8; 32]) -> AlignedValue {
-    AlignedValue::from(bytes)
+/// The `Bytes<32>` key a caller's request index files a record under.
+pub(crate) fn key_of(request_id: RequestId) -> AlignedValue {
+    AlignedValue::from(request_id.bytes)
 }
 
 /// A ledger map from key/value pairs.

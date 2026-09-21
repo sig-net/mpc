@@ -1,5 +1,7 @@
 //! Mirrors of the Midnight Signet contract's on-chain record types.
 
+use mpc_primitives::RequestId;
+
 /// One signing request, the contract's `SignBidirectionalEvent` record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignBidirectionalRecord {
@@ -74,6 +76,6 @@ pub struct EvmAccessListEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignBidirectionalEventNotification {
     pub version: u8,
-    pub request_id: [u8; 32],
+    pub request_id: RequestId,
     pub payload: [u8; 128],
 }

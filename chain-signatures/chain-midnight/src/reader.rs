@@ -5,7 +5,9 @@ use midnight_base_crypto::fab::{AlignedValue, AlignmentAtom, AlignmentSegment, V
 use midnight_onchain_state::state::StateValue;
 use midnight_storage::DefaultDB;
 
-use crate::hashing::compute_request_id;
+use mpc_primitives::RequestId;
+
+use crate::hashing::MidnightRequestId;
 use crate::records::{
     CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams,
     SignBidirectionalEventNotification, SignBidirectionalRecord,
@@ -183,7 +185,7 @@ fn decode_record(node: &Node) -> anyhow::Result<SignBidirectionalRecord> {
 
 /// The recompute-and-drop gate. The decode never sees `request_id`, so this comparison
 /// is the only thing binding a record's contents to the key it was filed under.
-pub fn resolve_verified_record(map: &Node, request_id: [u8; 32]) -> Resolved {
+pub fn resolve_verified_record(map: &Node, request_id: RequestId) -> Resolved {
     let StateValue::Map(entries) = map else {
         return Resolved::Dropped {
             reason: "request-index-not-a-map",
@@ -192,7 +194,7 @@ pub fn resolve_verified_record(map: &Node, request_id: [u8; 32]) -> Resolved {
     };
     // The ledger's own keyed lookup on the ledger's own key type: no scan, and no
     // re-padding of a trimmed wire key.
-    let Some(entry) = entries.get(&AlignedValue::from(request_id)) else {
+    let Some(entry) = entries.get(&AlignedValue::from(request_id.bytes)) else {
         return Resolved::Absent;
     };
     let cell = match cell_of(&entry, "request record") {
@@ -213,13 +215,13 @@ pub fn resolve_verified_record(map: &Node, request_id: [u8; 32]) -> Resolved {
             };
         }
     };
-    let recomputed = compute_request_id(cell);
+    let recomputed = RequestId::from_midnight_record(cell);
     if recomputed != request_id {
         return Resolved::Dropped {
             reason: "rid-mismatch",
             detail: format!(
                 "recomputed {}, so this is a spoofed or wrongly filed record",
-                hex::encode(recomputed)
+                hex::encode(recomputed.as_bytes())
             ),
         };
     }
@@ -241,7 +243,7 @@ pub enum Resolved {
 }
 
 pub(crate) struct DecodedResponse {
-    pub request_id: [u8; 32],
+    pub request_id: RequestId,
     pub signature: anyhow::Result<mpc_primitives::Signature>,
 }
 
@@ -284,7 +286,7 @@ pub(crate) fn decode_response_payload(
     let mut s = [0u8; 32];
     s.copy_from_slice(&emitted[96..128]);
     DecodedResponse {
-        request_id,
+        request_id: RequestId::new(request_id),
         signature: decode_response_signature(x, y, s, emitted[128]),
     }
 }
@@ -300,7 +302,7 @@ pub(crate) fn decode_notification(
     payload.copy_from_slice(&emitted[33..161]);
     SignBidirectionalEventNotification {
         version: emitted[0],
-        request_id,
+        request_id: RequestId::new(request_id),
         payload,
     }
 }
@@ -567,14 +569,14 @@ mod tests {
     }
 
     fn response_payload(
-        request_id: [u8; 32],
+        request_id: RequestId,
         x: [u8; 32],
         y: [u8; 32],
         s: [u8; 32],
         recovery_id: u8,
     ) -> [u8; crate::emissions::MISC_PAYLOAD_LEN] {
         let mut payload = [0u8; crate::emissions::MISC_PAYLOAD_LEN];
-        payload[..32].copy_from_slice(&request_id);
+        payload[..32].copy_from_slice(request_id.as_bytes());
         payload[32..64].copy_from_slice(&x);
         payload[64..96].copy_from_slice(&y);
         payload[96..128].copy_from_slice(&s);
@@ -638,7 +640,7 @@ mod tests {
 
     #[test]
     fn decode_notification_reads_the_emitted_layout() {
-        let request_id = [0x5a; 32];
+        let request_id = RequestId::from_u8(0x5a);
         let caller_address = [0xab; 32];
         let mut notification_payload = [0u8; 128];
         notification_payload[..32].copy_from_slice(&caller_address);
@@ -647,7 +649,7 @@ mod tests {
 
         let mut emitted = [0u8; crate::emissions::MISC_PAYLOAD_LEN];
         emitted[0] = 1;
-        emitted[1..33].copy_from_slice(&request_id);
+        emitted[1..33].copy_from_slice(request_id.as_bytes());
         emitted[33..161].copy_from_slice(&notification_payload);
 
         let decoded = decode_notification(&emitted);
@@ -667,7 +669,10 @@ mod tests {
         let decoded = decode_notification(&emission.payload);
 
         assert_eq!(decoded.version, 1);
-        assert_eq!(decoded.request_id, hex_32(CAPTURE_REQUEST_ID));
+        assert_eq!(
+            decoded.request_id,
+            RequestId::new(hex_32(CAPTURE_REQUEST_ID))
+        );
         let unpacked = unpack_notification_v1(&decoded).expect("captured V1 notification unpacks");
         assert_eq!(unpacked.caller_address, hex_32(CAPTURE_CALLER));
         assert_eq!(unpacked.requests_path, vec![4]);
@@ -683,8 +688,10 @@ mod tests {
         let mut y = [0u8; 32];
         y.copy_from_slice(encoded.y().expect("generator y"));
 
-        for (request_id, scalar, recovery_id) in [([0x31; 32], 7u64, 0u8), ([0x42; 32], 11u64, 1u8)]
-        {
+        for (request_id, scalar, recovery_id) in [
+            (RequestId::from_u8(0x31), 7u64, 0u8),
+            (RequestId::from_u8(0x42), 11u64, 1u8),
+        ] {
             let s: [u8; 32] = k256::Scalar::from(scalar).to_bytes().into();
             let decoded =
                 decode_response_payload(&response_payload(request_id, x, y, s, recovery_id));
@@ -712,7 +719,11 @@ mod tests {
         ] {
             let emission = captured_emission(bytes, kind);
             let decoded = decode_response_payload(&emission.payload);
-            assert_eq!(decoded.request_id, hex_32(CAPTURE_REQUEST_ID), "{name}");
+            assert_eq!(
+                decoded.request_id,
+                RequestId::new(hex_32(CAPTURE_REQUEST_ID)),
+                "{name}"
+            );
             decoded
                 .signature
                 .unwrap_or_else(|err| panic!("{name}: captured signature must be valid: {err:#}"));
@@ -723,7 +734,7 @@ mod tests {
     fn decode_response_payload_rejects_invalid_signature_values() {
         use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 
-        let request_id = [0x5a; 32];
+        let request_id = RequestId::from_u8(0x5a);
         let encoded = k256::AffinePoint::GENERATOR.to_encoded_point(false);
         let mut x = [0u8; 32];
         x.copy_from_slice(encoded.x().expect("generator x"));
@@ -896,13 +907,17 @@ mod tests {
     #[test]
     fn resolve_verified_record_accepts_transient_id_and_rejects_legacy_id() {
         let record = sample_record();
-        let rid = hex_32("db879820adcaca1d5e38c36a3d8de6cc0918273268fdde87b8258ac77ca11e00");
-        let legacy = hex_32("b3d7090a8236265efcbf6be5021de3c49961f85ed6339eaa0a4e83c4510e91bf");
+        let request_id = RequestId::new(hex_32(
+            "db879820adcaca1d5e38c36a3d8de6cc0918273268fdde87b8258ac77ca11e00",
+        ));
+        let legacy = RequestId::new(hex_32(
+            "b3d7090a8236265efcbf6be5021de3c49961f85ed6339eaa0a4e83c4510e91bf",
+        ));
         let cell = cell_from_record(&record);
 
-        let map = map_of(vec![(key_of(rid), cell.clone())]);
+        let map = map_of(vec![(key_of(request_id), cell.clone())]);
         assert_eq!(
-            resolve_verified_record(&map, rid),
+            resolve_verified_record(&map, request_id),
             Resolved::Found(Box::new(record))
         );
 
@@ -923,14 +938,15 @@ mod tests {
     #[test]
     fn resolve_verified_record_reports_absent_and_dropped() {
         let record = sample_record();
-        let rid = compute_request_id(&crate::test_utils::aligned_value_from_record(&record));
-        let poisoned = [0x55; 32];
+        let request_id =
+            RequestId::from_midnight_record(&crate::test_utils::aligned_value_from_record(&record));
+        let poisoned = RequestId::from_u8(0x55);
         let map = map_of(vec![
             (
                 key_of(poisoned),
                 cell_from_atoms(&[vec![1], vec![2], vec![3]], &[1, 1, 1]),
             ),
-            (key_of(rid), cell_from_record(&record)),
+            (key_of(request_id), cell_from_record(&record)),
         ]);
 
         // The undecodable cell drops without panicking...
@@ -943,13 +959,16 @@ mod tests {
         ));
         // ...and does not block the sibling genuine entry.
         assert_eq!(
-            resolve_verified_record(&map, rid),
+            resolve_verified_record(&map, request_id),
             Resolved::Found(Box::new(record))
         );
         // An id absent from the index is the ordinary negative, distinct from a drop.
-        assert_eq!(resolve_verified_record(&map, [0x44; 32]), Resolved::Absent);
+        assert_eq!(
+            resolve_verified_record(&map, RequestId::from_u8(0x44)),
+            Resolved::Absent
+        );
         assert!(matches!(
-            resolve_verified_record(&StateValue::Null, rid),
+            resolve_verified_record(&StateValue::Null, request_id),
             Resolved::Dropped {
                 reason: "request-index-not-a-map",
                 ..
@@ -961,7 +980,7 @@ mod tests {
     fn unpack_notification_v1_rejects_an_unsupported_version() {
         let notification = SignBidirectionalEventNotification {
             version: 2,
-            request_id: [0u8; 32],
+            request_id: RequestId::from_u8(0),
             payload: [0u8; 128],
         };
         let err = unpack_notification_v1(&notification)
@@ -983,7 +1002,7 @@ mod tests {
 
         let notification = SignBidirectionalEventNotification {
             version: 1,
-            request_id: [0u8; 32],
+            request_id: RequestId::from_u8(0),
             payload,
         };
         let unpacked = unpack_notification_v1(&notification).expect("v1 payload unpacks");
@@ -997,7 +1016,7 @@ mod tests {
             p[32] = bad_depth;
             let bad = SignBidirectionalEventNotification {
                 version: 1,
-                request_id: [0u8; 32],
+                request_id: RequestId::from_u8(0),
                 payload: p,
             };
             let err = unpack_notification_v1(&bad)

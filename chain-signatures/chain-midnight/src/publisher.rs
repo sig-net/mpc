@@ -7,7 +7,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
-use mpc_primitives::{Chain, SignKind, Signature};
+use mpc_primitives::{Chain, RequestId, SignKind, Signature};
 use mpc_utils::time::current_unix_timestamp;
 
 use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
@@ -67,7 +67,7 @@ impl RespondCircuit {
 /// One respond call, marshalled off the action before anything is read or spawned.
 struct RespondCall {
     circuit: RespondCircuit,
-    request_id: [u8; 32],
+    request_id: RequestId,
     signature: WireSignature,
 }
 
@@ -158,12 +158,9 @@ impl ChainPublisher for MidnightPublisher {
             // Compact circuit byte payloads need a compile-time size, but serialized
             // execution outcomes vary in length across requests. Cache the exact attested
             // bytes off-chain when possible; cache availability does not gate the response.
-            if let Err(error) = store
-                .ensure_output(&call.request_id, &response.output)
-                .await
-            {
+            if let Err(error) = store.ensure_output(call.request_id, &response.output).await {
                 tracing::warn!(
-                    request_id = %hex::encode(call.request_id),
+                    request_id = %hex::encode(call.request_id.as_bytes()),
                     ?error,
                     "Midnight output caching failed; continuing with on-chain response"
                 );
@@ -176,7 +173,7 @@ impl ChainPublisher for MidnightPublisher {
             ?request_id,
             circuit = call.circuit.wire_name(),
             central = %central_address,
-            request_id = %hex::encode(call.request_id),
+            request_id = %hex::encode(call.request_id.as_bytes()),
             elapsed = ?action.timestamp.elapsed(),
             "midnight: publishing signature"
         );
@@ -187,7 +184,7 @@ impl ChainPublisher for MidnightPublisher {
         let request = IntentRequest {
             circuit: call.circuit.wire_name(),
             contract_address: central_address,
-            request_id: hex::encode(call.request_id),
+            request_id: hex::encode(call.request_id.as_bytes()),
             signature: call.signature.clone(),
             contract_state: hex::encode(&chain.contract_state),
             ledger_parameters: hex::encode(&chain.ledger_parameters),
@@ -224,7 +221,7 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
         action.request.chain
     );
     let signature = wire_signature(&action.signature)?;
-    let request_id = action.request.id.bytes;
+    let request_id = action.request.id;
 
     match &action.request.kind {
         SignKind::SignBidirectional(event) => {
@@ -301,7 +298,7 @@ mod tests {
 
     /// An arbitrary well-formed central address.
     const CENTRAL: &str = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
-    const REQUEST_ID: [u8; 32] = [0x5c; 32];
+    const SIGN_ID: RequestId = RequestId::from_u8(0x5c);
     /// Two different heads, so a per-read re-reader cannot pass the one-hash assertion.
     const HEAD_ONE: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
     const HEAD_TWO: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
@@ -522,18 +519,18 @@ mod tests {
 
     #[derive(Default)]
     struct StubOutputStore {
-        outputs: Mutex<Vec<([u8; 32], Vec<u8>)>>,
+        outputs: Mutex<Vec<(RequestId, Vec<u8>)>>,
         failure: bool,
     }
 
     #[async_trait]
     impl OutputStore for StubOutputStore {
-        async fn ensure_output(&self, request_id: &[u8; 32], output: &[u8]) -> anyhow::Result<()> {
+        async fn ensure_output(&self, request_id: RequestId, output: &[u8]) -> anyhow::Result<()> {
             anyhow::ensure!(!self.failure, "output storage unavailable");
             self.outputs
                 .lock()
                 .unwrap()
-                .push((*request_id, output.to_vec()));
+                .push((request_id, output.to_vec()));
             Ok(())
         }
     }
@@ -560,7 +557,7 @@ mod tests {
         make_publish_action(
             Chain::Midnight,
             SignKind::SignBidirectional(sign_event(Chain::Midnight)),
-            RequestId::new(REQUEST_ID),
+            SIGN_ID,
         )
     }
 
@@ -573,7 +570,7 @@ mod tests {
                 origin_indexed_at: None,
                 chain_ctx: None,
             }),
-            RequestId::new(REQUEST_ID),
+            SIGN_ID,
         )
     }
 
@@ -620,7 +617,10 @@ mod tests {
             .find(|line| line.contains("output caching failed"))
             .unwrap();
         assert!(warning.contains("WARN"), "{recorded}");
-        assert!(warning.contains(&hex::encode(REQUEST_ID)), "{recorded}");
+        assert!(
+            warning.contains(&hex::encode(SIGN_ID.as_bytes())),
+            "{recorded}"
+        );
         assert!(warning.contains("output storage unavailable"), "{recorded}");
         assert!(!recorded.contains("ERROR"), "{recorded}");
         assert_eq!(reads.reads().len(), 3);
@@ -663,7 +663,10 @@ mod tests {
                 .create_async()
                 .await;
             let read = if let Some(status) = read_status {
-                let object = format!("v1/preprod/{CENTRAL}/{}.bin", hex::encode(REQUEST_ID));
+                let object = format!(
+                    "v1/preprod/{CENTRAL}/{}.bin",
+                    hex::encode(SIGN_ID.as_bytes())
+                );
                 let encoded: String =
                     url::form_urlencoded::byte_serialize(object.as_bytes()).collect();
                 Some(
@@ -689,7 +692,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(client.submissions(), 1);
-            assert_eq!(client.built()[0].request_id, hex::encode(REQUEST_ID));
+            assert_eq!(
+                client.built()[0].request_id,
+                hex::encode(SIGN_ID.as_bytes())
+            );
             write.assert_async().await;
             if let Some(read) = read {
                 read.assert_async().await;
@@ -842,10 +848,7 @@ mod tests {
                 .publish_signature(&bidirectional_action(output.clone()))
                 .await
                 .unwrap();
-            assert_eq!(
-                store.outputs.lock().unwrap().pop(),
-                Some((REQUEST_ID, output))
-            );
+            assert_eq!(store.outputs.lock().unwrap().pop(), Some((SIGN_ID, output)));
         }
     }
 
@@ -858,7 +861,7 @@ mod tests {
         }
         #[async_trait]
         impl OutputStore for BlockingStore {
-            async fn ensure_output(&self, _: &[u8; 32], _: &[u8]) -> anyhow::Result<()> {
+            async fn ensure_output(&self, _: RequestId, _: &[u8]) -> anyhow::Result<()> {
                 self.entered.notify_one();
                 self.release.notified().await;
                 Ok(())
@@ -902,7 +905,7 @@ mod tests {
                 make_publish_action(
                     Chain::Canton,
                     SignKind::SignBidirectional(sign_event(Chain::Canton)),
-                    RequestId::new(REQUEST_ID),
+                    SIGN_ID,
                 ),
                 "Canton",
             ),
@@ -910,12 +913,12 @@ mod tests {
                 make_publish_action(
                     Chain::Midnight,
                     SignKind::SignBidirectional(sign_event(Chain::Canton)),
-                    RequestId::new(REQUEST_ID),
+                    SIGN_ID,
                 ),
                 "Canton",
             ),
             (
-                make_publish_action(Chain::Midnight, SignKind::Sign, RequestId::new(REQUEST_ID)),
+                make_publish_action(Chain::Midnight, SignKind::Sign, SIGN_ID),
                 "Sign",
             ),
         ];
@@ -1123,7 +1126,7 @@ mod tests {
         assert_eq!(request.circuit, RESPOND);
         assert_eq!(request.contract_address, CENTRAL);
         assert_eq!(reads.contract_addresses(), [CENTRAL]);
-        assert_eq!(request.request_id, hex::encode(REQUEST_ID));
+        assert_eq!(request.request_id, hex::encode(SIGN_ID.as_bytes()));
         assert_eq!(request.contract_state, hex::encode(CONTRACT_STATE));
         assert_eq!(request.ledger_parameters, hex::encode(LEDGER_PARAMETERS));
 
@@ -1163,6 +1166,6 @@ mod tests {
         let [request] = client.built().try_into().expect("one build per publish");
         assert_eq!(request.circuit, RESPOND_BIDIRECTIONAL);
         assert_eq!(request.contract_address, CENTRAL);
-        assert_eq!(request.request_id, hex::encode(REQUEST_ID));
+        assert_eq!(request.request_id, hex::encode(SIGN_ID.as_bytes()));
     }
 }

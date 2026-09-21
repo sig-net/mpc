@@ -21,7 +21,8 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
+    Chain, ChainEvent, IndexedSignRequest, RequestId, RespondBidirectionalEvent,
+    SignatureRespondedEvent,
 };
 use mpc_utils::{
     task::{retry_until_some, CancellationTokenExt as _},
@@ -91,13 +92,13 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
 fn drop_entry<T>(
     reason: &'static str,
     height: u64,
-    request_id: Option<[u8; 32]>,
+    request_id: Option<RequestId>,
     detail: &str,
 ) -> Option<T> {
     tracing::warn!(
         reason,
         height,
-        request_id = request_id.map(hex::encode),
+        request_id = request_id.map(|id| hex::encode(id.as_bytes())),
         "midnight entry dropped: {detail}"
     );
     None
@@ -231,12 +232,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         height: u64,
         indexed_ts: u64,
     ) -> anyhow::Result<Option<IndexedSignRequest>> {
-        let rid = notification.request_id;
+        let request_id = notification.request_id;
         if notification.version != 1 {
             return Ok(drop_entry(
                 "notification-version",
                 height,
-                Some(rid),
+                Some(request_id),
                 &format!("unsupported version {}", notification.version),
             ));
         }
@@ -247,7 +248,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 return Ok(drop_entry(
                     "notification-payload",
                     height,
-                    Some(rid),
+                    Some(request_id),
                     &format!("{err:#}"),
                 ));
             }
@@ -274,7 +275,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 return Ok(drop_entry(
                     "caller-contract-absent",
                     height,
-                    Some(rid),
+                    Some(request_id),
                     &caller_hex,
                 ));
             }
@@ -282,7 +283,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 return Ok(drop_entry(
                     "caller-state-undecodable",
                     height,
-                    Some(rid),
+                    Some(request_id),
                     &format!("{caller_hex}: {err:#}"),
                 ));
             }
@@ -290,7 +291,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 return Ok(drop_entry(
                     "caller-state-too-large",
                     height,
-                    Some(rid),
+                    Some(request_id),
                     &format!("{caller_hex}: {err:#}"),
                 ));
             }
@@ -306,30 +307,30 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 return Ok(drop_entry(
                     "requests-field-walk",
                     height,
-                    Some(rid),
+                    Some(request_id),
                     &format!("{err:#}"),
                 ));
             }
         };
         // The resolver reports nothing and hands back the reason, so this is the only
         // place a resolution is logged.
-        let record = match resolve_verified_record(field, rid) {
+        let record = match resolve_verified_record(field, request_id) {
             Resolved::Found(record) => *record,
             Resolved::Absent => {
                 // Not a fault: the id is absent from the caller's own index.
                 tracing::debug!(
                     reason = "request-absent",
                     height,
-                    request_id = %hex::encode(rid),
+                    request_id = %hex::encode(request_id.as_bytes()),
                     "midnight entry produced no request: the id is not in the caller's index"
                 );
                 return Ok(None);
             }
             Resolved::Dropped { reason, detail } => {
-                return Ok(drop_entry(reason, height, Some(rid), &detail));
+                return Ok(drop_entry(reason, height, Some(request_id), &detail));
             }
         };
-        match generate_sign_request(&record, &unpacked.caller_address, rid, indexed_ts) {
+        match generate_sign_request(&record, &unpacked.caller_address, request_id, indexed_ts) {
             Ok(request) => Ok(Some(request)),
             Err(err) => {
                 // Every conversion failure is a per-record data property, so drop with
@@ -337,7 +338,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 Ok(drop_entry(
                     "convert-rejected",
                     height,
-                    Some(rid),
+                    Some(request_id),
                     &format!("{err:#}"),
                 ))
             }
@@ -566,6 +567,7 @@ mod tests {
     use super::*;
 
     use crate::emissions::{emissions_in, DecodedTransaction, Emission, EmissionKind};
+    use crate::hashing::MidnightRequestId;
     use crate::source::{BlockProofSeed, CandidateTransactionEmissions};
     use crate::test_utils::{
         array_of, cell_from_record, hex_32, key_of, map_of, notification_payload, response_payload,
@@ -698,29 +700,30 @@ mod tests {
         }]
     }
 
-    fn notification(rid: [u8; 32]) -> [u8; 256] {
-        notification_payload(1, rid, CALLER, &[REQUESTS_FIELD])
+    fn notification(request_id: RequestId) -> [u8; 256] {
+        notification_payload(1, request_id, CALLER, &[REQUESTS_FIELD])
     }
 
-    fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
+    fn named_record_and_request_id(
+        nonce: u64,
+    ) -> (crate::records::SignBidirectionalRecord, RequestId) {
         let mut record = sample_record();
         record.request_nonce = nonce;
-        let rid = crate::hashing::compute_request_id(
-            &crate::test_utils::aligned_value_from_record(&record),
-        );
-        (record, rid)
+        let request_id =
+            RequestId::from_midnight_record(&crate::test_utils::aligned_value_from_record(&record));
+        (record, request_id)
     }
 
     fn caller_state(
         record: &crate::records::SignBidirectionalRecord,
-        rid: [u8; 32],
+        request_id: RequestId,
     ) -> crate::reader::Node {
         array_of(vec![
             StateValue::Null,
             StateValue::Null,
             StateValue::Null,
             StateValue::Null,
-            map_of(vec![(key_of(rid), cell_from_record(record))]),
+            map_of(vec![(key_of(request_id), cell_from_record(record))]),
         ])
     }
 
@@ -961,7 +964,7 @@ mod tests {
         );
     }
 
-    fn assert_request(event: ChainEvent, rid: [u8; 32]) {
+    fn assert_request(event: ChainEvent, request_id: RequestId) {
         let ChainEvent::SignRequest {
             request,
             block_timestamp,
@@ -969,7 +972,7 @@ mod tests {
         else {
             panic!("expected SignRequest");
         };
-        assert_eq!(request.id, RequestId::new(rid));
+        assert_eq!(request.id, request_id);
         assert_eq!(block_timestamp, None);
     }
 
@@ -1114,7 +1117,7 @@ mod tests {
 
     #[tokio::test]
     async fn process_block_emits_one_request_per_notify_emission() {
-        let (record, rid) = named_record_and_rid(7);
+        let (record, request_id) = named_record_and_request_id(7);
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,
@@ -1123,16 +1126,16 @@ mod tests {
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification(rid),
+                        payload: notification(request_id),
                     },
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification(rid),
+                        payload: notification(request_id),
                     },
                 ],
             }],
         );
-        source.set_state(CALLER, 9, caller_state(&record, rid));
+        source.set_state(CALLER, 9, caller_state(&record, request_id));
 
         let events = direct_indexer()
             .await
@@ -1142,15 +1145,15 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         for event in events {
-            assert_request(event, rid);
+            assert_request(event, request_id);
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn successful_request_logs_ledger_hash_and_request_id_together() {
-        let (record, rid) = named_record_and_rid(7);
-        let absent_rid = [0x91; 32];
-        let mut unsupported = notification(rid);
+        let (record, request_id) = named_record_and_request_id(7);
+        let absent_request_id = RequestId::from_u8(0x91);
+        let mut unsupported = notification(request_id);
         unsupported[0] = 2;
         let mut source = FixtureSource::default();
         source.set_emissions(
@@ -1160,7 +1163,7 @@ mod tests {
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification(absent_rid),
+                        payload: notification(absent_request_id),
                     },
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1168,16 +1171,16 @@ mod tests {
                     },
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification(rid),
+                        payload: notification(request_id),
                     },
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification(rid),
+                        payload: notification(request_id),
                     },
                 ],
             }],
         );
-        source.set_state(CALLER, 9, caller_state(&record, rid));
+        source.set_state(CALLER, 9, caller_state(&record, request_id));
 
         let recorder = EventRecorder::default();
         // Keep a second scoped dispatch registered so callsites first reached by a
@@ -1193,7 +1196,7 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         for event in events {
-            assert_request(event, rid);
+            assert_request(event, request_id);
         }
 
         let recorded = recorder.snapshot();
@@ -1205,7 +1208,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(correlations.len(), 2);
         let expected_tx_hash = hex::encode(LEDGER_TX_HASH);
-        let expected_request_id = format!("{:?}", RequestId::new(rid));
+        let expected_request_id = format!("{request_id:?}");
         for fields in correlations {
             assert_eq!(fields.get("tx_hash"), Some(&expected_tx_hash));
             assert_eq!(fields.get("request_id"), Some(&expected_request_id));
@@ -1269,12 +1272,12 @@ mod tests {
             panic!("captured requests field is not a map");
         };
         let entry = entries
-            .get(&key_of(hex_32(CAPTURE_REQUEST_ID)))
+            .get(&key_of(RequestId::new(hex_32(CAPTURE_REQUEST_ID))))
             .expect("captured request entry exists");
         let StateValue::Cell(cell) = &*entry else {
             panic!("captured request entry is not a cell");
         };
-        let request_id = crate::hashing::compute_request_id(cell);
+        let request_id = RequestId::from_midnight_record(cell);
         notification.request_id = request_id;
         source.states.insert(
             (hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()),
@@ -1294,7 +1297,7 @@ mod tests {
             .expect("captured entry processing does not hold")
             .expect("captured entry produces a request");
 
-        assert_eq!(request.id, RequestId::new(request_id));
+        assert_eq!(request.id, request_id);
         assert_eq!(request.args.key_version, 1);
         assert_eq!(
             request.args.path,
@@ -1311,8 +1314,8 @@ mod tests {
         x.copy_from_slice(encoded.x().expect("x"));
         let mut y = [0u8; 32];
         y.copy_from_slice(encoded.y().expect("y"));
-        let respond_rid = [0x31; 32];
-        let bidirectional_rid = [0x32; 32];
+        let respond_request_id = RequestId::from_u8(0x31);
+        let bidirectional_request_id = RequestId::from_u8(0x32);
         let s1: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
         let s2: [u8; 32] = k256::Scalar::from(10u64).to_bytes().into();
         let mut source = FixtureSource::default();
@@ -1323,11 +1326,11 @@ mod tests {
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignatureResponded,
-                        payload: response_payload(respond_rid, x, y, s1, 0),
+                        payload: response_payload(respond_request_id, x, y, s1, 0),
                     },
                     Emission {
                         kind: EmissionKind::RespondBidirectional,
-                        payload: response_payload(bidirectional_rid, x, y, s2, 1),
+                        payload: response_payload(bidirectional_request_id, x, y, s2, 1),
                     },
                 ],
             }],
@@ -1342,12 +1345,12 @@ mod tests {
         let ChainEvent::Respond(respond) = &events[0] else {
             panic!("first locator must be Respond: {events:?}");
         };
-        assert_eq!(respond.request_id, respond_rid);
+        assert_eq!(respond.request_id, respond_request_id);
         assert_eq!(respond.signature.s, k256::Scalar::from(9u64));
         let ChainEvent::RespondBidirectional(respond) = &events[1] else {
             panic!("second locator must be RespondBidirectional: {events:?}");
         };
-        assert_eq!(respond.request_id, bidirectional_rid);
+        assert_eq!(respond.request_id, bidirectional_request_id);
         assert_eq!(respond.signature.s, k256::Scalar::from(10u64));
     }
 
@@ -1360,7 +1363,7 @@ mod tests {
         x.copy_from_slice(encoded.x().expect("x"));
         let mut y = [0u8; 32];
         y.copy_from_slice(encoded.y().expect("y"));
-        let rid = [0x44; 32];
+        let request_id = RequestId::from_u8(0x44);
         let s: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
         let mut source = FixtureSource::default();
         source.set_emissions(
@@ -1370,11 +1373,17 @@ mod tests {
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignatureResponded,
-                        payload: response_payload([0x43; 32], [0xff; 32], [0xff; 32], s, 0),
+                        payload: response_payload(
+                            RequestId::from_u8(0x43),
+                            [0xff; 32],
+                            [0xff; 32],
+                            s,
+                            0,
+                        ),
                     },
                     Emission {
                         kind: EmissionKind::SignatureResponded,
-                        payload: response_payload(rid, x, y, s, 0),
+                        payload: response_payload(request_id, x, y, s, 0),
                     },
                 ],
             }],
@@ -1386,7 +1395,7 @@ mod tests {
             .await
             .expect("invalid signature is a per-emission drop");
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], ChainEvent::Respond(event) if event.request_id == rid));
+        assert!(matches!(&events[0], ChainEvent::Respond(event) if event.request_id == request_id));
     }
 
     #[tokio::test]
@@ -1419,11 +1428,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_caller_read_error_holds_the_block() {
-        let (_record, rid) = named_record_and_rid(7);
+        let (_record, request_id) = named_record_and_request_id(7);
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,
-            one_call(EmissionKind::SignBidirectional, notification(rid)),
+            one_call(EmissionKind::SignBidirectional, notification(request_id)),
         );
         source.set_state_error(CALLER, 9, "state is unavailable at the requested block");
 
@@ -1440,8 +1449,8 @@ mod tests {
 
     #[tokio::test]
     async fn caller_data_failures_drop_only_the_affected_notification() {
-        let (good, good_rid) = named_record_and_rid(7);
-        let (_absent, absent_rid) = named_record_and_rid(8);
+        let (good, good_request_id) = named_record_and_request_id(7);
+        let (_absent, absent_request_id) = named_record_and_request_id(8);
         let mut source = FixtureSource {
             head: 9,
             ..Default::default()
@@ -1453,24 +1462,29 @@ mod tests {
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification_payload(2, [0x01; 32], CALLER, &[REQUESTS_FIELD]),
+                        payload: notification_payload(
+                            2,
+                            RequestId::from_u8(0x01),
+                            CALLER,
+                            &[REQUESTS_FIELD],
+                        ),
                     },
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification_payload(1, [0x02; 32], CALLER, &[]),
+                        payload: notification_payload(1, RequestId::from_u8(0x02), CALLER, &[]),
                     },
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification(absent_rid),
+                        payload: notification(absent_request_id),
                     },
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification(good_rid),
+                        payload: notification(good_request_id),
                     },
                 ],
             }],
         );
-        source.set_state(CALLER, 9, caller_state(&good, good_rid));
+        source.set_state(CALLER, 9, caller_state(&good, good_request_id));
 
         let events = direct_indexer()
             .await
@@ -1478,17 +1492,20 @@ mod tests {
             .await
             .expect("caller data failures do not hold");
         assert_eq!(events.len(), 1);
-        assert_request(events.into_iter().next().expect("good request"), good_rid);
+        assert_request(
+            events.into_iter().next().expect("good request"),
+            good_request_id,
+        );
     }
 
     #[tokio::test]
     async fn caller_state_too_large_and_undecodable_are_per_entry_drops() {
-        let (_record, rid) = named_record_and_rid(7);
+        let (_record, request_id) = named_record_and_request_id(7);
         for failure in ["too-large", "undecodable"] {
             let mut source = FixtureSource::default();
             source.set_emissions(
                 9,
-                one_call(EmissionKind::SignBidirectional, notification(rid)),
+                one_call(EmissionKind::SignBidirectional, notification(request_id)),
             );
             if failure == "too-large" {
                 source.set_oversized_state(CALLER, 9);
@@ -1536,18 +1553,18 @@ mod tests {
 
     #[tokio::test]
     async fn run_emits_catchup_before_completed_and_live_blocks() {
-        let (record, rid) = named_record_and_rid(7);
+        let (record, request_id) = named_record_and_request_id(7);
         let (mut source, live_tx) = with_live(8);
         source.set_emissions(
             7,
-            one_call(EmissionKind::SignBidirectional, notification(rid)),
+            one_call(EmissionKind::SignBidirectional, notification(request_id)),
         );
-        source.set_state(CALLER, 7, caller_state(&record, rid));
+        source.set_state(CALLER, 7, caller_state(&record, request_id));
         live_tx.send(block_ref(9)).await.expect("queue live block");
 
         let mut harness = RunFixture::spawn(source, 5).await;
         assert_block(harness.next_event().await, 6);
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, request_id);
         assert_block(harness.next_event().await, 7);
         assert_block(harness.next_event().await, 8);
         assert!(matches!(
@@ -1560,17 +1577,17 @@ mod tests {
 
     #[tokio::test]
     async fn catchup_retries_a_transient_block_emission_read() {
-        let (record, rid) = named_record_and_rid(7);
+        let (record, request_id) = named_record_and_request_id(7);
         let (mut source, live_tx) = with_live(8);
         source.set_emissions(
             7,
-            one_call(EmissionKind::SignBidirectional, notification(rid)),
+            one_call(EmissionKind::SignBidirectional, notification(request_id)),
         );
-        source.set_state(CALLER, 7, caller_state(&record, rid));
+        source.set_state(CALLER, 7, caller_state(&record, request_id));
         source.set_transient_emission_error(7, 1, "connection reset by peer");
 
         let mut harness = RunFixture::spawn(source, 6).await;
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, request_id);
         assert_block(harness.next_event().await, 7);
         assert_block(harness.next_event().await, 8);
         assert!(matches!(
@@ -1653,13 +1670,13 @@ mod tests {
 
     #[tokio::test]
     async fn live_retries_a_transient_block_emission_read() {
-        let (record, rid) = named_record_and_rid(7);
+        let (record, request_id) = named_record_and_request_id(7);
         let (mut source, live_tx) = with_live(8);
         source.set_emissions(
             9,
-            one_call(EmissionKind::SignBidirectional, notification(rid)),
+            one_call(EmissionKind::SignBidirectional, notification(request_id)),
         );
-        source.set_state(CALLER, 9, caller_state(&record, rid));
+        source.set_state(CALLER, 9, caller_state(&record, request_id));
         source.set_transient_emission_error(9, 1, "connection reset by peer");
 
         let mut harness = RunFixture::spawn(source, 8).await;
@@ -1668,7 +1685,7 @@ mod tests {
             ChainEvent::CatchupCompleted
         ));
         live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, request_id);
         assert_block(harness.next_event().await, 9);
         harness.cancel_and_join().await;
     }
@@ -1704,14 +1721,14 @@ mod tests {
 
     #[tokio::test]
     async fn caller_contract_absent_is_a_per_entry_drop() {
-        let (_record, rid) = named_record_and_rid(7);
+        let (_record, request_id) = named_record_and_request_id(7);
         let mut source = FixtureSource {
             head: 9,
             ..Default::default()
         };
         source.set_emissions(
             9,
-            one_call(EmissionKind::SignBidirectional, notification(rid)),
+            one_call(EmissionKind::SignBidirectional, notification(request_id)),
         );
         let events = direct_indexer()
             .await
@@ -1723,11 +1740,11 @@ mod tests {
 
     #[tokio::test]
     async fn path_walk_and_conversion_failures_drop_only_the_affected_entry() {
-        let (good_record, good_rid) = named_record_and_rid(7);
+        let (good_record, good_request_id) = named_record_and_request_id(7);
         let mut bad_record = sample_record();
         bad_record.request_nonce = 8;
         bad_record.algo = 1;
-        let bad_rid = crate::hashing::compute_request_id(
+        let bad_request_id = RequestId::from_midnight_record(
             &crate::test_utils::aligned_value_from_record(&bad_record),
         );
         let mut source = FixtureSource::default();
@@ -1738,15 +1755,15 @@ mod tests {
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification_payload(1, [0x81; 32], CALLER, &[9]),
+                        payload: notification_payload(1, RequestId::from_u8(0x81), CALLER, &[9]),
                     },
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification(bad_rid),
+                        payload: notification(bad_request_id),
                     },
                     Emission {
                         kind: EmissionKind::SignBidirectional,
-                        payload: notification(good_rid),
+                        payload: notification(good_request_id),
                     },
                 ],
             }],
@@ -1760,8 +1777,8 @@ mod tests {
                 StateValue::Null,
                 StateValue::Null,
                 map_of(vec![
-                    (key_of(bad_rid), cell_from_record(&bad_record)),
-                    (key_of(good_rid), cell_from_record(&good_record)),
+                    (key_of(bad_request_id), cell_from_record(&bad_record)),
+                    (key_of(good_request_id), cell_from_record(&good_record)),
                 ]),
             ]),
         );
@@ -1772,7 +1789,10 @@ mod tests {
             .await
             .expect("per-entry failures do not hold the block");
         assert_eq!(events.len(), 1);
-        assert_request(events.into_iter().next().expect("good request"), good_rid);
+        assert_request(
+            events.into_iter().next().expect("good request"),
+            good_request_id,
+        );
     }
 
     #[tokio::test]
@@ -1804,13 +1824,13 @@ mod tests {
             }
         }
 
-        let (record, rid) = named_record_and_rid(7);
+        let (record, request_id) = named_record_and_request_id(7);
         let (mut source, live_tx) = with_live(9);
         source.set_emissions(
             9,
-            one_call(EmissionKind::SignBidirectional, notification(rid)),
+            one_call(EmissionKind::SignBidirectional, notification(request_id)),
         );
-        source.set_state(CALLER, 9, caller_state(&record, rid));
+        source.set_state(CALLER, 9, caller_state(&record, request_id));
         let state = MockStateManager::new();
         state.set_processed_block(Chain::Midnight, 8).await;
         let counted = CountingTelemetry::default();

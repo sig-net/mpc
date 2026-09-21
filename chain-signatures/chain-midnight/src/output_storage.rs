@@ -5,13 +5,14 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use bytes::Bytes;
 use google_cloud_storage::client::Storage;
+use mpc_primitives::RequestId;
 use mpc_utils::task::AbortOnDrop;
 
 use crate::config::{MidnightAddress, OutputStorageConfig};
 
 #[async_trait]
 pub(crate) trait OutputStore: Send + Sync {
-    async fn ensure_output(&self, request_id: &[u8; 32], output: &[u8]) -> anyhow::Result<()>;
+    async fn ensure_output(&self, request_id: RequestId, output: &[u8]) -> anyhow::Result<()>;
 }
 
 /// Keeps optional caching recoverable without making publishers wait for initialization.
@@ -86,7 +87,7 @@ impl RecoveringOutputStore {
 
 #[async_trait]
 impl OutputStore for RecoveringOutputStore {
-    async fn ensure_output(&self, request_id: &[u8; 32], output: &[u8]) -> anyhow::Result<()> {
+    async fn ensure_output(&self, request_id: RequestId, output: &[u8]) -> anyhow::Result<()> {
         self.ready
             .get()
             .context("Midnight output storage is initializing; retrying in background")?
@@ -187,8 +188,8 @@ impl GcsOutputStore {
 
 #[async_trait]
 impl OutputStore for GcsOutputStore {
-    async fn ensure_output(&self, request_id: &[u8; 32], output: &[u8]) -> anyhow::Result<()> {
-        let object = format!("{}/{}.bin", self.prefix, hex::encode(request_id));
+    async fn ensure_output(&self, request_id: RequestId, output: &[u8]) -> anyhow::Result<()> {
+        let object = format!("{}/{}.bin", self.prefix, hex::encode(request_id.bytes));
         tokio::time::timeout(self.timeout, self.upload(&object, output))
             .await
             .context("Midnight output upload timed out")
@@ -203,7 +204,7 @@ mod tests {
     use google_cloud_auth::credentials::anonymous;
     use mockito::{Matcher, Server};
 
-    const REQUEST_ID: [u8; 32] = [0x5c; 32];
+    const SIGN_ID: RequestId = RequestId::from_u8(0x5c);
 
     async fn store(server: &Server) -> GcsOutputStore {
         let client = Storage::builder()
@@ -278,7 +279,7 @@ mod tests {
             .with_body(r#"{"bucket":"outputs","generation":"1"}"#)
             .create_async()
             .await;
-        store.ensure_output(&REQUEST_ID, &output).await.unwrap();
+        store.ensure_output(SIGN_ID, &output).await.unwrap();
         write.assert_async().await;
     }
 
@@ -303,7 +304,7 @@ mod tests {
                 .with_body(existing)
                 .create_async()
                 .await;
-            let result = store.ensure_output(&REQUEST_ID, &output).await;
+            let result = store.ensure_output(SIGN_ID, &output).await;
             assert_eq!(result.is_ok(), accepted, "{result:#?}");
             read.assert_async().await;
             read.remove_async().await;
@@ -316,7 +317,7 @@ mod tests {
         let mut server = Server::new_async().await;
         let store = store(&server).await;
         let write = upload(&mut server).with_status(403).create_async().await;
-        let error = store.ensure_output(&REQUEST_ID, &[1]).await.unwrap_err();
+        let error = store.ensure_output(SIGN_ID, &[1]).await.unwrap_err();
         assert!(format!("{error:#}").contains("403"));
         assert!(format!("{error:#}").contains(&object_name()));
         write.assert_async().await;
@@ -338,7 +339,7 @@ mod tests {
             client,
         )
         .unwrap();
-        let error = store.ensure_output(&REQUEST_ID, &[1]).await.unwrap_err();
+        let error = store.ensure_output(SIGN_ID, &[1]).await.unwrap_err();
         assert!(format!("{error:#}").contains("timed out"));
     }
 
@@ -405,7 +406,7 @@ mod tests {
             tokio::task::yield_now().await;
             assert_eq!(attempts.load(Ordering::SeqCst), expected);
             let started = tokio::time::Instant::now();
-            store.ensure_output(&REQUEST_ID, &[1]).await.unwrap_err();
+            store.ensure_output(SIGN_ID, &[1]).await.unwrap_err();
             assert_eq!(started.elapsed(), Duration::ZERO);
         }
     }
@@ -462,7 +463,7 @@ mod tests {
             .unwrap();
         tokio::task::yield_now().await;
         assert!(store
-            .ensure_output(&REQUEST_ID, &[1])
+            .ensure_output(SIGN_ID, &[1])
             .await
             .unwrap_err()
             .to_string()
