@@ -35,7 +35,9 @@ and threshold changes.
 
 A correct node is told the truth by its RPC provider, and keeps up: it indexes
 faster than the chain produces blocks, so it reaches the tip from wherever it
-starts. The governance chain is assumed live and readable throughout, so a
+starts. A provider that misleads a node otherwise following the protocol
+leaves it neither faulty nor in agreement, but diverged, which is what L2
+is for. The governance chain is assumed live and readable throughout, so a
 node that cannot see a settlement or get a vote recorded is a node with its
 own problem rather than a network without a contract.
 
@@ -333,17 +335,22 @@ question.
 
 ## 5. Why the properties hold
 
-*S1.* The backlog changes two ways only: applying the events of the next
-finalised block, a function of that block alone, and promoting a checkpoint,
-whose backlog some correct node derived the first way. Entries carry nothing
-local, which keeps the induction closed.
+*S1.* The backlog changes two ways: applying the events of the next
+finalised block, a deterministic step reading that block and the backlog it
+is applied to and nothing else, and promoting a checkpoint, whose backlog
+some correct node derived the first way. A rebase is neither, assigning the
+base, which is a promotion's result. Entries carry nothing local, which
+keeps the induction closed, and the bases it runs on lie on one chain, which
+is S2 below. Nodes reading the same finalised blocks therefore hold the same
+backlog at a height; one reading something else is the diverged node L2
+covers.
 
 Effects sit outside it. This design does not solve the output commit problem;
 it acts ahead of agreement and requires the duplicate to be harmless. It does
-not produce duplicates gratuitously either: #1301 signs on admission and has
+not produce duplicates gratuitously either. #1301 signs on admission and has
 no tip gate, so a replay would open a signing round for every request in the
-range, each pulling in the nodes a signing round takes, which is why
-`acted_through` exists.
+range, and each round pulls in the n - f nodes that signing takes.
+`acted_through` is what stops a replay doing that.
 What it cannot prevent is the range a crash loses, so the duplicate still has
 to be harmless. On the source chain the contract emits the event either way
 and the receiving library drops a response whose request it no longer has
@@ -354,14 +361,25 @@ arriving twice.
 or by promoting a digest f+1 voted for, of which one is correct and a
 correct node votes only for a backlog it derived. The digest covers the
 entries, so matching it means being that backlog and the supplier can
-substitute nothing. Quorums never have to intersect: the contract settles a
-height once.
+substitute nothing. Safety here is not two quorums meeting, which is what a
+height settling twice would need: it is one correct voter behind the digest
+and one settlement per height, and that is why f+1 suffices.
 
 The chain is the open-height rule doing it. A node's open height is the first
 boundary above its own base, so one that has not promoted the settlement at
-h has its open height at h and cannot vote above it. Every vote at the next
-boundary is therefore from a node that promoted h, and the induction S1
-relies on has a base.
+h has its open height at h or below and cannot vote above it. Every correct
+vote at the next boundary is therefore from a node that promoted h, and
+settling takes one of those. The faulty may vote at any height and are f, so
+they settle nothing between them. The induction S1 relies on has a base.
+
+*S3.* (i) is `want`. A poll that reads a settled checkpoint the node cannot
+produce sets it, and the block handler returns while it is set, so the node
+stops indexing, acting and voting until it holds that body. The poll period
+is what bounds the staleness, the contract being read nowhere else. (ii) is
+the cap. A node that has derived `CAP` boundaries beyond its base stops in
+the same handler and for the same reason, and the base is a settled height,
+so the distance is measured from agreement rather than from wherever the
+node started. Both release on a promotion.
 
 *L1.* Correct nodes agree (S1), so the bar is about how many are up, and f+1
 of n - f leaves n - 2f - 1 correct nodes free to be down, four at n = 9 with
@@ -370,9 +388,11 @@ together, and a node catching up votes on reaching the open height rather
 than waiting for the head. Voting only for the next height keeps one height
 open: the faulty are f and cannot settle anything alone. A node whose
 provider has healed gives a different answer only by reading the chain again,
-which it does after a promotion it did not predict. What bounds a node running
-ahead is the cap, so one the contract will not hear from pauses like any
-other.
+and two things make it do so: promoting a checkpoint it did not derive, and
+`rebase_if_stuck` when the tally shows the height is not settling. The second
+is the one that matters when nothing settles at all, there being no promotion
+to trigger the first. A node the contract never hears from runs ahead only to
+the cap and stops there, so it settles nothing and disturbs nothing.
 
 *Retention*, which L2 needs. Every digest a node has voted at a height is one
 it can still produce the backlog for, until that height is settled and the
@@ -385,18 +405,20 @@ by entry: a node behind moves forward and keeps indexing, one that diverged
 takes the settled body and rebases onto it.
 
 The body is there to be had, by retention: the f+1 behind a settled digest
-hold it the moment it settles, one of them correct, and hold it until they
-promote it. There is no escape by voting again at the same height, which
-would drop what the voter had and, where a node's reading of a block is not
-reproducible, could take the last copy of a digest the network had just
-settled. One guaranteed holder is thin, and it is what the threshold costs.
+hold it the moment it settles, one of them correct. Promoting it loses
+nothing, the body becoming the base. What ends a holder's ability to serve it
+is promoting a later checkpoint, by which time the settlement the fetcher is
+chasing has moved too and its next poll asks for that one instead. There is
+no escape by voting again at the same height, which would drop what the voter
+had and, where a node's reading of a block is not reproducible, could take
+the last copy of a digest the network had just settled. One guaranteed holder is thin, and it is what the threshold costs.
 Where no node can produce it at all there is no recovery here, which section
 6 owns.
 
 
 ## 6. Limits and failure modes
 
-* One correct node reading wrongly for one round is enough to settle its
+* One node reading wrongly for one round is enough to settle its
   reading, the f faulty supplying the rest. f+1 is what the agreement needs
   and no more, so a transient bad provider on any single node is inside the
   settling threshold rather than outside it. 2f+1 would put it outside, at
