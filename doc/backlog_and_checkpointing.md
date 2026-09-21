@@ -65,12 +65,6 @@ Vocabulary, per node per source chain:
   * **Genesis checkpoint**: an empty backlog at the chain's start height,
     which the contract holds.
 
-Settling a checkpoint requires a threshold of f+1 to guarantee that at least
-one correct node holds the checkpoint. Guaranteeing a majority of at least
-f+1 *correct* nodes hold a settled checkpoint needs a threshold of 2f+1,
-which makes settling under a buggy non-deterministic implementation harder,
-needing more nodes to have reached the same backlog for a given height.
-
 ## 2. Digest and interfaces
 
 ### The digest
@@ -87,10 +81,9 @@ digest(height, backlog) = H(
 )
 ```
 
-Encoding for digest must be canonical so it's one byte string per
-checkpoint, no two checkpoints reaching the same one. Request id order is
-design rather than encoding: insertion order is node-local, and a digest
-taken over it would differ between nodes holding the same backlog.
+Encoding for digest must be canonical so it's one byte string per checkpoint,
+no two checkpoints reaching the same one. 
+Request id order is ensures no node-local information is used for the order
 
 ### Governance contract
 
@@ -110,6 +103,12 @@ when one digest reaches f+1 votes, settles it at most once, and its settled
 height never decreases. One vote per node per height, a later one replacing
 the earlier and counted. The count is a diagnostic and gates nothing: a node
 barred from a height after too many votes would have no way back in.
+
+Settling a checkpoint requires a threshold of f+1 to guarantee that at least
+one correct node holds the checkpoint. Guaranteeing a majority of at least
+f+1 *correct* nodes hold a settled checkpoint needs a threshold of 2f+1,
+which makes settling under a buggy non-deterministic implementation harder,
+needing more nodes to have reached the same backlog for a given height.
 
 ### Peer
 
@@ -136,7 +135,7 @@ on was read from finalised chain state by a correct node.
 the network has agreed.
 (i) It neither acts on a source chain's backlog nor votes there while it is
 missing the backlog of the newest settled checkpoint it has read from the
-contract. The poll period is how stale that reading can be.
+contract (thus the poll period defines how stale that reading can be).
 (ii) It acts and votes only within a bounded distance of the newest
 checkpoint it has installed, and at that bound it does neither, until it
 installs a newer one or starts again from the one it has.
@@ -153,15 +152,10 @@ backlog and indexing on from it, given a reachable node holding one.
 
 ## 4. Design
 
-One node, one source chain. `commit` is a single durable write, so the two
-fields an install replaces cannot be left half replaced. The handlers are
-mutually exclusive: no two run
-their bodies at once and none runs against itself. `reconcile` is the one
-exception and only while it fetches, which is unbounded and cannot be held
-across. It sets `installing` before releasing, so a block handler starting
-meanwhile sees the flag and returns having touched nothing, and a later
-`reconcile` supersedes it, dropping the fetch and the rest of that run with
-it. So the only overlap is a handler that does nothing.
+Described for one node, one source chain. 
+
+`commit` defines a single durable write, so the two fields an install replaces
+cannot be left half replaced. 
 
 The backlogs recorded in `crossed` and `voted` are snapshots, not the
 live map, so what was hashed is what is still there. Serving
@@ -216,10 +210,10 @@ on start:
   rebase()
   reconcile()
   
-on the settlement poll, re-armed at a fixed interval:
+on settlement poll period expiry:
   reconcile()
 
-on block b finalised, the next one above the watermark:
+on block b finalised, the next one above the watermark:       //indexing
   if installing or len(crossed) >= CAP:
     return                           
   backlog.update(b)                  // add/change/remove entries, idempotent
@@ -231,6 +225,13 @@ on block b finalised, the next one above the watermark:
     act on backlog                 // #1301's. Here only that it is per block
     acted_through = watermark      // and not repeated over a replay
 ```
+
+No two start and indexing handlers run their bodies at once.
+Reconciliation poll handlers may interleave because fetching can take and
+unbounded time. It sets `installing` before releasing, so a if newer handler
+starting meanwhile sees the flag and returns having touched nothing, and a 
+later `reconcile` supersedes it, dropping the fetch and the rest of that run with
+it. So the only overlap is a handler that does nothing.
 
 `backlog.update` changes state and nothing else; effects (signing,
 publishing, attesting) only happen later if at all.
