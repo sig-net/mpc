@@ -9,7 +9,7 @@ use mpc_chain_integration_core::utils::test::ChainIndexerStream;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use mpc_chain_midnight::MidnightIndexer;
 use mpc_node::sign_bidirectional::{derive_user_address, SignBidirectionalEventExt as _};
-use mpc_primitives::{Chain, ChainEvent, SignKind};
+use mpc_primitives::{Chain, ChainEvent, RequestId, SignKind};
 use serial_test::serial;
 use test_log::test;
 
@@ -18,7 +18,7 @@ const RETURN_TRUE_RUNTIME_BYTECODE: &str = "600160005260206000f3";
 
 async fn wait_for_completed_checkpoint(
     cluster: &cluster::Cluster,
-    request_id: [u8; 32],
+    request_id: RequestId,
     minimum_height: u64,
 ) -> anyhow::Result<()> {
     tokio::time::timeout(EVENT_TIMEOUT, async {
@@ -31,7 +31,7 @@ async fn wait_for_completed_checkpoint(
                             && checkpoint
                                 .pending_requests
                                 .iter()
-                                .all(|pending| pending.request_id().bytes != request_id);
+                                .all(|pending| pending.request_id() != request_id);
                     }
                     Err(_) => complete = false,
                 }
@@ -113,7 +113,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         else {
             unreachable!("filtered above")
         };
-        let request_id = request.id.bytes;
+        let request_id = request.id;
         let SignKind::SignBidirectional(sign_event) = &request.kind else {
             unreachable!("filtered above")
         };
@@ -155,17 +155,17 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         assert_eq!(receipt.status(), !failed, "unexpected EVM execution status");
 
         events
-        .wait_for(
-            |event| {
-                matches!(
-                    event,
-                    ChainEvent::RespondBidirectional(response) if response.request_id == request_id
-                )
-            },
-            EVENT_TIMEOUT,
-        )
-        .await
-        .context("waiting for the finalized respondBidirectional entry")?;
+            .wait_for(
+                |event| {
+                    matches!(
+                        event,
+                        ChainEvent::RespondBidirectional(response) if response.request_id == request_id
+                    )
+                },
+                EVENT_TIMEOUT,
+            )
+            .await
+            .context("waiting for the finalized respondBidirectional entry")?;
         let output = midnight.stored_output(request_id).await?;
         assert_eq!(output.len(), expected_width);
         if failed {

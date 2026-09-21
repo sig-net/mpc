@@ -10,6 +10,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_midnight::{
     probe_network_id, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig,
 };
+use mpc_primitives::RequestId;
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -169,20 +170,20 @@ impl MidnightContext {
 
     pub async fn signed_evm_transaction(
         &self,
-        request_id: [u8; 32],
+        request_id: RequestId,
         expected_signer: &str,
     ) -> anyhow::Result<SignedEvmTransaction> {
         let mut driver = self.driver.lock().await;
         driver
             .request(&serde_json::json!({
                 "op": "signedTransaction",
-                "requestId": format!("0x{}", hex::encode(request_id)),
+                "requestId": format!("0x{}", hex::encode(request_id.bytes)),
                 "expectedSigner": expected_signer,
             }))
             .await
     }
 
-    pub async fn stored_output(&self, request_id: [u8; 32]) -> anyhow::Result<Vec<u8>> {
+    pub async fn stored_output(&self, request_id: RequestId) -> anyhow::Result<Vec<u8>> {
         let object = format!(
             "{}/{}/{}/{}.bin",
             self.config
@@ -193,14 +194,14 @@ impl MidnightContext {
                 .prefix,
             self._stack.network_id,
             self.config.central_address.to_hex(),
-            hex::encode(request_id),
+            hex::encode(request_id.bytes),
         );
         self.output_storage.read_object(&object).await
     }
 
     pub async fn settle_response(
         &self,
-        request_id: [u8; 32],
+        request_id: RequestId,
         serialized_output: &[u8],
         reject_padded_replay: bool,
     ) -> anyhow::Result<()> {
@@ -210,7 +211,7 @@ impl MidnightContext {
                 "op": "settleResponse",
                 "serializedOutput": hex::encode(serialized_output),
                 "rejectPaddedReplay": reject_padded_replay,
-                "requestId": format!("0x{}", hex::encode(request_id)),
+                "requestId": format!("0x{}", hex::encode(request_id.bytes)),
             }))
             .await?;
         Ok(())

@@ -10,7 +10,7 @@ use futures::StreamExt;
 use k256::Secp256k1;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt as _;
-use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use mpc_primitives::{RequestId, LATEST_MPC_KEY_VERSION};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
@@ -291,7 +291,7 @@ pub struct SolSignOutcome {
     pub signature: FullSignature<Secp256k1>,
     pub recovery_id: u8,
     pub signer_account: String,
-    pub request_id: [u8; 32],
+    pub request_id: RequestId,
     pub payload: [u8; 32],
     pub payload_hash: [u8; 32],
     pub path: String,
@@ -309,7 +309,7 @@ impl fmt::Debug for SolSignOutcome {
             .field("signature_s", &self.signature.s)
             .field("recovery_id", &self.recovery_id)
             .field("signer_account", &self.signer_account)
-            .field("request_id", &hex::encode(self.request_id))
+            .field("request_id", &self.request_id)
             .field("payload", &hex::encode(self.payload))
             .field("payload_hash", &hex::encode(self.payload_hash))
             .field("path", &self.path)
@@ -322,13 +322,13 @@ impl fmt::Debug for SolSignOutcome {
 }
 
 struct SolSignatureResponse {
-    request_id: [u8; 32],
+    request_id: RequestId,
     signature: FullSignature<Secp256k1>,
     recovery_id: u8,
 }
 
 pub struct SolRespondBidirectionalOutcome {
-    pub request_id: [u8; 32],
+    pub request_id: RequestId,
     pub responder: String,
     pub serialized_output: Vec<u8>,
     pub signature: FullSignature<Secp256k1>,
@@ -548,8 +548,9 @@ async fn wait_for_signature_responded_event(
                 match parse_signature_responded_events(&rpc_client, &tx_signature, &program_id).await {
                     Ok(events) => {
                         for event in events {
+                            let request_id = RequestId::new(event.request_id);
                             tracing::info!(
-                                request_id = %hex::encode(event.request_id),
+                                ?request_id,
                                 tx_signature = %tx_signature,
                                 "received SignatureRespondedEvent via CPI logs",
                             );
@@ -557,7 +558,7 @@ async fn wait_for_signature_responded_event(
                             match parse_sol_signature(&event.signature) {
                                 Ok((signature, recovery_id)) => {
                                     return Ok(SolSignatureResponse {
-                                        request_id: event.request_id,
+                                        request_id,
                                         signature,
                                         recovery_id,
                                     });
@@ -644,7 +645,7 @@ async fn parse_signature_responded_events(
             match SignatureRespondedEvent::deserialize(&mut &event_data[..]) {
                 Ok(event) => {
                     tracing::info!(
-                        request_id = %hex::encode(event.request_id),
+                        request_id = ?RequestId::new(event.request_id),
                         inner_index = %format!("{}.{}", set_idx, ix_idx),
                         "parsed SignatureRespondedEvent from respond transaction",
                     );
@@ -674,14 +675,14 @@ impl SignCall {
 
 pub async fn wait_for_respond_bidirectional(
     solana: &containers::Solana,
-    expected_request_id: [u8; 32],
+    expected_request_id: RequestId,
     timeout: Duration,
 ) -> anyhow::Result<SolRespondBidirectionalOutcome> {
     let program_id = solana.program_keypair.pubkey();
     let rpc = RpcClient::new(solana.rpc_address.clone());
 
     tracing::info!(
-        request_id = %hex::encode(expected_request_id),
+        ?expected_request_id,
         timeout_secs = timeout.as_secs(),
         "polling for RespondBidirectionalEvent CPI instruction...",
     );
@@ -700,8 +701,7 @@ pub async fn wait_for_respond_bidirectional(
 
         if tokio::time::Instant::now() >= deadline {
             anyhow::bail!(
-                "timeout ({timeout:?}) waiting for respond bidirectional on solana (request_id={})",
-                hex::encode(expected_request_id),
+                "timeout ({timeout:?}) waiting for respond bidirectional on solana (request_id={expected_request_id:?})",
             );
         }
 
@@ -709,7 +709,7 @@ pub async fn wait_for_respond_bidirectional(
         elapsed_secs += 2;
         if elapsed_secs.is_multiple_of(30) {
             tracing::info!(
-                request_id = %hex::encode(expected_request_id),
+                ?expected_request_id,
                 elapsed_secs,
                 "still waiting for RespondBidirectionalEvent..."
             );
@@ -720,7 +720,7 @@ pub async fn wait_for_respond_bidirectional(
 async fn scan_respond_bidirectional_events(
     rpc: &RpcClient,
     program_id: &Pubkey,
-    expected_request_id: [u8; 32],
+    expected_request_id: RequestId,
     seen: &mut HashSet<String>,
 ) -> anyhow::Result<Option<SolRespondBidirectionalOutcome>> {
     let statuses = rpc.get_signatures_for_address(program_id).await?;
@@ -748,20 +748,21 @@ async fn scan_respond_bidirectional_events(
         seen.insert(status.signature.clone());
 
         for event in events {
+            let request_id = RequestId::new(event.request_id);
             tracing::info!(
-                request_id = %hex::encode(event.request_id),
+                ?request_id,
                 responder = ?event.responder,
                 serialized_output_len = event.serialized_output.len(),
                 "received RespondBidirectionalEvent",
             );
 
-            if event.request_id != expected_request_id {
+            if request_id != expected_request_id {
                 continue;
             }
 
             let (signature, recovery_id) = parse_sol_signature(&event.signature)?;
             return Ok(Some(SolRespondBidirectionalOutcome {
-                request_id: event.request_id,
+                request_id,
                 responder: event.responder.to_string(),
                 serialized_output: event.serialized_output,
                 signature,

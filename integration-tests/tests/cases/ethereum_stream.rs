@@ -66,7 +66,7 @@ fn test_eth_bidirectional_tx(
         params: "{}".to_string(),
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        request_id: request_id.bytes,
+        request_id,
         from_address: **from_address,
         nonce,
     }
@@ -294,7 +294,7 @@ async fn submit_eth_transfer_with_block(ctx: &EthereumTestEnvironment) -> Result
 
 async fn submit_respond_for_request_id<P>(
     contract: ChainSignatures::ChainSignaturesInstance<P>,
-    request_id: [u8; 32],
+    request_id: RequestId,
     signature: mpc_primitives::Signature,
 ) -> Result<B256>
 where
@@ -306,7 +306,7 @@ where
     let s = U256::from_be_bytes(signature.s.to_bytes().into());
 
     let response = ChainSignatures::Response {
-        requestId: request_id.into(),
+        requestId: request_id.bytes.into(),
         signature: ChainSignatures::Signature {
             bigR: ChainSignatures::AffinePoint {
                 x: U256::from_be_slice(x),
@@ -534,8 +534,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let resolved_args = test_sign_args(0x11);
     let resolved_sig = generate_signature(&root_sk, &resolved_args);
 
-    submit_respond_for_request_id(responder_contract, resolved_request_id.bytes, resolved_sig)
-        .await?;
+    submit_respond_for_request_id(responder_contract, resolved_request_id, resolved_sig).await?;
     submit_eth_transfer(&ctx).await?;
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
@@ -691,7 +690,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         ctx.wallet,
         0,
     );
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
     backlog.insert_mock_executing(&tx).await;
 
     let mut stream = stream_ethereum(&ctx, backlog.clone()).await?;
@@ -1213,7 +1212,7 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
         match stream.next_event_within(Duration::from_secs(10)).await? {
             ChainEvent::Respond(ev) => {
                 assert_eq!(ev.chain, mpc_primitives::Chain::Ethereum);
-                assert_eq!(ev.request_id, sign_req.id.bytes);
+                assert_eq!(ev.request_id, sign_req.id);
                 assert_eq!(ev.signature.big_r, expected_big_r);
                 assert_eq!(ev.signature.s, expected_s);
                 assert_eq!(ev.signature.recovery_id, expected_recovery_id);
@@ -1256,9 +1255,9 @@ async fn test_ethereum_stream_respond_event_off_curve_point_skipped() -> Result<
     // A valid respond followed by a later sign request must still flow:
     // the malformed event is skipped (warn-and-drop), the pipeline survives.
     let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
-    let valid_id = [0xf2; 32];
+    let valid_id = RequestId::new([0xf2; 32]);
     let valid = ChainSignatures::Response {
-        requestId: valid_id.into(),
+        requestId: valid_id.bytes.into(),
         signature: ChainSignatures::Signature {
             bigR: ChainSignatures::AffinePoint {
                 x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),
@@ -1335,9 +1334,9 @@ async fn test_ethereum_stream_respond_event_scalar_out_of_range_skipped() -> Res
 
     // A valid respond followed by a later sign request must still flow:
     // the malformed event is skipped (warn-and-drop), the pipeline survives.
-    let valid_id = [0xf2; 32];
+    let valid_id = RequestId::new([0xf2; 32]);
     let valid = ChainSignatures::Response {
-        requestId: valid_id.into(),
+        requestId: valid_id.bytes.into(),
         signature: ChainSignatures::Signature {
             bigR: ChainSignatures::AffinePoint {
                 x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),

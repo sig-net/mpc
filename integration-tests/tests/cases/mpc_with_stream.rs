@@ -453,7 +453,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             2,
             Box::new(move |event: &ChainEvent| {
                 if let ChainEvent::Respond(respond) = event {
-                    if respond.request_id == bad_request_id.bytes {
+                    if respond.request_id == bad_request_id {
                         return EventDelivery::Drop;
                     }
                 }

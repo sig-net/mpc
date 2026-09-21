@@ -10,16 +10,15 @@ use integration_tests::canton::{
 };
 use integration_tests::cluster;
 use mpc_chain_canton::{
-    compute_request_id,
     daml::{
         EvmType2TransactionParams, RespondBidirectionalEventPayload, SignatureRespondedEventPayload,
     },
-    parse_canton_signature,
+    parse_canton_signature, CantonRequestId as _,
 };
 use mpc_node::respond_bidirectional::CANTON_RESPOND_BIDIRECTIONAL_PATH;
 use mpc_node::sign_bidirectional::{derive_user_address, sign_and_hash_transaction};
 use mpc_node::util::NearPublicKeyExt;
-use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use mpc_primitives::{RequestId, LATEST_MPC_KEY_VERSION};
 use serial_test::serial;
 use std::time::Duration;
 use test_log::test;
@@ -102,7 +101,8 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
 
     let evm_params = case.params.clone();
     let expected_event = test_sign_request_event(canton, &case);
-    let expected_request_id = hex::encode(compute_request_id(&expected_event)?);
+    let expected_request_id = RequestId::from_canton_bidirectional_request(&expected_event)?;
+    let expected_request_id = hex::encode(expected_request_id.bytes);
 
     // The requester isn't a stakeholder on the Signer/fee contracts, so disclosure
     // blobs ride along (Daml still enforces authorization):

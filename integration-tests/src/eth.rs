@@ -1,5 +1,5 @@
 use alloy::network::EthereumWallet;
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{ProviderBuilder, RootProvider};
 use alloy::signers::local::PrivateKeySigner;
@@ -39,27 +39,4 @@ pub fn client(
         .wallet(wallet)
         .connect_http(endpoint.parse()?);
     Ok((client, address))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn compute_request_id(
-    requester: Address,
-    payload: [u8; 32],
-    path: &str,
-    key_version: u32,
-    chain_id: U256,
-    algo: &str,
-    dest: &str,
-    params: &str,
-) -> B256 {
-    B256::from(mpc_chain_ethereum::generate_request_id(
-        requester,
-        &payload,
-        path,
-        key_version,
-        chain_id,
-        algo,
-        dest,
-        params,
-    ))
 }

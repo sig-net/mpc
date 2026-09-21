@@ -12,7 +12,9 @@ use mpc_chain_integration_core::{
 use mpc_node::backlog::Backlog;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
 use mpc_node::sign_bidirectional::SignBidirectionalEventExt;
-use mpc_primitives::{ChainEvent, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{
+    ChainEvent, RequestId, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION,
+};
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashSet;
@@ -70,7 +72,11 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
     assert_eq!(event.chain, Chain::Canton);
     assert_eq!(event.args.key_version, LATEST_MPC_KEY_VERSION);
     assert_eq!(event.args.path, sandbox.requester_party);
-    assert_ne!(event.id.bytes, [0u8; 32], "request_id should not be zero");
+    assert_ne!(
+        event.id,
+        RequestId::from_u8(0),
+        "request_id should not be zero"
+    );
 
     // Verify bidirectional inner fields survive the indexer pipeline.
     let SignKind::SignBidirectional(ref bidir) = event.kind else {
@@ -151,7 +157,7 @@ async fn test_canton_stream_concurrent_events() -> Result<()> {
             Ok(Some(ChainEvent::SignRequest { request, .. })) => {
                 assert_eq!(request.chain, Chain::Canton);
                 assert_eq!(request.args.path, sandbox.requester_party);
-                received_ids.insert(request.id.bytes);
+                received_ids.insert(request.id);
                 if received_ids.len() >= 3 {
                     break;
                 }
@@ -276,7 +282,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
         "expected one pending request in checkpoint"
     );
     let checkpoint_height = checkpoint.block_height;
-    let phase1_request_id = checkpoint.pending_requests[0].request_id().bytes;
+    let phase1_request_id = checkpoint.pending_requests[0].request_id();
     drop(indexer);
 
     // Verify the backlog actually persisted the block height
@@ -296,13 +302,13 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
 
     sandbox.submit_sign_request(Some(1)).await?;
 
-    let mut sign_request_ids = Vec::new();
+    let mut request_ids = Vec::new();
     let mut first_block: Option<u64> = None;
     let mut saw_new_checkpoint = false;
     for _ in 0..20 {
         match timeout(Duration::from_secs(5), indexer2.next_event()).await {
             Ok(Some(ChainEvent::SignRequest { request, .. })) => {
-                sign_request_ids.push(request.id.bytes);
+                request_ids.push(request.id);
                 backlog.insert(request).await;
                 if saw_new_checkpoint {
                     break;
@@ -318,7 +324,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
                     .is_some()
                 {
                     saw_new_checkpoint = true;
-                    if !sign_request_ids.is_empty() {
+                    if !request_ids.is_empty() {
                         break;
                     }
                 }
@@ -337,13 +343,13 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
 
     // Exactly one sign request: the Phase 2 submission, not a replay of Phase 1
     assert_eq!(
-        sign_request_ids.len(),
+        request_ids.len(),
         1,
         "expected exactly 1 sign request in phase 2, got {} — checkpoint may not have prevented replay",
-        sign_request_ids.len()
+        request_ids.len()
     );
     assert_ne!(
-        sign_request_ids[0], phase1_request_id,
+        request_ids[0], phase1_request_id,
         "indexer2 replayed the phase 1 request instead of skipping it"
     );
 
@@ -365,7 +371,8 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     sandbox.submit_sign_request(None).await?;
     let sign_event = wait_for_sign_request(&mut indexer, 30).await?;
     assert_eq!(sign_event.chain, Chain::Canton);
-    let request_id = hex::encode(sign_event.id.bytes);
+    let request_id = sign_event.id;
+    let request_id_hex = hex::encode(request_id.bytes);
     let sign_event_cid = match &sign_event.kind {
         SignKind::SignBidirectional(event) if event.chain == Chain::Canton => {
             let chain_ctx_bytes = event
@@ -402,7 +409,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
             "Respond",
             json!({
                 "signEventCid": &sign_event_cid,
-                "requestId": &request_id,
+                "requestId": &request_id_hex,
                 "signature": canton_signature,
             }),
             &[],
@@ -414,7 +421,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
         match timeout(Duration::from_secs(5), indexer.next_event()).await {
             Ok(Some(ChainEvent::Respond(ev))) => {
                 assert_eq!(ev.chain, mpc_primitives::Chain::Canton);
-                assert_eq!(hex::encode(ev.request_id), request_id);
+                assert_eq!(ev.request_id, request_id);
                 assert_eq!(ev.signature.big_r, expected_big_r);
                 assert_eq!(ev.signature.s, expected_s);
                 assert_eq!(ev.signature.recovery_id, expected_recovery_id);

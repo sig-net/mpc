@@ -26,7 +26,7 @@ use mpc_contract::primitives::Participants;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
-use mpc_primitives::Chain;
+use mpc_primitives::{Chain, RequestId};
 use near_account_id::AccountId;
 use reqwest::Client;
 use serde_json::json;
@@ -1376,7 +1376,7 @@ impl Solana {
 
     pub async fn respond_bidirectional(
         &self,
-        request_id: [u8; 32],
+        request_id: RequestId,
         serialized_output: Vec<u8>,
         signature: &FullSignature<Secp256k1>,
         recovery_id: u8,
@@ -1404,7 +1404,7 @@ impl Solana {
         s_bytes.copy_from_slice(signature.s.to_bytes().as_slice());
 
         let args = RespondBidirectionalArgs {
-            request_id,
+            request_id: request_id.bytes,
             serialized_output,
             signature: RespondBidirectionalSignature {
                 big_r: RespondBidirectionalAffinePoint { x, y },
@@ -1434,7 +1434,7 @@ impl Solana {
 
         tracing::info!(
             ?signature,
-            request_id = %hex::encode(request_id),
+            ?request_id,
             "respond_bidirectional transaction successful",
         );
 

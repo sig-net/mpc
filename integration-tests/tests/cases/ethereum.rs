@@ -1,4 +1,4 @@
-use alloy::primitives::U256;
+use alloy::primitives::{B256, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol_types::SolEvent;
@@ -10,11 +10,12 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest, SignatureResponded};
 use mpc_chain_ethereum::utils::test::submit_sign_request;
+use mpc_chain_ethereum::EthereumRequestId as _;
 use mpc_crypto::derive_key;
 use mpc_crypto::kdf::derive_epsilon_eth;
 use mpc_node::backlog::Checkpoint;
 use mpc_node::sign_bidirectional::public_key_to_address;
-use mpc_primitives::{Chain, ChainConfig as _, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{Chain, ChainConfig as _, RequestId, LATEST_MPC_KEY_VERSION};
 use test_log::test;
 use tokio::time::Duration;
 
@@ -62,9 +63,9 @@ async fn test_signature_ethereum() -> Result<()> {
         .block_number
         .context("missing block number in receipt")?;
 
-    let expected_request_id = eth::compute_request_id(
+    let expected_request_id = RequestId::from_ethereum_sign_request(
         requester,
-        payload,
+        &payload,
         path,
         LATEST_MPC_KEY_VERSION,
         U256::from(chain_id),
@@ -72,6 +73,7 @@ async fn test_signature_ethereum() -> Result<()> {
         dest,
         params,
     );
+    let expected_request_topic = B256::from(expected_request_id.bytes);
 
     let signature_responded_topic = alloy::primitives::keccak256(
         "SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))",
@@ -96,7 +98,7 @@ async fn test_signature_ethereum() -> Result<()> {
                 SignatureResponded::decode_log(&prim_log)
                     .ok()
                     .filter(|event| {
-                        event.requestId == expected_request_id && event.responder == requester
+                        event.requestId == expected_request_topic && event.responder == requester
                     })
             })
         }) {
@@ -218,9 +220,9 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         .block_number
         .context("missing block number in receipt")?;
 
-    let expected_request_id = eth::compute_request_id(
+    let expected_request_id = RequestId::from_ethereum_sign_request(
         requester,
-        payload,
+        &payload,
         path,
         LATEST_MPC_KEY_VERSION,
         U256::from(chain_id),
@@ -228,6 +230,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         dest,
         params,
     );
+    let expected_request_topic = B256::from(expected_request_id.bytes);
 
     tracing::info!(?expected_request_id, "submitted signature request");
 
@@ -276,7 +279,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
                 SignatureResponded::decode_log(&prim_log)
                     .ok()
                     .filter(|event| {
-                        event.requestId == expected_request_id && event.responder == requester
+                        event.requestId == expected_request_topic && event.responder == requester
                     })
             })
         }) {
@@ -313,11 +316,10 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         "pending transactions count after response"
     );
 
-    let expected_request_bytes: [u8; 32] = expected_request_id.into();
     let request_still_present = checkpoint
         .pending_requests
         .iter()
-        .any(|entry| entry.request_id().bytes == expected_request_bytes);
+        .any(|entry| entry.request_id() == expected_request_id);
 
     assert!(
         !request_still_present,

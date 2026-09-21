@@ -669,7 +669,7 @@ async fn test_solana_respond_round_trip() -> Result<()> {
     let ChainEvent::Respond(responded) = event else {
         panic!("expected Respond event, got {event:?}");
     };
-    assert_eq!(responded.request_id, request.id.bytes);
+    assert_eq!(responded.request_id, request.id);
     assert_eq!(responded.chain, Chain::Solana);
     assert_eq!(responded.signature.big_r, AffinePoint::GENERATOR);
     assert_eq!(responded.signature.s, Scalar::ONE);
@@ -711,7 +711,7 @@ async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
     let ChainEvent::RespondBidirectional(responded) = event else {
         panic!("expected RespondBidirectional event, got {event:?}");
     };
-    assert_eq!(responded.request_id, request_id.bytes);
+    assert_eq!(responded.request_id, request_id);
     assert_eq!(responded.chain, Chain::Solana);
     assert_eq!(responded.signature.big_r, AffinePoint::GENERATOR);
     assert_eq!(responded.signature.s, Scalar::ONE);
