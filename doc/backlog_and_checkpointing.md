@@ -41,7 +41,7 @@ own problem rather than a network without a contract.
 
 Vocabulary, per node per source chain:
 
-* **Processed height**: the height the cursor has reached, inclusive. Promoting a
+* **Processed height**: the height the indexer has reached, inclusive. Promoting a
   checkpoint may move it, back or forward.
 
 * **Backlog**: one *entry* per request admitted and not finished, holding the
@@ -51,10 +51,8 @@ Vocabulary, per node per source chain:
   finished signature generation or published one. Nothing else, and every field a
   fact about the source chain. 
 
-* **Boundary**: a height at which a checkpoint is due, the chain's start
-  height plus a multiple of a constant interval, whether or not a block is
-  delivered there. Both are per chain, and every node computes the same grid
-  from them.
+* **Boundary**: a height at which a next checkpoint is due, e.g., the chain's 
+start height plus a multiple of a constant interval. 
 
 * **Checkpoint**: a height and the backlog at that height. Its *digest* binds
   the chain, the height and the entries over a canonical encoding (section 2).
@@ -140,14 +138,13 @@ node derived at that height from the settled checkpoint below it, so the
 settled checkpoints are a chain back to genesis and every entry a node acts
 on was read from finalised chain state by a correct node.
 
-**S3 Containment.** A node acts and votes only inside a window around what
-the network has agreed.
-(i) It neither acts on a source chain's backlog nor votes there while it is
+**S3 Containment.** 
+(i) A node neither acts on a source chain's backlog nor votes there while it is
 missing the backlog of the newest settled checkpoint it has read from the
 contract (thus the poll period defines how stale that reading can be).
-(ii) It acts and votes only within a bounded distance of the newest
-checkpoint it has promoted, and at that bound it does neither, until it
-promotes a newer one or starts again from the one it has.
+(ii) A node acts and votes only within a bounded distance of the newest
+checkpoint, and at that bound it does neither, until it promotes a newer one or
+starts again from the one it has.
 
 ### Liveness, during a long-enough synchronous interval
 
@@ -163,33 +160,12 @@ backlog and indexing on from it, given a reachable node holding one.
 
 Described for one node, one source chain. `commit` is a single durable
 write, so a promotion cannot leave `base` replaced and `voted` not, or the
-other way round. `acted_through` is neither, and a promotion leaves it where
-it is.
+other way round. 
 
 The backlogs recorded in `pending` and `voted` are snapshots, not the
-live map, so what was hashed is what is still there. Serving
-`get_checkpoint` is outside all of this and waits for none of it, which is
-what serving snapshots allows.
-
-`voted` is the store, and the only checkpoints kept across a restart are
-the ones there and the `base`. `pending` is derived: the cursor fills it
-again on the way back up, and a restart drops it. Unlike the pending store
-the code keeps today, nothing is written when a boundary is crossed, only
-when a vote is cast.
-
-Base and cursor. The node indexes the chain with a cursor, which
-holds the backlog the node acts on and records at every boundary it crosses
-the digest it derived there and the backlog behind it. The `base` is the
-settled checkpoint it indexes from, replaced when polling the contract shows
-a newer one. Its body comes from what the cursor recorded, from the body
-behind a digest the node voted, or from a peer.
-
-Cap: how many boundaries beyond the base a node derives before it waits,
-which is `len(pending)`. It is
-how far the network will go on signing from state nobody has agreed to, and
-only incidentally a bound on what `pending` holds. One block crossing
-several boundaries takes it past the cap, and the cursor stops on the next
-block rather than at an exact count.
+live map. `pending` is derived: indexing fills it again on the way back up,
+and a restart drops it. A checkpoint is persisted when a vote is cast,
+not when crossing a boundary.
 
 Note that signatures and attestations a node produces are persisted too, 
 however, they don't need to be in the backlog, therefore we don't talk about
@@ -199,14 +175,15 @@ them in detail here.
 
 ```
 persistent:
-    base             (Height, Digest, Backlog)   // from governance contract
-    voted            {Digest -> Backlog}         // every digest we have voted
-                                                 // at the open height, held
-                                                 // until that height is
-                                                 // promoted
-    acted_through    Height                      // acting (signing, attesting, 
-                                                 // publishing) is done up to 
-                                                 // and including this height
+    base           (Height, Digest, Backlog)       // Checkpoint according to
+                                                   // governance contract
+    voted          {Digest -> Backlog}             // every digest we have voted
+                                                   // at the open height, held
+                                                   // until that height is
+                                                   // promoted
+    acted_through  Height                          // acting (signing, attesting, 
+                                                   // publishing) is done up to 
+                                                   // and including this height
 
 in memory:
     backlog           RequestId -> Entry
@@ -235,7 +212,7 @@ on settlement poll period expiry:
                                 // a digest binds its height, so voted cannot
                                 // answer for the wrong one
   if body is none:
-    want = (h, d)               // S3(i): the cursor stops until we hold it
+    want = (h, d)               // S3(i): indexing stops until we hold it
     return                      // asking peers is section 2's get_checkpoint
   promote(h, d, body)
 ```
@@ -267,15 +244,6 @@ on block b finalised, the next one above the processed height:
 
 No two handlers run their bodies at once, and none runs against itself.
 
-A boundary is not a block. Where only blocks carrying requests or responses
-are delivered, the cursor can go from 119 to 500 with 120 a boundary nobody
-observed, so a checkpoint is recorded at the boundary and never at the block
-that crossed it. The backlog to bind there is the one in hand: a block
-between the processed height and the boundary that changed the backlog
-would have
-been delivered before this one. That is why a skipped boundary is recorded
-before the block is applied and a delivered one after.
-
 `backlog.update` changes state and nothing else; effects (signing,
 publishing, attesting) only happen later if at all.
 
@@ -292,18 +260,14 @@ conditions can be defined without changing the properties materially.
 ```
 rebase():
   backlog, processed_height = base
-  pending = {}                     // which also puts the cap back under its
-                                   // bound
+  pending = {}                     
 ```
 ```
 promote(h, d, body):
-  mine = pending[h].digest == d // the cursor derived it this run
+  mine = pending[h].digest == d       // the backlog computed in this run
   base = (h, d, body) ; voted = {} ; commit
-                                // one write: a crash partway would leave the
-                                // old base with no body for what we voted,
-                                // and the f+1 holders one short
-  want = none                   // in memory, so outside the write
-  if mine and processed_height > h:   // the cursor's own reading, kept
+  want = none                   
+  if mine and processed_height > h:   
     pending.remove_below(h+1)         // drop what is now below the base
     vote_if_ready(open height)        // open height moved with h
   else:                               // read h differently, or not yet there
@@ -315,26 +279,16 @@ rebase_if_stuck():
     return                       // vote there and a rebase would only lose
                                  // the replay
   if backoff not met yet: return // prevent spinning
-  increase backoff for this height
+  increase backoff for this open height
   if contract.checkpoint_votes() shows 2f+1 voted with nothing settled:
     rebase()
 ```
 
-The tally is read for one thing, 2f+1 having voted with nothing settled. In
-model that cannot happen, since correct nodes agree and f+1 of them settle a
-height, so seeing it means several nodes read the chain differently and this
+The tally is read for one thing, 2f+1 having voted with nothing settled. 
+In a bug-free world with honest RPC services only this will never happen,
+so seeing it means several nodes interpreted the chain differently and this
 one rebases on the chance that it is among them and rebasing may help. 
-The tally is not scrutinized to find a
-digest worth rebasing towards: at f+1 such a digest has settled by the time
-we could see it, and the node learns it is wrong from the settlement poll
-finding the settled digest is not the one it recorded.
 
-Who it serves is the node whose reading of a block is not reproducible.
-Crossing the open height is what makes a node vote, and absent a settlement
-a rebase is the only thing that makes it cross again, so without this a
-second reading never reaches the contract and a flaky network never takes a
-second draw. Where readings are reproducible it re-derives the same digest
-and re-casts the same vote, and the backoff is what makes that cheap.
 ### Voting
 
 ```
@@ -347,19 +301,16 @@ vote_if_ready(h):
   d = pending[h].digest
   if d is none: return                 // the open height is not crossed yet
   if d not in voted and len(voted) == KEEP:
-    return                             // we could not keep it, so we do not
-                                       // claim it: whatever we voted last
-                                       // stands
-  voted[d] = pending[h].backlog        // before the vote, so anything the
-  contract.vote_checkpoint(h, d)       // network settles, somebody holds
+    return                             // store <= KEEP checkpoints
+  voted[d] = pending[h].backlog        // before the vote, so we hold it
+  contract.vote_checkpoint(h, d)       // in case it settles
 ```
 
 ### Asking peers
 
 While `want` is set the node asks peers for `get_checkpoint(chain, want)`,
-and a reply that hashes to its digest is promoted. This is not a call anything
-waits on: it has no result to return and no run to abandon, so nothing has
-to decide when to give up on it.
+repeatedly and a reply that hashes to its digest is promoted via the handler described
+above. 
 
 Asking for a superseded height goes unanswered, since every holder of that
 digest cleared its `voted` on promoting a later one. That costs nothing
@@ -367,8 +318,7 @@ here: the next poll reads the contract and overwrites `want` with whatever
 is settled then, so the poll period bounds how long the node asks the wrong
 question.
 
-
-
+###
 
 Rules the code does not show:
 
@@ -440,27 +390,6 @@ settled. One guaranteed holder is thin, and it is what the threshold costs.
 Where no node can produce it at all there is no recovery here, which section
 6 owns.
 
-Draining is not among these. An entry leaves when the source chain retires
-it, and nothing here makes the source chain do so: an entry whose signature
-nobody broadcasts produces no event and stays, which is #1301's open point.
-
-What is here is whether the entry can be signed at all. Admission is a
-function of the block, so anything in one correct node's backlog is in all of
-them, which is n - f holders, exactly the t that signing takes. It needs t of
-them acting at once, and the budget for a correct node not acting is f,
-shared with the nodes that are faulty, so it is zero exactly when the model
-is at its limit.
-Section 1 gives that each correct node keeps up, not that all are up
-together. Three things here stop a node acting: it has rebased and is
-replaying back to `acted_through`, it is paused at the cap, or it is holding
-for a promotion. The cap is the one that spends no budget at all, because it
-spends the lot: it counts from the base, which is the settled height and so
-the same on every node up to a poll, so a vote-settle-promote round trip
-slower than the boundary interval leaves every node at the cap at once.
-
-Closure and convergence, self-stabilisation's two halves, are S1 and L2 here,
-so the weight falls on S1 being checkable: every defect this design has had
-was S1 failing quietly.
 
 ## 6. Limits and failure modes
 
