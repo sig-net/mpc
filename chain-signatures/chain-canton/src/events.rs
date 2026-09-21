@@ -6,7 +6,9 @@ use crate::daml::{
 };
 use crate::ledger_api;
 use crate::signing::{parse_canton_signature, CantonSignBidirectionalRequestedEvent};
-use mpc_primitives::{Chain, ChainEvent, RespondBidirectionalEvent, SignatureRespondedEvent};
+use mpc_primitives::{
+    Chain, ChainEvent, RequestId, RespondBidirectionalEvent, SignatureRespondedEvent,
+};
 use mpc_utils::time::current_unix_timestamp;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -50,8 +52,8 @@ pub async fn process_canton_event(
                         return;
                     }
                 };
-                let request_id = canton_event.generate_request_id();
-                let entropy: [u8; 32] = alloy::primitives::keccak256(request_id).into();
+                let entropy: [u8; 32] =
+                    alloy::primitives::keccak256(canton_event.request_id.bytes).into();
                 match canton_event.generate_sign_request(entropy, current_unix_timestamp()) {
                     Ok(request) => {
                         if events_tx
@@ -98,6 +100,7 @@ pub async fn process_canton_event(
                 if let Err(e) = hex::decode_to_slice(&payload.request_id, &mut request_id) {
                     tracing::warn!(%e, "invalid request_id hex");
                 } else {
+                    let request_id = RequestId::new(request_id);
                     let signature = match parse_canton_signature(&payload.signature) {
                         Ok(signature) => signature,
                         Err(e) => {
@@ -189,6 +192,7 @@ fn parse_signature_responded_event(
     let mut request_id = [0u8; 32];
     hex::decode_to_slice(&payload.request_id, &mut request_id)
         .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?;
+    let request_id = RequestId::new(request_id);
 
     Ok(SignatureRespondedEvent {
         request_id,
@@ -356,7 +360,7 @@ mod tests {
             serde_json::from_value(created.payload.clone()).expect("payload should parse");
         let mut request_id = [0u8; 32];
         hex::decode_to_slice(&payload.request_id, &mut request_id).unwrap();
-        assert_eq!(request_id, [5u8; 32]);
+        assert_eq!(RequestId::new(request_id), RequestId::from_u8(5));
         assert_eq!(payload.responder, "alice");
         assert_eq!(
             hex::decode(&payload.serialized_output).unwrap(),
@@ -393,7 +397,7 @@ mod tests {
         match events_rx.recv().await {
             Some(ChainEvent::Respond(event)) => {
                 assert_eq!(event.chain, Chain::Canton);
-                assert_eq!(event.request_id, [6u8; 32]);
+                assert_eq!(event.request_id, RequestId::from_u8(6));
             }
             other => panic!("expected Canton respond event, got {other:?}"),
         }

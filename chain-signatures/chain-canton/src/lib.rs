@@ -10,6 +10,4 @@ pub mod signing;
 pub use client::CantonClient;
 pub use config::{CantonAuthConfig, CantonConfig};
 pub use indexer::CantonIndexer;
-pub use signing::{
-    compute_request_id, der_encode_signature, parse_canton_signature, CantonChainCtx,
-};
+pub use signing::{der_encode_signature, parse_canton_signature, CantonChainCtx, CantonRequestId};

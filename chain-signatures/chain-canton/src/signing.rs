@@ -47,7 +47,7 @@ pub fn der_encode_signature(signature: &Signature) -> anyhow::Result<Vec<u8>> {
 pub struct CantonSignBidirectionalRequestedEvent {
     pub sign_event_contract_id: String,
     pub sender: [u8; 32],
-    pub request_id: [u8; 32],
+    pub request_id: RequestId,
     pub serialized_transaction: Vec<u8>,
     pub caip2_id: String,
     pub key_version: u32,
@@ -64,7 +64,7 @@ impl CantonSignBidirectionalRequestedEvent {
         contract_id: String,
         raw: SignBidirectionalRequestedEvent,
     ) -> anyhow::Result<Self> {
-        let request_id = compute_request_id(&raw)?;
+        let request_id = RequestId::from_canton_bidirectional_request(&raw)?;
         let serialized_transaction = match &raw.tx_params {
             TxParams::EvmType2TxParams(params) => {
                 TxEip1559::try_from(params)?.encoded_for_signing()
@@ -90,10 +90,6 @@ impl CantonSignBidirectionalRequestedEvent {
         })
     }
 
-    pub fn generate_request_id(&self) -> [u8; 32] {
-        self.request_id
-    }
-
     pub fn generate_sign_request(
         &self,
         entropy: [u8; 32],
@@ -105,8 +101,6 @@ impl CantonSignBidirectionalRequestedEvent {
             tracing::warn!("unsupported key version: {}", self.key_version);
             anyhow::bail!("unsupported key version");
         }
-
-        let request_id = self.request_id;
 
         let epsilon = mpc_crypto::kdf::derive_epsilon_canton(
             self.key_version,
@@ -120,7 +114,7 @@ impl CantonSignBidirectionalRequestedEvent {
             anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
         };
 
-        let request_id = RequestId::new(request_id);
+        let request_id = self.request_id;
         tracing::info!(?request_id, "canton signature requested");
 
         let ctx = CantonChainCtx {
@@ -197,19 +191,32 @@ pub fn parse_der_signature_with_recovery(
     })
 }
 
-pub fn compute_request_id(event: &SignBidirectionalRequestedEvent) -> anyhow::Result<[u8; 32]> {
-    let key_version = U256::from(event.key_version);
+/// Canton-specific [`RequestId`] derivations.
+pub trait CantonRequestId {
+    /// Canton `sign_bidirectional`: keccak256 over the EIP-712 data words of the
+    /// request fields (tx params hashed as a nested struct), matching the Daml contract.
+    fn from_canton_bidirectional_request(
+        event: &SignBidirectionalRequestedEvent,
+    ) -> anyhow::Result<RequestId>;
+}
 
-    let mut buf = Vec::with_capacity(8 * 32);
-    buf.extend_from_slice(event.sender.as_str().eip712_data_word().as_slice());
-    buf.extend_from_slice(&hash_tx_params(&event.tx_params)?);
-    buf.extend_from_slice(event.caip2_id.as_str().eip712_data_word().as_slice());
-    buf.extend_from_slice(key_version.eip712_data_word().as_slice());
-    buf.extend_from_slice(event.path.as_str().eip712_data_word().as_slice());
-    buf.extend_from_slice(event.algo.as_str().eip712_data_word().as_slice());
-    buf.extend_from_slice(event.dest.as_str().eip712_data_word().as_slice());
-    buf.extend_from_slice(event.params.as_str().eip712_data_word().as_slice());
-    Ok(keccak256(&buf).into())
+impl CantonRequestId for RequestId {
+    fn from_canton_bidirectional_request(
+        event: &SignBidirectionalRequestedEvent,
+    ) -> anyhow::Result<RequestId> {
+        let key_version = U256::from(event.key_version);
+
+        let mut buf = Vec::with_capacity(8 * 32);
+        buf.extend_from_slice(event.sender.as_str().eip712_data_word().as_slice());
+        buf.extend_from_slice(&hash_tx_params(&event.tx_params)?);
+        buf.extend_from_slice(event.caip2_id.as_str().eip712_data_word().as_slice());
+        buf.extend_from_slice(key_version.eip712_data_word().as_slice());
+        buf.extend_from_slice(event.path.as_str().eip712_data_word().as_slice());
+        buf.extend_from_slice(event.algo.as_str().eip712_data_word().as_slice());
+        buf.extend_from_slice(event.dest.as_str().eip712_data_word().as_slice());
+        buf.extend_from_slice(event.params.as_str().eip712_data_word().as_slice());
+        Ok(RequestId::new(keccak256(&buf).into()))
+    }
 }
 
 fn hash_tx_params(cp: &TxParams) -> anyhow::Result<[u8; 32]> {
