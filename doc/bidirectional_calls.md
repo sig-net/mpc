@@ -43,6 +43,7 @@ Happy path:
   in the encoding that chain accepts.
 * *Request*: what a call asks for, the tuple (tx, dest, key, schemas): the
   transaction, its destination chain, the key parameters to sign it with,
+  a derivation path, key version and signing scheme (section 3.1),
   and the schemas for decoding its output and encoding the response. Written
   `req` in the pseudocode.
 * *Request ID* (rid): a collision-resistant hash over (contract, tx, dest,
