@@ -34,7 +34,7 @@ own problem rather than a network without a contract.
 
 Vocabulary, per node per source chain:
 
-* **Watermark**: the height the cursor has reached, inclusive. Adopting a
+* **Watermark**: the height the cursor has reached, inclusive. Installing a
   checkpoint may move it, back or forward.
 
 * **Backlog**: one *entry* per request admitted and not finished, holding the
@@ -124,7 +124,7 @@ get_checkpoint(chain, height, digest) -> Checkpoint
 ### Safety
 
 **S1 Agreement.** The backlog at a height is a deterministic function of the
-newest checkpoint the node has adopted and the finalised blocks since, so
+newest checkpoint the node has installed and the finalised blocks since, so
 correct nodes at a height hold the same backlog.
 
 **S2 Validity.** A digest the contract settles at a height is one a correct
@@ -138,8 +138,8 @@ the network has agreed.
 missing the backlog of the newest settled checkpoint it has read from the
 contract. The poll period is how stale that reading can be.
 (ii) It acts and votes only within a bounded distance of the newest
-checkpoint it has adopted, and at that bound it does neither, until it adopts
-a newer checkpoint or starts again from the one it has.
+checkpoint it has installed, and at that bound it does neither, until it
+installs a newer one or starts again from the one it has.
 
 ### Liveness, during a long-enough synchronous interval
 
@@ -345,9 +345,9 @@ Rules the code does not show:
 ## 5. Why the properties hold
 
 *S1.* The backlog changes two ways only: applying the events of the next
-finalised block, a function of that block alone, and adopting a checkpoint,
-which installs a backlog some correct node derived the first way. Entries carry
-nothing local, which keeps the induction closed.
+finalised block, a function of that block alone, and installing a checkpoint,
+whose backlog some correct node derived the first way. Entries carry nothing
+local, which keeps the induction closed.
 
 Effects sit outside it. This design does not solve the output commit problem;
 it acts ahead of agreement and requires the duplicate to be harmless. It does
@@ -362,7 +362,7 @@ outstanding; on a destination chain the effect is the same signed transaction
 arriving twice.
 
 *S2.* An entry enters by admission from a finalised block this node fetched,
-or by adoption of a digest f+1 voted for, of which one is correct and a
+or by installing a digest f+1 voted for, of which one is correct and a
 correct node votes only for a backlog it derived. The digest covers the
 entries, so matching it means being that backlog and the supplier can
 substitute nothing. Quorums never have to intersect: the contract settles a
@@ -485,7 +485,7 @@ offer: enough nodes hold backlogs nobody shares that no digest reaches f+1.
 August 2026 came close, twelve nodes with eight against four, which is f = 4
 against a model allowing three, and yet the eight were a clear majority. Under
 this design they would have settled long before that and the four would have
-adopted them, which says what the bar costs and nothing about safety.
+installed them, which says what the bar costs and nothing about safety.
 
 Whether such a split heals turns on the requests dividing it. A request fewer
 than t nodes admitted can never be signed, so it separates their digests for
@@ -598,7 +598,7 @@ explicit: the digest covers the whole state rather than identifiers into it
 (S2), and one mechanism repairs both a lagging node and a diverged one. Their
 water marks are not borrowed. The availability rule, that a node votes only
 for a checkpoint it holds, is Narwhal's dissemination/ordering split (EuroSys
-2022). S1 above a genesis checkpoint is weak subjectivity and adoption is
+2022). S1 above a genesis checkpoint is weak subjectivity and installing is
 checkpoint sync.
 
 S1, S2 and L1 are consensus's agreement, validity and termination; S1 and L2
