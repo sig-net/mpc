@@ -15,7 +15,7 @@ its backlog there, and the contract settles that height once f+1 nodes have
 voted for the same digest, enough that at least one correct node holds the
 body behind it. Every node polls for what settled. A node that derived that
 digest itself carries on indexing; any other fetches the body from a peer
-and installs it, and everything it derives from then on hangs off that
+and promotes it, and everything it derives from then on hangs off that
 checkpoint.
 
 A node that has passed the height under vote and sees nothing settle there
@@ -41,7 +41,7 @@ own problem rather than a network without a contract.
 
 Vocabulary, per node per source chain:
 
-* **Watermark**: the height the cursor has reached, inclusive. Installing a
+* **Watermark**: the height the cursor has reached, inclusive. Promoting a
   checkpoint may move it, back or forward.
 
 * **Backlog**: one *entry* per request admitted and not finished, holding the
@@ -67,7 +67,7 @@ Vocabulary, per node per source chain:
 
   * **Settled**: a digest the governance contract has fixed for a height.
 
-  * **Installed**: a node has made a settled checkpoint its base, durably,
+  * **Promoted**: a node has made a settled checkpoint its base, durably,
     so that every backlog it derives from then on descends from that one.
 
   * **Genesis checkpoint**: an empty backlog at the chain's start height,
@@ -132,7 +132,7 @@ get_checkpoint(chain, height, digest) -> Checkpoint
 ### Safety
 
 **S1 Agreement.** The backlog at a height is a deterministic function of the
-newest checkpoint the node has installed and the finalised blocks since, so
+newest checkpoint the node has promoted and the finalised blocks since, so
 correct nodes at a height hold the same backlog.
 
 **S2 Validity.** A digest the contract settles at a height is one a correct
@@ -146,8 +146,8 @@ the network has agreed.
 missing the backlog of the newest settled checkpoint it has read from the
 contract (thus the poll period defines how stale that reading can be).
 (ii) It acts and votes only within a bounded distance of the newest
-checkpoint it has installed, and at that bound it does neither, until it
-installs a newer one or starts again from the one it has.
+checkpoint it has promoted, and at that bound it does neither, until it
+promotes a newer one or starts again from the one it has.
 
 ### Liveness, during a long-enough synchronous interval
 
@@ -162,11 +162,11 @@ backlog and indexing on from it, given a reachable node holding one.
 ## 4. Design
 
 Described for one node, one source chain. `commit` is a single durable
-write, so an install cannot leave `base` replaced and `voted` not, or the
-other way round. `acted_through` is neither, and an install leaves it where
+write, so a promotion cannot leave `base` replaced and `voted` not, or the
+other way round. `acted_through` is neither, and a promotion leaves it where
 it is.
 
-The backlogs recorded in `crossed` and `voted` are snapshots, not the
+The backlogs recorded in `pending` and `voted` are snapshots, not the
 live map, so what was hashed is what is still there. Serving
 `get_checkpoint` is outside all of this and waits for none of it, which is
 what serving snapshots allows.
@@ -179,9 +179,9 @@ a newer one. Its body comes from what the cursor recorded, from the body
 behind a digest the node voted, or from a peer.
 
 Cap: how many boundaries beyond the base a node derives before it waits,
-which is `len(crossed)`. It is
+which is `len(pending)`. It is
 how far the network will go on signing from state nobody has agreed to, and
-only incidentally a bound on what `crossed` holds. One block crossing
+only incidentally a bound on what `pending` holds. One block crossing
 several boundaries takes it past the cap, and the cursor stops on the next
 block rather than at an exact count.
 
@@ -197,7 +197,7 @@ persistent:
     voted            {Digest -> Backlog}         // every digest we have voted
                                                  // at the open height, held
                                                  // until that height is
-                                                 // installed
+                                                 // promoted
     acted_through    Height                      // acting (signing, attesting, 
                                                  // publishing) is done up to 
                                                  // and including this height
@@ -205,7 +205,7 @@ persistent:
 in memory:
     backlog       RequestId -> Entry          
     watermark     Height
-    crossed       Height -> (Digest, Backlog)    // checkpoints above base
+    pending       Height -> (Digest, Backlog)    // checkpoints above base
     want          (Height, Digest)?              // a settled checkpoint we
                                                  // have read and do not
                                                  // hold; unset on start, so
@@ -225,33 +225,33 @@ on settlement poll period expiry:
   if h == base.height:
     rebase_if_stuck()
     return
-  body = crossed[h].backlog if crossed[h].digest == d else voted[d]
+  body = pending[h].backlog if pending[h].digest == d else voted[d]
                                 // a digest binds its height, so voted cannot
                                 // answer for the wrong one
   if body is none:
     want = (h, d)               // S3(i): the cursor stops until we hold it
     return                      // asking peers is section 2's get_checkpoint
-  install(h, d, body)
+  promote(h, d, body)
 ```
 Interacting with peers
 ```
 on receiving a peer's reply (h, d, backlog) to what we asked for:
   if want == (h, d) and digest(h, backlog) == d:
-    install(h, d, backlog)
+    promote(h, d, backlog)
 ```
 Indexing
 ```
 on block b finalised, the next one above the watermark:       //indexing
-  if want is set or len(crossed) >= CAP:
+  if want is set or len(pending) >= CAP:
     return                           
   for each boundary B with watermark < B < height(b):
-    crossed[B] = (digest(B, backlog), backlog)   // nothing between the
+    pending[B] = (digest(B, backlog), backlog)   // nothing between the
                                      // watermark and B changed the backlog,
                                      // or that block would be this one
   backlog.update(b)                  // add/change/remove entries, idempotent
   watermark = height(b)
   if height(b) is a boundary:
-    crossed[height(b)] = (digest(height(b), backlog), backlog)
+    pending[height(b)] = (digest(height(b), backlog), backlog)
   if a boundary was crossed:
     vote_if_ready(open height)
   if watermark > acted_through:
@@ -277,34 +277,34 @@ last of it and the replay acts twice, which is the case the destination
 already has to absorb. It is not reset by a `rebase`, a rebase being about
 what the node believes rather than what it has already done.
 
-Instead of `len(crossed) >= CAP` and `watermark > acted_through` alternative
+Instead of `len(pending) >= CAP` and `watermark > acted_through` alternative
 conditions can be defined without changing the properties materially.
 
-### Rebase and install
+### Rebase and promote
 
 ```
 rebase():
   backlog, watermark = base
-  crossed = {}                     // which also puts the cap back under its
+  pending = {}                     // which also puts the cap back under its
                                    // bound
 ```
 ```
-install(h, d, body):
-  mine = crossed[h].digest == d // the cursor derived it this run
+promote(h, d, body):
+  mine = pending[h].digest == d // the cursor derived it this run
   base = (h, d, body) ; voted = {} ; commit
                                 // one write: a crash partway would leave the
                                 // old base with no body for what we voted,
                                 // and the f+1 holders one short
   want = none                   // in memory, so outside the write
   if mine and watermark > h:    // only the cursor's own reading lets it keep
-    crossed.remove_below(h+1)   // remove entries no longer needed
+    pending.remove_below(h+1)   // remove entries no longer needed
     vote_if_ready(open height)  // open height moved with h
   else:                         // read h differently, or has not reached it
     rebase()
 ```
 ```
 rebase_if_stuck():
-  if not crossed[open height]:   // still replaying towards it, so we have no
+  if not pending[open height]:   // still replaying towards it, so we have no
     return                       // vote there and a rebase would only lose
                                  // the replay
   if backoff not met yet: return // prevent spinning
@@ -333,29 +333,29 @@ and re-casts the same vote, and the backoff is what makes that cheap.
 ```
 vote_if_ready(h):
   if h is not our open height: return  // a vote above it is one we cannot
-                                       // justify, having not installed what
+                                       // justify, having not promoted what
                                        // is below; the contract separately
                                        // rejects a vote at any height but
                                        // its own open one
-  d = crossed[h].digest
+  d = pending[h].digest
   if d is none: return                 // the open height is not crossed yet
   if d not in voted and len(voted) == KEEP:
     return                             // we could not keep it, so we do not
                                        // claim it: whatever we voted last
                                        // stands
-  voted[d] = crossed[h].backlog        // before the vote, so anything the
+  voted[d] = pending[h].backlog        // before the vote, so anything the
   contract.vote_checkpoint(h, d)       // network settles, somebody holds
 ```
 
 ### Asking peers
 
 While `want` is set the node asks peers for `get_checkpoint(chain, want)`,
-and a reply that hashes to its digest installs. This is not a call anything
+and a reply that hashes to its digest is promoted. This is not a call anything
 waits on: it has no result to return and no run to abandon, so nothing has
 to decide when to give up on it.
 
 Asking for a superseded height goes unanswered, since every holder of that
-digest cleared its `voted` on installing a later one. That costs nothing
+digest cleared its `voted` on promoting a later one. That costs nothing
 here: the next poll reads the contract and overwrites `want` with whatever
 is settled then, so the poll period bounds how long the node asks the wrong
 question.
@@ -367,14 +367,14 @@ Rules the code does not show:
 
 * A cursor pauses for two reasons and reads no block either way, so it
   crosses nothing, votes nowhere and does not act. The cap releases itself
-  when `crossed` shrinks, which an install and a `rebase` both do. The
-  install hold releases on the install, and the next poll overwrites `want`
-  if something else settled meanwhile.
+  when `pending` shrinks, which a promotion and a `rebase` both do. The
+  `want` hold releases when the body arrives and is promoted, and the next
+  poll overwrites `want` if something else settled meanwhile.
 
 ## 5. Why the properties hold
 
 *S1.* The backlog changes two ways only: applying the events of the next
-finalised block, a function of that block alone, and installing a checkpoint,
+finalised block, a function of that block alone, and promoting a checkpoint,
 whose backlog some correct node derived the first way. Entries carry nothing
 local, which keeps the induction closed.
 
@@ -391,16 +391,16 @@ outstanding; on a destination chain the effect is the same signed transaction
 arriving twice.
 
 *S2.* An entry enters by admission from a finalised block this node fetched,
-or by installing a digest f+1 voted for, of which one is correct and a
+or by promoting a digest f+1 voted for, of which one is correct and a
 correct node votes only for a backlog it derived. The digest covers the
 entries, so matching it means being that backlog and the supplier can
 substitute nothing. Quorums never have to intersect: the contract settles a
 height once.
 
 The chain is the open-height rule doing it. A node's open height is the first
-boundary above its own base, so one that has not installed the settlement at
+boundary above its own base, so one that has not promoted the settlement at
 h has its open height at h and cannot vote above it. Every vote at the next
-boundary is therefore from a node that installed h, and the induction S1
+boundary is therefore from a node that promoted h, and the induction S1
 relies on has a base.
 
 *L1.* Correct nodes agree (S1), so the bar is about how many are up, and f+1
@@ -410,23 +410,23 @@ together, and a node catching up votes on reaching the open height rather
 than waiting for the head. Voting only for the next height keeps one height
 open: the faulty are f and cannot settle anything alone. A node whose
 provider has healed gives a different answer only by reading the chain again,
-which it does after an install it did not predict. What bounds a node running
+which it does after a promotion it did not predict. What bounds a node running
 ahead is the cap, so one the contract will not hear from pauses like any
 other.
 
 *Retention*, which L2 needs. Every digest a node has voted at a height is one
 it can still produce the backlog for, until that height is settled and the
-node has installed it or a later one. A node keeps what it votes and a later
+node has promoted it or a later one. A node keeps what it votes and a later
 vote evicts nothing, the bound being what it can hold rather than which
 digest it currently believes.
 
-*L2.* Installing replaces the backlog wholesale rather than reconciling entry
+*L2.* Promoting replaces the backlog wholesale rather than reconciling entry
 by entry: a node behind moves forward and keeps indexing, one that diverged
 takes the settled body and rebases onto it.
 
 The body is there to be had, by retention: the f+1 behind a settled digest
 hold it the moment it settles, one of them correct, and hold it until they
-install it. There is no escape by voting again at the same height, which
+promote it. There is no escape by voting again at the same height, which
 would drop what the voter had and, where a node's reading of a block is not
 reproducible, could take the last copy of a digest the network had just
 settled. One guaranteed holder is thin, and it is what the threshold costs.
@@ -446,9 +446,9 @@ is at its limit.
 Section 1 gives that each correct node keeps up, not that all are up
 together. Three things here stop a node acting: it has rebased and is
 replaying back to `acted_through`, it is paused at the cap, or it is holding
-for an install. The cap is the one that spends no budget at all, because it
+for a promotion. The cap is the one that spends no budget at all, because it
 spends the lot: it counts from the base, which is the settled height and so
-the same on every node up to a poll, so a vote-settle-install round trip
+the same on every node up to a poll, so a vote-settle-promote round trip
 slower than the boundary interval leaves every node at the cap at once.
 
 Closure and convergence, self-stabilisation's two halves, are S1 and L2 here,
@@ -468,7 +468,7 @@ was S1 failing quietly.
   settling threshold rather than outside it. 2f+1 would put it outside, at
   the cost of the tally and the two rebase triggers it fed.
 * Settlement stalled with nobody disagreeing, which takes more than f nodes
-  down or slow. The cap on `crossed` is what keeps the node from running
+  down or slow. The cap on `pending` is what keeps the node from running
   ahead, at the price that it counts from the settled height, so nodes reach
   it together and the network signs nothing until settlement catches up. An
   operator has to notice.
@@ -502,7 +502,7 @@ was S1 failing quietly.
   t = n - f leaves no slack, so every node already out comes from the same
   budget.
 
-Three signals: a watermark that does not move with `crossed` under its cap,
+Three signals: a watermark that does not move with `pending` under its cap,
 for the node that cannot index; rebases one after another,
 for the node repairing endlessly; and the settled height standing still while
 tips move on, for a network that cannot agree. The tally's vote counts say
@@ -514,7 +514,7 @@ offer: enough nodes hold backlogs nobody shares that no digest reaches f+1.
 August 2026 came close, twelve nodes with eight against four, which is f = 4
 against a model allowing three, and yet the eight were a clear majority. Under
 this design they would have settled long before that and the four would have
-installed them, which says what the bar costs and nothing about safety.
+promoted them, which says what the bar costs and nothing about safety.
 
 Whether such a split heals turns on the requests dividing it. A request fewer
 than t nodes admitted can never be signed, so it separates their digests for
@@ -527,7 +527,7 @@ this design exists to avoid.
 ## 7. Getting there from here
 
 Most of the machinery exists. `align_backlog_with_consensus` already fetches a
-settled checkpoint from a peer, checks it and installs it, and
+settled checkpoint from a peer, checks it and promotes it, and
 `PendingRequests::from_checkpoint` already sets the watermark forwards or
 backwards.
 
@@ -610,7 +610,7 @@ Larger, step 7 excepted:
 9. Add the voting: vote on crossing the open height, and pause indexing at
    the cap. The per-node vote count belongs with it.
    The cap is not step 1's cap returning: it holds in memory, releases on the
-   next install, and needs no operator. Follows step 6, there being no single
+   next promotion, and needs no operator. Follows step 6, there being no single
    open height before it.
 10. Fetch only when the contract has settled above the base.
     `find_consensus_checkpoint` retries for ever inside the recovery the
@@ -634,7 +634,7 @@ explicit: the digest covers the whole state rather than identifiers into it
 (S2), and one mechanism repairs both a lagging node and a diverged one. Their
 water marks are not borrowed. The availability rule, that a node votes only
 for a checkpoint it holds, is Narwhal's dissemination/ordering split (EuroSys
-2022). S1 above a genesis checkpoint is weak subjectivity and installing is
+2022). S1 above a genesis checkpoint is weak subjectivity and promoting is
 checkpoint sync.
 
 S1, S2 and L1 are consensus's agreement, validity and termination; S1 and L2
@@ -670,7 +670,7 @@ is the one this design declines to solve.
    block fetch; against it, a height in the digest is a height every node has
    to agree on exactly.
 2. **How far ahead, how much to keep, and the two periods.** The cap on
-   `crossed` is how far ahead of agreement a node may run before it waits,
+   `pending` is how far ahead of agreement a node may run before it waits,
    `KEEP` is 10 until something says otherwise, a node needing more being
    one whose readings are not reproducible. Nodes reach the cap together, counting from the settled height, so it is the network that
    waits. The poll is the other period and cannot grow: convergence and
