@@ -42,17 +42,18 @@ Happy path:
   a submitted transaction, computable from the transaction and the signature
   in the encoding that chain accepts.
 * *Request*: what a call asks for, the tuple (tx, dest, key, schemas): the
-  transaction, its destination chain, the key parameters to sign it with,
-  a derivation path, key version and signing scheme (section 3.1),
-  and the schemas for decoding its output and encoding the response. Written
+  transaction, its destination chain, the key parameters to sign it with 
+  (a derivation path, key version and signing scheme), and the schemas for 
+  decoding its output and encoding the response. Written
   `req` in the pseudocode.
 * *Request ID* (rid): a collision-resistant hash over (contract, tx, dest,
   key) in a length-committing encoding, so within one source chain
   rid(a) = rid(b) exactly when a and b agree on all four. One rid names one
-  execution, and by key derivation (section 3.3) one execution
-  names one rid. The schemas are outside it, so that two calls for one
-  transaction cannot both be outstanding. The key parameters must be
-  canonical, or two rids could name one execution.
+  execution, and one execution names one rid: it gives tx and dest, and its
+  sender address gives the contract and key parameters, since derivation is
+  injective (section 3.3). The schemas are outside it, so that two calls for 
+  one transaction cannot both be outstanding.
+  The key parameters must be canonical, or two rids could name one execution.
 * *Outcome*: a pair (kind, data), with three kinds.
   * *Executed*: the transaction was finalised, succeeded, and its return
     data decoded against the contract's schema; data is that decoded return
