@@ -1,19 +1,18 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
 use crate::NodeConfig;
 
-use anchor_client::anchor_lang::{InstructionData, ToAccountMetas};
+use anchor_client::anchor_lang::{solana_program::system_program, InstructionData, ToAccountMetas};
 use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
 use backon::{ExponentialBuilder, Retryable};
 use bollard::errors::Error as DockerError;
-use bollard::network::CreateNetworkOptions;
-use bollard::secret::Ipam;
+use bollard::models::{Ipam, NetworkCreateRequest};
 use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
@@ -144,23 +143,19 @@ impl DockerClient {
     }
 
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
-        let create_network_options = CreateNetworkOptions {
-            name: network,
-            check_duplicate: true,
-            driver: if cfg!(windows) {
-                "transparent"
+        let create_network_request = NetworkCreateRequest {
+            name: network.to_string(),
+            driver: Some(if cfg!(windows) {
+                "transparent".to_string()
             } else {
-                "bridge"
-            },
-            ipam: Ipam {
-                config: None,
-                ..Default::default()
-            },
+                "bridge".to_string()
+            }),
+            ipam: Some(Ipam::default()),
             ..Default::default()
         };
         // Concurrent test threads have a race condition on creating this!
         // => Treat 409 Conflict (network already exists) as success and continue.
-        match self.docker.create_network(create_network_options).await {
+        match self.docker.create_network(create_network_request).await {
             Ok(_) => Ok(()),
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 409, ..
@@ -645,6 +640,13 @@ impl Solana {
                 .arg("127.0.0.1")
                 .arg("--mint")
                 .arg(payer_keypair.pubkey().to_string())
+                // The committed program artifact is SBPFv0; agave >= 4.x test validators
+                // activate `disable_sbpf_v0_v1_v2_deployment` at genesis, which restricts
+                // deploys to SBPF >= V3 (program-runtime/src/deploy.rs). Deactivate it until
+                // the artifact is rebuilt with an SBPF >= V1 toolchain. Deactivating an
+                // unknown feature is a no-op, so this is safe for older validators too.
+                .arg("--deactivate-feature")
+                .arg("B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g") // on-chain feature-gate pubkey
                 .arg("--reset")
                 .arg("--quiet");
 
@@ -654,7 +656,7 @@ impl Solana {
 
             let rpc_client = SolanaRpcClient::new_with_commitment(
                 rpc_address.clone(),
-                solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+                solana_commitment_config::CommitmentConfig::confirmed(),
             );
 
             match Self::wait_for_validator_ready(
@@ -727,13 +729,8 @@ impl Solana {
                 .ok()
                 .is_some_and(|balance| balance > 0);
 
-            if version_ready && blockhash_ready && ws_ready {
-                if !funded {
-                    tracing::warn!(
-                        attempt,
-                        "solana validator RPC is ready but payer balance is still zero"
-                    );
-                }
+            if version_ready && blockhash_ready && ws_ready && funded {
+                Self::wait_for_block_production(rpc_client).await?;
                 return Ok(());
             }
 
@@ -749,6 +746,23 @@ impl Solana {
         }
 
         anyhow::bail!("solana-test-validator did not become ready in time")
+    }
+
+    /// Wait for the validator to produce a new block after startup or restart.
+    async fn wait_for_block_production(rpc_client: &SolanaRpcClient) -> anyhow::Result<()> {
+        const POLL: Duration = Duration::from_millis(100);
+        const DEADLINE: Duration = Duration::from_secs(30);
+
+        let start = Instant::now();
+        let last_slot = rpc_client.get_slot().await?;
+        while Instant::now() - start < DEADLINE {
+            sleep(POLL).await;
+            let slot = rpc_client.get_slot().await?;
+            if slot > last_slot {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("solana-test-validator did not produce new slots in time")
     }
 
     /// Kill and relaunch the validator against the same ledger
@@ -787,6 +801,9 @@ impl Solana {
             .arg("127.0.0.1")
             .arg("--mint")
             .arg(self.payer_keypair.pubkey().to_string())
+            // See run(): keep SBPFv0 deployment allowed for the committed artifact.
+            .arg("--deactivate-feature")
+            .arg("B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g")
             .arg("--quiet");
 
         let mut process = command
@@ -1024,7 +1041,9 @@ impl Solana {
         tracing::info!("initializing solana program...");
 
         // Create payer keypair - recreate since it doesn't implement Clone
-        let payer = std::sync::Arc::new(SolanaKeypair::from_bytes(&self.payer_keypair.to_bytes())?);
+        let payer = std::sync::Arc::new(SolanaKeypair::try_from(
+            self.payer_keypair.to_bytes().as_slice(),
+        )?);
         let program_id = self.program_keypair.pubkey();
 
         // Define program state PDA
@@ -1060,7 +1079,7 @@ impl Solana {
             accounts: vec![
                 AccountMeta::new(program_state_pda, false),
                 AccountMeta::new(payer.pubkey(), true),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(system_program::id(), false),
             ],
             data,
         };
@@ -1140,7 +1159,7 @@ impl Solana {
                 // fee_payer (writable, signer) - same as requester for simplicity
                 AccountMeta::new(self.payer_keypair.pubkey(), true),
                 // system_program (readonly, not signer)
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(system_program::id(), false),
                 // event_authority (readonly, not signer) - required for #[event_cpi]
                 AccountMeta::new_readonly(event_authority_pda, false),
                 // program account (readonly, not signer) - required for #[event_cpi]
@@ -1193,7 +1212,7 @@ impl Solana {
             accounts: signet_program::accounts::Sign {
                 program_state: program_state_pda,
                 requester: self.payer_keypair.pubkey(),
-                system_program: solana_sdk::system_program::id(),
+                system_program: system_program::id(),
                 event_authority: event_authority_pda,
                 program: program_id,
             }
@@ -1215,7 +1234,7 @@ impl Solana {
             accounts: signet_program::accounts::Initialize {
                 program_state: program_state_pda,
                 admin: self.payer_keypair.pubkey(),
-                system_program: solana_sdk::system_program::id(),
+                system_program: system_program::id(),
             }
             .to_account_metas(None),
             data: signet_program::instruction::Initialize {
@@ -1325,7 +1344,7 @@ impl Solana {
                 AccountMeta::new(program_state_pda, false),
                 AccountMeta::new(self.payer_keypair.pubkey(), true),
                 AccountMeta::new(self.payer_keypair.pubkey(), true),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(system_program::id(), false),
                 AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false),
                 AccountMeta::new_readonly(event_authority_pda, false),
                 AccountMeta::new_readonly(contract_program_id, false),

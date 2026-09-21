@@ -28,7 +28,6 @@ use axum_extra::extract::WithRejection;
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
 use near_account_id::AccountId;
-use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -164,17 +163,14 @@ pub enum StateView {
         presignature_count: usize,
         presignature_mine_count: usize,
         presignature_potential_count: usize,
-        latest_block_height: BlockHeight,
     },
     Resharing {
         old_participants: Vec<Participant>,
         new_participants: Vec<Participant>,
-        latest_block_height: BlockHeight,
         phase: ResharingStatus,
     },
     Joining {
         participants: Vec<Participant>,
-        latest_block_height: BlockHeight,
     },
     NotRunning,
 }
@@ -183,11 +179,6 @@ pub enum StateView {
 async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
     let start = Instant::now();
     tracing::debug!("fetching state");
-
-    // TODO: decide whether to keep latest_block_height in /state or not. We could use it for showing
-    // whatever block height our governance chain is on but with multiple chains, it doesn't have much
-    // of a use.
-    let latest_block_height = 0;
 
     let result = match web.node.status() {
         NodeStatus::Running {
@@ -211,7 +202,6 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
                 presignature_count,
                 presignature_mine_count,
                 presignature_potential_count,
-                latest_block_height,
             }))
         }
         NodeStatus::Resharing {
@@ -221,12 +211,10 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
         } => Ok(Json(StateView::Resharing {
             old_participants: old_participants.clone(),
             new_participants: new_participants.clone(),
-            latest_block_height,
             phase,
         })),
         NodeStatus::Joining { participants } => Ok(Json(StateView::Joining {
             participants: participants.clone(),
-            latest_block_height,
         })),
         NodeStatus::Generating { .. }
         | NodeStatus::WaitingForConsensus { .. }

@@ -11,7 +11,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
-use crate::protocol::request::SignatureSpawnerTask;
+use crate::protocol::request::{SignatureSpawner, SignatureSpawnerTask};
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::{SyncReportSender, SyncTask};
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
@@ -21,6 +21,7 @@ use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::{supervisor::run_supervised, StreamContext};
+use crate::types::SignCommand;
 use crate::{logs, storage, web};
 pub use args::{
     canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
@@ -37,10 +38,10 @@ use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
 use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
-use mpc_chain_near::NearClient;
+use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_keys::hpke;
-use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
+use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
@@ -84,7 +85,7 @@ pub enum Cli {
         cipher_sk: String,
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"))]
-        sign_sk: Option<SecretKey>,
+        sign_sk: SecretKey,
         /// Ethereum Indexer options
         #[command(flatten)]
         eth: EthArgs,
@@ -164,9 +165,7 @@ impl Cli {
                     "--redis-url".to_string(),
                     storage_options.redis_url.to_string(),
                 ];
-                if let Some(sign_sk) = sign_sk {
-                    args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
-                }
+                args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
@@ -250,7 +249,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog,
             } = StorageHandles::new(&account_id, &storage_options).await?;
 
-            let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
             let my_address = my_address.unwrap_or_else(|| {
                 let my_ip = local_ip().unwrap();
                 Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
@@ -261,10 +259,11 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // TODO: Remove this once we have integration tests built on other chains
             if env == "integration-tests" {
                 let rpc_client = near_fetch::Client::new(&near_rpc);
+                let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
                 mpc_chain_near::run(
                     &mpc_contract_id,
                     &account_id,
-                    sign_tx.clone(),
+                    near_sign_tx,
                     rpc_client,
                     backlog.clone(),
                 )?;
@@ -343,7 +342,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 presignature_storage.clone(),
                 mesh_state.clone(),
                 rpc_channel.clone(),
-                backlog.clone(),
                 sync_report_tx,
             )
             .await;
@@ -399,10 +397,9 @@ fn configuration_digest(
     account_id: AccountId,
     account_sk: SecretKey,
     cipher_pk: String,
-    sign_sk: Option<SecretKey>,
+    sign_sk: SecretKey,
     eth: EthArgs,
 ) -> i64 {
-    let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
     let eth_contract_address = eth.eth_contract_address.unwrap_or_default();
     calculate_digest(
         mpc_contract_id,
@@ -652,10 +649,14 @@ impl RpcHandles {
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         let near_rpc = near_fetch::Client::new(near_rpc_url);
+        // One set of gates for every NEAR call: the publisher and the governance
+        // client share the endpoint and the signer.
+        let near_gates = NearRpcGates::new(stack.gate(Chain::NEAR));
         let near_client = NearClient::new(
             near_rpc.clone(),
             mpc_contract_id,
             signer.clone(),
+            near_gates.clone(),
             publisher_telemetry,
         );
         let near_governance_client = NearGovernanceClient::new(
@@ -665,6 +666,7 @@ impl RpcHandles {
             &network.cipher_sk,
             mpc_contract_id,
             signer,
+            near_gates,
         );
         let publishers = stack.publishers(near_client.clone()).await;
         let (rpc_channel, rpc_executor) =
@@ -735,7 +737,6 @@ impl ProtocolHandles {
         presignature_storage: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
         rpc_channel: RpcChannel,
-        backlog: Backlog,
         sync_report_tx: SyncReportSender,
     ) -> Self {
         let config = Config::new(LocalConfig {
@@ -753,18 +754,16 @@ impl ProtocolHandles {
             contract_watcher.clone(),
         )
         .await;
-        let sign_task = SignatureSpawnerTask::run(
+        let spawner = SignatureSpawner::new(
             account_id.clone(),
-            sign_rx,
             contract_watcher.clone(),
-            config_rx.clone(),
             presignature_storage.clone(),
             mesh_state.clone(),
             message_channel.clone(),
             rpc_channel,
-            backlog,
             sync_report_tx,
         );
+        let sign_task = SignatureSpawnerTask::run(spawner, sign_rx, config_rx.clone());
         let protocol = MpcSignProtocol {
             my_account_id: account_id.clone(),
             msg_channel: message_channel.clone(),
@@ -1155,6 +1154,9 @@ mod tests {
             "MPC_MIDNIGHT_PROOF_SERVER_URL",
             "MPC_MIDNIGHT_INDEXER_URL",
             "MPC_MIDNIGHT_INDEXER_WS_URL",
+            "MPC_MIDNIGHT_OUTPUT_STORAGE_BUCKET",
+            "MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX",
+            "MPC_MIDNIGHT_OUTPUT_STORAGE_TIMEOUT_SECS",
         ] {
             assert!(
                 std::env::var_os(var).is_none(),
@@ -1173,6 +1175,7 @@ mod tests {
         assert_midnight_env_unset();
 
         let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
+        let sign_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign").to_string();
         let central_address = "ab".repeat(32);
         let funding_seed = "0f".repeat(32);
         let intent_gen_command = r#"["midnight-publisher"]"#;
@@ -1183,6 +1186,8 @@ mod tests {
             "test.near",
             "--account-sk",
             &account_sk,
+            "--sign-sk",
+            &sign_sk,
             "--cipher-sk",
             "cipher",
             "--env",
@@ -1205,6 +1210,12 @@ mod tests {
             "http://127.0.0.1:8088/api/v3/graphql",
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
+            "--midnight-output-storage-bucket",
+            "midnight-results",
+            "--midnight-output-storage-prefix",
+            "staging/testnet",
+            "--midnight-output-storage-timeout-secs",
+            "47",
         ];
         let out = Cli::try_parse_from(argv).unwrap().into_str_args();
 
@@ -1223,6 +1234,12 @@ mod tests {
             "http://127.0.0.1:8088/api/v3/graphql",
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
+            "--midnight-output-storage-bucket",
+            "midnight-results",
+            "--midnight-output-storage-prefix",
+            "staging/testnet",
+            "--midnight-output-storage-timeout-secs",
+            "47",
         ] {
             assert!(
                 out.contains(&expected.to_string()),
@@ -1267,6 +1284,7 @@ mod tests {
             near,
             &account_id,
             signer,
+            NearRpcGates::new(SharedBackoff::new()),
             Arc::new(NodeTelemetry::new(Chain::NEAR)),
         );
         let publishers = ChainStack::new(chains).publishers(near).await;
