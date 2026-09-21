@@ -79,7 +79,7 @@ async fn test_backlog_filter_by_status() {
 
     // Filter Solana by Pending execution
     let sol_pending = backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Solana, &tx3.request_id())
+        .get_by::<Bidirectional<Executing>>(Chain::Solana, &tx3.request_id)
         .await;
     assert!(sol_pending.is_some());
 
@@ -91,13 +91,13 @@ async fn test_backlog_filter_by_status() {
 
     // Filter Solana by bidirectional completion awaiting final respond
     let sol_completion = backlog
-        .get_by::<Bidirectional<Final<Generating>>>(Chain::Solana, &tx2.request_id())
+        .get_by::<Bidirectional<Final<Generating>>>(Chain::Solana, &tx2.request_id)
         .await;
     assert!(sol_completion.is_some());
 
     // Filter Canton by Pending execution
     let canton_pending = backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Canton, &tx4.request_id())
+        .get_by::<Bidirectional<Executing>>(Chain::Canton, &tx4.request_id)
         .await;
     assert!(canton_pending.is_some());
 
@@ -326,11 +326,11 @@ fn test_checkpoint_digest_invariants() {
 
     let mut pending1 = PendingRequests::new();
     pending1.insert(
-        tx1.request_id(),
+        tx1.request_id,
         mock_execution_entry(&tx1, Chain::Ethereum, bidi_initial_status()),
     );
     pending1.insert(
-        tx2.request_id(),
+        tx2.request_id,
         mock_execution_entry(&tx2, Chain::Ethereum, bidi_initial_status()),
     );
     pending1.set_processed_block(100);
@@ -382,7 +382,7 @@ fn test_checkpoint_digest_invariants() {
 #[test]
 fn test_checkpoint_consensus_projection() {
     let tx = mock_bidirectional_tx(RequestId::from_u8(60), Chain::Ethereum);
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
 
     // Initial source-chain phase: generation, and publishing by any proposer,
     // all collapse to a single digest.
@@ -467,7 +467,7 @@ fn test_checkpoint_serialization() {
     assert_eq!(checkpoint.digest(), deserialized.digest());
 
     let restored_entry = &deserialized.pending_requests[0];
-    assert_eq!(restored_entry.request_id(), tx1.request_id());
+    assert_eq!(restored_entry.request_id(), tx1.request_id);
     let SignKind::SignBidirectional(ref event) = restored_entry.request.kind else {
         panic!("Expected SignBidirectional kind");
     };
@@ -660,7 +660,7 @@ async fn test_bidirectional_typestate_lifecycle() {
 async fn test_bidirectional_executing_advance_outcomes() {
     let backlog = Backlog::new();
     let tx = mock_tx(20);
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
 
     let entry = backlog.insert_mock_executing(&tx).await;
 
@@ -683,7 +683,7 @@ async fn test_bidirectional_executing_advance_outcomes() {
 
     // Test Failed outcome
     let tx2 = mock_tx(21);
-    let request_id2 = tx2.request_id();
+    let request_id2 = tx2.request_id;
     let entry2 = backlog.insert_mock_executing(&tx2).await;
     let failed_entry = entry2
         .advance(ExecutionOutcome::Failed)
@@ -703,7 +703,7 @@ async fn test_bidirectional_executing_advance_outcomes() {
 async fn test_watch_unwatch_and_respond() {
     let backlog = Backlog::new();
     let tx = mock_tx(7);
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
 
     backlog.insert_mock_executing(&tx).await;
 
@@ -747,7 +747,7 @@ async fn test_watch_unwatch_and_respond() {
 async fn test_recovery_restores_state_and_watchers() {
     let backlog = Backlog::new();
     let tx = mock_tx(6);
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
 
     backlog.insert_mock_executing(&tx).await;
     backlog.set_processed_block(Chain::Solana, 10).await;
@@ -909,7 +909,6 @@ async fn test_insert_and_accessors() {
     assert!(is_new);
     assert_eq!(entry.chain(), chain);
     assert_eq!(entry.request_id(), request_id);
-    assert_eq!(entry.request_bytes(), request_id.bytes);
     assert_eq!(entry.request().id, request_id);
     assert_eq!(entry.into_request().id, request_id);
 
@@ -999,12 +998,12 @@ async fn test_pending_executions_typestate() {
 
     let eth_execs = backlog.pending_executions(Chain::Ethereum).await;
     assert_eq!(eth_execs.len(), 1);
-    assert_eq!(eth_execs[0].request_id(), tx1.request_id());
+    assert_eq!(eth_execs[0].request_id(), tx1.request_id);
     assert_eq!(eth_execs[0].execution_tx().id, tx1.id);
 
     let sol_execs = backlog.pending_executions(Chain::Solana).await;
     assert_eq!(sol_execs.len(), 1);
-    assert_eq!(sol_execs[0].request_id(), tx2_sol.request_id());
+    assert_eq!(sol_execs[0].request_id(), tx2_sol.request_id);
     assert_eq!(sol_execs[0].execution_tx().id, tx2_sol.id);
 }
 
@@ -1084,7 +1083,7 @@ async fn plain_lookup_cannot_measure_the_execution_wait() {
     backlog.insert_mock_executing(&tx).await;
 
     let entry = backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Solana, &tx.request_id())
+        .get_by::<Bidirectional<Executing>>(Chain::Solana, &tx.request_id)
         .await
         .expect("entry must still be executing");
     assert_eq!(entry.awaiting_execution(), None);

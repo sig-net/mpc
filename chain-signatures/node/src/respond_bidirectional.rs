@@ -94,14 +94,14 @@ impl CompletedTx {
         serialized_output: RespondBidirectionalSerializedOutput,
     ) -> anyhow::Result<IndexedSignRequest> {
         let source_chain = self.tx.source_chain;
-        let request_id_bytes = self.tx.request_id;
+        let request_id = self.tx.request_id;
         tracing::info!(
             "Respond bidirectional serialized output: {:?}",
             serialized_output
         );
         let message = calculate_respond_bidirectional_hash_message_for_chain(
             source_chain,
-            &request_id_bytes,
+            request_id,
             &serialized_output,
         );
         tracing::info!(
@@ -115,7 +115,7 @@ impl CompletedTx {
         let epsilon = self.tx.epsilon(&path)?;
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest::respond_bidirectional(
-            RequestId::new(request_id_bytes),
+            request_id,
             SignArgs {
                 entropy,
                 epsilon,
@@ -149,12 +149,12 @@ pub fn calculate_respond_bidirectional_hash_message(
 
 fn calculate_respond_bidirectional_hash_message_for_chain(
     source_chain: Chain,
-    request_id: &[u8; 32],
+    request_id: RequestId,
     serialized_output: &[u8],
 ) -> [u8; 32] {
     match source_chain {
         Chain::Midnight => {
-            mpc_compact_hashing::compute_response_hash(request_id, serialized_output)
+            mpc_compact_hashing::compute_response_hash(request_id.as_bytes(), serialized_output)
         }
         Chain::NEAR
         | Chain::Ethereum
@@ -162,7 +162,7 @@ fn calculate_respond_bidirectional_hash_message_for_chain(
         | Chain::Bitcoin
         | Chain::Hydration
         | Chain::Canton => {
-            calculate_respond_bidirectional_hash_message(request_id, serialized_output)
+            calculate_respond_bidirectional_hash_message(request_id.as_bytes(), serialized_output)
         }
     }
 }
@@ -175,7 +175,7 @@ mod tests {
 
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
 
-    fn sample_bidirectional_tx(source_chain: Chain, request_id: [u8; 32]) -> Arc<BidirectionalTx> {
+    fn sample_bidirectional_tx(source_chain: Chain, request_id: RequestId) -> Arc<BidirectionalTx> {
         Arc::new(BidirectionalTx {
             id: BidirectionalTxId(B256::repeat_byte(0xab).0),
             sender: [0x11; 32],
@@ -201,7 +201,7 @@ mod tests {
     async fn create_failed_sign_request_emits_error_prefix() {
         // Solana (Borsh).
         let borsh = CompletedTx::new(
-            sample_bidirectional_tx(Chain::Solana, [0x22; 32]),
+            sample_bidirectional_tx(Chain::Solana, RequestId::from_u8(0x22)),
             None,
             Some(100),
         )
@@ -215,7 +215,7 @@ mod tests {
 
         // Canton (ABI).
         let abi = CompletedTx::new(
-            sample_bidirectional_tx(Chain::Canton, [0x22; 32]),
+            sample_bidirectional_tx(Chain::Canton, RequestId::from_u8(0x22)),
             None,
             Some(100),
         )
@@ -232,7 +232,7 @@ mod tests {
 
         // Midnight (FAB).
         let fab = CompletedTx::new(
-            sample_bidirectional_tx(Chain::Midnight, [0x22; 32]),
+            sample_bidirectional_tx(Chain::Midnight, RequestId::from_u8(0x22)),
             None,
             Some(100),
         )
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn create_sign_request_carries_output_and_context() {
-        let tx = sample_bidirectional_tx(Chain::Solana, [0x22; 32]);
+        let tx = sample_bidirectional_tx(Chain::Solana, RequestId::from_u8(0x22));
         let output = vec![1, 2, 3, 4];
         let chain_ctx = Some(vec![9, 9]);
         let completed = CompletedTx::new(tx.clone(), chain_ctx.clone(), Some(100));
@@ -271,7 +271,7 @@ mod tests {
     #[tokio::test]
     async fn failed_execution_output_is_detectable() {
         let failed = CompletedTx::new(
-            sample_bidirectional_tx(Chain::Solana, [0x31; 32]),
+            sample_bidirectional_tx(Chain::Solana, RequestId::from_u8(0x31)),
             None,
             Some(100),
         )
@@ -284,7 +284,7 @@ mod tests {
         assert!(is_failed_execution_output(&failed.output));
 
         let succeeded = CompletedTx::new(
-            sample_bidirectional_tx(Chain::Solana, [0x32; 32]),
+            sample_bidirectional_tx(Chain::Solana, RequestId::from_u8(0x32)),
             None,
             Some(100),
         )
@@ -314,7 +314,7 @@ mod tests {
     #[tokio::test]
     async fn midnight_failure_payload_differs_from_zero_padded_success() {
         let completed = CompletedTx::new(
-            sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]),
+            sample_bidirectional_tx(Chain::Midnight, RequestId::from_u8(0x2f)),
             None,
             Some(100),
         );
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn response_hash_policy_preserves_legacy_keccak_for_non_midnight_chains() {
-        let request_id = [0x2f; 32];
+        let request_id = RequestId::from_u8(0x2f);
         let serialized_output = (1..=32).collect::<Vec<_>>();
         let expected = "c19dbe87b89aa45fdd7be361ae98513371d19c015b591ba1194ee6d356f0e8dc";
 
@@ -350,7 +350,7 @@ mod tests {
             assert_eq!(
                 hex::encode(calculate_respond_bidirectional_hash_message_for_chain(
                     source_chain,
-                    &request_id,
+                    request_id,
                     &serialized_output,
                 )),
                 expected,
@@ -361,14 +361,18 @@ mod tests {
 
     #[test]
     fn response_hash_policy_uses_midnight_compact_hash() {
-        let request_id = [0x2f; 32];
+        let request_id = RequestId::from_u8(0x2f);
         let serialized_output = (1..=32).collect::<Vec<_>>();
         let keccak = alloy::primitives::keccak256(
-            [request_id.as_slice(), serialized_output.as_slice()].concat(),
+            [
+                request_id.as_bytes().as_slice(),
+                serialized_output.as_slice(),
+            ]
+            .concat(),
         );
         let midnight_hash = calculate_respond_bidirectional_hash_message_for_chain(
             Chain::Midnight,
-            &request_id,
+            request_id,
             &serialized_output,
         );
 
@@ -381,7 +385,7 @@ mod tests {
 
     #[test]
     fn completed_tx_uses_source_chain_for_midnight_response() {
-        let request_id = [0x2f; 32];
+        let request_id = RequestId::from_u8(0x2f);
         let serialized_output = (1..=32).collect::<Vec<_>>();
         let tx = sample_bidirectional_tx(Chain::Midnight, request_id);
         assert_eq!(tx.target_chain, Chain::Ethereum);

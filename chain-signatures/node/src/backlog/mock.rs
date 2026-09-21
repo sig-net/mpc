@@ -58,7 +58,7 @@ impl BacklogTestExt for Backlog {
         tx: &BidirectionalTx,
     ) -> SignEntry<Bidirectional<Executing>> {
         let bidi = self
-            .insert_mock_bidirectional(tx.request_id(), tx.source_chain)
+            .insert_mock_bidirectional(tx.request_id, tx.source_chain)
             .await;
         let (pk, output) = mock_signature_output(&bidi.request().args);
         bidi.advance(pk, &output, mock_participants(), true)
@@ -220,7 +220,7 @@ pub fn mock_bidirectional_tx(id: RequestId, source_chain: Chain) -> Bidirectiona
         params: "{}".to_string(),
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        request_id: id.bytes,
+        request_id: id,
         from_address: [0u8; 20],
         nonce: 0,
     }
@@ -259,7 +259,7 @@ pub fn mock_bidi_response_request(
 
 /// Create a mock bidirectional final response request from a [`BidirectionalTx`].
 pub fn mock_bidi_response(tx: &BidirectionalTx) -> Arc<IndexedSignRequest> {
-    mock_bidi_response_request(tx.request_id(), tx.id, tx.source_chain)
+    mock_bidi_response_request(tx.request_id, tx.id, tx.source_chain)
 }
 
 /// Helper to create a backlog entry with an arbitrary status for bidirectional requests.
@@ -279,9 +279,9 @@ pub fn mock_execution_entry_with_timestamp(
     unix_timestamp_indexed: u64,
 ) -> BacklogEntry {
     let request = if unix_timestamp_indexed == 0 {
-        mock_bidi_request(tx.request_id(), chain)
+        mock_bidi_request(tx.request_id, chain)
     } else {
-        let mut req = (*mock_bidi_request(tx.request_id(), chain)).clone();
+        let mut req = (*mock_bidi_request(tx.request_id, chain)).clone();
         req.unix_timestamp_indexed = unix_timestamp_indexed;
         Arc::new(req)
     };

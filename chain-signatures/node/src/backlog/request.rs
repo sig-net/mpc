@@ -166,10 +166,6 @@ impl<State> SignEntry<State> {
         self.request.id
     }
 
-    pub fn request_bytes(&self) -> [u8; 32] {
-        self.request.id.bytes
-    }
-
     pub fn request(&self) -> &Arc<IndexedSignRequest> {
         &self.request
     }

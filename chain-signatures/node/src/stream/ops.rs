@@ -12,8 +12,8 @@ use crate::types::SignCommand;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    Chain, ExecutionOutcome, IndexedSignRequest, RequestId, RequestKind, RespondBidirectionalEvent,
-    SignKind, SignatureRespondedEvent,
+    Chain, ExecutionOutcome, IndexedSignRequest, RequestKind, RespondBidirectionalEvent, SignKind,
+    SignatureRespondedEvent,
 };
 use mpc_utils::time::unix_elapsed_checked;
 
@@ -117,7 +117,7 @@ pub(crate) async fn process_respond_event(
     ctx: &StreamContext,
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
-    let request_id = RequestId::new(respond_event.request_id);
+    let request_id = respond_event.request_id;
     let source_chain = respond_event.chain;
 
     let Some(entry) = ctx.backlog.get(source_chain, &request_id).await else {
@@ -209,7 +209,7 @@ pub(crate) async fn process_respond_bidirectional_event(
     ctx: &StreamContext,
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
-    let request_id = RequestId::new(event.request_id);
+    let request_id = event.request_id;
     let source_chain = event.chain;
     tracing::info!(?request_id, "processing RespondBidirectionalEvent");
 

@@ -6,7 +6,8 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
 pub use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
+    BidirectionalTx, BidirectionalTxId, ChainFromError, RequestId, SignBidirectionalEvent,
+    Signature,
 };
 use rlp::{Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
@@ -126,7 +127,7 @@ pub trait SignBidirectionalEventExt {
     /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
     fn to_bidirectional_tx(
         &self,
-        request_id: [u8; 32],
+        request_id: RequestId,
         mpc_sig: Signature,
         root_pk: mpc_primitives::PublicKey,
     ) -> anyhow::Result<BidirectionalTx>;
@@ -185,7 +186,7 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
 
     fn to_bidirectional_tx(
         &self,
-        request_id: [u8; 32],
+        request_id: RequestId,
         mpc_sig: Signature,
         root_pk: mpc_primitives::PublicKey,
     ) -> anyhow::Result<BidirectionalTx> {

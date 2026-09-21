@@ -41,7 +41,7 @@ pub fn test_bidirectional_tx(id: u8, source_chain: Chain, target_chain: Chain) -
         params: "{}".to_string(),
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        request_id: [id; 32],
+        request_id: RequestId::from_u8(id),
         from_address: **Address::ZERO,
         nonce: 0,
     }
@@ -92,7 +92,7 @@ pub fn test_canton_sign_bidirectional_request(
 
 pub fn respond_event(request_id: RequestId, signature: Signature) -> RespondBidirectionalEvent {
     RespondBidirectionalEvent {
-        request_id: request_id.bytes,
+        request_id,
         signature,
         chain: Chain::Solana,
     }
@@ -104,7 +104,7 @@ pub fn signature_responded_event(
     chain: Chain,
 ) -> SignatureRespondedEvent {
     SignatureRespondedEvent {
-        request_id: request_id.bytes,
+        request_id,
         signature,
         chain,
     }

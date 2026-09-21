@@ -134,7 +134,7 @@ impl ExecutionWatchers {
     fn all(&self) -> HashMap<BidirectionalTxId, (RequestId, Arc<BidirectionalTx>)> {
         self.watchers
             .iter()
-            .map(|(id, watch)| (*id, (watch.tx.request_id(), Arc::clone(&watch.tx))))
+            .map(|(id, watch)| (*id, (watch.tx.request_id, Arc::clone(&watch.tx))))
             .collect()
     }
 }
@@ -276,7 +276,7 @@ impl Backlog {
             left.request()
                 .unix_timestamp_indexed
                 .cmp(&right.request().unix_timestamp_indexed)
-                .then_with(|| left.request_bytes().cmp(&right.request_bytes()))
+                .then_with(|| left.request_id().cmp(&right.request_id()))
         });
 
         requeueable
@@ -308,7 +308,7 @@ impl Backlog {
             left.request()
                 .unix_timestamp_indexed
                 .cmp(&right.request().unix_timestamp_indexed)
-                .then_with(|| left.request_bytes().cmp(&right.request_bytes()))
+                .then_with(|| left.request_id().cmp(&right.request_id()))
         });
 
         publishable
@@ -350,7 +350,7 @@ impl Backlog {
         };
 
         // Restore the observation time absent from backlog status.
-        self.get_by::<Bidirectional<Executing>>(watch.tx.source_chain, &watch.tx.request_id())
+        self.get_by::<Bidirectional<Executing>>(watch.tx.source_chain, &watch.tx.request_id)
             .await
             .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
     }

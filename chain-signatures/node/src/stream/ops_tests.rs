@@ -23,7 +23,7 @@ use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ChainConfig as _, IndexedSignRequest, SignArgs,
+    BidirectionalTx, BidirectionalTxId, ChainConfig as _, IndexedSignRequest, RequestId, SignArgs,
     SignBidirectionalEvent, SignKind, Signature,
 };
 use mpc_utils::time::current_unix_timestamp;
@@ -40,7 +40,7 @@ fn signature_respond_event_conversion() {
     let recovery_id: u8 = 1;
 
     let event = SignatureRespondedEvent {
-        request_id: [0u8; 32],
+        request_id: RequestId::from_u8(0),
         signature: Signature::new(big_r, s_scalar, recovery_id),
         chain: Chain::Ethereum,
     };
@@ -118,7 +118,7 @@ async fn seed_executing_entry(
 async fn process_execution_confirmed_success_creates_respond_request() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(1, Chain::Solana, Chain::Ethereum);
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
     backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -231,7 +231,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let storage = CheckpointStorage::in_memory();
     let backlog = Backlog::persisted(storage.clone());
     let tx = test_bidirectional_tx(9, Chain::Solana, Chain::Ethereum);
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
     backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, sign_rx) = mpsc::channel(4);
@@ -346,7 +346,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
-        request_id: request_id.bytes,
+        request_id,
         signature: mpc_crypto::generate_signature(&root_sk, &args),
         chain: Chain::Ethereum,
     };
@@ -405,7 +405,7 @@ async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_adv
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let signature = mpc_crypto::generate_signature(&root_sk, &req.args);
     let event = SignatureRespondedEvent {
-        request_id: request_id.bytes,
+        request_id,
         signature,
         chain: Chain::Solana,
     };
@@ -568,7 +568,7 @@ async fn process_respond_event_rejects_invalid_signature() {
     invalid_signature.s += Scalar::ONE;
 
     let event = SignatureRespondedEvent {
-        request_id: request_id.bytes,
+        request_id,
         signature: invalid_signature,
         chain: Chain::Ethereum,
     };
@@ -596,7 +596,7 @@ async fn process_respond_event_rejects_invalid_signature() {
 async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(13, Chain::Solana, Chain::Ethereum);
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
     let entry = backlog.insert_mock_final(&tx).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
@@ -638,7 +638,7 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
 async fn process_respond_bidirectional_event_rejects_invalid_signature() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(16, Chain::Solana, Chain::Ethereum);
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
     let entry = backlog.insert_mock_final(&tx).await;
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
@@ -670,7 +670,7 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
-        request_id: request_id.bytes,
+        request_id,
         signature: mpc_crypto::generate_signature(&root_sk, &entry.request().args),
         chain: Chain::Ethereum,
     };
@@ -717,7 +717,7 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
 async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Solana);
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
     let args = test_sign_args(14);
 
     let mut rlp_s = rlp::RlpStream::new_list(9);
@@ -763,7 +763,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
     let event = SignatureRespondedEvent {
-        request_id: request_id.bytes,
+        request_id,
         signature: mpc_crypto::generate_signature(&root_sk, &args),
         chain: Chain::Ethereum,
     };
@@ -804,7 +804,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     let backlog = Backlog::new();
 
     let tx = test_bidirectional_tx(2, Chain::Solana, Chain::Ethereum);
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
     backlog.insert_mock_executing(&tx).await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -893,7 +893,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
     let backlog = Backlog::new();
     let mut tx = test_bidirectional_tx(24, Chain::Canton, Chain::Ethereum);
     tx.sender = [7u8; 32];
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
     let sign_event_contract_id = "#sign-event-cid";
 
     let request = test_canton_sign_bidirectional_request(request_id, sign_event_contract_id);
@@ -1066,7 +1066,7 @@ async fn live_block_votes_for_checkpoint() {
 async fn publish_failover_fires_once_per_leg() {
     let backlog = Backlog::new();
     let tx = mock_tx(21);
-    let request_id = tx.request_id();
+    let request_id = tx.request_id;
 
     let bidi = backlog
         .insert_mock_bidirectional(request_id, Chain::Solana)
