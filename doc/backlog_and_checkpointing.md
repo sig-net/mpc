@@ -41,7 +41,7 @@ own problem rather than a network without a contract.
 
 Vocabulary, per node per source chain:
 
-* **Watermark**: the height the cursor has reached, inclusive. Promoting a
+* **Processed height**: the height the cursor has reached, inclusive. Promoting a
   checkpoint may move it, back or forward.
 
 * **Backlog**: one *entry* per request admitted and not finished, holding the
@@ -171,7 +171,13 @@ live map, so what was hashed is what is still there. Serving
 `get_checkpoint` is outside all of this and waits for none of it, which is
 what serving snapshots allows.
 
-Base and cursor. The node indexes the chain with a watermark cursor, which
+`voted` is the store, and the only checkpoints kept across a restart are
+the ones there and the `base`. `pending` is derived: the cursor fills it
+again on the way back up, and a restart drops it. Unlike the pending store
+the code keeps today, nothing is written when a boundary is crossed, only
+when a vote is cast.
+
+Base and cursor. The node indexes the chain with a cursor, which
 holds the backlog the node acts on and records at every boundary it crosses
 the digest it derived there and the backlog behind it. The `base` is the
 settled checkpoint it indexes from, replaced when polling the contract shows
@@ -203,13 +209,13 @@ persistent:
                                                  // and including this height
 
 in memory:
-    backlog       RequestId -> Entry          
-    watermark     Height
-    pending       Height -> (Digest, Backlog)    // checkpoints above base
-    want          (Height, Digest)?              // a settled checkpoint we
-                                                 // have read and do not
-                                                 // hold; unset on start, so
-                                                 // a crash lifts the hold
+    backlog           RequestId -> Entry
+    processed_height  Height
+    pending           Height -> (Digest, Backlog)  // checkpoints above base
+    want              (Height, Digest)?            // a settled checkpoint we
+                                                   // have read and do not
+                                                   // hold; unset on start, so
+                                                   // a crash lifts the hold
 ```
 
 ### Event Handlers
@@ -241,22 +247,22 @@ on receiving a peer's reply (h, d, backlog) to what we asked for:
 ```
 Indexing
 ```
-on block b finalised, the next one above the watermark:       //indexing
+on block b finalised, the next one above the processed height:
   if want is set or len(pending) >= CAP:
     return                           
-  for each boundary B with watermark < B < height(b):
-    pending[B] = (digest(B, backlog), backlog)   // nothing between the
-                                     // watermark and B changed the backlog,
+  for each boundary B with processed_height < B < height(b):
+    pending[B] = (digest(B, backlog), backlog)   // no block between the
+                                     // processed height and B changed it,
                                      // or that block would be this one
   backlog.update(b)                  // add/change/remove entries, idempotent
-  watermark = height(b)
+  processed_height = height(b)
   if height(b) is a boundary:
     pending[height(b)] = (digest(height(b), backlog), backlog)
   if a boundary was crossed:
     vote_if_ready(open height)
-  if watermark > acted_through:
-    act on backlog                 // Sign, watch, attest, publish
-    acted_through = watermark      // and not repeated over a replay
+  if processed_height > acted_through:
+    act on backlog                     // Sign, watch, attest, publish
+    acted_through = processed_height   // and not repeated over a replay
 ```
 
 No two handlers run their bodies at once, and none runs against itself.
@@ -265,7 +271,8 @@ A boundary is not a block. Where only blocks carrying requests or responses
 are delivered, the cursor can go from 119 to 500 with 120 a boundary nobody
 observed, so a checkpoint is recorded at the boundary and never at the block
 that crossed it. The backlog to bind there is the one in hand: a block
-between the watermark and the boundary that changed the backlog would have
+between the processed height and the boundary that changed the backlog
+would have
 been delivered before this one. That is why a skipped boundary is recorded
 before the block is applied and a delivered one after.
 
@@ -273,18 +280,18 @@ before the block is applied and a delivered one after.
 publishing, attesting) only happen later if at all.
 
 `acted_through` is written lazily, so it is a lower bound: a crash loses the
-last of it and the replay acts twice, which is the case the destination
+last of it and the replay acts twice, which is the case the target
 already has to absorb. It is not reset by a `rebase`, a rebase being about
 what the node believes rather than what it has already done.
 
-Instead of `len(pending) >= CAP` and `watermark > acted_through` alternative
+Instead of `len(pending) >= CAP` and `processed_height > acted_through` alternative
 conditions can be defined without changing the properties materially.
 
 ### Rebase and promote
 
 ```
 rebase():
-  backlog, watermark = base
+  backlog, processed_height = base
   pending = {}                     // which also puts the cap back under its
                                    // bound
 ```
@@ -296,10 +303,10 @@ promote(h, d, body):
                                 // old base with no body for what we voted,
                                 // and the f+1 holders one short
   want = none                   // in memory, so outside the write
-  if mine and watermark > h:    // only the cursor's own reading lets it keep
-    pending.remove_below(h+1)   // remove entries no longer needed
-    vote_if_ready(open height)  // open height moved with h
-  else:                         // read h differently, or has not reached it
+  if mine and processed_height > h:   // the cursor's own reading, kept
+    pending.remove_below(h+1)         // drop what is now below the base
+    vote_if_ready(open height)        // open height moved with h
+  else:                               // read h differently, or not yet there
     rebase()
 ```
 ```
@@ -387,7 +394,7 @@ range, each pulling in the nodes a signing round takes, which is why
 What it cannot prevent is the range a crash loses, so the duplicate still has
 to be harmless. On the source chain the contract emits the event either way
 and the receiving library drops a response whose request it no longer has
-outstanding; on a destination chain the effect is the same signed transaction
+outstanding; on a target chain the effect is the same signed transaction
 arriving twice.
 
 *S2.* An entry enters by admission from a finalised block this node fetched,
@@ -491,7 +498,7 @@ was S1 failing quietly.
   has simply run out of room to claim anything new, which a node whose
   reading of a block is not reproducible will do and a node whose reading is
   will not.
-* A restart loses the watermark cursor and replays from `base`
+* A restart loses the cursor and replays from `base`
   to the tip. A long absence does not replay the absence: the first poll
   takes the body in one reply, so the cost is the settlement lag either
   way.
@@ -502,7 +509,8 @@ was S1 failing quietly.
   t = n - f leaves no slack, so every node already out comes from the same
   budget.
 
-Three signals: a watermark that does not move with `pending` under its cap,
+Three signals: a processed height that does not move with `pending` under
+its cap,
 for the node that cannot index; rebases one after another,
 for the node repairing endlessly; and the settled height standing still while
 tips move on, for a network that cannot agree. The tally's vote counts say
@@ -528,7 +536,8 @@ this design exists to avoid.
 
 Most of the machinery exists. `align_backlog_with_consensus` already fetches a
 settled checkpoint from a peer, checks it and promotes it, and
-`PendingRequests::from_checkpoint` already sets the watermark forwards or
+`PendingRequests::from_checkpoint` already sets the processed height
+forwards or
 backwards.
 
 | | today | here | step |
@@ -664,7 +673,7 @@ is the one this design declines to solve.
 ## 9. Open
 
 1. **Whether an entry should record where its response was.** `signature_finalized`
-   is a bit, so re-arming a destination-chain watcher means finding a
+   is a bit, so re-arming a target-chain watcher means finding a
    `Respond` the node may never have indexed. Replacing the bit with the
    height that set it costs no extra field and turns that search into one
    block fetch; against it, a height in the digest is a height every node has
