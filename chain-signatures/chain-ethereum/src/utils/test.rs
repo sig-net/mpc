@@ -3,8 +3,9 @@
 
 use crate::abi::{ChainSignatures, ChainSignaturesConstructor};
 use crate::event_parsing::parse_filtered_logs;
+use crate::EthereumRequestId;
 use alloy::network::{Ethereum, TransactionBuilder};
-use alloy::primitives::{Address, Bytes, B256, U256};
+use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::{Provider, WalletProvider};
 use alloy::rpc::types::{request::TransactionRequest, Filter};
 use alloy::sol_types::{SolEvent, SolValue};
@@ -56,14 +57,14 @@ where
         .context("deployment receipt missing contract address")
 }
 
-/// Submit a `sign` request on-chain and return its derived `request_id`.
+/// Submit a `sign` request on-chain and return its derived [`RequestId`].
 ///
 /// The emitted `SignatureRequested` log and its `RequestId` are cross-checked
 /// against the off-chain derivation
 pub async fn submit_sign_request<P>(
     contract: &ChainSignatures::ChainSignaturesInstance<P>,
     seed: usize,
-) -> Result<B256>
+) -> Result<RequestId>
 where
     P: Provider + WalletProvider + Clone + Send + Sync + 'static,
 {
@@ -78,7 +79,7 @@ where
     let algo = "secp256k1";
     let dest = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
     let params = "{}";
-    let request_id = B256::from(crate::generate_request_id(
+    let request_id = RequestId::from_ethereum_sign_request(
         sender,
         &payload,
         &path,
@@ -87,7 +88,7 @@ where
         algo,
         dest,
         params,
-    ));
+    );
 
     for attempt in 1..=MAX_ATTEMPTS {
         let request = ChainSignatures::SignRequest {
@@ -127,10 +128,9 @@ where
                     .await
                     .context("fetch SignatureRequested logs")?;
                 let parsed = parse_filtered_logs(logs);
-                let expected = RequestId::new(request_id.into());
                 anyhow::ensure!(
-                    parsed.iter().any(|r| r.id == expected),
-                    "emitted SignatureRequested log parsed to {parsed:?}, expected id {expected:?}"
+                    parsed.iter().any(|r| r.id == request_id),
+                    "emitted SignatureRequested log parsed to {parsed:?}, expected id {request_id:?}"
                 );
                 return Ok(request_id);
             }

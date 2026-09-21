@@ -72,7 +72,7 @@ pub async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEven
         let signature = MpcSignature::new(big_r, s, signature.recoveryId);
 
         let respond_event = SignatureRespondedEvent {
-            request_id: request_id.bytes,
+            request_id,
             signature,
             chain: Chain::Ethereum,
         };
@@ -92,8 +92,7 @@ fn request_id_from_signature_responded_log(log: &Log) -> Option<RequestId> {
     }
 
     let request_topic = log.topics().get(1)?;
-    let request_id: [u8; 32] = (*request_topic).into();
-    Some(RequestId { bytes: request_id })
+    Some(RequestId::new(request_topic.0))
 }
 
 fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
@@ -133,7 +132,7 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let tx_hash = log.transaction_hash.unwrap_or_default();
     let entropy = tx_hash;
 
-    let request_id = RequestId::new(generate_request_id(
+    let request_id = RequestId::from_ethereum_sign_request(
         event.requester,
         &event.payload_hash,
         &event.path,
@@ -142,7 +141,7 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
         &event.algo,
         &event.dest,
         &event.params,
-    ));
+    );
     tracing::info!(%tx_hash, ?request_id, "eth signature requested");
 
     Some(IndexedSignRequest::sign(
@@ -206,32 +205,48 @@ struct SignatureRequestedEvent {
     params: String,
 }
 
-/// Derive the `request_id` identifying a sign request: `keccak256` over the
-/// ABI encoding of the [`SignatureRequestedEncoding`] event fields. The
-/// contract never computes this itself (must be calculated off-chain)
-#[allow(clippy::too_many_arguments)]
-pub fn generate_request_id(
-    sender: Address,
-    payload: &[u8; 32],
-    path: &str,
-    key_version: u32,
-    chain_id: U256,
-    algo: &str,
-    dest: &str,
-    params: &str,
-) -> [u8; 32] {
-    let encoded = SignatureRequestedEncoding {
-        sender,
-        payload: (*payload).into(),
-        path: path.to_string(),
-        keyVersion: key_version,
-        chainId: chain_id,
-        algo: algo.to_string(),
-        dest: dest.to_string(),
-        params: params.to_string(),
+/// Ethereum-specific [`RequestId`] derivation.
+pub trait EthereumRequestId {
+    /// Ethereum `sign`: `keccak256` over the ABI encoding of the
+    /// [`SignatureRequestedEncoding`] event fields (sender as address). The
+    /// contract never computes this itself (must be calculated off-chain).
+    #[allow(clippy::too_many_arguments)]
+    fn from_ethereum_sign_request(
+        sender: Address,
+        payload: &[u8; 32],
+        path: &str,
+        key_version: u32,
+        chain_id: U256,
+        algo: &str,
+        dest: &str,
+        params: &str,
+    ) -> RequestId;
+}
+
+impl EthereumRequestId for RequestId {
+    fn from_ethereum_sign_request(
+        sender: Address,
+        payload: &[u8; 32],
+        path: &str,
+        key_version: u32,
+        chain_id: U256,
+        algo: &str,
+        dest: &str,
+        params: &str,
+    ) -> RequestId {
+        let encoded = SignatureRequestedEncoding {
+            sender,
+            payload: (*payload).into(),
+            path: path.to_string(),
+            keyVersion: key_version,
+            chainId: chain_id,
+            algo: algo.to_string(),
+            dest: dest.to_string(),
+            params: params.to_string(),
+        }
+        .encode_data();
+        RequestId::new(alloy::primitives::keccak256(encoded).0)
     }
-    .encode_data();
-    alloy::primitives::keccak256(encoded).into()
 }
 
 #[cfg(test)]
@@ -308,9 +323,9 @@ mod tests {
             dest: event.dest.clone(),
             params: event.params.clone(),
         };
-        let expected: [u8; 32] = alloy::primitives::keccak256(encoding.encode_data()).into();
+        let expected = RequestId::new(alloy::primitives::keccak256(encoding.encode_data()).0);
         assert_eq!(
-            generate_request_id(
+            RequestId::from_ethereum_sign_request(
                 parsed.requester,
                 &parsed.payload_hash,
                 &parsed.path,
@@ -329,7 +344,7 @@ mod tests {
         // Pinned to the historical off-chain derivation (legacy ethabi
         // golden, ported from integration-tests); the contract computes no
         // request id itself.
-        let id = generate_request_id(
+        let id = RequestId::from_ethereum_sign_request(
             Address::ZERO,
             &[0x42; 32],
             "test-path",
@@ -341,21 +356,21 @@ mod tests {
         );
         assert_eq!(
             id,
-            [
+            RequestId::new([
                 0x33, 0xda, 0x60, 0xf7, 0x1a, 0x38, 0x66, 0xe6, 0xb6, 0x32, 0xc9, 0xbb, 0xc2, 0x17,
                 0x01, 0x72, 0x03, 0x80, 0x0f, 0x86, 0x36, 0x52, 0xbf, 0x49, 0xd8, 0xeb, 0xa6, 0x3d,
                 0xb9, 0x77, 0xd9, 0x1c,
-            ]
+            ])
         );
     }
 
-    fn responded_log(request_id: [u8; 32], data: Vec<u8>) -> Log {
+    fn responded_log(request_id: RequestId, data: Vec<u8>) -> Log {
         Log {
             inner: PrimitiveLog::new_unchecked(
                 Address::ZERO,
                 vec![
                     ChainSignatures::SignatureResponded::SIGNATURE_HASH,
-                    request_id.into(),
+                    request_id.bytes.into(),
                 ],
                 data.into(),
             ),
@@ -364,13 +379,13 @@ mod tests {
     }
 
     fn sample_responded_event(
-        request_id: [u8; 32],
+        request_id: RequestId,
     ) -> (ChainSignatures::SignatureResponded, K256AffinePoint) {
         use k256::elliptic_curve::sec1::ToEncodedPoint;
         let big_r = K256AffinePoint::GENERATOR;
         let encoded = big_r.to_encoded_point(false);
         let event = ChainSignatures::SignatureResponded {
-            requestId: request_id.into(),
+            requestId: request_id.bytes.into(),
             responder: Address::from([0x33; 20]),
             signature: ChainSignatures::Signature {
                 bigR: ChainSignatures::AffinePoint {
@@ -386,7 +401,7 @@ mod tests {
 
     #[tokio::test]
     async fn emit_respond_events_emits_valid_signature() {
-        let request_id = [0x42u8; 32];
+        let request_id = RequestId::from_u8(0x42);
         let (event, big_r) = sample_responded_event(request_id);
         let log = responded_log(request_id, event.encode_data());
 
@@ -409,9 +424,9 @@ mod tests {
     #[tokio::test]
     async fn emit_respond_events_skips_malformed_data() {
         let logs = vec![
-            responded_log([1u8; 32], vec![]),
-            responded_log([2u8; 32], vec![0u8; 100]),
-            responded_log([3u8; 32], vec![0u8; 159]),
+            responded_log(RequestId::from_u8(1), vec![]),
+            responded_log(RequestId::from_u8(2), vec![0u8; 100]),
+            responded_log(RequestId::from_u8(3), vec![0u8; 159]),
         ];
         let (tx, mut rx) = mpsc::channel(1);
         emit_respond_events(&logs, tx).await;
@@ -421,10 +436,10 @@ mod tests {
     #[tokio::test]
     async fn emit_respond_events_skips_invalid_signature_values() {
         // decodes fine, but bigR = (0, 0) is not on the curve
-        let (mut event, _) = sample_responded_event([4u8; 32]);
+        let (mut event, _) = sample_responded_event(RequestId::from_u8(4));
         event.signature.bigR.x = U256::ZERO;
         event.signature.bigR.y = U256::ZERO;
-        let log = responded_log([4u8; 32], event.encode_data());
+        let log = responded_log(RequestId::from_u8(4), event.encode_data());
 
         let (tx, mut rx) = mpsc::channel(1);
         emit_respond_events(&[log], tx).await;
@@ -433,15 +448,15 @@ mod tests {
 
     #[test]
     fn request_id_from_responded_log_extracts_request_id() {
-        let request_bytes = [0xabu8; 32];
-        let log = responded_log(request_bytes, vec![]);
+        let expected = RequestId::from_u8(0xab);
+        let log = responded_log(expected, vec![]);
         let request_id = request_id_from_signature_responded_log(&log).expect("well-formed log");
-        assert_eq!(request_id.bytes, request_bytes);
+        assert_eq!(request_id, expected);
     }
 
     #[test]
     fn request_id_from_responded_log_rejects_wrong_topic0() {
-        let mut log = responded_log([0xabu8; 32], vec![]);
+        let mut log = responded_log(RequestId::from_u8(0xab), vec![]);
         log.topics_mut()[0] = ChainSignatures::SignatureRequested::SIGNATURE_HASH;
         assert!(request_id_from_signature_responded_log(&log).is_none());
     }

@@ -18,6 +18,7 @@ use mpc_chain_ethereum::abi::ChainSignatures;
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 pub use mpc_chain_ethereum::utils::test::submit_sign_request;
 use mpc_chain_ethereum::{EthConfig, PublisherConfig};
+use mpc_primitives::RequestId;
 use std::time::{Duration, Instant};
 
 pub type AnvilWalletProvider = FillProvider<
@@ -104,7 +105,7 @@ impl EthTestEnv {
 /// the responder address and the transaction hash it was mined in.
 pub async fn wait_for_responded(
     env: &EthTestEnv,
-    request_id: B256,
+    request_id: RequestId,
     timeout: Duration,
 ) -> Result<(Address, B256)> {
     let filter = Filter::new()
@@ -112,7 +113,7 @@ pub async fn wait_for_responded(
         .from_block(0u64)
         .address(env.contract_address)
         .event_signature(ChainSignatures::SignatureResponded::SIGNATURE_HASH)
-        .topic1(request_id);
+        .topic1(B256::from(request_id.bytes));
     let deadline = Instant::now() + timeout;
     loop {
         let logs = env.provider.get_logs(&filter).await.context("get_logs")?;

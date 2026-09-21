@@ -20,5 +20,5 @@ pub mod utils;
 
 pub use client::{CatchupItem, MaybeBlock};
 pub use config::{EthConfig, GasConfig, IndexerConfig, PublisherConfig, RpcConfig};
-pub use event_parsing::generate_request_id;
+pub use event_parsing::EthereumRequestId;
 pub use indexer::EthereumIndexer;

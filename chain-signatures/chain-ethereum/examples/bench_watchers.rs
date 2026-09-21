@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
     for i in 0..watchers_count {
         let mut hash = [0u8; 32];
         hash[24..].copy_from_slice(&i.to_be_bytes());
+        let request_id = RequestId::new(hash);
 
         let tx = BidirectionalTx {
             id: BidirectionalTxId(hash),
@@ -70,13 +71,13 @@ async fn main() -> anyhow::Result<()> {
             params: "{}".to_string(),
             output_deserialization_schema: vec![],
             respond_serialization_schema: vec![],
-            request_id: hash,
+            request_id,
             from_address: **dummy_address,
             nonce: u64::MAX,
         };
 
         state
-            .watch_execution(Chain::Ethereum, RequestId::new(hash), Arc::new(tx))
+            .watch_execution(Chain::Ethereum, request_id, Arc::new(tx))
             .await;
     }
     tracing::info!("bench_watchers: injected {watchers_count} dummy watchers");

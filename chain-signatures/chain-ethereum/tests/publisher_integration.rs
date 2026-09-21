@@ -21,11 +21,7 @@ async fn publishes_single_response() {
         .await
         .expect("submit sign request");
 
-    let action = make_publish_action(
-        Chain::Ethereum,
-        SignKind::Sign,
-        RequestId::new(request_id.into()),
-    );
+    let action = make_publish_action(Chain::Ethereum, SignKind::Sign, request_id);
 
     let client = EthClient::new(
         &env.eth_config,
@@ -63,12 +59,8 @@ async fn publishes_batched_responses() {
     let client = EthClient::new(&cfg, Arc::new(NoopPublisherTelemetry), SharedBackoff::new());
 
     // Publish all 3 responses.
-    for rid in &request_ids {
-        let action = make_publish_action(
-            Chain::Ethereum,
-            SignKind::Sign,
-            RequestId::new((*rid).into()),
-        );
+    for request_id in &request_ids {
+        let action = make_publish_action(Chain::Ethereum, SignKind::Sign, *request_id);
         client
             .publish_signature(&action)
             .await
@@ -77,8 +69,8 @@ async fn publishes_batched_responses() {
 
     // All 3 must land in a single batched `respond` transaction.
     let mut tx_hashes = Vec::with_capacity(request_ids.len());
-    for rid in &request_ids {
-        let (responder, tx_hash) = wait_for_responded(&env, *rid, Duration::from_secs(5))
+    for request_id in &request_ids {
+        let (responder, tx_hash) = wait_for_responded(&env, *request_id, Duration::from_secs(5))
             .await
             .expect("SignatureResponded observed");
         assert_eq!(responder, env.signer.address());
@@ -110,12 +102,8 @@ async fn publishes_across_multiple_batches() {
     cfg.publisher.batch_flush_interval = Duration::from_millis(2000);
     let client = EthClient::new(&cfg, Arc::new(NoopPublisherTelemetry), SharedBackoff::new());
 
-    for rid in &request_ids {
-        let action = make_publish_action(
-            Chain::Ethereum,
-            SignKind::Sign,
-            RequestId::new((*rid).into()),
-        );
+    for request_id in &request_ids {
+        let action = make_publish_action(Chain::Ethereum, SignKind::Sign, *request_id);
         client
             .publish_signature(&action)
             .await
@@ -124,22 +112,22 @@ async fn publishes_across_multiple_batches() {
 
     // All 6 must be responded, grouped into exactly 2 batched transactions of 3
     // TODO: assert the exact 3+3 split once BatchPublisher lands (PR #1144)
-    let mut by_tx: HashMap<B256, Vec<B256>> = HashMap::new();
-    for rid in &request_ids {
-        let (responder, tx_hash) = wait_for_responded(&env, *rid, Duration::from_secs(10))
+    let mut by_tx: HashMap<B256, Vec<RequestId>> = HashMap::new();
+    for request_id in &request_ids {
+        let (responder, tx_hash) = wait_for_responded(&env, *request_id, Duration::from_secs(10))
             .await
             .expect("SignatureResponded observed");
         assert_eq!(responder, env.signer.address());
-        by_tx.entry(tx_hash).or_default().push(*rid);
+        by_tx.entry(tx_hash).or_default().push(*request_id);
     }
     assert!(
         by_tx.len() >= 2,
         "expected responses across multiple batches, got {by_tx:?}"
     );
-    for (tx, rids) in &by_tx {
+    for (tx, request_ids) in &by_tx {
         assert!(
-            rids.len() <= 3,
-            "batch {tx:?} exceeds max_batch_size: {rids:?}"
+            request_ids.len() <= 3,
+            "batch {tx:?} exceeds max_batch_size: {request_ids:?}"
         );
     }
 }
