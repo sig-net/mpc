@@ -59,16 +59,25 @@ jobs:
         run: docker build --target midnight-publisher-runtime .
 
       - name: Install Rust (1.93.0)
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.93.0
+        uses: dtolnay/rust-toolchain@1.93.0
+
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
+
+      # Cache policy: doc/ci-caching.md
       - uses: Swatinem/rust-cache@v2
         with:
-          # Cache policy: docs/ci-caching.md
           shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest

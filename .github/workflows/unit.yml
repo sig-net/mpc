@@ -24,11 +24,9 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Install Rust (1.93.0)
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@1.93.0
         with:
-          profile: minimal
-          toolchain: 1.93.0
-          target: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -37,12 +35,23 @@ jobs:
           cache: 'npm'
           cache-dependency-path: chain-signatures/contract-eth/package-lock.json
 
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
+
+      # Cache policy: doc/ci-caching.md
       - uses: Swatinem/rust-cache@v2
         with:
-          # Cache policy: docs/ci-caching.md
           shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
       
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
@@ -82,10 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.93.0
+        uses: dtolnay/rust-toolchain@1.93.0
 
       # Check the feature-resolved dependency graph: security advisories
       # (vulnerabilities deny; `unmaintained`/`unsound` downgraded to warnings to

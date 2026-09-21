@@ -47,11 +47,9 @@ jobs:
         run: docker pull redis:7.4.2
 
       - name: Install Rust (1.93.0)
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@1.93.0
         with:
-          profile: minimal
-          toolchain: 1.93.0
-          target: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
@@ -59,12 +57,23 @@ jobs:
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
+
+      # Cache policy: doc/ci-caching.md
       - uses: Swatinem/rust-cache@v2
         with:
-          # Cache policy: docs/ci-caching.md
           shared-key: workspace-full
           cache-targets: true
           cache-on-failure: false
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -132,11 +141,9 @@ jobs:
             | xargs -P "$(nproc)" -n 1 docker pull
 
       - name: Install Rust (1.93.0)
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@1.93.0
         with:
-          profile: minimal
-          toolchain: 1.93.0
-          target: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
@@ -159,12 +166,23 @@ jobs:
           solana-cli-version: '4.2.2'
           anchor-version: '0.31.1'
 
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
+
+      # Cache policy: doc/ci-caching.md
       - uses: Swatinem/rust-cache@v2
         with:
-          # Cache policy: docs/ci-caching.md
           shared-key: workspace-full
           cache-targets: true
           cache-on-failure: false
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -209,21 +227,29 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Install Rust (1.93.0)
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.93.0
+        uses: dtolnay/rust-toolchain@1.93.0
 
       - name: Install system OpenSSL
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
+      # Cache policy: doc/ci-caching.md
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
+
       - uses: Swatinem/rust-cache@v2
         with:
-          # Cache policy: docs/ci-caching.md
           shared-key: workspace-dev
           cache-targets: true
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
       - name: Install Node.js
         uses: actions/setup-node@v4
