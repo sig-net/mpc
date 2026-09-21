@@ -472,7 +472,7 @@ pub async fn emit_events(
                         continue;
                     }
                 };
-                let _ = events_tx
+                events_tx
                     .send(ChainEvent::RespondBidirectional(
                         mpc_primitives::RespondBidirectionalEvent {
                             request_id,
@@ -480,7 +480,7 @@ pub async fn emit_events(
                             chain: Chain::Solana,
                         },
                     ))
-                    .await;
+                    .await?;
             }
 
             for ev in responded {
@@ -496,7 +496,7 @@ pub async fn emit_events(
                         continue;
                     }
                 };
-                let _ = events_tx
+                events_tx
                     .send(ChainEvent::Respond(
                         mpc_primitives::SignatureRespondedEvent {
                             request_id,
@@ -504,7 +504,7 @@ pub async fn emit_events(
                             chain: Chain::Solana,
                         },
                     ))
-                    .await;
+                    .await?;
             }
         }
         SolanaEvents::None => {}

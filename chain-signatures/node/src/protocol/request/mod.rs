@@ -350,8 +350,8 @@ impl SignatureSpawner {
             Ok(()) => {
                 tracing::info!(?request_id, "signature task completed successfully");
             }
-            Err(SignError::Aborted) => {
-                tracing::warn!(?request_id, "signature task terminated");
+            Err(SignError::Aborted(reason)) => {
+                tracing::warn!(?request_id, %reason, "signature task terminated");
             }
         }
     }
