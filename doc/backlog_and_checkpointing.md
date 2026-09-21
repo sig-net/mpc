@@ -212,8 +212,7 @@ in memory:
     pending           Height -> (Digest, Backlog)  // checkpoints above base
     want              (Height, Digest)?            // a settled checkpoint we
                                                    // have read and do not
-                                                   // hold; unset on start, so
-                                                   // a crash lifts the hold
+                                                   // hold; unset on start.
 ```
 
 ### Event Handlers
