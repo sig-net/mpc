@@ -27,6 +27,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.93.0
         with:
           targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
 
       - name: Install Node.js
         uses: actions/setup-node@v4
