@@ -90,8 +90,6 @@ digest(height, backlog) = H(
     height
     for each entry, in request id order:
         request id
-        request
-        contract
         signature_finalized
 )
 ```
