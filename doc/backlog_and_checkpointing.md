@@ -24,7 +24,7 @@ settled, it throws away everything it derived above the checkpoint it holds
 and indexes that stretch again, on the chance that its own reading of a
 block was the odd one.
 
-This is a design doc. Section 7 says what it would take to get there.
+This is a design doc.
 
 ## 1. Background
 
@@ -460,106 +460,3 @@ Where no node can produce it at all there is no recovery here, which section
   t = n - f leaves no slack, so every node already out comes from the same
   budget.
 * `voted` containing more than one entry: non-determinism in the implementation.
-
-
-## 7. Getting there from here
-
-Most of the machinery exists. `align_backlog_with_consensus` already fetches a
-settled checkpoint from a peer, checks it and promotes it, and
-`PendingRequests::from_checkpoint` already sets the processed height
-forwards or
-backwards.
-
-| | today | here | step |
-|---|---|---|---|
-| the digest covers | request ids and a phase tag | the entries, `signature_finalized` among them | 5 |
-| settling takes | the signing threshold | f+1, at one open height | 6 |
-| checkpoints kept | a store of them | `base` and what we voted | 11 |
-| a diverged node | `reset_checkpoints`, by an operator | fetches, then rebases, in band | 6, 9, 10 |
-| a vote that does not settle | nothing retries it | re-cast on a backoff | 9 |
-| a node catching up | votes at no boundary | votes on reaching the open height | 3 |
-| the boundary grid | node configuration | the contract, with the start height | 7 |
-| a checkpoint's height | the observed height that crossed the interval | the boundary | 7 |
-| a full checkpoint store | halts event consumption | declines to vote | 1 |
-
-Small. Steps 1 and 3 stand alone; step 2 waits for step 5 and step 4 for
-steps 5 and 8, both of which are below:
-
-1. Stop the pending cap gating event consumption. The guard on the
-   supervisor's receive branch turns a full checkpoint store into a total halt
-   for that chain, which wedged devnet in August 2026. What is left of the cap
-   is the rule that a node which cannot store a checkpoint declines to vote.
-2. Drop `detect_regression`'s no-local-checkpoint guard and take the path
-   startup already takes, so a node that comes up empty converges instead of
-   voting its own view for ever (L2).
-3. Vote on reaching the open height while catching up, not only at the head.
-   L1 rests on it.
-4. Make `Backlog::insert` leave an existing entry alone, so re-observing a
-   request does not reset an entry that has advanced (S1). Not enough on its
-   own: the enqueue that follows happens whether or not the entry was new.
-
-Needs a coordinated switch, a digest change splitting the network until every
-node has it (S1):
-
-5. Hash the entries rather than request ids and a phase tag. Today's entry
-   carries node-local state, `PublishState` with its `is_proposer` and
-   participant list, and on a bidirectional entry the assembled `execution_tx`
-   its watcher is keyed by; the transaction need not be carried, following
-   from the request and the signature. `SignStatus::consensus_tag` is today's
-   answer to the same problem, projecting the status onto two values; this
-   design records `signature_finalized` instead. What is left is the request payload
-   and a decision about `unix_timestamp_indexed`, a node-local wall clock
-   inside the request, which is why step 8 travels with this. The encoding is
-   the other half and today's is not canonical: it runs fields together in a
-   way that is unambiguous only while they are all the same size. Fence the
-   switch on a height the contract records, or a rolling upgrade passes
-   through a point where upgraded nodes settle digests the rest cannot verify.
-6. Settle at f+1 rather than the signing threshold, and vote only for the
-   height above the settled one. The contract holds `latest_checkpoints`
-   per chain and `checkpoint_votes` as `CheckpointDigest` to a set of
-   accounts, and offers `latest_checkpoint(chain)`, `vote_checkpoint(digest)`
-   and `checkpoint_votes(chain)`, the last returning a count per digest.
-   `latest_checkpoint` is section 2's already, the digest carrying its own
-   chain and height. What is missing is three things.
-   One vote per node per height, since a map keyed by the whole digest keeps
-   an account's earlier vote alongside its later one. A count per node, which
-   a set per digest cannot carry. And an open height, there being none today:
-   a node may vote at any height above the settled one, so several gather at
-   once. Section 2 puts the last two into `checkpoint_votes`, and the open
-   height needs the grid from step 7. A contract change, so it travels with
-   step 5. It retires
-   `reset_checkpoints` with no replacement, and it cannot reject a vote at the
-   wrong height until the contract holds the grid, so step 7 comes with it
-   rather than after.
-
-Larger, step 7 excepted:
-
-7. Move the anchors and intervals into the governance contract and index from
-   an anchor rather than the live head. Ethereum has an issue for the start
-   height; the interval has to travel with it. Step 6 needs it. The same step
-   settles what a checkpoint's height is: today it is the observed height
-   that crossed the bucket, `height / interval`, kept that way because
-   Solana's indexer sees only slots carrying relevant transactions and may
-   jump from 119 to 500. Two nodes crossing one bucket at different heights
-   then hash different heights over the same backlog, so here the height is
-   the boundary and the crossing block only triggers the record.
-8. Take an entry's timestamp from the block that finalised the request. Only
-   Ethereum carries a block timestamp into its events today, so this touches
-   every chain's event plumbing.
-9. Add the voting: vote on crossing the open height, and pause indexing at
-   the cap. The per-node vote count belongs with it.
-   The cap is not step 1's cap returning: it holds in memory, releases on the
-   next promotion, and needs no operator. Follows step 6, there being no single
-   open height before it.
-10. Fetch only when the contract has settled above the base.
-    `find_consensus_checkpoint` retries for ever inside the recovery the
-    supervisor runs before spawning the indexer, so a node nobody answers
-    never starts. Here the same call blocks, which is the deliberate trade of
-    section 6, but the poll reaches it only when there is a settled height
-    the node does not hold, and then one answer beats indexing the gap.
-11. Stop storing what can be derived. That deletes the pending cap and the
-    store's growth through an outage. It needs the
-    store migrated rather than orphaned: take `CHECKPOINT_STORAGE_VERSION` out
-    of the key prefixes, since a bump empties every node at once.
-
-Not needed: reconciling entry by entry, and any new peer call.
