@@ -43,6 +43,33 @@ pub static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Identifier of a signature request. This is the one id type used by the NEAR
+/// contract, every chain indexer and publisher, the node's protocol layer, and
+/// the backlog.
+///
+/// The 32 bytes are derived from the on-chain request, and **every chain derives
+/// them differently**: each derivation reproduces whatever that chain's contract
+/// or client SDK computes, so the bytes match what the chain later echoes back in
+/// its responded event. Each derivation is a named constructor. The ones that
+/// need chain-specific dependencies live in the crate that owns those
+/// dependencies, as extension traits implemented on `RequestId`. The full registry:
+///
+/// | Request | Constructor | Scheme |
+/// |---|---|---|
+/// | NEAR `sign` | [`RequestId::from_near_request`] | SHA3-256 over raw concatenation |
+/// | Solana / Hydration `sign` | `EvmRequestId::from_evm_sign_request` (`mpc-chain-integration-core`) | keccak256 over ABI encoding, string sender |
+/// | Solana / Hydration `sign_bidirectional` | `EvmRequestId::from_evm_bidirectional_request` (`mpc-chain-integration-core`) | keccak256 over packed ABI encoding |
+/// | Ethereum `sign` | `EthereumRequestId::from_ethereum_sign_request` (`mpc-chain-ethereum`) | keccak256 over ABI encoding, address sender |
+/// | Canton `sign_bidirectional` | `CantonRequestId::from_canton_bidirectional_request` (`mpc-chain-canton`) | keccak256 over EIP-712 data words |
+/// | Midnight `sign_bidirectional` | `MidnightRequestId::from_midnight_record` (`mpc-chain-midnight`) | Compact transient hash of the record cell |
+///
+/// Ids are unique only within a chain; key by `(Chain, RequestId)` when mixing
+/// chains. When an id arrives on the wire (a responded event, a contract call),
+/// wrap it with [`RequestId::new`] or `From<[u8; 32]>` instead of re-deriving it.
+///
+/// The serde layout is `{"request_id": <bytes>}`. That is the NEAR contract's
+/// JSON ABI, so it must not change; use [`request_id_as_array`] on fields whose
+/// persisted layout is the bare 32-byte array.
 #[derive(
     Copy,
     Clone,
@@ -71,28 +98,62 @@ impl std::fmt::Debug for RequestId {
 }
 
 impl RequestId {
+    /// Wraps an id that was already derived, typically one read back off the wire.
     pub const fn new(bytes: [u8; 32]) -> Self {
         Self { bytes }
     }
 
-    pub fn from_parts(id: &str, payload: &[u8; 32], path: &str, key_version: u32) -> Self {
+    /// NEAR `sign`: `sha3_256(predecessor || payload || path || key_version.to_le_bytes())`,
+    /// exactly as the NEAR contract computes it when it accepts a request.
+    pub fn from_near_request(
+        predecessor: &str,
+        payload: &[u8; 32],
+        path: &str,
+        key_version: u32,
+    ) -> Self {
         let mut hasher = sha3::Sha3_256::new();
-        hasher.update(id.as_bytes());
+        hasher.update(predecessor.as_bytes());
         hasher.update(payload);
         hasher.update(path.as_bytes());
         hasher.update(key_version.to_le_bytes());
-        let bytes: [u8; 32] = hasher.finalize().into();
-        Self { bytes }
+        Self::new(hasher.finalize().into())
     }
 
+    /// Former name of [`RequestId::from_near_request`], kept so external clients
+    /// compiled against this crate keep building.
+    #[deprecated(note = "renamed to `RequestId::from_near_request`")]
+    pub fn from_parts(id: &str, payload: &[u8; 32], path: &str, key_version: u32) -> Self {
+        Self::from_near_request(id, payload, path, key_version)
+    }
+
+    /// Test helper: an id made of one byte repeated 32 times.
     pub const fn from_u8(byte: u8) -> Self {
         Self::new([byte; 32])
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.bytes
     }
 }
 
 impl From<[u8; 32]> for RequestId {
     fn from(bytes: [u8; 32]) -> Self {
         Self::new(bytes)
+    }
+}
+
+/// Serde adapter that (de)serializes a [`RequestId`] as a bare `[u8; 32]` array.
+/// For fields whose persisted layout predates their switch to `RequestId`.
+pub mod request_id_as_array {
+    use super::RequestId;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(id: &RequestId, serializer: S) -> Result<S::Ok, S::Error> {
+        id.bytes.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RequestId, D::Error> {
+        <[u8; 32]>::deserialize(deserializer).map(RequestId::new)
     }
 }
 
@@ -235,5 +296,20 @@ mod tests {
         //                                                  [15]
         not_too_high[15] = 0xFD;
         assert!(Scalar::from_bytes(not_too_high).is_some());
+    }
+}
+
+#[cfg(test)]
+mod request_id_tests {
+    use super::RequestId;
+
+    /// The NEAR contract's `respond` takes this JSON shape; node-to-node messages
+    /// carry it too. Renaming the Rust field must not change it.
+    #[test]
+    fn request_id_json_layout_is_contract_abi() {
+        let id = RequestId::from_u8(7);
+        let json = serde_json::to_value(id).unwrap();
+        assert_eq!(json, serde_json::json!({ "request_id": vec![7u8; 32] }));
+        assert_eq!(serde_json::from_value::<RequestId>(json).unwrap(), id);
     }
 }

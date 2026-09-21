@@ -218,7 +218,7 @@ pub async fn create_response(
 
     let s = signature.s();
     let (r_bytes, _s_bytes) = signature.split_bytes();
-    let request_id = RequestId::from_parts(
+    let request_id = RequestId::from_near_request(
         predecessor_id.as_str(),
         &payload_hash,
         path,

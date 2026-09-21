@@ -132,7 +132,7 @@ impl MpcContract {
         }
         let predecessor = env::predecessor_account_id();
         let request_id =
-            RequestId::from_parts(predecessor.as_str(), &payload_bytes, &path, key_version);
+            RequestId::from_near_request(predecessor.as_str(), &payload_bytes, &path, key_version);
         if self.contains_request(&request_id) {
             return Err(SignError::RequestCollision.into());
         }
