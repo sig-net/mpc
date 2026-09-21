@@ -1,33 +1,4 @@
 use alloy::primitives::keccak256;
-use mpc_primitives::RequestId;
-
-use super::request_id::EvmRequestId;
-
-/// Transitional wrapper over [`EvmRequestId::from_evm_sign_request`] for the
-/// Solana and Hydration indexers; removed once they call the constructor directly.
-#[allow(clippy::too_many_arguments)]
-pub fn compute_request_id(
-    sender: &str,
-    payload: &[u8; 32],
-    path: &str,
-    key_version: u32,
-    chain_id: &str,
-    algo: &str,
-    dest: &str,
-    params: &str,
-) -> [u8; 32] {
-    RequestId::from_evm_sign_request(
-        sender,
-        payload,
-        path,
-        key_version,
-        chain_id,
-        algo,
-        dest,
-        params,
-    )
-    .bytes
-}
 
 /// Computes the Keccak256 hash of the given payload.
 pub fn hash_payload(data: &[u8]) -> [u8; 32] {

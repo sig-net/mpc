@@ -1,13 +1,11 @@
 use crate::config::HydrationConfig;
 
-use alloy::sol_types::SolValue;
 use anyhow::{anyhow, Context as _, Result};
 
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_chain_integration_core::{
-    utils::hashing::{compute_request_id, hash_payload},
-    ChainIndexer, ChainTelemetry,
+    utils::hashing::hash_payload, ChainIndexer, ChainTelemetry, EvmRequestId,
 };
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
@@ -47,8 +45,8 @@ pub struct HydrationSignatureRequestedEvent {
 }
 
 impl HydrationSignatureRequestedEvent {
-    fn generate_request_id(&self) -> [u8; 32] {
-        compute_request_id(
+    fn request_id(&self) -> RequestId {
+        RequestId::from_evm_sign_request(
             &self.sender_string(),
             &self.payload,
             &self.path,
@@ -91,7 +89,7 @@ impl HydrationSignatureRequestedEvent {
             &self.path,
         );
 
-        let request_id = RequestId::new(self.generate_request_id());
+        let request_id = self.request_id();
         tracing::info!(?request_id, "hydration signature requested");
 
         Some(IndexedSignRequest::sign(
@@ -164,21 +162,17 @@ pub struct HydrationSignBidirectionalRequestedEvent {
 }
 
 impl HydrationSignBidirectionalRequestedEvent {
-    fn generate_request_id(&self) -> [u8; 32] {
-        // Match TypeScript implementation using ABI encoding
-        let encoded = (
-            self.sender_string(),
-            self.serialized_transaction.clone(),
-            self.caip2_id.clone(),
+    fn request_id(&self) -> RequestId {
+        RequestId::from_evm_bidirectional_request(
+            &self.sender_string(),
+            &self.serialized_transaction,
+            &self.caip2_id,
             self.key_version,
-            self.path.clone(),
-            self.algo.clone(),
-            self.dest.clone(),
-            self.params.clone(),
+            &self.path,
+            &self.algo,
+            &self.dest,
+            &self.params,
         )
-            .abi_encode_packed();
-
-        alloy::primitives::keccak256(encoded).into()
     }
 
     pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
@@ -193,7 +187,7 @@ impl HydrationSignBidirectionalRequestedEvent {
             return None;
         }
 
-        let request_id = self.generate_request_id();
+        let request_id = self.request_id();
 
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
@@ -203,7 +197,6 @@ impl HydrationSignBidirectionalRequestedEvent {
             &self.path,
         );
 
-        let request_id = RequestId::new(request_id);
         tracing::info!(?request_id, "hydration signature requested");
         let unsigned_tx_hash = hash_payload(&self.serialized_transaction);
         let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| {
@@ -511,7 +504,7 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
                 }
             };
             let request_id = match get_named_bytes32(&fields, "request_id") {
-                Ok(id) => id,
+                Ok(id) => RequestId::new(id),
                 Err(e) => {
                     tracing::error!("failed to get request_id: {e}");
                     return Ok(());
@@ -694,7 +687,7 @@ fn decode_signature_responded(
 ) -> anyhow::Result<SignatureRespondedEvent> {
     let fields = ev.field_values()?;
 
-    let request_id = get_named_bytes32(&fields, "request_id")?;
+    let request_id = RequestId::new(get_named_bytes32(&fields, "request_id")?);
 
     // signature: pallet 的 Signature 结构（嵌套）
     let sig_value = get_named(&fields, "signature")?;
@@ -903,7 +896,7 @@ mod tests {
         };
 
         assert_eq!(
-            hex::encode(event.generate_request_id()),
+            hex::encode(event.request_id().as_bytes()),
             "67a3a9bf9d424d85bef21cf9780a0634c6a06061265ce9d1063f30f1eec84821"
         );
     }

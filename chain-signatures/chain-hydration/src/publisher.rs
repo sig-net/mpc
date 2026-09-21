@@ -210,9 +210,13 @@ impl HydrationClient {
         })
     }
 
-    async fn call_respond(&self, id: &RequestId, response: &Signature) -> anyhow::Result<()> {
+    async fn call_respond(
+        &self,
+        request_id: &RequestId,
+        response: &Signature,
+    ) -> anyhow::Result<()> {
         let tx = HydrationRespondTx {
-            request_ids: BoundedVec(vec![id.bytes]),
+            request_ids: BoundedVec(vec![request_id.bytes]),
             signatures: BoundedVec(vec![Self::to_hydration_signature(response)?]),
         };
 
@@ -228,12 +232,12 @@ impl HydrationClient {
 
     async fn call_respond_bidirectional(
         &self,
-        id: &RequestId,
+        request_id: &RequestId,
         serialized_output: Vec<u8>,
         response: &Signature,
     ) -> anyhow::Result<subxt::config::HashFor<HydradxConfig>> {
         let tx = HydrationRespondBidirectionalTx {
-            request_id: id.bytes,
+            request_id: request_id.bytes,
             serialized_output: BoundedVec(serialized_output),
             signature: Self::to_hydration_signature(response)?,
         };
@@ -256,19 +260,17 @@ impl ChainPublisher for HydrationClient {
         let signature = &action.signature;
         let chain = action.request.chain;
         let request_id = action.request.id;
-        let request_ids = [action.request.id.bytes];
 
         tracing::info!(
             ?request_id,
             ?chain,
             elapsed = ?timestamp.elapsed(),
-            request_id = ?request_ids[0],
             "Hydration: publishing signature"
         );
 
         match &action.request.kind {
             SignKind::Sign | SignKind::SignBidirectional(_) => {
-                self.call_respond(&action.request.id, signature)
+                self.call_respond(&request_id, signature)
                     .await
                     .inspect_err(|e| {
                         tracing::error!(?request_id, ?e, "Hydration: failed to publish signature")
@@ -284,12 +286,11 @@ impl ChainPublisher for HydrationClient {
                 let serialized_output = respond_bidirectional_tx.output.clone();
                 tracing::debug!(
                     ?request_id,
-                    request_id = ?request_ids[0],
                     serialized_output_len = serialized_output.len(),
                     "Hydration publish signature: entering RespondBidirectional arm"
                 );
                 let tx_hash = self
-                    .call_respond_bidirectional(&action.request.id, serialized_output, signature)
+                    .call_respond_bidirectional(&request_id, serialized_output, signature)
                     .await
                     .inspect_err(|e| {
                         tracing::error!(

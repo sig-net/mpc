@@ -1,12 +1,12 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use alloy::sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_lang::Discriminator;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
-use mpc_chain_integration_core::utils::hashing::{compute_request_id, hash_payload};
+use mpc_chain_integration_core::utils::hashing::hash_payload;
+use mpc_chain_integration_core::EvmRequestId;
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
@@ -14,7 +14,6 @@ use mpc_primitives::{
     MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
-use sha3::Digest as _;
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
     SignatureRespondedEvent,
@@ -61,9 +60,9 @@ impl SolanaSignEvent {
         true
     }
 
-    pub fn generate_request_id(&self) -> [u8; 32] {
+    pub fn request_id(&self) -> RequestId {
         match self {
-            SolanaSignEvent::SignatureRequested(ev) => compute_request_id(
+            SolanaSignEvent::SignatureRequested(ev) => RequestId::from_evm_sign_request(
                 &ev.sender.to_string(),
                 &ev.payload,
                 &ev.path,
@@ -73,26 +72,21 @@ impl SolanaSignEvent {
                 &ev.dest,
                 &ev.params,
             ),
-            SolanaSignEvent::SignBidirectional(ev) => {
-                let encoded = (
-                    ev.sender.to_string(),
-                    ev.serialized_transaction.clone(),
-                    ev.caip2_id.clone(),
-                    ev.key_version,
-                    ev.path.clone(),
-                    ev.algo.clone(),
-                    ev.dest.clone(),
-                    ev.params.clone(),
-                )
-                    .abi_encode_packed();
-
-                sha3::Keccak256::digest(&encoded).into()
-            }
+            SolanaSignEvent::SignBidirectional(ev) => RequestId::from_evm_bidirectional_request(
+                &ev.sender.to_string(),
+                &ev.serialized_transaction,
+                &ev.caip2_id,
+                ev.key_version,
+                &ev.path,
+                &ev.algo,
+                &ev.dest,
+                &ev.params,
+            ),
         }
     }
 
     pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
-        let request_id = RequestId::new(self.generate_request_id());
+        let request_id = self.request_id();
         if !self.is_valid(request_id) {
             return None;
         }
@@ -466,12 +460,13 @@ pub async fn emit_events(
             responded,
         } => {
             for ev in bidirectional {
+                let request_id = RequestId::new(ev.request_id);
                 let signature = match to_mpc_signature(&ev.signature) {
                     Ok(sig) => sig,
                     Err(err) => {
                         tracing::warn!(
                             ?err,
-                            ?ev.request_id,
+                            ?request_id,
                             "ignoring malformed signature in RespondBidirectional event"
                         );
                         continue;
@@ -480,7 +475,7 @@ pub async fn emit_events(
                 let _ = events_tx
                     .send(ChainEvent::RespondBidirectional(
                         mpc_primitives::RespondBidirectionalEvent {
-                            request_id: ev.request_id,
+                            request_id,
                             signature,
                             chain: Chain::Solana,
                         },
@@ -489,12 +484,13 @@ pub async fn emit_events(
             }
 
             for ev in responded {
+                let request_id = RequestId::new(ev.request_id);
                 let signature = match to_mpc_signature(&ev.signature) {
                     Ok(sig) => sig,
                     Err(err) => {
                         tracing::warn!(
                             ?err,
-                            ?ev.request_id,
+                            ?request_id,
                             "ignoring malformed signature in SignatureResponded event"
                         );
                         continue;
@@ -503,7 +499,7 @@ pub async fn emit_events(
                 let _ = events_tx
                     .send(ChainEvent::Respond(
                         mpc_primitives::SignatureRespondedEvent {
-                            request_id: ev.request_id,
+                            request_id,
                             signature,
                             chain: Chain::Solana,
                         },
@@ -607,7 +603,11 @@ mod tests {
         };
 
         assert_eq!(
-            hex::encode(SolanaSignEvent::SignatureRequested(event).generate_request_id()),
+            hex::encode(
+                SolanaSignEvent::SignatureRequested(event)
+                    .request_id()
+                    .as_bytes()
+            ),
             "7f7aee49c2a994cc17f85058f7e0b19a44603d619a7e738522f9aa329e457879"
         );
     }

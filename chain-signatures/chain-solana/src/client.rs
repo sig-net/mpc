@@ -466,7 +466,6 @@ impl ChainPublisher for SolanaClient {
         let program = self.client.program(self.program_id)?;
 
         let request_id = action.request.id;
-        let request_ids = vec![action.request.id.bytes];
         let big_r = mpc_sig.big_r.to_encoded_point(false);
         let signature = mpc_to_sol_signature(mpc_sig, big_r);
 
@@ -489,7 +488,7 @@ impl ChainPublisher for SolanaClient {
                         program: self.program_id,
                     })
                     .args(SolanaRespond {
-                        request_ids,
+                        request_ids: vec![request_id.bytes],
                         signatures: vec![signature.clone()],
                     })
                     .send()
@@ -512,7 +511,6 @@ impl ChainPublisher for SolanaClient {
             SignKind::RespondBidirectional(respond_bidirectional_tx) => {
                 tracing::debug!(
                     ?request_id,
-                    request_id = ?request_ids[0],
                     serialized_output_len = respond_bidirectional_tx.output.len(),
                     "Solana publish signature: entering RespondBidirectional arm"
                 );
@@ -526,7 +524,7 @@ impl ChainPublisher for SolanaClient {
                         program: self.program_id,
                     })
                     .args(SolanaRespondBidirectional {
-                        request_id: request_ids[0],
+                        request_id: request_id.bytes,
                         serialized_output: respond_bidirectional_serialized_output,
                         signature: signature.clone(),
                     })

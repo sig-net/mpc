@@ -597,7 +597,6 @@ mod tests {
     use crate::events::SolanaSignEvent;
     use anchor_lang::{AnchorSerialize, Discriminator};
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
-    use mpc_primitives::RequestId;
     use signet_program::{SignatureRequestedEvent, SignatureRespondedEvent};
     use solana_commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
@@ -1068,9 +1067,9 @@ mod tests {
             params: String::new(),
             fee_payer: None,
         };
-        let request_id = SolanaSignEvent::SignatureRequested(request.clone()).generate_request_id();
+        let request_id = SolanaSignEvent::SignatureRequested(request.clone()).request_id();
         let response = SignatureRespondedEvent {
-            request_id,
+            request_id: request_id.bytes,
             responder: Pubkey::new_unique(),
             signature: signet_program::Signature {
                 big_r: signet_program::AffinePoint {
@@ -1151,7 +1150,7 @@ mod tests {
 
         assert!(matches!(
             events_rx.recv().await,
-            Some(ChainEvent::SignRequest { request, .. }) if request.id == RequestId::new(request_id)
+            Some(ChainEvent::SignRequest { request, .. }) if request.id == request_id
         ));
         assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
         assert!(matches!(
