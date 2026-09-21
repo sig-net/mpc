@@ -163,10 +163,10 @@ what serving snapshots allows.
 
 Base and cursor. The node indexes the chain with a watermark cursor, which
 holds the backlog the node acts on and records at every boundary it crosses
-the digest it derived there and the backlog behind it. The base is
-`local_checkpoint`, replaced when polling the contract shows a newer settled
-height. Its body comes from what the cursor recorded, from the body behind a
-digest the node voted, or from a peer.
+the digest it derived there and the backlog behind it. The `base` is the
+settled checkpoint it indexes from, replaced when polling the contract shows
+a newer one. Its body comes from what the cursor recorded, from the body
+behind a digest the node voted, or from a peer.
 
 Cap: how many boundaries beyond the base a node derives before it waits,
 which is `len(crossed)`. It is
@@ -181,7 +181,8 @@ them in detail here.
 
 ```
 persistent:
-    local_checkpoint (Height, Digest, Backlog)   // the base
+    base             (Height, Digest, Backlog)   // everything derives
+                                                 // from this one
     voted            {Digest -> Backlog}         // every digest we have voted
                                                  // at the open height, held
                                                  // until that height is
@@ -203,7 +204,7 @@ in memory:
 
 ```
 on start:
-  local_checkpoint = the one held, or the chain's genesis
+  base = the one held, or the chain's genesis
   rebase()
   reconcile()
   
@@ -247,7 +248,7 @@ what the node believes rather than what it has already done.
 
 ```
 rebase():
-  backlog, watermark = local_checkpoint
+  backlog, watermark = base
   crossed = {}                     // which also puts the cap back under its
                                    // bound
 ```
@@ -255,7 +256,7 @@ rebase():
 ```
 reconcile():
   h, d = contract.latest_checkpoint(chain)
-  if h == local_checkpoint.height:
+  if h == base.height:
     rebase_if_stuck()
     return
   body = crossed[h].backlog if crossed[h].digest == d else voted[d]
@@ -268,7 +269,7 @@ reconcile():
 
 install(h, d, body):
   mine = crossed[h].digest == d // the cursor derived it this run
-  local_checkpoint = (h, d, body) ; voted = {} ; want = none ; commit
+  base = (h, d, body) ; voted = {} ; want = none ; commit
                                 // one write: a crash partway would leave the
                                 // old base with no body for what we voted,
                                 // and the f+1 holders one short
@@ -466,7 +467,7 @@ was S1 failing quietly.
   has simply run out of room to claim anything new, which a node whose
   reading of a block is not reproducible will do and a node whose reading is
   will not.
-* A restart loses the watermark cursor and replays from `local_checkpoint`
+* A restart loses the watermark cursor and replays from `base`
   to the tip. A long absence does not replay the absence: the first poll
   takes the body in one reply, so the cost is the settlement lag either
   way.
@@ -510,7 +511,7 @@ backwards.
 |---|---|---|---|
 | the digest covers | request ids and a phase tag | the entries, `signature_finalized` among them | 5 |
 | settling takes | the signing threshold | f+1, at one open height | 6 |
-| checkpoints kept | a store of them | `local_checkpoint` and what we voted | 11 |
+| checkpoints kept | a store of them | `base` and what we voted | 11 |
 | a diverged node | `reset_checkpoints`, by an operator | fetches, then rebases, in band | 6, 9, 10 |
 | a vote that does not settle | nothing retries it | re-cast on a backoff | 9 |
 | a node catching up | votes at no boundary | votes on reaching the open height | 3 |
