@@ -180,11 +180,7 @@ them in detail here.
 ### State
 
 ```
-persistent:                                      // `commit` is what makes a
-                                                 // write durable on top of
-                                                 // this; acted_through has
-                                                 // no commit and is a lower
-                                                 // bound after a crash
+persistent:
     local_checkpoint (Height, Digest, Backlog)   // the base
     voted            {Digest -> Backlog}         // every digest we have voted
                                                  // at the open height, held
