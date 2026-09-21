@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use mpc_primitives::{Chain, ChainConfig as _, SignId};
+use mpc_primitives::{Chain, ChainConfig as _, RequestKind, SignId};
 use mpc_utils::time::unix_elapsed;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -16,6 +16,7 @@ use tokio_util::time::delay_queue::{DelayQueue, Key};
 struct DelayEntry {
     key: Key,
     chain: Chain,
+    kind: RequestKind,
     unix_timestamp_indexed: u64,
     expected_response_time_secs: u64,
     is_proposer: Arc<AtomicBool>,
@@ -25,6 +26,7 @@ enum DelayCommand {
     Watch {
         sign_id: SignId,
         chain: Chain,
+        kind: RequestKind,
         unix_timestamp_indexed: u64,
         expected_response_time_secs: u64,
         deadline: Instant,
@@ -62,6 +64,7 @@ impl DelayMonitor {
         &self,
         sign_id: SignId,
         chain: Chain,
+        kind: RequestKind,
         unix_timestamp_indexed: u64,
         remaining_time: Duration,
         is_proposer: Arc<AtomicBool>,
@@ -75,6 +78,7 @@ impl DelayMonitor {
         let _ = self.tx.send(DelayCommand::Watch {
             sign_id,
             chain,
+            kind,
             unix_timestamp_indexed,
             expected_response_time_secs,
             deadline,
@@ -108,6 +112,7 @@ impl DelayMonitor {
                     tracing::warn!(
                         ?sign_id,
                         chain = ?entry.chain,
+                        kind = entry.kind.as_str(),
                         elapsed_secs = elapsed.as_secs(),
                         expected_secs = entry.expected_response_time_secs,
                         "signature request delayed beyond expected response time"
@@ -115,7 +120,7 @@ impl DelayMonitor {
 
                     if entry.is_proposer.load(Ordering::Relaxed) {
                         crate::metrics::requests::SIGN_REQUEST_DELAYED
-                            .with_label_values(&[entry.chain.as_str()])
+                            .with_label_values(&[entry.chain.as_str(), entry.kind.as_str()])
                             .inc();
                     }
                 }
@@ -134,6 +139,7 @@ impl DelayMonitor {
             DelayCommand::Watch {
                 sign_id,
                 chain,
+                kind,
                 unix_timestamp_indexed,
                 expected_response_time_secs,
                 deadline,
@@ -148,6 +154,7 @@ impl DelayMonitor {
                     DelayEntry {
                         key,
                         chain,
+                        kind,
                         unix_timestamp_indexed,
                         expected_response_time_secs,
                         is_proposer,
@@ -174,9 +181,9 @@ mod tests {
         SignId::new([byte; 32])
     }
 
-    fn read_delayed_metric(chain: Chain) -> u64 {
+    fn read_delayed_metric(chain: Chain, kind: RequestKind) -> u64 {
         crate::metrics::requests::SIGN_REQUEST_DELAYED
-            .with_label_values(&[chain.as_str()])
+            .with_label_values(&[chain.as_str(), kind.as_str()])
             .get() as u64
     }
 
@@ -184,7 +191,8 @@ mod tests {
     async fn test_delay_monitor_emits_metric_when_proposer_exceeds_deadline() {
         let monitor = DelayMonitor::spawn();
         let chain = Chain::Ethereum;
-        let initial_metric = read_delayed_metric(chain);
+        let kind = RequestKind::Sign;
+        let initial_metric = read_delayed_metric(chain, kind);
 
         let sign_id = sample_sign_id(1);
         let is_proposer = Arc::new(AtomicBool::new(true));
@@ -192,6 +200,7 @@ mod tests {
         monitor.watch(
             sign_id,
             chain,
+            kind,
             0,
             Duration::from_millis(20),
             Arc::clone(&is_proposer),
@@ -199,18 +208,19 @@ mod tests {
 
         // Before deadline: metric unchanged
         tokio::time::sleep(Duration::from_millis(5)).await;
-        assert_eq!(read_delayed_metric(chain) - initial_metric, 0);
+        assert_eq!(read_delayed_metric(chain, kind) - initial_metric, 0);
 
         // Past deadline: metric increments
         tokio::time::sleep(Duration::from_millis(30)).await;
-        assert_eq!(read_delayed_metric(chain) - initial_metric, 1);
+        assert_eq!(read_delayed_metric(chain, kind) - initial_metric, 1);
     }
 
     #[tokio::test]
     async fn test_delay_monitor_non_proposer_does_not_increment_metric() {
         let monitor = DelayMonitor::spawn();
         let chain = Chain::Solana;
-        let initial_metric = read_delayed_metric(chain);
+        let kind = RequestKind::SignBidirectional;
+        let initial_metric = read_delayed_metric(chain, kind);
 
         let sign_id = sample_sign_id(2);
         let is_proposer = Arc::new(AtomicBool::new(false));
@@ -218,6 +228,7 @@ mod tests {
         monitor.watch(
             sign_id,
             chain,
+            kind,
             0,
             Duration::from_millis(20),
             Arc::clone(&is_proposer),
@@ -225,14 +236,15 @@ mod tests {
 
         // Advance past deadline
         tokio::time::sleep(Duration::from_millis(40)).await;
-        assert_eq!(read_delayed_metric(chain), initial_metric);
+        assert_eq!(read_delayed_metric(chain, kind), initial_metric);
     }
 
     #[tokio::test]
     async fn test_delay_monitor_cancellation_prevents_metric() {
         let monitor = DelayMonitor::spawn();
         let chain = Chain::NEAR;
-        let initial_metric = read_delayed_metric(chain);
+        let kind = RequestKind::Sign;
+        let initial_metric = read_delayed_metric(chain, kind);
 
         let sign_id = sample_sign_id(3);
         let is_proposer = Arc::new(AtomicBool::new(true));
@@ -240,6 +252,7 @@ mod tests {
         monitor.watch(
             sign_id,
             chain,
+            kind,
             0,
             Duration::from_millis(30),
             Arc::clone(&is_proposer),
@@ -251,14 +264,15 @@ mod tests {
 
         // Wait past original deadline
         tokio::time::sleep(Duration::from_millis(40)).await;
-        assert_eq!(read_delayed_metric(chain), initial_metric);
+        assert_eq!(read_delayed_metric(chain, kind), initial_metric);
     }
 
     #[tokio::test]
     async fn test_delay_monitor_handles_multiple_requests_in_deadline_order() {
         let monitor = DelayMonitor::spawn();
         let chain = Chain::Canton;
-        let initial_metric = read_delayed_metric(chain);
+        let kind = RequestKind::RespondBidirectional;
+        let initial_metric = read_delayed_metric(chain, kind);
 
         let id1 = sample_sign_id(10);
         let id2 = sample_sign_id(20);
@@ -269,24 +283,55 @@ mod tests {
         let is_proposer3 = Arc::new(AtomicBool::new(true));
 
         // Register with different deadlines: id2 (15ms), id1 (40ms), id3 (80ms)
-        monitor.watch(id1, chain, 0, Duration::from_millis(40), is_proposer1);
-        monitor.watch(id2, chain, 0, Duration::from_millis(15), is_proposer2);
-        monitor.watch(id3, chain, 0, Duration::from_millis(80), is_proposer3);
+        monitor.watch(id1, chain, kind, 0, Duration::from_millis(40), is_proposer1);
+        monitor.watch(id2, chain, kind, 0, Duration::from_millis(15), is_proposer2);
+        monitor.watch(id3, chain, kind, 0, Duration::from_millis(80), is_proposer3);
 
         // After 25ms -> id2 expired (+1), id1 & id3 still active
         tokio::time::sleep(Duration::from_millis(25)).await;
-        assert_eq!(read_delayed_metric(chain) - initial_metric, 1);
+        assert_eq!(read_delayed_metric(chain, kind) - initial_metric, 1);
 
         // Unwatch id3 before it expires
         monitor.unwatch(id3, "test abort");
 
         // After 30ms more (total 55ms) -> id1 expired (+1)
         tokio::time::sleep(Duration::from_millis(30)).await;
-        assert_eq!(read_delayed_metric(chain) - initial_metric, 2);
+        assert_eq!(read_delayed_metric(chain, kind) - initial_metric, 2);
 
         // After 50ms more (total 105ms) -> id3 was cancelled, no further increment
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(read_delayed_metric(chain) - initial_metric, 2);
+        assert_eq!(read_delayed_metric(chain, kind) - initial_metric, 2);
+    }
+
+    #[tokio::test]
+    async fn test_delay_monitor_counts_each_kind_separately() {
+        let monitor = DelayMonitor::spawn();
+        let chain = Chain::Hydration;
+        let leg1 = RequestKind::SignBidirectional;
+        let leg2 = RequestKind::RespondBidirectional;
+        let initial_leg1 = read_delayed_metric(chain, leg1);
+        let initial_leg2 = read_delayed_metric(chain, leg2);
+
+        monitor.watch(
+            sample_sign_id(40),
+            chain,
+            leg1,
+            0,
+            Duration::from_millis(20),
+            Arc::new(AtomicBool::new(true)),
+        );
+        monitor.watch(
+            sample_sign_id(41),
+            chain,
+            leg2,
+            0,
+            Duration::from_millis(20),
+            Arc::new(AtomicBool::new(true)),
+        );
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(read_delayed_metric(chain, leg1) - initial_leg1, 1);
+        assert_eq!(read_delayed_metric(chain, leg2) - initial_leg2, 1);
     }
 
     #[tokio::test]
@@ -295,6 +340,13 @@ mod tests {
         let sign_id = sample_sign_id(99);
         let is_proposer = Arc::new(AtomicBool::new(true));
 
-        monitor.watch(sign_id, Chain::Ethereum, 0, Duration::ZERO, is_proposer);
+        monitor.watch(
+            sign_id,
+            Chain::Ethereum,
+            RequestKind::Sign,
+            0,
+            Duration::ZERO,
+            is_proposer,
+        );
     }
 }

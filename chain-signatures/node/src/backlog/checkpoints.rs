@@ -15,7 +15,11 @@ pub struct Checkpoint {
     pub block_height: u64,
     pub pending_requests: Vec<BacklogEntry>,
     /// Commitment to each pending request's checkpoint-consensus phase.
-    #[serde(default, with = "serde_bytes")]
+    ///
+    /// Deliberately not `#[serde(default)]`: a missing digest must fail to
+    /// decode rather than deserialize as all-zeros, which consensus would
+    /// otherwise compare against as if it were a real commitment.
+    #[serde(with = "serde_bytes")]
     pub cumulative_digest: [u8; 32],
 }
 
@@ -82,6 +86,16 @@ impl Checkpoint {
 
     pub fn is_empty(&self) -> bool {
         self.pending_requests.is_empty()
+    }
+}
+
+impl From<&Checkpoint> for mpc_primitives::CheckpointDigest {
+    fn from(checkpoint: &Checkpoint) -> Self {
+        Self {
+            chain: checkpoint.chain,
+            height: checkpoint.block_height,
+            digest: checkpoint.digest(),
+        }
     }
 }
 
@@ -220,6 +234,17 @@ impl Checkpoints {
     pub async fn latest(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
         self.storage
             .latest(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
+    /// Loads the durable unconfirmed checkpoints for `chain`, ordered by height.
+    pub(crate) async fn load_pending(
+        &self,
+        chain: Chain,
+    ) -> Result<Vec<Checkpoint>, CheckpointError> {
+        self.storage
+            .load_pending(chain)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })
     }

@@ -724,12 +724,22 @@ mod tests {
         let batches = inbox.decrypt(&cipher_sk, &participants);
         assert!(MessageInbox::verify_senders(batches, Some(me)).is_empty());
 
-        // Wrong signing key: rejected at signature verification already.
+        // Wrong signing key: rejected at signature verification already, and it
+        // must not reach the dedup cache on the way out. That cache is keyed on
+        // the signature, and our cipher key is public, so anyone able to reach
+        // the node could otherwise flood it with signatures of their choosing
+        // and evict the entries that make real duplicates detectable.
         let forged_envelope = triple_batch(3, peer);
         let encrypted =
             SignedMessage::encrypt(&forged_envelope, peer, &my_sign_sk, &cipher_pk).unwrap();
         inbox.pending_decrypt.push_back((encrypted, Instant::now()));
+        let cached = inbox.idempotent.len();
         assert!(inbox.decrypt(&cipher_sk, &participants).is_empty());
+        assert_eq!(
+            inbox.idempotent.len(),
+            cached,
+            "unverified signature entered the dedup cache",
+        );
 
         // Control: consistent sender passes through.
         let valid = triple_batch(2, peer);

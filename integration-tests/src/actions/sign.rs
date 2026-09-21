@@ -20,7 +20,7 @@ use solana_client::nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcCli
 use solana_client::rpc_config::{
     RpcTransactionConfig, RpcTransactionLogsConfig, RpcTransactionLogsFilter,
 };
-use solana_sdk::commitment_config::CommitmentConfig;
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature as SolSignature;
 use solana_sdk::signer::Signer as _;

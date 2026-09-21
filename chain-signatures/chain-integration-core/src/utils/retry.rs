@@ -13,7 +13,7 @@ const RATE_LIMIT_MAX_COOLDOWN: Duration = Duration::from_secs(60);
 const RATE_LIMIT_MAX_JITTER: Duration = Duration::from_millis(500);
 const MAX_PENALTY_LEVEL: u32 = 10;
 
-/// Shared, 429-aware cooldown gate.
+/// Shared cooldown gate: callers wait out a window that failures extend.
 #[derive(Clone)]
 pub struct SharedBackoff {
     /// Inner state is shared across all clones of this instance to avoid per-instance fragmentation
@@ -53,10 +53,10 @@ impl SharedBackoff {
         }
     }
 
-    /// Extends the global cooldown window after an observed 429. Concurrent
-    /// reports grow the penalty but only ever extend the window, never shorten
-    /// it. Returns the cooldown that was applied.
-    pub fn report_rate_limited(&self) -> Duration {
+    /// Extends the global cooldown window after a failure callers should back
+    /// off from (e.g. a 429). Concurrent reports grow the penalty but only ever
+    /// extend the window, never shorten it. Returns the cooldown that was applied.
+    pub fn extend_cooldown(&self) -> Duration {
         let level = self.inner.penalty_level.fetch_add(1, Ordering::Relaxed);
         self.inner
             .penalty_level
@@ -109,9 +109,11 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Returns true if the error looks like an HTTP 429 (rate limited).
-pub fn is_rate_limited(e: &anyhow::Error) -> bool {
-    contains_status_code(&e.to_string(), "429")
+/// Returns true if the error looks like the provider throttling us: HTTP 429
+/// (rate limited) or 402 (payment required, e.g. exhausted credits).
+pub fn is_provider_throttled(e: &anyhow::Error) -> bool {
+    let s = e.to_string();
+    contains_status_code(&s, "429") || contains_status_code(&s, "402")
 }
 
 /// Configuration for retrying RPC calls with exponential backoff.
@@ -289,11 +291,11 @@ macro_rules! retry_rpc {
     }};
 }
 
-/// Like [`retry_rpc!`], but gates every attempt on a shared 429 cooldown
+/// Like [`retry_rpc!`], but gates every attempt on a shared cooldown
 /// ([`SharedBackoff`]): each attempt waits out the global cooldown before
-/// firing, a 429 extends the shared window, and a success resets the penalty.
-/// Prevents retry storms when an endpoint starts rate-limiting. Per-call
-/// backoff still applies on top.
+/// firing, a 429 or 402 extends the shared window, and a success resets the
+/// penalty. Prevents retry storms when an endpoint starts rate-limiting or runs
+/// out of credits. Per-call backoff still applies on top.
 ///
 /// # Forms
 ///
@@ -324,12 +326,12 @@ macro_rules! retry_rpc_gated {
                     Ok(res)
                 }
                 Ok(Err(e)) => {
-                    if $crate::utils::retry::is_rate_limited(&e) {
-                        let cooldown = shared.report_rate_limited();
+                    if $crate::utils::retry::is_provider_throttled(&e) {
+                        let cooldown = shared.extend_cooldown();
                         tracing::warn!(
                             operation = $op_name,
                             ?cooldown,
-                            "rate limited (429), engaging global cooldown"
+                            "provider throttled (429/402), engaging global cooldown"
                         );
                     }
                     Err(e)
@@ -367,9 +369,9 @@ macro_rules! retry_rpc_gated {
                     Ok(res)
                 }
                 Ok(Err(e)) => {
-                    if $crate::utils::retry::is_rate_limited(&e) {
-                        let cooldown = shared.report_rate_limited();
-                        tracing::warn!(?cooldown, "rate limited (429), engaging global cooldown");
+                    if $crate::utils::retry::is_provider_throttled(&e) {
+                        let cooldown = shared.extend_cooldown();
+                        tracing::warn!(?cooldown, "provider throttled (429/402), engaging global cooldown");
                     }
                     Err(e)
                 }
@@ -407,19 +409,19 @@ mod tests {
     fn shared_backoff_rate_limit_cooldown_grows_and_caps() {
         let sb =
             SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_millis(400));
-        assert_eq!(sb.report_rate_limited(), Duration::from_millis(100));
-        assert_eq!(sb.report_rate_limited(), Duration::from_millis(200));
-        assert_eq!(sb.report_rate_limited(), Duration::from_millis(400));
-        assert_eq!(sb.report_rate_limited(), Duration::from_millis(400));
+        assert_eq!(sb.extend_cooldown(), Duration::from_millis(100));
+        assert_eq!(sb.extend_cooldown(), Duration::from_millis(200));
+        assert_eq!(sb.extend_cooldown(), Duration::from_millis(400));
+        assert_eq!(sb.extend_cooldown(), Duration::from_millis(400));
     }
 
     #[test]
     fn shared_backoff_shorter_cooldown_does_not_shorten_window() {
         let sb = SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
-        sb.report_rate_limited();
-        let long = sb.report_rate_limited();
+        sb.extend_cooldown();
+        let long = sb.extend_cooldown();
         sb.report_success();
-        let short = sb.report_rate_limited();
+        let short = sb.extend_cooldown();
         assert!(short < long);
         assert!(sb.remaining() > short);
     }
@@ -427,22 +429,25 @@ mod tests {
     #[test]
     fn shared_backoff_success_resets_penalty() {
         let sb = SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
-        sb.report_rate_limited();
-        sb.report_rate_limited();
+        sb.extend_cooldown();
+        sb.extend_cooldown();
         sb.report_success();
-        assert_eq!(sb.report_rate_limited(), Duration::from_millis(100));
+        assert_eq!(sb.extend_cooldown(), Duration::from_millis(100));
     }
 
     #[test]
-    fn detects_rate_limit_errors() {
-        assert!(is_rate_limited(&anyhow::anyhow!(
+    fn detects_provider_throttling_errors() {
+        assert!(is_provider_throttled(&anyhow::anyhow!(
             "HTTP status client error (429 Too Many Requests) for url (http://x/)"
         )));
-        // Port 42900 contains "429"; the 500 must not be mistaken for rate limiting.
-        assert!(!is_rate_limited(&anyhow::anyhow!(
+        assert!(is_provider_throttled(&anyhow::anyhow!(
+            "rpc: the server returned a non-OK (200) status code: [402 Payment Required]"
+        )));
+        // Port 42900 contains "429"; the 500 must not be mistaken for throttling.
+        assert!(!is_provider_throttled(&anyhow::anyhow!(
             "HTTP status server error (500) for url (http://127.0.0.1:42900/)"
         )));
-        assert!(!is_rate_limited(&anyhow::anyhow!(
+        assert!(!is_provider_throttled(&anyhow::anyhow!(
             "HTTP status client error (403 Forbidden)"
         )));
     }
@@ -454,7 +459,7 @@ mod tests {
         sb.wait().await;
         assert!(t.elapsed() < Duration::from_millis(50));
 
-        sb.report_rate_limited();
+        sb.extend_cooldown();
         let t = std::time::Instant::now();
         sb.wait().await;
         assert!(t.elapsed() >= Duration::from_millis(80));
@@ -505,6 +510,27 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 6);
         // Without the gate, 6 calls with 1-5ms backoff finish in ~20ms.
         assert!(start.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn macro_engages_global_cooldown_on_402() {
+        let shared =
+            SharedBackoff::with_cooldowns(Duration::from_millis(50), Duration::from_millis(200));
+        let _: anyhow::Result<()> = retry_rpc_gated!(
+            Duration::from_secs(5),
+            RetryConfig {
+                max_times: 0,
+                ..gated_test_config()
+            },
+            shared,
+            "test_op",
+            {
+                Err(anyhow::anyhow!(
+                    "rpc: the server returned a non-OK (200) status code: [402 Payment Required]"
+                ))
+            }
+        );
+        assert!(shared.remaining() > Duration::ZERO);
     }
 
     #[tokio::test]
