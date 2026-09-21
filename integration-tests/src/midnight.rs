@@ -285,7 +285,7 @@ fn responder_config(
     Ok(MidnightConfig {
         node_url: endpoints.node_http_url.clone(),
         central_address: MidnightAddress::from_hex(central_address)
-            .context("decoding Midnight central address")?,
+            .with_context(|| format!("decoding Midnight central address {central_address:?}"))?,
         publisher: PublisherConfig {
             output_storage,
             intent_gen_command: vec![
