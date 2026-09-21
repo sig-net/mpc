@@ -1,5 +1,14 @@
 # Bidirectional calls: entities, API, properties
 
+## TL;DR
+
+A contract on the source chain makes an asynchronous call to a destination
+chain, and gets at most one response. The response is final when it comes:
+the call executed, it reverted, or it can never execute. Until then nothing
+arrives, and a call that never executes is never answered. The rest of the
+document is what the MPC, the signet contract and the library have to do
+for that to hold.
+
 ## 1. Entities and Happy Path
 
 * *Application contract*: the contract a developer writes on the source
