@@ -448,13 +448,17 @@ Where no node can produce it at all there is no recovery here, which section
   t = n - f leaves no slack, so every node already out comes from the same
   budget.
 
-Three signals: a processed height that does not move with `pending` under
-its cap,
-for the node that cannot index; rebases one after another,
-for the node repairing endlessly; and the settled height standing still while
-tips move on, for a network that cannot agree. The tally's vote counts say
-which nodes a stall is coming from, which the local ones cannot, being kept
-by the node whose reading is in question.
+Three things to watch:
+
+* the processed height stops moving while `pending` is under the cap: the
+  node cannot index, and nothing in this design is holding it back;
+* a rebase follows a rebase: the node repairs and diverges again;
+* the settled height stands still while the chain tips move on: the network
+  cannot agree.
+
+The first two are the node's own reports, and a node whose reading of a
+block is in question is the wrong witness for them. The contract's vote
+counts are what say which nodes a stall comes from.
 
 Beyond the model, where more than f nodes are wrong, the design has nothing to
 offer: enough nodes hold backlogs nobody shares that no digest reaches f+1.
