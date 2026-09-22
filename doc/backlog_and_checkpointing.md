@@ -96,7 +96,8 @@ digest(height, backlog) = H(
 Encoding for digest must be canonical so it's one byte string per checkpoint,
 no two checkpoints reaching the same one. Request id order is design rather
 than encoding: insertion order is node-local, and a digest taken over it
-would differ between nodes holding the same backlog.
+would differ between nodes holding the same backlog. It is the order today's
+snapshot already sorts by.
 
 ### Governance contract
 
