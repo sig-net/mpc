@@ -206,9 +206,6 @@ persistent:
                                                    // at the open height, held
                                                    // until that height is
                                                    // promoted
-    acted_through  Height                          // acting (signing, attesting, 
-                                                   // publishing) is done up to 
-                                                   // and including this height
 
 in memory:
     backlog           RequestId -> Entry
@@ -258,9 +255,9 @@ on block b finalised, the next one above the processed height:
   if processed_height is a boundary:
     pending[processed_height] = (digest(processed_height, backlog), backlog)
     vote_if_ready(processed_height)
-  if caught_up and processed_height > acted_through:
-    act on backlog                     // Sign, watch, attest, publish
-    acted_through = processed_height   // and not repeated over a replay
+  if caught_up:
+    act on backlog                     // sign, watch, attest, publish, for
+                                       // each entry whatever it still needs
 ```
 
 No two handlers run their bodies at once, and none runs against itself.
@@ -272,13 +269,14 @@ it opens no signing round for a request the network finished while it was
 away, and spends no presignature on one. Indexing and voting cannot wait
 for the head, L1 needs them; acting can.
 
-`acted_through` is written lazily, so it is a lower bound: a crash loses the
-last of it and the replay acts twice, which is the case the target
-already has to absorb. It is not reset by a `rebase`, a rebase being about
-what the node believes rather than what it has already done.
+Acting on the backlog is a sweep: for each entry, whatever it still needs
+that has not been started. What has been started is #1301's state, not the
+backlog's, which is what lets the sweep run at every block without repeating
+itself. A crash loses what was in flight, and the replay starts it again,
+which is the case the target already has to absorb.
 
-Instead of `len(pending) >= CAP` and `processed_height > acted_through` alternative
-conditions can be defined without changing the properties materially.
+Instead of `len(pending) >= CAP` other conditions can be defined without
+changing the properties materially.
 
 ### Rebase and promote
 
@@ -368,9 +366,9 @@ does not solve. #1301 signs on admission and relies on the caught-up gate
 for the rest: without it a replay would open a signing round for every
 request in the range, each round pulling in the n - f nodes signing takes
 and each spending a presignature. What the gate does not cover is a crash at
-the head, where the replay of that last stretch is caught up almost at once;
-`acted_through` bounds what it acts on again, down to the range the crash
-loses. That range is why harmless matters: on the source chain the contract emits the event either
+the head: the replay of that last stretch is caught up almost at once and
+starts again whatever was in flight when the node went down. That is why
+harmless matters: on the source chain the contract emits the event either
 way and the receiving library drops a response whose request it no longer
 has outstanding, and on a target chain the effect is the same signed
 transaction arriving twice.
