@@ -1,4 +1,4 @@
-name: Build Image & Deploy Nodes to Dev
+name: Deploy Dev Nodes
 on:
   push:
     branches:
@@ -12,11 +12,12 @@ env:
   TAG: ${{ github.sha }}
 
 jobs:
-  build:
+  # The dev nodes poll this image repository, so pushing the image is the deployment.
+  build-image:
+    name: Build & Push Dev Image
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        name: "Checkout mpc"
 
       - name: Login to GCP Artifact Registry
         uses: docker/login-action@v4
@@ -34,13 +35,4 @@ jobs:
           build-args: |
             GIT_COMMIT_HASH=${{ github.sha }}
           tags: "${{ env.IMAGE }}:${{ env.TAG }},${{ env.IMAGE }}:latest"
-
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - id: 'auth'
-        uses: 'google-github-actions/auth@v2'
-        with:
-          credentials_json: '${{ secrets.SIG_CREDENTIALS_DEV }}'
 

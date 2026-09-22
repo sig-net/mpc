@@ -1,4 +1,4 @@
-name: Deploy Multichain Prod.
+name: Deploy Prod Nodes
 on:
   workflow_call:
   workflow_dispatch:
@@ -17,12 +17,12 @@ env:
 
 
 jobs:
-  build-mpc-recovery:
+  build-image:
+    name: Build & Push ${{ inputs.network }} Image
     runs-on: ubuntu-latest
     environment: prod
     steps:
       - uses: actions/checkout@v6
-        name: "Checkout mpc-recovery"
 
       - name: Login to GCP Artifact Registry Mainnet
         if: github.event.inputs.network == 'mainnet'

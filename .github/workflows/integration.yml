@@ -1,4 +1,4 @@
-name: Integration
+name: Integration Tests
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ jobs:
   # Fixture tests: in-process MPC protocol tests, no Docker or external infra needed.
   # Runs the `fixture` nextest profile (see .config/nextest.toml).
   fixture-test:
-    name: Fixture Test
+    name: Fixture Tests
     runs-on: warp-ubuntu-latest-x64-4x
 
     steps:
@@ -98,11 +98,8 @@ jobs:
   # Integration tests that need Docker (near-sandbox, anvil, solana validator) and
   # additional Solana/Anchor setup. Runs with num-cpus threads (see .config/nextest.toml).
   cluster-test:
-    name: Integration Test
-    strategy:
-      matrix:
-        os: [warp-ubuntu-latest-x64-4x]
-    runs-on: ${{ matrix.os }}
+    name: Cluster Integration Tests
+    runs-on: warp-ubuntu-latest-x64-4x
 
     steps:
       - name: Comment on PR if this is a re-run

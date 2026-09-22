@@ -1,4 +1,4 @@
-name: Unit
+name: Unit Tests
 on:
   pull_request:
   merge_group:
@@ -11,9 +11,9 @@ on:
 env:
   RUSTFLAGS: -D warnings
 jobs:
-  test:
+  lint-and-test:
     runs-on: warp-ubuntu-latest-x64-4x
-    name: Check & Test
+    name: Lint & Unit Tests
     steps:
       - uses: actions/checkout@v6
 
@@ -87,7 +87,7 @@ jobs:
         run: cargo test -p mpc-chain-midnight --lib --features sandbox output_storage::tests
 
   audit:
-    name: Audit
+    name: Dependency Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

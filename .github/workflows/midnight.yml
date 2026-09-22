@@ -1,4 +1,4 @@
-name: Midnight Integration Tests
+name: Midnight Tests
 
 on:
   pull_request:
@@ -14,7 +14,7 @@ env:
 
 jobs:
   midnight-real-stack:
-    name: Midnight Real Stack
+    name: Midnight Real-Stack Tests
     runs-on: warp-ubuntu-latest-x64-4x
     timeout-minutes: 90
 

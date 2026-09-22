@@ -1,4 +1,4 @@
-name: Canton Integration Tests
+name: Canton Tests
 
 on:
   pull_request:

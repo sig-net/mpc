@@ -26,7 +26,7 @@ setup helios="" scope="":
 alias s := setup
 
 # Run GitHub workflows locally via act (needs Docker; pulls runner images on first run)
-# Usage: just run-ci [args] (e.g. just run-ci "-l" to list, just run-ci "-j 'Unit Check & Test'")
+# Usage: just run-ci [args] (e.g. just run-ci "-l" to list, just run-ci "-j lint-and-test")
 run-ci args="": (setup "act")
     act -P warp-ubuntu-latest-x64-4x=catthehacker/ubuntu:act-latest -P ubuntu-latest=catthehacker/ubuntu:act-latest {{args}}
 
