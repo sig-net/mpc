@@ -197,9 +197,9 @@ persistent:
     base           (Height, Digest, Backlog)       // Checkpoint according to
                                                    // governance contract
     voted          {Digest -> Backlog}             // every digest we have voted
-                                                   // at the open height, held
-                                                   // until that height is
-                                                   // promoted
+                                                   // at the open height, at
+                                                   // most KEEP, held until
+                                                   // that height is promoted
 
 in memory:
     backlog           RequestId -> Entry
@@ -216,7 +216,9 @@ in memory:
 
 ```
 on start:
-  rebase()
+  base = the one held, or the chain's genesis checkpoint
+  re-cast every vote in voted        // a crash between recording and sending
+  rebase()                           // it left the contract without it
 ```
 Governance contract polling
 ```
@@ -248,7 +250,7 @@ on block b finalised, the next one above the processed height:
   processed_height = height(b)
   if processed_height is a boundary:
     pending[processed_height] = (digest(processed_height, backlog), backlog)
-    vote_if_ready(processed_height)
+    vote_if_ready()
   if caught_up:
     act on backlog                     // sign, watch, attest, publish, for
                                        // each entry whatever it still needs
@@ -286,7 +288,7 @@ promote(h, d, body):
   want = none                   
   if mine and processed_height > h:   
     pending.remove_below(h+1)         // drop what is now below the base
-    vote_if_ready(open height)        // open height moved with h
+    vote_if_ready()                   // open height moved with h
   else:                               // read h differently, or not yet there
     rebase()
 ```
@@ -309,25 +311,19 @@ one rebases on the chance that it is among them and rebasing may help.
 ### Voting
 
 ```
-vote_if_ready(h):
-  if h is not our open height: return  // a vote above it is one we cannot
-                                       // justify, having not promoted what
-                                       // is below; the contract separately
-                                       // rejects a vote at any height but
-                                       // its own open one
-  d = pending[h].digest
-  if d is none: return                 // the open height is not crossed yet
-  if d not in voted and len(voted) == KEEP:
-    return                             // store <= KEEP checkpoints
-  voted[d] = pending[h].backlog        // before the vote, so we hold it
-  contract.vote_checkpoint(h, d)       // in case it settles
+vote_if_ready():
+  d = pending[open height].digest
+  if d is none or d in voted: return       // not crossed yet, or already cast
+  if len(voted) == KEEP: return            // out of room; the last vote stands
+  voted[d] = pending[open height].backlog  // store before voting, so we hold
+  contract.vote_checkpoint(open height, d) // it in case it settles
 ```
 
 ### Asking peers
 
-While `want` is set the node asks peers for `get_checkpoint(chain, want)`,
-repeatedly and a reply that hashes to its digest is promoted via the handler 
-described above. 
+While `want` is set the node keeps asking peers for
+`get_checkpoint(chain, want)`. The reply handler above promotes a body whose
+digest matches.
 
 Asking for a superseded height goes unanswered, since every holder of that
 digest cleared its `voted` on promoting a later one. That costs nothing
@@ -436,8 +432,8 @@ here, which section 6 owns.
 * One node reading wrongly for one round is enough to settle its
   reading, the f faulty supplying the rest. f+1 is what the agreement needs
   and no more, so a transient bad provider on any single node is inside the
-  settling threshold rather than outside it. 2f+1 would put it outside, at
-  the cost of the tally and the two rebase triggers it fed.
+  settling threshold rather than outside it. Section 2 says what 2f+1
+  would buy.
 * Stalling
   * Settlement stalled with nobody disagreeing, which takes more than f nodes
     down or slow. The cap on `pending` is what keeps the node from running
