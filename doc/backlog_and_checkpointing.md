@@ -46,7 +46,9 @@ reached height h, and most heights change nothing. The cursor therefore
 lands on every boundary. An indexer that reports in jumps instead, as one
 scanning a range of Solana slots does, has to record the boundaries it
 passed over, with the backlog it held at each; that is an implementation
-matter, and nothing below depends on which way it reports.
+matter, and nothing below depends on which way it reports. The indexer also
+says when it has reached the chain's finalised head, which is what *caught
+up* means below.
 
 Vocabulary, per node per source chain:
 
@@ -215,6 +217,8 @@ in memory:
     want              (Height, Digest)?            // a settled checkpoint we
                                                    // have read and do not
                                                    // hold; unset on start.
+    caught_up         bool                         // the indexer has reached
+                                                   // the finalised head
 ```
 
 ### Event Handlers
@@ -254,7 +258,7 @@ on block b finalised, the next one above the processed height:
   if processed_height is a boundary:
     pending[processed_height] = (digest(processed_height, backlog), backlog)
     vote_if_ready(processed_height)
-  if processed_height > acted_through:
+  if caught_up and processed_height > acted_through:
     act on backlog                     // Sign, watch, attest, publish
     acted_through = processed_height   // and not repeated over a replay
 ```
@@ -262,7 +266,11 @@ on block b finalised, the next one above the processed height:
 No two handlers run their bodies at once, and none runs against itself.
 
 `backlog.update` changes state and nothing else; effects (signing,
-publishing, attesting) only happen later if at all.
+publishing, attesting) only happen later if at all, and only once the node
+is caught up. A node behind the head indexes and votes but does not act, so
+it opens no signing round for a request the network finished while it was
+away, and spends no presignature on one. Indexing and voting cannot wait
+for the head, L1 needs them; acting can.
 
 `acted_through` is written lazily, so it is a lower bound: a crash loses the
 last of it and the replay acts twice, which is the case the target
@@ -356,11 +364,13 @@ it back.
 
 Effects sit outside that argument. This design acts ahead of agreement and
 needs the duplicate to be harmless, the output commit problem being one it
-does not solve. #1301 signs on admission and has no tip gate, so a replay
-would open a signing round for every request in the range, each round
-pulling in the n - f nodes signing takes. `acted_through` is what stops a
-replay acting again, down to the range a crash loses. That range is why
-harmless matters: on the source chain the contract emits the event either
+does not solve. #1301 signs on admission and relies on the caught-up gate
+for the rest: without it a replay would open a signing round for every
+request in the range, each round pulling in the n - f nodes signing takes
+and each spending a presignature. What the gate does not cover is a crash at
+the head, where the replay of that last stretch is caught up almost at once;
+`acted_through` bounds what it acts on again, down to the range the crash
+loses. That range is why harmless matters: on the source chain the contract emits the event either
 way and the receiving library drops a response whose request it no longer
 has outstanding, and on a target chain the effect is the same signed
 transaction arriving twice.
