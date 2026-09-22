@@ -68,11 +68,8 @@ Vocabulary, per node per source chain:
   *digest* binds the chain, the height and the entries over a canonical
   encoding (section 2).
 
-  * **Open height**: the one height a vote may be cast at, the first
-    boundary above the settled height. The node's is measured from the
-    checkpoint it holds and the contract's from the settlement it has
-    recorded, and the two differ for a node that has not polled since a
-    settlement. Unqualified, it is the node's.
+  * **Open height**: the first boundary above the node's base, the one
+    height it may vote at.
 
   * **Settled**: a digest the governance contract has fixed for a height.
 
