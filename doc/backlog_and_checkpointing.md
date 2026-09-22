@@ -64,8 +64,9 @@ Vocabulary, per node per source chain:
   chain's start height plus a multiple of a constant interval. Every node
   computes the same ones.
 
-* **Checkpoint**: a height and the backlog at that height. Its *digest* binds
-  the chain, the height and the entries over a canonical encoding (section 2).
+* **Checkpoint**: a height and a snapshot of the backlog at that height. Its
+  *digest* binds the chain, the height and the entries over a canonical
+  encoding (section 2).
 
   * **Open height**: the one height a vote may be cast at, the first
     boundary above the settled height. The node's is measured from the
