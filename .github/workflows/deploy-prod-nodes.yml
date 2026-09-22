@@ -17,7 +17,19 @@ env:
 
 
 jobs:
+  # Prod releases are cut from tags only. The "Run workflow" dialog also offers
+  # branches, so refuse to build unless the selected ref is a tag.
+  require-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse to release from a branch
+        if: github.ref_type != 'tag'
+        run: |
+          echo "::error::Prod releases must be run from a tag, not a branch (got ${{ github.ref }})."
+          exit 1
+
   build-mpc-recovery:
+    needs: require-tag
     runs-on: ubuntu-latest
     environment: prod
     steps:
