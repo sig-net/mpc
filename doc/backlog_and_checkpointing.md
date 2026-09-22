@@ -175,9 +175,11 @@ backlog and indexing on from it, given a reachable node holding one.
 
 ## 4. Design
 
-Described for one node, one source chain. `commit` is a single durable
-write, so a promotion cannot leave `base` replaced and `voted` not, or the
-other way round. 
+Described for one node, one source chain. Two words are borrowed from the
+code and mean less here: a node promotes only a checkpoint the contract has
+settled, and `pending` is derived and in memory, not the store the code
+keeps under that name. `commit` is a single durable write, so a promotion
+cannot leave `base` replaced and `voted` not, or the other way round.
 
 The backlogs recorded in `pending` and `voted` are snapshots, not the
 live map. `pending` is derived: indexing fills it again on the way back up,
