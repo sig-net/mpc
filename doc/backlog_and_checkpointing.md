@@ -151,8 +151,8 @@ newest checkpoint the node has promoted and the finalised blocks since, so
 correct nodes at a height hold the same backlog.
 
 **S2 Validity.** A digest the contract settles at a height is one a correct
-node derived at that height from the settled checkpoint below it, so the
-settled checkpoints are a chain back to genesis and every entry a node acts
+node derived at that height from the settled checkpoint below it. So the
+settled checkpoints form a chain back to genesis, and every entry a node acts
 on was read from finalised chain state by a correct node.
 
 **S3 Containment.** 
