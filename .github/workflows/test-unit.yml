@@ -5,7 +5,7 @@ on:
   # Cache policy: docs/ci-caching.md
   push:
     branches: [develop]
-    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "deny.toml", "rust-toolchain*", .github/workflows/unit.yml]
+    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "deny.toml", "rust-toolchain*", .github/workflows/test-unit.yml]
   workflow_dispatch:
 
 env:
