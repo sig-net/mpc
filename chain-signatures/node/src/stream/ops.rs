@@ -34,10 +34,15 @@ pub(crate) async fn process_sign_request(
         SignKind::Sign => {}
     }
 
+    let sign_id = sign_request.id;
     let (entry, is_new) = ctx.backlog.insert(sign_request).await;
+    if !is_new {
+        tracing::debug!(?sign_id, "sign request already pending; keeping its entry");
+        return Ok(false);
+    }
     ctx.try_enqueue(SignCommand::Request(entry)).await?;
 
-    Ok(is_new)
+    Ok(true)
 }
 
 pub(crate) async fn requeue_pending_sign_requests(
