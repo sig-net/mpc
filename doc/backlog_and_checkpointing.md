@@ -50,8 +50,8 @@ matter, and nothing below depends on which way it reports.
 
 Vocabulary, per node per source chain:
 
-* **Processed height**: the height the indexer has reached, inclusive. Promoting a
-  checkpoint may move it, back or forward.
+* **Processed height**: the height the indexer has reached, inclusive. It
+  advances with the indexer; only a rebase sets it elsewhere, back or forward.
 
 * **Backlog**: one *entry* per request admitted and not finished, holding the
   request id as its key, the request as the chain gave it, the contract that
