@@ -2,12 +2,12 @@
 
 ## TL;DR
 
-The backlog is the node's durable record of requests it has observed on a
-source chain and whose final response, a plain signature or a bidirectional
-response, is not yet finalised there. One map per source chain.
-Checkpointing keeps those maps in sync across restarts without silently
-diverging, and lets a joining or rejoining node catch up without replaying
-every block.
+The backlog is the node's record of requests it has observed on a source
+chain and whose final response, a plain signature or a bidirectional
+response, is not yet finalised there. One map per source chain, in memory.
+Checkpoints are what persist: they keep those maps in sync across restarts
+without silently diverging, and let a joining or rejoining node catch up
+without replaying every block.
 
 ### Approach
 Checkpoints are due at fixed heights, the same grid for every
