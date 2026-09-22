@@ -57,7 +57,7 @@ Vocabulary, per node per source chain:
 
 * **Backlog**: one *entry* per request admitted and not finished, holding the
   request id as its key, the request as the chain gave it, the contract that
-  made it, and `signature_finalized`, true once the first call of  `Respond`
+  made it, and `respond_finalized`, true once the first call of  `Respond`
   for it has been finalised on the source chain, never when this node merely
   finished signature generation or published one. Nothing else, and every field a
   fact about the source chain. 
@@ -91,7 +91,7 @@ digest(height, backlog) = H(
     height
     for each entry, in request id order:
         request id
-        signature_finalized
+        respond_finalized
 )
 ```
 
