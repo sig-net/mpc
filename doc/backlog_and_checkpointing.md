@@ -77,7 +77,7 @@ Vocabulary, per node per source chain:
     so that every backlog it derives from then on descends from that one.
 
   * **Genesis checkpoint**: an empty backlog at the chain's start height,
-    which the contract holds.
+    whose digest the contract holds.
 
 ## 2. Digest and interfaces
 
