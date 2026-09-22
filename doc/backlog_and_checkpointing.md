@@ -110,25 +110,19 @@ vote_checkpoint(CheckpointDigest)      // carries chain, height and digest
 latest_checkpoint(chain) -> CheckpointDigest
 
 checkpoint_votes(chain) -> [(CheckpointDigest, count)]
-  // the votes it still holds, counted per digest
+  // number of nodes who submitted a vote for a CheckpointDigest.
 ```
 
-The contract is the only writer of settled checkpoints. It settles a height
-when one digest reaches f+1 votes, settles it at most once, and its settled
-height never decreases. Votes at or below a settled height are rejected, and
-votes at heights it has passed are discarded.
+The contract is the only writer of settled checkpoint digests. It settles a
+height when one digest reaches f+1 votes, settles it at most once, and its
+settled height never decreases. Votes at or below a settled height are 
+rejected, and votes at heights it has passed are discarded.
 
-That is the whole of it, and apart from the threshold it is what the
-contract does today. Three things it deliberately does not do. It does not
-police the open height: a correct node votes only at its own (section 4),
-and a vote at any other height needs f+1 accounts behind one digest before
-it settles anything, which it cannot reach without a correct node joining
-it. It does not hold one vote per node per height: a node that votes twice
-at a height counts behind both digests, and retention (section 5) means it
-still holds both bodies, so whichever settles it can serve. And it counts
-per digest rather than per node, which is enough for the stuck test, since
-summing the counts at the node's open height overstates the turnout only
-when somebody voted twice, and rebasing sooner is the harmless direction.
+Note that the contract does not hold one vote per node per height:
+a node that votes for two different digests at a height counts behind both
+digests. Thanks to retention (section 5), a node still holds both bodies, so
+the node can serve the body for whichever settles. However, a node voting twice
+for the same digest, does not increase the vote count for that digest. 
 
 Settling a checkpoint requires a threshold of f+1 to guarantee that at least
 one correct node holds the checkpoint. Guaranteeing a majority of at least
@@ -152,15 +146,16 @@ get_checkpoint(chain, height, digest) -> Checkpoint
 newest checkpoint the node has promoted and the finalised blocks since, so
 correct nodes at a height hold the same backlog.
 
-**S2 Validity.** For each `(digest, height)` pair settlet by the contract it
-holds that there is at least one correct node that derived a checkpoint with
-this digest and height starting from the settled checkpoint below it. 
+**S2 Validity.** For each `(chain, height, digest)` tuple settled by the 
+contract it holds that there is at least one correct node that derived a 
+checkpoint with this digest for this height by reading the chain starting from
+the settled checkpoint below it. 
 
 **S3 Containment.** 
-(i) A node neither acts on a source chain's backlog nor votes there while it is
+(i) A node neither acts on a source chain's backlog nor votes while it is
 missing the backlog of the newest settled checkpoint it has read from the
 contract (thus the poll period defines how stale that reading can be).
-(ii) A node acts and votes only within a bounded distance of the newest
+(ii) A node acts and votes only within a bounded distance of the newest 
 checkpoint, and at that bound it does neither, until it promotes a newer one or
 starts again from the one it has.
 
