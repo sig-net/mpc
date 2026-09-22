@@ -1,18 +1,8 @@
-use std::fs::File;
-use std::io::Write;
-use std::str::FromStr;
-use std::vec;
-
 use clap::Parser;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
 use mpc_chain_ethereum::EthConfig;
-use near_account_id::AccountId;
-use near_crypto::PublicKey;
-use serde_json::json;
 use tokio::signal;
-
-mod commands;
 
 #[derive(Parser, Debug)]
 enum Cli {
@@ -42,8 +32,6 @@ enum Cli {
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
-    /// Generate example commands to interact with the contract
-    ContractCommands,
 }
 
 #[tokio::main]
@@ -133,90 +121,6 @@ async fn main() -> anyhow::Result<()> {
             signal::ctrl_c().await.expect("Failed to listen for event");
             println!("Received Ctrl-C");
             println!("Stopped dependency services");
-        }
-        Cli::ContractCommands => {
-            println!("Building a doc with example commands");
-            let path = "../chain-signatures/contract/EXAMPLE.md";
-            let mut file = File::create(path)?;
-            let mut doc: Vec<String> = vec![];
-            let contract_account_id = AccountId::from_str("dev.sig-net.testnet")?;
-            let caller_account_id = AccountId::from_str("caller.testnet")?;
-            let public_key: PublicKey =
-                "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae".parse()?;
-
-            doc.push(
-                "# Iteracting with contract using NEAR CLI\nAll data is fake and used for example purposes\nIt's necessary to update script after contract API changes\n## User contract API"
-                .to_string()
-            );
-
-            doc.push(commands::sign_command(
-                &contract_account_id,
-                &caller_account_id,
-            )?);
-            doc.push(format!("near view {contract_account_id} public_key"));
-
-            doc.push(format!(
-                "near view {contract_account_id} derived_public_key {}",
-                serde_json::to_string(&json!({"path": "test","predecessor": caller_account_id}))?
-            ));
-
-            doc.push(format!(
-                "near view {contract_account_id} latest_key_version"
-            ));
-
-            doc.push(format!(
-                "near view {contract_account_id} experimental_signature_deposit"
-            ));
-
-            doc.push(format!(
-                "\n## Node API\n\n{}\n\n{}",
-                commands::respond_command(&contract_account_id, &caller_account_id,)?,
-                commands::join_command(&contract_account_id, &caller_account_id,)?
-            ));
-
-            doc.push(format!(
-                "near call {contract_account_id} vote_join '{{\"candidate\":\"{caller_account_id}\"}}' --accountId {caller_account_id} --gas 300000000000000"
-            ));
-
-            doc.push(format!(
-                "near call {contract_account_id} vote_leave '{{\"kick\":\"{caller_account_id}\"}}' --accountId {caller_account_id} --gas 300000000000000"
-            ));
-
-            doc.push(format!(
-                "near call {contract_account_id} vote_pk '{{\"public_key\": {public_key}}}' --accountId {caller_account_id} --gas 300000000000000"
-            ));
-
-            doc.push(format!(
-                "near call {contract_account_id} vote_reshared '{{\"epoch\": 1}}' --accountId {caller_account_id} --gas 300000000000000"
-            ));
-
-            doc.push(commands::proposed_updates_command(
-                &contract_account_id,
-                &caller_account_id,
-            )?);
-
-            doc.push(format!(
-                "near call {contract_account_id} vote_update '{{\"id\": 0}}' --accountId {caller_account_id} --gas 300000000000000"
-            ));
-
-            doc.push(format!(
-                "\n## Contract developer helper API\n\n{}\n\n{}",
-                commands::init_command(&contract_account_id, &caller_account_id,)?,
-                commands::init_running_command(&contract_account_id, &caller_account_id,)?
-            ));
-
-            doc.push(format!("near view {contract_account_id} migrate"));
-
-            doc.push(format!("near view {contract_account_id} state"));
-
-            doc.push(format!("near view {contract_account_id} config"));
-
-            doc.push(format!("near view {contract_account_id} version"));
-
-            for arg in doc {
-                file.write_all(arg.as_bytes())?;
-                file.write_all("\n\n".as_bytes())?;
-            }
         }
     }
 
