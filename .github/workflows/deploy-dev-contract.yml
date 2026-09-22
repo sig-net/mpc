@@ -16,7 +16,7 @@ jobs:
       - name: add JSON contract
         run: mkdir -p ~/.near-credentials/testnet && echo '${{ secrets.DEV_CONTRACT_JSON }}' > ~/.near-credentials/testnet/dev.sig-net.testnet.json
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install just
         run: |
@@ -24,7 +24,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - name: Use Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 'latest'
 
@@ -32,8 +32,9 @@ jobs:
         run: 'npm install -g near-cli'
 
       - name: Install Rust (1.93.0)
-        uses: dtolnay/rust-toolchain@1.93.0
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # 1.93.0
         with:
+          toolchain: 1.93.0
           targets: wasm32-unknown-unknown
 
       - name: Install cargo-near
@@ -52,7 +53,7 @@ jobs:
             echo changed=true >> "$GITHUB_OUTPUT" || true
 
       # Cache policy: doc/ci-caching.md
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: workspace-dev
           cache-targets: true

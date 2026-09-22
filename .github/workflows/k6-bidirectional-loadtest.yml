@@ -67,7 +67,7 @@ jobs:
     # lets in-flight jobs finish.
     timeout-minutes: 200
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Validate configuration
         run: |
@@ -91,7 +91,7 @@ jobs:
       # near-dev-github holds secretAccessor on the three secrets below and
       # nothing else. The runner pods have no GCP identity of their own.
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           credentials_json: '${{ secrets.SIG_CREDENTIALS_DEV }}'
 
@@ -99,14 +99,14 @@ jobs:
       # copy to keep level. Masked, which `gcloud ... >> GITHUB_ENV` is not.
       - name: Read Grafana credentials
         id: grafana
-        uses: google-github-actions/get-secretmanager-secrets@v2
+        uses: google-github-actions/get-secretmanager-secrets@2b5f97c5a4b9c105e64646762ad4fc3f5128e6f5 # v2
         with:
           secrets: |-
             push_url:near-cs-dev/prom-push-url
             username:near-cs-dev/grafana-username
             password:near-cs-dev/grafana_cloud_pswd
 
-      - uses: grafana/setup-k6-action@v1
+      - uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1
 
       # Run k6 directly, not through run-k6-action: the script's thresholds are
       # the verdict, and --exit-on-running reports success once a test has
