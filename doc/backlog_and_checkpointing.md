@@ -75,7 +75,7 @@ Vocabulary, per node per source chain:
 
   * **Settled**: a digest the governance contract has fixed for a height.
 
-  * **Promoted**: a node has made a settled checkpoint its base, durably,
+  * **Promoted**: a node has made a pending checkpoint its base, durably,
     so that every backlog it derives from then on descends from that one.
 
   * **Genesis checkpoint**: an empty backlog at the chain's start height,
