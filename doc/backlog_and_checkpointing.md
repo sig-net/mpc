@@ -10,14 +10,15 @@ without silently diverging, and let a joining or rejoining node catch up
 without replaying every block.
 
 ### Approach
-Checkpoints are due at fixed heights, the same grid for every
-node. A node reaching one votes in the governance contract for a digest of
-its backlog there, and the contract settles that height once f+1 nodes have
-voted for the same digest, enough that at least one correct node holds the
-body behind it. Every node polls for what settled. A node that derived that
-digest itself carries on indexing; any other fetches the body from a peer
-and promotes it, and everything it derives from then on hangs off that
-checkpoint.
+Checkpoints are due at fixed heights, the same grid for every node. A node
+reaching one votes in the governance contract for a digest of its backlog
+there, and the contract settles that height once f+1 nodes have voted for
+the same digest (n nodes, at most f of them faulty, section 1), enough that
+at least one correct node holds the body behind it; section 2 says why f+1
+rather than the signing threshold. Every node polls for what settled. A node
+that derived that digest itself carries on indexing; any other fetches the
+body from a peer and promotes it, and everything it derives from then on
+hangs off that checkpoint.
 
 A node that has passed the height under vote and sees nothing settle there
 reads the vote counts, on a growing backoff. If 2f+1 have voted with nothing
