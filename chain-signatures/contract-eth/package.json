@@ -10,9 +10,9 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
-    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
-    "@openzeppelin/hardhat-upgrades": "^3.9.0",
-    "hardhat": "^2.22.15",
+    "@nomicfoundation/hardhat-toolbox": "^7.0.0",
+    "@openzeppelin/hardhat-upgrades": "^4.1.0",
+    "hardhat": "^3.17.0",
     "prettier": "^3.5.0",
     "prettier-plugin-solidity": "^1.4.2"
   },
