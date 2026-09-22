@@ -152,10 +152,9 @@ get_checkpoint(chain, height, digest) -> Checkpoint
 newest checkpoint the node has promoted and the finalised blocks since, so
 correct nodes at a height hold the same backlog.
 
-**S2 Validity.** A digest the contract settles at a height is one a correct
-node derived at that height from the settled checkpoint below it. So the
-settled checkpoints form a chain back to genesis, and every entry a node acts
-on was read from finalised chain state by a correct node.
+**S2 Validity.** For each `(digest, height)` pair settlet by the contract it
+holds that there is at least one correct node that derived a checkpoint with
+this digest and height starting from the settled checkpoint below it. 
 
 **S3 Containment.** 
 (i) A node neither acts on a source chain's backlog nor votes there while it is
