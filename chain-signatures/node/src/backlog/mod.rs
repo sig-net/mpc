@@ -10,6 +10,7 @@ pub use request::{
     Sign, SignEntry,
 };
 
+use crate::respond_bidirectional::is_respond_bidirectional_path;
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
@@ -225,6 +226,31 @@ impl Backlog {
 
         self.observe_backlog_size(chain, len);
         removed
+    }
+
+    /// Drop entries naming their chain's reserved attestation path, returning the
+    /// ids dropped. Admission rejects these, but checkpoint recovery restores
+    /// entries wholesale, so signing one would still mint a forged attestation.
+    ///
+    /// Matched against the map's chain, not the entry's: a peer-supplied checkpoint
+    /// is digest-bound on the former and not on the latter.
+    pub async fn drop_reserved_path_requests(&self, chain: Chain) -> Vec<SignId> {
+        let (dropped, len) = {
+            let mut pending = self.pending(&chain).write().await;
+            let dropped: Vec<SignId> = pending
+                .requests
+                .extract_if(|_, entry| {
+                    is_respond_bidirectional_path(chain, &entry.request().args.path)
+                })
+                .map(|(id, _)| id)
+                .collect();
+            (dropped, pending.len())
+        };
+
+        self.total_pending
+            .fetch_sub(dropped.len(), Ordering::Relaxed);
+        self.observe_backlog_size(chain, len);
+        dropped
     }
 
     /// Get an in-flight sign request entry from the backlog for the specified chain.

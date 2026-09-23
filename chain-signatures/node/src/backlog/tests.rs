@@ -1180,3 +1180,54 @@ async fn advance_carries_the_origin_into_the_final_response() {
     };
     assert_eq!(response.origin_indexed_at, Some(origin));
 }
+
+/// Checkpoint recovery restores entries without passing admission, so the sweep in
+/// `recover_backlog` is what makes the rejection cover a restart and a regression.
+#[tokio::test]
+async fn drop_removes_recovered_requests_on_the_reserved_path() {
+    let reserved_id = SignId::new([75; 32]);
+    let benign_id = SignId::new([76; 32]);
+
+    let source = Backlog::new();
+    let mut reserved = mock_sign_request(reserved_id, Chain::Solana);
+    Arc::make_mut(&mut reserved).args.path = "solana response key".to_string();
+    source.insert_sign(reserved).await;
+    source.insert_mock_sign(benign_id, Chain::Solana).await;
+
+    let checkpoint = source
+        .checkpoint(Chain::Solana)
+        .await
+        .expect("checkpoint must snapshot");
+
+    // Present even on a node running the admission check: recovery bypasses it.
+    let recovered = Backlog::new();
+    recovered.recover_by_checkpoint(&checkpoint).await;
+    assert!(recovered.get(Chain::Solana, &reserved_id).await.is_some());
+
+    let dropped = recovered.drop_reserved_path_requests(Chain::Solana).await;
+
+    assert_eq!(dropped, vec![reserved_id]);
+    assert!(recovered.get(Chain::Solana, &reserved_id).await.is_none());
+    assert!(
+        recovered.get(Chain::Solana, &benign_id).await.is_some(),
+        "the sweep must drop only the reserved path, not the whole chain"
+    );
+    assert_eq!(recovered.len(), 1, "total pending must track the removal");
+}
+
+/// Only the request's own chain's path derives its attestation key, which separates
+/// the sweep from one matching the four reserved strings on any chain.
+#[tokio::test]
+async fn drop_keeps_another_chains_reserved_string() {
+    let foreign_id = SignId::new([77; 32]);
+
+    let backlog = Backlog::new();
+    let mut foreign = mock_sign_request(foreign_id, Chain::Ethereum);
+    Arc::make_mut(&mut foreign).args.path = "solana response key".to_string();
+    backlog.insert_sign(foreign).await;
+
+    let dropped = backlog.drop_reserved_path_requests(Chain::Ethereum).await;
+
+    assert!(dropped.is_empty());
+    assert!(backlog.get(Chain::Ethereum, &foreign_id).await.is_some());
+}
