@@ -548,42 +548,15 @@ impl SignatureSpawner {
 
 #[cfg(test)]
 impl SignatureSpawner {
-    fn test_dead_ids_contains(&self, sign_id: &SignId) -> bool {
-        if let Some(tracked) = self.requests.get(sign_id) {
-            let kind = tracked.entry.request().request_kind();
-            self.dead_ids.contains(&( *sign_id, kind))
-        } else {
-            self.dead_ids.iter().any(|((id, _), _)| id == sign_id)
-        }
+    fn test_dead_ids_contains(&self, sign_id: &SignId, kind: RequestKind) -> bool {
+        self.dead_ids.contains(&(*sign_id, kind))
     }
 
-    fn test_dead_ids_contains_kind(&self, sign_id: &SignId, kind: RequestKind) -> bool {
-        self.dead_ids.contains(&( *sign_id, kind))
+    fn test_posit_mailboxes_contains(&self, sign_id: &SignId, kind: RequestKind) -> bool {
+        self.posit_mailboxes.contains_key(&(*sign_id, kind))
     }
 
-    fn test_posit_mailboxes_contains(&self, sign_id: &SignId) -> bool {
-        if let Some(tracked) = self.requests.get(sign_id) {
-            let kind = tracked.entry.request().request_kind();
-            self.posit_mailboxes.contains_key(&( *sign_id, kind))
-        } else {
-            self.posit_mailboxes.keys().any(|(id, _)| id == sign_id)
-        }
-    }
-
-    fn test_posit_mailboxes_contains_kind(&self, sign_id: &SignId, kind: RequestKind) -> bool {
-        self.posit_mailboxes.contains_key(&( *sign_id, kind))
-    }
-
-    fn test_tasks_contains(&self, sign_id: SignId) -> bool {
-        if let Some(tracked) = self.requests.get(&sign_id) {
-            let kind = tracked.entry.request().request_kind();
-            self.tasks.contains_key(&(sign_id, kind))
-        } else {
-            self.tasks.keys().any(|(id, _)| *id == sign_id)
-        }
-    }
-
-    fn test_tasks_contains_kind(&self, sign_id: SignId, kind: RequestKind) -> bool {
+    fn test_tasks_contains(&self, sign_id: SignId, kind: RequestKind) -> bool {
         self.tasks.contains_key(&(sign_id, kind))
     }
 
@@ -714,20 +687,20 @@ mod tests {
         // Step 1: Spawn → mailbox created, request retained, not dead
         let entry = backlog::SignEntry::generating(Arc::clone(&request), &backlog);
         spawner.add_request(&governance, entry, cfg.clone());
-        assert!(spawner.test_tasks_contains(sign_id));
-        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::Sign));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
         assert!(spawner.test_requests_contains(&sign_id));
-        assert!(!spawner.test_dead_ids_contains(&sign_id));
+        assert!(!spawner.test_dead_ids_contains(&sign_id, RequestKind::Sign));
 
         // Step 2: Abort chain → mailbox removed, request dropped, marked dead
         spawner.handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg);
         tokio::time::timeout(Duration::from_secs(1), dropped.notified())
             .await
             .expect("aborting a chain should cancel its sign tasks");
-        assert!(!spawner.test_tasks_contains(sign_id));
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
+        assert!(!spawner.test_tasks_contains(sign_id, RequestKind::Sign));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
         assert!(!spawner.test_requests_contains(&sign_id));
-        assert!(spawner.test_dead_ids_contains(&sign_id));
+        assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::Sign));
 
         // Step 3: Late posit → dropped (dead_id check), mailbox NOT recreated
         spawner.handle_posit(
@@ -740,13 +713,13 @@ mod tests {
                 action: PositAction::Propose,
             },
         );
-        assert!(!spawner.test_posit_mailboxes_contains(&sign_id));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
 
         // Step 4: Re-spawn → dead cleared, request retained again
         let entry = backlog::SignEntry::generating(request, &backlog);
         spawner.add_request(&governance, entry, cfg.clone());
-        assert!(spawner.test_tasks_contains(sign_id));
-        assert!(!spawner.test_dead_ids_contains(&sign_id));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::Sign));
+        assert!(!spawner.test_dead_ids_contains(&sign_id, RequestKind::Sign));
 
         // Step 5: Posit after re-spawn → accepted, mailbox re-created
         spawner.handle_posit(
@@ -759,7 +732,7 @@ mod tests {
                 action: PositAction::Propose,
             },
         );
-        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
 
         // Step 6: Governance respawn → task swapped in place, nothing retired,
         // and the new incarnation resumes from the entry's carried round.
@@ -767,10 +740,10 @@ mod tests {
         spawner.requests.get_mut(&sign_id).unwrap().round = Arc::clone(&carried);
         spawner.tasks.abort_all();
         spawner.spawn_tasks(&governance, &cfg);
-        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::Sign));
         assert!(spawner.test_requests_contains(&sign_id));
-        assert!(spawner.test_posit_mailboxes_contains(&sign_id));
-        assert!(!spawner.test_dead_ids_contains(&sign_id));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
+        assert!(!spawner.test_dead_ids_contains(&sign_id, RequestKind::Sign));
         assert!(
             Arc::strong_count(&carried) >= 3,
             "respawned task must share the entry's round, not a fresh one"
@@ -839,9 +812,9 @@ mod tests {
             &cfg,
         );
         assert!(!spawner.test_requests_contains(&sign_id));
-        assert!(!spawner.test_tasks_contains(sign_id));
+        assert!(!spawner.test_tasks_contains(sign_id, RequestKind::Sign));
         assert!(
-            !spawner.test_dead_ids_contains(&sign_id),
+            !spawner.test_dead_ids_contains(&sign_id, RequestKind::Sign),
             "the id stays live to buffer posits until leg 2 is admitted, not to admit it"
         );
 
@@ -849,7 +822,7 @@ mod tests {
         let entry = backlog::SignEntry::generating(request, &backlog);
         spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
         assert!(spawner.test_requests_contains(&sign_id));
-        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::Sign));
     }
 
     /// The duplicate guard admits a next leg over the leg it supersedes, while
@@ -900,7 +873,7 @@ mod tests {
         let leg1 = crate::backlog::mock::mock_bidi_request(sign_id, Chain::Solana);
         let entry = backlog::SignEntry::generating(Arc::clone(&leg1), &backlog);
         spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
-        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::SignBidirectional));
         let first_leg_task = spawner.tasks.len();
 
         // Same kind again: still a duplicate, so the tracked leg keeps running.
@@ -917,7 +890,7 @@ mod tests {
         let entry = backlog::SignEntry::generating(leg2, &backlog);
         spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
         assert!(spawner.test_requests_contains(&sign_id));
-        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::RespondBidirectional));
         assert_eq!(
             spawner
                 .requests
@@ -928,7 +901,8 @@ mod tests {
                 .request_kind(),
             mpc_primitives::RequestKind::RespondBidirectional
         );
-        assert!(!spawner.test_dead_ids_contains(&sign_id));
+        assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::SignBidirectional));
+        assert!(!spawner.test_dead_ids_contains(&sign_id, RequestKind::RespondBidirectional));
     }
 
     /// Superseding runs one way. A first leg re-indexed behind a running second
@@ -983,7 +957,7 @@ mod tests {
         );
         let entry = backlog::SignEntry::generating(leg2, &backlog);
         spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
-        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::RespondBidirectional));
         let second_leg_task = spawner.tasks.len();
 
         // A catchup re-scan feeds the first leg back under the same sign id.
@@ -1062,14 +1036,14 @@ mod tests {
             &cfg,
         );
         assert!(!spawner.test_requests_contains(&sign_id));
-        assert!(!spawner.test_dead_ids_contains(&sign_id));
+        assert!(!spawner.test_dead_ids_contains(&sign_id, RequestKind::SignBidirectional));
 
         // A request arriving afterwards is admitted as usual.
         let request = crate::backlog::mock::mock_bidi_request(sign_id, Chain::Solana);
         let entry = backlog::SignEntry::generating(request, &backlog);
         spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
         assert!(spawner.test_requests_contains(&sign_id));
-        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::SignBidirectional));
     }
 
     /// Completions and requests travel from different chains' streams, so one
