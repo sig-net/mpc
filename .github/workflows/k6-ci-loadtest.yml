@@ -67,7 +67,7 @@ jobs:
     runs-on: ${{ github.event_name == 'schedule' && 'arc-runner-set' || 'ubuntu-latest' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Normalize inputs
         id: normalized
@@ -107,13 +107,13 @@ jobs:
           CHECK_SIGNATURE: ${{ github.event.inputs.check_signature }}
 
       - name: Setup K6
-        uses: grafana/setup-k6-action@v1
+        uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1
 
       # No --exit-on-running: the action waits for the test to finish, so the
       # job fails when the script's thresholds fail.
       - name: Run k6 test
         id: k6
-        uses: grafana/run-k6-action@v1
+        uses: grafana/run-k6-action@de51a7390bdf0ac85a3bef493691bd71d4c7c158 # v1
         env:
           K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
           K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
