@@ -102,7 +102,7 @@ fn round_timeout(round: usize) -> Duration {
     if round == 0 {
         return ORGANIZE_POSIT_TIMEOUT;
     }
-    // Saturates at the ceiling within ~16 iterations, which bounds the loop:
+    // Saturates at the ceiling within ~41 iterations, which bounds the loop:
     // `round` derives from `highest_seen_round`, so a peer can make it huge.
     let mut timeout = ROUND_TIMEOUT_FLOOR;
     for _ in 1..round {
@@ -323,6 +323,32 @@ impl SignatureSpawner {
         }
     }
 
+    /// A bidirectional leg responded: drop its task, keeping the sign id live
+    /// for the next leg, which reuses it.
+    fn handle_leg_completed(&mut self, sign_id: SignId, kind: RequestKind) {
+        let Some(tracked) = self.requests.get(&sign_id) else {
+            return;
+        };
+        // This completion and the next leg's request come from different
+        // chains' streams, so they can arrive out of order.
+        let tracked_kind = tracked.entry.request().request_kind();
+        if tracked_kind != kind {
+            tracing::info!(
+                ?sign_id,
+                ?tracked_kind,
+                ?kind,
+                "ignoring leg completion for a superseded leg"
+            );
+            return;
+        }
+        if self.drop_task(sign_id, "leg completed") {
+            tracing::info!(
+                ?sign_id,
+                "aborting signature task; bidirectional leg responded"
+            );
+        }
+    }
+
     /// A task's `JoinMap` entry finished (or was cancelled): tear down and log.
     fn handle_task_exit(&mut self, result: Result<(SignId, Result<(), SignError>), SignId>) {
         self.observe_queue_size();
@@ -339,8 +365,8 @@ impl SignatureSpawner {
             Ok(()) => {
                 tracing::info!(?sign_id, "signature task completed successfully");
             }
-            Err(SignError::Aborted) => {
-                tracing::warn!(?sign_id, "signature task terminated");
+            Err(SignError::Aborted(reason)) => {
+                tracing::warn!(?sign_id, %reason, "signature task terminated");
             }
         }
     }
@@ -356,8 +382,14 @@ impl SignatureSpawner {
     /// running, mark the id dead, forget the request, drop its mailbox and
     /// unwatch its delay monitoring. Returns whether a task was aborted.
     fn retire_task(&mut self, sign_id: SignId, reason: &'static str) -> bool {
-        let aborted = self.tasks.abort(sign_id);
         self.mark_dead(sign_id);
+        self.drop_task(sign_id, reason)
+    }
+
+    /// Like [`Self::retire_task`], but leaves the sign id live so a later
+    /// request carrying it is admitted instead of skipped as a duplicate.
+    fn drop_task(&mut self, sign_id: SignId, reason: &'static str) -> bool {
+        let aborted = self.tasks.abort(sign_id);
         self.requests.remove(&sign_id);
         self.posit_mailboxes.remove(&sign_id);
         self.delay_monitor.unwatch(sign_id, reason);
@@ -373,6 +405,9 @@ impl SignatureSpawner {
         match sign {
             SignCommand::Completion(sign_id) => {
                 self.handle_completion(sign_id);
+            }
+            SignCommand::LegCompleted { sign_id, kind } => {
+                self.handle_leg_completed(sign_id, kind);
             }
             SignCommand::AbortChain(chain) => {
                 tracing::warn!(
@@ -396,9 +431,26 @@ impl SignatureSpawner {
                 // the mailbox map, which may already hold buffered messages (e.g. a
                 // Propose arriving before the indexer notifies us), and rather than
                 // the task map, which is empty while requests are held for governance.
-                if self.requests.contains_key(&sign_id) {
-                    tracing::info!(?sign_id, "skipping duplicate sign request");
-                    return;
+                //
+                // A bidirectional request's second leg carries its first leg's
+                // sign id, so that one transition is the next leg superseding
+                // the tracked one. Every other pairing is a duplicate.
+                if let Some(tracked) = self.requests.get(&sign_id) {
+                    let tracked_kind = tracked.entry.request().request_kind();
+                    let incoming_kind = entry.request().request_kind();
+                    let is_next_leg = tracked_kind == RequestKind::SignBidirectional
+                        && incoming_kind == RequestKind::RespondBidirectional;
+                    if !is_next_leg {
+                        tracing::info!(?sign_id, "skipping duplicate sign request");
+                        return;
+                    }
+                    tracing::info!(
+                        ?sign_id,
+                        ?tracked_kind,
+                        ?incoming_kind,
+                        "superseding the tracked request with its next leg"
+                    );
+                    self.drop_task(sign_id, "superseded by the next leg");
                 }
 
                 record_request_latency_since(
@@ -670,6 +722,378 @@ mod tests {
             "respawned task must share the entry's round, not a fresh one"
         );
         assert!(carried.load(Ordering::Relaxed) >= 7);
+    }
+
+    /// The second leg reuses its first leg's sign id, so retiring the first
+    /// must leave that id admissible.
+    #[tokio::test]
+    async fn test_leg_completed_admits_the_next_leg() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+
+        let mut spawner = SignatureSpawner::new(
+            account_id,
+            contract,
+            presignatures,
+            mesh_rx,
+            msg_channel,
+            RpcChannel { tx: rpc_tx },
+            sync_report_tx,
+        );
+        let backlog = crate::backlog::Backlog::new();
+        let cfg = ProtocolConfig::default();
+        let sign_id = SignId::new([7u8; 32]);
+        let request = crate::backlog::mock::mock_sign_request(sign_id, Chain::Solana);
+
+        // First leg in flight.
+        let entry = backlog::SignEntry::generating(Arc::clone(&request), &backlog);
+        spawner.add_request(&governance, entry, cfg.clone());
+        assert!(spawner.test_requests_contains(&sign_id));
+
+        // Its response landed on chain: the task is dropped, but the sign id
+        // stays live for the second leg.
+        spawner.handle_sign(
+            &governance,
+            SignCommand::LegCompleted {
+                sign_id,
+                kind: mpc_primitives::RequestKind::Sign,
+            },
+            &cfg,
+        );
+        assert!(!spawner.test_requests_contains(&sign_id));
+        assert!(!spawner.test_tasks_contains(sign_id));
+        assert!(
+            !spawner.test_dead_ids_contains(&sign_id),
+            "the id stays live to buffer posits until leg 2 is admitted, not to admit it"
+        );
+
+        // Second leg, same sign id: admitted rather than skipped as a duplicate.
+        let entry = backlog::SignEntry::generating(request, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+        assert!(spawner.test_requests_contains(&sign_id));
+        assert!(spawner.test_tasks_contains(sign_id));
+    }
+
+    /// The duplicate guard admits a next leg over the leg it supersedes, while
+    /// a request of the same kind stays a duplicate.
+    #[tokio::test]
+    async fn test_next_leg_supersedes_tracked_request() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+
+        let mut spawner = SignatureSpawner::new(
+            account_id,
+            contract,
+            presignatures,
+            mesh_rx,
+            msg_channel,
+            RpcChannel { tx: rpc_tx },
+            sync_report_tx,
+        );
+        let backlog = crate::backlog::Backlog::new();
+        let cfg = ProtocolConfig::default();
+        let sign_id = SignId::new([9u8; 32]);
+
+        // First leg in flight, with a task of its own.
+        let leg1 = crate::backlog::mock::mock_bidi_request(sign_id, Chain::Solana);
+        let entry = backlog::SignEntry::generating(Arc::clone(&leg1), &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+        assert!(spawner.test_tasks_contains(sign_id));
+        let first_leg_task = spawner.tasks.len();
+
+        // Same kind again: still a duplicate, so the tracked leg keeps running.
+        let entry = backlog::SignEntry::generating(leg1, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+        assert_eq!(spawner.tasks.len(), first_leg_task);
+
+        // Second leg, same sign id, different kind: admitted.
+        let leg2 = crate::backlog::mock::mock_bidi_response_request(
+            sign_id,
+            mpc_primitives::BidirectionalTxId([9u8; 32]),
+            Chain::Solana,
+        );
+        let entry = backlog::SignEntry::generating(leg2, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+        assert!(spawner.test_requests_contains(&sign_id));
+        assert!(spawner.test_tasks_contains(sign_id));
+        assert_eq!(
+            spawner
+                .requests
+                .get(&sign_id)
+                .unwrap()
+                .entry
+                .request()
+                .request_kind(),
+            mpc_primitives::RequestKind::RespondBidirectional
+        );
+        assert!(!spawner.test_dead_ids_contains(&sign_id));
+    }
+
+    /// Superseding runs one way. A first leg re-indexed behind a running second
+    /// leg is a duplicate, not a reason to drop the leg that replaced it.
+    #[tokio::test]
+    async fn test_a_replayed_first_leg_does_not_supersede_the_second() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+
+        let mut spawner = SignatureSpawner::new(
+            account_id,
+            contract,
+            presignatures,
+            mesh_rx,
+            msg_channel,
+            RpcChannel { tx: rpc_tx },
+            sync_report_tx,
+        );
+        let backlog = crate::backlog::Backlog::new();
+        let cfg = ProtocolConfig::default();
+        let sign_id = SignId::new([9u8; 32]);
+
+        // Second leg in flight, with a task of its own.
+        let leg2 = crate::backlog::mock::mock_bidi_response_request(
+            sign_id,
+            mpc_primitives::BidirectionalTxId([9u8; 32]),
+            Chain::Solana,
+        );
+        let entry = backlog::SignEntry::generating(leg2, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+        assert!(spawner.test_tasks_contains(sign_id));
+        let second_leg_task = spawner.tasks.len();
+
+        // A catchup re-scan feeds the first leg back under the same sign id.
+        let leg1 = crate::backlog::mock::mock_bidi_request(sign_id, Chain::Solana);
+        let entry = backlog::SignEntry::generating(leg1, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+
+        assert_eq!(
+            spawner.tasks.len(),
+            second_leg_task,
+            "the running second leg keeps its task"
+        );
+        assert_eq!(
+            spawner
+                .requests
+                .get(&sign_id)
+                .unwrap()
+                .entry
+                .request()
+                .request_kind(),
+            mpc_primitives::RequestKind::RespondBidirectional
+        );
+    }
+
+    /// A completion can name a sign id this node does not track: catchup holds
+    /// back requests but not stop events.
+    #[tokio::test]
+    async fn test_leg_completion_for_an_untracked_id_is_a_no_op() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+
+        let mut spawner = SignatureSpawner::new(
+            account_id,
+            contract,
+            presignatures,
+            mesh_rx,
+            msg_channel,
+            RpcChannel { tx: rpc_tx },
+            sync_report_tx,
+        );
+        let backlog = crate::backlog::Backlog::new();
+        let cfg = ProtocolConfig::default();
+        let sign_id = SignId::new([13u8; 32]);
+
+        // Nothing is tracked yet: the completion must not mark the id in any way.
+        spawner.handle_sign(
+            &governance,
+            SignCommand::LegCompleted {
+                sign_id,
+                kind: RequestKind::SignBidirectional,
+            },
+            &cfg,
+        );
+        assert!(!spawner.test_requests_contains(&sign_id));
+        assert!(!spawner.test_dead_ids_contains(&sign_id));
+
+        // A request arriving afterwards is admitted as usual.
+        let request = crate::backlog::mock::mock_bidi_request(sign_id, Chain::Solana);
+        let entry = backlog::SignEntry::generating(request, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+        assert!(spawner.test_requests_contains(&sign_id));
+        assert!(spawner.test_tasks_contains(sign_id));
+    }
+
+    /// Completions and requests travel from different chains' streams, so one
+    /// can land after the leg it would retire has been replaced.
+    #[tokio::test]
+    async fn test_late_leg_completion_spares_the_running_leg() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+
+        let mut spawner = SignatureSpawner::new(
+            account_id,
+            contract,
+            presignatures,
+            mesh_rx,
+            msg_channel,
+            RpcChannel { tx: rpc_tx },
+            sync_report_tx,
+        );
+        let backlog = crate::backlog::Backlog::new();
+        let cfg = ProtocolConfig::default();
+        let sign_id = SignId::new([11u8; 32]);
+
+        // The second leg is already running.
+        let leg2 = crate::backlog::mock::mock_bidi_response_request(
+            sign_id,
+            mpc_primitives::BidirectionalTxId([11u8; 32]),
+            Chain::Solana,
+        );
+        let entry = backlog::SignEntry::generating(leg2, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+        assert!(spawner.test_tasks_contains(sign_id));
+
+        // The first leg's completion arrives late: it must not retire this leg.
+        spawner.handle_sign(
+            &governance,
+            SignCommand::LegCompleted {
+                sign_id,
+                kind: RequestKind::SignBidirectional,
+            },
+            &cfg,
+        );
+        assert!(spawner.test_requests_contains(&sign_id));
+        assert!(spawner.test_tasks_contains(sign_id));
+
+        // A completion naming the leg we do track still retires it.
+        spawner.handle_sign(
+            &governance,
+            SignCommand::LegCompleted {
+                sign_id,
+                kind: RequestKind::RespondBidirectional,
+            },
+            &cfg,
+        );
+        assert!(!spawner.test_requests_contains(&sign_id));
     }
 
     #[test]

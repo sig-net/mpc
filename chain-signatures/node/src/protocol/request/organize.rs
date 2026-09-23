@@ -121,7 +121,9 @@ impl OrganizingPhase {
                 }
                 Err(SignLimitError::Closed) => {
                     tracing::error!(?sign_id, "proposer semaphore closed");
-                    return SignPhase::Complete(Err(SignError::Aborted));
+                    return SignPhase::Complete(Err(SignError::Aborted(
+                        "proposer semaphore closed".to_string(),
+                    )));
                 }
             };
 

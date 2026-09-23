@@ -3,11 +3,12 @@
 use anyhow::Context as _;
 use midnight_base_crypto::fab::{AlignmentAtom, AlignmentSegment};
 use midnight_ledger_v9::structure::{ContractCall, ProofKind, ProofMarker, Signature, Transaction};
-use midnight_onchain_runtime::context::QueryContext;
+use midnight_onchain_runtime::context::{Effects, QueryContext};
 use midnight_onchain_runtime::cost_model::INITIAL_COST_MODEL;
-use midnight_onchain_runtime::ops::{LogEventType, VersionedLogItem};
+use midnight_onchain_runtime::ops::{LogEventType, Op, VersionedLogItem};
 use midnight_onchain_runtime::result_mode::ResultModeVerify;
 use midnight_onchain_runtime::state::{ChargedState, StateValue};
+use midnight_onchain_runtime::transcript::Transcript;
 use midnight_storage::storage::Array;
 use midnight_storage::DefaultDB;
 
@@ -47,51 +48,61 @@ pub struct Emission {
     pub payload: [u8; MISC_PAYLOAD_LEN],
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TranscriptPhase {
+    Guaranteed,
+    Fallible,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SingletonCallEmissions {
-    /// Position in [`DecodedTransaction::calls`] before filtering by the singleton address.
+    /// Position in [`DecodedTransaction::calls`] before filtering or execution-order sorting.
     pub call_index: u32,
+    pub physical_segment: u16,
+    pub phase: TranscriptPhase,
     pub emissions: Vec<Emission>,
 }
 
-#[derive(Debug)]
-pub(crate) struct UnsupportedFallibleCall {
-    pub call_index: u32,
-}
-
-impl std::fmt::Display for UnsupportedFallibleCall {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "singleton call {} contains a fallible transcript",
-            self.call_index
-        )
-    }
-}
-
-impl std::error::Error for UnsupportedFallibleCall {}
-
 fn log_items<P: ProofKind<DefaultDB>>(
     call: &ContractCall<P, DefaultDB>,
+    transcript: &Transcript<DefaultDB>,
 ) -> anyhow::Result<Vec<VersionedLogItem<DefaultDB>>> {
+    let program = Vec::from(&transcript.program);
+    // Live ingestion establishes TxApplied first; transaction normalization is
+    // the ledger's responsibility. Only constrain what we can replay correctly.
+    // Noops and checkpoints only consume gas during VM execution; they cannot
+    // observe or change the stack, state, effects or logs. Ignore them for shape
+    // validation, but replay the original program, preserving its gas charges.
+    let log_program = program
+        .iter()
+        .filter(|op| !matches!(op, Op::Noop { .. } | Op::Ckpt))
+        .collect::<Vec<_>>();
+    let (pairs, remainder) = log_program.as_chunks::<2>();
+    anyhow::ensure!(
+        remainder.is_empty()
+            && pairs
+                .iter()
+                .all(|pair| matches!(pair, [Op::Push { storage: false, .. }, Op::Log])),
+        "unsupported-singleton-transcript: expected literal non-storage Push/Log pairs with Noops and checkpoints"
+    );
+    anyhow::ensure!(
+        transcript.effects == Effects::default(),
+        "unsupported-singleton-transcript: expected empty declared effects"
+    );
+    // The ledger starts each phase with a fresh query context. The accepted subset
+    // cannot observe its omitted contract state, balance or block context.
     let context = QueryContext::new(
         ChargedState::new(StateValue::Array(Array::new())),
         call.address,
     );
-    // TODO: Consider decoding fallible transcripts when indexing supports them.
-    match call.guaranteed_transcript.as_deref() {
-        Some(transcript) => {
-            let result = context
-                .query::<ResultModeVerify>(
-                    &Vec::from(&transcript.program),
-                    None,
-                    &INITIAL_COST_MODEL,
-                )
-                .context("singleton guaranteed transcript rejected by the ledger VM")?;
-            Ok(result.events)
-        }
-        None => Ok(Vec::new()),
-    }
+    let result = context
+        .query::<ResultModeVerify>(&program, None, &INITIAL_COST_MODEL)
+        .context("singleton transcript rejected by the ledger VM")?;
+    anyhow::ensure!(
+        result.context.effects == transcript.effects,
+        "unsupported-singleton-transcript: replayed effects differ from declared effects"
+    );
+    Ok(result.events)
 }
 
 fn emission_from_log_item(item: &VersionedLogItem<DefaultDB>) -> anyhow::Result<Emission> {
@@ -148,38 +159,81 @@ fn emission_from_log_item(item: &VersionedLogItem<DefaultDB>) -> anyhow::Result<
     Ok(Emission { kind, payload })
 }
 
-pub fn emissions_of_call<P: ProofKind<DefaultDB>>(
+fn emissions_of_transcript<P: ProofKind<DefaultDB>>(
     call: &ContractCall<P, DefaultDB>,
+    transcript: &Transcript<DefaultDB>,
 ) -> anyhow::Result<Vec<Emission>> {
-    anyhow::ensure!(
-        call.fallible_transcript.is_none(),
-        "singleton call contains a fallible transcript"
-    );
-    log_items(call)?
+    log_items(call, transcript)?
         .iter()
         .map(emission_from_log_item)
         .collect()
 }
 
+/// Decode a call's guaranteed then fallible emissions without establishing its outcome.
+/// Live ingestion must establish full transaction success before using these values.
+pub fn emissions_of_call<P: ProofKind<DefaultDB>>(
+    call: &ContractCall<P, DefaultDB>,
+) -> anyhow::Result<Vec<Emission>> {
+    let mut emissions = Vec::new();
+    for transcript in [
+        call.guaranteed_transcript.as_deref(),
+        call.fallible_transcript.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        emissions.extend(emissions_of_transcript(call, transcript)?);
+    }
+    Ok(emissions)
+}
+
+/// Extract only after the caller establishes that the whole transaction applied.
+/// A partial-success transaction cannot use this path: its failed phases must not emit.
 pub fn emissions_in(
     tx: &DecodedTransaction,
     singleton: &[u8; 32],
 ) -> anyhow::Result<Vec<SingletonCallEmissions>> {
-    tx.calls()
+    let mut calls = tx
+        .calls()
         .enumerate()
         .filter(|(_, (_, call))| call.address.0 .0 == *singleton)
-        .map(|(call_index, (_, call))| {
-            let call_index = u32::try_from(call_index)
-                .context("transaction contains more calls than a u32 locator can represent")?;
-            if call.fallible_transcript.is_some() {
-                return Err(anyhow::Error::new(UnsupportedFallibleCall { call_index }));
-            }
-            Ok(SingletonCallEmissions {
-                call_index,
-                emissions: emissions_of_call(&call)?,
-            })
+        .map(|(call_index, (physical_segment, call))| {
+            Ok((
+                physical_segment,
+                u32::try_from(call_index)
+                    .context("transaction contains more calls than a u32 locator can represent")?,
+                call,
+            ))
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    // Ledger application runs all guaranteed phases before any fallible phase,
+    // sorting physical segments numerically and retaining action order within each.
+    calls.sort_by_key(|(segment, call_index, _)| (*segment, *call_index));
+    let mut decoded = Vec::new();
+    for phase in [TranscriptPhase::Guaranteed, TranscriptPhase::Fallible] {
+        for (physical_segment, call_index, call) in &calls {
+            let transcript = match phase {
+                TranscriptPhase::Guaranteed => call.guaranteed_transcript.as_deref(),
+                TranscriptPhase::Fallible => call.fallible_transcript.as_deref(),
+            };
+            let emissions = if let Some(transcript) = transcript {
+                emissions_of_transcript(call, transcript).with_context(|| {
+                    format!("singleton call {call_index}, segment {physical_segment}, {phase:?}")
+                })?
+            } else if phase == TranscriptPhase::Guaranteed && call.fallible_transcript.is_none() {
+                Vec::new()
+            } else {
+                continue;
+            };
+            decoded.push(SingletonCallEmissions {
+                call_index: *call_index,
+                physical_segment: *physical_segment,
+                phase,
+                emissions,
+            });
+        }
+    }
+    Ok(decoded)
 }
 
 #[cfg(test)]
@@ -279,6 +333,12 @@ mod tests {
         guaranteed: Option<Vec<TestOp>>,
         fallible: Option<Vec<TestOp>>,
     ) -> ContractCall<ProofMarker, DefaultDB> {
+        let fallible = fallible.map(|mut ops| {
+            if guaranteed.is_some() {
+                ops.insert(0, Op::Ckpt);
+            }
+            ops
+        });
         let mut call = ContractCall {
             address: Default::default(),
             entry_point: EntryPointBuf(b"test".to_vec()),
@@ -402,19 +462,318 @@ mod tests {
     }
 
     #[test]
-    fn rejects_fallible_singleton_calls() {
+    fn captured_applied_fallible_notifications_decode() {
+        for (bytes, request) in [
+            (
+                include_bytes!("../fixtures/fallible-deposit-tx-432.mn").as_slice(),
+                "ee3385dda706877d30e802a0df57c228310016889104b8fb361c830a58d1e500",
+            ),
+            (
+                include_bytes!("../fixtures/fallible-withdraw-tx-458.mn").as_slice(),
+                "2b39323a4680ccb0b379e61e4887375190e2d5e14f8f2c0ac81d7df4ca6ba400",
+            ),
+            (
+                include_bytes!("../fixtures/fallible-supply-tx-368.mn").as_slice(),
+                "32aeb17a73a84173bce929c0225a50b2c6ffcc55a97d2c6787204fcc7cba9600",
+            ),
+        ] {
+            let tx: DecodedTransaction =
+                midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
+            let (_, singleton_call) = tx.calls().nth(1).unwrap();
+            assert!(singleton_call.guaranteed_transcript.is_none());
+            assert!(singleton_call.fallible_transcript.is_some());
+            let calls = emissions_in(&tx, &singleton_call.address.0 .0).unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].call_index, 1);
+            assert_eq!(calls[0].phase, TranscriptPhase::Fallible);
+            assert_eq!(calls[0].emissions.len(), 1);
+            assert_eq!(calls[0].emissions[0].kind, EmissionKind::SignBidirectional);
+            assert_eq!(calls[0].emissions[0].payload[1..33], hex_32(request));
+        }
+    }
+
+    #[test]
+    fn decodes_all_event_kinds_in_either_phase() {
+        for (name, kind) in [
+            (SIGN_BIDIRECTIONAL_EVENT, EmissionKind::SignBidirectional),
+            (SIGNATURE_RESPONDED_EVENT, EmissionKind::SignatureResponded),
+            (
+                RESPOND_BIDIRECTIONAL_EVENT,
+                EmissionKind::RespondBidirectional,
+            ),
+        ] {
+            for phase in [TranscriptPhase::Guaranteed, TranscriptPhase::Fallible] {
+                let ops = emit_ops(name, GUARANTEED);
+                let (guaranteed, fallible) = match phase {
+                    TranscriptPhase::Guaranteed => (Some(ops), None),
+                    TranscriptPhase::Fallible => (None, Some(ops)),
+                };
+                let decoded = emissions_in(
+                    &transaction(vec![call(SINGLETON, guaranteed, fallible)]),
+                    &SINGLETON,
+                )
+                .unwrap();
+                assert_eq!(decoded.len(), 1);
+                assert_eq!(decoded[0].phase, phase);
+                assert_eq!(decoded[0].physical_segment, 1);
+                assert_eq!(
+                    decoded[0].emissions,
+                    vec![Emission {
+                        kind,
+                        payload: GUARANTEED
+                    }]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decodes_both_phases_with_required_fallible_checkpoint() {
+        let call = call(
+            SINGLETON,
+            Some(emit_ops(SIGN_BIDIRECTIONAL_EVENT, GUARANTEED)),
+            Some(emit_ops(RESPOND_BIDIRECTIONAL_EVENT, FALLIBLE)),
+        );
+        assert_eq!(
+            call.fallible_transcript.as_ref().unwrap().program.get(0),
+            Some(&Op::Ckpt)
+        );
+        assert_eq!(
+            emissions_of_call(&call).unwrap(),
+            vec![
+                Emission {
+                    kind: EmissionKind::SignBidirectional,
+                    payload: GUARANTEED
+                },
+                Emission {
+                    kind: EmissionKind::RespondBidirectional,
+                    payload: FALLIBLE
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn orders_phases_then_segments_and_actions_preserving_native_call_indices() {
+        let make = |marker| {
+            call(
+                SINGLETON,
+                Some(emit_ops(
+                    SIGN_BIDIRECTIONAL_EVENT,
+                    [marker; MISC_PAYLOAD_LEN],
+                )),
+                Some(emit_ops(
+                    RESPOND_BIDIRECTIONAL_EVENT,
+                    [marker + 1; MISC_PAYLOAD_LEN],
+                )),
+            )
+        };
+        let DecodedTransaction::Standard(mut tx) = transaction(vec![make(20), make(30)]) else {
+            unreachable!()
+        };
+        let later = (*tx.intents.get(&1).unwrap()).clone();
+        let DecodedTransaction::Standard(earlier) = transaction(vec![
+            call(OTHER_CONTRACT, None, Some(vec![Op::Root])),
+            make(10),
+        ]) else {
+            unreachable!()
+        };
+        let first = (*earlier.intents.get(&1).unwrap()).clone();
+        tx.intents = HashMap::new().insert(500u16, later).insert(2u16, first);
+        let tx = DecodedTransaction::Standard(tx);
+        let native = tx
+            .calls()
+            .enumerate()
+            .filter(|(_, (_, call))| call.address.0 .0 == SINGLETON)
+            .map(|(index, (segment, _))| (segment, index as u32))
+            .collect::<Vec<_>>();
+        let mut expected = native.clone();
+        expected.sort();
+        let decoded = emissions_in(&tx, &SINGLETON).unwrap();
+        assert_eq!(decoded.len(), 6);
+        for (phase_index, phase) in [TranscriptPhase::Guaranteed, TranscriptPhase::Fallible]
+            .into_iter()
+            .enumerate()
+        {
+            let records = &decoded[phase_index * 3..phase_index * 3 + 3];
+            assert_eq!(
+                records
+                    .iter()
+                    .map(|r| (r.physical_segment, r.call_index))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(records.iter().all(|r| r.phase == phase));
+            assert_eq!(
+                records
+                    .iter()
+                    .map(|r| r.emissions[0].payload[0])
+                    .collect::<Vec<_>>(),
+                vec![
+                    10 + phase_index as u8,
+                    20 + phase_index as u8,
+                    30 + phase_index as u8
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn decodes_noops_without_revalidating_normalization_in_either_phase() {
+        let [push, log]: [TestOp; 2] = emit_ops(SIGN_BIDIRECTIONAL_EVENT, GUARANTEED)
+            .try_into()
+            .unwrap();
+        for checkpoint in [false, true] {
+            let mut program = vec![];
+            if checkpoint {
+                program.push(Op::Ckpt);
+            }
+            program.extend([
+                Op::Noop { n: 0 },
+                // Deliberately adjacent: transaction normalization belongs to the
+                // ledger. This decoder fixture is not a ledger-valid transaction.
+                Op::Noop { n: 2 },
+                push.clone(),
+                Op::Noop { n: 3 },
+                log.clone(),
+                Op::Noop { n: 0 },
+            ]);
+            for fallible in [false, true] {
+                let call = if fallible {
+                    call(SINGLETON, None, Some(program.clone()))
+                } else {
+                    call(SINGLETON, Some(program.clone()), None)
+                };
+                assert_eq!(
+                    emissions_of_call(&call).unwrap(),
+                    vec![Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: GUARANTEED,
+                    }]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decodes_checkpoints_anywhere_in_either_phase() {
+        // These are decoder/VM fixtures, not proven transactions. Full transaction
+        // validity and the actual phase boundary are established before extraction.
+        let first = emit_ops(SIGN_BIDIRECTIONAL_EVENT, GUARANTEED);
+        let second = emit_ops(SIGNATURE_RESPONDED_EVENT, FALLIBLE);
+        let original = [first, second].concat();
+        let expected = vec![
+            Emission {
+                kind: EmissionKind::SignBidirectional,
+                payload: GUARANTEED,
+            },
+            Emission {
+                kind: EmissionKind::SignatureResponded,
+                payload: FALLIBLE,
+            },
+        ];
+        // Before, inside and between Push/Log pairs, and after the last Log.
+        let mut programs: Vec<_> = (0..=original.len())
+            .map(|position| {
+                let mut program = original.clone();
+                program.insert(position, Op::Ckpt);
+                program
+            })
+            .collect();
+        programs.push(vec![
+            Op::Ckpt,
+            Op::Ckpt,
+            original[0].clone(),
+            Op::Noop { n: 0 },
+            Op::Ckpt,
+            original[1].clone(),
+            Op::Ckpt,
+            original[2].clone(),
+            Op::Ckpt,
+            Op::Noop { n: 2 },
+            original[3].clone(),
+            Op::Ckpt,
+        ]);
+        for program in programs {
+            for fallible in [false, true] {
+                let call = if fallible {
+                    call(SINGLETON, None, Some(program.clone()))
+                } else {
+                    call(SINGLETON, Some(program.clone()), None)
+                };
+                assert_eq!(emissions_of_call(&call).unwrap(), expected);
+            }
+        }
+        for fallible in [false, true] {
+            let program = vec![Op::Ckpt, Op::Noop { n: 0 }, Op::Ckpt];
+            let call = if fallible {
+                call(SINGLETON, None, Some(program))
+            } else {
+                call(SINGLETON, Some(program), None)
+            };
+            assert!(emissions_of_call(&call).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn rejects_context_dependent_programs_in_either_phase() {
+        let good = emit_ops(SIGN_BIDIRECTIONAL_EVENT, GUARANTEED);
+        let mut storage_push = good.clone();
+        if let Op::Push { storage, .. } = &mut storage_push[0] {
+            *storage = true;
+        }
+        for program in [
+            vec![Op::Root, Op::Log],
+            vec![Op::Ckpt, Op::Root, Op::Ckpt, Op::Log],
+            vec![Op::Log],
+            storage_push,
+            {
+                let mut ops = good.clone();
+                ops.push(Op::Pop);
+                ops
+            },
+        ] {
+            for fallible in [false, true] {
+                let call = if fallible {
+                    call(SINGLETON, None, Some(program.clone()))
+                } else {
+                    call(SINGLETON, Some(program.clone()), None)
+                };
+                let error = emissions_in(&transaction(vec![call]), &SINGLETON).unwrap_err();
+                assert!(format!("{error:#}").contains("unsupported-singleton-transcript"));
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_nonempty_declared_effects_in_either_phase() {
+        for fallible in [false, true] {
+            let mut transcript = transcript(emit_ops(SIGN_BIDIRECTIONAL_EVENT, GUARANTEED));
+            transcript.effects.unshielded_mints = HashMap::new().insert(Default::default(), 1);
+            let mut call = call(SINGLETON, None, None);
+            if fallible {
+                call.fallible_transcript = Some(Sp::new(transcript));
+            } else {
+                call.guaranteed_transcript = Some(Sp::new(transcript));
+            }
+            let error = emissions_in(&transaction(vec![call]), &SINGLETON).unwrap_err();
+            assert!(format!("{error:#}").contains("expected empty declared effects"));
+        }
+    }
+
+    #[test]
+    fn a_malformed_fallible_log_rejects_the_whole_extraction() {
         let tx = transaction(vec![call(
             SINGLETON,
-            Some(emit_ops(padded_name(b"SignBidirectionalEvent"), GUARANTEED)),
-            Some(emit_ops(padded_name(b"SignatureRespondedEvent"), FALLIBLE)),
+            Some(emit_ops(SIGN_BIDIRECTIONAL_EVENT, GUARANTEED)),
+            Some(logging(raw_log_item(
+                2,
+                LogEventType::Misc as u8,
+                data_cell(&SIGN_BIDIRECTIONAL_EVENT, &FALLIBLE, 288),
+            ))),
         )]);
-
-        let err = emissions_in(&tx, &SINGLETON)
-            .expect_err("a fallible singleton call is outside the supported integration contract");
-        let unsupported = err
-            .downcast_ref::<UnsupportedFallibleCall>()
-            .unwrap_or_else(|| panic!("unexpected rejection: {err:#}"));
-        assert_eq!(unsupported.call_index, 0);
+        let error = emissions_in(&tx, &SINGLETON).unwrap_err();
+        assert!(format!("{error:#}").contains("emission-schema"));
     }
 
     #[test]
@@ -462,7 +821,7 @@ mod tests {
             let tx = transaction(vec![call(SINGLETON, Some(logging(logged_value)), None)]);
             let error = emissions_in(&tx, &SINGLETON).unwrap_err();
             assert!(
-                error.to_string().contains("emission-schema"),
+                format!("{error:#}").contains("emission-schema"),
                 "{case}: {error:#}"
             );
         }
@@ -497,6 +856,8 @@ mod tests {
             emissions_in(&tx, &SINGLETON).unwrap(),
             vec![SingletonCallEmissions {
                 call_index: 1,
+                physical_segment: 1,
+                phase: TranscriptPhase::Guaranteed,
                 emissions: vec![Emission {
                     kind: EmissionKind::RespondBidirectional,
                     payload: FALLIBLE,
@@ -513,6 +874,8 @@ mod tests {
             emissions_in(&tx, &SINGLETON).unwrap(),
             vec![SingletonCallEmissions {
                 call_index: 0,
+                physical_segment: 1,
+                phase: TranscriptPhase::Guaranteed,
                 emissions: Vec::new(),
             }]
         );

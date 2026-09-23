@@ -588,6 +588,46 @@ async fn process_sign_request_duplicate_is_idempotent() {
 }
 
 #[tokio::test]
+async fn process_sign_request_replay_keeps_an_advanced_entry() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::new([21u8; 32]);
+    let request = mock_sign_request(sign_id, Chain::Ethereum);
+    let (pk, output) = mock_signature_output(&request.args);
+
+    // The entry is past Generating: it holds a signature and waits to publish.
+    backlog
+        .insert_sign(Arc::clone(&request))
+        .await
+        .advance(pk, &output, mock_participants(), true)
+        .await
+        .expect("advance to pending publish");
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+
+    // The same request id is emitted again while the first is in flight.
+    let is_new = process_sign_request(request, &ctx)
+        .await
+        .expect("a replayed sign request is accepted");
+
+    assert!(!is_new, "the replay must not report a new entry");
+    assert_eq!(backlog.len(), 1, "the entry must still be there");
+    assert!(
+        backlog
+            .requeueable_requests(Chain::Ethereum)
+            .await
+            .is_empty(),
+        "the replay must not reset the entry to pending generation"
+    );
+    assert!(
+        timeout(Duration::from_millis(100), sign_rx.recv())
+            .await
+            .is_err(),
+        "the replay must not enqueue a second signing task"
+    );
+}
+
+#[tokio::test]
 async fn process_respond_event_rejects_invalid_signature() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([15u8; 32]);
@@ -799,12 +839,25 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     let (_contract_watcher, _tx) =
         ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
-    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    // Not caught up: stop events bypass the gate that holds back new requests.
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
 
     process_respond_event(event, &ctx, public_key)
         .await
         .expect("respond event should advance pending publish bidirectional entries");
+
+    // The finished leg holds the sign id the next one reuses.
+    match sign_rx
+        .try_recv()
+        .expect("leg completion should be enqueued")
+    {
+        SignCommand::LegCompleted { sign_id: id, kind } => {
+            assert_eq!(id, sign_id);
+            assert_eq!(kind, RequestKind::SignBidirectional);
+        }
+        other => panic!("unexpected sign command: {other:?}"),
+    }
 
     let entry = ctx
         .backlog

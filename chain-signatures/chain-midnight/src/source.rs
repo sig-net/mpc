@@ -125,6 +125,8 @@ mod proof_seed_tests {
                 ledger_tx_hash: [0x55; 32],
                 extrinsic_index: 1,
                 calls: vec![SingletonCallEmissions {
+                    phase: crate::emissions::TranscriptPhase::Guaranteed,
+                    physical_segment: 1,
                     call_index: 1,
                     emissions: vec![
                         Emission {
