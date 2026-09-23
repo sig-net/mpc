@@ -49,7 +49,6 @@ hex.workspace = true
 k256.workspace = true
 rand.workspace = true
 reqwest.workspace = true
-reqwest12 = { package = "reqwest", version = "0.12", default-features = false, features = ["rustls-tls"] }
 semver.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
@@ -104,5 +103,3 @@ bench = []
 test-feature = ["mpc-chain-midnight/sandbox"]
 # Show a debug page
 debug-page = ["maud"]
-# Enable Helios light client for Ethereum
-helios = ["mpc-chain-ethereum/helios"]

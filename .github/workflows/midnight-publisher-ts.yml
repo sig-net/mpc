@@ -22,7 +22,7 @@ jobs:
       run:
         working-directory: chain-signatures/midnight-publisher-ts
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install just
         run: |
@@ -31,7 +31,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: 'npm'
@@ -59,19 +59,32 @@ jobs:
         run: docker build --target midnight-publisher-runtime .
 
       - name: Install Rust (1.93.0)
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
         with:
-          profile: minimal
           toolchain: 1.93.0
-      - uses: Swatinem/rust-cache@v2
+
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
+
+      # Cache policy: doc/ci-caching.md
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          # Cache policy: docs/ci-caching.md
           shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
+        with:
+          tool: nextest
       # The filter names the test binary: the seam tests live in
       # `tests/intent_seam.rs` and are `#[ignore]`d, so `--run-ignored all` plus
       # `binary(intent_seam)` runs exactly them, while a `test(intent_seam)` filter

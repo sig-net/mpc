@@ -46,12 +46,9 @@ pub async fn create_test_ethereum_client_with_catchup(
 
     let eth = EthConfig {
         execution_rpc_http_url: url.parse().unwrap(),
-        light_client: false,
         account_sk: test_signer(),
-        consensus_rpc_http_url: "".to_string(),
         contract_address: Address::ZERO,
         network: "".to_string(),
-        helios_data_path: "".to_string(),
         refresh_finalized_interval: 0,
         optimistic_requests: false,
         rpc: RpcConfig {
@@ -85,14 +82,11 @@ impl TestIndexerBuilder {
             server_url: server_url.clone(),
             eth: EthConfig {
                 account_sk: test_signer(),
-                consensus_rpc_http_url: server_url.clone(),
                 execution_rpc_http_url: server_url.parse().unwrap(),
                 contract_address: Address::ZERO,
                 network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios-test".to_string(),
                 refresh_finalized_interval: DEFAULT_REFRESH_FINALIZED_INTERVAL,
                 optimistic_requests: false,
-                light_client: false,
                 rpc: Default::default(),
                 gas: Default::default(),
                 publisher: Default::default(),
@@ -108,14 +102,6 @@ impl TestIndexerBuilder {
         let url = url.into();
         self.eth.execution_rpc_http_url = url.parse().unwrap();
         self.server_url = url;
-        self
-    }
-
-    /// Override both RPC URLs (e.g. empty consensus URL) — only changes
-    /// config, not the client build URL.
-    pub fn rpc_urls(mut self, consensus: impl Into<String>, execution: impl Into<String>) -> Self {
-        self.eth.consensus_rpc_http_url = consensus.into();
-        self.eth.execution_rpc_http_url = execution.into().parse().unwrap();
         self
     }
 
@@ -182,8 +168,8 @@ impl ChainTelemetry for CountingChainTelemetry {
     fn block_indexed(&self, _block_number: u64) {}
     fn block_finalized(&self, _block_number: u64) {}
     fn checkpoint_created(&self, _block_number: u64) {}
-    fn request_indexed_at(&self, _block_timestamp: u64) {}
-    fn request_indexed(&self) {}
+    fn request_indexed_at(&self, _block_timestamp: u64, _kind: mpc_primitives::RequestKind) {}
+    fn request_indexed(&self, _kind: mpc_primitives::RequestKind) {}
 
     fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind) {
         let counter = match kind {

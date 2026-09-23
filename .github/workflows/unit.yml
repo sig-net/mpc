@@ -15,7 +15,7 @@ jobs:
     runs-on: warp-ubuntu-latest-x64-4x
     name: Check & Test
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install just
         run: |
@@ -24,25 +24,36 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Install Rust (1.93.0)
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
         with:
-          profile: minimal
           toolchain: 1.93.0
-          target: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "18"
           cache: 'npm'
           cache-dependency-path: chain-signatures/contract-eth/package-lock.json
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
+
+      # Cache policy: doc/ci-caching.md
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          # Cache policy: docs/ci-caching.md
           shared-key: workspace-dev
           cache-targets: true
           cache-on-failure: false
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
       
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
@@ -73,15 +84,17 @@ jobs:
       - name: Unit tests
         run: just test-unit
 
+      - name: Midnight output storage tests
+        run: cargo test -p mpc-chain-midnight --lib --features sandbox output_storage::tests
+
   audit:
     name: Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
         with:
-          profile: minimal
           toolchain: 1.93.0
 
       # Check the feature-resolved dependency graph: security advisories
@@ -89,6 +102,6 @@ jobs:
       # match the previous cargo-audit behavior), license compliance, dependency
       # bans, and source allow-listing.
       - name: Check dependencies (cargo-deny)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check advisories bans licenses sources -W unmaintained -W unsound --hide-inclusion-graph

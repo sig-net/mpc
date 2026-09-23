@@ -4,8 +4,9 @@ use common::init_env;
 use serde_json::json;
 
 use mpc_contract::primitives::CandidateEntry;
+use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::types::NearToken;
-use near_workspaces::{AccountId, Contract};
+use near_workspaces::{Account, AccountId, Contract};
 
 async fn candidate_info(contract: &Contract, account_id: &AccountId) -> Option<CandidateEntry> {
     contract
@@ -17,22 +18,46 @@ async fn candidate_info(contract: &Contract, account_id: &AccountId) -> Option<C
         .unwrap()
 }
 
+const JOIN_URL: &str = "127.0.0.1";
+const JOIN_SIGN_PK: &str = "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae";
+
+/// Submit a `join` request from `account`. A `deposit` of `None` attaches none,
+/// which the contract rejects.
+async fn join_with(
+    account: &Account,
+    contract: &Contract,
+    url: String,
+    deposit: Option<NearToken>,
+) -> anyhow::Result<ExecutionFinalResult> {
+    let mut tx = account.call(contract.id(), "join").args_json(json!({
+        "url": url,
+        "cipher_pk": vec![1u8; 32],
+        "sign_pk": JOIN_SIGN_PK,
+    }));
+    if let Some(deposit) = deposit {
+        tx = tx.deposit(deposit);
+    }
+    Ok(tx.transact().await?)
+}
+
+/// `join` with the standard url and the required 1 NEAR deposit.
+async fn join(account: &Account, contract: &Contract) -> anyhow::Result<ExecutionFinalResult> {
+    join_with(
+        account,
+        contract,
+        JOIN_URL.to_owned(),
+        Some(NearToken::from_near(1)),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn test_join() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
 
     let alice = worker.dev_create_account().await?;
 
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(1))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
 
     assert!(execution.is_success());
 
@@ -44,29 +69,11 @@ async fn test_join() -> anyhow::Result<()> {
     assert!(candidate.join_votes.is_empty());
 
     // try join again, still ok, because not become participant yet
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(1))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
 
     // participant try join again, should fail
-    let execution = accounts[0]
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(1))
-        .transact()
-        .await?;
+    let execution = join(&accounts[0], &contract).await?;
     assert!(execution.is_failure());
     Ok(())
 }
@@ -76,15 +83,7 @@ async fn test_join_requires_deposit() -> anyhow::Result<()> {
     let (worker, contract, _, _) = init_env().await;
     let alice = worker.dev_create_account().await?;
 
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .transact()
-        .await?;
+    let execution = join_with(&alice, &contract, JOIN_URL.to_owned(), None).await?;
 
     assert!(execution.is_failure());
     Ok(())
@@ -96,16 +95,13 @@ async fn test_join_rejects_oversized_url() -> anyhow::Result<()> {
     let alice = worker.dev_create_account().await?;
 
     // Deposit is attached so the call can only fail on the url length check.
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "a".repeat(mpc_contract::MAX_JOIN_URL_LEN + 1),
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(1))
-        .transact()
-        .await?;
+    let execution = join_with(
+        &alice,
+        &contract,
+        "a".repeat(mpc_contract::MAX_JOIN_URL_LEN + 1),
+        Some(NearToken::from_near(1)),
+    )
+    .await?;
 
     assert!(execution.is_failure());
     Ok(())
@@ -117,16 +113,13 @@ async fn test_join_refunds_excess_deposit() -> anyhow::Result<()> {
 
     let alice = worker.dev_create_account().await?;
     let balance = alice.view_account().await?.balance;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(2))
-        .transact()
-        .await?;
+    let execution = join_with(
+        &alice,
+        &contract,
+        JOIN_URL.to_owned(),
+        Some(NearToken::from_near(2)),
+    )
+    .await?;
     assert!(execution.is_success());
 
     let new_balance = alice.view_account().await?.balance;
@@ -149,16 +142,7 @@ async fn test_remove_candidacy() -> anyhow::Result<()> {
 
     // Create a new account to join as candidate
     let alice = worker.dev_create_account().await?;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(1))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
 
     // Verify alice is in candidates
@@ -231,16 +215,7 @@ async fn test_vote_join() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
 
     let alice = worker.dev_create_account().await?;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(1))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
 
     // vote by first candidate should success, but vote not pass threshold yet
@@ -279,16 +254,7 @@ async fn test_vote_join() -> anyhow::Result<()> {
 
     // another try to join should fail, because it's in Resharing state now
     let bob = worker.dev_create_account().await?;
-    let execution = bob
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(1))
-        .transact()
-        .await?;
+    let execution = join(&bob, &contract).await?;
     assert!(execution.is_failure());
 
     Ok(())
@@ -300,16 +266,7 @@ async fn test_vote_leave() -> anyhow::Result<()> {
 
     let alice = worker.dev_create_account().await?;
     let bob = worker.dev_create_account().await?;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(1))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
     // now alice is candidate, bob is just a random account
 
@@ -462,16 +419,7 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
 
     // join a new candidate
     let alice = worker.dev_create_account().await?;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(1))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
 
     // vote to make it participant
@@ -577,16 +525,7 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
     };
 
     let alice = worker.dev_create_account().await?;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(1))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
 
     let execution = accounts[0]
@@ -689,16 +628,7 @@ async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
 
     // --- Add a 4th participant -------------------------------------------------
     let alice = worker.dev_create_account().await?;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .deposit(NearToken::from_near(1))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
 
     // Two votes (the current threshold) move the network into resharing.

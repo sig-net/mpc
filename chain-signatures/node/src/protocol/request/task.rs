@@ -47,7 +47,7 @@ impl SignPhase {
             SignPhase::Organizing(phase) => phase.advance(ctx, state).await,
             SignPhase::Posit(phase) => phase.advance(ctx, state, mailbox).await,
             SignPhase::Generating(phase) => phase.advance(ctx, state, mailbox).await,
-            SignPhase::Complete(result) => SignPhase::Complete(*result),
+            SignPhase::Complete(result) => SignPhase::Complete(result.clone()),
         }
     }
 }
@@ -108,7 +108,9 @@ impl GeneratingPhase {
 
         match result {
             Ok(()) => SignPhase::Complete(Ok(())),
-            Err(err) => state.reorganize(&format!("signature generation failed: {err:?}")),
+            Err(SignError::Aborted(cause)) => {
+                state.reorganize(&format!("signature generation failed: {cause}"))
+            }
         }
     }
 
@@ -233,7 +235,7 @@ impl SignTask {
             match new_phase {
                 SignPhase::Complete(result) => {
                     if result.is_ok() {
-                        durations.emit(state.request().chain);
+                        durations.emit(state.request().chain, state.request().request_kind());
                     }
                     return result;
                 }

@@ -48,7 +48,7 @@ In case of authorization issues make sure you have logged into docker using your
 
 ### Running tests
 
-Each `just` test recipe automatically runs setup (WASM contract + node binary compilation) before executing tests. Pass an optional `filter` to run matching tests only, and `helios=1` to build with Helios. Run `just` with no arguments to list all available recipes.
+Each `just` test recipe automatically runs setup (WASM contract + node binary compilation) before executing tests. Pass an optional `filter` to run matching tests only. Run `just` with no arguments to list all available recipes.
 
 | Command | Full recipe | Description |
 |---|---|---|
@@ -63,8 +63,7 @@ Each `just` test recipe automatically runs setup (WASM contract + node binary co
 ```bash
 just t                               # run all tests
 just t my_module                     # run matching tests only
-just t my_module helios=1            # run matching tests with Helios
-just to test_basic_action helios=1.  # run specific test with Helios
+just to test_basic_action.           # run specific test
 ```
 
 The available profiles and their concurrency settings are defined in [`.config/nextest.toml`](../.config/nextest.toml).
@@ -92,33 +91,9 @@ just test-midnight
 The test requires the host `mpc-node` binary. Midnight node, indexer, proof-server, and fixture-driver logs are written under `target/tmp_*/midnight`.
 
 ## Logging and Tracing
-We have three types of logging available:
 
-### FMT
-This is the default logging format used for local development. It outputs logs to the console in a human-readable format.
-
-### OTLP
-OpenTelemetry Protocol is used for exporting logs to an OpenTelemetry collector. This is useful for integrating with various observability backends.
-
-#### Configuring Local OTLP Logging
-1. **Setup OTLP Backend**
-Start OTLP backend of your choice. For example [Jaeger](https://www.jaegertracing.io/docs/getting-started/).
-
-2. **Set the OTLP Endpoint**:
-    - By default, the endpoint is set to `http://localhost:4318`.
-    - To change it, set the environment variable `MPC_OTLP_ENDPOINT` or pass it as a parameter when starting the node with `--otlp-endpoint` flag.
-
-3. **Set the OpenTelemetry Logging Level**:
-    - By default, the logging level is set to `off` when parameters are skipped and to `debug` when running the integration tests cluster.
-    - To change it, pass `-opentelemetry-level` value when starting the node, or set the environment variable `MPC_OPENTELEMETRY_LEVEL` to the desired level (`debug`, `info`, etc.).
-
-4. **Explore traces**:
-- Start the cluster or run tests
-- Open the page of your backend in browser
-- Explore traces
-
-### Stackdriver
-This logging format is used exclusively in Google Cloud Platform (GCP). It integrates with Google Cloud's operations suite (formerly Stackdriver) to provide structured logging.
+Log level policy, output layers (FMT, OTLP, Stackdriver) and local OTLP setup are documented in
+[doc/logging.md](../doc/logging.md).
 
 ## Benchmarking
 

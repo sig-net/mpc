@@ -197,6 +197,7 @@ mod tests {
                 tx_id,
                 output: vec![],
                 chain_ctx: None,
+                origin_indexed_at: None,
             }));
         let publish = test_publish_state();
 

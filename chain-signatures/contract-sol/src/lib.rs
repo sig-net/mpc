@@ -186,7 +186,7 @@ pub struct SignBidirectional<'info> {
     #[account(mut)]
     pub fee_payer: Option<Signer<'info>>,
     pub system_program: Program<'info, System>,
-    pub instructions: Option<AccountInfo<'info>>,
+    pub instructions: Option<UncheckedAccount<'info>>,
 }
 
 #[event]

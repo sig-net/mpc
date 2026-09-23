@@ -533,7 +533,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         let events = replaced
             .into_iter()
             .map(|(tx_id, (sign_id, tx))| {
-                tracing::warn!(
+                tracing::info!(
                     ?tx_id,
                     ?sign_id,
                     nonce = tx.nonce,
@@ -609,7 +609,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                     }
                 },
                 Ok(BackfillOutcome::NotObserved) => {
-                    tracing::warn!(
+                    tracing::info!(
                         ?tx_id,
                         ?sign_id,
                         expected_nonce = pending_tx.nonce,

@@ -19,9 +19,9 @@ use tokio::sync::mpsc;
 
 /// Outcome of a signature task. Produced here on a protocol/abort error, and by
 /// the `request` layer when organizing cannot proceed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum SignError {
-    Aborted,
+    Aborted(String),
 }
 
 pub(crate) struct GenerateCtx {
@@ -80,10 +80,17 @@ impl SignGenerator {
         let delta =
             mpc_crypto::kdf::derive_delta(request.id.request_id, request.args.entropy, big_r);
         // TODO: Check whether it is okay to use invert_vartime instead
+        // `delta` is HKDF output, so a zero is only reachable by breaking the hash;
+        // reject it rather than panicking mid-signing.
+        let Some(delta_inv) = Option::<k256::Scalar>::from(delta.invert()) else {
+            return Err(InitializationError::BadParameters(format!(
+                "derived delta for {sign_id:?} is zero and cannot be inverted",
+            )));
+        };
         let output: PresignOutput<Secp256k1> = PresignOutput {
             big_r: (big_r * delta).to_affine(),
-            k: k * delta.invert().unwrap(),
-            sigma: (sigma + request.args.epsilon * k) * delta.invert().unwrap(),
+            k: k * delta_inv,
+            sigma: (sigma + request.args.epsilon * k) * delta_inv,
         };
         let protocol = Box::new(cait_sith::sign(
             &participants,
@@ -136,7 +143,7 @@ impl SignGenerator {
                     awaited = ?self.awaited(seen),
                     "signature generation aborted",
                 );
-                Err(SignError::Aborted)
+                Err(SignError::Aborted("inbox closed".to_string()))
             }
             Err(_err) => {
                 tracing::warn!(
@@ -145,7 +152,7 @@ impl SignGenerator {
                     awaited = ?self.awaited(seen),
                     "signature generation timeout",
                 );
-                Err(SignError::Aborted)
+                Err(SignError::Aborted("timeout".to_string()))
             }
         }
     }
@@ -181,13 +188,18 @@ impl SignGenerator {
                     if self.proposer == me {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES.inc();
                     }
-                    tracing::error!(
+                    // Wedged requests re-fail every round; `reorganize` warns
+                    // round-aware and carries this cause in its reason.
+                    tracing::info!(
                         ?sign_id,
                         ?err,
                         awaited = ?self.awaited(&seen),
                         "signature generation failed on protocol advancement",
                     );
-                    break Err(SignError::Aborted);
+                    break Err(SignError::Aborted(format!(
+                        "{err:?} (awaited {:?})",
+                        self.awaited(&seen)
+                    )));
                 }
             };
 

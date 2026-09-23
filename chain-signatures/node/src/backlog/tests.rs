@@ -1055,3 +1055,134 @@ async fn test_advance_rejects_invalid_publish_transition() {
         .unwrap_err();
     assert_eq!(err2, BacklogError::InvalidPublishTransition);
 }
+
+#[tokio::test]
+async fn respond_observed_at_survives_the_unwatch_lookup() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::new([71; 32]), Chain::Solana);
+    backlog.insert_mock_executing(&tx).await;
+
+    let entry = backlog
+        .unwatch_execution(tx.target_chain, &tx.id)
+        .await
+        .expect("watch must resolve to the executing entry");
+
+    let measured = entry
+        .awaiting_execution()
+        .expect("wait start must survive the lookup the handler goes through");
+    assert!(
+        measured < std::time::Duration::from_secs(60),
+        "a freshly published entry has barely been waiting, got {measured:?}"
+    );
+}
+
+#[tokio::test]
+async fn plain_lookup_cannot_measure_the_execution_wait() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::new([75; 32]), Chain::Solana);
+    backlog.insert_mock_executing(&tx).await;
+
+    let entry = backlog
+        .get_by::<Bidirectional<Executing>>(Chain::Solana, &tx.sign_id())
+        .await
+        .expect("entry must still be executing");
+    assert_eq!(entry.awaiting_execution(), None);
+}
+
+#[tokio::test]
+async fn live_regress_preserves_only_matching_execution_wait_starts() {
+    let backlog = Backlog::new();
+    let retained = mock_bidirectional_tx(SignId::from_u8(80), Chain::Solana);
+    let restored = mock_bidirectional_tx(SignId::from_u8(81), Chain::Solana);
+    let stale = mock_bidirectional_tx(SignId::from_u8(82), Chain::Solana);
+    let unrelated = mock_bidirectional_tx(SignId::from_u8(83), Chain::Canton);
+
+    // Backdate the wait so it is distinguishable from one restarted at recovery.
+    let observed_at = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(120))
+        .expect("clock must support backdating");
+    let entry = backlog
+        .insert_mock_executing(&retained)
+        .await
+        .with_respond_observed_at(Some(observed_at));
+    backlog.watch_execution(&entry).await;
+    backlog.insert_mock_executing(&restored).await;
+    let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
+    backlog
+        .unwatch_execution(restored.target_chain, &restored.id)
+        .await
+        .unwrap();
+    backlog.insert_mock_executing(&stale).await;
+    let unrelated_observed_at = backlog
+        .insert_mock_executing(&unrelated)
+        .await
+        .respond_observed_at();
+
+    backlog.regress(&checkpoint).await.unwrap();
+
+    let entry = backlog
+        .unwatch_execution(retained.target_chain, &retained.id)
+        .await
+        .expect("matching execution must remain watched");
+    assert_eq!(entry.respond_observed_at(), Some(observed_at));
+    assert!(entry.awaiting_execution().unwrap() >= std::time::Duration::from_secs(120));
+    let entry = backlog
+        .unwatch_execution(restored.target_chain, &restored.id)
+        .await
+        .expect("checkpoint execution must be re-watched");
+    assert_eq!(entry.respond_observed_at(), None);
+    assert!(backlog
+        .unwatch_execution(stale.target_chain, &stale.id)
+        .await
+        .is_none());
+    let entry = backlog
+        .unwatch_execution(unrelated.target_chain, &unrelated.id)
+        .await
+        .expect("other source chain must remain watched");
+    assert_eq!(entry.respond_observed_at(), unrelated_observed_at);
+}
+
+#[tokio::test]
+async fn recovered_executing_entry_has_no_wait_start() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::new([73; 32]), Chain::Solana);
+    backlog.insert_mock_executing(&tx).await;
+
+    let checkpoint = backlog
+        .checkpoint(Chain::Solana)
+        .await
+        .expect("checkpoint must snapshot");
+    let recovered = Backlog::new();
+    recovered.recover_by_checkpoint(&checkpoint).await;
+
+    let entry = recovered
+        .unwatch_execution(tx.target_chain, &tx.id)
+        .await
+        .expect("recovery must re-register the watch");
+    assert_eq!(
+        entry.awaiting_execution(),
+        None,
+        "a wait that began before the restart has no measurable start"
+    );
+}
+
+/// The final-response request stamps its own queue timestamp with "now", so the
+/// round trip's origin has to be carried across the transition explicitly.
+#[tokio::test]
+async fn advance_carries_the_origin_into_the_final_response() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::new([74; 32]), Chain::Solana);
+    let executing = backlog.insert_mock_executing(&tx).await;
+    let origin = executing.request().unix_timestamp_indexed;
+
+    let entry = executing
+        .advance(ExecutionOutcome::Success { output: vec![] })
+        .await
+        .expect("advance to final generating")
+        .expect("a success outcome yields a response to sign");
+
+    let SignKind::RespondBidirectional(response) = &entry.request().kind else {
+        panic!("expected RespondBidirectional");
+    };
+    assert_eq!(response.origin_indexed_at, Some(origin));
+}

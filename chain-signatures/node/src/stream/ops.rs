@@ -3,16 +3,19 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign, SignEntry};
+use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
+use crate::respond_bidirectional::is_failed_execution_output;
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    Chain, ExecutionOutcome, IndexedSignRequest, RespondBidirectionalEvent, SignId, SignKind,
-    SignatureRespondedEvent,
+    Chain, ExecutionOutcome, IndexedSignRequest, RequestKind, RespondBidirectionalEvent, SignId,
+    SignKind, SignatureRespondedEvent,
 };
+use mpc_utils::time::unix_elapsed_checked;
 
 pub(crate) async fn process_sign_request(
     sign_request: Arc<IndexedSignRequest>,
@@ -31,10 +34,15 @@ pub(crate) async fn process_sign_request(
         SignKind::Sign => {}
     }
 
+    let sign_id = sign_request.id;
     let (entry, is_new) = ctx.backlog.insert(sign_request).await;
+    if !is_new {
+        tracing::debug!(?sign_id, "sign request already pending; keeping its entry");
+        return Ok(false);
+    }
     ctx.try_enqueue(SignCommand::Request(entry)).await?;
 
-    Ok(is_new)
+    Ok(true)
 }
 
 pub(crate) async fn requeue_pending_sign_requests(
@@ -136,7 +144,7 @@ pub(crate) async fn process_respond_event(
 
     if let Some(entry) = entry.cast::<Bidirectional<Initial<AnyProgress>>>() {
         entry.verify_signature(root_pk, &respond_event.signature)?;
-        return advance_bidirectional_to_execution(entry, respond_event, root_pk).await;
+        return advance_bidirectional_to_execution(entry, respond_event, root_pk, ctx).await;
     }
 
     if entry.is::<Bidirectional<Executing>>() {
@@ -162,9 +170,11 @@ async fn advance_bidirectional_to_execution(
     entry: SignEntry<Bidirectional<Initial<AnyProgress>>>,
     respond_event: SignatureRespondedEvent,
     root_pk: mpc_primitives::PublicKey,
+    ctx: &StreamContext,
 ) -> anyhow::Result<()> {
     let sign_id = entry.sign_id();
     let source_chain = entry.chain();
+    let leg_kind = entry.request().request_kind();
     let event = entry.sign_bidirectional_event();
 
     // Admission validates the same derivations, but entries can enter the backlog
@@ -195,6 +205,16 @@ async fn advance_bidirectional_to_execution(
     })?;
 
     tracing::info!(?sign_id, "advance bidirectional tx to execution successful");
+    // The leg's task runs until told to stop, holding the sign id the next leg
+    // reuses. Bypasses the catchup gate: nothing replays a stop event.
+    ctx.sign_tx
+        .send(SignCommand::LegCompleted {
+            sign_id,
+            kind: leg_kind,
+        })
+        .await
+        .context("sign command channel closed")?;
+
     Ok(())
 }
 
@@ -217,11 +237,44 @@ pub(crate) async fn process_respond_bidirectional_event(
     };
 
     entry.verify_signature(root_pk, &event.signature)?;
+
+    // The whole round trip, measured against when the initial request was
+    // indexed. The origin travels with the final-response request so checkpoint
+    // recovery does not change whether this observation is emitted -- but it
+    // may therefore carry a peer's clock, so a future origin is skipped rather
+    // than saturated to a zero-length round trip.
+    if let SignKind::RespondBidirectional(response) = &entry.request.kind {
+        if let Some(origin_indexed_at) = response.origin_indexed_at {
+            match unix_elapsed_checked(origin_indexed_at) {
+                Some(elapsed) => record_request_latency(
+                    source_chain,
+                    SignRequestStep::BidirectionalTotal,
+                    execution_status(is_failed_execution_output(&response.output)),
+                    RequestKind::RespondBidirectional,
+                    elapsed,
+                ),
+                None => tracing::warn!(
+                    ?sign_id,
+                    origin_indexed_at,
+                    "skipping end-to-end latency: origin timestamp is ahead of local clock"
+                ),
+            }
+        }
+    }
+
     entry.complete().await;
     tracing::info!(?sign_id, "bidirectional tx completed");
     ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
 
     Ok(())
+}
+
+fn execution_status(failed: bool) -> &'static str {
+    if failed {
+        "execution_failed"
+    } else {
+        "ok"
+    }
 }
 
 /// Process an execution confirmation emitted by a chain client.
@@ -259,6 +312,11 @@ pub async fn process_execution_confirmed(
         "handling execution confirmation"
     );
 
+    // Captured before `advance` consumes the entry: the wait ends here, and the
+    // outcome is what distinguishes a healthy round trip from a reverted one.
+    let awaiting_execution = entry.awaiting_execution();
+    let execution_failed = matches!(result, ExecutionOutcome::Failed);
+
     let Some(entry) = entry
         .advance(result)
         .await
@@ -283,6 +341,16 @@ pub async fn process_execution_confirmed(
         "transitioned transaction to final response"
     );
     let chain = entry.chain;
+
+    if let Some(awaiting_execution) = awaiting_execution {
+        record_request_latency(
+            source_chain,
+            SignRequestStep::AwaitingExecution,
+            execution_status(execution_failed),
+            RequestKind::RespondBidirectional,
+            awaiting_execution,
+        );
+    }
     // Execution confirmations are observed on the target chain, but the follow-up
     // request belongs to the source chain. Do not let the target chain's catchup
     // barrier strand that follow-up work.
@@ -315,14 +383,9 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 
     telemetry.checkpoint_created(checkpoint.block_height);
 
-    let digest = checkpoint.digest();
-    let checkpoint_digest = mpc_primitives::CheckpointDigest {
-        chain,
-        height: checkpoint.block_height,
-        digest,
-    };
+    let checkpoint_digest = mpc_primitives::CheckpointDigest::from(&checkpoint);
     tracing::info!(block, ?checkpoint, %chain, ?checkpoint_digest, "created checkpoint");
-    ctx.rpc.vote_checkpoint(checkpoint_digest);
+    ctx.rpc.vote_checkpoint(checkpoint_digest).await?;
 
     Ok(())
 }
