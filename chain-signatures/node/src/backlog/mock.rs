@@ -78,6 +78,7 @@ impl BacklogTestExt for Backlog {
             .advance(ExecutionOutcome::Success { output: vec![] })
             .await
             .expect("advance to final generating")
+            .expect("a success outcome yields a response to sign")
     }
 }
 

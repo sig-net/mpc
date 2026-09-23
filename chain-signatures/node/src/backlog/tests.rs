@@ -592,7 +592,8 @@ async fn test_bidirectional_typestate_lifecycle() {
     let final_entry = exec_entry
         .advance(ExecutionOutcome::Success { output: vec![] })
         .await
-        .expect("should advance to final");
+        .expect("should advance to final")
+        .expect("a success outcome yields a response to sign");
     assert_eq!(final_entry.request().id, sign_id);
 
     // Verify get_by can retrieve Final<Generating> state directly from backlog
@@ -636,7 +637,8 @@ async fn test_bidirectional_typestate_lifecycle() {
         .expect("chained advance to executing")
         .advance(ExecutionOutcome::Success { output: vec![] })
         .await
-        .expect("chained advance to final generating");
+        .expect("chained advance to final generating")
+        .expect("a success outcome yields a response to sign");
 
     let (cpk2, cout2) = mock_signature_output(&bidi_final_gen.request().args);
     let chained_done = bidi_final_gen
@@ -664,7 +666,8 @@ async fn test_bidirectional_executing_advance_outcomes() {
             output: vec![0x01, 0x02],
         })
         .await
-        .expect("advance success");
+        .expect("advance success")
+        .expect("a success outcome yields a response to sign");
 
     // Verified: sign_id and chain match invariant by construction
     assert_eq!(success_entry.sign_id(), sign_id);
@@ -682,7 +685,8 @@ async fn test_bidirectional_executing_advance_outcomes() {
     let failed_entry = entry2
         .advance(ExecutionOutcome::Failed)
         .await
-        .expect("advance failed");
+        .expect("advance failed")
+        .expect("a failed execution still yields a response to sign");
 
     assert_eq!(failed_entry.sign_id(), sign_id2);
     assert_eq!(failed_entry.chain, tx2.source_chain);
@@ -726,7 +730,8 @@ async fn test_watch_unwatch_and_respond() {
     executing_entry
         .advance(ExecutionOutcome::Success { output: vec![] })
         .await
-        .expect("respond should transition to final generating");
+        .expect("respond should transition to final generating")
+        .expect("a success outcome yields a response to sign");
     assert!(backlog
         .get_by::<Bidirectional<Final<Generating>>>(tx.source_chain, &sign_id)
         .await
@@ -1173,7 +1178,8 @@ async fn advance_carries_the_origin_into_the_final_response() {
     let entry = executing
         .advance(ExecutionOutcome::Success { output: vec![] })
         .await
-        .expect("advance to final generating");
+        .expect("advance to final generating")
+        .expect("a success outcome yields a response to sign");
 
     let SignKind::RespondBidirectional(response) = &entry.request().kind else {
         panic!("expected RespondBidirectional");
