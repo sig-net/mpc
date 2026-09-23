@@ -60,17 +60,5 @@ pub(crate) async fn recover_backlog(
         tracing::warn!(%chain, "backlog regressed via consensus checkpoint");
     }
 
-    // Neither branch above passes through admission: hydration restores what the
-    // local checkpoint held, and a regression installs a peer-built one. Sweep after both.
-    let dropped = backlog.drop_reserved_path_requests(chain).await;
-    if !dropped.is_empty() {
-        tracing::error!(
-            %chain,
-            count = dropped.len(),
-            ?dropped,
-            "dropped recovered sign requests on the reserved attestation path"
-        );
-    }
-
     Ok(())
 }

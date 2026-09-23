@@ -5,7 +5,7 @@ use anyhow::Context;
 use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign, SignEntry};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
-use crate::respond_bidirectional::{is_failed_execution_output, is_respond_bidirectional_path};
+use crate::respond_bidirectional::{claims_attestation_key, is_failed_execution_output};
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -38,7 +38,7 @@ pub(crate) async fn process_sign_request(
     // path, so a request naming that path forges a response to itself. Here
     // rather than in `validate`, which plain `sign` never reaches.
     anyhow::ensure!(
-        !is_respond_bidirectional_path(sign_request.chain, &sign_request.args.path),
+        !claims_attestation_key(&sign_request),
         "rejecting sign request {:?} on the reserved attestation path",
         sign_request.id
     );

@@ -5,6 +5,7 @@ use mpc_crypto::ScalarExt;
 use mpc_primitives::{
     BidirectionalTx, Chain, ChainConfig as _, IndexedSignRequest,
     RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
+    SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
 use std::sync::Arc;
@@ -19,21 +20,21 @@ const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
 pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
 pub const MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH: &str = "midnight response key";
 
-fn respond_bidirectional_path(chain: Chain) -> anyhow::Result<String> {
+fn respond_bidirectional_path(chain: Chain) -> Option<&'static str> {
     match chain {
-        Chain::Solana => Ok(SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string()),
-        Chain::Hydration => Ok(HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string()),
-        Chain::Canton => Ok(CANTON_RESPOND_BIDIRECTIONAL_PATH.to_string()),
-        Chain::Midnight => Ok(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH.to_string()),
-        _ => anyhow::bail!("Unsupported chain: {}", chain),
+        Chain::Solana => Some(SOLANA_RESPOND_BIDIRECTIONAL_PATH),
+        Chain::Hydration => Some(HYDRATION_RESPOND_BIDIRECTIONAL_PATH),
+        Chain::Canton => Some(CANTON_RESPOND_BIDIRECTIONAL_PATH),
+        Chain::Midnight => Some(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH),
+        _ => None,
     }
 }
 
-/// Whether `path` is the one `chain`'s attestation key is derived under. False
-/// for a chain that has no attestation key, so a chain that gains one has to be
-/// added to `respond_bidirectional_path` or its path is admitted here.
-pub(crate) fn is_respond_bidirectional_path(chain: Chain, path: &str) -> bool {
-    respond_bidirectional_path(chain).is_ok_and(|reserved| path == reserved)
+/// Whether `request` asks for its chain's attestation key without being the leg-2
+/// attestation the respond path builds. False on chains `respond_bidirectional_path` omits.
+pub(crate) fn claims_attestation_key(request: &IndexedSignRequest) -> bool {
+    !matches!(request.kind, SignKind::RespondBidirectional(_))
+        && respond_bidirectional_path(request.chain) == Some(request.args.path.as_str())
 }
 
 pub struct CompletedTx {
@@ -118,7 +119,9 @@ impl CompletedTx {
         let Some(payload) = Scalar::from_bytes(message) else {
             anyhow::bail!("Failed to convert respond bidirectional message to scalar: {message:?}");
         };
-        let path = respond_bidirectional_path(source_chain)?;
+        let path = respond_bidirectional_path(source_chain)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported chain: {}", source_chain))?
+            .to_string();
         let epsilon = self.tx.epsilon(&path)?;
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest::respond_bidirectional(
@@ -407,5 +410,33 @@ mod tests {
         assert_eq!(request.chain, Chain::Midnight);
         assert_eq!(request.args.payload, expected_payload);
         assert_eq!(request.args.path, MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH);
+    }
+
+    /// The network's own leg-2 attestation and the attack name the same path, so the
+    /// request kind is all that separates them.
+    #[test]
+    fn claims_attestation_key_separates_the_attack_from_leg_two() {
+        let tx = sample_bidirectional_tx(Chain::Solana, [0x30; 32]);
+        let leg_two = CompletedTx::new(tx, None, None)
+            .create_sign_request_from_serialized_output(vec![1; 32])
+            .unwrap();
+        assert!(!claims_attestation_key(&leg_two));
+
+        let mut attack = leg_two.clone();
+        attack.kind = SignKind::Sign;
+        assert!(claims_attestation_key(&attack));
+
+        // Canton has no plain `sign`, so a first leg is its only way to ask.
+        let mut leg_one =
+            (*crate::backlog::mock::mock_bidi_request(SignId::new([0x31; 32]), Chain::Solana))
+                .clone();
+        leg_one.args.path = SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string();
+        assert!(claims_attestation_key(&leg_one));
+
+        attack.chain = Chain::Ethereum;
+        assert!(
+            !claims_attestation_key(&attack),
+            "only the request's own chain's path is reserved"
+        );
     }
 }
