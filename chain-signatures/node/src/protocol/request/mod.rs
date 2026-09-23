@@ -1098,7 +1098,7 @@ mod tests {
         );
         let entry = backlog::SignEntry::generating(leg2, &backlog);
         spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
-        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::RespondBidirectional));
 
         // The first leg's completion arrives late: it must not retire this leg.
         spawner.handle_sign(
@@ -1110,7 +1110,7 @@ mod tests {
             &cfg,
         );
         assert!(spawner.test_requests_contains(&sign_id));
-        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::RespondBidirectional));
 
         // A completion naming the leg we do track still retires it.
         spawner.handle_sign(
@@ -1266,9 +1266,9 @@ mod tests {
         let leg1 = crate::backlog::mock::mock_bidi_request(sign_id, Chain::Solana);
         let entry1 = backlog::SignEntry::generating(Arc::clone(&leg1), &backlog);
         spawner.handle_sign(&governance, SignCommand::Request(entry1), &cfg);
-        assert!(spawner.test_tasks_contains(sign_id));
-        assert!(spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::SignBidirectional));
-        assert!(!spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::RespondBidirectional));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::SignBidirectional));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
 
         // 2. Deliver a Phase 2 Propose while Phase 1 is still running.
         // It must NOT be routed into Phase 1's mailbox. It buffers into Phase 2's mailbox.
@@ -1282,7 +1282,7 @@ mod tests {
                 action: PositAction::Propose,
             },
         );
-        assert!(spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::RespondBidirectional));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
 
         // 3. Supersede Phase 1 with Phase 2 (RespondBidirectional).
         // Phase 1 must be retired/marked dead, and Phase 2 task must be spawned.
@@ -1293,12 +1293,12 @@ mod tests {
         );
         let entry2 = backlog::SignEntry::generating(leg2, &backlog);
         spawner.handle_sign(&governance, SignCommand::Request(entry2), &cfg);
-        assert!(spawner.test_dead_ids_contains_kind(&sign_id, RequestKind::SignBidirectional));
-        assert!(!spawner.test_dead_ids_contains_kind(&sign_id, RequestKind::RespondBidirectional));
-        assert!(spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::RespondBidirectional));
-        assert!(!spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::SignBidirectional));
-        assert!(spawner.test_tasks_contains_kind(sign_id, RequestKind::RespondBidirectional));
-        assert!(!spawner.test_tasks_contains_kind(sign_id, RequestKind::SignBidirectional));
+        assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::SignBidirectional));
+        assert!(!spawner.test_dead_ids_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::RespondBidirectional));
+        assert!(!spawner.test_tasks_contains(sign_id, RequestKind::SignBidirectional));
 
         // 4. A late Phase 1 Propose arriving after Phase 1 was superseded must be dropped by dead_ids.
         spawner.handle_posit(
@@ -1311,14 +1311,14 @@ mod tests {
                 action: PositAction::Propose,
             },
         );
-        assert!(!spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::SignBidirectional));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
 
         // 5. When the cancelled Phase 1 task yields its exit from tasks.join_next(),
         // handle_task_exit must NOT tear down the running Phase 2 task or its request entry.
         spawner.handle_task_exit(Err((sign_id, RequestKind::SignBidirectional)));
-        assert!(spawner.test_tasks_contains_kind(sign_id, RequestKind::RespondBidirectional));
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::RespondBidirectional));
         assert!(spawner.test_requests_contains(&sign_id));
-        assert!(spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::RespondBidirectional));
-        assert!(!spawner.test_dead_ids_contains_kind(&sign_id, RequestKind::RespondBidirectional));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert!(!spawner.test_dead_ids_contains(&sign_id, RequestKind::RespondBidirectional));
     }
 }
