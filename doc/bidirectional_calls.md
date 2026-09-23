@@ -619,3 +619,121 @@ a path from B48 through A15; the first at A12 has none.
   when that is attested, so an application has a way out, but nothing
   bounds the entries nobody clears. Checking old entries less often bounds
   the work per block, which is the part that matters.
+
+
+## 7. Canonical Protocol Structures
+
+The Midnight protocol structures are the canonical structures.
+
+### Request Id
+
+```compact
+new type RequestIdV1 = Bytes<32>;
+```
+
+### Sign Bidirectional Event
+
+```compact
+struct SignBidirectionalEventV1<TxParams, #LenOutputDeserialization, #LenRespondSerialization> {
+  // RequestIdPreimage Fields
+  keyVersion: Uint<8>;
+  sender: ContractAddress;
+  path: Bytes<32>; 
+  algo: MPCSignatureAlgorithm;
+  txParamType: TxParamType;       // which transaction type
+  txParams: TxParams;             // the transaction parameters
+  executionDest: Bytes<32>;       // Caip2Id that identifies 'destination chain'
+
+  // Protocol Only Fields
+  signatureDest: MPCDestination;  // where signatures and reponse attestations posted
+  params: Bytes<64>;
+  outputDeserializationSchema: Bytes<LenOutputDeserialization>;
+  respondSerializationSchema: Bytes<LenRespondSerialization>;
+}
+```
+
+#### Request Id
+
+```compact
+struct RequestIdPreimageV1<TxParams> {
+  keyVersion: Uint<8>;
+  sender: ContractAddress;
+  path: Bytes<32>;
+  algo: MPCSignatureAlgorithm;
+  txParamType: TxParamType;
+  txParams: TxParams;
+  executionDest: Bytes<32>;
+}
+
+calculateRequestIdV1<TxParams, #LenOutputDeserialization, #LenRespondSerialization>(
+    request: SignBidirectionalEvent<TxParams, LenOutputDeserialization, LenRespondSerialization>
+): RequestId {
+    const preimage = RequestIdPreimage<TxParams> {
+      keyVersion: request.keyVersion,
+      sender: request.sender,
+      path: request.path,
+      algo: request.algo,
+      txParamType: request.txParamType,
+      txParams: request.txParams,
+      executionDest: request.executionDest,
+    };
+
+    return upgradeFromTransient(transientHash<RequestIdPreimage<TxParams>>(preimage)) as RequestId;
+}
+```
+
+### Signature Responded Event
+
+```compact
+struct SignatureRespondedEventV1 {
+    requestId: RequestId;
+    signature: Signature;
+}
+```
+
+
+### Respond Bidircectional Event
+
+
+```compact
+export enum OutputKindV1 {
+  executed,
+  failed,
+  unviable
+}
+
+struct RespondBidirectionalEventV1 {
+    requestId: RequestId;
+    blockHeight: Uint<64>;
+    outputKind: OutputKind;
+    serializedOutputLength: Uint<64>;
+    digest: Bytes<32>; // output of calculateSignetAttestationDigestV1
+    signature: Signature;
+}
+```
+
+#### Response Attestation
+
+```compact
+calculateSignetAttestationDigestV1<#serializedOutputLength>(
+    requestId: RequestId,
+    blockHeight: Uint<64>,
+    outputKind: OutputKind,
+    serializedOutput: Bytes<serializedOutputLength>,
+): Bytes<32> {
+  return upgradeFromTransient(transientHash<[
+      Uint<8>,
+      RequestId,
+      Uint<64>,
+      OutputKind,
+      Uint<64>,
+      Bytes<serializedOutputLength>,
+    ]>([
+      requestId,
+      blockHeight,
+      outputKind,
+      serializedOutputLength,
+      serializedOutput,
+  ]));
+}
+```
