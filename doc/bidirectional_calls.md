@@ -215,7 +215,7 @@ upgrade that introduces last_seen (Section 4.1).
   different transaction using the same nonce or output blocks ours for
   good. A Solana transaction with a recent blockhash has no such
   protection; see Section 6.
-* Progress. All source and destination chains keep producing final blocks. 
+* Progress. All source and destination chains keep producing final blocks.
   An outage delays delivery and changes nothing else.
 * One id per chain. Two different chain ids the MPC accepts never name the
   same chain. Otherwise the same transaction could be made once under each
@@ -239,7 +239,7 @@ state (per application contract):
     attestation_key: KeyVersion -> PublicKey   // Section 3.1
     last_seen:   ChainId -> Height       // 0 for every chain, see below
     outstanding: RequestId -> Entry
-    Entry = { dest: ChainId, known: Height }
+    Entry = { dest: ChainId, known: Height }   // a rid cannot yield dest
 
 on sign_bidirectional(req) from the application logic:
     rid = request_id(self, req)
@@ -266,29 +266,26 @@ on response(rid, att = (key_version, kind, height, data), sig):
 The check is here and not in the MPC because the nodes have no agreed
 mapping between source and destination heights, so no node can say what the
 destination looked like when a request was made; the contract can, from the
-responses it has accepted. The entry keeps `dest` because the rid is a hash
-and cannot yield it, and C3d needs it to pick the last_seen to raise. Where
-the chain runs the handler in the response transaction, `response` is
-atomic: a handler that fails reverts C3d and C4 with it, so the entry
-stays outstanding and the response can be delivered again (Section 6).
+responses it has accepted. On chains where `response` and the
+application's handler run in one transaction, a failing handler reverts
+the whole transaction, C3d and C4 included: the entry stays outstanding and
+the same response can be delivered again (Section 6).
 
 last_seen starts at 0 for every destination, and so does `known` for any
 entry already outstanding when a contract upgrades to this design. Until
 an acceptance raises last_seen[dest] above every execution from before the
-upgrade, G1 and G2 are suspended for that destination. The cost: a rid
-whose transaction already executed through this API, and that is made
-again with the same bytes, can accept one replayed old response, a stale
-answer for a request that could never execute again, and a second accepted
-response for that execution (G2). A start height an operator supplies
-instead would, if too high, drop every execution at or below it with no
-way back (C4).
+upgrade, G1 and G2 are suspended for that destination: a request made
+again for a transaction that executed before the upgrade can accept a
+replay of its old response. A start height supplied by an operator would
+avoid that, but set too high it drops every execution at or below it for
+good (C4).
 
-The library relies on its state survivings contract upgrades and migrations:
-a contract that keeps its key and loses `outstanding` and `last_seen` accepts,
-for a rid made again, a response to a request it already answered. 
-Furthermore it must hold that every published response eventually
-reaches `response`, and again after a drop; who delivers it is in Section
-4.2 for Midnight and 4.3 elsewhere.
+The library relies on its state surviving contract upgrades and
+migrations: a contract that keeps its key and loses `outstanding` and
+`last_seen` will accept a response to a request it already answered
+when a request with a rid used earlier is made again.
+It also relies on every published response eventually reaching `response`.
+Who delivers it is in Section 4.2 for Midnight and 4.3 elsewhere.
 
 Properties:
 
@@ -388,8 +385,8 @@ processable(req): bool
 state:
     tracked: RequestId -> Entry
     Entry = { req, contract, signatures: Set<Signature>, attestation? }
-    // a set: if a second signature for the same request is known
-    // a second transaction ID must be watched watch
+    // a set: a second signature for one request is a second
+    // transaction ID to watch (see below)
 
 on SignRequest { contract, rid, req } finalised on the source chain:
     if not authentic(contract, rid, req):                 // M1
@@ -435,48 +432,37 @@ on Response { contract, rid, att, sig } finalised on the source chain:
         delete tracked[rid]
 ```
 
-The MPC looks for a request's execution in two ways. The first is by
-transaction ID, under every signature it holds for the request, in any
-final block: the one being processed or one finalised earlier, so a node
-that starts looking late, or admits the request after the execution, still
-finds it. There can be several signatures, for instance when a node whose
-share went into one run restarts and joins another; replay protection lets
-at most one of them execute. The second way looks only in the block being
-processed, by sender and unsigned bytes, and needs no signature: the sender
-is the request's own account, which only the network controls, and the
-bytes alone would not do, since another contract or key may have requested
-the same bytes.
+The MPC looks for a request's execution in two ways. (i) By transaction ID,
+under every signature it holds for the request, in any final block, so a
+node that starts looking late still finds it. There can be several
+signatures, for instance when a node whose share went into one run
+restarts and joins another, and replay protection lets at most one of them
+execute. And (ii) in the block being processed, by sender and unsigned bytes:
+the sender is the request's own account, which only the network controls, 
+and the bytes alone would not do, since another contract or key may have 
+requested the same bytes.
 
-The second way keeps attestation off the source chain's critical path: a
-signing round leaves fewer than t nodes holding the signature, so an
-attestation always needs nodes that were not in it, and without the block
-scan they would first have to index the `Signature` event.
+(ii) is an optimisation. A node that was not in the signing
+round does not know the signature until the `Signature` event is published
+on the source chain and indexed, and the attestation may need such nodes
+when some participants of the round are faulty. The block scan lets them
+attest from the destination block alone, so the attestation does not wait
+on the source chain.
 
-Unviable is detected only in the block being processed, and only by nodes
-that admitted the request before processing that block. Finding the block
-later would mean querying historical account state, which the lookup by
-transaction ID does not need. Whether a node has admitted the request by
-then depends on how far its destination indexing runs ahead of its source
-indexing, so replay protection used up soon after the request is made may
-be seen by fewer nodes than the threshold: Unviable is best-effort. Other
-ways a transaction becomes unviable, an expiry height or a timebound, are
-not detected at all (Section 6).
+Unviable is detected only in the blocks being processed after admission,
+So replay protection used up soon after the request is made may be seen
+by fewer than t nodes: Unviable is best-effort.
 
-Restarts. A node keeps `tracked` and its position on every chain durably,
-advances the position only once an event's effects are persisted, and
-resumes from it. So admitted requests survive, dropped ones stay dropped
-(M4), no destination block is skipped, which the block scan needs, and
-each entry resumes at the step it is missing: signing, the lookup (the
-search for its execution above) or publishing, the last retried until the
-Response event is final. A duplicate attestation has the same content
-(Section 5) and is dropped (C3a), so restarting anywhere is harmless.
+A node keeps `tracked` and its position on every chain durably, advances
+the position only once an event's effects are persisted, and resumes from
+it, so no block is skipped and a restart repeats at most the step in
+progress. A repeated attestation has the same content (Section 5) and is
+dropped (C3a).
 
-A request made again after it was answered (Section 2) is signed again,
-or dropped as still tracked if the first Response has not been processed
-yet. Its transaction executed under the first signature and cannot execute
-again; the new entry holds only the new signature and the block scan sees
-only current blocks, so nothing is attested, and the entry stays tracked
-forever, as does the library's.
+A request made again after it was answered (Section 2) is signed again, or
+dropped as still tracked. Its transaction cannot execute again, and the
+old execution is under another signature in a past block, so no lookup
+matches: the entry stays tracked forever, as does the library's.
 
 Properties:
 
@@ -513,8 +499,8 @@ design.
 * Threshold (Section 2 of protocol_properties.md). Fewer than t nodes cannot
   produce a signature or an attestation, honest nodes alone can, and honest
   nodes eventually publish what they produce.
-* Agreement. Honest nodes admit the same requests and compute the same 
-  attestation for a rid, as a function of final destination state and the 
+* Agreement. Honest nodes admit the same requests and compute the same
+  attestation for a rid, as a function of final destination state and the
   request's schemas only.
 * Distinct keys (ACCOUNT_DERIVATION.md). The derivation path contains the
   source chain and the requesting contract, so different (source chain,
@@ -523,17 +509,18 @@ design.
   asked for it. Assumed here: the attestation key sits on a path no request
   may name, and two signing schemes never share a key.
 
-* G1: an accepted response to req describes a destination block at height
-  h (M2) with h > e.known (C3c). Suppose that block happens-before the
-  making of req. The only edges into the source chain are this contract's
-  acceptances, so the path runs along the destination chain to a block at
-  height h'' >= h, from there to the transaction in which this contract
-  accepted a response attesting h'', and along the source chain to the
-  making of req. That acceptance raised last_seen[dest] to at least h''
-  (C3d) before req recorded it (C2; C3d runs before the handler), so
-  e.known >= h and C3c drops the response. Contradiction. The diagram
-  shows the case where the accepted response answered an earlier making of
-  the same request.
+* G1, in short: an execution this contract has already accepted is at or below
+  last_seen, so a request made later records it as known and C3c drops any
+  response about it. In full: an accepted response to req describes a
+  destination block at height h (M2) with h > e.known (C3c). Suppose that
+  block happens-before the making of req. The only edges into the source chain
+  are this contract's acceptances, so the path runs along the destination
+  chain to a block at height h'' >= h, from there to the transaction in which
+  this contract accepted a response attesting h'', and along the source chain
+  to the making of req. That acceptance raised last_seen[dest] to at least h''
+  (C3d) before req recorded it (C2; C3d runs before the handler), so e.known
+  >= h and C3c drops the response. Contradiction. The diagram shows the case
+  where the accepted response answered an earlier making of the same request.
 
 ```mermaid
 flowchart LR
@@ -557,17 +544,19 @@ one on each chain; dashed arrows are cross-chain requests, which are
 deliberately not part of the relation. The second making of req at A16 has
 a path from B48 through A15; the first at A12 has none.
 
-* G2: suppose two responses reporting the same execution (height h) are
-  accepted by entries e1 and e2. An accepted response is for a rid the MPC
-  admitted (C3b), so its key parameters are canonical (M4) and its dest
-  names one chain (Section 3.3). Both then carry the same rid: the
+* G2, in short: one execution has one rid, so a second entry for it was
+  created after the first acceptance and records a height at or above the
+  execution. In full: suppose two responses reporting the same execution
+  (height h) are accepted by entries e1 and e2. An accepted response is for a
+  rid the MPC admitted (C3b), so its key parameters are canonical (M4) and its
+  dest names one chain (Section 3.3). Both then carry the same rid: the
   execution fixes the transaction and the destination, and its sender fixes
-  the contract and key (distinct keys, above). By C1 they were not
-  outstanding together, so e2 was created after e1 was removed, after the
-  first acceptance. By C3d last_seen[dest] was already at least h then,
-  so by C2 e2.known >= h, and C3c drops the second response. Contradiction.
-  The execution itself happening at most once is the replay-protection
-  assumption, not something the library enforces.
+  the contract and key (distinct keys, above). By C1 they were not outstanding
+  together, so e2 was created after e1 was removed, after the first
+  acceptance. By C3d last_seen[dest] was already at least h then, so by C2
+  e2.known >= h, and C3c drops the second response. Contradiction. The
+  execution itself happening at most once is the replay-protection assumption,
+  not something the library enforces.
 
 * G3: the attestation key binds the source chain and the contract (M1), the
   attestation binds the rid (M2), the rid binds the transaction (a length-
@@ -577,27 +566,28 @@ a path from B48 through A15; the first at A12 has none.
   and M6 report a transaction from req.tx's account using up req.tx's
   replay protection, which blocks req.tx for good (Section 3.3).
 
-* G4: the signature was issued after this making of req was final (Section
-  4.4, signing follows the finalised SignRequest), and e.known is a height
-  some accepted response attested before req was made (C2, C3d), hence
-  final by then (M2), so the execution's height is above e.known. The MPC
-  finds the execution by its transaction ID or in its own block (M3),
-  whenever it started looking; the return data decodes (G4's premise), so
-  M5 does not apply, and honest nodes compute the same attestation and
-  publish it (threshold and agreement, above). By C4 the entry is still
-  outstanding unless a response for the rid of req was accepted first, and
-  any such response reports this execution too, since at most one
-  signature executes and no Unviable can follow an execution (replay
-  protection, Section 3.3), and M3 attests only that receipt. So a
-  response reporting the execution passes C3 and is accepted.
+* G4, in three steps.
+  1. The execution is above e.known: the signature was issued after this
+     making of req was final (Section 4.4, signing follows the finalised
+     SignRequest), and e.known is a height some accepted response attested
+     before req was made (C2, C3d), hence final by then (M2).
+  2. It is attested: the MPC finds the execution by its transaction ID or
+     in its own block (M3), whenever it started looking; the return data
+     decodes (G4's premise), so M5 does not apply; and honest nodes compute
+     the same attestation and publish it (threshold and agreement, above).
+  3. It is accepted: by C4 the entry is still outstanding unless a
+     response for the rid of req was accepted first, and any such response
+     reports this execution too, since at most one signature executes and
+     no Unviable can follow an execution (replay protection, Section 3.3),
+     and M3 attests only that receipt. So a response reporting the
+     execution passes C3 and is accepted.
 
 ## 6. Notes
 
-* This design assumes once a transaction has executed, the same bytes never
-  execute again under that key. EVM nonces, spent UTXOs and Solana durable
-  nonces give this. Using a recent blockhash can be made to work if the MPC
-  remembers completed rids for as long as a differently signed copy could
-  still execute, about a minute on Solana.
+* Solana with a recent blockhash has no replay protection in the sense of
+  Section 3.3. It can be made to work if the MPC remembers completed rids
+  for as long as a differently signed copy could still execute, about a
+  minute.
 * Unviability by expiry. A transaction that expires by height or timebound
   never executes and uses up no replay protection, so nothing in Section
   4.4 notices, and the request stays outstanding on both sides. Reporting it
@@ -620,12 +610,10 @@ a path from B48 through A15; the first at A12 has none.
   outstanding, and an unanswered request is outstanding forever. Until then
   C3b accepts any key version the library holds, for any rid, so a
   compromised old key forges responses to current requests.
-* `tracked` grows without bound. An entry lives until a verified Response,
-  and a request whose signature nobody broadcasts never produces one. A
-  cancel transaction that uses up the replay protection ends the MPC's
-  entry when enough nodes see it (M6), and the library's when that is
-  attested, so an application has a way out, but nothing bounds the
-  entries nobody clears.
-  `outstanding` and an entry's `signatures` grow the same way. Checking old
-  entries less often bounds the work per block, which is the part that
-  matters.
+* `tracked` and `outstanding` can grow without bound. An entry lives until a
+  verified Response, and a request whose signature nobody broadcasts never
+  produces one. A cancel transaction that uses up the replay protection
+  ends the MPC's entry when enough nodes see it (M6), and the library's
+  when that is attested, so an application has a way out, but nothing
+  bounds the entries nobody clears. Checking old entries less often bounds
+  the work per block, which is the part that matters.
