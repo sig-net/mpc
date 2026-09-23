@@ -9,7 +9,9 @@ pub enum SignKind {
 }
 
 /// Payload-free projection of [`SignKind`], used as a metric label.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum RequestKind {
     #[default]
     Sign,

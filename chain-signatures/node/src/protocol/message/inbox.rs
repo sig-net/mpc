@@ -792,7 +792,12 @@ mod tests {
         let mut messages = Vec::with_capacity(sub::MAX_MESSAGE_SUB_CHANNEL_SIZE + 2);
         for round in 0..=sub::MAX_MESSAGE_SUB_CHANNEL_SIZE {
             messages.push(Message::Posit(PositMessage {
-                id: PositProtocolId::signature(sign_id, mpc_primitives::RequestKind::Sign, 77, round),
+                id: PositProtocolId::signature(
+                    sign_id,
+                    mpc_primitives::RequestKind::Sign,
+                    77,
+                    round,
+                ),
                 from,
                 action: PositAction::Accept,
             }));

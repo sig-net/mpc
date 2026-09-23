@@ -27,13 +27,7 @@ pub type Round = usize;
 pub enum PositProtocolId {
     Triple(TripleId),
     Presignature(FullPresignatureId),
-    Signature(
-        SignId,
-        PresignatureId,
-        Round,
-        #[serde(default)]
-        RequestKind,
-    ),
+    Signature(SignId, PresignatureId, Round, #[serde(default)] RequestKind),
 }
 
 impl PositProtocolId {

@@ -284,8 +284,10 @@ impl SignatureSpawner {
         };
 
         // Spawn the async task with organizing loop
-        self.tasks
-            .spawn((sign_id, kind), task.run(entry, self.mesh_state.clone(), mailbox));
+        self.tasks.spawn(
+            (sign_id, kind),
+            task.run(entry, self.mesh_state.clone(), mailbox),
+        );
     }
 
     /// Spawn a fresh incarnation for every retained request; the caller must
@@ -679,10 +681,12 @@ mod tests {
                 round: Arc::new(AtomicUsize::new(0)),
             },
         );
-        spawner.tasks.spawn((probe_id, RequestKind::Sign), async move {
-            let _probe = probe;
-            std::future::pending::<Result<(), SignError>>().await
-        });
+        spawner
+            .tasks
+            .spawn((probe_id, RequestKind::Sign), async move {
+                let _probe = probe;
+                std::future::pending::<Result<(), SignError>>().await
+            });
 
         // Step 1: Spawn → mailbox created, request retained, not dead
         let entry = backlog::SignEntry::generating(Arc::clone(&request), &backlog);

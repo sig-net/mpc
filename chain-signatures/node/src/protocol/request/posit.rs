@@ -192,7 +192,12 @@ impl PositPhase {
                 ctx.governance.me,
                 proposer,
                 PositMessage {
-                    id: PositProtocolId::signature(sign_id, ctx.kind, presignature_id, state.round()),
+                    id: PositProtocolId::signature(
+                        sign_id,
+                        ctx.kind,
+                        presignature_id,
+                        state.round(),
+                    ),
                     from: ctx.governance.me,
                     action: PositAction::Accept,
                 },
@@ -453,7 +458,12 @@ impl PositPhase {
                     ctx.governance.me,
                     p,
                     PositMessage {
-                        id: PositProtocolId::signature(sign_id, ctx.kind, presignature_id, state.round()),
+                        id: PositProtocolId::signature(
+                            sign_id,
+                            ctx.kind,
+                            presignature_id,
+                            state.round(),
+                        ),
                         from: ctx.governance.me,
                         action: PositAction::Start(participants.clone()),
                     },
