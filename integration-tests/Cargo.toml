@@ -104,4 +104,3 @@ harness = false
 
 [features]
 default = []
-helios = ["mpc-chain-ethereum/helios", "mpc-node/helios"]
