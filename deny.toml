@@ -15,7 +15,6 @@ all-features = true
 
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2026-0258", reason = "h2 0.3 unbounded empty DATA frames; DoS only, outgoing client connections (workspace hyper 0.14 dep in integration-tests utils); no 0.3 patch exists (mpc#782)" },
     { id = "RUSTSEC-2026-0222", reason = "wasmtime 45 type-index mixup; only reachable via near-sdk unit-testing dev-only feature (near-vm-runner pins wasmtime ^45, no patched release)" },
     { id = "RUSTSEC-2026-0269", reason = "wasmtime 45 filesystem sandbox escape; same chain as RUSTSEC-2026-0222; dev-only, no WASI filesystem exposed to guest code" },
     { id = "RUSTSEC-2026-0285", reason = "rustls 0.23 accepts TLS 1.3 handshake messages across encryption-level boundaries; spec-compliance issue, transcript still authenticated, outgoing client TLS only; 0.23.45 needs aws-lc-rs ^1.18 but near-crypto 0.37.x pins aws-lc-rs =1.16.2 and google-cloud-storage =1.17.0 forces rustls' aws-lc provider" },
