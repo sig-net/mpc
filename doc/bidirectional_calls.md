@@ -105,12 +105,12 @@ Happy path:
 * *Attestation key*: a signing key the MPC derives from its root key, the
   source chain, the contract, a reserved path and the request's key version,
   used for nothing but attestations to that contract.
-* *Attestation*: a statement (rid, key version, height, outcome) signed
-  with the attestation key of rid's contract at that key version, each field
+* *Attestation*: a statement (rid, height, outcome) signed with the
+  attestation key of rid's contract at the request's key version, each field
   length-committed. `height` is the height, in the destination chain's own
-  numbering (a slot on Solana), of the final block that holds the
-  transaction the outcome describes: req.tx for Executed and Failed, the
-  transaction that used up its replay protection for Unviable.
+  numbering (a slot on Solana), of the final block that holds the transaction
+  the outcome describes: req.tx for Executed and Failed, the transaction that
+  used up its replay protection for Unviable.
 * *Response*: an attestation delivered to the contract that made rid's
   request.
 
@@ -225,12 +225,12 @@ upgrade that introduces last_seen (Section 4.1).
 ## 4. Pseudocode and properties per entity
 
 Each entity is an event handler over its own state. `drop` means the event
-has no effect. Key versions are omitted throughout: an attestation names
-the key version it is signed under, and the library keeps the key of every
-key version it has been given, since an attestation published under one key
-version may be delivered after the next. A key version may change the root
-key or only the derivation path; a resharing changes neither, so it keeps
-the key version.
+has no effect. The library keeps the attestation key of every key version
+it has been given, and each entry records the key version its request
+named; a response is verified only under that key, so a key version
+cannot answer requests made under another. A key version may change the
+root key or only the derivation path; a resharing changes neither, so it
+keeps the key version.
 
 ### 4.1 Library (inside the application contract)
 
@@ -239,22 +239,24 @@ state (per application contract):
     attestation_key: KeyVersion -> PublicKey   // Section 3.1
     last_seen:   ChainId -> Height       // 0 for every chain, see below
     outstanding: RequestId -> Entry
-    Entry = { dest: ChainId, known: Height }   // a rid cannot yield dest
+    Entry = { dest: ChainId, known: Height, key_version: KeyVersion }
+    // a rid is a hash and cannot yield dest or key_version
 
 on sign_bidirectional(req) from the application logic:
     rid = request_id(self, req)
     if rid in outstanding:                                // C1
         return Refused
-    outstanding[rid] = { req.dest, known: last_seen[req.dest] }   // C2
+    outstanding[rid] = { req.dest, known: last_seen[req.dest],   // C2
+                         req.key.key_version }
     signet.sign_bidirectional(rid, req)
     return rid
 
-on response(rid, att = (key_version, kind, height, data), sig):
+on response(rid, att = (kind, height, data), sig):
     if rid not in outstanding:                          // C3a
         drop
     e = outstanding[rid]
     if not verify(sig, H(rid || att),                   // C3b
-                  attestation_key[att.key_version]):
+                  attestation_key[e.key_version]):
         drop
     if height <= e.known:                               // C3c
         drop
@@ -472,9 +474,9 @@ Properties:
   under a reserved path that no request on any signing API may name
   (`processable` covers this one); otherwise a contract could have its own
   attestation key sign an arbitrary hash and forge a response to itself.
-* M2 An attestation binds rid, key version, kind, height and data as
-  separate length-committed fields, and describes only destination state
-  final at that height.
+* M2 An attestation binds rid, kind, height and data as separate
+  length-committed fields, and describes only destination state final at
+  that height.
 * M3 The MPC attests an outcome only from a transaction in a final block
   sent by the request's own account, which only the network controls: the
   receipt of one whose unsigned bytes are req.tx, or, for Unviable, one
@@ -606,10 +608,10 @@ a path from B48 through A15; the first at A12 has none.
 * A dropped request strands its rid. After M4 or M5 the MPC keeps nothing
   while the library's entry stays outstanding, so C1 refuses that rid for
   good and the application can only retry with a different transaction.
-* A key version can be retired only once no request using it is
-  outstanding, and an unanswered request is outstanding forever. Until then
-  C3b accepts any key version the library holds, for any rid, so a
-  compromised old key forges responses to current requests.
+* A key version can be retired only once no entry that recorded it is
+  outstanding, and an unanswered request is outstanding forever. Until
+  then a compromised key can forge responses to the requests made under
+  it, and to no others (C3b).
 * `tracked` and `outstanding` can grow without bound. An entry lives until a
   verified Response, and a request whose signature nobody broadcasts never
   produces one. A cancel transaction that uses up the replay protection
