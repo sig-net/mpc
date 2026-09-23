@@ -12,14 +12,11 @@ setup-check scope="":
 alias sc := setup-check
 
 # Install missing system deps (if needed), then build WASM contract + local mpc-node binary
-# Pass helios=1 to enable Helios: just setup helios=1
 # Pass scope="all" to also install extended chain tooling; install auto-skips on CI (SETUP_DEPS_FORCE=1 to override) and with SETUP_DEPS_SKIP=1
 # just setup act installs the act CI runner only (no dep check, no artifact build)
-setup helios="" scope="":
-    @if [ "{{helios}}" = "act" ]; then \
+setup mode="" scope="":
+    @if [ "{{mode}}" = "act" ]; then \
       ./scripts/setup-deps.sh --install-act; \
-    elif [ -n "{{helios}}" ]; then \
-      ./scripts/setup-deps.sh --install {{scope}} && MPC_ENABLE_HELIOS=1 ./setup.sh; \
     else \
       ./scripts/setup-deps.sh --install {{scope}} && ./setup.sh; \
     fi
@@ -31,37 +28,37 @@ run-ci args="": (setup "act")
     act -P warp-ubuntu-latest-x64-4x=catthehacker/ubuntu:act-latest -P ubuntu-latest=catthehacker/ubuntu:act-latest {{args}}
 
 # Run all integration tests
-# Usage: just t [filter] [helios=1]
-test filter="" helios="": (setup helios)
+# Usage: just t [filter]
+test filter="": (setup "")
     cargo nextest run -p integration-tests {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias t := test
 
 # Run only lightweight fixture tests (no full cluster or Docker beyond Redis)
-# Usage: just tf [filter] [helios=1]
-test-fixture filter="" helios="": (setup helios)
+# Usage: just tf [filter]
+test-fixture filter="": (setup "")
     cargo nextest run -p integration-tests --profile fixture {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias tf := test-fixture
 
 # Run only full cluster tests
-# Usage: just tc [filter] [helios=1]
-test-cluster filter="" helios="": (setup helios)
+# Usage: just tc [filter]
+test-cluster filter="": (setup "")
     cargo nextest run -p integration-tests --profile cluster {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias tc := test-cluster
 
 # Run a single test by name, keeping containers alive for inspection
-# Usage: just to <name> [helios=1]
-test-one name helios="": (setup helios)
+# Usage: just to <name>
+test-one name: (setup "")
     TESTCONTAINERS=keep cargo nextest run -p integration-tests -E 'test({{name}})'
 alias to := test-one
 
 # Run all tests keeping containers alive
-# Usage: just tk [filter] [helios=1]
-test-keep filter="" helios="": (setup helios)
+# Usage: just tk [filter]
+test-keep filter="": (setup "")
     TESTCONTAINERS=keep cargo nextest run -p integration-tests {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias tk := test-keep
 
 # Run clippy (mirrors CI). --all-features/--all-targets so dead code behind
-# feature gates (bench, test-feature, debug-page, helios, ...) is checked too.
+# feature gates (bench, test-feature, debug-page, ...) is checked too.
 lint:
     cargo clippy --workspace --all-targets --all-features -- -Dclippy::all
 
@@ -90,8 +87,8 @@ audit:
     cargo audit
 
 # Run all tests sequentially (single-threaded)
-# Usage: just ts [filter] [helios=1]
-test-seq filter="" helios="": (setup helios)
+# Usage: just ts [filter]
+test-seq filter="": (setup "")
     cargo test -p integration-tests --jobs 1 -- --test-threads 1 {{ if filter != "" { filter } else { "" } }}
 alias ts := test-seq
 
@@ -100,8 +97,8 @@ alias ts := test-seq
 # `just build midnight` = midnight-publisher-ts fixtures,
 # `just build tests` = integration test binaries without running them,
 # `just build compat` = historical prod-compat node binaries
-# Usage: just build [target] [helios=1] (target="" | eth | contract | midnight | tests | compat)
-build target="" helios="":
+# Usage: just build [target] (target="" | eth | contract | midnight | tests | compat)
+build target="":
     @if [ "{{target}}" = "eth" ]; then \
       cd chain-signatures/contract-eth && npm ci && npx hardhat compile; \
     elif [ "{{target}}" = "contract" ]; then \
@@ -109,11 +106,11 @@ build target="" helios="":
     elif [ "{{target}}" = "midnight" ]; then \
       cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-caller && npm run typecheck:real-stack; \
     elif [ "{{target}}" = "tests" ]; then \
-      cargo build -p integration-tests --tests{{ if helios != "" { " --features helios" } else { "" } }}; \
+      cargo build -p integration-tests --tests; \
     elif [ "{{target}}" = "compat" ]; then \
       ./scripts/build-compat-binaries.sh; \
     elif [ -z "{{target}}" ]; then \
-      just setup {{helios}} && cargo build --workspace; \
+      just setup && cargo build --workspace; \
     else \
       echo "Unknown build target: {{target}} (expected '' | eth | contract | midnight | tests | compat)" >&2; exit 1; \
     fi

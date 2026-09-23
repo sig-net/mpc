@@ -48,7 +48,7 @@ In case of authorization issues make sure you have logged into docker using your
 
 ### Running tests
 
-Each `just` test recipe automatically runs setup (WASM contract + node binary compilation) before executing tests. Pass an optional `filter` to run matching tests only, and `helios=1` to build with Helios. Run `just` with no arguments to list all available recipes.
+Each `just` test recipe automatically runs setup (WASM contract + node binary compilation) before executing tests. Pass an optional `filter` to run matching tests only. Run `just` with no arguments to list all available recipes.
 
 | Command | Full recipe | Description |
 |---|---|---|
@@ -63,8 +63,7 @@ Each `just` test recipe automatically runs setup (WASM contract + node binary co
 ```bash
 just t                               # run all tests
 just t my_module                     # run matching tests only
-just t my_module helios=1            # run matching tests with Helios
-just to test_basic_action helios=1.  # run specific test with Helios
+just to test_basic_action.           # run specific test
 ```
 
 The available profiles and their concurrency settings are defined in [`.config/nextest.toml`](../.config/nextest.toml).
