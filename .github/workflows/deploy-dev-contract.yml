@@ -32,7 +32,7 @@ jobs:
         run: 'npm install -g near-cli'
 
       - name: Install Rust (1.93.0)
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # 1.93.0
+        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
         with:
           toolchain: 1.93.0
           targets: wasm32-unknown-unknown
