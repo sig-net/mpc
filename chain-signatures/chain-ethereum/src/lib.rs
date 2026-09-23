@@ -9,11 +9,9 @@ mod event_parsing;
 mod execution_watcher;
 mod finalized_head;
 mod indexer;
-mod indexer_eth_direct_rpc;
-#[cfg(feature = "helios")]
-pub mod indexer_eth_helios;
 pub mod publisher;
 mod respond_bidirectional;
+mod rpc;
 #[cfg(test)]
 mod test_utils;
 pub mod utils;
