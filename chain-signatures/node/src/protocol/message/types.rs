@@ -9,7 +9,7 @@ use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
 use crate::types::Epoch;
 use mpc_keys::hpke;
-use mpc_primitives::SignId;
+use mpc_primitives::{RequestKind, SignId};
 
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Protocols {
@@ -27,7 +27,24 @@ pub type Round = usize;
 pub enum PositProtocolId {
     Triple(TripleId),
     Presignature(FullPresignatureId),
-    Signature(SignId, PresignatureId, Round),
+    Signature(
+        SignId,
+        PresignatureId,
+        Round,
+        #[serde(default)]
+        RequestKind,
+    ),
+}
+
+impl PositProtocolId {
+    pub const fn signature(
+        sign_id: SignId,
+        kind: RequestKind,
+        presignature_id: PresignatureId,
+        round: Round,
+    ) -> Self {
+        Self::Signature(sign_id, presignature_id, round, kind)
+    }
 }
 
 /// The message associated with positing a new protocol.

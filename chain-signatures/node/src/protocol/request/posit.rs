@@ -73,8 +73,9 @@ impl PositPhase {
                             PositMessage {
                                 // The id echoes the rejected message so the
                                 // sender knows which attempt we are answering.
-                                id: PositProtocolId::Signature(
+                                id: PositProtocolId::signature(
                                     sign_id,
+                                    ctx.kind,
                                     *presignature_id,
                                     *peer_round,
                                 ),
@@ -131,8 +132,9 @@ impl PositPhase {
                                 ctx.governance.me,
                                 proposer,
                                 PositMessage {
-                                    id: PositProtocolId::Signature(
+                                    id: PositProtocolId::signature(
                                         sign_id,
+                                        ctx.kind,
                                         *presignature_id,
                                         state.round(),
                                     ),
@@ -160,8 +162,9 @@ impl PositPhase {
                             ctx.governance.me,
                             *from,
                             PositMessage {
-                                id: PositProtocolId::Signature(
+                                id: PositProtocolId::signature(
                                     sign_id,
+                                    ctx.kind,
                                     *presignature_id,
                                     state.round(),
                                 ),
@@ -189,7 +192,7 @@ impl PositPhase {
                 ctx.governance.me,
                 proposer,
                 PositMessage {
-                    id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
+                    id: PositProtocolId::signature(sign_id, ctx.kind, presignature_id, state.round()),
                     from: ctx.governance.me,
                     action: PositAction::Accept,
                 },
@@ -286,8 +289,9 @@ impl PositPhase {
                                 PositMessage {
                                     // The id echoes the rejected message so the
                                     // sender knows which attempt we are answering.
-                                    id: PositProtocolId::Signature(
+                                    id: PositProtocolId::signature(
                                         sign_id,
+                                        ctx.kind,
                                         task_msg.presignature_id,
                                         peer_round,
                                     ),
@@ -449,7 +453,7 @@ impl PositPhase {
                     ctx.governance.me,
                     p,
                     PositMessage {
-                        id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
+                        id: PositProtocolId::signature(sign_id, ctx.kind, presignature_id, state.round()),
                         from: ctx.governance.me,
                         action: PositAction::Start(participants.clone()),
                     },
@@ -505,6 +509,7 @@ pub(crate) mod tests {
         let ctx = SignTask {
             governance,
             sign_id: SignId::new([0u8; 32]),
+            kind: RequestKind::Sign,
             presignatures,
             msg: msg_channel,
             rpc: RpcChannel { tx: rpc_tx },
@@ -550,7 +555,7 @@ pub(crate) mod tests {
         let Message::Posit(posit) = sent.message else {
             panic!("expected a posit message");
         };
-        let PositProtocolId::Signature(_, _, round) = posit.id else {
+        let PositProtocolId::Signature(_, _, round, _) = posit.id else {
             panic!("expected a signature posit id");
         };
         (round, posit.action)

@@ -136,15 +136,16 @@ pub struct SignatureSpawner {
     presignatures: PresignatureStorage,
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
     tasks: JoinMap<SignId, Result<(), SignError>>,
-    /// Per-sign posit mailboxes; also buffer messages that arrive before their
-    /// task spawns.
-    posit_mailboxes: HashMap<SignId, Arc<PositMailbox>>,
+    /// Per-(sign, kind) posit mailboxes; also buffer messages that arrive before their
+    /// task spawns. Segregating by RequestKind prevents Phase 2 posits from entering
+    /// Phase 1 mailboxes.
+    posit_mailboxes: HashMap<(SignId, RequestKind), Arc<PositMailbox>>,
     /// Monitor alerting when signature requests exceed their expected response time.
     delay_monitor: DelayMonitor,
     /// In-flight requests: enables chain-scoped abort and respawning.
     requests: HashMap<SignId, SignEntry>,
-    /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan mailboxes.
-    dead_ids: LruCache<SignId, ()>,
+    /// Recently completed/aborted sign IDs and leg kinds; prevents late peer posit messages from recreating orphan mailboxes.
+    dead_ids: LruCache<(SignId, RequestKind), ()>,
     mesh_state: watch::Receiver<MeshState>,
     /// Caps concurrent sign-task progress per chain so requests don't flood the system's compute.
     limiters: EnumMap<Chain, SignLimiter>,
@@ -197,9 +198,10 @@ impl SignatureSpawner {
         cfg: ProtocolConfig,
     ) {
         let sign_id = entry.sign_id();
+        let kind = entry.request().request_kind();
         // Ensure we don't retain the dead tag from a prior incarnation of this
         // sign ID (e.g. after regression recovery re-queues a completed request).
-        self.dead_ids.pop(&sign_id);
+        self.dead_ids.pop(&(sign_id, kind));
         let is_proposer = Arc::new(AtomicBool::new(false));
         let chain = entry.chain();
         let request = Arc::clone(entry.request());
@@ -256,17 +258,20 @@ impl SignatureSpawner {
             })
             .expect("sign request entry must exist when spawning its task");
 
+        let kind = request.request_kind();
+
         // Take (or create) the posit mailbox; it may already hold messages
         // that arrived before this task spawned.
         let mailbox = Arc::clone(
             self.posit_mailboxes
-                .entry(sign_id)
+                .entry((sign_id, kind))
                 .or_insert_with(PositMailbox::new),
         );
 
         let task = SignTask {
             governance: governance.clone(),
             sign_id,
+            kind,
             presignatures: self.presignatures.clone(),
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
@@ -302,21 +307,33 @@ impl SignatureSpawner {
     }
 
     /// Handle a posit message - routes to existing task or buffers if task not yet created
-    fn handle_posit(&mut self, sign_id: SignId, msg: SignPositMessage) {
+    fn handle_posit(&mut self, sign_id: SignId, kind: RequestKind, msg: SignPositMessage) {
         // Drop late-arriving posits for already-completed/aborted sign IDs
         // to prevent re-creating orphan mailboxes.
-        if self.dead_ids.contains(&sign_id) {
+        if self.dead_ids.contains(&(sign_id, kind)) {
             return;
         }
         self.posit_mailboxes
-            .entry(sign_id)
+            .entry((sign_id, kind))
             .or_insert_with(PositMailbox::new)
             .push(msg);
     }
 
     /// A peer/chain reported this signature done: tear down and abort our task.
     fn handle_completion(&mut self, sign_id: SignId) {
-        if self.retire_task(sign_id, "completion") {
+        let kind = self
+            .requests
+            .get(&sign_id)
+            .map(|q| q.entry.request().request_kind());
+        let aborted = if let Some(kind) = kind {
+            self.retire_task(sign_id, kind, "completion")
+        } else {
+            self.retire_task(sign_id, RequestKind::Sign, "completion");
+            self.retire_task(sign_id, RequestKind::SignBidirectional, "completion");
+            self.retire_task(sign_id, RequestKind::RespondBidirectional, "completion");
+            false
+        };
+        if aborted {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
         } else {
             tracing::info!(?sign_id, "task already completed or unable to be aborted");
@@ -341,7 +358,7 @@ impl SignatureSpawner {
             );
             return;
         }
-        if self.drop_task(sign_id, "leg completed") {
+        if self.drop_task(sign_id, kind, "leg completed") {
             tracing::info!(
                 ?sign_id,
                 "aborting signature task; bidirectional leg responded"
@@ -356,11 +373,21 @@ impl SignatureSpawner {
             Ok(outcome) => outcome,
             Err(sign_id) => {
                 tracing::warn!(?sign_id, "signature task interrupted");
-                self.retire_task(sign_id, "interruption");
+                let kind = self
+                    .requests
+                    .get(&sign_id)
+                    .map(|q| q.entry.request().request_kind())
+                    .unwrap_or(RequestKind::Sign);
+                self.retire_task(sign_id, kind, "interruption");
                 return;
             }
         };
-        self.retire_task(sign_id, "task completion");
+        let kind = self
+            .requests
+            .get(&sign_id)
+            .map(|q| q.entry.request().request_kind())
+            .unwrap_or(RequestKind::Sign);
+        self.retire_task(sign_id, kind, "task completion");
         match result {
             Ok(()) => {
                 tracing::info!(?sign_id, "signature task completed successfully");
@@ -371,27 +398,27 @@ impl SignatureSpawner {
         }
     }
 
-    /// Record a sign ID as dead so that late-arriving peer posits are dropped
+    /// Record a sign ID and leg kind as dead so that late-arriving peer posits are dropped
     /// instead of recreating an orphan mailbox. Automatically LRU-evicts the
     /// stalest entry when the cache exceeds [`MAX_DEAD_IDS`].
-    fn mark_dead(&mut self, sign_id: SignId) {
-        self.dead_ids.put(sign_id, ());
+    fn mark_dead(&mut self, sign_id: SignId, kind: RequestKind) {
+        self.dead_ids.put((sign_id, kind), ());
     }
 
     /// Common teardown when a sign request ends: abort its task if one is still
     /// running, mark the id dead, forget the request, drop its mailbox and
     /// unwatch its delay monitoring. Returns whether a task was aborted.
-    fn retire_task(&mut self, sign_id: SignId, reason: &'static str) -> bool {
-        self.mark_dead(sign_id);
-        self.drop_task(sign_id, reason)
+    fn retire_task(&mut self, sign_id: SignId, kind: RequestKind, reason: &'static str) -> bool {
+        self.mark_dead(sign_id, kind);
+        self.drop_task(sign_id, kind, reason)
     }
 
     /// Like [`Self::retire_task`], but leaves the sign id live so a later
     /// request carrying it is admitted instead of skipped as a duplicate.
-    fn drop_task(&mut self, sign_id: SignId, reason: &'static str) -> bool {
+    fn drop_task(&mut self, sign_id: SignId, kind: RequestKind, reason: &'static str) -> bool {
         let aborted = self.tasks.abort(sign_id);
         self.requests.remove(&sign_id);
-        self.posit_mailboxes.remove(&sign_id);
+        self.posit_mailboxes.remove(&(sign_id, kind));
         self.delay_monitor.unwatch(sign_id, reason);
         aborted
     }
@@ -414,14 +441,14 @@ impl SignatureSpawner {
                     ?chain,
                     "aborting all in-flight signature tasks on chain regression"
                 );
-                let to_abort: Vec<SignId> = self
+                let to_abort: Vec<(SignId, RequestKind)> = self
                     .requests
                     .iter()
                     .filter(|(_, q)| q.entry.chain() == chain)
-                    .map(|(id, _)| *id)
+                    .map(|(id, q)| (*id, q.entry.request().request_kind()))
                     .collect();
-                for sign_id in to_abort {
-                    self.retire_task(sign_id, "chain aborted");
+                for (sign_id, kind) in to_abort {
+                    self.retire_task(sign_id, kind, "chain aborted");
                 }
             }
             SignCommand::Request(entry) => {
@@ -450,7 +477,7 @@ impl SignatureSpawner {
                         ?incoming_kind,
                         "superseding the tracked request with its next leg"
                     );
-                    self.drop_task(sign_id, "superseded by the next leg");
+                    self.retire_task(sign_id, tracked_kind, "superseded by the next leg");
                 }
 
                 record_request_latency_since(
@@ -493,8 +520,8 @@ impl SignatureSpawner {
                     };
                     self.handle_sign(&governance, sign, &protocol);
                 }
-                Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
-                    self.handle_posit(sign_id, SignPositMessage { presignature_id, round, from, action });
+                Some((sign_id, kind, presignature_id, round, from, action)) = posits.recv() => {
+                    self.handle_posit(sign_id, kind, SignPositMessage { presignature_id, round, from, action });
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     self.handle_task_exit(result);
@@ -525,11 +552,29 @@ impl SignatureSpawner {
 #[cfg(test)]
 impl SignatureSpawner {
     fn test_dead_ids_contains(&self, sign_id: &SignId) -> bool {
-        self.dead_ids.contains(sign_id)
+        if let Some(tracked) = self.requests.get(sign_id) {
+            let kind = tracked.entry.request().request_kind();
+            self.dead_ids.contains(&( *sign_id, kind))
+        } else {
+            self.dead_ids.iter().any(|((id, _), _)| id == sign_id)
+        }
+    }
+
+    fn test_dead_ids_contains_kind(&self, sign_id: &SignId, kind: RequestKind) -> bool {
+        self.dead_ids.contains(&( *sign_id, kind))
     }
 
     fn test_posit_mailboxes_contains(&self, sign_id: &SignId) -> bool {
-        self.posit_mailboxes.contains_key(sign_id)
+        if let Some(tracked) = self.requests.get(sign_id) {
+            let kind = tracked.entry.request().request_kind();
+            self.posit_mailboxes.contains_key(&( *sign_id, kind))
+        } else {
+            self.posit_mailboxes.keys().any(|(id, _)| id == sign_id)
+        }
+    }
+
+    fn test_posit_mailboxes_contains_kind(&self, sign_id: &SignId, kind: RequestKind) -> bool {
+        self.posit_mailboxes.contains_key(&( *sign_id, kind))
     }
 
     fn test_tasks_contains(&self, sign_id: SignId) -> bool {
@@ -680,6 +725,7 @@ mod tests {
         // Step 3: Late posit → dropped (dead_id check), mailbox NOT recreated
         spawner.handle_posit(
             sign_id,
+            RequestKind::Sign,
             SignPositMessage {
                 presignature_id: 0,
                 round: 0,
@@ -698,6 +744,7 @@ mod tests {
         // Step 5: Posit after re-spawn → accepted, mailbox re-created
         spawner.handle_posit(
             sign_id,
+            RequestKind::Sign,
             SignPositMessage {
                 presignature_id: 0,
                 round: 0,
@@ -1190,5 +1237,97 @@ mod tests {
         assert!(eth_third.is_ok());
 
         drop(sol_permit);
+    }
+
+    #[tokio::test]
+    async fn test_phase1_and_phase2_posit_mailboxes_are_segregated() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+
+        let mut spawner = SignatureSpawner::new(
+            account_id,
+            contract,
+            presignatures,
+            mesh_rx,
+            msg_channel,
+            RpcChannel { tx: rpc_tx },
+            sync_report_tx,
+        );
+        let backlog = crate::backlog::Backlog::new();
+        let cfg = ProtocolConfig::default();
+        let sign_id = SignId::new([77u8; 32]);
+
+        // 1. Admit Phase 1 (SignBidirectional)
+        let leg1 = crate::backlog::mock::mock_bidi_request(sign_id, Chain::Solana);
+        let entry1 = backlog::SignEntry::generating(Arc::clone(&leg1), &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry1), &cfg);
+        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::SignBidirectional));
+        assert!(!spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::RespondBidirectional));
+
+        // 2. Deliver a Phase 2 Propose while Phase 1 is still running.
+        // It must NOT be routed into Phase 1's mailbox. It buffers into Phase 2's mailbox.
+        spawner.handle_posit(
+            sign_id,
+            RequestKind::RespondBidirectional,
+            SignPositMessage {
+                presignature_id: 999,
+                round: 0,
+                from: Participant::from(1),
+                action: PositAction::Propose,
+            },
+        );
+        assert!(spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::RespondBidirectional));
+
+        // 3. Supersede Phase 1 with Phase 2 (RespondBidirectional).
+        // Phase 1 must be retired/marked dead, and Phase 2 task must be spawned.
+        let leg2 = crate::backlog::mock::mock_bidi_response_request(
+            sign_id,
+            mpc_primitives::BidirectionalTxId([77u8; 32]),
+            Chain::Solana,
+        );
+        let entry2 = backlog::SignEntry::generating(leg2, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry2), &cfg);
+        assert!(spawner.test_dead_ids_contains_kind(&sign_id, RequestKind::SignBidirectional));
+        assert!(!spawner.test_dead_ids_contains_kind(&sign_id, RequestKind::RespondBidirectional));
+        assert!(spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::RespondBidirectional));
+        assert!(!spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::SignBidirectional));
+
+        // 4. A late Phase 1 Propose arriving after Phase 1 was superseded must be dropped by dead_ids.
+        spawner.handle_posit(
+            sign_id,
+            RequestKind::SignBidirectional,
+            SignPositMessage {
+                presignature_id: 111,
+                round: 0,
+                from: Participant::from(1),
+                action: PositAction::Propose,
+            },
+        );
+        assert!(!spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::SignBidirectional));
     }
 }
