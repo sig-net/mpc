@@ -123,6 +123,10 @@ where
         self.mapping.contains_key(key)
     }
 
+    pub fn keys(&self) -> impl Iterator<Item = &T> {
+        self.mapping.keys()
+    }
+
     pub fn spawn(&mut self, key: T, task: impl Future<Output = U> + Send + 'static) {
         let handle = self.tasks.spawn(task);
         let task_id = handle.id();

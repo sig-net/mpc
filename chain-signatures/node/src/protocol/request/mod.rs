@@ -134,8 +134,8 @@ pub struct SignatureSpawner {
     contract: ContractStateWatcher,
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
-    /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
-    tasks: JoinMap<SignId, Result<(), SignError>>,
+    /// Consolidated signature tasks - one per (sign_id, kind), each task is an async task handling complete lifecycle
+    tasks: JoinMap<(SignId, RequestKind), Result<(), SignError>>,
     /// Per-(sign, kind) posit mailboxes; also buffer messages that arrive before their
     /// task spawns. Segregating by RequestKind prevents Phase 2 posits from entering
     /// Phase 1 mailboxes.
@@ -285,7 +285,7 @@ impl SignatureSpawner {
 
         // Spawn the async task with organizing loop
         self.tasks
-            .spawn(sign_id, task.run(entry, self.mesh_state.clone(), mailbox));
+            .spawn((sign_id, kind), task.run(entry, self.mesh_state.clone(), mailbox));
     }
 
     /// Spawn a fresh incarnation for every retained request; the caller must
@@ -367,33 +367,26 @@ impl SignatureSpawner {
     }
 
     /// A task's `JoinMap` entry finished (or was cancelled): tear down and log.
-    fn handle_task_exit(&mut self, result: Result<(SignId, Result<(), SignError>), SignId>) {
+    fn handle_task_exit(
+        &mut self,
+        result: Result<((SignId, RequestKind), Result<(), SignError>), (SignId, RequestKind)>,
+    ) {
         self.observe_queue_size();
-        let (sign_id, result) = match result {
+        let ((sign_id, kind), result) = match result {
             Ok(outcome) => outcome,
-            Err(sign_id) => {
-                tracing::warn!(?sign_id, "signature task interrupted");
-                let kind = self
-                    .requests
-                    .get(&sign_id)
-                    .map(|q| q.entry.request().request_kind())
-                    .unwrap_or(RequestKind::Sign);
+            Err((sign_id, kind)) => {
+                tracing::warn!(?sign_id, ?kind, "signature task interrupted");
                 self.retire_task(sign_id, kind, "interruption");
                 return;
             }
         };
-        let kind = self
-            .requests
-            .get(&sign_id)
-            .map(|q| q.entry.request().request_kind())
-            .unwrap_or(RequestKind::Sign);
         self.retire_task(sign_id, kind, "task completion");
         match result {
             Ok(()) => {
-                tracing::info!(?sign_id, "signature task completed successfully");
+                tracing::info!(?sign_id, ?kind, "signature task completed successfully");
             }
             Err(SignError::Aborted(reason)) => {
-                tracing::warn!(?sign_id, %reason, "signature task terminated");
+                tracing::warn!(?sign_id, ?kind, %reason, "signature task terminated");
             }
         }
     }
@@ -416,10 +409,14 @@ impl SignatureSpawner {
     /// Like [`Self::retire_task`], but leaves the sign id live so a later
     /// request carrying it is admitted instead of skipped as a duplicate.
     fn drop_task(&mut self, sign_id: SignId, kind: RequestKind, reason: &'static str) -> bool {
-        let aborted = self.tasks.abort(sign_id);
-        self.requests.remove(&sign_id);
+        let aborted = self.tasks.abort((sign_id, kind));
+        if let Some(tracked) = self.requests.get(&sign_id) {
+            if tracked.entry.request().request_kind() == kind {
+                self.requests.remove(&sign_id);
+                self.delay_monitor.unwatch(sign_id, reason);
+            }
+        }
         self.posit_mailboxes.remove(&(sign_id, kind));
-        self.delay_monitor.unwatch(sign_id, reason);
         aborted
     }
 
@@ -578,8 +575,18 @@ impl SignatureSpawner {
     }
 
     fn test_tasks_contains(&self, sign_id: SignId) -> bool {
-        self.tasks.contains_key(&sign_id)
+        if let Some(tracked) = self.requests.get(&sign_id) {
+            let kind = tracked.entry.request().request_kind();
+            self.tasks.contains_key(&(sign_id, kind))
+        } else {
+            self.tasks.keys().any(|(id, _)| *id == sign_id)
+        }
     }
+
+    fn test_tasks_contains_kind(&self, sign_id: SignId, kind: RequestKind) -> bool {
+        self.tasks.contains_key(&(sign_id, kind))
+    }
+
     fn test_requests_contains(&self, sign_id: &SignId) -> bool {
         self.requests.contains_key(sign_id)
     }
@@ -699,7 +706,7 @@ mod tests {
                 round: Arc::new(AtomicUsize::new(0)),
             },
         );
-        spawner.tasks.spawn(probe_id, async move {
+        spawner.tasks.spawn((probe_id, RequestKind::Sign), async move {
             let _probe = probe;
             std::future::pending::<Result<(), SignError>>().await
         });
@@ -1316,6 +1323,8 @@ mod tests {
         assert!(!spawner.test_dead_ids_contains_kind(&sign_id, RequestKind::RespondBidirectional));
         assert!(spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::RespondBidirectional));
         assert!(!spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::SignBidirectional));
+        assert!(spawner.test_tasks_contains_kind(sign_id, RequestKind::RespondBidirectional));
+        assert!(!spawner.test_tasks_contains_kind(sign_id, RequestKind::SignBidirectional));
 
         // 4. A late Phase 1 Propose arriving after Phase 1 was superseded must be dropped by dead_ids.
         spawner.handle_posit(
@@ -1329,5 +1338,13 @@ mod tests {
             },
         );
         assert!(!spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::SignBidirectional));
+
+        // 5. When the cancelled Phase 1 task yields its exit from tasks.join_next(),
+        // handle_task_exit must NOT tear down the running Phase 2 task or its request entry.
+        spawner.handle_task_exit(Err((sign_id, RequestKind::SignBidirectional)));
+        assert!(spawner.test_tasks_contains_kind(sign_id, RequestKind::RespondBidirectional));
+        assert!(spawner.test_requests_contains(&sign_id));
+        assert!(spawner.test_posit_mailboxes_contains_kind(&sign_id, RequestKind::RespondBidirectional));
+        assert!(!spawner.test_dead_ids_contains_kind(&sign_id, RequestKind::RespondBidirectional));
     }
 }
