@@ -118,6 +118,9 @@ fn round_timeout(round: usize) -> Duration {
 /// so that late-arriving peer posit messages do not re-create orphan mailboxes.
 const MAX_DEAD_IDS: usize = 4096;
 
+type SignTaskKey = (SignId, RequestKind);
+type SignTaskExit = Result<(SignTaskKey, Result<(), SignError>), SignTaskKey>;
+
 /// A retained in-flight request. `is_proposer` is shared with the current
 /// task incarnation and read by the deadline watcher; `round` carries the
 /// posit round across respawns.
@@ -135,17 +138,17 @@ pub struct SignatureSpawner {
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
     /// Consolidated signature tasks - one per (sign_id, kind), each task is an async task handling complete lifecycle
-    tasks: JoinMap<(SignId, RequestKind), Result<(), SignError>>,
+    tasks: JoinMap<SignTaskKey, Result<(), SignError>>,
     /// Per-(sign, kind) posit mailboxes; also buffer messages that arrive before their
     /// task spawns. Segregating by RequestKind prevents second leg posits from entering
     /// first leg mailboxes.
-    posit_mailboxes: HashMap<(SignId, RequestKind), Arc<PositMailbox>>,
+    posit_mailboxes: HashMap<SignTaskKey, Arc<PositMailbox>>,
     /// Monitor alerting when signature requests exceed their expected response time.
     delay_monitor: DelayMonitor,
     /// In-flight requests: enables chain-scoped abort and respawning.
     requests: HashMap<SignId, SignEntry>,
     /// Recently completed/aborted sign IDs and leg kinds; prevents late peer posit messages from recreating orphan mailboxes.
-    dead_ids: LruCache<(SignId, RequestKind), ()>,
+    dead_ids: LruCache<SignTaskKey, ()>,
     mesh_state: watch::Receiver<MeshState>,
     /// Caps concurrent sign-task progress per chain so requests don't flood the system's compute.
     limiters: EnumMap<Chain, SignLimiter>,
@@ -369,10 +372,7 @@ impl SignatureSpawner {
     }
 
     /// A task's `JoinMap` entry finished (or was cancelled): tear down and log.
-    fn handle_task_exit(
-        &mut self,
-        result: Result<((SignId, RequestKind), Result<(), SignError>), (SignId, RequestKind)>,
-    ) {
+    fn handle_task_exit(&mut self, result: SignTaskExit) {
         self.observe_queue_size();
         let ((sign_id, kind), result) = match result {
             Ok(outcome) => outcome,
