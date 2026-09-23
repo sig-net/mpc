@@ -1248,3 +1248,31 @@ async fn publish_failover_needs_catchup() {
         "the deadline was past all along; catchup is what held it back"
     );
 }
+
+/// A stream restart clears `caught_up` while the sign loop still runs the
+/// request's task, and the completed entry is gone from the backlog, so a
+/// completion dropped during replay would leave that task running.
+#[tokio::test]
+async fn process_respond_bidirectional_event_sends_completion_before_catchup() {
+    let backlog = Backlog::new();
+    let tx = test_bidirectional_tx(82, Chain::Solana, Chain::Ethereum);
+    let sign_id = tx.sign_id();
+    let entry = backlog.insert_mock_final(&tx).await;
+
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let signature = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
+    let public_key = root_sk.public_key().into();
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+
+    process_respond_bidirectional_event(respond_event(sign_id, signature), &ctx, public_key)
+        .await
+        .expect("respond event should complete the request");
+
+    let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_matches!(msg, SignCommand::Completion(id) if id == sign_id);
+}
