@@ -254,7 +254,9 @@ impl RespondFieldKind {
             RespondFieldKind::String { max_bytes } => {
                 Self::dynamic_bytes(as_text(raw)?.into_bytes(), *max_bytes)
             }
-            RespondFieldKind::Bytes { max_bytes } => Self::dynamic_bytes(as_bytes(raw)?, *max_bytes),
+            RespondFieldKind::Bytes { max_bytes } => {
+                Self::dynamic_bytes(as_bytes(raw)?, *max_bytes)
+            }
             RespondFieldKind::Array { element, max_items } => {
                 Self::coerce_array(raw, element, *max_items)
             }
@@ -601,10 +603,34 @@ mod tests {
     use std::collections::HashMap;
 
     use alloy::dyn_abi::{DynSolType, DynSolValue};
+    use alloy::primitives::{Address, I256, U256};
     use serde::Deserialize;
 
     use super::serialize;
     use crate::respond_bidirectional::{AbiField, Output};
+
+    const FIXTURE_ADDRESS: [u8; 20] = [
+        0x8b, 0xa1, 0xf1, 0x09, 0x55, 0x1b, 0xd4, 0x32, 0x80, 0x30, 0x12, 0x64, 0x5a, 0xc1, 0x36,
+        0xdd, 0xd6, 0x4d, 0xba, 0x72,
+    ];
+
+    fn contract_output(fields: &[(&str, DynSolValue)]) -> Output {
+        Output {
+            fields: fields
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.clone()))
+                .collect(),
+            from_contract_call: true,
+        }
+    }
+
+    fn le64(value: u64) -> Vec<u8> {
+        value.to_le_bytes().to_vec()
+    }
+
+    fn serialize_with(schema: &str, output: &Output) -> anyhow::Result<Vec<u8>> {
+        serialize(output, schema.as_bytes())
+    }
 
     #[derive(Deserialize)]
     struct OracleFixture {
@@ -685,6 +711,226 @@ mod tests {
             assert!(
                 format!("{err:#}").contains("unsupported type"),
                 "{typ} must not classify"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_int_producers_only_coerce_to_numeric_kinds() {
+        let out = serialize_with(
+            r#"[{"name":"v","type":"uint8"}]"#,
+            &contract_output(&[("v", DynSolValue::Int(I256::from_dec_str("9").unwrap(), 256))]),
+        )
+        .unwrap();
+        assert_eq!(out, vec![9]);
+
+        let err = serialize_with(
+            r#"[{"name":"v","type":"uint8"}]"#,
+            &contract_output(&[(
+                "v",
+                DynSolValue::Int(I256::from_dec_str("-5").unwrap(), 256),
+            )]),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("integer-compatible"));
+
+        assert!(serialize_with(
+            r#"[{"name":"v","type":"string","maxBytes":4}]"#,
+            &contract_output(&[("v", DynSolValue::Int(I256::from_dec_str("5").unwrap(), 256),)]),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn incompatible_producer_variants_are_rejected() {
+        let cases: &[(&str, DynSolValue)] = &[
+            (
+                r#"[{"name":"v","type":"bool"}]"#,
+                DynSolValue::Uint(U256::from(1u64), 256),
+            ),
+            (r#"[{"name":"v","type":"uint8"}]"#, DynSolValue::Bool(true)),
+            (
+                r#"[{"name":"v","type":"uint8"}]"#,
+                DynSolValue::Array(vec![DynSolValue::Bool(true)]),
+            ),
+            (
+                r#"[{"name":"v","type":"string","maxBytes":4}]"#,
+                DynSolValue::Uint(U256::from(1u64), 256),
+            ),
+            (
+                r#"[{"name":"v","type":"bytes4"}]"#,
+                DynSolValue::String("0x00".to_string()),
+            ),
+        ];
+        for (schema, value) in cases {
+            assert!(
+                serialize_with(schema, &contract_output(&[("v", value.clone())])).is_err(),
+                "schema {schema} must reject the producer variant"
+            );
+        }
+    }
+
+    #[test]
+    fn error_contexts_name_the_field_and_item() {
+        let err = serialize_with(
+            r#"[{"name":"values","type":"bool[]","maxItems":2}]"#,
+            &contract_output(&[(
+                "values",
+                DynSolValue::Array(vec![
+                    DynSolValue::Bool(true),
+                    DynSolValue::Uint(U256::from(1u64), 256),
+                ]),
+            )]),
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("Midnight respond field 'values'"));
+        assert!(message.contains("item 1"));
+        assert!(message.contains("expects bool"));
+
+        let err = serialize_with(
+            r#"[{"name":"x","type":"uint8"}]"#,
+            &contract_output(&[("y", DynSolValue::Uint(U256::from(1u64), 8))]),
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("Midnight respond field 'x'"));
+        assert!(message.contains("missing from decoded output"));
+    }
+
+    #[test]
+    fn address_producer_serializes_as_raw_bytes() {
+        let out = serialize_with(
+            r#"[{"name":"to","type":"bytes20"}]"#,
+            &contract_output(&[("to", DynSolValue::Address(Address::from(FIXTURE_ADDRESS)))]),
+        )
+        .unwrap();
+        assert_eq!(out, FIXTURE_ADDRESS.to_vec());
+    }
+
+    #[test]
+    fn bytes_producers_coerce_to_text_and_integer() {
+        let out = serialize_with(
+            r#"[{"name":"tag","type":"string","maxBytes":8}]"#,
+            &contract_output(&[("tag", DynSolValue::Bytes(vec![0xde, 0xad].into()))]),
+        )
+        .unwrap();
+        let mut expected = le64(6);
+        expected.extend_from_slice(b"0xdead".as_slice());
+        expected.extend_from_slice(&[0u8; 2]);
+        assert_eq!(out, expected);
+
+        let schema = r#"[{"name":"v","type":"uint8"}]"#;
+        let out = serialize_with(
+            schema,
+            &contract_output(&[("v", DynSolValue::Bytes(vec![0, 5].into()))]),
+        )
+        .unwrap();
+        assert_eq!(out, vec![5]);
+
+        let err = serialize_with(
+            schema,
+            &contract_output(&[("v", DynSolValue::Bytes(vec![1u8; 33].into()))]),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("exceeds 256 bits"));
+    }
+
+    #[test]
+    fn tuple_producer_coerces_as_array() {
+        let out = serialize_with(
+            r#"[{"name":"values","type":"uint8[]","maxItems":1}]"#,
+            &contract_output(&[(
+                "values",
+                DynSolValue::Tuple(vec![DynSolValue::Uint(U256::from(9u64), 8)]),
+            )]),
+        )
+        .unwrap();
+        let mut expected = le64(1);
+        expected.push(9);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn fixed_bytes_declared_size_truncates() {
+        let mut word = [0u8; 32];
+        word[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        word[4] = 0xff;
+        let out = serialize_with(
+            r#"[{"name":"salt","type":"bytes4"}]"#,
+            &contract_output(&[("salt", DynSolValue::FixedBytes(word.into(), 4))]),
+        )
+        .unwrap();
+        assert_eq!(out, vec![0xde, 0xad, 0xbe, 0xef]);
+
+        let err = serialize_with(
+            r#"[{"name":"salt","type":"bytes4"}]"#,
+            &contract_output(&[("salt", DynSolValue::Bytes(vec![0xaa, 0xbb, 0xcc].into()))]),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("expects 4 bytes"));
+    }
+
+    #[test]
+    fn string_to_bytes_requires_hex_prefix() {
+        assert!(serialize_with(
+            r#"[{"name":"payload","type":"bytes","maxBytes":4}]"#,
+            &contract_output(&[("payload", DynSolValue::String("deadbeef".to_string()),)]),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn non_contract_call_synthesizes_string_default_only() {
+        let output = Output {
+            fields: HashMap::new(),
+            from_contract_call: false,
+        };
+
+        let out = serialize_with(
+            r#"[{"name":"status","type":"string","maxBytes":32}]"#,
+            &output,
+        )
+        .unwrap();
+        let mut expected = le64(25);
+        expected.extend_from_slice(b"non_function_call_success".as_slice());
+        expected.extend_from_slice(&[0u8; 7]);
+        assert_eq!(out, expected);
+
+        assert!(serialize_with(r#"[{"name":"v","type":"uint8"}]"#, &output).is_err());
+    }
+
+    #[test]
+    fn whole_float_capacities_are_accepted() {
+        let out = serialize_with(
+            r#"[{"name":"v","type":"uint8[]","maxItems":3.0}]"#,
+            &contract_output(&[(
+                "v",
+                DynSolValue::Array(vec![DynSolValue::Uint(U256::from(9u64), 8)]),
+            )]),
+        )
+        .unwrap();
+        let mut expected = le64(1);
+        expected.extend_from_slice(&[9, 0, 0]);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn schema_requires_named_typed_fields() {
+        let output = Output {
+            fields: HashMap::new(),
+            from_contract_call: true,
+        };
+        let rejected = [
+            br#"[{"name":"","type":"bool"}]"#.as_slice(),
+            br#"[{"name":"v","type":""}]"#,
+            br#"[{"type":"bool"}]"#,
+            br#"[{"name":"v"}]"#,
+        ];
+        for schema in rejected {
+            assert!(
+                serialize(&output, schema).is_err(),
+                "schema {schema:?} must be rejected"
             );
         }
     }
