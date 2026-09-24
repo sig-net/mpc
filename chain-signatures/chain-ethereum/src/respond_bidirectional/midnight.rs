@@ -111,12 +111,9 @@ impl MidnightRespondPlan {
 
 fn decode_schema_text(bytes: &[u8]) -> Cow<'_, str> {
     let text = String::from_utf8_lossy(bytes);
-    if !text.starts_with('\u{feff}') {
-        return text;
-    }
-    match text {
-        Cow::Borrowed(text) => Cow::Borrowed(text.strip_prefix('\u{feff}').unwrap()),
-        Cow::Owned(text) => Cow::Owned(text.strip_prefix('\u{feff}').unwrap().to_owned()),
+    match text.strip_prefix('\u{feff}') {
+        Some(stripped) => Cow::Owned(stripped.to_owned()),
+        None => text,
     }
 }
 
