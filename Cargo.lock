@@ -7817,6 +7817,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-midnight-respond-codec"
+version = "1.20.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "serde_json",
+ "signet-midnight-serde",
+]
+
+[[package]]
 name = "mpc-node"
 version = "1.20.0"
 dependencies = [

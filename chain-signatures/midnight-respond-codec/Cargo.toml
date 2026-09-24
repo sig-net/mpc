@@ -1,0 +1,12 @@
+[package]
+name = "mpc-midnight-respond-codec"
+edition = "2021"
+version.workspace = true
+publish.workspace = true
+description = "Midnight FAB respond-output codec shared by MPC execution targets"
+
+[dependencies]
+anyhow.workspace = true
+hex.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+signet-midnight-serde.workspace = true
