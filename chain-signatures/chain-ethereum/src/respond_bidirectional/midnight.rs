@@ -101,6 +101,13 @@ impl RawSchemaField {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
+        Self::validate(&fields, label)?;
+
+        Ok(fields)
+    }
+
+    /// Reject blank/`__proto__` names, blank types, and duplicate names.
+    fn validate(fields: &[Self], label: &str) -> anyhow::Result<()> {
         let mut names = HashSet::with_capacity(fields.len());
         for (index, field) in fields.iter().enumerate() {
             if field.name.is_empty() {
@@ -116,7 +123,7 @@ impl RawSchemaField {
                 anyhow::bail!("{label} contains duplicate field name '{}'", field.name);
             }
         }
-        Ok(fields)
+        Ok(())
     }
 
     fn string_property(
