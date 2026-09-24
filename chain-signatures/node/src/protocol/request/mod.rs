@@ -462,9 +462,9 @@ impl SignatureSpawner {
                         chain = %entry.chain(),
                         "refusing to sign on the reserved attestation path"
                     );
-    // Drop posits peers sent ahead of the request, and any that arrive later.
-    self.mark_dead(sign_id);
-    self.posit_mailboxes.remove(&sign_id);
+                    // Drop posits peers sent ahead of the request, and any that arrive later.
+                    self.mark_dead(sign_id);
+                    self.posit_mailboxes.remove(&sign_id);
                     return;
                 }
 
