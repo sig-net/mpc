@@ -340,6 +340,8 @@ impl RespondFieldKind {
     }
 }
 
+/// Must mirror the value shapes built by `RespondFieldKind::coerce` and its
+/// helpers; descriptor/value drift is only caught by the oracle corpus.
 impl From<&RespondFieldKind> for Descriptor {
     fn from(kind: &RespondFieldKind) -> Self {
         match kind {
@@ -368,6 +370,7 @@ impl From<&RespondFieldKind> for Descriptor {
     }
 }
 
+/// Must mirror `FixedCarrier::coerce`'s value constructors and `zero_value`.
 impl From<&FixedCarrier> for Descriptor {
     fn from(carrier: &FixedCarrier) -> Self {
         match carrier {
