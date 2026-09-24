@@ -169,6 +169,19 @@ impl TryFrom<RawSchemaField> for RespondField {
     }
 }
 
+/// Require the capacity a field's type demands (e.g. `maxBytes` for `string`).
+fn required_capacity(
+    capacity: Option<usize>,
+    typ: &str,
+    capacity_name: &str,
+) -> anyhow::Result<usize> {
+    match capacity {
+        Some(capacity) if capacity > 0 => Ok(capacity),
+        Some(_) => anyhow::bail!("type '{typ}' requires positive {capacity_name}"),
+        None => anyhow::bail!("type '{typ}' requires {capacity_name}"),
+    }
+}
+
 impl RespondField {
     /// Resolve this field against the decoded output: the coerced producer
     /// value for a contract call, a synthesized default otherwise.
@@ -442,18 +455,6 @@ pub(super) fn serialize(output: &Output, respond_schema: &[u8]) -> anyhow::Resul
         .context("failed to serialize Midnight respond output")?;
     debug_assert_eq!(serialized.len(), plan.packed_size);
     Ok(serialized)
-}
-
-fn required_capacity(
-    capacity: Option<usize>,
-    typ: &str,
-    capacity_name: &str,
-) -> anyhow::Result<usize> {
-    match capacity {
-        Some(capacity) if capacity > 0 => Ok(capacity),
-        Some(_) => anyhow::bail!("type '{typ}' requires positive {capacity_name}"),
-        None => anyhow::bail!("type '{typ}' requires {capacity_name}"),
-    }
 }
 
 fn decode_schema_text(bytes: &[u8]) -> Cow<'_, str> {
