@@ -625,10 +625,20 @@ a path from B48 through A15; the first at A12 has none.
 
 The Midnight protocol structures are the canonical structures.
 
+Naming rule: the `V1` suffix marks the wire and hash-domain artefacts of
+protocol version 1, that is the structs a contract's ledger stores or the
+signet contract emits, and the circuits that hash, verify or construct them.
+Vocabulary shared across versions carries no suffix: `RequestId`,
+`OutputKind`, `Signature`, the enums (`MPCSignatureAlgorithm`,
+`MPCDestination`, `TxParamType`) and the transaction parameter structs, which
+`TxParamType` tags. A payload that carries its own version byte (the
+notification) and the signet contract's circuits (a deployed singleton never
+changes) carry no suffix either.
+
 ### Request Id
 
 ```compact
-new type RequestIdV1 = Bytes<32>;
+new type RequestId = Bytes<32>;
 ```
 
 ### Sign Bidirectional Event
@@ -667,7 +677,7 @@ struct RequestIdPreimageV1<TxParams> {
 
 pure circuit calculateRequestIdV1<TxParams, #LenOutputDeserialization, #LenRespondSerialization>(
     request: SignBidirectionalEventV1<TxParams, LenOutputDeserialization, LenRespondSerialization>
-): RequestIdV1 {
+): RequestId {
     const preimage = RequestIdPreimageV1<TxParams> {
       keyVersion: request.keyVersion,
       sender: request.sender,
@@ -678,7 +688,7 @@ pure circuit calculateRequestIdV1<TxParams, #LenOutputDeserialization, #LenRespo
       executionDest: request.executionDest,
     };
 
-    return upgradeFromTransient(transientHash<RequestIdPreimageV1<TxParams>>(preimage)) as RequestIdV1;
+    return upgradeFromTransient(transientHash<RequestIdPreimageV1<TxParams>>(preimage)) as RequestId;
 }
 ```
 
@@ -686,7 +696,7 @@ pure circuit calculateRequestIdV1<TxParams, #LenOutputDeserialization, #LenRespo
 
 ```compact
 struct SignatureRespondedEventV1 {
-    requestId: RequestIdV1;
+    requestId: RequestId;
     signature: Signature;
 }
 ```
@@ -694,16 +704,16 @@ struct SignatureRespondedEventV1 {
 ### Respond Bidirectional Event
 
 ```compact
-export enum OutputKindV1 {
+export enum OutputKind {
   executed,
   failed,
   unviable
 }
 
 struct RespondBidirectionalEventV1 {
-    requestId: RequestIdV1;
+    requestId: RequestId;
     blockHeight: Uint<64>;
-    outputKind: OutputKindV1;
+    outputKind: OutputKind;
     serializedOutputLength: Uint<64>;
     digest: Bytes<32>; // output of calculateSignetAttestationDigestV1
     signature: Signature;
@@ -714,15 +724,15 @@ struct RespondBidirectionalEventV1 {
 
 ```compact
 pure circuit calculateSignetAttestationDigestV1<#serializedOutputLength>(
-    requestId: RequestIdV1,
+    requestId: RequestId,
     blockHeight: Uint<64>,
-    outputKind: OutputKindV1,
+    outputKind: OutputKind,
     serializedOutput: Bytes<serializedOutputLength>,
 ): Bytes<32> {
   return upgradeFromTransient(transientHash<[
-      RequestIdV1,
+      RequestId,
       Uint<64>,
-      OutputKindV1,
+      OutputKind,
       Uint<64>,
       Bytes<serializedOutputLength>,
     ]>([
