@@ -3,9 +3,9 @@ use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
-    AttestationMetadata, AttestationOutcomeKind, BidirectionalTx, Chain, ChainConfig as _,
-    IndexedSignRequest, RespondBidirectionalSerializedOutput, RespondBidirectionalTx,
-    SerDeserFormat, SignArgs, SignId, SignKind,
+    BidirectionalTx, Chain, ChainConfig as _, IndexedSignRequest,
+    RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
+    SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
 use std::sync::Arc;
@@ -537,10 +537,13 @@ mod tests {
         assert_eq!(request.args.payload, expected_payload);
         assert_eq!(request.args.path, MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH);
     }
+
+    /// The network's own leg-2 attestation and the attack name the same path, so the
+    /// request kind is all that separates them.
     #[test]
     fn claims_attestation_key_separates_the_attack_from_leg_two() {
         let tx = sample_bidirectional_tx(Chain::Solana, [0x30; 32]);
-        let leg_two = CompletedTx::new(tx, None, None, 456)
+        let leg_two = CompletedTx::new(tx, None, None)
             .create_sign_request_from_serialized_output(vec![1; 32])
             .unwrap();
         assert!(!claims_attestation_key(&leg_two));

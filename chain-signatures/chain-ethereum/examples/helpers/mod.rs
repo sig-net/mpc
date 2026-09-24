@@ -46,7 +46,6 @@ pub fn make_config() -> anyhow::Result<EthConfig> {
         account_sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             .parse()
             .unwrap(),
-        consensus_rpc_http_url: String::new(),
         execution_rpc_http_url: opt_env("RPC_URL")?
             .parse()
             .map_err(|e| anyhow!("invalid RPC_URL: {e}"))?,
@@ -54,12 +53,10 @@ pub fn make_config() -> anyhow::Result<EthConfig> {
             .parse()
             .map_err(|e| anyhow!("invalid CONTRACT_ADDRESS: {e}"))?,
         network: std::env::var("NETWORK").unwrap_or_else(|_| "sepolia".to_string()),
-        helios_data_path: "/tmp/helios-bench".to_string(),
         // Production finality-watch cadence; The watcher drives finality in OPTIMISTIC=0 mode.
         refresh_finalized_interval: env_u64("REFRESH_FINALIZED_INTERVAL", Some(10_000))?,
         // Default to the production (non-optimistic) path;
         optimistic_requests: env_bool("OPTIMISTIC", false)?,
-        light_client: false,
         rpc: Default::default(),
         gas: Default::default(),
         publisher: Default::default(),

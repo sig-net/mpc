@@ -581,6 +581,39 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
     );
 }
 
+/// Plain `sign` takes a free-text path and never reaches `validate`, so without
+/// this check a contract asks for its own chain's attestation path with a payload
+/// of keccak(request_id || output) and gets a valid attestation for any outcome.
+#[tokio::test]
+async fn process_sign_request_rejects_the_reserved_attestation_path() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
+
+    let mut reserved = mock_sign_request(SignId::new([31u8; 32]), Chain::Solana);
+    Arc::make_mut(&mut reserved).args.path = "solana response key".to_string();
+    let err = process_sign_request(reserved, &ctx)
+        .await
+        .expect_err("a sign request on the attestation path must be rejected");
+    assert!(err.to_string().contains("reserved attestation path"));
+    assert_eq!(
+        backlog.len(),
+        0,
+        "a rejected request must not reach the backlog"
+    );
+
+    // Only this request's own source chain's path is reserved. Another chain's
+    // cannot derive this one's attestation key, so it stays admitted, which is
+    // what distinguishes the check from one that matches all four strings.
+    let foreign_id = SignId::new([32u8; 32]);
+    let mut foreign = mock_sign_request(foreign_id, Chain::Solana);
+    Arc::make_mut(&mut foreign).args.path = "canton response key".to_string();
+    process_sign_request(foreign, &ctx)
+        .await
+        .expect("another chain's attestation path must still be admitted");
+    assert!(backlog.get(Chain::Solana, &foreign_id).await.is_some());
+}
+
 #[tokio::test]
 async fn process_sign_request_duplicate_is_idempotent() {
     let backlog = Backlog::new();
@@ -984,6 +1017,90 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     }
 }
 
+/// A terminal extraction failure means the transaction executed but its output
+/// could not be interpreted. The watcher and the backlog entry are dropped and
+/// no sign request is queued.
+#[tokio::test]
+async fn process_execution_confirmed_extraction_failed_signs_nothing() {
+    let backlog = Backlog::new();
+
+    let tx = test_bidirectional_tx(2, Chain::Solana, Chain::Ethereum);
+    let sign_id = tx.sign_id();
+    backlog
+        .insert_mock_executing(&tx)
+        .await
+        .watch_execution()
+        .await;
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+
+    process_execution_confirmed(
+        tx.id,
+        456u64,
+        ExecutionOutcome::ExtractionFailed,
+        &ctx,
+        tx.target_chain,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        ctx.backlog
+            .get_execution_watchers(tx.target_chain)
+            .await
+            .is_empty(),
+        "the watcher is dropped: retrying re-runs the same deterministic decode"
+    );
+    assert!(
+        ctx.backlog.get(tx.source_chain, &sign_id).await.is_none(),
+        "the entry is removed on every node, so checkpoints stay aligned"
+    );
+    match sign_rx.try_recv() {
+        Ok(SignCommand::Completion(id)) => assert_eq!(id, sign_id, "the id is retired"),
+        other => panic!("expected only a completion, got {other:?}"),
+    }
+    assert!(
+        sign_rx.try_recv().is_err(),
+        "no response is signed for an execution that actually happened"
+    );
+}
+
+/// The completion refers to an entry that was just removed, so nothing can
+/// requeue it once dropped: it must not sit behind the target chain's catchup
+/// barrier the way an ordinary follow-up sign request does.
+#[tokio::test]
+async fn process_execution_confirmed_extraction_failed_retires_id_before_catchup() {
+    let backlog = Backlog::new();
+
+    let tx = test_bidirectional_tx(3, Chain::Solana, Chain::Ethereum);
+    let sign_id = tx.sign_id();
+    backlog
+        .insert_mock_executing(&tx)
+        .await
+        .watch_execution()
+        .await;
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    // Not caught up on the target chain, which is where the confirmation is observed.
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+
+    process_execution_confirmed(
+        tx.id,
+        456u64,
+        ExecutionOutcome::ExtractionFailed,
+        &ctx,
+        tx.target_chain,
+    )
+    .await
+    .unwrap();
+
+    match sign_rx.try_recv() {
+        Ok(SignCommand::Completion(id)) => assert_eq!(id, sign_id),
+        other => panic!("expected the id to be retired during catchup, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
     let backlog = Backlog::new();
@@ -1235,7 +1352,8 @@ async fn publish_failover_fires_once_per_leg() {
     let fin_gen = exec
         .advance(ExecutionOutcome::Success { output: vec![] }, 456)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("a success outcome yields a response to sign");
     let (pk2, output2) = mock_signature_output(&fin_gen.request().args);
     fin_gen
         .advance(pk2, &output2, mock_participants(), false)
@@ -1334,434 +1452,30 @@ async fn publish_failover_needs_catchup() {
     );
 }
 
+/// A stream restart clears `caught_up` while the sign loop still runs the
+/// request's task, and the completed entry is gone from the backlog, so a
+/// completion dropped during replay would leave that task running.
 #[tokio::test]
-async fn midnight_execution_response_binds_receipt_height_and_outcome() {
-    for (result, kind, expected_output) in [
-        (
-            ExecutionOutcome::Success {
-                output: vec![0xde, 0xad, 0xbe, 0xef],
-            },
-            mpc_primitives::AttestationOutcomeKind::Executed,
-            vec![0xde, 0xad, 0xbe, 0xef],
-        ),
-        (
-            ExecutionOutcome::Failed,
-            mpc_primitives::AttestationOutcomeKind::Failed,
-            vec![],
-        ),
-    ] {
-        let backlog = Backlog::new();
-        let tx = test_bidirectional_tx(92, Chain::Midnight, Chain::Ethereum);
-        backlog.insert_mock_executing(&tx).await;
-        let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-        process_execution_confirmed(tx.id, 7123, result, &ctx, Chain::Ethereum)
-            .await
-            .unwrap();
-        let SignCommand::Request(entry) = sign_rx.try_recv().unwrap() else {
-            panic!("expected signing request")
-        };
-        let SignKind::RespondBidirectional(response) = &entry.request().kind else {
-            panic!("expected response")
-        };
-        assert_eq!(response.output, expected_output);
-        assert_eq!(
-            response.attestation,
-            Some(mpc_primitives::AttestationMetadata {
-                key_version: tx.key_version,
-                block_height: 7123,
-                outcome: kind,
-            })
-        );
-        assert!(ctx
-            .backlog
-            .get_execution_watchers(Chain::Ethereum)
-            .await
-            .is_empty());
-    }
-}
-
-#[tokio::test]
-async fn midnight_completion_requires_the_published_metadata_to_match_the_signature() {
-    for case in 0..6 {
-        let backlog = Backlog::new();
-        let tx = test_bidirectional_tx(94, Chain::Midnight, Chain::Ethereum);
-        let entry = backlog.insert_mock_final(&tx).await;
-        let SignKind::RespondBidirectional(response) = &entry.request().kind else {
-            unreachable!()
-        };
-        let metadata = response.attestation.unwrap();
-        let digest = mpc_compact_hashing::compute_attestation_hash(
-            &tx.request_id,
-            &metadata,
-            &response.output,
-        )
-        .unwrap();
-        let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
-        let signature = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
-        let mut event = RespondBidirectionalEvent {
-            request_id: tx.request_id,
-            signature,
-            chain: Chain::Midnight,
-            attestation: Some(mpc_primitives::PublishedAttestation {
-                block_height: metadata.block_height,
-                outcome: metadata.outcome,
-                serialized_output_length: response.output.len() as u64,
-                digest,
-            }),
-        };
-        match case {
-            0 => event.attestation = None,
-            1 => event.attestation.as_mut().unwrap().block_height += 1,
-            2 => {
-                event.attestation.as_mut().unwrap().outcome =
-                    mpc_primitives::AttestationOutcomeKind::Failed
-            }
-            3 => event.attestation.as_mut().unwrap().serialized_output_length += 1,
-            4 => event.attestation.as_mut().unwrap().digest[0] ^= 1,
-            5 => {}
-            _ => unreachable!(),
-        }
-        let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-        let result =
-            process_respond_bidirectional_event(event, &ctx, root_sk.public_key().into()).await;
-        assert_eq!(result.is_ok(), case == 5, "case {case}: {result:?}");
-        assert_eq!(
-            ctx.backlog
-                .get(Chain::Midnight, &tx.sign_id())
-                .await
-                .is_none(),
-            case == 5
-        );
-        assert_eq!(sign_rx.try_recv().is_ok(), case == 5);
-    }
-}
-
-#[tokio::test]
-async fn process_sign_request_rejects_the_reserved_attestation_path() {
+async fn process_respond_bidirectional_event_sends_completion_before_catchup() {
     let backlog = Backlog::new();
-    let (sign_tx, _sign_rx) = mpsc::channel(4);
-    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
+    let tx = test_bidirectional_tx(82, Chain::Solana, Chain::Ethereum);
+    let sign_id = tx.sign_id();
+    let entry = backlog.insert_mock_final(&tx).await;
 
-    let mut reserved = mock_sign_request(SignId::new([31u8; 32]), Chain::Solana);
-    Arc::make_mut(&mut reserved).args.path = "solana response key".to_string();
-    let err = process_sign_request(reserved, &ctx)
-        .await
-        .expect_err("a sign request on the attestation path must be rejected");
-    assert!(err.to_string().contains("reserved attestation path"));
-    assert_eq!(
-        backlog.len(),
-        0,
-        "a rejected request must not reach the backlog"
-    );
-
-    // Only this request's own source chain's path is reserved. Another chain's
-    // cannot derive this one's attestation key, so it stays admitted, which is
-    // what distinguishes the check from one that matches all four strings.
-    let foreign_id = SignId::new([32u8; 32]);
-    let mut foreign = mock_sign_request(foreign_id, Chain::Solana);
-    Arc::make_mut(&mut foreign).args.path = "canton response key".to_string();
-    process_sign_request(foreign, &ctx)
-        .await
-        .expect("another chain's attestation path must still be admitted");
-    assert!(backlog.get(Chain::Solana, &foreign_id).await.is_some());
-}
-
-#[tokio::test]
-async fn legacy_recovery_preserves_source_phase_without_republishing() {
-    use alloy::consensus::{SignableTransaction as _, TxEip1559};
-    use alloy::primitives::{Address, Bytes, TxKind, U256};
-    use mpc_chain_integration_core::utils::hashing::hash_payload;
-    use mpc_primitives::ScalarExt as _;
-
-    let chain = Chain::Midnight;
-    let id = SignId::new([201; 32]);
-    let unsigned = TxEip1559 {
-        chain_id: Chain::Ethereum
-            .caip2_chain_id()
-            .split_once(':')
-            .unwrap()
-            .1
-            .parse()
-            .unwrap(),
-        nonce: 3,
-        gas_limit: 100_000,
-        max_fee_per_gas: 100_000_000_000,
-        max_priority_fee_per_gas: 1_000_000_000,
-        to: TxKind::Call(Address::from([0x12; 20])),
-        value: U256::ZERO,
-        access_list: Default::default(),
-        input: Bytes::new(),
-    };
-    let event = SignBidirectionalEvent {
-        sender: [0xab; 32],
-        serialized_transaction: unsigned.encoded_for_signing(),
-        caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-        key_version: 1,
-        deposit: 0,
-        path: hex::encode([0xcd; 32]),
-        algo: "ecdsa".to_string(),
-        dest: String::new(),
-        params: String::new(),
-        chain,
-        chain_ctx: None,
-        output_deserialization_schema: b"uint256".to_vec(),
-        respond_serialization_schema: b"uint256".to_vec(),
-    };
-    event.validate().unwrap();
-    let args = SignArgs {
-        entropy: hash_payload(&id.request_id),
-        epsilon: event.epsilon().unwrap(),
-        payload: Scalar::from_bytes(hash_payload(&event.serialized_transaction)).unwrap(),
-        path: event.path.clone(),
-        key_version: event.key_version,
-    };
-    let request = Arc::new(IndexedSignRequest::sign_bidirectional(
-        id,
-        args,
-        chain,
-        1_753_000_000,
-        event,
-    ));
-    let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let signature = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
     let public_key = root_sk.public_key().into();
-    let signature = mpc_crypto::generate_signature(&root_sk, &request.args);
 
-    let generating = Backlog::new();
-    generating.insert_bidirectional(request.clone()).await;
-    let publishing = Backlog::new();
-    publishing
-        .insert_bidirectional(request.clone())
-        .await
-        .advance(
-            public_key,
-            &cait_sith::FullSignature {
-                big_r: signature.big_r,
-                s: signature.s,
-            },
-            vec![],
-            true,
-        )
-        .await
-        .unwrap();
-    let cp_generating = generating.checkpoint(chain).await.unwrap();
-    let cp_publishing = publishing.checkpoint(chain).await.unwrap();
-    assert_eq!(cp_generating.digest(), cp_publishing.digest());
-
-    let restored_generating = Backlog::new();
-    restored_generating
-        .recover_by_checkpoint(&cp_generating)
-        .await;
-    let restored_publishing = Backlog::new();
-    restored_publishing
-        .recover_by_checkpoint(&cp_publishing)
-        .await;
-    let (sign_tx_g, mut sign_rx_g) = mpsc::channel(4);
-    let (sign_tx_p, _sign_rx_p) = mpsc::channel(4);
-    let (ctx_g, _rpc_g) =
-        make_test_stream_context_with_rpc(restored_generating, sign_tx_g, true, public_key);
-    let (ctx_p, mut rpc_p) =
-        make_test_stream_context_with_rpc(restored_publishing, sign_tx_p, true, public_key);
-    let ctx_p = ctx_p.with_observe_lag(Some(Duration::ZERO));
-    requeue_pending_sign_requests(&ctx_g, chain).await.unwrap();
-    requeue_pending_sign_requests(&ctx_p, chain).await.unwrap();
-    assert!(sign_rx_g.try_recv().is_err());
-    resume_pending_publish_requests(&ctx_p, chain).await;
-    assert!(
-        next_publish(&mut rpc_p).await.is_none(),
-        "incompatible publication must not reach RPC retries"
-    );
-    publish_failover_due(&ctx_p, chain).await;
-    assert!(
-        next_publish(&mut rpc_p).await.is_none(),
-        "failover must also preserve the compatibility boundary"
-    );
-    assert_eq!(
-        ctx_g.backlog.checkpoint(chain).await.unwrap().digest(),
-        ctx_p.backlog.checkpoint(chain).await.unwrap().digest()
-    );
-
-    let response = SignatureRespondedEvent {
-        request_id: id.request_id,
-        signature,
-        chain,
-    };
-    process_respond_event(response.clone(), &ctx_g, public_key)
-        .await
-        .unwrap();
-    process_respond_event(response, &ctx_p, public_key)
-        .await
-        .unwrap();
-    let state_g = ctx_g.backlog.get(chain, &id).await.unwrap();
-    let state_p = ctx_p.backlog.get(chain, &id).await.unwrap();
-    assert_eq!(state_g.state().consensus_tag(), 1);
-    assert_eq!(state_p.state().consensus_tag(), 1);
-    ctx_g
-        .backlog
-        .set_processed_block_interval(chain, 1, 0)
-        .await;
-    ctx_p
-        .backlog
-        .set_processed_block_interval(chain, 1, 0)
-        .await;
-    assert_eq!(
-        ctx_g.backlog.checkpoint(chain).await.unwrap().digest(),
-        ctx_p.backlog.checkpoint(chain).await.unwrap().digest()
-    );
-}
-
-#[tokio::test]
-async fn legacy_midnight_execution_stays_pending_and_recovers_its_watch() {
-    let backlog = Backlog::new();
-    let tx = test_bidirectional_tx(93, Chain::Midnight, Chain::Ethereum);
-    let mut request = (*mock_bidi_request(tx.sign_id(), Chain::Midnight)).clone();
-    let SignKind::SignBidirectional(event) = &mut request.kind else {
-        unreachable!()
-    };
-    event.chain_ctx = None;
-    seed_executing_entry(&backlog, Arc::new(request), Arc::new(tx.clone())).await;
-    let before = backlog.checkpoint(Chain::Midnight).await.unwrap();
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
-    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-    process_execution_confirmed(
-        tx.id,
-        7123,
-        ExecutionOutcome::Success { output: vec![1] },
-        &ctx,
-        Chain::Ethereum,
-    )
-    .await
-    .unwrap();
-    let after = ctx.backlog.checkpoint(Chain::Midnight).await.unwrap();
-    assert_eq!(before.digest(), after.digest());
-    assert!(ctx
-        .backlog
-        .get(Chain::Midnight, &tx.sign_id())
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+
+    process_respond_bidirectional_event(respond_event(sign_id, signature), &ctx, public_key)
+        .await
+        .expect("respond event should complete the request");
+
+    let msg = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
         .unwrap()
-        .state()
-        .is_pending_execution());
-    assert!(
-        sign_rx.try_recv().is_err(),
-        "no signing or completion command for incompatible state"
-    );
-    assert_eq!(
-        ctx.backlog
-            .get_execution_watchers(Chain::Ethereum)
-            .await
-            .len(),
-        1
-    );
-    let restored = Backlog::new();
-    restored.recover_by_checkpoint(&after).await;
-    assert_eq!(
-        restored.get_execution_watchers(Chain::Ethereum).await.len(),
-        1
-    );
-    assert_eq!(
-        before.digest(),
-        restored.checkpoint(Chain::Midnight).await.unwrap().digest()
-    );
-}
-
-#[tokio::test]
-async fn recovered_midnight_final_publication_requires_canonical_metadata() {
-    for compatible in [false, true] {
-        let backlog = Backlog::new();
-        let tx = test_bidirectional_tx(96, Chain::Midnight, Chain::Ethereum);
-        let request = if compatible {
-            backlog.insert_mock_final(&tx).await.request().clone()
-        } else {
-            mock_bidi_response_request(tx.sign_id(), tx.id, Chain::Midnight)
-        };
-        let entry = crate::backlog::SignEntry::generating(request.clone(), &backlog);
-        if !compatible {
-            backlog.insert(request.clone()).await;
-        }
-        let (pk, output) = mock_signature_output(&request.args);
-        entry
-            .advance(pk, &output, mock_participants(), true)
-            .await
-            .unwrap();
-        let before = backlog.checkpoint(Chain::Midnight).await.unwrap();
-        let restored = Backlog::new();
-        restored.recover_by_checkpoint(&before).await;
-        let (sign_tx, _sign_rx) = mpsc::channel(4);
-        let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(restored, sign_tx, true, pk);
-        let ctx = ctx.with_observe_lag(Some(Duration::ZERO));
-        resume_pending_publish_requests(&ctx, Chain::Midnight).await;
-        assert_eq!(next_publish(&mut rpc_rx).await.is_some(), compatible);
-        publish_failover_due(&ctx, Chain::Midnight).await;
-        assert!(next_publish(&mut rpc_rx).await.is_none());
-        assert_eq!(
-            before.digest(),
-            ctx.backlog
-                .checkpoint(Chain::Midnight)
-                .await
-                .unwrap()
-                .digest()
-        );
-    }
-}
-
-#[tokio::test]
-async fn decode_failure_preserves_source_checkpoint_across_target_progress() {
-    for source_chain in [
-        Chain::Midnight,
-        Chain::Solana,
-        Chain::Canton,
-        Chain::Hydration,
-    ] {
-        for caught_up in [false, true] {
-            let backlog = Backlog::new();
-            let tx = test_bidirectional_tx(97, source_chain, Chain::Ethereum);
-            backlog.insert_mock_executing(&tx).await;
-            backlog
-                .set_processed_block_interval(source_chain, 40, 0)
-                .await;
-            let before = backlog.checkpoint(source_chain).await.unwrap();
-            let observer = Backlog::new();
-            observer.recover_by_checkpoint(&before).await;
-            let (sign_tx, mut sign_rx) = mpsc::channel(4);
-            let ctx = make_test_stream_context_with_generator_pk(observer, sign_tx, caught_up);
-            process_execution_confirmed(
-                tx.id,
-                7123,
-                ExecutionOutcome::ExtractionFailed,
-                &ctx,
-                Chain::Ethereum,
-            )
-            .await
-            .unwrap();
-            let after = ctx.backlog.checkpoint(source_chain).await.unwrap();
-            assert_eq!(before.block_height, after.block_height);
-            assert_eq!(
-                before.digest(),
-                after.digest(),
-                "unequal target progress must not change the same source checkpoint"
-            );
-            assert!(
-                sign_rx.try_recv().is_err(),
-                "decode failure must not sign or complete the request"
-            );
-            assert!(ctx
-                .backlog
-                .get(source_chain, &tx.sign_id())
-                .await
-                .unwrap()
-                .state()
-                .is_pending_execution());
-            let restored = Backlog::new();
-            restored.recover_by_checkpoint(&after).await;
-            assert_eq!(
-                restored.get_execution_watchers(Chain::Ethereum).await.len(),
-                1
-            );
-            assert_eq!(
-                before.digest(),
-                restored.checkpoint(source_chain).await.unwrap().digest()
-            );
-        }
-    }
+        .unwrap();
+    assert_matches!(msg, SignCommand::Completion(id) if id == sign_id);
 }

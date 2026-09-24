@@ -32,8 +32,9 @@ pub enum ExtractionFailureKind {
     /// provider response). Another node may well succeed, so the watcher is
     /// retried rather than resolved.
     Retryable,
-    /// Deterministic failure of on-chain data against the request's schemas.
-    /// The transaction executed; this cannot authorize a failure attestation.
+    /// Deterministic failure of on-chain data against the request's schemas. Every
+    /// node observes it identically, so the request is resolved rather than retried,
+    /// and without a response: the transaction itself executed.
     Terminal,
 }
 

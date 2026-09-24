@@ -19,7 +19,6 @@ clap.workspace = true
 deadpool-redis.workspace = true
 futures = "0.3"
 hex.workspace = true
-hyper.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -105,4 +104,3 @@ harness = false
 
 [features]
 default = []
-helios = ["mpc-chain-ethereum/helios", "mpc-node/helios"]

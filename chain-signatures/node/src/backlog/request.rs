@@ -558,11 +558,13 @@ impl SignEntry<Bidirectional<Executing>> {
     /// The response sign request is constructed directly from the entry's execution
     /// transaction and original sign request context, guaranteeing by construction
     /// that the sign ID, chain, and `RespondBidirectional` kind match.
+    ///
+    /// `None` for [`ExecutionOutcome::ExtractionFailed`]: there is no response to
+    /// sign, so the request is removed rather than advanced.
     pub async fn advance(
         self,
         outcome: ExecutionOutcome,
-        block_height: u64,
-    ) -> anyhow::Result<SignEntry<Bidirectional<Final<Generating>>>> {
+    ) -> anyhow::Result<Option<SignEntry<Bidirectional<Final<Generating>>>>> {
         let chain_ctx = match &self.request.kind {
             SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
             _ => None,
@@ -573,12 +575,9 @@ impl SignEntry<Bidirectional<Executing>> {
         // follow-up request stamps itself with "now", so it must be carried.
         let origin_indexed_at = Some(self.request.unix_timestamp_indexed);
 
-        let completed_tx = CompletedTx::new(
-            Arc::clone(self.execution_tx()),
-            chain_ctx,
-            origin_indexed_at,
-            block_height,
-        );
+        let execution_tx = Arc::clone(self.execution_tx());
+        let completed_tx =
+            CompletedTx::new(Arc::clone(&execution_tx), chain_ctx, origin_indexed_at);
         let sign_request = match outcome {
             ExecutionOutcome::Success { output } => {
                 completed_tx.create_sign_request_from_serialized_output(output)?
@@ -586,18 +585,30 @@ impl SignEntry<Bidirectional<Executing>> {
             ExecutionOutcome::Failed => completed_tx.create_failed_sign_request().await?,
 
             ExecutionOutcome::ExtractionFailed => {
-                anyhow::bail!("output extraction failure cannot enter response signing")
+                tracing::error!(
+                    sign_id = ?self.sign_id(),
+                    chain = ?self.chain,
+                    tx_id = ?execution_tx.id,
+                    output_deserialization_schema =
+                        %String::from_utf8_lossy(&execution_tx.output_deserialization_schema),
+                    respond_serialization_schema =
+                        %String::from_utf8_lossy(&execution_tx.respond_serialization_schema),
+                    "bidirectional output extraction failed terminally; resolving the request \
+                     without a response, even though the destination transaction executed."
+                );
+                self.complete().await;
+                return Ok(None);
             }
         };
 
         let respond_request = Arc::new(sign_request);
         self.responding(Arc::clone(&respond_request)).await?;
-        Ok(SignEntry {
+        Ok(Some(SignEntry {
             chain: self.chain,
             request: respond_request,
             state: Bidirectional(Final(Generating)),
             backlog: self.backlog,
-        })
+        }))
     }
 }
 

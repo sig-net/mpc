@@ -220,7 +220,6 @@ jobs:
           RUST_BACKTRACE: 1
           IT_ETH_ACCOUNT_SK: ${{ secrets.IT_ETH_ACCOUNT_SK }}
           IT_ETH_CONTRACT_ADDR: ${{ secrets.IT_ETH_CONTRACT_ADDR }}
-          IT_ETH_CONSENSUS_RPC_URL: ${{ secrets.IT_ETH_CONSENSUS_RPC_URL }}
           IT_ETH_EXECUTION_RPC_URL: ${{ secrets.IT_ETH_EXECUTION_RPC_URL }}
 
   # Anvil-backed integration tests (no docker cluster): real EVM + real contract bytecode
