@@ -9,7 +9,7 @@ const packageDir = resolve(fixtureDir, "../..");
 const managedDir = resolve(fixtureDir, "managed");
 const compile = spawnSync(
   "compact",
-  ["compile", "--feature-zkir-v3", "caller.compact", "managed/caller"],
+  ["compile", "+0.33.0-rc.2", "--feature-zkir-v3", "erc20-vault.compact", "managed/erc20-vault"],
   {
     cwd: fixtureDir,
     env: { ...process.env, COMPACT_PATH: resolve(packageDir, "node_modules") },

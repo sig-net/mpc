@@ -1,105 +1,91 @@
-import { createInterface } from "node:readline";
+import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { findDeployedContract, type FoundContract } from "@midnight-ntwrk/midnight-js/contracts";
+import { createInterface } from "node:readline";
+import { rawTokenType } from "@midnight-ntwrk/compact-runtime";
+import { findDeployedContract } from "@midnight-ntwrk/midnight-js/contracts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js/network-id";
 import {
-  buildDeployTransaction,
-  deploySignetContract,
-  deriveAccountKeys,
-  deriveWalletAddresses,
-  GENESIS_MINT_WALLET_SEED,
-  initialiseWalletFacade,
-  isLocalStandaloneNetwork,
-  registerNightForDustGeneration,
-  submitUnprovenTransaction,
-  transferNight,
-  waitForSpendableDust,
-  withSyncedWalletFacade,
-  type FacadeState,
-  type MidnightNodeConfig,
-  type WalletFacade,
-} from "@sig-net/midnight-contract-deploy";
-import {
-  contractAddressFromHex,
-  parseRequestIdHex,
+  asciiPadded,
+  bytesToHex,
+  calculateRequestId,
+  deriveEvmAddress,
+  deriveMidnightResponseKey,
+  deserializeEvmOutput,
+  hexToBytes,
   parseSecp256k1PublicKey,
   requestIdBytes,
+  requestIdHex,
   respondBidirectionalEventToCircuitInput,
+  serializeRespondOutput,
+  SIGNET_DEFAULT_KEY_VERSION,
   signetEventSourceFromPublicDataProvider,
   SignetRequestResponseReader,
+  toSignBidirectionalEventIndex,
   type RequestIdHex,
   type Secp256k1Point,
-  type SignetPublicStateSource,
 } from "@sig-net/midnight";
-import { ledger, pureCircuits, type Contract } from "./managed/caller/contract/index.js";
 import {
-  buildCallerProviders,
-  callerCompiledContract,
-  CALLER_PRIVATE_STATE_ID,
+  deploySignetContract,
+  deriveAccountKeys,
+  withSyncedWalletFacade,
+  type MidnightNodeConfig,
+} from "@sig-net/midnight-contract-deploy";
+import { JsonRpcProvider } from "ethers";
+import { deployVault } from "./deploy.js";
+import {
+  AAVE_USDC,
+  erc20Balance,
+  fundFork,
+  quoteSwap,
+  SEPOLIA_USDC,
+  STATA_USDC,
+  UNISWAP_ROUTER,
+} from "./evm.js";
+import { DEPLOYER_SEED, fundRoles, PUBLISHER_SEED, USER_SEED } from "./funding.js";
+import { ledger, pureCircuits } from "./managed/erc20-vault/contract/index.js";
+import {
+  buildProviders,
+  vaultCompiledContract,
+  vaultManagedPath,
+  VAULT_PRIVATE_STATE_ID,
 } from "./providers.js";
-import { createCallerPrivateState, type CallerPrivateState } from "./witnesses.js";
-
-const DEPLOYER_SEED = "02".repeat(32);
-const INVOKER_SEED = "03".repeat(32);
-const PUBLISHER_SEED = "04".repeat(32);
-
-type CallerHandle = FoundContract<Contract<CallerPrivateState>>;
-
-interface BootstrapRequest {
-  op: "bootstrap";
-  config: MidnightNodeConfig;
-  artifactDir: string;
-}
-
-interface InitialiseRequest {
-  op: "initialise";
-  responsePublicKey: string;
-}
-
-interface SubmitRequest {
-  op: "submitIsEven";
-  nonce: string;
-  target: string;
-  argument: string;
-  outputType: "bool" | "uint64" | "bytes32";
-}
-
-interface SignedTransactionRequest {
-  op: "signedTransaction";
-  requestId: string;
-  expectedSigner: string;
-}
-
-interface SettleResponseRequest {
-  op: "settleResponse";
-  requestId: string;
-  serializedOutput: string;
-  rejectPaddedReplay?: boolean;
-}
-
-interface ShutdownRequest {
-  op: "shutdown";
-}
+import { createPrivateState } from "./witnesses.js";
 
 type Request =
-  | BootstrapRequest
-  | InitialiseRequest
-  | SubmitRequest
-  | SignedTransactionRequest
-  | SettleResponseRequest
-  | ShutdownRequest;
+  | { op: "bootstrap"; config: MidnightNodeConfig; artifactDir: string; mpcPublicKey: string }
+  | { op: "initialise"; responsePublicKey: string }
+  | { op: "runVault"; evmRpcUrl: string }
+  | { op: "shutdown" };
 
 interface Session {
-  facade: WalletFacade;
-  caller: CallerHandle;
-  callerAddress: string;
-  publicDataProvider: SignetPublicStateSource;
-  reader: SignetRequestResponseReader;
+  config: MidnightNodeConfig;
+  artifactDir: string;
+  centralAddress: string;
+  vaultAddress: string;
+  mpcPublicKey: string;
   responseKey?: Secp256k1Point;
 }
 
-let session: Session | undefined;
+interface OperationResult {
+  operation: string;
+  requestId: RequestIdHex;
+  succeeded: boolean;
+}
 
+// These paths also occur in the contract's MPC notifications. Check the compiler
+// layout before deploying so a changed ledger cannot silently redirect a reader.
+const requestPaths = {
+  signBidirectionalEventMap: [0, 0],
+  depositEventMap: [1, 3],
+  swapEventMap: [1, 7],
+  supplyEventMap: [1, 11],
+  redeemEventMap: [1, 13],
+} as const;
+type RequestMap = keyof typeof requestPaths;
+
+let session: Session | undefined;
 const diagnostics = (...values: unknown[]) => {
   process.stderr.write(`${values.map(String).join(" ")}\n`);
 };
@@ -107,22 +93,9 @@ console.log = diagnostics;
 console.info = diagnostics;
 console.warn = diagnostics;
 
-function bytes(hex: string, width?: number): Uint8Array {
-  const bare = hex.replace(/^0x/i, "");
-  if (!/^[0-9a-fA-F]*$/.test(bare) || bare.length % 2 !== 0) {
-    throw new Error(`expected even-length hex, got ${hex}`);
-  }
-  const result = Uint8Array.from(
-    bare.match(/.{2}/g)?.map((part) => Number.parseInt(part, 16)) ?? [],
-  );
-  if (width !== undefined && result.length !== width) {
-    throw new Error(`expected ${width} bytes, got ${result.length}`);
-  }
-  return result;
-}
-
 async function waitFor<T>(description: string, read: () => Promise<T | undefined>): Promise<T> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  const deadline = Date.now() + 360_000;
+  while (Date.now() < deadline) {
     const value = await read();
     if (value !== undefined) return value;
     await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -130,280 +103,392 @@ async function waitFor<T>(description: string, read: () => Promise<T | undefined
   throw new Error(`timed out waiting for ${description}`);
 }
 
-async function callerHasRequest(active: Session, requestId: RequestIdHex): Promise<boolean> {
-  const state = await active.publicDataProvider.queryContractState(active.callerAddress);
-  if (!state) throw new Error(`no caller state found at ${active.callerAddress}`);
-  return ledger(state.data).requests.member(requestIdBytes(requestId));
-}
-
-function deployEnv(config: MidnightNodeConfig, seed: string): Record<string, string> {
-  return {
-    NETWORK_ID: config.networkId,
-    MIDNIGHT_NODE_URL: config.nodeUrl,
-    MIDNIGHT_NODE_INDEXER_URL: config.indexerUrl,
-    MIDNIGHT_NODE_INDEXER_WS_URL: config.indexerWsUrl,
-    MIDNIGHT_NODE_PROOF_SERVER_URL: config.proofServerUrl,
-    DEPLOYER_SEED: seed,
-  };
-}
-
-// `assertRootFunded` returns as soon as root's spendable DUST is positive, but a
-// transfer's fee may exceed that first sliver until a few more blocks of DUST
-// generate. A transfer built too early fails to balance ("could not balance
-// dust"); the same transfer a few blocks later succeeds. Retry only that error,
-// so root's DUST can catch up without masking a genuine funding failure.
-function isDustBalancingShortfall(error: unknown): boolean {
-  const text = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error);
-  return /Wallet\.InsufficientFunds|Insufficient Funds|could not balance dust/i.test(text);
-}
-
-function totalNight(state: FacadeState): bigint {
-  return Object.values(state.unshielded.balances).reduce((sum, value) => sum + value, 0n);
-}
-
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-// Mirrors the package's per-child flow but amortizes the expensive part: a
-// root facade re-syncs from genesis once (that re-sync dominates wall time),
-// funds every role wallet sequentially from that live facade, and the
-// independent child verifications run concurrently afterwards.
-async function fundRoles(config: MidnightNodeConfig): Promise<void> {
-  const networkId = config.networkId;
-  const rootKeys = deriveAccountKeys(GENESIS_MINT_WALLET_SEED, networkId);
-  const roles = [
-    ["deployer", DEPLOYER_SEED],
-    ["invoker", INVOKER_SEED],
-    ["publisher", PUBLISHER_SEED],
-  ] as const;
-
-  await withSyncedWalletFacade(rootKeys, config, async (rootFacade, initialState) => {
-    // Local standalone genesis funds root by construction, but the indexer can
-    // lag before the UTXO is visible; poll like assertRootFunded does.
-    let state = initialState;
-    if (isLocalStandaloneNetwork(networkId)) {
-      const deadline = Date.now() + 120_000;
-      while (totalNight(state) === 0n && Date.now() < deadline) {
-        await sleep(3_000);
-        state = await rootFacade.waitForSyncedState();
-      }
-    }
-    const amount = totalNight(state) / 5n;
-    if (amount === 0n) throw new Error("local genesis wallet cannot fund role wallets");
-    await registerNightForDustGeneration(rootFacade, rootKeys, state);
-    if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade);
-
-    // Sequential: every transfer spends root UTXOs selected from `state`.
-    for (const [name, seed] of roles) {
-      const startedAt = Date.now();
-      const unshielded = deriveWalletAddresses(seed, config).unshielded;
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          await transferNight(rootFacade, rootKeys, state, unshielded, networkId, amount);
-          break;
-        } catch (error) {
-          if (attempt >= 11 || !isDustBalancingShortfall(error)) throw error;
-          diagnostics(
-            `root DUST is not yet enough to cover the ${name} transfer; retrying (attempt ${attempt + 1})`,
-          );
-          await sleep(5_000);
-          state = await rootFacade.waitForSyncedState();
-        }
-      }
-      // Let the transfer block land before selecting UTXOs for the next one.
-      await sleep(3_000);
-      state = await rootFacade.waitForSyncedState();
-      diagnostics(`funded ${name} wallet in ${Date.now() - startedAt}ms`);
-    }
-  });
-
-  await Promise.all(
-    roles.map(async ([name, seed]) => {
-      const startedAt = Date.now();
-      const keys = deriveAccountKeys(seed, networkId);
-      await withSyncedWalletFacade(keys, config, async (facade, initialState) => {
-        let state = initialState;
-        const deadline = Date.now() + 120_000;
-        while (totalNight(state) === 0n && Date.now() < deadline) {
-          await sleep(3_000);
-          state = await facade.waitForSyncedState();
-        }
-        if (totalNight(state) === 0n) {
-          throw new Error(`${name} wallet shows no NIGHT after funding from root`);
-        }
-        await registerNightForDustGeneration(facade, keys, state);
-        if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade);
-      });
-      diagnostics(`verified ${name} wallet in ${Date.now() - startedAt}ms`);
-    }),
-  );
-}
-
-async function bootstrap(request: BootstrapRequest) {
-  if (session !== undefined) throw new Error("driver is already bootstrapped");
+async function bootstrap(request: Extract<Request, { op: "bootstrap" }>) {
+  assert.equal(session, undefined, "driver is already bootstrapped");
+  assert.equal(request.config.networkId, "undeployed", "funding requires the local stack");
+  parseSecp256k1PublicKey(request.mpcPublicKey);
+  const info = JSON.parse(
+    await readFile(join(vaultManagedPath, "compiler/contract-info.json"), "utf8"),
+  ) as { ledger: { name: string; index: number[] }[] };
+  for (const [name, expected] of Object.entries({ ...requestPaths, signetRequestNonce: [0, 3] })) {
+    assert.deepEqual(info.ledger.find((field) => field.name === name)?.index, expected, name);
+  }
+  await mkdir(request.artifactDir, { recursive: true });
+  process.chdir(request.artifactDir);
   setNetworkId(request.config.networkId);
-  diagnostics("funding real-stack role wallets");
   await fundRoles(request.config);
-  diagnostics("deploying central Signet contract");
-  const central = await deploySignetContract(deployEnv(request.config, DEPLOYER_SEED));
-
-  const deployerKeys = deriveAccountKeys(DEPLOYER_SEED, request.config.networkId);
-  const deployerSecret = bytes(DEPLOYER_SEED, 32);
-  const deployerCommitment = pureCircuits.deployerCommitment(deployerSecret);
-  const callerDeployment = await withSyncedWalletFacade(
-    deployerKeys,
-    request.config,
-    async (facade) => {
-      const built = await buildDeployTransaction(
-        callerCompiledContract,
-        request.config.networkId,
-        deployerKeys.shieldedSecretKeys.coinPublicKey,
-        createCallerPrivateState(deployerSecret),
-        deployerCommitment,
-        contractAddressFromHex(central.contractAddress),
-      );
-      await submitUnprovenTransaction(facade, deployerKeys, built.serializedTransaction);
-      return { contractAddress: built.contractAddress };
-    },
-  );
-  const invokerKeys = deriveAccountKeys(INVOKER_SEED, request.config.networkId);
-  const facade = await initialiseWalletFacade(invokerKeys, request.config);
-  await facade.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
-  await facade.waitForSyncedState();
-  const providers = buildCallerProviders(
-    facade,
-    invokerKeys,
-    request.config,
-    join(request.artifactDir, "caller.leveldb"),
-  );
-  const caller = await findDeployedContract(providers, {
-    contractAddress: callerDeployment.contractAddress,
-    compiledContract: callerCompiledContract,
-    privateStateId: CALLER_PRIVATE_STATE_ID,
-    initialPrivateState: createCallerPrivateState(deployerSecret),
+  const central = await deploySignetContract({
+    NETWORK_ID: request.config.networkId,
+    MIDNIGHT_NODE_URL: request.config.nodeUrl,
+    MIDNIGHT_NODE_INDEXER_URL: request.config.indexerUrl,
+    MIDNIGHT_NODE_INDEXER_WS_URL: request.config.indexerWsUrl,
+    MIDNIGHT_NODE_PROOF_SERVER_URL: request.config.proofServerUrl,
+    DEPLOYER_SEED,
   });
+  const vaultAddress = await deployVault(request.config, central.contractAddress);
   session = {
-    facade,
-    caller,
-    callerAddress: callerDeployment.contractAddress,
-    publicDataProvider: providers.publicDataProvider,
-    reader: new SignetRequestResponseReader({
-      requesterContractAddress: callerDeployment.contractAddress,
-      requesterRequestsPath: [3],
-      signetContractAddress: central.contractAddress,
-      publicDataProvider: providers.publicDataProvider,
-      eventSource: signetEventSourceFromPublicDataProvider(providers.publicDataProvider),
-    }),
+    config: request.config,
+    artifactDir: request.artifactDir,
+    mpcPublicKey: request.mpcPublicKey,
+    centralAddress: central.contractAddress,
+    vaultAddress,
   };
   return {
     centralAddress: central.contractAddress,
-    callerAddress: callerDeployment.contractAddress,
+    callerAddress: vaultAddress,
     publisherSeed: PUBLISHER_SEED,
   };
 }
 
+function evmVaultAddress(active: Session): string {
+  return deriveEvmAddress(
+    active.mpcPublicKey,
+    active.vaultAddress,
+    bytesToHex(asciiPadded("vault", 32)),
+  );
+}
+
+async function initialise(active: Session, responsePublicKey: string): Promise<void> {
+  assert.equal(active.responseKey, undefined, "vault is already initialised");
+  const responseKey = parseSecp256k1PublicKey(responsePublicKey);
+  assert.deepEqual(
+    responseKey,
+    deriveMidnightResponseKey(active.mpcPublicKey, active.vaultAddress),
+  );
+  const keys = deriveAccountKeys(DEPLOYER_SEED, active.config.networkId);
+  await withSyncedWalletFacade(keys, active.config, async (facade) => {
+    const providers = buildProviders(
+      facade,
+      keys,
+      active.config,
+      join(active.artifactDir, "deployer.leveldb"),
+    );
+    const vault = await findDeployedContract(providers, {
+      contractAddress: active.vaultAddress,
+      compiledContract: vaultCompiledContract,
+      privateStateId: VAULT_PRIVATE_STATE_ID,
+      initialPrivateState: createPrivateState(hexToBytes(DEPLOYER_SEED)),
+    });
+    await vault.callTx.initialise(
+      hexToBytes(evmVaultAddress(active)),
+      hexToBytes(UNISWAP_ROUTER),
+      hexToBytes(AAVE_USDC),
+      hexToBytes(STATA_USDC),
+      31337n,
+      responseKey,
+    );
+    const state = await providers.publicDataProvider.queryContractState(active.vaultAddress);
+    assert(state);
+    const configured = ledger(state.data);
+    assert.equal(configured.initialised, 1n);
+    assert.equal(configured.evmChainId, 31337n);
+    assert.deepEqual(configured.mpcResponseKey, responseKey);
+  });
+  active.responseKey = responseKey;
+}
+
+async function runVault(
+  active: Session,
+  evmRpcUrl: string,
+): Promise<{ operations: OperationResult[] }> {
+  assert(active.responseKey, "vault is not initialised");
+  const responseKey = active.responseKey;
+  const evm = new JsonRpcProvider(evmRpcUrl, undefined, { cacheTimeout: -1 });
+  const evmVault = evmVaultAddress(active);
+  const secretKey = hexToBytes(USER_SEED);
+  const evmUser = deriveEvmAddress(
+    active.mpcPublicKey,
+    active.vaultAddress,
+    bytesToHex(pureCircuits.userCommitment(secretKey)),
+  );
+  try {
+    await fundFork(evm, evmRpcUrl, evmUser, evmVault);
+    const keys = deriveAccountKeys(USER_SEED, active.config.networkId);
+    return await withSyncedWalletFacade(keys, active.config, async (facade) => {
+      const providers = buildProviders(
+        facade,
+        keys,
+        active.config,
+        join(active.artifactDir, "user.leveldb"),
+      );
+      const vault = await findDeployedContract(providers, {
+        contractAddress: active.vaultAddress,
+        compiledContract: vaultCompiledContract,
+        privateStateId: VAULT_PRIVATE_STATE_ID,
+        initialPrivateState: createPrivateState(secretKey),
+      });
+      const operations: OperationResult[] = [];
+      const readLedger = async () => {
+        const state = await providers.publicDataProvider.queryContractState(active.vaultAddress);
+        assert(state, "vault state is missing");
+        return ledger(state.data);
+      };
+      const tokenType = (token: string) =>
+        rawTokenType(
+          pureCircuits.vaultTokenDomainSeparator(hexToBytes(token)),
+          active.vaultAddress,
+        );
+      const balance = async (token: string) =>
+        (await facade.waitForSyncedState()).shielded.balances[tokenType(token)] ?? 0n;
+      const coin = (token: string, amount: bigint) => ({
+        nonce: randomBytes(32),
+        color: hexToBytes(tokenType(token)),
+        value: amount,
+      });
+      const nonce = async (address = evmVault) => BigInt(await evm.getTransactionCount(address));
+      const removed = async (map: RequestMap, id: RequestIdHex) => {
+        assert.equal(
+          (await readLedger())[map].member(requestIdBytes(id)),
+          false,
+          `${map} must settle ${id}`,
+        );
+      };
+
+      async function execute(
+        operation: string,
+        map: RequestMap,
+        start: () => Promise<unknown>,
+        signer = evmVault,
+      ) {
+        diagnostics(`starting ${operation}`);
+        const before = toSignBidirectionalEventIndex((await readLedger())[map]);
+        await start();
+        const after = toSignBidirectionalEventIndex((await readLedger())[map]);
+        const added = [...after].filter(([id]) => !before.has(id));
+        assert.equal(added.length, 1, `${operation} must create exactly one request`);
+        const entry = added[0];
+        assert(entry);
+        const [id, record] = entry;
+        assert.equal(requestIdHex(calculateRequestId(record)), id);
+        const result = { operation, requestId: id, succeeded: false };
+        operations.push(result);
+        const reader = new SignetRequestResponseReader({
+          requesterContractAddress: active.vaultAddress,
+          requesterRequestsPath: requestPaths[map],
+          signetContractAddress: active.centralAddress,
+          publicDataProvider: providers.publicDataProvider,
+          eventSource: signetEventSourceFromPublicDataProvider(providers.publicDataProvider),
+        });
+        const signed = await waitFor(`${operation} signature`, () =>
+          reader.getSignedEvmTransaction(id, signer),
+        );
+        const sent = await evm.broadcastTransaction(signed.serialized);
+        const receipt = await sent.wait(1, 180_000);
+        assert(receipt);
+        assert.equal(receipt.status, 1, `${operation} EVM transaction failed`);
+        const trace = (await evm.send("debug_traceTransaction", [
+          receipt.hash,
+          { tracer: "callTracer" },
+        ])) as { output?: string };
+        assert(typeof trace.output === "string", "Anvil trace must contain the executed output");
+        const decoded = deserializeEvmOutput(record.outputDeserializationSchema, trace.output);
+        if ("success" in decoded)
+          assert.equal(decoded.success, true, `${operation} returned false`);
+        const output = serializeRespondOutput(record.respondSerializationSchema, decoded);
+        const response = await waitFor(`${operation} attestation`, () =>
+          reader.getVerifiedRespondBidirectionalEvent(id, output, responseKey),
+        );
+        diagnostics(`attested ${operation}: ${id}`);
+        return {
+          id,
+          output,
+          decoded,
+          response: respondBidirectionalEventToCircuitInput(response),
+          result,
+        };
+      }
+
+      async function deposit(operation: string, token: string, amount: bigint): Promise<void> {
+        const before = await balance(token);
+        const evmBefore = await erc20Balance(evm, token, evmVault);
+        const depositNonce = await nonce(evmUser);
+        const request = await execute(
+          operation,
+          "depositEventMap",
+          () =>
+            vault.callTx.startDeposit(
+              depositNonce,
+              100_000n,
+              30_000_000_000n,
+              1_000_000_000n,
+              SIGNET_DEFAULT_KEY_VERSION,
+              { erc20Address: hexToBytes(token), amount },
+            ),
+          evmUser,
+        );
+        await vault.callTx.completeDeposit(
+          requestIdBytes(request.id),
+          request.response,
+          request.output,
+          randomBytes(32),
+          {
+            is_some: false,
+            value: {
+              is_left: true,
+              left: { bytes: new Uint8Array(32) },
+              right: { bytes: new Uint8Array(32) },
+            },
+          },
+        );
+        await removed("depositEventMap", request.id);
+        assert.equal((await balance(token)) - before, amount);
+        assert.equal((await erc20Balance(evm, token, evmVault)) - evmBefore, amount);
+        request.result.succeeded = true;
+      }
+
+      const amount = 100_000n;
+      await deposit("deposit", SEPOLIA_USDC, amount);
+      const evmBefore = await erc20Balance(evm, SEPOLIA_USDC, evmUser);
+      const beforeWithdraw = await balance(SEPOLIA_USDC);
+      const withdrawNonce = await nonce();
+      const withdraw = await execute("withdraw", "signBidirectionalEventMap", () =>
+        vault.callTx.startWithdraw(
+          withdrawNonce,
+          SIGNET_DEFAULT_KEY_VERSION,
+          { erc20Address: hexToBytes(SEPOLIA_USDC), amount, destEvmAddress: hexToBytes(evmUser) },
+          coin(SEPOLIA_USDC, amount),
+        ),
+      );
+      await vault.callTx.completeWithdraw(
+        requestIdBytes(withdraw.id),
+        withdraw.response,
+        withdraw.output,
+        randomBytes(32),
+      );
+      await removed("signBidirectionalEventMap", withdraw.id);
+      assert.equal(
+        (await readLedger()).withdrawSettleViews.member(requestIdBytes(withdraw.id)),
+        false,
+      );
+      assert.equal((await erc20Balance(evm, SEPOLIA_USDC, evmUser)) - evmBefore, amount);
+      assert.equal(beforeWithdraw - (await balance(SEPOLIA_USDC)), amount);
+      withdraw.result.succeeded = true;
+
+      const tokenOut = "0x08210F9170F89Ab7658F0B5E3fF39b0E03C594D4";
+      const fee = 500n;
+      const amountOut = 1_000_000n;
+      const maximum = await quoteSwap(evm, tokenOut, fee, amountOut);
+      await deposit("depositSwap", SEPOLIA_USDC, maximum);
+      const routerNonce = await nonce();
+      const router = await execute("approveRouter", "signBidirectionalEventMap", () =>
+        vault.callTx.approveRouter(
+          hexToBytes(SEPOLIA_USDC),
+          routerNonce,
+          SIGNET_DEFAULT_KEY_VERSION,
+        ),
+      );
+      router.result.succeeded = true;
+      const inputBefore = await balance(SEPOLIA_USDC);
+      const outputBefore = await balance(tokenOut);
+      const swapNonce = await nonce();
+      const swap = await execute("swap", "swapEventMap", () =>
+        vault.callTx.startSwap(
+          swapNonce,
+          SIGNET_DEFAULT_KEY_VERSION,
+          {
+            tokenIn: hexToBytes(SEPOLIA_USDC),
+            tokenOut: hexToBytes(tokenOut),
+            fee,
+            amountOut,
+            amountInMaximum: maximum,
+          },
+          coin(SEPOLIA_USDC, maximum),
+        ),
+      );
+      const spent = swap.decoded.amountIn;
+      assert(typeof spent === "bigint" && spent > 0n && spent < maximum);
+      await vault.callTx.completeSwap(
+        requestIdBytes(swap.id),
+        swap.response,
+        swap.output,
+        randomBytes(32),
+        randomBytes(32),
+      );
+      await removed("swapEventMap", swap.id);
+      assert.equal((await balance(tokenOut)) - outputBefore, amountOut);
+      assert.equal(inputBefore - (await balance(SEPOLIA_USDC)), spent);
+      swap.result.succeeded = true;
+
+      const supplyAmount = 1_000_000n;
+      await deposit("depositSupply", AAVE_USDC, supplyAmount);
+      const stataNonce = await nonce();
+      const stata = await execute("approveStata", "signBidirectionalEventMap", () =>
+        vault.callTx.approveStata(stataNonce, SIGNET_DEFAULT_KEY_VERSION),
+      );
+      stata.result.succeeded = true;
+      const sharesBefore = await balance(STATA_USDC);
+      const supplyNonce = await nonce();
+      const supply = await execute("supply", "supplyEventMap", () =>
+        vault.callTx.startSupply(
+          supplyNonce,
+          SIGNET_DEFAULT_KEY_VERSION,
+          supplyAmount,
+          coin(AAVE_USDC, supplyAmount),
+        ),
+      );
+      const shares = supply.decoded.shares;
+      assert(typeof shares === "bigint" && shares > 0n);
+      await vault.callTx.completeSupply(
+        requestIdBytes(supply.id),
+        supply.response,
+        supply.output,
+        randomBytes(32),
+      );
+      await removed("supplyEventMap", supply.id);
+      assert.equal((await balance(STATA_USDC)) - sharesBefore, shares);
+      supply.result.succeeded = true;
+
+      const assetsBefore = await balance(AAVE_USDC);
+      const redeemNonce = await nonce();
+      const redeem = await execute("redeem", "redeemEventMap", () =>
+        vault.callTx.startRedeem(
+          redeemNonce,
+          SIGNET_DEFAULT_KEY_VERSION,
+          shares,
+          coin(STATA_USDC, shares),
+        ),
+      );
+      const assets = redeem.decoded.assets;
+      assert(typeof assets === "bigint" && assets > 0n);
+      await vault.callTx.completeRedeem(
+        requestIdBytes(redeem.id),
+        redeem.response,
+        redeem.output,
+        randomBytes(32),
+      );
+      await removed("redeemEventMap", redeem.id);
+      assert.equal((await balance(AAVE_USDC)) - assetsBefore, assets);
+      redeem.result.succeeded = true;
+      return { operations };
+    });
+  } finally {
+    evm.destroy();
+  }
+}
+
 async function dispatch(request: Request): Promise<unknown> {
   if (request.op === "bootstrap") return bootstrap(request);
-  if (request.op === "shutdown") {
-    await session?.facade.stop();
-    session = undefined;
-    return {};
-  }
-  if (session === undefined) throw new Error("driver is not bootstrapped");
-  const active = session;
-  await active.facade.waitForSyncedState();
+  if (request.op === "shutdown") return {};
+  assert(session, "driver is not bootstrapped");
   if (request.op === "initialise") {
-    if (active.responseKey !== undefined) throw new Error("caller is already initialised");
-    diagnostics("initialising deployed Compact caller");
-    const responseKey = parseSecp256k1PublicKey(request.responsePublicKey);
-    await active.caller.callTx.initialise(responseKey);
-    active.responseKey = responseKey;
+    await initialise(session, request.responsePublicKey);
     return {};
   }
-  if (request.op === "signedTransaction") {
-    const requestId = parseRequestIdHex(request.requestId);
-    const transaction = await waitFor("a verified signed EVM transaction", () =>
-      active.reader.getSignedEvmTransaction(requestId, request.expectedSigner),
-    );
-    return {
-      serialized: transaction.serialized,
-      unsignedHash: transaction.unsignedHash,
-      from: transaction.from,
-      to: transaction.to,
-      data: transaction.data,
-      chainId: transaction.chainId.toString(),
-    };
-  }
-  if (request.op === "settleResponse") {
-    const responseKey = active.responseKey;
-    if (responseKey === undefined) throw new Error("caller is not initialised");
-    const requestId = parseRequestIdHex(request.requestId);
-    const serializedOutput = bytes(request.serializedOutput);
-    const response = await waitFor("a verified respondBidirectional entry", () =>
-      active.reader.getVerifiedRespondBidirectionalEvent(requestId, serializedOutput, responseKey),
-    );
-    const circuitInput = respondBidirectionalEventToCircuitInput(response);
-    if (request.rejectPaddedReplay === true) {
-      const padded = new Uint8Array(8);
-      padded.set(serializedOutput);
-      const replay = await active.reader.getVerifiedRespondBidirectionalEvent(
-        requestId,
-        padded,
-        responseKey,
-      );
-      if (replay !== undefined) throw new Error("SDK accepted a zero-padded failure replay");
-      let rejected = false;
-      try {
-        await active.caller.callTx.verifyResponse8(requestIdBytes(requestId), circuitInput, padded);
-      } catch (error) {
-        if (!String(error).includes("Invalid attestation signature")) throw error;
-        rejected = true;
-      }
-      if (!rejected) throw new Error("Compact accepted a zero-padded failure replay");
-      if (!(await callerHasRequest(active, requestId)))
-        throw new Error("replay consumed the pending request");
-    }
-    const verify =
-      serializedOutput.length === 1
-        ? active.caller.callTx.verifyResponse
-        : serializedOutput.length === 5
-          ? active.caller.callTx.verifyResponse5
-          : serializedOutput.length === 8
-            ? active.caller.callTx.verifyResponse8
-            : serializedOutput.length === 32
-              ? active.caller.callTx.verifyResponse32
-              : undefined;
-    if (verify === undefined)
-      throw new Error(`unsupported real-stack output width ${serializedOutput.length}`);
-    await verify(requestIdBytes(requestId), circuitInput, serializedOutput);
-    await waitFor("the caller request to be removed", async () =>
-      (await callerHasRequest(active, requestId)) ? undefined : true,
-    );
-    return {};
-  }
-  await active.caller.callTx.submitIsEvenRequest(
-    BigInt(request.nonce),
-    1n,
-    bytes(request.target, 20),
-    bytes(request.argument, 32),
-    new TextEncoder().encode(
-      JSON.stringify([{ name: "success", type: request.outputType }]).padEnd(64, " "),
-    ),
-    new TextEncoder().encode(
-      JSON.stringify([{ name: "success", type: request.outputType }]).padEnd(64, " "),
-    ),
-  );
-  return {};
+  return runVault(session, request.evmRpcUrl);
 }
 
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const line of lines) {
   try {
-    const result = await dispatch(JSON.parse(line) as Request);
+    const request = JSON.parse(line) as Request;
+    const result = await dispatch(request);
     process.stdout.write(`${JSON.stringify({ ok: true, result })}\n`);
+    if (request.op === "shutdown") break;
   } catch (error) {
     process.stdout.write(
       `${JSON.stringify({ ok: false, error: error instanceof Error ? (error.stack ?? error.message) : String(error) })}\n`,
     );
   }
 }
-await session?.facade.stop().catch(() => undefined);
+// Indexer provider sockets outlive the wallet facades, which have all stopped.
+process.exit(0);
