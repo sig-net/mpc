@@ -92,6 +92,19 @@ export circuit submitIsEvenRequest(
   );
 }
 
+// Test-only impersonation: notify the central Signet contract naming another contract's request.
+// The MPC must drop it because this contract, not `victim`, is the direct caller.
+export circuit notifyAs(victim: ContractAddress, requestId: RequestId): [] {
+  signetSigner.signBidirectional(
+    disclose(requestId),
+    constructSignBidirectionalEventNotificationV1(
+      disclose(victim),
+      1 as Uint<8>,
+      [3, 0, 0, 0] as Vector<4, Uint<8>>,
+    ),
+  );
+}
+
 circuit consumeResponse<#N>(
   requestId: RequestId,
   response: RespondBidirectionalEvent,
