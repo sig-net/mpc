@@ -440,8 +440,8 @@ node that starts looking late still finds it. There can be several
 signatures, for instance when a node whose share went into one run
 restarts and joins another, and replay protection lets at most one of them
 execute. And (ii) in the block being processed, by sender and unsigned bytes:
-the sender is the request's own account, which only the network controls, 
-and the bytes alone would not do, since another contract or key may have 
+the sender is the request's own account, which only the network controls,
+and the bytes alone would not do, since another contract or key may have
 requested the same bytes.
 
 (ii) is an optimisation. A node that was not in the signing
@@ -635,17 +635,17 @@ new type RequestIdV1 = Bytes<32>;
 
 ```compact
 struct SignBidirectionalEventV1<TxParams, #LenOutputDeserialization, #LenRespondSerialization> {
-  // RequestIdPreimage Fields
+  // hashed into the request id
   keyVersion: Uint<8>;
   sender: ContractAddress;
-  path: Bytes<32>; 
+  path: Bytes<32>;
   algo: MPCSignatureAlgorithm;
   txParamType: TxParamType;       // which transaction type
   txParams: TxParams;             // the transaction parameters
-  executionDest: Bytes<32>;       // Caip2Id that identifies 'destination chain'
+  executionDest: Bytes<32>;       // CAIP-2 id of the destination chain
 
-  // Protocol Only Fields
-  signatureDest: MPCDestination;  // where signatures and reponse attestations posted
+  // not hashed into the request id
+  signatureDest: MPCDestination;  // where signatures and response attestations are posted
   params: Bytes<64>;
   outputDeserializationSchema: Bytes<LenOutputDeserialization>;
   respondSerializationSchema: Bytes<LenRespondSerialization>;
@@ -665,10 +665,10 @@ struct RequestIdPreimageV1<TxParams> {
   executionDest: Bytes<32>;
 }
 
-calculateRequestIdV1<TxParams, #LenOutputDeserialization, #LenRespondSerialization>(
-    request: SignBidirectionalEvent<TxParams, LenOutputDeserialization, LenRespondSerialization>
-): RequestId {
-    const preimage = RequestIdPreimage<TxParams> {
+pure circuit calculateRequestIdV1<TxParams, #LenOutputDeserialization, #LenRespondSerialization>(
+    request: SignBidirectionalEventV1<TxParams, LenOutputDeserialization, LenRespondSerialization>
+): RequestIdV1 {
+    const preimage = RequestIdPreimageV1<TxParams> {
       keyVersion: request.keyVersion,
       sender: request.sender,
       path: request.path,
@@ -678,7 +678,7 @@ calculateRequestIdV1<TxParams, #LenOutputDeserialization, #LenRespondSerializati
       executionDest: request.executionDest,
     };
 
-    return upgradeFromTransient(transientHash<RequestIdPreimage<TxParams>>(preimage)) as RequestId;
+    return upgradeFromTransient(transientHash<RequestIdPreimageV1<TxParams>>(preimage)) as RequestIdV1;
 }
 ```
 
@@ -686,14 +686,12 @@ calculateRequestIdV1<TxParams, #LenOutputDeserialization, #LenRespondSerializati
 
 ```compact
 struct SignatureRespondedEventV1 {
-    requestId: RequestId;
+    requestId: RequestIdV1;
     signature: Signature;
 }
 ```
 
-
-### Respond Bidircectional Event
-
+### Respond Bidirectional Event
 
 ```compact
 export enum OutputKindV1 {
@@ -703,9 +701,9 @@ export enum OutputKindV1 {
 }
 
 struct RespondBidirectionalEventV1 {
-    requestId: RequestId;
+    requestId: RequestIdV1;
     blockHeight: Uint<64>;
-    outputKind: OutputKind;
+    outputKind: OutputKindV1;
     serializedOutputLength: Uint<64>;
     digest: Bytes<32>; // output of calculateSignetAttestationDigestV1
     signature: Signature;
@@ -715,24 +713,23 @@ struct RespondBidirectionalEventV1 {
 #### Response Attestation
 
 ```compact
-calculateSignetAttestationDigestV1<#serializedOutputLength>(
-    requestId: RequestId,
+pure circuit calculateSignetAttestationDigestV1<#serializedOutputLength>(
+    requestId: RequestIdV1,
     blockHeight: Uint<64>,
-    outputKind: OutputKind,
+    outputKind: OutputKindV1,
     serializedOutput: Bytes<serializedOutputLength>,
 ): Bytes<32> {
   return upgradeFromTransient(transientHash<[
-      Uint<8>,
-      RequestId,
+      RequestIdV1,
       Uint<64>,
-      OutputKind,
+      OutputKindV1,
       Uint<64>,
       Bytes<serializedOutputLength>,
     ]>([
       requestId,
       blockHeight,
       outputKind,
-      serializedOutputLength,
+      serializedOutputLength as Uint<64>,
       serializedOutput,
   ]));
 }
