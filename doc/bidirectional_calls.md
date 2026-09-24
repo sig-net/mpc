@@ -635,7 +635,7 @@ new type RequestIdV1 = Bytes<32>;
 
 ```compact
 struct SignBidirectionalEventV1<TxParams, #LenOutputDeserialization, #LenRespondSerialization> {
-  // hashed into the request id
+  // RequestIdPreimage fields, hashed into the request id
   keyVersion: Uint<8>;
   sender: ContractAddress;
   path: Bytes<32>;
@@ -644,7 +644,7 @@ struct SignBidirectionalEventV1<TxParams, #LenOutputDeserialization, #LenRespond
   txParams: TxParams;             // the transaction parameters
   executionDest: Bytes<32>;       // CAIP-2 id of the destination chain
 
-  // not hashed into the request id
+  // Protocol only fields, not hashed into the request id
   signatureDest: MPCDestination;  // where signatures and response attestations are posted
   params: Bytes<64>;
   outputDeserializationSchema: Bytes<LenOutputDeserialization>;
