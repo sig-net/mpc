@@ -206,6 +206,8 @@ impl RespondField {
     }
 }
 
+/// Parses fixed-width types only, the capacity-bearing kinds (`string`,
+/// `bytes`, arrays) are classified in `TryFrom<RawSchemaField>`.
 impl FromStr for FixedCarrier {
     type Err = anyhow::Error;
 
@@ -250,6 +252,7 @@ fn parse_canonical_bytes_length(digits: &str) -> Option<usize> {
 }
 
 impl FixedCarrier {
+    /// Coerce a producer value into this carrier's Compact shape.
     fn coerce(&self, raw: &DynSolValue) -> anyhow::Result<Value> {
         match self {
             FixedCarrier::Bool => match raw {
@@ -287,6 +290,7 @@ impl FixedCarrier {
 }
 
 impl RespondFieldKind {
+    /// Coerce a producer value into this kind's Compact shape.
     fn coerce(&self, raw: &DynSolValue) -> anyhow::Result<Value> {
         match self {
             RespondFieldKind::Fixed(carrier) => carrier.coerce(raw),
@@ -302,6 +306,7 @@ impl RespondFieldKind {
         }
     }
 
+    /// The non-contract-call default, only `bool` and `string` synthesize one.
     fn default_value(&self) -> anyhow::Result<Value> {
         match self {
             RespondFieldKind::Fixed(FixedCarrier::Bool) => Ok(Value::Bool(true)),
@@ -312,6 +317,14 @@ impl RespondFieldKind {
         }
     }
 
+    /// The `{len, field}` struct wrapping every dynamic kind's value.
+    fn len_prefixed(field: &str, len: usize, payload: Value) -> Value {
+        Value::Struct(vec![
+            ("len".to_string(), Value::Uint(MidnightU256::from(len as u64))),
+            (field.to_string(), payload),
+        ])
+    }
+
     /// Right-pad `payload` with zeros to `max_bytes`, prefixing its length.
     fn dynamic_bytes(payload: Vec<u8>, max_bytes: usize) -> anyhow::Result<Value> {
         if payload.len() > max_bytes {
@@ -320,13 +333,7 @@ impl RespondFieldKind {
         let payload_len = payload.len();
         let mut data = vec![0u8; max_bytes];
         data[..payload_len].copy_from_slice(&payload);
-        Ok(Value::Struct(vec![
-            (
-                "len".to_string(),
-                Value::Uint(MidnightU256::from(payload_len as u64)),
-            ),
-            ("data".to_string(), Value::Bytes(data)),
-        ]))
+        Ok(Self::len_prefixed("data", payload_len, Value::Bytes(data)))
     }
 
     /// Coerce an array producer into a fixed-capacity `{len, items}` struct,
@@ -350,13 +357,17 @@ impl RespondFieldKind {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         items.resize_with(max_items, || element.zero_value());
-        Ok(Value::Struct(vec![
-            (
-                "len".to_string(),
-                Value::Uint(MidnightU256::from(raw_items.len() as u64)),
-            ),
-            ("items".to_string(), Value::Vector(items)),
-        ]))
+        Ok(Self::len_prefixed("items", raw_items.len(), Value::Vector(items)))
+    }
+}
+
+/// Descriptor twin of `RespondFieldKind::len_prefixed`.
+fn len_prefixed_descriptor(field: &str, payload: Descriptor) -> Descriptor {
+    Descriptor::Struct {
+        fields: vec![
+            ("len".to_string(), Descriptor::UintBits { bits: 64 }),
+            (field.to_string(), payload),
+        ],
     }
 }
 
@@ -367,25 +378,15 @@ impl From<&RespondFieldKind> for Descriptor {
         match kind {
             RespondFieldKind::Fixed(carrier) => Descriptor::from(carrier),
             RespondFieldKind::String { max_bytes } | RespondFieldKind::Bytes { max_bytes } => {
-                Descriptor::Struct {
-                    fields: vec![
-                        ("len".to_string(), Descriptor::UintBits { bits: 64 }),
-                        ("data".to_string(), Descriptor::Bytes { length: *max_bytes }),
-                    ],
-                }
+                len_prefixed_descriptor("data", Descriptor::Bytes { length: *max_bytes })
             }
-            RespondFieldKind::Array { element, max_items } => Descriptor::Struct {
-                fields: vec![
-                    ("len".to_string(), Descriptor::UintBits { bits: 64 }),
-                    (
-                        "items".to_string(),
-                        Descriptor::Vector {
-                            length: *max_items,
-                            element: Box::new(Descriptor::from(element)),
-                        },
-                    ),
-                ],
-            },
+            RespondFieldKind::Array { element, max_items } => len_prefixed_descriptor(
+                "items",
+                Descriptor::Vector {
+                    length: *max_items,
+                    element: Box::new(Descriptor::from(element)),
+                },
+            ),
         }
     }
 }
@@ -440,6 +441,7 @@ impl TryFrom<&[u8]> for MidnightRespondPlan {
 }
 
 impl MidnightRespondPlan {
+    /// Build the plan's Compact struct value, field by field.
     fn value_for(&self, output: &Output) -> anyhow::Result<Value> {
         self.fields
             .iter()
@@ -464,6 +466,7 @@ pub(super) fn serialize(output: &Output, respond_schema: &[u8]) -> anyhow::Resul
     Ok(serialized)
 }
 
+// Text and number parsing, shared by schema parsing and coercion.
 fn decode_schema_text(bytes: &[u8]) -> Cow<'_, str> {
     let text = String::from_utf8_lossy(bytes);
     match text.strip_prefix('\u{feff}') {
@@ -520,6 +523,18 @@ fn unsigned_integer(digits: &str, radix: u64) -> anyhow::Result<U256> {
         anyhow::bail!("integer text contains an underscore separator");
     }
     U256::from_str_radix(digits, radix).map_err(Into::into)
+}
+
+fn parse_hex_bytes(text: &str) -> anyhow::Result<Vec<u8>> {
+    let digits = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .ok_or_else(|| anyhow::anyhow!("hex bytes require a 0x prefix"))?;
+    hex::decode(digits).map_err(Into::into)
+}
+
+fn hex_text(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
 }
 
 fn incompatible<T>(expected: &str, value: &DynSolValue) -> anyhow::Result<T> {
@@ -595,18 +610,6 @@ fn as_sequence<'a>(value: &'a DynSolValue) -> anyhow::Result<&'a [DynSolValue]> 
 fn fixed_bytes_slice<'a>(word: &'a [u8], size: usize) -> anyhow::Result<&'a [u8]> {
     word.get(..size)
         .ok_or_else(|| anyhow::anyhow!("invalid FixedBytes declared size {size}"))
-}
-
-fn parse_hex_bytes(text: &str) -> anyhow::Result<Vec<u8>> {
-    let digits = text
-        .strip_prefix("0x")
-        .or_else(|| text.strip_prefix("0X"))
-        .ok_or_else(|| anyhow::anyhow!("hex bytes require a 0x prefix"))?;
-    hex::decode(digits).map_err(Into::into)
-}
-
-fn hex_text(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
 }
 
 fn to_midnight_u256(value: U256) -> MidnightU256 {
