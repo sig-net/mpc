@@ -578,17 +578,15 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         NoopChainTelemetry,
     ));
 
+    let mut saw_resolved_completion = false;
     let mut saw_execution_follow_up = false;
     let mut saw_catchup_request = false;
     let mut saw_requeued_request = false;
 
     for _ in 0..8 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await? {
-            SignCommand::Completion(sign_id) => {
-                assert_ne!(
-                    sign_id, resolved_sign_id,
-                    "pre-catchup resolved request should not emit a completion"
-                );
+            SignCommand::Completion(sign_id) if sign_id == resolved_sign_id => {
+                saw_resolved_completion = true;
             }
             SignCommand::Request(req) if req.sign_id() == execution_sign_id => {
                 assert!(matches!(
@@ -611,11 +609,19 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
             _ => {}
         }
 
-        if saw_execution_follow_up && saw_catchup_request && saw_requeued_request {
+        if saw_resolved_completion
+            && saw_execution_follow_up
+            && saw_catchup_request
+            && saw_requeued_request
+        {
             break;
         }
     }
 
+    assert!(
+        saw_resolved_completion,
+        "expected a completion for the request resolved during catchup"
+    );
     assert!(
         saw_execution_follow_up,
         "expected execution follow-up request after catchup"

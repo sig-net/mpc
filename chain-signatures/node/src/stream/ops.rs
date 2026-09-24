@@ -138,7 +138,11 @@ pub(crate) async fn process_respond_event(
         entry.verify_signature(root_pk, &respond_event.signature)?;
         tracing::info!(?sign_id, "sign request completed successfully");
         entry.complete().await;
-        ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
+        // Sent even during catchup: unlike a request, nothing requeues it later.
+        ctx.sign_tx
+            .send(SignCommand::Completion(sign_id))
+            .await
+            .context("sign command channel closed")?;
         return Ok(());
     }
 
@@ -264,7 +268,11 @@ pub(crate) async fn process_respond_bidirectional_event(
 
     entry.complete().await;
     tracing::info!(?sign_id, "bidirectional tx completed");
-    ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
+    // Sent even during catchup: unlike a request, nothing requeues it later.
+    ctx.sign_tx
+        .send(SignCommand::Completion(sign_id))
+        .await
+        .context("sign command channel closed")?;
 
     Ok(())
 }
