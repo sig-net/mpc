@@ -55,8 +55,8 @@ struct MidnightRespondPlan {
 }
 
 impl MidnightRespondPlan {
-    fn parse(bytes: &[u8]) -> anyhow::Result<Self> {
-        let raw_fields = parse_raw_schema(bytes, "respond schema")?;
+    fn parse(schema_bytes: &[u8]) -> anyhow::Result<Self> {
+        let raw_fields = parse_raw_schema(schema_bytes, "respond schema")?;
         if raw_fields.is_empty() {
             anyhow::bail!("respond schema must contain at least one field");
         }
@@ -125,8 +125,8 @@ fn trim_ecmascript_whitespace(text: &str) -> &str {
     })
 }
 
-pub(super) fn serialize(output: &Output, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let plan = MidnightRespondPlan::parse(bytes)?;
+pub(super) fn serialize(output: &Output, respond_schema: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let plan = MidnightRespondPlan::parse(respond_schema)?;
     let value = plan.value_for(output)?;
     let serialized = signet_midnight_serde::serialize(&plan.descriptor, &value, None)
         .context("failed to serialize Midnight respond output")?;
@@ -470,36 +470,46 @@ fn integer_from_be_bytes(
     Ok(U256::from_be_slice(significant))
 }
 
+const RADIX_PREFIXES: [(&str, u64); 6] = [
+    ("0x", 16),
+    ("0X", 16),
+    ("0o", 8),
+    ("0O", 8),
+    ("0b", 2),
+    ("0B", 2),
+];
+
 fn parse_integer_text(text: &str) -> anyhow::Result<U256> {
     let text = trim_ecmascript_whitespace(text);
     if text.is_empty() {
         return Ok(U256::ZERO);
     }
 
-    let (digits, radix, negative) = if let Some(digits) = text.strip_prefix('+') {
-        (digits, 10, false)
-    } else if let Some(digits) = text.strip_prefix('-') {
-        (digits, 10, true)
-    } else if let Some(digits) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        (digits, 16, false)
-    } else if let Some(digits) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
-        (digits, 8, false)
-    } else if let Some(digits) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
-        (digits, 2, false)
-    } else {
-        (text, 10, false)
-    };
+    if let Some(digits) = text.strip_prefix('+') {
+        return unsigned_integer(digits, 10);
+    }
+    if let Some(digits) = text.strip_prefix('-') {
+        let value = unsigned_integer(digits, 10)?;
+        if !value.is_zero() {
+            anyhow::bail!("integer text is negative");
+        }
+        return Ok(value);
+    }
+    let (digits, radix) = RADIX_PREFIXES
+        .into_iter()
+        .find_map(|(prefix, radix)| Some((text.strip_prefix(prefix)?, radix)))
+        .unwrap_or((text, 10));
+    unsigned_integer(digits, radix)
+}
+
+fn unsigned_integer(digits: &str, radix: u64) -> anyhow::Result<U256> {
     if digits.is_empty() {
         anyhow::bail!("integer text has no digits");
     }
     if digits.contains('_') {
         anyhow::bail!("integer text contains an underscore separator");
     }
-    let value = U256::from_str_radix(digits, radix)?;
-    if negative && !value.is_zero() {
-        anyhow::bail!("integer text is negative");
-    }
-    Ok(value)
+    U256::from_str_radix(digits, radix).map_err(Into::into)
 }
 
 fn as_bytes(value: &DynSolValue, label: &str) -> anyhow::Result<Vec<u8>> {
