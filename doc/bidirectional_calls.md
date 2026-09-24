@@ -79,8 +79,10 @@ Happy path:
   change the execution, so they are the only way two requests for one
   execution could get two rids; with them in, both would be outstanding
   and signed, and the single execution would be attested twice. Canonical
-  key parameters make it sufficient: otherwise two encodings of one key
-  would be two rids for one execution.
+  key parameters and a transaction digest over the used entries only
+  (Section 7) make it sufficient: otherwise two encodings of one key, or
+  one transaction at two capacities or with different bytes in unused
+  slots, would be two rids for one execution.
 * *Outcome*: a pair (kind, data), with three kinds.
 
   | kind | what happened to req.tx | data |
@@ -631,138 +633,185 @@ a path from B48 through A15; the first at A12 has none.
 
 ## 7. Canonical Protocol Structures
 
-The Midnight protocol structures are the canonical structures.
+The structures the library, the signet contract and the MPC agree on. 7.1
+to 7.4 are source-chain neutral: the fields, which of them each hash covers
+and the order it walks them, over an abstract hash `H` and encoding `E`.
+Each source chain binds `H` and `E` in its own SDK (7.5, Midnight).
 
-Naming rule: the `V1` suffix marks the wire and hash-domain artefacts of
-protocol version 1, that is the structs a contract's ledger stores or the
-signet contract emits, and the circuits that hash, verify or construct them.
-Vocabulary shared across versions carries no suffix: `RequestId`,
-`OutputKind`, `Signature`, the enums (`MPCSignatureAlgorithm`,
-`MPCDestination`, `TxParamType`) and the transaction parameter structs, which
-`TxParamType` tags. Two more carry no suffix: the signet contract's circuits,
-since a deployed singleton never changes, and the notification (below),
-which carries its own version byte.
+Naming: the `V1` suffix marks the types a contract stores or the signet
+contract emits and the functions that hash, verify or construct them.
+Shared vocabulary (`RequestId`, `OutputKind`, `Signature`, the enums, the
+transaction parameter structures) carries none, nor does the self-versioned
+notification (7.5) or the signet contract's entry points.
 
 `OutputKind` is hashed by position, so variants may only be appended.
 Reordering them would make a digest signed under the old order attest a
 different kind.
 
-### Request Id
+Types: `u8` to `u128` unsigned integers, `bool`, `bytes(N)`, `address` (a
+source-chain contract), `enum`, `T[n]` a vector of capacity n, `hash` the
+native output of `H`. `E[a: t, ...]` encodes a typed tuple, `bytes32(h)` is
+a hash's 32-byte form.
 
-```compact
-new type RequestId = Bytes<32>;
+The names of Section 2 map onto the fields below as follows.
+
+| Section 2 | field |
+|---|---|
+| contract | `sender` |
+| req.tx | `txParamType` with `txParams` |
+| req.dest | `executionDest` |
+| req.key | `keyVersion`, `path`, `algo` |
+| req.schemas | `outputDeserializationSchema`, `respondSerializationSchema` |
+| rid | `RequestId` |
+| height, outcome | `blockHeight`, `outputKind` with the serialised output |
+
+### 7.1 Request: SignBidirectionalEventV1
+
+The request a contract makes. The first seven fields name the execution
+and enter the request id, in this order. The rest are protocol fields and
+stay out.
+
+| field | type | in rid | meaning |
+|---|---|---|---|
+| `keyVersion` | `u8` | yes | MPC root key version, at least 1 |
+| `sender` | `address` | yes | the requesting contract |
+| `path` | `bytes(32)` | yes | key derivation path; the reserved response-key path is refused |
+| `algo` | `enum MPCSignatureAlgorithm` | yes | signing scheme |
+| `txParamType` | `enum TxParamType` | yes | which transaction structure `txParams` holds |
+| `txParams` | per `txParamType` (7.3) | as its digest | the transaction |
+| `executionDest` | `bytes(32)` | yes | CAIP-2 id of the destination chain |
+| `signatureDest` | `enum MPCDestination` | no | reserved, set to `unused` |
+| `params` | `bytes(64)` | no | reserved, zero |
+| `outputDeserializationSchema` | `bytes` | no | how the MPC decodes the execution output |
+| `respondSerializationSchema` | `bytes` | no | how the MPC serialises that output into the response |
+
+Enums: `MPCSignatureAlgorithm { ecdsa, reserved }`,
+`MPCDestination { unused, reserved }`, `TxParamType { evmType2, reserved }`.
+
+`RequestId` is `bytes(32)`. `Signature` is the MPC's ECDSA signature:
+`bigR`, an affine point `{ x: bytes(32), y: bytes(32) }`, `s: bytes(32)`
+and `recoveryId: u8`, the parity of `bigR.y`, all big-endian SEC1.
+
+### 7.2 Request id: RequestIdPreimageV1
+
+The preimage is the request's first seven fields with the transaction
+replaced by its digest.
+
+| field | type |
+|---|---|
+| `keyVersion` | `u8` |
+| `sender` | `address` |
+| `path` | `bytes(32)` |
+| `algo` | `enum MPCSignatureAlgorithm` |
+| `txParamType` | `enum TxParamType` |
+| `txParamsDigest` | `bytes(32)`, the transaction type's digest `D` of `txParams` |
+| `executionDest` | `bytes(32)` |
+
+```
+rid = bytes32(H(E(preimage)))
 ```
 
-### Sign Bidirectional Event
+`D` is defined with each transaction type (7.3 for `evmType2`). It covers
+the entries up to their declared counts and nothing else, so one transaction
+has one rid whatever capacities the requester compiled its structure with
+and whatever bytes sit in unused slots.
 
-```compact
-struct SignBidirectionalEventV1<TxParams, #LenOutputDeserialization, #LenRespondSerialization> {
-  // RequestIdPreimage fields, hashed into the request id
-  keyVersion: Uint<8>;
-  sender: ContractAddress;
-  path: Bytes<32>;
-  algo: MPCSignatureAlgorithm;
-  txParamType: TxParamType;       // which transaction type
-  txParams: TxParams;             // the transaction parameters
-  executionDest: Bytes<32>;       // CAIP-2 id of the destination chain
+### 7.3 EVM type 2 transaction: EvmType2TxParams
 
-  // Protocol only fields, not hashed into the request id
-  signatureDest: MPCDestination;  // where signatures and response attestations are posted
-  params: Bytes<64>;
-  outputDeserializationSchema: Bytes<LenOutputDeserialization>;
-  respondSerializationSchema: Bytes<LenRespondSerialization>;
-}
+The transaction for `txParamType = evmType2`, an EIP-1559 transaction.
+Every variable-length part is a capacity the requesting contract fixes (`w`
+calldata words, `e` access-list entries, `k` storage keys per entry) plus a
+count of how many leading slots are used. Field order is the EIP-1559 RLP
+order.
+
+| field | type | meaning |
+|---|---|---|
+| `chainId` | `u64` | EIP-155 chain id |
+| `nonce` | `u64` | nonce of the derived sender |
+| `maxPriorityFeePerGas` | `u128` | wei |
+| `maxFeePerGas` | `u128` | wei |
+| `gasLimit` | `u64` | |
+| `to` | `bytes(20)` | call target |
+| `value` | `u128` | wei |
+| `calldata` | optional `{ selector: bytes(4), noWords: u16, words: bytes(32)[w] }` | absent for a plain transfer; `words` are canonical ABI words, `noWords` of them used |
+| `accessListEntryCount` | `u8` | used entries |
+| `accessList` | `{ address: bytes(20), storageKeyCount: u8, storageKeys: bytes(32)[k] }[e]` | EIP-2930 entries, `storageKeyCount` keys used per entry |
+
+The digest `D_evmType2(txParams)`:
+
+```
+noWords  = calldata present ? calldata.noWords  : 0
+selector = calldata present ? calldata.selector : bytes(4) of zero
+require noWords <= w, accessListEntryCount <= e, and storageKeyCount <= k for every used entry
+
+acc = H(E[chainId: u64, nonce: u64, maxPriorityFeePerGas: u128, maxFeePerGas: u128, gasLimit: u64,
+          to: bytes(20), value: u128, calldata present: bool, selector: bytes(4), noWords: u16,
+          accessListEntryCount: u8])
+
+for each calldata word at index < noWords, in order:
+    acc = H(E[acc: hash, word: bytes(32)])
+
+for each access-list entry at index < accessListEntryCount, in order:
+    keys = hash zero
+    for each storage key at index < entry.storageKeyCount, in order:
+        keys = H(E[keys: hash, key: bytes(32)])
+    acc = H(E[acc: hash, entry.address: bytes(20), entry.storageKeyCount: u8, keys: hash])
+
+D = bytes32(acc)
 ```
 
-#### Request Id
+Each count is hashed beside its entries, so the encoding commits to its
+length. Slots past a count are skipped, and an absent calldata contributes
+only its absence.
 
-```compact
-struct RequestIdPreimageV1<TxParams> {
-  keyVersion: Uint<8>;
-  sender: ContractAddress;
-  path: Bytes<32>;
-  algo: MPCSignatureAlgorithm;
-  txParamType: TxParamType;
-  txParams: TxParams;
-  executionDest: Bytes<32>;
-}
+The request id of an EVM type 2 request is 7.2 with
+`txParamsDigest = D_evmType2(txParams)`. An implementation refuses a request
+whose `txParamType` is not `evmType2` while its `txParams` is this
+structure.
 
-pure circuit calculateRequestIdV1<TxParams, #LenOutputDeserialization, #LenRespondSerialization>(
-    request: SignBidirectionalEventV1<TxParams, LenOutputDeserialization, LenRespondSerialization>
-): RequestId {
-    const preimage = RequestIdPreimageV1<TxParams> {
-      keyVersion: request.keyVersion,
-      sender: request.sender,
-      path: request.path,
-      algo: request.algo,
-      txParamType: request.txParamType,
-      txParams: request.txParams,
-      executionDest: request.executionDest,
-    };
+### 7.4 Responses
 
-    return upgradeFromTransient(transientHash<RequestIdPreimageV1<TxParams>>(preimage)) as RequestId;
-}
+`SignatureRespondedEventV1`, the signature a request asked for:
+
+| field | type | meaning |
+|---|---|---|
+| `requestId` | `RequestId` | the request it answers |
+| `signature` | `Signature` | over the transaction the request describes, by the request's key |
+
+`RespondBidirectionalEventV1`, the attestation of the execution:
+
+| field | type | meaning |
+|---|---|---|
+| `requestId` | `RequestId` | the request it settles |
+| `blockHeight` | `u64` | height of the final destination block, in that chain's numbering |
+| `outputKind` | `enum OutputKind { executed, failed, unviable }` | the outcome's kind |
+| `serializedOutputLength` | `u64` | byte width of the serialised output |
+| `digest` | `bytes(32)` | the attestation digest below |
+| `signature` | `Signature` | over `digest`, by the attestation key of `requestId`'s contract at the request's key version |
+
+The attestation digest, over the serialised output the request's schema
+produced (empty for `failed` and `unviable`):
+
+```
+digest = bytes32(H(E[requestId: bytes(32), blockHeight: u64, outputKind: enum,
+                     serializedOutputLength: u64, serializedOutput: bytes(serializedOutputLength)]))
 ```
 
-### Notification
+The output itself travels off chain. A reader recomputes the digest from
+the output bytes it obtained and verifies the signature against the
+attestation key.
 
-The application contract stores its `SignBidirectionalEventV1` in its own
-ledger, and the signet contract emits only a notification per request: a
-version byte, the request id, and a 128-byte payload. In version 1 the
-payload is the caller's address (32 bytes), the depth of the ledger path
-to the caller's request index (1 to 4), that path (4 bytes, only the
-first depth bytes used), and zero padding. The MPC reads the request from
-that index under the request id.
+### 7.5 Midnight binding
 
-### Signature Responded Event
+The Midnight binding of `H`, `E` and every declaration above is the
+`Signet` Compact module of the `@sig-net/midnight` SDK:
+[`packages/signet-midnight/src/Signet.compact`](https://github.com/sig-net/midnight-integration/blob/main/packages/signet-midnight/src/Signet.compact).
 
-```compact
-struct SignatureRespondedEventV1 {
-    requestId: RequestId;
-    signature: Signature;
-}
-```
-
-### Respond Bidirectional Event
-
-```compact
-export enum OutputKind {
-  executed,
-  failed,
-  unviable
-}
-
-struct RespondBidirectionalEventV1 {
-    requestId: RequestId;
-    blockHeight: Uint<64>;
-    outputKind: OutputKind;
-    serializedOutputLength: Uint<64>;
-    digest: Bytes<32>; // output of calculateSignetAttestationDigestV1
-    signature: Signature;
-}
-```
-
-#### Response Attestation
-
-```compact
-pure circuit calculateSignetAttestationDigestV1<#serializedOutputLength>(
-    requestId: RequestId,
-    blockHeight: Uint<64>,
-    outputKind: OutputKind,
-    serializedOutput: Bytes<serializedOutputLength>,
-): Bytes<32> {
-  return upgradeFromTransient(transientHash<[
-      RequestId,
-      Uint<64>,
-      OutputKind,
-      Uint<64>,
-      Bytes<serializedOutputLength>,
-    ]>([
-      requestId,
-      blockHeight,
-      outputKind,
-      serializedOutputLength as Uint<64>,
-      serializedOutput,
-  ]));
-}
-```
+On Midnight the signet contract cannot emit a structure whose type the
+caller chooses, so the application contract stores its
+`SignBidirectionalEventV1` in its own ledger and the signet contract emits
+only a notification per request: a version byte, the request id, and a
+128-byte payload. In version 1 the payload is the caller's address (32
+bytes), the depth of the ledger path to the caller's request index (1 to
+4), that path (4 bytes, only the first depth bytes used), and zero padding.
+The MPC reads the request from that index under the request id.
