@@ -1,6 +1,6 @@
 name: k6 Bidirectional Load Test
 
-# Drives the Solana -> Ethereum bidirectional round trip via
+# Drives Solana or Midnight -> Ethereum bidirectional round trips via
 # loadtests/k6-bidirectional.js.
 #
 # Every job spends gas from addresses only a funding sweep refills, so the
@@ -11,8 +11,16 @@ on:
     - cron: '*/20 * * * *'
   workflow_dispatch:
     inputs:
+      source_chain:
+        description: Source chain (Midnight runs serially, at most one start/minute)
+        type: choice
+        options:
+          - solana
+          - midnight
+        default: solana
+        required: true
       lt_strategy:
-        description: Arrival rate per minute (the service caps at 10)
+        description: Solana arrivals per minute (mainnet always uses rpm_1; Midnight uses serial)
         type: choice
         options:
           - rpm_1
@@ -30,12 +38,14 @@ on:
         default: 20m
         required: true
       environment:
-        description: MPC network
+        description: MPC network (both selects dev/testnet for Solana, stagenet for Midnight)
         type: choice
         options:
           - both
           - dev
           - testnet
+          - mainnet
+          - stagenet
         default: both
         required: true
 
@@ -45,27 +55,36 @@ permissions:
 jobs:
   loadtest:
     strategy:
-      # Add an option above without adding it here and the run fails rather
-      # than silently driving both. A schedule carries no inputs, hence ''.
+      # Scheduled Midnight starts only after its service has been configured
+      # and LT_MIDNIGHT_ENABLED is set to true. Manual runs remain available.
       matrix:
-        environment: ${{ (inputs.environment == 'dev' && fromJSON('["dev"]'))
-          || (inputs.environment == 'testnet' && fromJSON('["testnet"]'))
-          || ((inputs.environment == 'both' || inputs.environment == '')
-              && fromJSON('["dev","testnet"]'))
-          || fromJSON('["unmatched"]') }}
+        include: ${{ (github.event_name == 'schedule' && vars.LT_MIDNIGHT_ENABLED == 'true'
+              && fromJSON('[{"source":"solana","environment":"dev"},{"source":"solana","environment":"testnet"},{"source":"midnight","environment":"stagenet"}]'))
+          || (github.event_name == 'schedule'
+              && fromJSON('[{"source":"solana","environment":"dev"},{"source":"solana","environment":"testnet"}]'))
+          || (inputs.source_chain == 'midnight' && (inputs.environment == 'both' || inputs.environment == 'stagenet')
+              && fromJSON('[{"source":"midnight","environment":"stagenet"}]'))
+          || (inputs.source_chain == 'solana' && inputs.environment == 'both'
+              && fromJSON('[{"source":"solana","environment":"dev"},{"source":"solana","environment":"testnet"}]'))
+          || (inputs.source_chain == 'solana' && inputs.environment == 'dev'
+              && fromJSON('[{"source":"solana","environment":"dev"}]'))
+          || (inputs.source_chain == 'solana' && inputs.environment == 'testnet'
+              && fromJSON('[{"source":"solana","environment":"testnet"}]'))
+          || (inputs.source_chain == 'solana' && inputs.environment == 'mainnet'
+              && fromJSON('[{"source":"solana","environment":"mainnet"}]'))
+          || fromJSON('[{"source":"unmatched","environment":"unmatched"}]') }}
       # The networks hold separate address pools and rate limits, so they
       # need no max-parallel.
       fail-fast: false
     # Per network: overlapping runs would double the arrival rate one claims
     # to apply. Queued, since cancelling abandons jobs already paid for.
     concurrency:
-      group: k6-bidirectional-${{ matrix.environment }}
+      group: k6-bidirectional-${{ matrix.source }}-${{ matrix.environment }}
       cancel-in-progress: false
     # Self-hosted: every run holds a runner for over an hour.
     runs-on: arc-runner-set
-    # Submission runs for lt_duration, then the scenario's 45m gracefulStop
-    # lets in-flight jobs finish.
-    timeout-minutes: 200
+    # Midnight allows 90m for proving/signing/finality after the submission window.
+    timeout-minutes: ${{ matrix.source == 'midnight' && 230 || 200 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -77,16 +96,17 @@ jobs:
             exit 1
           fi
           # What the matrix yields for an unrecognised input.
-          case "${LT_CHAIN_ENV}" in
-            dev | testnet) ;;
+          case "${LT_SOURCE_CHAIN}:${LT_CHAIN_ENV}" in
+            solana:dev | solana:testnet | solana:mainnet | midnight:stagenet) ;;
             *)
-              echo "::error::Unhandled environment '${LT_CHAIN_ENV}': add it to the matrix"
+              echo "::error::Unsupported source/environment selection"
               exit 1
               ;;
           esac
         env:
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
           LT_CHAIN_ENV: ${{ matrix.environment }}
+          LT_SOURCE_CHAIN: ${{ matrix.source }}
 
       # near-dev-github holds secretAccessor on the three secrets below and
       # nothing else. The runner pods have no GCP identity of their own.
@@ -115,6 +135,7 @@ jobs:
         run: |
           set -euo pipefail
           k6 run -o experimental-prometheus-rw \
+            --tag source_chain="${LT_SOURCE_CHAIN}" \
             --tag env="${LT_CHAIN_ENV}" \
             loadtests/k6-bidirectional.js 2>&1 | tee k6-bidirectional.log
         env:
@@ -129,7 +150,8 @@ jobs:
           # needed: without it both networks write the same series.
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
           LT_CHAIN_ENV: ${{ matrix.environment }}
-          LT_STRATEGY: ${{ inputs.lt_strategy || 'rpm_1' }}
+          LT_SOURCE_CHAIN: ${{ matrix.source }}
+          LT_STRATEGY: ${{ matrix.source == 'midnight' && 'serial' || matrix.environment == 'mainnet' && 'rpm_1' || inputs.lt_strategy || 'rpm_1' }}
           LT_DURATION: ${{ inputs.lt_duration || '2h' }}
 
       - name: Write job summary
@@ -138,8 +160,8 @@ jobs:
           {
             echo "## k6 Bidirectional Load Test"
             echo
-            echo "- Network: \`${{ matrix.environment }}\`"
-            echo "- Rate: \`${{ inputs.lt_strategy || 'rpm_1' }}\` submitting for \`${{ inputs.lt_duration || '2h' }}\`"
+            echo "- Source/network: \`${{ matrix.source }}/${{ matrix.environment }}\`"
+            echo "- Workload: \`${{ matrix.source == 'midnight' && 'serial (one active job, at most one start/minute)' || matrix.environment == 'mainnet' && 'rpm_1' || inputs.lt_strategy || 'rpm_1' }}\` submitting for \`${{ inputs.lt_duration || '2h' }}\`"
             echo
             if [ -f k6-bidirectional.log ]; then
               echo '```'
