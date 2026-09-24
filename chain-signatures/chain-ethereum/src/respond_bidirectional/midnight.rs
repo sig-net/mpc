@@ -119,7 +119,10 @@ impl RawSchemaField {
                 anyhow::bail!("respond schema field '{}' has a blank type", field.name);
             }
             if !names.insert(field.name.as_str()) {
-                anyhow::bail!("respond schema contains duplicate field name '{}'", field.name);
+                anyhow::bail!(
+                    "respond schema contains duplicate field name '{}'",
+                    field.name
+                );
             }
         }
         Ok(())
@@ -329,7 +332,10 @@ impl RespondFieldKind {
     /// The `{len, field}` struct wrapping every dynamic kind's value.
     fn len_prefixed(field: &str, len: usize, payload: Value) -> Value {
         Value::Struct(vec![
-            ("len".to_string(), Value::Uint(MidnightU256::from(len as u64))),
+            (
+                "len".to_string(),
+                Value::Uint(MidnightU256::from(len as u64)),
+            ),
             (field.to_string(), payload),
         ])
     }
@@ -366,7 +372,11 @@ impl RespondFieldKind {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         items.resize_with(max_items, || element.zero_value());
-        Ok(Self::len_prefixed("items", raw_items.len(), Value::Vector(items)))
+        Ok(Self::len_prefixed(
+            "items",
+            raw_items.len(),
+            Value::Vector(items),
+        ))
     }
 }
 
