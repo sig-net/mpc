@@ -7,8 +7,8 @@ use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
 use crate::emissions::{EmissionKind, SingletonCallEmissions};
 use crate::reader::{
-    decode_notification, decode_response_payload, resolve_verified_record,
-    signet_field_node_by_path, unpack_notification_v1, Resolved,
+    decode_bidirectional_response_payload, decode_notification, decode_response_payload,
+    resolve_verified_record, signet_field_node_by_path, unpack_notification_v1, Resolved,
 };
 use crate::records::SignBidirectionalEventNotification;
 use crate::rpc::{is_oversized_contract_state, BlockRef};
@@ -223,15 +223,16 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                             }
                         }
                         EmissionKind::RespondBidirectional => {
-                            let decoded = decode_response_payload(&emission.payload);
-                            match decoded.signature {
-                                Ok(signature) => events.push(ChainEvent::RespondBidirectional(
-                                    RespondBidirectionalEvent {
+                            let decoded = decode_bidirectional_response_payload(&emission.payload);
+                            match decoded.response {
+                                Ok((attestation, signature)) => events.push(
+                                    ChainEvent::RespondBidirectional(RespondBidirectionalEvent {
+                                        attestation: Some(attestation),
                                         request_id: decoded.request_id,
                                         signature,
                                         chain: Chain::Midnight,
-                                    },
-                                )),
+                                    }),
+                                ),
                                 Err(err) => {
                                     drop_entry::<()>(
                                         "response-signature-invalid",
@@ -735,7 +736,7 @@ mod tests {
 
     fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
         let mut record = sample_record();
-        record.request_nonce = nonce;
+        record.tx_params.nonce = nonce;
         let rid = crate::hashing::compute_request_id(
             &crate::test_utils::aligned_value_from_record(&record),
         );
@@ -1275,7 +1276,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn captured_cell_decodes_resolves_and_converts_under_transient_id() {
+    async fn captured_legacy_request_remains_rejected_even_after_rehashing() {
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &CAPTURE_NOTIFY_TX[..])
                 .expect("captured notify transaction decodes");
@@ -1315,7 +1316,7 @@ mod tests {
             .expect("captured entry processing does not hold");
         assert!(
             legacy_request.is_none(),
-            "the pre-transient captured ID must not bypass the request-ID gate"
+            "the old nonce-bearing record must not bypass the request decoder"
         );
 
         let captured_tree = source
@@ -1353,14 +1354,10 @@ mod tests {
             .await
             .process_entry(&source, notification, CAPTURE_BLOCK_HASH, CAPTURE_HEIGHT, 0)
             .await
-            .expect("captured entry processing does not hold")
-            .expect("captured entry produces a request");
-
-        assert_eq!(request.id, SignId::new(request_id));
-        assert_eq!(request.args.key_version, 1);
-        assert_eq!(
-            request.args.path,
-            "63616c6c65722d70617468000000000000000000000000000000000000000000"
+            .expect("legacy entry processing does not hold");
+        assert!(
+            request.is_none(),
+            "rehashing cannot migrate a legacy record"
         );
     }
 
@@ -1391,7 +1388,19 @@ mod tests {
                     },
                     Emission {
                         kind: EmissionKind::RespondBidirectional,
-                        payload: response_payload(bidirectional_rid, x, y, s2, 1),
+                        payload: crate::test_utils::bidirectional_response_payload(
+                            bidirectional_rid,
+                            mpc_primitives::PublishedAttestation {
+                                block_height: 0x0102030405060708,
+                                outcome: mpc_primitives::AttestationOutcomeKind::Executed,
+                                serialized_output_length: 32,
+                                digest: [0x54; 32],
+                            },
+                            x,
+                            y,
+                            s2,
+                            1,
+                        ),
                     },
                 ],
             }],
@@ -1413,6 +1422,17 @@ mod tests {
         };
         assert_eq!(respond.request_id, bidirectional_rid);
         assert_eq!(respond.signature.s, k256::Scalar::from(10u64));
+        let attestation = respond
+            .attestation
+            .as_ref()
+            .expect("Midnight response metadata");
+        assert_eq!(attestation.block_height, 0x0102030405060708);
+        assert_eq!(
+            attestation.outcome,
+            mpc_primitives::AttestationOutcomeKind::Executed
+        );
+        assert_eq!(attestation.serialized_output_length, 32);
+        assert_eq!(attestation.digest, [0x54; 32]);
     }
 
     #[tokio::test]
@@ -1437,6 +1457,22 @@ mod tests {
                     Emission {
                         kind: EmissionKind::SignatureResponded,
                         payload: response_payload([0x43; 32], [0xff; 32], [0xff; 32], s, 0),
+                    },
+                    Emission {
+                        kind: EmissionKind::RespondBidirectional,
+                        payload: crate::test_utils::bidirectional_response_payload(
+                            [0x45; 32],
+                            mpc_primitives::PublishedAttestation {
+                                block_height: 42,
+                                outcome: mpc_primitives::AttestationOutcomeKind::Executed,
+                                serialized_output_length: 32,
+                                digest: [0x54; 32],
+                            },
+                            x,
+                            y,
+                            s,
+                            2,
+                        ),
                     },
                     Emission {
                         kind: EmissionKind::SignatureResponded,
@@ -1795,7 +1831,7 @@ mod tests {
     async fn path_walk_and_conversion_failures_drop_only_the_affected_entry() {
         let (good_record, good_rid) = named_record_and_rid(7);
         let mut bad_record = sample_record();
-        bad_record.request_nonce = 8;
+        bad_record.tx_params.nonce = 8;
         bad_record.algo = 1;
         let bad_rid = crate::hashing::compute_request_id(
             &crate::test_utils::aligned_value_from_record(&bad_record),

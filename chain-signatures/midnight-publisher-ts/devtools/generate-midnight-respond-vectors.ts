@@ -19,9 +19,9 @@ interface OracleVector {
 interface OracleFixture {
   oracle: {
     fakenetCommit: "7084242437d8a0e52f3648f4a3594f9dd401ef71";
-    midnightIntegrationCommit: "c171225731f5ca07028fcd6caa6ced853ed139ef";
-    midnightPackage: "@sig-net/midnight@0.20.0-rc.1";
-    serializerPackage: "@sig-net/midnight-serde@0.20.0-rc.1";
+    midnightIntegrationCommit: "e9350c4c470db4a1886bc3b161c64d509dcec794";
+    midnightPackage: "@sig-net/midnight@0.24.0-rc.2";
+    serializerPackage: "@sig-net/midnight-serde@0.24.0-rc.2";
     ethers: "6.17.0";
   };
   vectors: OracleVector[];
@@ -501,9 +501,9 @@ const vectors = [...validInputs.map(validVector), ...rejectionInputs.map(rejecte
 const fixture: OracleFixture = {
   oracle: {
     fakenetCommit: "7084242437d8a0e52f3648f4a3594f9dd401ef71",
-    midnightIntegrationCommit: "c171225731f5ca07028fcd6caa6ced853ed139ef",
-    midnightPackage: "@sig-net/midnight@0.20.0-rc.1",
-    serializerPackage: "@sig-net/midnight-serde@0.20.0-rc.1",
+    midnightIntegrationCommit: "e9350c4c470db4a1886bc3b161c64d509dcec794",
+    midnightPackage: "@sig-net/midnight@0.24.0-rc.2",
+    serializerPackage: "@sig-net/midnight-serde@0.24.0-rc.2",
     ethers: "6.17.0",
   },
   vectors,

@@ -1,5 +1,4 @@
-// Test-only real caller for the Rust-owned integration stack. Its structure is the
-// minimal subset of sig-net/midnight-integration's v0.20.0-rc.1 test caller.
+// Test-only caller for the SDK Midnight attestation API.
 pragma language_version >= 0.25;
 
 import CompactStandardLibrary;
@@ -9,12 +8,11 @@ struct BoolResponse {
   success: Boolean;
 }
 
-// The declaration order is protocol-visible. The request map is field 3 and the
+// The declaration order is protocol-visible. The request map is field 2 and the
 // notification below names that exact path.
-export ledger requestNonce: Counter;
 export ledger mpcResponseKey: Secp256k1Point;
 sealed ledger signetSigner: SignetSigner;
-export ledger requests: SignBidirectionalEventMap<EvmType2TxParams<1, 0, 0>, 64, 64>;
+export ledger requests: Map<RequestId, SignBidirectionalEvent<EvmType2TxParams<1, 0, 0>, 64, 64>>;
 sealed ledger deployer: Bytes<32>;
 export ledger initialised: Counter;
 
@@ -61,25 +59,22 @@ export circuit submitIsEvenRequest(
     accessListEntryCount: 0,
     accessList: []
   };
-  const nonce = requestNonce as Uint<64>;
-  const request = constructSignBidirectionalEvent<EvmType2TxParams<1, 0, 0>, 64, 64>(
-    kernel.self(),
-    nonce,
-    keyVersion,
-    pad(32, "caller-path"),
-    MPCSignatureAlgorithm.ecdsa,
-    MPCDestination.unused,
-    pad(64, ""),
-    TxParamType.evmType2,
-    txParams,
-    pad(32, "eip155:1"),
-    outputSchema,
-    responseSchema
-  );
+  const request = SignBidirectionalEvent<EvmType2TxParams<1, 0, 0>, 64, 64> {
+    sender: kernel.self(),
+    keyVersion: keyVersion,
+    path: pad(32, "caller-path"),
+    algo: MPCSignatureAlgorithm.ecdsa,
+    signatureDest: MPCDestination.unused,
+    params: pad(64, ""),
+    txParamType: TxParamType.evmType2,
+    txParams: txParams,
+    executionDest: pad(32, "eip155:1"),
+    outputDeserializationSchema: outputSchema,
+    respondSerializationSchema: responseSchema
+  };
   const requestId = disclose(calculateRequestId<EvmType2TxParams<1, 0, 0>, 64, 64>(request));
 
   assert(!requests.member(requestId), "Request already exists");
-  requestNonce.increment(1);
   requests.insert(requestId, disclose(request));
 
   signetSigner.signBidirectional(
@@ -87,58 +82,52 @@ export circuit submitIsEvenRequest(
     constructSignBidirectionalEventNotificationV1(
       kernel.self(),
       1 as Uint<8>,
-      [3, 0, 0, 0] as Vector<4, Uint<8>>,
+      [2, 0, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
 
-circuit consumeResponse<#N>(
-  requestId: RequestId,
-  response: RespondBidirectionalEvent,
-  serializedOutput: Bytes<N>
-): [] {
-  const disclosedRequestId = disclose(requestId);
+circuit consumeResponse<#N>(response: RespondBidirectionalEvent, serializedOutput: Bytes<N>): [] {
+  const requestId = disclose(response.requestId);
   assert(initialised != 0, "Not initialised");
-  assert(
-    verifyRespondBidirectionalEvent<N>(
-      disclosedRequestId, serializedOutput, disclose(response), mpcResponseKey
-    ),
-    "Invalid attestation signature"
-  );
-  assert(requests.member(disclosedRequestId), "Request not found");
-  requests.remove(disclosedRequestId);
+  assert(verifyRespondBidirectionalEvent<N>(serializedOutput, disclose(response), mpcResponseKey), "Invalid attestation signature");
+  assert(requests.member(requestId), "Request not found");
+  requests.remove(requestId);
 }
 
-export circuit verifyResponse(
-  requestId: RequestId,
-  response: RespondBidirectionalEvent,
-  serializedOutput: Bytes<1>
-): [] {
-  consumeResponse<1>(requestId, response, serializedOutput);
+export circuit verifyResponse0(response: RespondBidirectionalEvent, serializedOutput: Bytes<0>): [] {
+  consumeResponse<0>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.failed || response.outputKind == OutputKind.unviable, "Expected failed or unviable outcome");
+}
+
+export pure circuit checkResponse0(response: RespondBidirectionalEvent, serializedOutput: Bytes<0>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEvent<0>(serializedOutput, response, responseKey);
+}
+
+export circuit verifyResponse(response: RespondBidirectionalEvent, serializedOutput: Bytes<1>): [] {
+  consumeResponse<1>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
   assert(deserialize<BoolResponse, 1>(serializedOutput).success, "Foreign call reported failure");
 }
 
-export circuit verifyResponse5(
-  requestId: RequestId,
-  response: RespondBidirectionalEvent,
-  serializedOutput: Bytes<5>
-): [] {
-  consumeResponse<5>(requestId, response, serializedOutput);
-  assert(serializedOutput == Bytes [0xde, 0xad, 0xbe, 0xef, 1], "Expected execution failure");
+export pure circuit checkResponse1(response: RespondBidirectionalEvent, serializedOutput: Bytes<1>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEvent<1>(serializedOutput, response, responseKey);
 }
 
-export circuit verifyResponse8(
-  requestId: RequestId,
-  response: RespondBidirectionalEvent,
-  serializedOutput: Bytes<8>
-): [] {
-  consumeResponse<8>(requestId, response, serializedOutput);
+export circuit verifyResponse8(response: RespondBidirectionalEvent, serializedOutput: Bytes<8>): [] {
+  consumeResponse<8>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
 }
 
-export circuit verifyResponse32(
-  requestId: RequestId,
-  response: RespondBidirectionalEvent,
-  serializedOutput: Bytes<32>
-): [] {
-  consumeResponse<32>(requestId, response, serializedOutput);
+export pure circuit checkResponse8(response: RespondBidirectionalEvent, serializedOutput: Bytes<8>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEvent<8>(serializedOutput, response, responseKey);
+}
+
+export circuit verifyResponse32(response: RespondBidirectionalEvent, serializedOutput: Bytes<32>): [] {
+  consumeResponse<32>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
+}
+
+export pure circuit checkResponse32(response: RespondBidirectionalEvent, serializedOutput: Bytes<32>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEvent<32>(serializedOutput, response, responseKey);
 }

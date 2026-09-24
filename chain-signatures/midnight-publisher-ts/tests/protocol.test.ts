@@ -52,6 +52,44 @@ describe("handleLine", () => {
     );
   });
 
+  it("requires canonical attestation metadata exactly for bidirectional builds", async () => {
+    const bidirectional = await respondInput({ circuit: "respondBidirectional" });
+    expect(await answer(request({ ...bidirectional }))).toMatchObject({ id: 7, ok: true });
+    const attestation = bidirectional.attestation!;
+    for (const override of [
+      { circuit: "respondBidirectional" },
+      { attestation },
+      ...["-1", "01", "invalid", "18446744073709551616", 42].map((blockHeight) => ({
+        ...bidirectional,
+        attestation: { ...attestation, blockHeight },
+      })),
+      ...["-1", "01", "invalid", "18446744073709551616", 32].map((serializedOutputLength) => ({
+        ...bidirectional,
+        attestation: { ...attestation, serializedOutputLength },
+      })),
+      { ...bidirectional, attestation: { ...attestation, outputKind: 3 } },
+      { ...bidirectional, attestation: { ...attestation, digest: "00" } },
+    ]) {
+      expect(await answer(request(override))).toMatchObject({
+        id: 7,
+        ok: false,
+        code: "bad_request",
+      });
+    }
+    expect(
+      await answer(
+        request({
+          ...bidirectional,
+          attestation: {
+            ...attestation,
+            blockHeight: "18446744073709551615",
+            serializedOutputLength: "18446744073709551615",
+          },
+        }),
+      ),
+    ).toMatchObject({ id: 7, ok: true });
+  });
+
   it("answers malformed input with bad_request and echoes only a usable id", async () => {
     for (const line of ["{not json", "[]"]) {
       expect(await answer(line)).toMatchObject({ id: null, ok: false, code: "bad_request" });
@@ -109,12 +147,12 @@ describe("handleLine", () => {
 describe("handleLine: the operation discriminator", () => {
   it("reports timing and starts publisher warmup at readiness", async () => {
     await expect(
-      answer(JSON.stringify({ id: 6, op: "ready", protocolVersion: 1 })),
+      answer(JSON.stringify({ id: 6, op: "ready", protocolVersion: 2 })),
     ).resolves.toEqual({
       id: 6,
       ok: true,
       ready: true,
-      protocolVersion: 1,
+      protocolVersion: 2,
       submitTimeoutMs: 6 * 60 * 1_000,
       recipeTtlMs: 5 * 60 * 1_000,
     });
@@ -122,7 +160,7 @@ describe("handleLine: the operation discriminator", () => {
   });
 
   it("requires the exact protocol version on ready", async () => {
-    for (const protocolVersion of [undefined, 0, 2, 3, "1", null]) {
+    for (const protocolVersion of [undefined, 0, 1, 3, "2", null]) {
       const reply = await answer(JSON.stringify({ id: 6, op: "ready", protocolVersion }));
 
       expect(reply, String(protocolVersion)).toMatchObject({

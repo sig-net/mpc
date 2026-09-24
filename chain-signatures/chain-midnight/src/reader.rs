@@ -14,16 +14,16 @@ use crate::tx::TX_PARAM_TYPE_EVM_TYPE2;
 
 /// Atoms of an evmType2 record excluding its capacity-scaled vectors. The calldata
 /// `Maybe`'s three atoms count even when `is_some` is false.
-const EVM_TYPE2_FIXED_ATOMS: usize = 22;
+const EVM_TYPE2_FIXED_ATOMS: usize = 21;
 
 /// `sender` through `calldata.no_words`; the calldata words begin here.
-const EVM_TYPE2_HEAD_ATOMS: usize = 18;
+const EVM_TYPE2_HEAD_ATOMS: usize = 17;
 
-/// `caip2_id` and the two schemas.
+/// `execution_dest` and the two schemas.
 const EVM_TYPE2_TAIL_ATOMS: usize = 3;
 
-/// `tx_param_type`'s fixed position: eighth field of `SignBidirectionalEvent`.
-const TX_PARAM_TYPE_ATOM: usize = 7;
+/// `tx_param_type`'s fixed position: seventh field of `SignBidirectionalEvent`.
+const TX_PARAM_TYPE_ATOM: usize = 6;
 
 pub type Node = StateValue<DefaultDB>;
 
@@ -93,7 +93,7 @@ struct EvmType2Capacities {
 /// Recover the sizing parameters the caller's contract was compiled with
 /// (`#maxCalldataWords`, `#maxAccessListEntries`, `#maxStorageKeysPerEntry`) from the
 /// declared widths alone. The tail anchors from the end: calldata words, storage keys
-/// and `caip2_id` are all `Bytes<32>`, so no forward scan can find the boundaries.
+/// and `execution_dest` are all `Bytes<32>`, so no forward scan can find the boundaries.
 fn evm_type2_capacities(widths: &[u32]) -> anyhow::Result<EvmType2Capacities> {
     anyhow::ensure!(
         widths.len() >= EVM_TYPE2_FIXED_ATOMS,
@@ -245,6 +245,14 @@ pub(crate) struct DecodedResponse {
     pub signature: anyhow::Result<mpc_primitives::Signature>,
 }
 
+pub(crate) struct DecodedBidirectionalResponse {
+    pub request_id: [u8; 32],
+    pub response: anyhow::Result<(
+        mpc_primitives::PublishedAttestation,
+        mpc_primitives::Signature,
+    )>,
+}
+
 fn decode_response_signature(
     x: [u8; 32],
     y: [u8; 32],
@@ -286,6 +294,49 @@ pub(crate) fn decode_response_payload(
     DecodedResponse {
         request_id,
         signature: decode_response_signature(x, y, s, emitted[128]),
+    }
+}
+
+/// Decode the singleton's `RespondBidirectionalEvent` layout. Metadata is an
+/// unverified claim until the node compares it with its stored attestation and
+/// verifies the signature against the expected digest.
+pub(crate) fn decode_bidirectional_response_payload(
+    emitted: &[u8; crate::emissions::MISC_PAYLOAD_LEN],
+) -> DecodedBidirectionalResponse {
+    let request_id = emitted[..32].try_into().expect("fixed request id width");
+    let response = (|| {
+        anyhow::ensure!(
+            emitted[178..].iter().all(|byte| *byte == 0),
+            "respondBidirectional padding must be zero"
+        );
+        let attestation = mpc_primitives::PublishedAttestation {
+            block_height: u64::from_le_bytes(
+                emitted[32..40].try_into().expect("fixed height width"),
+            ),
+            outcome: emitted[40].try_into()?,
+            serialized_output_length: u64::from_le_bytes(
+                emitted[41..49]
+                    .try_into()
+                    .expect("fixed output length width"),
+            ),
+            digest: emitted[49..81].try_into().expect("fixed digest width"),
+        };
+        anyhow::ensure!(
+            attestation.outcome == mpc_primitives::AttestationOutcomeKind::Executed
+                || attestation.serialized_output_length == 0,
+            "failed and unviable responses require zero output length"
+        );
+        let signature = decode_response_signature(
+            emitted[81..113].try_into().expect("fixed x width"),
+            emitted[113..145].try_into().expect("fixed y width"),
+            emitted[145..177].try_into().expect("fixed scalar width"),
+            emitted[177],
+        )?;
+        Ok((attestation, signature))
+    })();
+    DecodedBidirectionalResponse {
+        request_id,
+        response,
     }
 }
 
@@ -434,21 +485,20 @@ fn decode_sign_bidirectional(
     };
     // Field order mirrors, field for field, `SignBidirectionalEvent` in signet-midnight's
     // Signet.compact: each call consumes the next atom, so a reorder between same-width
-    // neighbours (chain_id/nonce, the two fees, algo/dest) decodes cleanly and surfaces
+    // neighbours (chain_id/nonce, the two fees, algo/signature_dest) decodes cleanly and surfaces
     // only as an rid-mismatch drop on every record, which reads like caller fault.
     // `decode_tx_params` likewise mirrors `EvmType2TxParams`.
     let record = SignBidirectionalRecord {
         sender: bytes_n::<32>(cursor, "sender")?,
-        request_nonce: uint::<u64>(cursor, 8, "request_nonce")?,
         key_version: uint::<u8>(cursor, 1, "key_version")?,
         path: bytes_n::<32>(cursor, "path")?,
         algo: bounded_enum(cursor, "algo")?,
-        dest: bounded_enum(cursor, "dest")?,
+        signature_dest: bounded_enum(cursor, "signature_dest")?,
         params: bytes_n::<64>(cursor, "params")?,
         // Width-checked only: `ensure_evm_type2_param_type` already pinned the value.
         tx_param_type: uint::<u8>(cursor, 1, "tx_param_type")?,
         tx_params: decode_tx_params(cursor, capacities)?,
-        caip2_id: bytes_n::<32>(cursor, "caip2_id")?,
+        execution_dest: bytes_n::<32>(cursor, "execution_dest")?,
         output_deserialization_schema: bytes_dyn(cursor, "output_deserialization_schema")?,
         respond_serialization_schema: bytes_dyn(cursor, "respond_serialization_schema")?,
     };
@@ -674,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_response_payload_reads_both_emitted_response_layouts() {
+    fn decode_response_payload_reads_initial_signatures() {
         use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 
         let encoded = k256::AffinePoint::GENERATOR.to_encoded_point(false);
@@ -697,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_response_payload_reads_the_captured_emissions() {
+    fn decode_response_payload_reads_initial_and_legacy_captured_emissions() {
         for (name, bytes, kind) in [
             (
                 "respond-tx-161",
@@ -716,6 +766,14 @@ mod tests {
             decoded
                 .signature
                 .unwrap_or_else(|err| panic!("{name}: captured signature must be valid: {err:#}"));
+            if kind == EmissionKind::RespondBidirectional {
+                assert!(
+                    decode_bidirectional_response_payload(&emission.payload)
+                        .response
+                        .is_err(),
+                    "the pre-attestation legacy layout cannot be a current response"
+                );
+            }
         }
     }
 
@@ -747,6 +805,119 @@ mod tests {
     }
 
     #[test]
+    fn bidirectional_response_preserves_compact_producer_metadata_and_signature() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/api-parity-vectors.json"))
+                .expect("Compact producer fixture");
+        let event = &fixture["responseEvent"];
+        let payload: [u8; crate::emissions::MISC_PAYLOAD_LEN] =
+            hex::decode(event["payload"].as_str().expect("emitted payload"))
+                .unwrap()
+                .try_into()
+                .expect("singleton emits 256 bytes");
+        let decoded = decode_bidirectional_response_payload(&payload);
+        assert_eq!(
+            decoded.request_id,
+            hex_32(event["requestId"].as_str().unwrap())
+        );
+        let (attestation, signature) = decoded.response.expect("canonical response decodes");
+        assert_eq!(
+            attestation.block_height.to_string(),
+            event["blockHeight"].as_str().unwrap()
+        );
+        assert_eq!(
+            attestation.outcome as u64,
+            event["outputKind"].as_u64().unwrap()
+        );
+        assert_eq!(
+            attestation.serialized_output_length.to_string(),
+            event["serializedOutputLength"].as_str().unwrap()
+        );
+        assert_eq!(
+            attestation.digest,
+            hex_32(event["digest"].as_str().unwrap())
+        );
+        let expected = &event["signature"];
+        let expected_signature = decode_response_signature(
+            hex_32(expected["bigR"]["x"].as_str().unwrap()),
+            hex_32(expected["bigR"]["y"].as_str().unwrap()),
+            hex_32(expected["s"].as_str().unwrap()),
+            expected["recoveryId"].as_u64().unwrap() as u8,
+        )
+        .unwrap();
+        assert_eq!(signature, expected_signature);
+
+        // The emitter's metadata is only decoded here. A changed digest remains a
+        // claim for the node's stored-digest verification, not a decoder failure.
+        let mut changed_digest = payload;
+        changed_digest[49] ^= 1;
+        assert_ne!(
+            decode_bidirectional_response_payload(&changed_digest)
+                .response
+                .unwrap()
+                .0
+                .digest,
+            attestation.digest
+        );
+    }
+
+    #[test]
+    fn bidirectional_response_rejects_malformed_fields() {
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+        use mpc_primitives::{AttestationOutcomeKind, PublishedAttestation};
+
+        let point = k256::AffinePoint::GENERATOR.to_encoded_point(false);
+        let payload = crate::test_utils::bidirectional_response_payload(
+            [0x31; 32],
+            PublishedAttestation {
+                block_height: u64::MAX,
+                outcome: AttestationOutcomeKind::Executed,
+                serialized_output_length: 0,
+                digest: [0x41; 32],
+            },
+            (*point.x().unwrap()).into(),
+            (*point.y().unwrap()).into(),
+            k256::Scalar::from(7u64).to_bytes().into(),
+            1,
+        );
+        for tag in 0..=2 {
+            let mut valid = payload;
+            valid[40] = tag;
+            assert!(decode_bidirectional_response_payload(&valid)
+                .response
+                .is_ok());
+        }
+        for (name, start, end, byte) in [
+            ("output kind", 40, 41, 3),
+            ("point", 81, 145, 0xff),
+            ("scalar", 145, 177, 0xff),
+            ("recovery id", 177, 178, 2),
+            ("first padding byte", 178, 179, 1),
+            ("last padding byte", 255, 256, 1),
+        ] {
+            let mut invalid = payload;
+            invalid[start..end].fill(byte);
+            assert!(
+                decode_bidirectional_response_payload(&invalid)
+                    .response
+                    .is_err(),
+                "{name}"
+            );
+        }
+        for tag in [1, 2] {
+            let mut invalid = payload;
+            invalid[40] = tag;
+            invalid[41] = 1;
+            assert!(
+                decode_bidirectional_response_payload(&invalid)
+                    .response
+                    .is_err(),
+                "failure output must be empty"
+            );
+        }
+    }
+
+    #[test]
     fn decode_record_reads_capacities_from_declared_widths() {
         // Counts below capacity throughout, so a decode inferring the split from
         // anything but the widths would misread it.
@@ -767,13 +938,13 @@ mod tests {
         );
 
         // One atom below the boundary is refused rather than underflowing the tail.
-        // Atom 7 is zeroed so the tx_param_type gate passes and the count check fires.
-        let mut atoms = vec![vec![0xab]; 21];
+        // Atom 6 is zeroed so the tx_param_type gate passes and the count check fires.
+        let mut atoms = vec![vec![0xab]; 20];
         atoms[TX_PARAM_TYPE_ATOM] = Vec::new();
-        let err = decode_record(&cell_from_atoms(&atoms, &[1u32; 21]))
-            .expect_err("21 atoms cannot hold the fixed fields")
+        let err = decode_record(&cell_from_atoms(&atoms, &[1u32; 20]))
+            .expect_err("20 atoms cannot hold the fixed fields")
             .to_string();
-        assert!(err.contains("21") && err.contains("22"), "err: {err}");
+        assert!(err.contains("20") && err.contains("21"), "err: {err}");
     }
 
     #[test]
@@ -879,7 +1050,7 @@ mod tests {
         let widths = widths_from_record(&record);
 
         let mut not_boolean = atoms_from_record(&record);
-        not_boolean[15] = vec![2];
+        not_boolean[14] = vec![2];
         let err = decode_record(&cell_from_atoms(&not_boolean, &widths))
             .expect_err("a non-Boolean calldata.is_some atom must reject")
             .to_string();
@@ -896,9 +1067,9 @@ mod tests {
     #[test]
     fn resolve_verified_record_accepts_transient_id_and_rejects_legacy_id() {
         let record = sample_record();
-        let rid = hex_32("db879820adcaca1d5e38c36a3d8de6cc0918273268fdde87b8258ac77ca11e00");
+        let (reference_cell, rid) = crate::test_utils::api_reference_cell();
         let legacy = hex_32("b3d7090a8236265efcbf6be5021de3c49961f85ed6339eaa0a4e83c4510e91bf");
-        let cell = cell_from_record(&record);
+        let cell = StateValue::from(reference_cell);
 
         let map = map_of(vec![(key_of(rid), cell.clone())]);
         assert_eq!(

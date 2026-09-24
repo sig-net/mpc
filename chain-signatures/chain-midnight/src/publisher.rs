@@ -11,7 +11,7 @@ use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::time::current_unix_timestamp;
 
 use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
-use crate::intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
+use crate::intent_gen::{IntentGen, IntentRequest, WireAttestation, WirePoint, WireSignature};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 
@@ -69,6 +69,7 @@ struct RespondCall {
     circuit: RespondCircuit,
     request_id: [u8; 32],
     signature: WireSignature,
+    attestation: Option<WireAttestation>,
 }
 
 /// Posts MPC responses back to the Midnight central contract.
@@ -159,7 +160,14 @@ impl ChainPublisher for MidnightPublisher {
             // execution outcomes vary in length across requests. Cache the exact attested
             // bytes off-chain when possible; cache availability does not gate the response.
             if let Err(error) = store
-                .ensure_output(&call.request_id, &response.output)
+                .ensure_output(
+                    &call.request_id,
+                    response
+                        .attestation
+                        .as_ref()
+                        .context("Midnight attestation metadata is missing")?,
+                    &response.output,
+                )
                 .await
             {
                 tracing::warn!(
@@ -189,6 +197,7 @@ impl ChainPublisher for MidnightPublisher {
             contract_address: central_address,
             request_id: hex::encode(call.request_id),
             signature: call.signature.clone(),
+            attestation: call.attestation,
             contract_state: hex::encode(&chain.contract_state),
             ledger_parameters: hex::encode(&chain.ledger_parameters),
             ttl_seconds: ttl_seconds(&self.config, current_unix_timestamp()),
@@ -233,19 +242,47 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
                 "midnight publisher was handed a request routed to it carrying a {:?} event",
                 event.chain
             );
+            anyhow::ensure!(
+                event.chain_ctx.as_deref() == Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT),
+                "legacy Midnight signing request is incompatible with the canonical Midnight SDK contract",
+            );
             Ok(RespondCall {
                 circuit: RespondCircuit::Respond,
+                attestation: None,
                 request_id,
                 signature,
             })
         }
-        // The on-chain event carries only the signature; output storage is handled
-        // by the publisher, when configured, before it builds this circuit call.
-        SignKind::RespondBidirectional(_) => Ok(RespondCall {
-            circuit: RespondCircuit::RespondBidirectional,
-            request_id,
-            signature,
-        }),
+        // Metadata travels on chain; only the exact output bytes go to the cache.
+        SignKind::RespondBidirectional(response) => {
+            let metadata = response.attestation.as_ref().context(
+                "Midnight attestation metadata is missing; legacy responses require explicit migration",
+            )?;
+            anyhow::ensure!(
+                metadata.key_version == action.request.args.key_version,
+                "Midnight attestation key version does not match the signing request",
+            );
+            let digest = mpc_compact_hashing::compute_attestation_hash(
+                &request_id,
+                metadata,
+                &response.output,
+            )?;
+            anyhow::ensure!(
+                action.request.args.payload.to_bytes().as_slice() == digest,
+                "Midnight published digest does not match the signed payload",
+            );
+            Ok(RespondCall {
+                circuit: RespondCircuit::RespondBidirectional,
+                attestation: Some(WireAttestation {
+                    block_height: metadata.block_height.to_string(),
+                    output_kind: metadata.outcome as u8,
+                    serialized_output_length: response.output.len().to_string(),
+                    digest: hex::encode(digest),
+                }),
+                request_id,
+                signature,
+            })
+        }
         SignKind::Sign => anyhow::bail!(
             "midnight publisher serves SignBidirectional and RespondBidirectional only, not Sign"
         ),
@@ -295,7 +332,8 @@ mod tests {
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{
-        BidirectionalTxId, Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignId, SignKind,
+        AttestationMetadata, BidirectionalTxId, Chain, RespondBidirectionalTx,
+        SignBidirectionalEvent, SignId, SignKind,
     };
 
     /// An arbitrary well-formed central address.
@@ -519,20 +557,33 @@ mod tests {
         )
     }
 
+    #[derive(Debug, PartialEq)]
+    struct StoredOutput {
+        request_id: [u8; 32],
+        metadata: AttestationMetadata,
+        output: Vec<u8>,
+    }
+
     #[derive(Default)]
     struct StubOutputStore {
-        outputs: Mutex<Vec<([u8; 32], Vec<u8>)>>,
+        outputs: Mutex<Vec<StoredOutput>>,
         failure: bool,
     }
 
     #[async_trait]
     impl OutputStore for StubOutputStore {
-        async fn ensure_output(&self, request_id: &[u8; 32], output: &[u8]) -> anyhow::Result<()> {
+        async fn ensure_output(
+            &self,
+            request_id: &[u8; 32],
+            metadata: &AttestationMetadata,
+            output: &[u8],
+        ) -> anyhow::Result<()> {
             anyhow::ensure!(!self.failure, "output storage unavailable");
-            self.outputs
-                .lock()
-                .unwrap()
-                .push((*request_id, output.to_vec()));
+            self.outputs.lock().unwrap().push(StoredOutput {
+                request_id: *request_id,
+                metadata: *metadata,
+                output: output.to_vec(),
+            });
             Ok(())
         }
     }
@@ -551,7 +602,7 @@ mod tests {
             output_deserialization_schema: vec![],
             respond_serialization_schema: vec![],
             chain,
-            chain_ctx: None,
+            chain_ctx: Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT.to_vec()),
         }
     }
 
@@ -563,17 +614,87 @@ mod tests {
         )
     }
 
+    const METADATA: AttestationMetadata = AttestationMetadata {
+        key_version: 1,
+        block_height: 42,
+        outcome: mpc_primitives::AttestationOutcomeKind::Executed,
+    };
+
     fn bidirectional_action(output: Vec<u8>) -> PublishAction {
-        make_publish_action(
+        let mut action = make_publish_action(
             Chain::Midnight,
             SignKind::RespondBidirectional(RespondBidirectionalTx {
                 tx_id: BidirectionalTxId([0x11; 32]),
                 output,
+                attestation: Some(METADATA),
                 origin_indexed_at: None,
-                chain_ctx: None,
+                chain_ctx: Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT.to_vec()),
             }),
             SignId::new(REQUEST_ID),
-        )
+        );
+        let request = Arc::make_mut(&mut action.request);
+        request.args.key_version = METADATA.key_version;
+        let SignKind::RespondBidirectional(response) = &request.kind else {
+            unreachable!()
+        };
+        let digest =
+            mpc_compact_hashing::compute_attestation_hash(&REQUEST_ID, &METADATA, &response.output)
+                .unwrap();
+        use mpc_primitives::ScalarExt as _;
+        request.args.payload = k256::Scalar::from_bytes(digest).unwrap();
+        action
+    }
+
+    #[tokio::test]
+    async fn invalid_attestation_metadata_is_rejected_before_cache_or_chain_io() {
+        for case in 0..5 {
+            let mut action = bidirectional_action(vec![1]);
+            let request = Arc::make_mut(&mut action.request);
+            let SignKind::RespondBidirectional(response) = &mut request.kind else {
+                unreachable!()
+            };
+            match case {
+                0 => response.attestation = None,
+                1 => response.attestation.as_mut().unwrap().key_version += 1,
+                2 => {
+                    response.attestation.as_mut().unwrap().outcome =
+                        mpc_primitives::AttestationOutcomeKind::Failed
+                }
+                3 => {
+                    response.attestation.as_mut().unwrap().outcome =
+                        mpc_primitives::AttestationOutcomeKind::Unviable
+                }
+                4 => response.attestation.as_mut().unwrap().block_height += 1,
+                _ => unreachable!(),
+            }
+            let reads = StubReads::new();
+            let client = StubClient::new();
+            let store = Arc::new(StubOutputStore::default());
+            let mut publisher = publisher(reads.clone(), client.clone());
+            publisher.output_store = Some(store.clone());
+            assert!(publisher.publish_signature(&action).await.is_err());
+            assert!(store.outputs.lock().unwrap().is_empty());
+            assert!(reads.reads().is_empty());
+            assert!(client.built().is_empty());
+            assert_eq!(client.submissions(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_initial_response_is_rejected_before_chain_io() {
+        let mut action = respond_action();
+        let SignKind::SignBidirectional(event) = &mut Arc::make_mut(&mut action.request).kind
+        else {
+            unreachable!()
+        };
+        event.chain_ctx = None;
+        let reads = StubReads::new();
+        let client = StubClient::new();
+        let publisher = publisher(reads.clone(), client.clone());
+        assert!(publisher.publish_signature(&action).await.is_err());
+        assert!(reads.reads().is_empty());
+        assert!(client.built().is_empty());
+        assert_eq!(client.submissions(), 0);
     }
 
     #[derive(Clone, Default)]
@@ -843,7 +964,11 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 store.outputs.lock().unwrap().pop(),
-                Some((REQUEST_ID, output))
+                Some(StoredOutput {
+                    request_id: REQUEST_ID,
+                    metadata: METADATA,
+                    output
+                })
             );
         }
     }
@@ -857,7 +982,12 @@ mod tests {
         }
         #[async_trait]
         impl OutputStore for BlockingStore {
-            async fn ensure_output(&self, _: &[u8; 32], _: &[u8]) -> anyhow::Result<()> {
+            async fn ensure_output(
+                &self,
+                _: &[u8; 32],
+                _: &AttestationMetadata,
+                _: &[u8],
+            ) -> anyhow::Result<()> {
                 self.entered.notify_one();
                 self.release.notified().await;
                 Ok(())
@@ -1150,7 +1280,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_bidirectional_action_names_the_other_circuit_on_the_same_request() {
-        // Output storage does not change the signature-only circuit arguments.
+        // Output bytes stay in the cache; the corresponding metadata travels on chain.
         let client = StubClient::new();
         let publisher = publisher(StubReads::new(), client.clone());
 
@@ -1163,5 +1293,21 @@ mod tests {
         assert_eq!(request.circuit, RESPOND_BIDIRECTIONAL);
         assert_eq!(request.contract_address, CENTRAL);
         assert_eq!(request.request_id, hex::encode(REQUEST_ID));
+        assert_eq!(
+            request.attestation,
+            Some(WireAttestation {
+                block_height: "42".to_string(),
+                output_kind: 0,
+                serialized_output_length: "32".to_string(),
+                digest: hex::encode(
+                    mpc_compact_hashing::compute_attestation_hash(
+                        &REQUEST_ID,
+                        &METADATA,
+                        &[0xab; 32]
+                    )
+                    .unwrap()
+                ),
+            })
+        );
     }
 }

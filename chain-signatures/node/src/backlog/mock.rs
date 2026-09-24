@@ -75,7 +75,7 @@ impl BacklogTestExt for Backlog {
     ) -> SignEntry<Bidirectional<Final<Generating>>> {
         self.insert_mock_executing(tx)
             .await
-            .advance(ExecutionOutcome::Success { output: vec![] })
+            .advance(ExecutionOutcome::Success { output: vec![] }, 456)
             .await
             .expect("advance to final generating")
     }
@@ -191,7 +191,8 @@ pub fn mock_bidi_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
             algo: "ECDSA".to_string(),
             params: "{}".to_string(),
             chain,
-            chain_ctx: None,
+            chain_ctx: (chain == Chain::Midnight)
+                .then(|| mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT.to_vec()),
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         },
@@ -251,6 +252,7 @@ pub fn mock_bidi_response_request(
         RespondBidirectionalTx {
             tx_id,
             output: vec![],
+            attestation: None,
             origin_indexed_at: None,
             chain_ctx: None,
         },

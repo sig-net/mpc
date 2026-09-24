@@ -561,6 +561,7 @@ impl SignEntry<Bidirectional<Executing>> {
     pub async fn advance(
         self,
         outcome: ExecutionOutcome,
+        block_height: u64,
     ) -> anyhow::Result<SignEntry<Bidirectional<Final<Generating>>>> {
         let chain_ctx = match &self.request.kind {
             SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
@@ -576,12 +577,17 @@ impl SignEntry<Bidirectional<Executing>> {
             Arc::clone(self.execution_tx()),
             chain_ctx,
             origin_indexed_at,
+            block_height,
         );
         let sign_request = match outcome {
             ExecutionOutcome::Success { output } => {
                 completed_tx.create_sign_request_from_serialized_output(output)?
             }
             ExecutionOutcome::Failed => completed_tx.create_failed_sign_request().await?,
+
+            ExecutionOutcome::ExtractionFailed => {
+                anyhow::bail!("output extraction failure cannot enter response signing")
+            }
         };
 
         let respond_request = Arc::new(sign_request);

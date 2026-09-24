@@ -590,7 +590,7 @@ async fn test_bidirectional_typestate_lifecycle() {
 
     // 4. Advance to Final Generating
     let final_entry = exec_entry
-        .advance(ExecutionOutcome::Success { output: vec![] })
+        .advance(ExecutionOutcome::Success { output: vec![] }, 456)
         .await
         .expect("should advance to final");
     assert_eq!(final_entry.request().id, sign_id);
@@ -634,7 +634,7 @@ async fn test_bidirectional_typestate_lifecycle() {
         .advance(tx2)
         .await
         .expect("chained advance to executing")
-        .advance(ExecutionOutcome::Success { output: vec![] })
+        .advance(ExecutionOutcome::Success { output: vec![] }, 456)
         .await
         .expect("chained advance to final generating");
 
@@ -660,9 +660,12 @@ async fn test_bidirectional_executing_advance_outcomes() {
 
     // Test Success outcome
     let success_entry = entry
-        .advance(ExecutionOutcome::Success {
-            output: vec![0x01, 0x02],
-        })
+        .advance(
+            ExecutionOutcome::Success {
+                output: vec![0x01, 0x02],
+            },
+            456,
+        )
         .await
         .expect("advance success");
 
@@ -680,7 +683,7 @@ async fn test_bidirectional_executing_advance_outcomes() {
     let sign_id2 = tx2.sign_id();
     let entry2 = backlog.insert_mock_executing(&tx2).await;
     let failed_entry = entry2
-        .advance(ExecutionOutcome::Failed)
+        .advance(ExecutionOutcome::Failed, 456)
         .await
         .expect("advance failed");
 
@@ -724,7 +727,7 @@ async fn test_watch_unwatch_and_respond() {
 
     // Advance executing entry to final response signing
     executing_entry
-        .advance(ExecutionOutcome::Success { output: vec![] })
+        .advance(ExecutionOutcome::Success { output: vec![] }, 456)
         .await
         .expect("respond should transition to final generating");
     assert!(backlog
@@ -1171,7 +1174,7 @@ async fn advance_carries_the_origin_into_the_final_response() {
     let origin = executing.request().unix_timestamp_indexed;
 
     let entry = executing
-        .advance(ExecutionOutcome::Success { output: vec![] })
+        .advance(ExecutionOutcome::Success { output: vec![] }, 456)
         .await
         .expect("advance to final generating");
 

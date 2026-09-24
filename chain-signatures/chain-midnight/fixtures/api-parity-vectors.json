@@ -1,0 +1,164 @@
+{
+  "responseEvent": {
+    "payload": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2a00000000000000002000000000000000cd6a0d82feba3135763f3187269c6229b42ae86a1dca5112323af501cf670000fcb1bd334d28092a61bdf53ceed8562eb159a406ed5dbb902a8de8479adaccadfbd56fe9b0822542f1254b593f33a04989b58043dfecb21b38f291fe2fefe88d1bf69b8ab875cbf8fc3c81e6cf985fda75d52818ba1dfa8d0c6476031ef5169001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "requestId": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+    "blockHeight": "42",
+    "outputKind": 0,
+    "serializedOutputLength": "32",
+    "digest": "cd6a0d82feba3135763f3187269c6229b42ae86a1dca5112323af501cf670000",
+    "signature": {
+      "bigR": {
+        "x": "fcb1bd334d28092a61bdf53ceed8562eb159a406ed5dbb902a8de8479adaccad",
+        "y": "fbd56fe9b0822542f1254b593f33a04989b58043dfecb21b38f291fe2fefe88d"
+      },
+      "s": "1bf69b8ab875cbf8fc3c81e6cf985fda75d52818ba1dfa8d0c6476031ef51690",
+      "recoveryId": 1
+    }
+  },
+  "compiler": "0.33.0-rc.2",
+  "runtime": "0.18.0-rc.1",
+  "reference": "@sig-net/midnight@0.24.0-rc.2/src/Signet.compact",
+  "request": {
+    "requestId": "b599c1e0876e270ff0b1418e957f0e7c613868c38934dc08696feb784bc29000",
+    "atoms": [
+      "abababababababababababababababababababababababababababababababab",
+      "01",
+      "63616c6c65722d70617468",
+      "",
+      "",
+      "",
+      "",
+      "697a",
+      "03",
+      "01",
+      "02",
+      "0852",
+      "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "05",
+      "01",
+      "ca11ab1e",
+      "01",
+      "1111111111111111111111111111111111111111111111111111111111111111",
+      "",
+      "6569703135353a3331333337",
+      "75696e74323536",
+      "75696e74323536"
+    ],
+    "widths": [
+      32,
+      1,
+      32,
+      1,
+      1,
+      64,
+      1,
+      8,
+      8,
+      16,
+      16,
+      8,
+      20,
+      16,
+      1,
+      4,
+      2,
+      32,
+      1,
+      32,
+      34,
+      34
+    ]
+  },
+  "attestations": [
+    {
+      "requestId": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+      "keyVersion": 1,
+      "kind": 0,
+      "blockHeight": "42",
+      "data": "",
+      "digest": "f16d9e47180c1572deaf3ba7ba41699a87b47934f0fc50078c4f3841b3e50400",
+      "cache": ""
+    },
+    {
+      "requestId": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+      "keyVersion": 1,
+      "kind": 0,
+      "blockHeight": "42",
+      "data": "01",
+      "digest": "9f96a2c784c802d82717b278676dff89cbc2f29248701e5b0efb32250a807500",
+      "cache": "01"
+    },
+    {
+      "requestId": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+      "keyVersion": 1,
+      "kind": 0,
+      "blockHeight": "42",
+      "data": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e",
+      "digest": "a439f7255fe566b49e7f33a2e3151659f84dae1f5a247e28107481920f370e00",
+      "cache": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e"
+    },
+    {
+      "requestId": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+      "keyVersion": 1,
+      "kind": 0,
+      "blockHeight": "42",
+      "data": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "digest": "c1a71b5dbcafbdac9d5d57b72025c2cb5ef630372789dd28f980c78fff8b3300",
+      "cache": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "requestId": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+      "keyVersion": 1,
+      "kind": 0,
+      "blockHeight": "42",
+      "data": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "digest": "cd6a0d82feba3135763f3187269c6229b42ae86a1dca5112323af501cf670000",
+      "cache": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    },
+    {
+      "requestId": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+      "keyVersion": 1,
+      "kind": 0,
+      "blockHeight": "42",
+      "data": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e",
+      "digest": "7ddc58d627945d203fad7fd12c7974f3019694194ad6bebf55188c13781e4100",
+      "cache": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e"
+    },
+    {
+      "requestId": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+      "keyVersion": 1,
+      "kind": 0,
+      "blockHeight": "42",
+      "data": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "digest": "7a6c527255b299d1a45b1b4241c6d24386416ac29e5046b8bcd191430b6d5a00",
+      "cache": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+    },
+    {
+      "requestId": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+      "keyVersion": 1,
+      "kind": 1,
+      "blockHeight": "42",
+      "data": "",
+      "digest": "63b5f0b892239972e419eee125c8038d24df850906b367a4655a20c32f3dd300",
+      "cache": ""
+    },
+    {
+      "requestId": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+      "keyVersion": 1,
+      "kind": 2,
+      "blockHeight": "42",
+      "data": "",
+      "digest": "58d6b826449dcb3f099c3c03d6f9f8098dcab2b8170a37de1f13915f969b8d00",
+      "cache": ""
+    },
+    {
+      "requestId": "2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+      "keyVersion": 4275878552,
+      "kind": 0,
+      "blockHeight": "18364758544493064720",
+      "data": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+      "digest": "b10c405a40a1be379cd8e702f305e25b7f0ee93dd8ce60500644f650900a1f00",
+      "cache": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+    }
+  ]
+}

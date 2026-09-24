@@ -25,7 +25,7 @@ pub use config::{
     IndexerConfig, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig, RpcConfig,
 };
 pub use indexer::MidnightIndexer;
-pub use intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
+pub use intent_gen::{IntentGen, IntentRequest, WireAttestation, WirePoint, WireSignature};
 pub use publisher::MidnightPublisher;
 #[cfg(feature = "sandbox")]
 pub use rpc::probe_network_id;

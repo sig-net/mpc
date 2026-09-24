@@ -1,0 +1,68 @@
+pragma language_version >= 0.25;
+import CompactStandardLibrary;
+import "@sig-net/midnight/src/Signet";
+
+export ledger record: SignBidirectionalEvent<EvmType2TxParams<1, 0, 0>, 34, 34>;
+constructor(initialRecord: SignBidirectionalEvent<EvmType2TxParams<1, 0, 0>, 34, 34>) {
+  record = disclose(initialRecord);
+}
+
+export pure circuit requestId34(
+  request: SignBidirectionalEvent<EvmType2TxParams<1, 0, 0>, 34, 34>
+): RequestId {
+  return calculateRequestId<EvmType2TxParams<1, 0, 0>, 34, 34>(request);
+}
+
+export pure circuit digest0(
+  requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<0>
+): Bytes<32> {
+  return calculateSignetAttestationDigest<0>(requestId, blockHeight, kind, data);
+}
+
+export pure circuit digest32(
+  requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<32>
+): Bytes<32> {
+  return calculateSignetAttestationDigest<32>(requestId, blockHeight, kind, data);
+}
+
+export pure circuit verify32(
+  data: Bytes<32>, response: RespondBidirectionalEvent, responseKey: Secp256k1Point
+): Boolean {
+  return verifyRespondBidirectionalEvent<32>(data, response, responseKey);
+}
+
+export pure circuit digest1(
+  requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<1>
+): Bytes<32> {
+  return calculateSignetAttestationDigest<1>(requestId, blockHeight, kind, data);
+}
+
+export pure circuit digest30(
+  requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<30>
+): Bytes<32> {
+  return calculateSignetAttestationDigest<30>(requestId, blockHeight, kind, data);
+}
+
+export pure circuit digest31(
+  requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<31>
+): Bytes<32> {
+  return calculateSignetAttestationDigest<31>(requestId, blockHeight, kind, data);
+}
+
+export pure circuit digest62(
+  requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<62>
+): Bytes<32> {
+  return calculateSignetAttestationDigest<62>(requestId, blockHeight, kind, data);
+}
+
+export pure circuit digest63(
+  requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<63>
+): Bytes<32> {
+  return calculateSignetAttestationDigest<63>(requestId, blockHeight, kind, data);
+}
+
+export pure circuit verify0(
+  data: Bytes<0>, response: RespondBidirectionalEvent, responseKey: Secp256k1Point
+): Boolean {
+  return verifyRespondBidirectionalEvent<0>(data, response, responseKey);
+}

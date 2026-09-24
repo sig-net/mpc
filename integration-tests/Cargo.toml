@@ -66,6 +66,7 @@ near-workspaces.workspace = true
 
 # local chain-signatures dependencies
 mpc-crypto.workspace = true
+mpc-compact-hashing.workspace = true
 mpc-contract.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-chain-canton.workspace = true

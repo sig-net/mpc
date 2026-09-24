@@ -26,7 +26,8 @@ pub enum ChainEvent {
 
     /// A watched bidirectional execution has been observed on the target chain.
     /// The client detected the execution, performed chain-specific extraction, and
-    /// carries either the serialized output (Success) or a failure indicator.
+    /// carries the serialized output, an execution failure, or a terminal
+    /// extraction failure that cannot authorize a failure attestation.
     ExecutionConfirmed {
         tx_id: BidirectionalTxId,
         sign_id: SignId,
@@ -80,8 +81,15 @@ impl std::fmt::Debug for ChainEvent {
 
 #[derive(Debug, Clone)]
 pub enum ExecutionOutcome {
-    Success { output: Vec<u8> },
+    Success {
+        output: Vec<u8>,
+    },
+    /// The transaction did not execute: reverted, replaced by a sibling, or its
+    /// nonce consumed.
     Failed,
+    /// The transaction executed, but its output could not be interpreted against
+    /// the request's own schemas.
+    ExtractionFailed,
 }
 
 #[derive(Clone, Debug)]
