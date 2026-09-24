@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 
 use alloy::dyn_abi::DynSolValue;
 use alloy::primitives::U256;
@@ -54,21 +55,25 @@ struct MidnightRespondPlan {
     packed_size: usize,
 }
 
-impl MidnightRespondPlan {
-    fn parse(schema_bytes: &[u8]) -> anyhow::Result<Self> {
-        let raw_fields = parse_raw_schema(schema_bytes, "respond schema")?;
-        if raw_fields.is_empty() {
+impl TryFrom<&[u8]> for MidnightRespondPlan {
+    type Error = anyhow::Error;
+
+    fn try_from(schema_bytes: &[u8]) -> anyhow::Result<Self> {
+        let fields = parse_raw_schema(schema_bytes, "respond schema")?
+            .into_iter()
+            .map(|raw| {
+                let label = format!("respond schema field '{}'", raw.name);
+                RespondField::try_from(raw).with_context(move || label)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        if fields.is_empty() {
             anyhow::bail!("respond schema must contain at least one field");
         }
 
-        let fields = raw_fields
-            .into_iter()
-            .map(normalize_respond_field)
-            .collect::<anyhow::Result<Vec<_>>>()?;
         let descriptor = Descriptor::Struct {
             fields: fields
                 .iter()
-                .map(|field| (field.name.clone(), descriptor_for_kind(&field.kind)))
+                .map(|field| (field.name.clone(), Descriptor::from(&field.kind)))
                 .collect(),
         };
         let packed_size = signet_midnight_serde::serialized_size(&descriptor)
@@ -85,27 +90,119 @@ impl MidnightRespondPlan {
             packed_size,
         })
     }
+}
 
+impl MidnightRespondPlan {
     fn value_for(&self, output: &Output) -> anyhow::Result<Value> {
-        let mut fields = Vec::with_capacity(self.fields.len());
-        for field in &self.fields {
-            let value = if output.is_contract_call() {
-                let raw = output.fields.get(&field.name).ok_or_else(|| {
-                    anyhow::anyhow!("Midnight respond output is missing field '{}'", field.name)
-                })?;
-                value_for_kind(raw, &field.kind, &field.name).with_context(|| {
-                    format!(
-                        "failed to convert Midnight respond field '{}' from {} producer",
-                        field.name,
-                        source_variant(raw)
-                    )
-                })?
-            } else {
-                default_value_for_kind(&field.kind, &field.name)?
-            };
-            fields.push((field.name.clone(), value));
+        self.fields
+            .iter()
+            .map(|field| {
+                let value = field_value(output, field)
+                    .with_context(|| format!("Midnight respond field '{}'", field.name))?;
+                Ok((field.name.clone(), value))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map(Value::Struct)
+    }
+}
+
+/// Resolve one respond field against the decoded output: the coerced producer
+/// value for a contract call, a synthesized default otherwise.
+fn field_value(output: &Output, field: &RespondField) -> anyhow::Result<Value> {
+    if !output.is_contract_call() {
+        return default_value_for_kind(&field.kind);
+    }
+    let raw = output
+        .fields
+        .get(&field.name)
+        .ok_or_else(|| anyhow::anyhow!("missing from decoded output"))?;
+    value_for_kind(raw, &field.kind)
+        .with_context(|| format!("failed to convert from {} producer", source_variant(raw)))
+}
+
+impl TryFrom<RawSchemaField> for RespondField {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: RawSchemaField) -> anyhow::Result<Self> {
+        let RawSchemaField {
+            name,
+            typ,
+            max_bytes,
+            max_items,
+        } = raw;
+        let kind = match typ.as_str() {
+            "string" => RespondFieldKind::String {
+                max_bytes: required_capacity(max_bytes, "string", "maxBytes")?,
+            },
+            "bytes" => RespondFieldKind::Bytes {
+                max_bytes: required_capacity(max_bytes, "bytes", "maxBytes")?,
+            },
+            typ if typ.ends_with("[]") => RespondFieldKind::Array {
+                element: typ[..typ.len() - 2].parse()?,
+                max_items: required_capacity(max_items, typ, "maxItems")?,
+            },
+            typ => RespondFieldKind::Fixed(typ.parse()?),
+        };
+        Ok(Self { name, kind })
+    }
+}
+
+impl FromStr for FixedCarrier {
+    type Err = anyhow::Error;
+
+    fn from_str(typ: &str) -> anyhow::Result<Self> {
+        fixed_carrier_for_typ(typ).ok_or_else(|| anyhow::anyhow!("unsupported type '{typ}'"))
+    }
+}
+
+impl From<&RespondFieldKind> for Descriptor {
+    fn from(kind: &RespondFieldKind) -> Self {
+        match kind {
+            RespondFieldKind::Fixed(carrier) => Descriptor::from(carrier),
+            RespondFieldKind::String { max_bytes } | RespondFieldKind::Bytes { max_bytes } => {
+                Descriptor::Struct {
+                    fields: vec![
+                        ("len".to_string(), Descriptor::UintBits { bits: 64 }),
+                        ("data".to_string(), Descriptor::Bytes { length: *max_bytes }),
+                    ],
+                }
+            }
+            RespondFieldKind::Array { element, max_items } => Descriptor::Struct {
+                fields: vec![
+                    ("len".to_string(), Descriptor::UintBits { bits: 64 }),
+                    (
+                        "items".to_string(),
+                        Descriptor::Vector {
+                            length: *max_items,
+                            element: Box::new(Descriptor::from(element)),
+                        },
+                    ),
+                ],
+            },
         }
-        Ok(Value::Struct(fields))
+    }
+}
+
+impl From<&FixedCarrier> for Descriptor {
+    fn from(carrier: &FixedCarrier) -> Self {
+        match carrier {
+            FixedCarrier::Bool => Descriptor::Boolean,
+            FixedCarrier::Uint { bits } => Descriptor::UintBits { bits: *bits },
+            FixedCarrier::Field | FixedCarrier::Address => Descriptor::Field,
+            FixedCarrier::Bytes { length } => Descriptor::Bytes { length: *length },
+        }
+    }
+}
+
+impl FixedCarrier {
+    /// The zero element used to right-pad fixed-capacity arrays.
+    fn zero_value(&self) -> Value {
+        match self {
+            FixedCarrier::Bool => Value::Bool(false),
+            FixedCarrier::Uint { .. } => Value::Uint(MidnightU256::ZERO),
+            FixedCarrier::Field | FixedCarrier::Address => Value::Field(MidnightU256::ZERO),
+            FixedCarrier::Bytes { length } => Value::Bytes(vec![0u8; *length]),
+        }
     }
 }
 
@@ -126,7 +223,7 @@ fn trim_ecmascript_whitespace(text: &str) -> &str {
 }
 
 pub(super) fn serialize(output: &Output, respond_schema: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let plan = MidnightRespondPlan::parse(respond_schema)?;
+    let plan = MidnightRespondPlan::try_from(respond_schema)?;
     let value = plan.value_for(output)?;
     let serialized = signet_midnight_serde::serialize(&plan.descriptor, &value, None)
         .context("failed to serialize Midnight respond output")?;
@@ -198,47 +295,16 @@ fn parse_string_property(
         .with_context(|| format!("{label} field {index} '{property}' must be a string"))
 }
 
-fn normalize_respond_field(raw: RawSchemaField) -> anyhow::Result<RespondField> {
-    let kind = match raw.typ.as_str() {
-        "string" => RespondFieldKind::String {
-            max_bytes: required_capacity(raw.max_bytes, &raw.name, "string", "maxBytes")?,
-        },
-        "bytes" => RespondFieldKind::Bytes {
-            max_bytes: required_capacity(raw.max_bytes, &raw.name, "bytes", "maxBytes")?,
-        },
-        typ if typ.ends_with("[]") => RespondFieldKind::Array {
-            element: classify_fixed_carrier(&typ[..typ.len() - 2], &raw.name)?,
-            max_items: required_capacity(raw.max_items, &raw.name, typ, "maxItems")?,
-        },
-        typ => RespondFieldKind::Fixed(classify_fixed_carrier(typ, &raw.name)?),
-    };
-    Ok(RespondField {
-        name: raw.name,
-        kind,
-    })
-}
-
 fn required_capacity(
     capacity: Option<usize>,
-    field_name: &str,
     typ: &str,
     capacity_name: &str,
 ) -> anyhow::Result<usize> {
     match capacity {
         Some(capacity) if capacity > 0 => Ok(capacity),
-        Some(_) => anyhow::bail!(
-            "Midnight respond field '{field_name}' ({typ}) requires positive {capacity_name}"
-        ),
-        None => {
-            anyhow::bail!("Midnight respond field '{field_name}' ({typ}) requires {capacity_name}")
-        }
+        Some(_) => anyhow::bail!("type '{typ}' requires positive {capacity_name}"),
+        None => anyhow::bail!("type '{typ}' requires {capacity_name}"),
     }
-}
-
-fn classify_fixed_carrier(typ: &str, field_name: &str) -> anyhow::Result<FixedCarrier> {
-    fixed_carrier_for_typ(typ).ok_or_else(|| {
-        anyhow::anyhow!("Midnight respond field '{field_name}' has unsupported type '{typ}'")
-    })
 }
 
 fn fixed_carrier_for_typ(typ: &str) -> Option<FixedCarrier> {
@@ -279,89 +345,47 @@ fn parse_canonical_bytes_length(digits: &str) -> Option<usize> {
     (1..=32).contains(&length).then_some(length)
 }
 
-fn descriptor_for_kind(kind: &RespondFieldKind) -> Descriptor {
+fn value_for_kind(raw: &DynSolValue, kind: &RespondFieldKind) -> anyhow::Result<Value> {
     match kind {
-        RespondFieldKind::Fixed(carrier) => descriptor_for_fixed(carrier),
-        RespondFieldKind::String { max_bytes } | RespondFieldKind::Bytes { max_bytes } => {
-            Descriptor::Struct {
-                fields: vec![
-                    ("len".to_string(), Descriptor::UintBits { bits: 64 }),
-                    ("data".to_string(), Descriptor::Bytes { length: *max_bytes }),
-                ],
-            }
-        }
-        RespondFieldKind::Array { element, max_items } => Descriptor::Struct {
-            fields: vec![
-                ("len".to_string(), Descriptor::UintBits { bits: 64 }),
-                (
-                    "items".to_string(),
-                    Descriptor::Vector {
-                        length: *max_items,
-                        element: Box::new(descriptor_for_fixed(element)),
-                    },
-                ),
-            ],
-        },
-    }
-}
-
-fn descriptor_for_fixed(carrier: &FixedCarrier) -> Descriptor {
-    match carrier {
-        FixedCarrier::Bool => Descriptor::Boolean,
-        FixedCarrier::Uint { bits } => Descriptor::UintBits { bits: *bits },
-        FixedCarrier::Field | FixedCarrier::Address => Descriptor::Field,
-        FixedCarrier::Bytes { length } => Descriptor::Bytes { length: *length },
-    }
-}
-
-fn value_for_kind(
-    raw: &DynSolValue,
-    kind: &RespondFieldKind,
-    label: &str,
-) -> anyhow::Result<Value> {
-    match kind {
-        RespondFieldKind::Fixed(carrier) => fixed_value(raw, carrier, label),
+        RespondFieldKind::Fixed(carrier) => fixed_value(raw, carrier),
         RespondFieldKind::String { max_bytes } => {
-            let text = as_text(raw, label)?;
-            dynamic_bytes_value(text.into_bytes(), *max_bytes, label)
+            dynamic_bytes_value(as_text(raw)?.into_bytes(), *max_bytes)
         }
-        RespondFieldKind::Bytes { max_bytes } => {
-            dynamic_bytes_value(as_bytes(raw, label)?, *max_bytes, label)
-        }
-        RespondFieldKind::Array { element, max_items } => {
-            let raw_items = as_sequence(raw, label)?;
-            if raw_items.len() > *max_items {
-                anyhow::bail!(
-                    "Midnight respond field '{label}' has {} items, above maxItems {max_items}",
-                    raw_items.len()
-                );
-            }
-            let mut items = Vec::with_capacity(*max_items);
-            for (index, raw_item) in raw_items.iter().enumerate() {
-                items.push(fixed_value(
-                    raw_item,
-                    element,
-                    &format!("{label}[{index}]"),
-                )?);
-            }
-            items.resize_with(*max_items, || zero_for_fixed(element));
-            Ok(Value::Struct(vec![
-                (
-                    "len".to_string(),
-                    Value::Uint(MidnightU256::from(raw_items.len() as u64)),
-                ),
-                ("items".to_string(), Value::Vector(items)),
-            ]))
-        }
+        RespondFieldKind::Bytes { max_bytes } => dynamic_bytes_value(as_bytes(raw)?, *max_bytes),
+        RespondFieldKind::Array { element, max_items } => array_value(raw, element, *max_items),
     }
 }
 
-fn dynamic_bytes_value(payload: Vec<u8>, max_bytes: usize, label: &str) -> anyhow::Result<Value> {
+/// Coerce an array producer into a fixed-capacity `{len, items}` struct,
+/// right-padding with the element's zero value.
+fn array_value(
+    raw: &DynSolValue,
+    element: &FixedCarrier,
+    max_items: usize,
+) -> anyhow::Result<Value> {
+    let raw_items = as_sequence(raw)?;
+    if raw_items.len() > max_items {
+        anyhow::bail!("{} items, above maxItems {max_items}", raw_items.len());
+    }
+    let mut items = raw_items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| fixed_value(item, element).with_context(|| format!("item {index}")))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    items.resize_with(max_items, || element.zero_value());
+    Ok(Value::Struct(vec![
+        (
+            "len".to_string(),
+            Value::Uint(MidnightU256::from(raw_items.len() as u64)),
+        ),
+        ("items".to_string(), Value::Vector(items)),
+    ]))
+}
+
+/// Right-pad `payload` with zeros to `max_bytes`, prefixing its length.
+fn dynamic_bytes_value(payload: Vec<u8>, max_bytes: usize) -> anyhow::Result<Value> {
     if payload.len() > max_bytes {
-        anyhow::bail!(
-            "Midnight respond field '{label}' is {} bytes, above maxBytes {max_bytes}",
-            payload.len()
-        );
+        anyhow::bail!("{} bytes, above maxBytes {max_bytes}", payload.len());
     }
     let payload_len = payload.len();
     let mut data = vec![0u8; max_bytes];
@@ -375,97 +399,78 @@ fn dynamic_bytes_value(payload: Vec<u8>, max_bytes: usize, label: &str) -> anyho
     ]))
 }
 
-fn fixed_value(raw: &DynSolValue, carrier: &FixedCarrier, label: &str) -> anyhow::Result<Value> {
+fn fixed_value(raw: &DynSolValue, carrier: &FixedCarrier) -> anyhow::Result<Value> {
     match carrier {
         FixedCarrier::Bool => match raw {
             DynSolValue::Bool(value) => Ok(Value::Bool(*value)),
-            _ => anyhow::bail!(
-                "Midnight respond field '{label}' expects bool, got {} producer",
-                source_variant(raw)
-            ),
+            _ => incompatible("bool", raw),
         },
-        FixedCarrier::Uint { .. } => Ok(Value::Uint(to_midnight_u256(as_integer(raw, label)?))),
-        FixedCarrier::Field => Ok(Value::Field(to_midnight_u256(as_integer(raw, label)?))),
+        FixedCarrier::Uint { .. } => Ok(Value::Uint(to_midnight_u256(as_integer(raw)?))),
+        FixedCarrier::Field => Ok(Value::Field(to_midnight_u256(as_integer(raw)?))),
         FixedCarrier::Address => {
-            let value = as_integer(raw, label)?;
+            let value = as_integer(raw)?;
             if value >= (U256::from(1u8) << 160) {
-                anyhow::bail!("Midnight respond field '{label}' exceeds the 160-bit address bound");
+                anyhow::bail!("exceeds the 160-bit address bound");
             }
             Ok(Value::Field(to_midnight_u256(value)))
         }
         FixedCarrier::Bytes { length } => {
-            let bytes = as_bytes(raw, label)?;
+            let bytes = as_bytes(raw)?;
             if bytes.len() != *length {
-                anyhow::bail!(
-                    "Midnight respond field '{label}' expects {length} bytes, got {}",
-                    bytes.len()
-                );
+                anyhow::bail!("expects {length} bytes, got {}", bytes.len());
             }
             Ok(Value::Bytes(bytes))
         }
     }
 }
 
-fn default_value_for_kind(kind: &RespondFieldKind, label: &str) -> anyhow::Result<Value> {
+fn default_value_for_kind(kind: &RespondFieldKind) -> anyhow::Result<Value> {
     match kind {
         RespondFieldKind::Fixed(FixedCarrier::Bool) => Ok(Value::Bool(true)),
         RespondFieldKind::String { max_bytes } => {
-            dynamic_bytes_value(b"non_function_call_success".to_vec(), *max_bytes, label)
+            dynamic_bytes_value(b"non_function_call_success".to_vec(), *max_bytes)
         }
-        _ => anyhow::bail!(
-            "cannot synthesize Midnight non-contract-call default for field '{label}'"
-        ),
+        _ => anyhow::bail!("cannot synthesize a non-contract-call default"),
     }
 }
 
-fn zero_for_fixed(carrier: &FixedCarrier) -> Value {
-    match carrier {
-        FixedCarrier::Bool => Value::Bool(false),
-        FixedCarrier::Uint { .. } => Value::Uint(MidnightU256::ZERO),
-        FixedCarrier::Field | FixedCarrier::Address => Value::Field(MidnightU256::ZERO),
-        FixedCarrier::Bytes { length } => Value::Bytes(vec![0u8; *length]),
-    }
+// Coercions below accept any producer variant the target kind can read
+// losslessly, matching the TypeScript oracle's loose typing. Call sites attach
+// the field/item context; these errors only say what went wrong.
+
+fn incompatible<T>(expected: &str, value: &DynSolValue) -> anyhow::Result<T> {
+    anyhow::bail!("expects {expected}, got {} producer", source_variant(value))
 }
 
-fn as_integer(value: &DynSolValue, label: &str) -> anyhow::Result<U256> {
+fn as_integer(value: &DynSolValue) -> anyhow::Result<U256> {
     match value {
         DynSolValue::Uint(value, _) => Ok(*value),
         DynSolValue::Int(value, _) if !value.is_negative() => Ok(value.into_raw()),
-        DynSolValue::Address(value) => integer_from_be_bytes(value.as_slice(), label, value),
+        DynSolValue::Address(value) => integer_from_be_bytes(value.as_slice(), value),
         DynSolValue::FixedBytes(word, size) => {
-            let bytes = fixed_bytes_slice(word.as_slice(), *size, label)?;
-            integer_from_be_bytes(bytes, label, value)
+            integer_from_be_bytes(fixed_bytes_slice(word.as_slice(), *size)?, value)
         }
-        DynSolValue::Bytes(bytes) => integer_from_be_bytes(bytes, label, value),
-        DynSolValue::Function(value) => integer_from_be_bytes(value.as_slice(), label, value),
-        DynSolValue::String(text) => parse_integer_text(text).with_context(|| {
-            format!(
-                "Midnight respond field '{label}' cannot read String producer '{text}' as an integer"
-            )
-        }),
-        _ => anyhow::bail!(
-            "Midnight respond field '{label}' expects an integer-compatible value, got {} producer",
-            source_variant(value)
-        ),
+        DynSolValue::Bytes(bytes) => integer_from_be_bytes(bytes, bytes),
+        DynSolValue::Function(value) => integer_from_be_bytes(value.as_slice(), value),
+        DynSolValue::String(text) => parse_integer_text(text)
+            .with_context(|| format!("cannot read String producer '{text}' as an integer")),
+        _ => incompatible("an integer-compatible value", value),
     }
 }
 
 fn integer_from_be_bytes(
     bytes: &[u8],
-    label: &str,
     source: impl std::fmt::Debug,
 ) -> anyhow::Result<U256> {
     if bytes.is_empty() {
-        anyhow::bail!("Midnight respond field '{label}' integer producer {source:?} has no bytes");
+        anyhow::bail!("integer producer {source:?} has no bytes");
     }
     let significant = bytes
         .iter()
         .position(|byte| *byte != 0)
         .map_or(&[][..], |first| &bytes[first..]);
     if significant.len() > 32 {
-        anyhow::bail!(
-            "Midnight respond field '{label}' integer producer {source:?} exceeds 256 bits"
-        );
+        anyhow::bail!("integer producer {source:?} exceeds 256 bits");
     }
     Ok(U256::from_be_slice(significant))
 }
@@ -512,58 +517,45 @@ fn unsigned_integer(digits: &str, radix: u64) -> anyhow::Result<U256> {
     U256::from_str_radix(digits, radix).map_err(Into::into)
 }
 
-fn as_bytes(value: &DynSolValue, label: &str) -> anyhow::Result<Vec<u8>> {
+fn as_bytes(value: &DynSolValue) -> anyhow::Result<Vec<u8>> {
     match value {
         DynSolValue::FixedBytes(word, size) => {
-            Ok(fixed_bytes_slice(word.as_slice(), *size, label)?.to_vec())
+            Ok(fixed_bytes_slice(word.as_slice(), *size)?.to_vec())
         }
         DynSolValue::Bytes(bytes) => Ok(bytes.clone()),
         DynSolValue::Address(value) => Ok(value.as_slice().to_vec()),
         DynSolValue::Function(value) => Ok(value.as_slice().to_vec()),
-        DynSolValue::String(text) => parse_hex_bytes(text).with_context(|| {
-            format!("Midnight respond field '{label}' cannot read String producer as 0x bytes")
-        }),
-        _ => anyhow::bail!(
-            "Midnight respond field '{label}' expects a bytes-compatible value, got {} producer",
-            source_variant(value)
-        ),
+        DynSolValue::String(text) => parse_hex_bytes(text)
+            .with_context(|| format!("cannot read String producer '{text}' as 0x bytes")),
+        _ => incompatible("a bytes-compatible value", value),
     }
 }
 
-fn as_text(value: &DynSolValue, label: &str) -> anyhow::Result<String> {
+fn as_text(value: &DynSolValue) -> anyhow::Result<String> {
     match value {
         DynSolValue::String(text) => Ok(text.clone()),
         DynSolValue::Address(value) => Ok(value.to_checksum(None)),
         DynSolValue::FixedBytes(word, size) => {
-            Ok(hex_text(fixed_bytes_slice(word.as_slice(), *size, label)?))
+            Ok(hex_text(fixed_bytes_slice(word.as_slice(), *size)?))
         }
         DynSolValue::Bytes(bytes) => Ok(hex_text(bytes)),
         DynSolValue::Function(value) => Ok(hex_text(value.as_slice())),
-        _ => anyhow::bail!(
-            "Midnight respond field '{label}' expects a text-compatible value, got {} producer",
-            source_variant(value)
-        ),
+        _ => incompatible("a text-compatible value", value),
     }
 }
 
-fn as_sequence<'a>(value: &'a DynSolValue, label: &str) -> anyhow::Result<&'a [DynSolValue]> {
+fn as_sequence<'a>(value: &'a DynSolValue) -> anyhow::Result<&'a [DynSolValue]> {
     match value {
         DynSolValue::Array(values)
         | DynSolValue::FixedArray(values)
         | DynSolValue::Tuple(values) => Ok(values),
-        _ => anyhow::bail!(
-            "Midnight respond field '{label}' expects an array-compatible value, got {} producer",
-            source_variant(value)
-        ),
+        _ => incompatible("an array-compatible value", value),
     }
 }
 
-fn fixed_bytes_slice<'a>(word: &'a [u8], size: usize, label: &str) -> anyhow::Result<&'a [u8]> {
-    word.get(..size).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Midnight respond field '{label}' has invalid FixedBytes declared size {size}"
-        )
-    })
+fn fixed_bytes_slice<'a>(word: &'a [u8], size: usize) -> anyhow::Result<&'a [u8]> {
+    word.get(..size)
+        .ok_or_else(|| anyhow::anyhow!("invalid FixedBytes declared size {size}"))
 }
 
 fn parse_hex_bytes(text: &str) -> anyhow::Result<Vec<u8>> {
