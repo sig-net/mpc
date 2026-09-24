@@ -1,3 +1,11 @@
+//! Re-serializes decoded Ethereum return values into the Compact ("FAB")
+//! layout Midnight contracts read, driven by the request's Midnight-authored
+//! respond schema: `{name, type, maxBytes?, maxItems?}` fields carrying the
+//! capacities ABI lacks. Compact has no variable-width types, so the dynamic
+//! kinds encode as `{len, data}` / `{len, items}` structs zero-padded to
+//! capacity. Byte-level behavior is pinned by the TypeScript oracle corpus
+//! in `tests/fixtures/midnight_respond_vectors.json`.
+
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -9,16 +17,23 @@ use signet_midnight_serde::{Descriptor, Value, U256 as MidnightU256};
 
 use super::Output;
 
+/// Ceiling on a packed respond payload, pinned by the oracle corpus.
 const MAX_RESPOND_PACKED_BYTES: usize = 65_536;
 
+/// Respond-schema field before validation
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RawSchemaField {
+    /// Field name as specified in the schema.
     name: String,
+    /// Field type as specified in the schema.
     typ: String,
+    /// Maximum number of bytes for dynamic types, if specified.
     max_bytes: Option<usize>,
+    /// Maximum number of items for array types, if specified.
     max_items: Option<usize>,
 }
 
+/// A fixed-width Compact type a field can classify into.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FixedCarrier {
     Bool,
@@ -28,6 +43,7 @@ enum FixedCarrier {
     Bytes { length: usize },
 }
 
+/// Fixed-width Compact type a field can classify into.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RespondFieldKind {
     Fixed(FixedCarrier),
@@ -43,12 +59,15 @@ enum RespondFieldKind {
     },
 }
 
+/// Validated respond-schema field: name plus classified kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RespondField {
     name: String,
     kind: RespondFieldKind,
 }
 
+/// Parsed respond schema: classified fields, the derived Compact
+/// descriptor, and its exact packed size.
 struct MidnightRespondPlan {
     fields: Vec<RespondField>,
     descriptor: Descriptor,
@@ -412,6 +431,7 @@ impl MidnightRespondPlan {
     }
 }
 
+/// Validate `output` against the respond schema and pack it in Compact layout.
 pub(super) fn serialize(output: &Output, respond_schema: &[u8]) -> anyhow::Result<Vec<u8>> {
     let plan = MidnightRespondPlan::try_from(respond_schema)?;
     let value = plan.value_for(output)?;
