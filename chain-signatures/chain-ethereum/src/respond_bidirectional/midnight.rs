@@ -76,16 +76,15 @@ struct MidnightRespondPlan {
 
 impl RawSchemaField {
     fn parse(bytes: &[u8]) -> anyhow::Result<Vec<Self>> {
-        let label = "respond schema";
         let objects: Vec<HashMap<String, Box<serde_json::value::RawValue>>> =
             serde_json::from_str(&decode_schema_text(bytes))
-                .with_context(|| format!("{label} must be a JSON array of fields"))?;
+                .context("respond schema must be a JSON array of fields")?;
         let fields = objects
             .into_iter()
             .enumerate()
             .map(|(index, mut object)| {
-                let name = Self::string_property(&mut object, "name", index, label)?;
-                let typ = Self::string_property(&mut object, "type", index, label)?;
+                let name = Self::string_property(&mut object, "name", index)?;
+                let typ = Self::string_property(&mut object, "type", index)?;
                 let max_bytes = object
                     .remove("maxBytes")
                     .and_then(|raw| Self::optional_capacity(raw.get()));
@@ -101,26 +100,26 @@ impl RawSchemaField {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        Self::validate(&fields, label)?;
+        Self::validate(&fields)?;
 
         Ok(fields)
     }
 
     /// Reject blank/`__proto__` names, blank types, and duplicate names.
-    fn validate(fields: &[Self], label: &str) -> anyhow::Result<()> {
+    fn validate(fields: &[Self]) -> anyhow::Result<()> {
         let mut names = HashSet::with_capacity(fields.len());
         for (index, field) in fields.iter().enumerate() {
             if field.name.is_empty() {
-                anyhow::bail!("{label} field {index} has a blank name");
+                anyhow::bail!("respond schema field {index} has a blank name");
             }
             if field.name == "__proto__" {
-                anyhow::bail!("{label} field name '__proto__' is not supported");
+                anyhow::bail!("respond schema field name '__proto__' is not supported");
             }
             if field.typ.is_empty() {
-                anyhow::bail!("{label} field '{}' has a blank type", field.name);
+                anyhow::bail!("respond schema field '{}' has a blank type", field.name);
             }
             if !names.insert(field.name.as_str()) {
-                anyhow::bail!("{label} contains duplicate field name '{}'", field.name);
+                anyhow::bail!("respond schema contains duplicate field name '{}'", field.name);
             }
         }
         Ok(())
@@ -130,13 +129,12 @@ impl RawSchemaField {
         object: &mut HashMap<String, Box<serde_json::value::RawValue>>,
         property: &str,
         index: usize,
-        label: &str,
     ) -> anyhow::Result<String> {
-        let raw = object
-            .remove(property)
-            .ok_or_else(|| anyhow::anyhow!("{label} field {index} is missing '{property}'"))?;
+        let raw = object.remove(property).ok_or_else(|| {
+            anyhow::anyhow!("respond schema field {index} is missing '{property}'")
+        })?;
         serde_json::from_str(raw.get())
-            .with_context(|| format!("{label} field {index} '{property}' must be a string"))
+            .with_context(|| format!("respond schema field {index} '{property}' must be a string"))
     }
 
     /// Capacities may be written as integers or whole-number floats (`64` or `64.0`).
@@ -159,33 +157,9 @@ impl TryFrom<RawSchemaField> for RespondField {
             max_bytes,
             max_items,
         } = raw;
-        let kind = match typ.as_str() {
-            "string" => RespondFieldKind::String {
-                max_bytes: required_capacity(max_bytes, "string", "maxBytes")?,
-            },
-            "bytes" => RespondFieldKind::Bytes {
-                max_bytes: required_capacity(max_bytes, "bytes", "maxBytes")?,
-            },
-            typ if typ.ends_with("[]") => RespondFieldKind::Array {
-                element: typ[..typ.len() - 2].parse()?,
-                max_items: required_capacity(max_items, typ, "maxItems")?,
-            },
-            typ => RespondFieldKind::Fixed(typ.parse()?),
-        };
+        let kind = RespondFieldKind::classify(&typ, max_bytes, max_items)
+            .with_context(|| format!("respond schema field '{name}'"))?;
         Ok(Self { name, kind })
-    }
-}
-
-/// Require the capacity a field's type demands (e.g. `maxBytes` for `string`).
-fn required_capacity(
-    capacity: Option<usize>,
-    typ: &str,
-    capacity_name: &str,
-) -> anyhow::Result<usize> {
-    match capacity {
-        Some(capacity) if capacity > 0 => Ok(capacity),
-        Some(_) => anyhow::bail!("type '{typ}' requires positive {capacity_name}"),
-        None => anyhow::bail!("type '{typ}' requires {capacity_name}"),
     }
 }
 
@@ -207,7 +181,7 @@ impl RespondField {
 }
 
 /// Parses fixed-width types only, the capacity-bearing kinds (`string`,
-/// `bytes`, arrays) are classified in `TryFrom<RawSchemaField>`.
+/// `bytes`, arrays) are classified in `RespondFieldKind::classify`.
 impl FromStr for FixedCarrier {
     type Err = anyhow::Error;
 
@@ -289,7 +263,42 @@ impl FixedCarrier {
     }
 }
 
+/// Require the capacity a field's type demands (e.g. `maxBytes` for `string`).
+fn required_capacity(
+    capacity: Option<usize>,
+    typ: &str,
+    capacity_name: &str,
+) -> anyhow::Result<usize> {
+    match capacity {
+        Some(capacity) if capacity > 0 => Ok(capacity),
+        Some(_) => anyhow::bail!("type '{typ}' requires positive {capacity_name}"),
+        None => anyhow::bail!("type '{typ}' requires {capacity_name}"),
+    }
+}
+
 impl RespondFieldKind {
+    /// Classify a type string, requiring the capacities the type demands.
+    fn classify(
+        typ: &str,
+        max_bytes: Option<usize>,
+        max_items: Option<usize>,
+    ) -> anyhow::Result<Self> {
+        let kind = match typ {
+            "string" => RespondFieldKind::String {
+                max_bytes: required_capacity(max_bytes, "string", "maxBytes")?,
+            },
+            "bytes" => RespondFieldKind::Bytes {
+                max_bytes: required_capacity(max_bytes, "bytes", "maxBytes")?,
+            },
+            typ if typ.ends_with("[]") => RespondFieldKind::Array {
+                element: typ[..typ.len() - 2].parse()?,
+                max_items: required_capacity(max_items, typ, "maxItems")?,
+            },
+            typ => RespondFieldKind::Fixed(typ.parse()?),
+        };
+        Ok(kind)
+    }
+
     /// Coerce a producer value into this kind's Compact shape.
     fn coerce(&self, raw: &DynSolValue) -> anyhow::Result<Value> {
         match self {
@@ -409,10 +418,7 @@ impl TryFrom<&[u8]> for MidnightRespondPlan {
     fn try_from(schema_bytes: &[u8]) -> anyhow::Result<Self> {
         let fields = RawSchemaField::parse(schema_bytes)?
             .into_iter()
-            .map(|raw| {
-                let label = format!("respond schema field '{}'", raw.name);
-                RespondField::try_from(raw).with_context(move || label)
-            })
+            .map(RespondField::try_from)
             .collect::<anyhow::Result<Vec<_>>>()?;
         if fields.is_empty() {
             anyhow::bail!("respond schema must contain at least one field");
@@ -598,7 +604,7 @@ fn as_text(value: &DynSolValue) -> anyhow::Result<String> {
     }
 }
 
-fn as_sequence<'a>(value: &'a DynSolValue) -> anyhow::Result<&'a [DynSolValue]> {
+fn as_sequence(value: &DynSolValue) -> anyhow::Result<&[DynSolValue]> {
     match value {
         DynSolValue::Array(values)
         | DynSolValue::FixedArray(values)
@@ -607,7 +613,7 @@ fn as_sequence<'a>(value: &'a DynSolValue) -> anyhow::Result<&'a [DynSolValue]> 
     }
 }
 
-fn fixed_bytes_slice<'a>(word: &'a [u8], size: usize) -> anyhow::Result<&'a [u8]> {
+fn fixed_bytes_slice(word: &[u8], size: usize) -> anyhow::Result<&[u8]> {
     word.get(..size)
         .ok_or_else(|| anyhow::anyhow!("invalid FixedBytes declared size {size}"))
 }
