@@ -364,6 +364,14 @@ emits three events:
   directly, which is how a response is delivered where the signet contract
   cannot call it, and again after a failed handler.
 
+On Midnight, `SignRequest` is split in two. The application contract keeps
+the request in its own ledger, and the signet contract emits only a
+notification with the rid, the caller's address and where in the caller's
+ledger the request is stored; the MPC reads the request from there
+(Section 7). Midnight's signet contract also cannot see which contract
+called it, so there `authentic` rests on the MPC checking that the caller
+named in the notification is the contract that made the call.
+
 ### 4.4 MPC network
 
 Written as if the network were one process; the real one is a threshold
@@ -631,9 +639,13 @@ signet contract emits, and the circuits that hash, verify or construct them.
 Vocabulary shared across versions carries no suffix: `RequestId`,
 `OutputKind`, `Signature`, the enums (`MPCSignatureAlgorithm`,
 `MPCDestination`, `TxParamType`) and the transaction parameter structs, which
-`TxParamType` tags. A payload that carries its own version byte (the
-notification) and the signet contract's circuits (a deployed singleton never
-changes) carry no suffix either.
+`TxParamType` tags. Two more carry no suffix: the signet contract's circuits,
+since a deployed singleton never changes, and the notification (below),
+which carries its own version byte.
+
+`OutputKind` is hashed by position, so variants may only be appended.
+Reordering them would make a digest signed under the old order attest a
+different kind.
 
 ### Request Id
 
@@ -691,6 +703,16 @@ pure circuit calculateRequestIdV1<TxParams, #LenOutputDeserialization, #LenRespo
     return upgradeFromTransient(transientHash<RequestIdPreimageV1<TxParams>>(preimage)) as RequestId;
 }
 ```
+
+### Notification
+
+The application contract stores its `SignBidirectionalEventV1` in its own
+ledger, and the signet contract emits only a notification per request: a
+version byte, the request id, and a 128-byte payload. In version 1 the
+payload is the caller's address (32 bytes), the depth of the ledger path
+to the caller's request index (1 to 4), that path (4 bytes, only the
+first depth bytes used), and zero padding. The MPC reads the request from
+that index under the request id.
 
 ### Signature Responded Event
 
