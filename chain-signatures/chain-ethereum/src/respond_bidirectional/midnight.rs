@@ -239,29 +239,47 @@ fn required_capacity(
 }
 
 fn classify_fixed_carrier(typ: &str, field_name: &str) -> anyhow::Result<FixedCarrier> {
+    fixed_carrier_for_typ(typ).ok_or_else(|| {
+        anyhow::anyhow!("Midnight respond field '{field_name}' has unsupported type '{typ}'")
+    })
+}
+
+fn fixed_carrier_for_typ(typ: &str) -> Option<FixedCarrier> {
     match typ {
-        "bool" => return Ok(FixedCarrier::Bool),
-        "uint256" | "field" => return Ok(FixedCarrier::Field),
-        "address" => return Ok(FixedCarrier::Address),
-        _ => {}
+        "bool" => Some(FixedCarrier::Bool),
+        "uint256" | "field" => Some(FixedCarrier::Field),
+        "address" => Some(FixedCarrier::Address),
+        _ => typ
+            .strip_prefix("uint")
+            .and_then(parse_canonical_uint_bits)
+            .map(|bits| FixedCarrier::Uint { bits })
+            .or_else(|| {
+                typ.strip_prefix("bytes")
+                    .and_then(parse_canonical_bytes_length)
+                    .map(|length| FixedCarrier::Bytes { length })
+            }),
     }
+}
 
-    if let Some(digits) = typ.strip_prefix("uint") {
-        if let Ok(bits) = digits.parse::<u32>() {
-            if typ == format!("uint{bits}") && (8..=248).contains(&bits) && bits % 8 == 0 {
-                return Ok(FixedCarrier::Uint { bits });
-            }
-        }
-    }
-    if let Some(digits) = typ.strip_prefix("bytes") {
-        if let Ok(length) = digits.parse::<usize>() {
-            if typ == format!("bytes{length}") && (1..=32).contains(&length) {
-                return Ok(FixedCarrier::Bytes { length });
-            }
-        }
-    }
+/// Canonical decimal form only, so `uint08`, `uint+8` or `uint 8` never classify.
+fn canonical_digits(digits: &str) -> bool {
+    digits.bytes().all(|byte| byte.is_ascii_digit()) && !digits.starts_with('0')
+}
 
-    anyhow::bail!("Midnight respond field '{field_name}' has unsupported type '{typ}'")
+fn parse_canonical_uint_bits(digits: &str) -> Option<u32> {
+    if !canonical_digits(digits) {
+        return None;
+    }
+    let bits = digits.parse().ok()?;
+    ((8..=248).contains(&bits) && bits % 8 == 0).then_some(bits)
+}
+
+fn parse_canonical_bytes_length(digits: &str) -> Option<usize> {
+    if !canonical_digits(digits) {
+        return None;
+    }
+    let length = digits.parse().ok()?;
+    (1..=32).contains(&length).then_some(length)
 }
 
 fn descriptor_for_kind(kind: &RespondFieldKind) -> Descriptor {
@@ -647,6 +665,22 @@ mod tests {
             });
             let expected = hex::decode(vector.expected_output_hex.as_ref().unwrap()).unwrap();
             assert_eq!(actual, expected, "{}: output bytes differ", vector.name);
+        }
+    }
+
+    #[test]
+    fn non_canonical_widths_never_classify() {
+        let output = Output {
+            fields: HashMap::new(),
+            from_contract_call: true,
+        };
+        for typ in ["uint08", "uint+8", "uint 8", "bytes032"] {
+            let schema = format!(r#"[{{"name":"v","type":"{typ}"}}]"#);
+            let err = serialize(&output, schema.as_bytes()).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("unsupported type"),
+                "{typ} must not classify"
+            );
         }
     }
 }
