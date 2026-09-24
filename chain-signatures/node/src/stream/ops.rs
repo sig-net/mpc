@@ -5,7 +5,7 @@ use anyhow::Context;
 use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign, SignEntry};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
-use crate::respond_bidirectional::is_failed_execution_output;
+use crate::respond_bidirectional::{claims_attestation_key, is_failed_execution_output};
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -33,6 +33,15 @@ pub(crate) async fn process_sign_request(
         })?,
         SignKind::Sign => {}
     }
+
+    // The attestation key is derived from the requesting contract under a fixed
+    // path, so a request naming that path forges a response to itself. Here
+    // rather than in `validate`, which plain `sign` never reaches.
+    anyhow::ensure!(
+        !claims_attestation_key(&sign_request),
+        "rejecting sign request {:?} on the reserved attestation path",
+        sign_request.id
+    );
 
     let sign_id = sign_request.id;
     let (entry, is_new) = ctx.backlog.insert(sign_request).await;
