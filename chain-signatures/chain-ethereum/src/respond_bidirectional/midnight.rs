@@ -862,7 +862,7 @@ mod tests {
     fn bytes_producers_coerce_to_text_and_integer() {
         let out = serialize_with(
             r#"[{"name":"tag","type":"string","maxBytes":8}]"#,
-            &contract_output(&[("tag", DynSolValue::Bytes(vec![0xde, 0xad].into()))]),
+            &contract_output(&[("tag", DynSolValue::Bytes(vec![0xde, 0xad]))]),
         )
         .unwrap();
         let mut expected = le64(6);
@@ -873,14 +873,14 @@ mod tests {
         let schema = r#"[{"name":"v","type":"uint8"}]"#;
         let out = serialize_with(
             schema,
-            &contract_output(&[("v", DynSolValue::Bytes(vec![0, 5].into()))]),
+            &contract_output(&[("v", DynSolValue::Bytes(vec![0, 5]))]),
         )
         .unwrap();
         assert_eq!(out, vec![5]);
 
         let err = serialize_with(
             schema,
-            &contract_output(&[("v", DynSolValue::Bytes(vec![1u8; 33].into()))]),
+            &contract_output(&[("v", DynSolValue::Bytes(vec![1u8; 33]))]),
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("exceeds 256 bits"));
@@ -915,7 +915,7 @@ mod tests {
 
         let err = serialize_with(
             r#"[{"name":"salt","type":"bytes4"}]"#,
-            &contract_output(&[("salt", DynSolValue::Bytes(vec![0xaa, 0xbb, 0xcc].into()))]),
+            &contract_output(&[("salt", DynSolValue::Bytes(vec![0xaa, 0xbb, 0xcc]))]),
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("expects 4 bytes"));
