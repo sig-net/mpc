@@ -592,8 +592,7 @@ async fn test_bidirectional_typestate_lifecycle() {
     let final_entry = exec_entry
         .advance(ExecutionOutcome::Success { output: vec![] }, 456)
         .await
-        .expect("should advance to final")
-        .expect("a success outcome yields a response to sign");
+        .expect("should advance to final");
     assert_eq!(final_entry.request().id, sign_id);
 
     // Verify get_by can retrieve Final<Generating> state directly from backlog
@@ -637,8 +636,7 @@ async fn test_bidirectional_typestate_lifecycle() {
         .expect("chained advance to executing")
         .advance(ExecutionOutcome::Success { output: vec![] }, 456)
         .await
-        .expect("chained advance to final generating")
-        .expect("a success outcome yields a response to sign");
+        .expect("chained advance to final generating");
 
     let (cpk2, cout2) = mock_signature_output(&bidi_final_gen.request().args);
     let chained_done = bidi_final_gen
@@ -669,8 +667,7 @@ async fn test_bidirectional_executing_advance_outcomes() {
             456,
         )
         .await
-        .expect("advance success")
-        .expect("a success outcome yields a response to sign");
+        .expect("advance success");
 
     // Verified: sign_id and chain match invariant by construction
     assert_eq!(success_entry.sign_id(), sign_id);
@@ -688,8 +685,7 @@ async fn test_bidirectional_executing_advance_outcomes() {
     let failed_entry = entry2
         .advance(ExecutionOutcome::Failed, 456)
         .await
-        .expect("advance failed")
-        .expect("a failed execution still yields a response to sign");
+        .expect("advance failed");
 
     assert_eq!(failed_entry.sign_id(), sign_id2);
     assert_eq!(failed_entry.chain, tx2.source_chain);
@@ -698,6 +694,39 @@ async fn test_bidirectional_executing_advance_outcomes() {
     };
     assert_eq!(respond2.tx_id, tx2.id);
     assert!(respond2.output.starts_with(&[0xde, 0xad, 0xbe, 0xef]));
+}
+
+#[tokio::test]
+async fn extraction_failure_cannot_advance_into_response_signing() {
+    for chain in [
+        Chain::Midnight,
+        Chain::Solana,
+        Chain::Canton,
+        Chain::Hydration,
+    ] {
+        let backlog = Backlog::new();
+        let tx = mock_bidirectional_tx(SignId::from_u8(22), chain);
+        let entry = backlog.insert_mock_executing(&tx).await;
+        let before = backlog.checkpoint(chain).await.unwrap();
+        assert!(entry
+            .advance(ExecutionOutcome::ExtractionFailed, 456)
+            .await
+            .is_err());
+        assert_eq!(
+            before.digest(),
+            backlog.checkpoint(chain).await.unwrap().digest()
+        );
+        assert!(backlog
+            .get(chain, &tx.sign_id())
+            .await
+            .unwrap()
+            .state()
+            .is_pending_execution());
+        assert_eq!(
+            backlog.get_execution_watchers(tx.target_chain).await.len(),
+            1
+        );
+    }
 }
 
 #[tokio::test]
@@ -733,8 +762,7 @@ async fn test_watch_unwatch_and_respond() {
     executing_entry
         .advance(ExecutionOutcome::Success { output: vec![] }, 456)
         .await
-        .expect("respond should transition to final generating")
-        .expect("a success outcome yields a response to sign");
+        .expect("respond should transition to final generating");
     assert!(backlog
         .get_by::<Bidirectional<Final<Generating>>>(tx.source_chain, &sign_id)
         .await
@@ -1181,8 +1209,7 @@ async fn advance_carries_the_origin_into_the_final_response() {
     let entry = executing
         .advance(ExecutionOutcome::Success { output: vec![] }, 456)
         .await
-        .expect("advance to final generating")
-        .expect("a success outcome yields a response to sign");
+        .expect("advance to final generating");
 
     let SignKind::RespondBidirectional(response) = &entry.request().kind else {
         panic!("expected RespondBidirectional");

@@ -26,8 +26,7 @@ pub enum ChainEvent {
 
     /// A watched bidirectional execution has been observed on the target chain.
     /// The client detected the execution, performed chain-specific extraction, and
-    /// carries the serialized output, an execution failure, or a terminal
-    /// extraction failure that cannot authorize a failure attestation.
+    /// carries either the serialized output (Success) or a failure indicator.
     ExecutionConfirmed {
         tx_id: BidirectionalTxId,
         sign_id: SignId,
@@ -84,8 +83,8 @@ pub enum ExecutionOutcome {
     Success {
         output: Vec<u8>,
     },
-    /// The transaction did not execute: reverted, replaced by a sibling, or its
-    /// nonce consumed.
+    /// Reverted execution, or a replacement/consumed nonce under a source
+    /// chain's legacy failure policy.
     Failed,
     /// The transaction executed, but its output could not be interpreted against
     /// the request's own schemas.

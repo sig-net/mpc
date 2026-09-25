@@ -4,6 +4,7 @@
 //! `Midnight::send_mn_transaction` dispatched in `Phase::Initialization` is outside
 //! this scanner's discovery surface.
 
+mod attestation;
 mod config;
 mod convert;
 pub mod emissions;
@@ -21,6 +22,7 @@ mod state;
 mod test_utils;
 mod tx;
 
+pub use attestation::validate_attestation_response;
 pub use config::{
     IndexerConfig, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig, RpcConfig,
 };

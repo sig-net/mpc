@@ -737,9 +737,7 @@ mod tests {
     fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
         let mut record = sample_record();
         record.tx_params.nonce = nonce;
-        let rid = crate::hashing::compute_request_id(
-            &crate::test_utils::aligned_value_from_record(&record),
-        );
+        let rid = crate::hashing::compute_request_id(&record);
         (record, rid)
     }
 
@@ -1337,7 +1335,19 @@ mod tests {
         let StateValue::Cell(cell) = &*entry else {
             panic!("captured request entry is not a cell");
         };
-        let request_id = crate::hashing::compute_request_id(cell);
+        // Reproduce a positional rehash without validating the legacy layout:
+        // changing the map key must not let an undecodable record reach signing.
+        use midnight_transient_crypto::fab::AlignedValueExt as _;
+        use midnight_transient_crypto::hash::{transient_hash, upgrade_from_transient};
+        let mut identity = (**cell).clone();
+        let identity_atoms = identity.value.0.len() - 2;
+        identity.value.0.truncate(identity_atoms);
+        identity.alignment.0.truncate(identity_atoms);
+        identity.value.0.drain(4..6);
+        identity.alignment.0.drain(4..6);
+        let mut preimage = Vec::new();
+        identity.value_only_field_repr(&mut preimage);
+        let request_id = upgrade_from_transient(transient_hash(&preimage)).0;
         notification.request_id = request_id;
         source.states.insert(
             (hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()),
@@ -1833,9 +1843,7 @@ mod tests {
         let mut bad_record = sample_record();
         bad_record.tx_params.nonce = 8;
         bad_record.algo = 1;
-        let bad_rid = crate::hashing::compute_request_id(
-            &crate::test_utils::aligned_value_from_record(&bad_record),
-        );
+        let bad_rid = crate::hashing::compute_request_id(&bad_record);
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,

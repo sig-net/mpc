@@ -10,6 +10,7 @@ use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemet
 use mpc_primitives::{Chain, SignKind, Signature};
 use mpc_utils::time::current_unix_timestamp;
 
+use crate::attestation::validate_attestation_response;
 use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
 use crate::intent_gen::{IntentGen, IntentRequest, WireAttestation, WirePoint, WireSignature};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
@@ -242,10 +243,6 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
                 "midnight publisher was handed a request routed to it carrying a {:?} event",
                 event.chain
             );
-            anyhow::ensure!(
-                event.chain_ctx.as_deref() == Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT),
-                "legacy Midnight signing request is incompatible with the canonical Midnight SDK contract",
-            );
             Ok(RespondCall {
                 circuit: RespondCircuit::Respond,
                 attestation: None,
@@ -253,31 +250,18 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
                 signature,
             })
         }
-        // Metadata travels on chain; only the exact output bytes go to the cache.
-        SignKind::RespondBidirectional(response) => {
-            let metadata = response.attestation.as_ref().context(
-                "Midnight attestation metadata is missing; legacy responses require explicit migration",
-            )?;
-            anyhow::ensure!(
-                metadata.key_version == action.request.args.key_version,
-                "Midnight attestation key version does not match the signing request",
-            );
-            let digest = mpc_compact_hashing::compute_attestation_hash(
-                &request_id,
-                metadata,
-                &response.output,
-            )?;
-            anyhow::ensure!(
-                action.request.args.payload.to_bytes().as_slice() == digest,
-                "Midnight published digest does not match the signed payload",
-            );
+        // The on-chain event carries the signature and attestation metadata; output
+        // storage is handled by the publisher, when configured, before it builds this
+        // circuit call.
+        SignKind::RespondBidirectional(_) => {
+            let attestation = validate_attestation_response(&action.request)?;
             Ok(RespondCall {
                 circuit: RespondCircuit::RespondBidirectional,
                 attestation: Some(WireAttestation {
-                    block_height: metadata.block_height.to_string(),
-                    output_kind: metadata.outcome as u8,
-                    serialized_output_length: response.output.len().to_string(),
-                    digest: hex::encode(digest),
+                    block_height: attestation.block_height.to_string(),
+                    output_kind: attestation.outcome as u8,
+                    serialized_output_length: attestation.serialized_output_length.to_string(),
+                    digest: hex::encode(attestation.digest),
                 }),
                 request_id,
                 signature,
@@ -602,7 +586,7 @@ mod tests {
             output_deserialization_schema: vec![],
             respond_serialization_schema: vec![],
             chain,
-            chain_ctx: Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT.to_vec()),
+            chain_ctx: None,
         }
     }
 
@@ -628,7 +612,7 @@ mod tests {
                 output,
                 attestation: Some(METADATA),
                 origin_indexed_at: None,
-                chain_ctx: Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT.to_vec()),
+                chain_ctx: None,
             }),
             SignId::new(REQUEST_ID),
         );
@@ -647,8 +631,10 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_attestation_metadata_is_rejected_before_cache_or_chain_io() {
-        for case in 0..5 {
-            let mut action = bidirectional_action(vec![1]);
+        for case in 0..10 {
+            // Case 8 changes only the outcome of an empty successful output,
+            // so the hash comparison, rather than the output constraint, rejects it.
+            let mut action = bidirectional_action(if case == 8 { vec![] } else { vec![1] });
             let request = Arc::make_mut(&mut action.request);
             let SignKind::RespondBidirectional(response) = &mut request.kind else {
                 unreachable!()
@@ -665,6 +651,14 @@ mod tests {
                         mpc_primitives::AttestationOutcomeKind::Unviable
                 }
                 4 => response.attestation.as_mut().unwrap().block_height += 1,
+                5 => response.output[0] ^= 1,
+                6 => response.output.push(0),
+                7 => request.id.request_id[0] ^= 1,
+                8 => {
+                    response.attestation.as_mut().unwrap().outcome =
+                        mpc_primitives::AttestationOutcomeKind::Failed
+                }
+                9 => request.args.payload += k256::Scalar::ONE,
                 _ => unreachable!(),
             }
             let reads = StubReads::new();
@@ -672,29 +666,15 @@ mod tests {
             let store = Arc::new(StubOutputStore::default());
             let mut publisher = publisher(reads.clone(), client.clone());
             publisher.output_store = Some(store.clone());
-            assert!(publisher.publish_signature(&action).await.is_err());
+            assert!(
+                publisher.publish_signature(&action).await.is_err(),
+                "case {case}"
+            );
             assert!(store.outputs.lock().unwrap().is_empty());
             assert!(reads.reads().is_empty());
             assert!(client.built().is_empty());
             assert_eq!(client.submissions(), 0);
         }
-    }
-
-    #[tokio::test]
-    async fn legacy_initial_response_is_rejected_before_chain_io() {
-        let mut action = respond_action();
-        let SignKind::SignBidirectional(event) = &mut Arc::make_mut(&mut action.request).kind
-        else {
-            unreachable!()
-        };
-        event.chain_ctx = None;
-        let reads = StubReads::new();
-        let client = StubClient::new();
-        let publisher = publisher(reads.clone(), client.clone());
-        assert!(publisher.publish_signature(&action).await.is_err());
-        assert!(reads.reads().is_empty());
-        assert!(client.built().is_empty());
-        assert_eq!(client.submissions(), 0);
     }
 
     #[derive(Clone, Default)]
@@ -1280,7 +1260,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_bidirectional_action_names_the_other_circuit_on_the_same_request() {
-        // Output bytes stay in the cache; the corresponding metadata travels on chain.
+        // Output storage does not change the circuit arguments.
         let client = StubClient::new();
         let publisher = publisher(StubReads::new(), client.clone());
 

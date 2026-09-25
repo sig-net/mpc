@@ -1,4 +1,4 @@
-// Test-only caller for the SDK Midnight attestation API.
+// Test-only real caller for the Rust-owned integration stack.
 pragma language_version >= 0.25;
 
 import CompactStandardLibrary;

@@ -5,7 +5,7 @@ use anyhow::Context;
 use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign, SignEntry};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
-use crate::respond_bidirectional::{claims_attestation_key, is_failed_execution_output};
+use crate::respond_bidirectional::{claims_attestation_key, is_failed_execution_response};
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -17,42 +17,19 @@ use mpc_primitives::{
 };
 use mpc_utils::time::unix_elapsed_checked;
 
-/// Checkpoint recovery bypasses indexer admission, so both ingress and requeue
-/// must reject legacy Midnight requests before they can start a signing round.
+/// Recovered final responses must bind their stored metadata to the signing payload.
 fn validate_midnight_signing_request(request: &IndexedSignRequest) -> anyhow::Result<()> {
     if request.chain != Chain::Midnight {
         return Ok(());
     }
+
     match &request.kind {
-        SignKind::SignBidirectional(event) => {
-            anyhow::ensure!(
-                event.chain == Chain::Midnight
-                    && event.chain_ctx.as_deref()
-                        == Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT),
-                "legacy Midnight signing request is incompatible with canonical Midnight SDK",
-            );
+        SignKind::RespondBidirectional(_) => {
+            mpc_chain_midnight::validate_attestation_response(request)?;
         }
-        SignKind::RespondBidirectional(response) => {
-            let metadata = response
-                .attestation
-                .as_ref()
-                .context("legacy Midnight response has no attestation metadata")?;
-            anyhow::ensure!(
-                metadata.key_version == request.args.key_version,
-                "Midnight attestation key version differs from signing request"
-            );
-            let hash = mpc_compact_hashing::compute_attestation_hash(
-                &request.id.request_id,
-                metadata,
-                &response.output,
-            )?;
-            anyhow::ensure!(
-                request.args.payload.to_bytes().as_slice() == hash,
-                "Midnight attestation digest differs from signing request"
-            );
-        }
-        SignKind::Sign => anyhow::bail!("Midnight supports bidirectional signing only"),
+        SignKind::SignBidirectional(_) | SignKind::Sign => {}
     }
+
     Ok(())
 }
 
@@ -301,21 +278,9 @@ pub(crate) async fn process_respond_bidirectional_event(
     };
 
     if source_chain == Chain::Midnight {
-        validate_midnight_signing_request(entry.request())?;
-        let SignKind::RespondBidirectional(response) = &entry.request.kind else {
-            anyhow::bail!("Midnight completion has no response request");
-        };
-        let metadata = response
-            .attestation
-            .context("Midnight response metadata is missing")?;
-        let published = event
-            .attestation
-            .context("Midnight event metadata is missing")?;
+        let expected = mpc_chain_midnight::validate_attestation_response(entry.request())?;
         anyhow::ensure!(
-            published.block_height == metadata.block_height
-                && published.outcome == metadata.outcome
-                && published.serialized_output_length == response.output.len() as u64
-                && published.digest.as_slice() == entry.request.args.payload.to_bytes().as_slice(),
+            event.attestation == Some(expected),
             "Midnight event metadata differs from the signed response",
         );
     }
@@ -402,17 +367,6 @@ pub async fn process_execution_confirmed(
     // Captured before `advance` consumes the entry: the wait ends here, and the
     // outcome is what distinguishes a healthy round trip from a reverted one.
     let awaiting_execution = entry.awaiting_execution();
-    if let Err(error) = validate_midnight_signing_request(entry.request()) {
-        tracing::warn!(
-            ?sign_id,
-            ?tx_id,
-            ?source_chain,
-            ?error,
-            "leaving incompatible Midnight execution pending"
-        );
-        entry.watch_execution().await;
-        return Ok(());
-    }
     if matches!(result, ExecutionOutcome::ExtractionFailed) {
         // Destination streams advance independently of source checkpoints.
         // Keep membership until a source-observable transition can settle it.
@@ -427,23 +381,14 @@ pub async fn process_execution_confirmed(
     }
     let execution_failed = matches!(result, ExecutionOutcome::Failed);
 
-    let Some(entry) = entry
-        .advance(result)
+    let entry = entry
+        .advance(result, block_height)
         .await
         .with_context(|| {
             format!(
                 "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
             )
-        })?
-    else {
-        // Retire the id: a leg-1 task on a node that lagged the publish would
-        // outlive its request.
-        ctx.sign_tx
-            .send(SignCommand::Completion(sign_id))
-            .await
-            .context("failed to send completion into queue")?;
-        return Ok(());
-    };
+        })?;
     tracing::info!(
         ?tx_id,
         ?sign_id,

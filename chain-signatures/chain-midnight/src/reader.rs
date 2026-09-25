@@ -177,7 +177,7 @@ fn decode_record_cell(cell: &AlignedValue) -> anyhow::Result<SignBidirectionalRe
 /// Decode a stored request record in one pass, refusing a cell whose declared widths
 /// are not a signet record's.
 #[cfg(test)]
-fn decode_record(node: &Node) -> anyhow::Result<SignBidirectionalRecord> {
+pub(crate) fn decode_record(node: &Node) -> anyhow::Result<SignBidirectionalRecord> {
     decode_record_cell(cell_of(node, "request record")?)
 }
 
@@ -213,7 +213,7 @@ pub fn resolve_verified_record(map: &Node, request_id: [u8; 32]) -> Resolved {
             };
         }
     };
-    let recomputed = compute_request_id(cell);
+    let recomputed = compute_request_id(&record);
     if recomputed != request_id {
         return Resolved::Dropped {
             reason: "rid-mismatch",
@@ -1094,7 +1094,7 @@ mod tests {
     #[test]
     fn resolve_verified_record_reports_absent_and_dropped() {
         let record = sample_record();
-        let rid = compute_request_id(&crate::test_utils::aligned_value_from_record(&record));
+        let rid = compute_request_id(&record);
         let poisoned = [0x55; 32];
         let map = map_of(vec![
             (

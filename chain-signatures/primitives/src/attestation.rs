@@ -1,9 +1,5 @@
 //! Outcome metadata shared by response signing, persistence and Midnight events.
 
-/// Marks node-internal context admitted under the canonical Midnight SDK contract.
-/// Legacy checkpoints lack it and cannot safely acquire new attestation semantics.
-pub const MIDNIGHT_ATTESTATION_CONTEXT: &[u8] = b"midnight-canonical-v1";
-
 /// Variant indices of the SDK Compact `OutputKind` enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]

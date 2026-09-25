@@ -18,7 +18,6 @@ pub use signet_primitives::*;
 
 pub use attestation::{
     AttestationError, AttestationMetadata, AttestationOutcomeKind, PublishedAttestation,
-    MIDNIGHT_ATTESTATION_CONTEXT,
 };
 
 pub use backlog::{

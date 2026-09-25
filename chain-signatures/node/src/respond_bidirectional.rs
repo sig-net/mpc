@@ -3,9 +3,9 @@ use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
-    BidirectionalTx, Chain, ChainConfig as _, IndexedSignRequest,
-    RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
-    SignKind,
+    AttestationMetadata, AttestationOutcomeKind, BidirectionalTx, Chain, ChainConfig as _,
+    IndexedSignRequest, RespondBidirectionalSerializedOutput, RespondBidirectionalTx,
+    SerDeserFormat, SignArgs, SignId, SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
 use std::sync::Arc;
@@ -126,19 +126,11 @@ impl CompletedTx {
             "Respond bidirectional serialized output: {:?}",
             serialized_output
         );
-        let attestation = if source_chain == Chain::Midnight {
-            anyhow::ensure!(
-                self.chain_ctx.as_deref() == Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT),
-                "legacy Midnight request requires an explicit migration before attestation"
-            );
-            Some(AttestationMetadata {
-                key_version: self.tx.key_version,
-                block_height: self.block_height,
-                outcome,
-            })
-        } else {
-            None
-        };
+        let attestation = (source_chain == Chain::Midnight).then_some(AttestationMetadata {
+            key_version: self.tx.key_version,
+            block_height: self.block_height,
+            outcome,
+        });
         let message = calculate_respond_bidirectional_hash_message_for_chain(
             source_chain,
             &request_id_bytes,
@@ -287,7 +279,7 @@ mod tests {
         // Midnight (FAB).
         let fab = CompletedTx::new(
             sample_bidirectional_tx(Chain::Midnight, [0x22; 32]),
-            Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT.to_vec()),
+            None,
             Some(100),
             456,
         )
@@ -379,25 +371,10 @@ mod tests {
     }
 
     #[test]
-    fn midnight_legacy_request_cannot_issue_new_attestation() {
-        let result = CompletedTx::new(
-            sample_bidirectional_tx(Chain::Midnight, [3; 32]),
-            None,
-            None,
-            456,
-        )
-        .create_sign_request_from_serialized_output(vec![1]);
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("explicit migration"));
-    }
-
-    #[test]
     fn midnight_success_with_legacy_error_bytes_remains_success() {
         let request = CompletedTx::new(
             sample_bidirectional_tx(Chain::Midnight, [3; 32]),
-            Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT.to_vec()),
+            None,
             None,
             456,
         )
@@ -417,7 +394,7 @@ mod tests {
     async fn midnight_failure_payload_differs_from_zero_padded_success() {
         let completed = CompletedTx::new(
             sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]),
-            Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT.to_vec()),
+            None,
             Some(100),
             456,
         );
@@ -441,28 +418,31 @@ mod tests {
         let request_id = [0x2f; 32];
         let serialized_output = (1..=32).collect::<Vec<_>>();
         let expected = "c19dbe87b89aa45fdd7be361ae98513371d19c015b591ba1194ee6d356f0e8dc";
-
-        for source_chain in [
-            Chain::NEAR,
-            Chain::Ethereum,
-            Chain::Solana,
-            Chain::Bitcoin,
-            Chain::Hydration,
-            Chain::Canton,
-        ] {
+        assert_eq!(
+            hex::encode(calculate_respond_bidirectional_hash_message(
+                &request_id,
+                &serialized_output
+            )),
+            expected
+        );
+        for source_chain in [Chain::Solana, Chain::Hydration, Chain::Canton] {
+            let request = CompletedTx::new(
+                sample_bidirectional_tx(source_chain, request_id),
+                None,
+                None,
+                456,
+            )
+            .create_sign_request_from_serialized_output(serialized_output.clone())
+            .unwrap();
             assert_eq!(
-                hex::encode(
-                    calculate_respond_bidirectional_hash_message_for_chain(
-                        source_chain,
-                        &request_id,
-                        &serialized_output,
-                        None,
-                    )
-                    .unwrap()
-                ),
+                hex::encode(request.args.payload.to_bytes()),
                 expected,
-                "unexpected response hash for {source_chain}"
+                "{source_chain}"
             );
+            let SignKind::RespondBidirectional(response) = request.kind else {
+                unreachable!()
+            };
+            assert!(response.attestation.is_none());
         }
     }
 
@@ -511,14 +491,9 @@ mod tests {
         let tx = sample_bidirectional_tx(Chain::Midnight, request_id);
         assert_eq!(tx.target_chain, Chain::Ethereum);
 
-        let request = CompletedTx::new(
-            tx,
-            Some(mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT.to_vec()),
-            Some(100),
-            456,
-        )
-        .create_sign_request_from_serialized_output(serialized_output)
-        .unwrap();
+        let request = CompletedTx::new(tx, None, Some(100), 456)
+            .create_sign_request_from_serialized_output(serialized_output)
+            .unwrap();
         let expected_payload = Scalar::from_bytes(
             mpc_compact_hashing::compute_attestation_hash(
                 &request_id,
@@ -543,7 +518,7 @@ mod tests {
     #[test]
     fn claims_attestation_key_separates_the_attack_from_leg_two() {
         let tx = sample_bidirectional_tx(Chain::Solana, [0x30; 32]);
-        let leg_two = CompletedTx::new(tx, None, None)
+        let leg_two = CompletedTx::new(tx, None, None, 456)
             .create_sign_request_from_serialized_output(vec![1; 32])
             .unwrap();
         assert!(!claims_attestation_key(&leg_two));

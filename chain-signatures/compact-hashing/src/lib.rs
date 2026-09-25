@@ -5,7 +5,7 @@ use midnight_transient_crypto::repr::FieldRepr as _;
 
 /// Matches the SDK's `calculateSignetAttestationDigest` tuple:
 /// `[RequestId, Uint<64>, OutputKind, Uint<64>, Bytes<N>]`.
-/// The final integer commits to the exact output length, including trailing zeroes.
+/// The separate length field prevents zero padding from aliasing different outputs.
 pub fn compute_attestation_hash(
     request_id: &[u8; 32],
     metadata: &mpc_primitives::AttestationMetadata,

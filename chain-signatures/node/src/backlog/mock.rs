@@ -78,7 +78,6 @@ impl BacklogTestExt for Backlog {
             .advance(ExecutionOutcome::Success { output: vec![] }, 456)
             .await
             .expect("advance to final generating")
-            .expect("a success outcome yields a response to sign")
     }
 }
 
@@ -192,8 +191,7 @@ pub fn mock_bidi_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
             algo: "ECDSA".to_string(),
             params: "{}".to_string(),
             chain,
-            chain_ctx: (chain == Chain::Midnight)
-                .then(|| mpc_primitives::MIDNIGHT_ATTESTATION_CONTEXT.to_vec()),
+            chain_ctx: None,
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         },
