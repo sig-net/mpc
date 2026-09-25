@@ -60,9 +60,11 @@ impl PublicKey {
         Ok(Self(hpke::Deserializable::from_bytes(bytes)?))
     }
 
-    /// Assumes the bytes are correctly formatted.
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self::try_from_bytes(bytes).expect("invalid bytes")
+    /// Infallible: the only way [`Self::try_from_bytes`] can fail is a length
+    /// mismatch, which the array type rules out. Use `try_from_bytes` for input
+    /// whose length isn't known at compile time.
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self::try_from_bytes(bytes).expect("32 bytes is always a valid X25519 public key")
     }
 
     pub fn encrypt(&self, msg: &[u8], associated_data: &[u8]) -> Result<Ciphered, hpke::HpkeError> {
@@ -93,8 +95,12 @@ impl SecretKey {
         hpke::Serializable::to_bytes(&self.0).into()
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self(hpke::Deserializable::from_bytes(bytes).expect("invalid bytes"))
+    /// Infallible: see [`PublicKey::from_bytes`].
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self(
+            hpke::Deserializable::from_bytes(bytes)
+                .expect("32 bytes is always a valid X25519 secret key"),
+        )
     }
 
     pub fn try_from_bytes(bytes: &[u8]) -> Result<Self, hpke::HpkeError> {
