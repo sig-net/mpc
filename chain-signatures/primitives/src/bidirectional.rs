@@ -57,6 +57,7 @@ pub struct RespondBidirectionalEvent {
     pub signature: Signature,
     pub chain: Chain,
     /// Midnight's published metadata is untrusted until matched to the signed response.
+    /// Legacy source-chain integrations omit it; Midnight requires it for completion.
     pub attestation: Option<crate::PublishedAttestation>,
 }
 

@@ -30,7 +30,7 @@ pub fn validate_attestation_response(
     );
     Ok(PublishedAttestation {
         block_height: metadata.block_height,
-        outcome: metadata.outcome,
+        outcome_kind: metadata.outcome_kind,
         serialized_output_length: response.output.len() as u64,
         digest,
     })

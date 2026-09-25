@@ -46,12 +46,14 @@ pub struct AttestationMetadata {
     /// Selects the signing key; the SDK digest binds this through the request ID.
     pub key_version: u32,
     pub block_height: u64,
-    pub outcome: AttestationOutcomeKind,
+    /// Checkpoints encode this field as `outcome`.
+    #[serde(rename = "outcome")]
+    pub outcome_kind: AttestationOutcomeKind,
 }
 
 impl AttestationMetadata {
     pub fn validate_output(&self, output: &[u8]) -> Result<(), AttestationError> {
-        if self.outcome != AttestationOutcomeKind::Executed && !output.is_empty() {
+        if self.outcome_kind != AttestationOutcomeKind::Executed && !output.is_empty() {
             return Err(AttestationError::NonemptyFailureOutput);
         }
         Ok(())
@@ -63,7 +65,7 @@ impl AttestationMetadata {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PublishedAttestation {
     pub block_height: u64,
-    pub outcome: AttestationOutcomeKind,
+    pub outcome_kind: AttestationOutcomeKind,
     pub serialized_output_length: u64,
     pub digest: [u8; 32],
 }
@@ -71,6 +73,27 @@ pub struct PublishedAttestation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attestation_metadata_preserves_checkpoint_encoding() {
+        for (outcome, fixture) in [
+            (AttestationOutcomeKind::Executed, "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a676f7574636f6d65684578656375746564"),
+            (AttestationOutcomeKind::Failed, "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a676f7574636f6d65664661696c6564"),
+            (AttestationOutcomeKind::Unviable, "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a676f7574636f6d6568556e766961626c65"),
+        ] {
+            let metadata = AttestationMetadata {
+                key_version: 1,
+                block_height: 42,
+                outcome_kind: outcome,
+            };
+            let fixture = hex::decode(fixture).unwrap();
+            let mut encoded = Vec::new();
+            ciborium::into_writer(&metadata, &mut encoded).unwrap();
+            assert_eq!(encoded, fixture);
+            let recovered: AttestationMetadata = ciborium::from_reader(fixture.as_slice()).unwrap();
+            assert_eq!(recovered, metadata);
+        }
+    }
 
     #[test]
     fn outcome_tags_match_the_sdk_enum() {
@@ -100,7 +123,7 @@ mod tests {
             let metadata = AttestationMetadata {
                 key_version: 1,
                 block_height: 42,
-                outcome,
+                outcome_kind: outcome,
             };
             assert!(metadata.validate_output(&[]).is_ok());
             assert_eq!(

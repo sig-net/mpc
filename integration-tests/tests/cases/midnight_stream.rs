@@ -177,7 +177,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         let signing_metadata = mpc_primitives::AttestationMetadata {
             key_version: sign_event.key_version,
             block_height: metadata.block_height,
-            outcome: metadata.outcome,
+            outcome_kind: metadata.outcome_kind,
         };
         assert_eq!(
             metadata.digest,
@@ -190,7 +190,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
                 .context("receipt has no inclusion height")?
         );
         assert_eq!(
-            metadata.outcome,
+            metadata.outcome_kind,
             if failed {
                 mpc_primitives::AttestationOutcomeKind::Failed
             } else {

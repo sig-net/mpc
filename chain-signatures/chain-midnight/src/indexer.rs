@@ -1461,7 +1461,7 @@ mod tests {
                             bidirectional_rid,
                             mpc_primitives::PublishedAttestation {
                                 block_height: 0x0102030405060708,
-                                outcome: mpc_primitives::AttestationOutcomeKind::Executed,
+                                outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
                                 serialized_output_length: 32,
                                 digest: [0x54; 32],
                             },
@@ -1497,7 +1497,7 @@ mod tests {
             .expect("Midnight response metadata");
         assert_eq!(attestation.block_height, 0x0102030405060708);
         assert_eq!(
-            attestation.outcome,
+            attestation.outcome_kind,
             mpc_primitives::AttestationOutcomeKind::Executed
         );
         assert_eq!(attestation.serialized_output_length, 32);
@@ -1534,7 +1534,7 @@ mod tests {
                             [0x45; 32],
                             mpc_primitives::PublishedAttestation {
                                 block_height: 42,
-                                outcome: mpc_primitives::AttestationOutcomeKind::Executed,
+                                outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
                                 serialized_output_length: 32,
                                 digest: [0x54; 32],
                             },

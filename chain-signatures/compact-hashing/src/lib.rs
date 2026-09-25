@@ -15,7 +15,7 @@ pub fn compute_attestation_hash(
     let mut preimage = Vec::with_capacity(request_id.field_size() + 3 + output.field_size());
     request_id.field_repr(&mut preimage);
     metadata.block_height.field_repr(&mut preimage);
-    (metadata.outcome as u8).field_repr(&mut preimage);
+    (metadata.outcome_kind as u8).field_repr(&mut preimage);
     (output.len() as u64).field_repr(&mut preimage);
     output.field_repr(&mut preimage);
     Ok(upgrade_from_transient(transient_hash(&preimage)).0)
@@ -38,7 +38,7 @@ mod tests {
             let metadata = AttestationMetadata {
                 key_version: vector["keyVersion"].as_u64().unwrap().try_into().unwrap(),
                 block_height: vector["blockHeight"].as_str().unwrap().parse().unwrap(),
-                outcome: AttestationOutcomeKind::try_from(
+                outcome_kind: AttestationOutcomeKind::try_from(
                     u8::try_from(vector["kind"].as_u64().unwrap()).unwrap(),
                 )
                 .unwrap(),
@@ -62,7 +62,7 @@ mod tests {
         let metadata = AttestationMetadata {
             key_version: 1,
             block_height: 42,
-            outcome: AttestationOutcomeKind::Executed,
+            outcome_kind: AttestationOutcomeKind::Executed,
         };
         let rid = [0x2f; 32];
         let baseline = compute_attestation_hash(&rid, &metadata, &[]).unwrap();
@@ -79,7 +79,7 @@ mod tests {
             (
                 rid,
                 AttestationMetadata {
-                    outcome: AttestationOutcomeKind::Failed,
+                    outcome_kind: AttestationOutcomeKind::Failed,
                     ..metadata
                 },
                 vec![],
@@ -87,7 +87,7 @@ mod tests {
             (
                 rid,
                 AttestationMetadata {
-                    outcome: AttestationOutcomeKind::Unviable,
+                    outcome_kind: AttestationOutcomeKind::Unviable,
                     ..metadata
                 },
                 vec![],
@@ -108,7 +108,7 @@ mod tests {
             compute_attestation_hash(
                 &rid,
                 &AttestationMetadata {
-                    outcome: AttestationOutcomeKind::Failed,
+                    outcome_kind: AttestationOutcomeKind::Failed,
                     ..metadata
                 },
                 &[]
@@ -117,7 +117,7 @@ mod tests {
             compute_attestation_hash(
                 &rid,
                 &AttestationMetadata {
-                    outcome: AttestationOutcomeKind::Unviable,
+                    outcome_kind: AttestationOutcomeKind::Unviable,
                     ..metadata
                 },
                 &[]
@@ -140,7 +140,7 @@ mod tests {
             assert!(compute_attestation_hash(
                 &rid,
                 &AttestationMetadata {
-                    outcome,
+                    outcome_kind: outcome,
                     ..metadata
                 },
                 &[1]

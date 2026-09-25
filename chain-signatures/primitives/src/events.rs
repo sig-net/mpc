@@ -78,6 +78,9 @@ impl std::fmt::Debug for ChainEvent {
     }
 }
 
+/// Internal watcher result, carrying successful output or an extraction failure.
+/// Unlike an attestation outcome kind, extraction failure cannot be signed and
+/// requires source-specific cleanup or parking.
 #[derive(Debug, Clone)]
 pub enum ExecutionOutcome {
     Success {

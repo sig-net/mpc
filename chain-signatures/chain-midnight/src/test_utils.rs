@@ -64,7 +64,7 @@ pub(crate) fn bidirectional_response_payload(
     let mut payload = [0; crate::emissions::MISC_PAYLOAD_LEN];
     payload[..32].copy_from_slice(&request_id);
     payload[32..40].copy_from_slice(&attestation.block_height.to_le_bytes());
-    payload[40] = attestation.outcome as u8;
+    payload[40] = attestation.outcome_kind as u8;
     payload[41..49].copy_from_slice(&attestation.serialized_output_length.to_le_bytes());
     payload[49..81].copy_from_slice(&attestation.digest);
     payload[81..113].copy_from_slice(&x);
