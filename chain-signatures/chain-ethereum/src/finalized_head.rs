@@ -79,7 +79,6 @@ pub struct FinalizedHeadTracker {
     head: watch::Sender<Option<u64>>,
     optimistic: bool,
     refresh_interval: Duration,
-    max_failures: u32,
     stall_rewarn_secs: u64,
 }
 
@@ -138,7 +137,6 @@ impl FinalizedHeadTracker {
             head: watch::channel(None).0,
             optimistic: eth.optimistic_requests,
             refresh_interval: Duration::from_millis(eth.refresh_finalized_interval),
-            max_failures: eth.indexer.max_finalized_failures,
             stall_rewarn_secs: eth.indexer.stall_rewarn_secs,
         }
     }
@@ -151,7 +149,6 @@ impl FinalizedHeadTracker {
             head: watch::channel(None).0,
             optimistic: false, // existing unit tests assume finalized mode
             refresh_interval: Duration::from_millis(100),
-            max_failures: indexer.max_finalized_failures,
             stall_rewarn_secs: indexer.stall_rewarn_secs,
         }
     }
@@ -191,7 +188,6 @@ impl FinalizedHeadTracker {
             client,
             self.head.clone(),
             self.refresh_interval,
-            self.max_failures,
             self.stall_rewarn_secs,
             self.optimistic,
             cancel,
@@ -213,7 +209,6 @@ impl FinalizedHeadTracker {
         client: Arc<EthereumClient>,
         head: watch::Sender<Option<u64>>,
         refresh_interval: Duration,
-        max_failures: u32,
         stall_rewarn_secs: u64,
         optimistic: bool,
         cancel: CancellationToken,
@@ -256,7 +251,6 @@ impl FinalizedHeadTracker {
                     tracing::warn!(
                         ?err,
                         failures,
-                        max_failures,
                         "ethereum get_block(head) failed; watcher keeps retrying"
                     );
                 }

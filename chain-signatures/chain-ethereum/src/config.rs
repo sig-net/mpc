@@ -154,9 +154,6 @@ impl Default for PublisherConfig {
 /// Tuning for the indexing pipeline (catchup, live stream, finality waits).
 #[derive(Clone, Debug)]
 pub struct IndexerConfig {
-    /// Consecutive `get_block(Finalized)` failures after which the finalized-head
-    /// watcher escalates its retry warning (it never gives up)
-    pub max_finalized_failures: u32,
     /// Re-warn interval (seconds) while the finalized head is stalled
     pub stall_rewarn_secs: u64,
     /// Max concurrent JSON-RPC calls when resolving watcher receipts/nonces.
@@ -169,7 +166,6 @@ pub struct IndexerConfig {
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
-            max_finalized_failures: 20,
             stall_rewarn_secs: 300,
             max_concurrent_watcher_rpcs: 8,
             watcher_slow_sweep_interval: 10,
