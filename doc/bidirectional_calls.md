@@ -833,9 +833,9 @@ length. Slots past a count are skipped, and an absent calldata contributes
 only its absence.
 
 The request id of an EVM type 2 request is 7.2 with
-`txParamsDigest = D_evmType2(txParams)`. An implementation refuses a request
-whose `txParamType` is not `evmType2` while its `txParams` is this
-structure.
+`txParamsDigest = D_evmType2(txParams)`. `txParamType` names the type of
+`txParams`, so a request whose `txParams` is an `EvmType2TxParams` must have
+`txParamType = evmType2`, and is refused otherwise.
 
 ### 7.4 Responses
 
