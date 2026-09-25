@@ -79,7 +79,9 @@ impl PublishKind {
             SignStatus::Bidirectional(BidirectionalProgress::Final { .. }) => {
                 self == PublishKind::BidirectionalResponse
             }
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => false,
+            SignStatus::Bidirectional(
+                BidirectionalProgress::Executing(_) | BidirectionalProgress::Parked(_),
+            ) => false,
         }
     }
 }
@@ -1283,7 +1285,12 @@ mod tests {
         assert!(!publish_still_awaited(&backlog, &second_leg).await);
 
         backlog.remove(tx.source_chain, &tx.sign_id()).await;
-        backlog.insert_mock_executing(&tx).await;
+        let executing = backlog.insert_mock_executing(&tx).await;
+        assert!(!publish_still_awaited(&backlog, &first_leg).await);
+        assert!(!publish_still_awaited(&backlog, &second_leg).await);
+
+        executing.park().await.unwrap();
+        assert!(backlog.get(tx.source_chain, &tx.sign_id()).await.is_some());
         assert!(!publish_still_awaited(&backlog, &first_leg).await);
         assert!(!publish_still_awaited(&backlog, &second_leg).await);
 
