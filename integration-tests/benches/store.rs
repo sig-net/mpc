@@ -127,6 +127,7 @@ fn env() -> (Runtime, SyncEnv) {
             mesh.watch(),
             contract_watcher,
             sync_report_tx,
+            Default::default(),
         );
 
         SyncEnv {

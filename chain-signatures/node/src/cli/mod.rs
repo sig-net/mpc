@@ -309,6 +309,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 contract_watcher.clone(),
                 sync_report_tx.clone(),
+                network.clone(),
             );
 
             log_startup(

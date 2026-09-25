@@ -630,6 +630,7 @@ impl MpcFixtureNodeBuilder {
             mesh_rx.clone(),
             context.contract_state,
             mpc_node::protocol::sync::SyncTask::sync_report_channel().0,
+            config_tx.borrow().local.network.clone(),
         );
         tokio::spawn(sync_task.run());
 
