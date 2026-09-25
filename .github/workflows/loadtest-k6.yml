@@ -64,7 +64,7 @@ on:
 
 jobs:
   load-test:
-    name: Load Test (${{ github.event_name == 'schedule' && 'dev Solana' || format('{0} {1}', inputs.environment, inputs.chain) }})
+    name: Load Test (${{ inputs.environment || 'dev' }}, ${{ inputs.chain || 'Solana' }})
     runs-on: ${{ github.event_name == 'schedule' && 'arc-runner-set' || 'ubuntu-latest' }}
     steps:
       - name: Checkout
