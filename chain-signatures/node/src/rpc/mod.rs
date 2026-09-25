@@ -463,14 +463,10 @@ impl RpcExecutor {
         let near = self.near.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
-                tokio::spawn(update_contract_data(
-                    near.clone(),
-                    contract.clone(),
-                    config.clone(),
-                    checkpoints.clone(),
-                ));
+                update_contract_data(&near, &contract, &config, &checkpoints).await;
             }
         });
 
@@ -573,10 +569,10 @@ impl RpcExecutor {
 }
 
 async fn update_contract_data(
-    near: NearGovernanceClient,
-    contract: watch::Sender<Option<ProtocolState>>,
-    config: watch::Sender<Config>,
-    checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
+    near: &NearGovernanceClient,
+    contract: &watch::Sender<Option<ProtocolState>>,
+    config: &watch::Sender<Config>,
+    checkpoints: &EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
 ) {
     let reads = vec![Read::State, Read::Config, Read::Checkpoints];
     let views = match near.read(reads).await {
@@ -624,7 +620,7 @@ async fn update_contract_data(
     }
 
     if let Some(signed_checkpoints) = checkpoints_view {
-        for (chain, tx) in &checkpoints {
+        for (chain, tx) in checkpoints {
             let new_digest = signed_checkpoints.get(&chain).copied();
             tx.send_if_modified(|old| {
                 if *old == new_digest {
