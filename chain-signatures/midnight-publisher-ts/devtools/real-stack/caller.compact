@@ -95,17 +95,13 @@ export circuit notifyAs(victim: ContractAddress, requestId: RequestId): [] {
     constructSignBidirectionalEventNotificationV1(
       disclose(victim),
       1 as Uint<8>,
-      [3, 0, 0, 0] as Vector<4, Uint<8>>,
+      [2, 0, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
 }
 
-circuit consumeResponse<#N>(
-  requestId: RequestId,
-  response: RespondBidirectionalEvent,
-  serializedOutput: Bytes<N>
-): [] {
-  const disclosedRequestId = disclose(requestId);
+circuit consumeResponse<#N>(response: RespondBidirectionalEventV1, serializedOutput: Bytes<N>): [] {
+  const requestId = disclose(response.requestId);
   assert(initialised != 0, "Not initialised");
   assert(verifyRespondBidirectionalEventV1<N>(serializedOutput, disclose(response), mpcResponseKey), "Invalid attestation signature");
   assert(requests.member(requestId), "Request not found");
