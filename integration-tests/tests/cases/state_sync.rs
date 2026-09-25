@@ -36,7 +36,7 @@ async fn test_sync_noop_when_fully_synced() {
 
     // Responder side: node1 receives node0's sync update and reports what it's missing.
     let response = node1
-        .sync(node0.me, node0_triples.clone(), node0_presigs.clone())
+        .sync(node0, node0_triples.clone(), node0_presigs.clone())
         .await;
     assert!(
         response.triples.is_empty(),
@@ -123,12 +123,12 @@ async fn test_sync_prune_below_threshold() {
     .await;
 
     // node0 tells node1 "I own id=99", node1 responds "I don't have it".
-    let response = node1.sync(node0.me, vec![99], vec![99]).await;
+    let response = node1.sync(node0, vec![99], vec![99]).await;
     assert_eq!(response.triples, vec![99]);
     assert_eq!(response.presignatures, vec![99]);
 
     // node2 also doesn't have it.
-    let response2 = node2.sync(node0.me, vec![99], vec![99]).await;
+    let response2 = node2.sync(node0, vec![99], vec![99]).await;
     assert_eq!(response2.triples, vec![99]);
     assert_eq!(response2.presignatures, vec![99]);
 
@@ -217,8 +217,8 @@ async fn test_sync_prunes_artifacts_with_missing_holders_metadata() {
     let _: usize = conn.del(&triple_holders_key).await.unwrap();
     let _: usize = conn.del(&presig_holders_key).await.unwrap();
 
-    let response1 = node1.sync(node0.me, vec![99], vec![99]).await;
-    let response2 = node2.sync(node0.me, vec![99], vec![99]).await;
+    let response1 = node1.sync(node0, vec![99], vec![99]).await;
+    let response2 = node2.sync(node0, vec![99], vec![99]).await;
     assert_eq!(response1.triples, vec![99]);
     assert_eq!(response1.presignatures, vec![99]);
     assert_eq!(response2.triples, vec![99]);
@@ -268,7 +268,7 @@ async fn test_sync_reports_missing_when_holders_metadata_is_missing_on_responder
     let _: usize = conn.del(&triple_holders_key).await.unwrap();
     let _: usize = conn.del(&presig_holders_key).await.unwrap();
 
-    let response = node1.sync(node0.me, vec![303], vec![303]).await;
+    let response = node1.sync(node0, vec![303], vec![303]).await;
     assert_eq!(
         response.triples,
         vec![303],
@@ -325,7 +325,7 @@ async fn test_sync_reports_missing_when_owner_mapping_is_missing_on_responder() 
     let _: usize = conn.srem(&triple_owner_key, 404).await.unwrap();
     let _: usize = conn.srem(&presig_owner_key, 404).await.unwrap();
 
-    let response = node1.sync(node0.me, vec![404], vec![404]).await;
+    let response = node1.sync(node0, vec![404], vec![404]).await;
     assert_eq!(
         response.triples,
         vec![404],
@@ -391,7 +391,7 @@ async fn test_sync_remove_outdated_orphan() {
     assert!(!node0_triples.contains(&77), "node0 should not own id=77");
 
     let response = node1
-        .sync(node0.me, node0_triples.clone(), node0_presigs.clone())
+        .sync(node0, node0_triples.clone(), node0_presigs.clone())
         .await;
     assert!(
         response.triples.is_empty(),
@@ -589,7 +589,7 @@ async fn test_sync_matrix() {
         // --- Responder processes the sync update ---
         let response = responder
             .sync(
-                caller.me,
+                caller,
                 caller_update,
                 vec![], // this matrix only tests triples
             )

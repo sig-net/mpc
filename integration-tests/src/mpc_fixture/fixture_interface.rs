@@ -10,6 +10,7 @@ use cait_sith::protocol::Participant;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
+use mpc_node::protocol::message::SignedMessage;
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
@@ -397,22 +398,27 @@ impl MpcFixtureNode {
 
     /// Simulate a /sync call between this node (as receiver) and a peer (as owner).
     ///
-    /// `from` is the owner node sending the sync update.
+    /// `from` is the owner node sending the sync update; it signs the update
+    /// and encrypts it to this node, as a real caller would.
     /// `triples` and `presignatures` are the lists of IDs the owner claims to hold.
     /// Returns the SyncUpdate response (IDs missing on this node).
     pub async fn sync(
         &self,
-        from: Participant,
+        from: &MpcFixtureNode,
         triples: Vec<u64>,
         presignatures: Vec<u64>,
     ) -> SyncUpdate {
         let update = SyncUpdate {
-            from,
+            from: from.me,
             triples,
             presignatures,
         };
+        let sign_sk = from.config.borrow().local.network.sign_sk.clone();
+        let cipher_pk = self.config.borrow().local.network.cipher_sk.public_key();
+        let encrypted = SignedMessage::encrypt(&update, from.me, &sign_sk, &cipher_pk)
+            .expect("failed to encrypt sync update");
         self.sync_channel
-            .request_update(update)
+            .request_update(encrypted)
             .await
             .expect("sync_channel request_update failed")
     }
