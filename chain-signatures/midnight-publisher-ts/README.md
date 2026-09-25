@@ -8,7 +8,7 @@ It is TypeScript because the pieces it wraps are: the Compact compiler emits the
 
 The process speaks newline-delimited JSON (NDJSON) over stdio, with exactly one JSON object per line in each direction. `stdout` is reserved for protocol replies; startup and failure diagnostics go to `stderr`. Every usable request `id` is echoed in its reply, and requests are handled sequentially so replies cannot overtake one another.
 
-Protocol generation 1 uses an explicit readiness handshake. Rust must send `{"id":0,"op":"ready","protocolVersion":1}` and require an `ok` reply that echoes the same `id` and contains `"ready":true` and the exact same `"protocolVersion":1`. A missing, differently typed, older, or newer version is rejected rather than negotiated.
+Protocol generation 2 uses an explicit readiness handshake. Rust must send `{"id":0,"op":"ready","protocolVersion":2}` and require an `ok` reply that echoes the same `id` and contains `"ready":true` and the exact same `"protocolVersion":2`. A missing, differently typed, older, or newer version is rejected rather than negotiated.
 
 Operations are:
 
@@ -29,6 +29,16 @@ A `TxPartialSuccess` result causes the reader to skip every event from that tran
 Supported singleton programs consist of literal, non-storage `Push`/`Log` pairs: `Push` places the encoded event on the execution stack, and `Log` emits it. `Noop` (no-op) and `Ckpt` (checkpoint) instructions may appear before, between or after those instructions. During VM execution, they only charge gas and do not change the recovered events. The reader ignores them when checking the instruction pattern, but replays the original program.
 
 The node validates the transaction structure; the reader checks whether it can reconstruct events without the original contract state. Declared effects must be empty, and events must use a supported Signet schema. Unsupported instructions or event schemas stop processing at that block. A fallible transcript alone is not a reason to reject a call: it is supported when the whole transaction succeeds. Caller record and signature validation still apply after decoding.
+
+## Midnight attestation API
+
+The publisher and real-stack caller use `@sig-net/midnight`, `@sig-net/midnight-contract`, and `@sig-net/midnight-contract-deploy` version `0.24.0-rc.4`. Every protocol hash input starts with its SDK `HashDomain` tag. Request identity commits to `(keyVersion, sender, path, algo, txParamType, txParamsDigest, executionDest)`. The transaction digest includes only used calldata words, access-list entries, and storage keys; unused capacity and absent calldata contents do not affect it. Reserved signature destination, extra MPC parameters, and serialization schemas remain outside the identity. The EVM account nonce remains part of the transaction.
+
+Final attestations bind `(requestId, blockHeight, outputKind, serializedOutputLength, serializedOutput)` using the SDK's Compact transient hash. Output kinds are `executed = 0`, `failed = 1`, and `unviable = 2`. The published response includes the request ID, height, kind, output length, digest, and signature; serialized output travels separately through the raw output cache at `<prefix>/<network>/<central>/<requestId>.bin`.
+
+A `build` request for `respondBidirectional` requires `attestation: { blockHeight, outputKind, serializedOutputLength, digest }`. Both uint64 fields are decimal strings, `outputKind` is a numeric enum index, and `digest` is 64 lowercase hex characters. The existing `requestId` and `signature` fields remain common to both response circuits. `respond` rejects attestation metadata. Both circuits receive one SDK record containing the request ID.
+
+`devtools/real-stack/caller.compact` imports the canonical SDK request and attestation circuits directly. The vector generator compares its compiled Compact digests with the SDK TypeScript helper and extracts the response payload from the installed singleton's emitted event.
 
 ## Deadlines and retry policy
 
@@ -66,10 +76,12 @@ npm run typecheck
 npm test
 ```
 
+`npm run gen:api-parity-vectors` compiles the pinned Compact oracle and regenerates the request-cell, attestation-digest, and cache fixtures consumed by Rust tests. Run `npm run compile:real-stack-caller` before `npm run typecheck:real-stack`; it also compiles the oracle bindings.
+
 `npm run start` runs the TypeScript entry point during development. `npm run format` and `npm run lint:fix` apply the local formatting and lint fixes. `npm test` builds first because the process tests execute `dist/main.js`; `npm run build` emits that runtime entry point without opening or synchronizing a wallet.
 
 ## Deployment seam
 
 The runtime image for this sidecar must include the built `dist/` tree, production Node.js dependencies, and the managed contract proving assets (`keys/` and `zkir/`) shipped by `@sig-net/midnight-contract`; proving resolves those assets through the installed package at runtime.
 
-The Rust node spawns this process from that image with the six publisher values above and must send and require protocol version 1 in the `ready` handshake before any build or submit traffic.
+The Rust node spawns this process from that image with the six publisher values above and must send and require protocol version 2 in the `ready` handshake before any build or submit traffic.

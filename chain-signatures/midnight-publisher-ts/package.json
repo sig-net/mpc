@@ -24,7 +24,11 @@
     "compile:real-stack-caller": "node devtools/real-stack/compile-caller.mjs",
     "typecheck:real-stack": "tsc --noEmit -p tsconfig.real-stack.json",
     "gen:initial-state": "tsx devtools/gen-initial-state.ts",
-    "gen:midnight-respond-vectors": "tsx devtools/generate-midnight-respond-vectors.ts"
+    "gen:midnight-respond-vectors": "tsx devtools/generate-midnight-respond-vectors.ts",
+    "compile:api-parity-oracle": "compact compile +0.33.0-rc.2 --skip-zk --feature-zkir-v3 --compact-path node_modules devtools/real-stack/api-parity-oracle.compact devtools/real-stack/managed/api-parity-oracle",
+    "pregen:api-parity-vectors": "npm run compile:api-parity-oracle",
+    "gen:api-parity-vectors": "node --import tsx devtools/real-stack/generate-api-parity-vectors.ts",
+    "postcompile:real-stack-caller": "npm run compile:api-parity-oracle"
   },
   "dependencies": {
     "@effect/platform-node": "0.107.0",
@@ -33,8 +37,8 @@
     "@midnight-ntwrk/compact-runtime": "0.18.0-rc.1",
     "@midnight-ntwrk/platform-js": "3.0.0",
     "@midnightntwrk/ledger-v9": "1.0.0-rc.3",
-    "@sig-net/midnight-contract": "0.21.0-rc.9",
-    "@sig-net/midnight-contract-deploy": "0.21.0-rc.9",
+    "@sig-net/midnight-contract": "0.24.0-rc.4",
+    "@sig-net/midnight-contract-deploy": "0.24.0-rc.4",
     "effect": "3.22.0",
     "rxjs": "7.8.2",
     "zod": "^4.4.3"
@@ -47,7 +51,7 @@
     "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0-beta.6",
     "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.6",
     "@midnightntwrk/wallet-sdk-facade": "5.0.0-beta.2",
-    "@sig-net/midnight": "0.21.0-rc.9",
+    "@sig-net/midnight": "0.24.0-rc.4",
     "@types/node": "^22.20.1",
     "@vitest/eslint-plugin": "^1.6.26",
     "eslint": "^10.8.0",

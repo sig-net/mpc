@@ -6,6 +6,7 @@
 /// near-sdk 5.29+ which use host functions like `chain_id` and `p256_verify`.
 pub const SANDBOX_VERSION: &str = "2.13.1";
 
+mod attestation;
 mod backlog;
 mod bidirectional;
 mod chain;
@@ -14,6 +15,10 @@ mod events;
 mod requests;
 
 pub use signet_primitives::*;
+
+pub use attestation::{
+    AttestationError, AttestationMetadata, AttestationOutcomeKind, PublishedAttestation,
+};
 
 pub use backlog::{
     checkpoint_digest, empty_cumulative_digest, reset_checkpoint_digest, CheckpointDigest,

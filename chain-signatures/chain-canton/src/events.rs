@@ -108,6 +108,7 @@ pub async fn process_canton_event(
                     if events_tx
                         .send(ChainEvent::RespondBidirectional(
                             RespondBidirectionalEvent {
+                                attestation: None,
                                 request_id,
                                 signature,
                                 chain: Chain::Canton,

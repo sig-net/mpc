@@ -6020,6 +6020,7 @@ dependencies = [
  "mpc-chain-integration-core",
  "mpc-chain-midnight",
  "mpc-chain-solana",
+ "mpc-compact-hashing",
  "mpc-contract",
  "mpc-crypto",
  "mpc-keys",
@@ -7688,6 +7689,7 @@ dependencies = [
  "midnight-transient-crypto 3.0.0",
  "mockito",
  "mpc-chain-integration-core",
+ "mpc-compact-hashing",
  "mpc-crypto",
  "mpc-primitives",
  "mpc-utils",
@@ -7762,6 +7764,8 @@ version = "1.20.0"
 dependencies = [
  "hex",
  "midnight-transient-crypto 3.0.0",
+ "mpc-primitives",
+ "serde_json",
 ]
 
 [[package]]

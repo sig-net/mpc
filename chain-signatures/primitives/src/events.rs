@@ -78,17 +78,23 @@ impl std::fmt::Debug for ChainEvent {
     }
 }
 
+/// Internal watcher result, carrying successful output or an extraction failure.
+/// Unlike an attestation outcome kind, extraction failure cannot be signed and
+/// requires source-specific cleanup or parking.
 #[derive(Debug, Clone)]
 pub enum ExecutionOutcome {
     Success {
         output: Vec<u8>,
     },
-    /// The transaction did not execute: reverted, replaced by a sibling, or its
-    /// nonce consumed.
+    /// Reverted execution, or a replacement/consumed nonce under a source
+    /// chain's legacy failure policy.
     Failed,
     /// The transaction executed, but its output could not be interpreted against
     /// the request's own schemas.
     ExtractionFailed,
+    /// A finalized different transaction consumed this transaction's nonce.
+    /// Emitted for Midnight only, at the observed replacement block's height.
+    Unviable,
 }
 
 #[derive(Clone, Debug)]
