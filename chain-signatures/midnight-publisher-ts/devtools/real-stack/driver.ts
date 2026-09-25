@@ -64,7 +64,9 @@ interface SubmitRequest {
   nonce: string;
   target: string;
   argument: string;
-  outputType: "bool" | "uint64" | "bytes32";
+  outputType?: "bool" | "uint64" | "bytes32";
+  outputSchema?: string;
+  responseSchema?: string;
 }
 
 interface SignedTransactionRequest {
@@ -129,6 +131,25 @@ function bytes(hex: string, width?: number): Uint8Array {
     throw new Error(`expected ${width} bytes, got ${result.length}`);
   }
   return result;
+}
+
+function requestSchemas(request: SubmitRequest): [Uint8Array, Uint8Array] {
+  const padSchema = (schema: Uint8Array): Uint8Array => {
+    if (schema.length > 64) throw new Error(`schema exceeds 64 bytes: ${schema.length}`);
+    const padded = new Uint8Array(64).fill(0x20);
+    padded.set(schema);
+    return padded;
+  };
+  if (request.outputSchema !== undefined || request.responseSchema !== undefined) {
+    if (request.outputSchema === undefined || request.responseSchema === undefined)
+      throw new Error("outputSchema and responseSchema must both be provided");
+    return [padSchema(bytes(request.outputSchema)), padSchema(bytes(request.responseSchema))];
+  }
+  if (request.outputType === undefined) throw new Error("outputType or raw schemas are required");
+  const schema = padSchema(
+    new TextEncoder().encode(JSON.stringify([{ name: "success", type: request.outputType }])),
+  );
+  return [schema, schema];
 }
 
 async function waitFor<T>(description: string, read: () => Promise<T | undefined>): Promise<T> {
@@ -402,9 +423,11 @@ async function dispatch(request: Request): Promise<unknown> {
           ? pureCircuits.checkResponse1
           : serializedOutput.length === 8
             ? pureCircuits.checkResponse8
-            : serializedOutput.length === 32
-              ? pureCircuits.checkResponse32
-              : undefined;
+            : serializedOutput.length === 16
+              ? pureCircuits.checkResponse16
+              : serializedOutput.length === 32
+                ? pureCircuits.checkResponse32
+                : undefined;
     if (check === undefined) throw new Error(`unsupported output width ${serializedOutput.length}`);
     const response = await waitFor("a verified respondBidirectional entry", async () => {
       for (const candidate of await active.reader.getRespondBidirectionalEvents(requestId)) {
@@ -420,6 +443,43 @@ async function dispatch(request: Request): Promise<unknown> {
       return undefined;
     });
     const circuitInput = respondBidirectionalEventToCircuitInput(response);
+    const wrongRequestId = circuitInput.requestId.map((byte, index) =>
+      index === 0 ? byte ^ 1 : byte,
+    );
+    for (const [field, value] of [
+      ["requestId", { ...circuitInput, requestId: wrongRequestId }],
+      ["blockHeight", { ...circuitInput, blockHeight: circuitInput.blockHeight ^ 1n }],
+      ["outputKind", { ...circuitInput, outputKind: (circuitInput.outputKind + 1) % 3 }],
+    ] as const) {
+      if (check(value, serializedOutput, responseKey))
+        throw new Error(`accepted tampered ${field}`);
+    }
+    if (serializedOutput.length > 0) {
+      const wrongOutput = serializedOutput.map((byte, index) => (index === 0 ? byte ^ 1 : byte));
+      if (check(circuitInput, wrongOutput, responseKey))
+        throw new Error("accepted tampered serialized output");
+    }
+    const wrongWidth = new Uint8Array(serializedOutput.length === 32 ? 16 : 32);
+    wrongWidth.set(serializedOutput.subarray(0, wrongWidth.length));
+    const checkWrongWidth =
+      wrongWidth.length === 16 ? pureCircuits.checkResponse16 : pureCircuits.checkResponse32;
+    if (checkWrongWidth(circuitInput, wrongWidth, responseKey))
+      throw new Error("accepted serialized output at a different width");
+    // The upstream checker commits the actual Bytes<N> width; these two event
+    // fields are reader metadata and deliberately excluded from verification.
+    const wrongDigest = circuitInput.digest.map((byte, index) => (index === 0 ? byte ^ 1 : byte));
+    if (
+      !check(
+        {
+          ...circuitInput,
+          serializedOutputLength: circuitInput.serializedOutputLength ^ 1n,
+          digest: wrongDigest,
+        },
+        serializedOutput,
+        responseKey,
+      )
+    )
+      throw new Error("reader metadata changed upstream circuit verification");
     if (request.rejectPaddedReplay === true) {
       const padded = new Uint8Array(8);
       padded.set(serializedOutput);
@@ -443,28 +503,37 @@ async function dispatch(request: Request): Promise<unknown> {
           ? active.caller.callTx.verifyResponse
           : serializedOutput.length === 8
             ? active.caller.callTx.verifyResponse8
-            : serializedOutput.length === 32
-              ? active.caller.callTx.verifyResponse32
-              : undefined;
+            : serializedOutput.length === 16
+              ? active.caller.callTx.verifyResponse16
+              : serializedOutput.length === 32
+                ? active.caller.callTx.verifyResponse32
+                : undefined;
     if (verify === undefined)
       throw new Error(`unsupported output width ${serializedOutput.length}`);
     await verify(circuitInput, serializedOutput);
     await waitFor("the caller request to be removed", async () =>
       (await callerHasRequest(active, requestId)) ? undefined : true,
     );
+    let duplicateRejected = false;
+    try {
+      await verify(circuitInput, serializedOutput);
+    } catch (error) {
+      if (!String(error).includes("Request not found")) throw error;
+      duplicateRejected = true;
+    }
+    if (!duplicateRejected) throw new Error("Compact accepted a duplicate settlement");
+    if (await callerHasRequest(active, requestId))
+      throw new Error("duplicate settlement restored the consumed request");
     return {};
   }
+  const [outputSchema, responseSchema] = requestSchemas(request);
   await active.caller.callTx.submitIsEvenRequest(
     BigInt(request.nonce),
     1n,
     bytes(request.target, 20),
     bytes(request.argument, 32),
-    new TextEncoder().encode(
-      JSON.stringify([{ name: "success", type: request.outputType }]).padEnd(64, " "),
-    ),
-    new TextEncoder().encode(
-      JSON.stringify([{ name: "success", type: request.outputType }]).padEnd(64, " "),
-    ),
+    outputSchema,
+    responseSchema,
   );
   return {};
 }

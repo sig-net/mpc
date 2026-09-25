@@ -3,6 +3,7 @@ use std::time::Duration;
 use alloy::primitives::{keccak256, Address, Bytes, U256};
 use alloy::providers::ext::AnvilApi as _;
 use alloy::providers::{Provider as _, ProviderBuilder};
+use alloy::rpc::types::{TransactionInput, TransactionRequest};
 use anyhow::Context as _;
 use integration_tests::cluster;
 use mpc_chain_integration_core::utils::test::ChainIndexerStream;
@@ -10,11 +11,145 @@ use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use mpc_chain_midnight::MidnightIndexer;
 use mpc_node::sign_bidirectional::{derive_user_address, SignBidirectionalEventExt as _};
 use mpc_primitives::{Chain, ChainEvent, SignKind};
+use serde::Deserialize;
 use serial_test::serial;
 use test_log::test;
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 const RETURN_TRUE_RUNTIME_BYTECODE: &str = "600160005260206000f3";
+
+struct OutputCase {
+    name: String,
+    runtime: Bytes,
+    argument: [u8; 32],
+    output_schema: Vec<u8>,
+    response_schema: Vec<u8>,
+    expected_output: Vec<u8>,
+    expected_call_result: Option<Bytes>,
+    failed: bool,
+    cache_outage: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OutputVector {
+    name: String,
+    output_schema_hex: String,
+    respond_schema_hex: String,
+    call_result_hex: String,
+    expected_output_hex: Option<String>,
+}
+
+fn output_cases() -> anyhow::Result<Vec<OutputCase>> {
+    let mut cases = Vec::new();
+    for (output_type, width, failed) in [
+        ("bool", 1, false),
+        ("uint64", 8, false),
+        ("bytes32", 32, false),
+        ("uint64", 0, true),
+    ] {
+        let schema = serde_json::to_vec(&serde_json::json!([
+            {"name": "success", "type": output_type}
+        ]))?;
+        let mut expected_output = vec![0; width];
+        if !failed {
+            expected_output[if output_type == "bytes32" { 31 } else { 0 }] = 1;
+        }
+        let mut argument = [0; 32];
+        argument[31] = 6;
+        cases.push(OutputCase {
+            name: if failed { "reverted" } else { output_type }.into(),
+            runtime: hex::decode(if failed {
+                "60006000fd"
+            } else {
+                RETURN_TRUE_RUNTIME_BYTECODE
+            })?
+            .into(),
+            argument,
+            output_schema: schema.clone(),
+            response_schema: schema,
+            expected_output,
+            expected_call_result: None,
+            failed,
+            cache_outage: false,
+        });
+    }
+
+    #[derive(Deserialize)]
+    struct Oracle {
+        vectors: Vec<OutputVector>,
+    }
+    let oracle: Oracle = serde_json::from_str(include_str!(
+        "../../../chain-signatures/chain-ethereum/tests/fixtures/midnight_respond_vectors.json"
+    ))?;
+    for (name, contract, variant, cache_outage) in [
+        (
+            "UTF-8 string uses byte length and maxBytes capacity",
+            "MidnightStringOutput",
+            0,
+            false,
+        ),
+        (
+            "dynamic bytes use length and maxBytes capacity",
+            "MidnightBytesOutput",
+            0,
+            false,
+        ),
+        (
+            "dynamic ABI array maps into fixed-capacity response array",
+            "MidnightArrayOutput",
+            0,
+            false,
+        ),
+        (
+            "dynamic bytes exactly fill maxBytes capacity",
+            "MidnightBytesOutput",
+            1,
+            false,
+        ),
+        (
+            "empty dynamic bytes retain maxBytes capacity",
+            "MidnightBytesOutput",
+            2,
+            true,
+        ),
+    ] {
+        let vector = oracle
+            .vectors
+            .iter()
+            .find(|vector| vector.name == name)
+            .with_context(|| format!("missing SDK oracle case: {name}"))?;
+        let artifact = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../chain-signatures/contract-eth/artifacts/contracts/MidnightConformance.sol/{contract}.json"
+        ));
+        let artifact: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&artifact)
+                .with_context(|| format!("reading {}; run just build eth", artifact.display()))?,
+        )?;
+        let runtime = artifact["deployedBytecode"]
+            .as_str()
+            .context("Solidity fixture has no deployed bytecode")?;
+        let mut argument = [0; 32];
+        argument[31] = variant;
+        cases.push(OutputCase {
+            name: name.into(),
+            runtime: hex::decode(runtime.trim_start_matches("0x"))?.into(),
+            argument,
+            output_schema: hex::decode(&vector.output_schema_hex)?,
+            response_schema: hex::decode(&vector.respond_schema_hex)?,
+            expected_output: hex::decode(
+                vector
+                    .expected_output_hex
+                    .as_ref()
+                    .context("live output case must be accepted by the SDK")?,
+            )?,
+            expected_call_result: Some(hex::decode(&vector.call_result_hex)?.into()),
+            failed: false,
+            cache_outage,
+        });
+    }
+    Ok(cases)
+}
 
 async fn wait_for_completed_checkpoint(
     cluster: &cluster::Cluster,
@@ -51,6 +186,8 @@ async fn wait_for_completed_checkpoint(
 #[serial]
 #[test(tokio::test)]
 async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::Result<()> {
+    let cases = output_cases()?;
+    let next_nonce = cases.len() as u64;
     let cluster = cluster::spawn().ethereum().midnight().await?;
     cluster.wait().signable().await?;
     let midnight = cluster
@@ -73,28 +210,34 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         .context("Ethereum context was not started")?;
     let anvil =
         ProviderBuilder::new().connect_http(ethereum.sandbox.external_http_endpoint.parse()?);
-    for (nonce, output_type, expected_width, failed) in [
-        (0, "bool", 1, false),
-        (1, "uint64", 8, false),
-        (2, "bytes32", 32, false),
-        (3, "uint64", 0, true),
-    ] {
+    for (nonce, case) in cases.into_iter().enumerate() {
+        tracing::info!(case = case.name, nonce, "checking Midnight API conformance");
         let target = Address::repeat_byte(0x42 + nonce as u8);
-        anvil
-            .anvil_set_code(
-                target,
-                Bytes::from(hex::decode(if failed {
-                    "60006000fd"
-                } else {
-                    RETURN_TRUE_RUNTIME_BYTECODE
-                })?),
-            )
-            .await?;
-
-        let mut argument = [0; 32];
-        argument[31] = 6;
+        anvil.anvil_set_code(target, case.runtime).await?;
+        let mut expected_input = hex::decode("2a2e1320")?;
+        expected_input.extend_from_slice(&case.argument);
+        if let Some(expected_call_result) = &case.expected_call_result {
+            let result = anvil
+                .call(
+                    TransactionRequest::default()
+                        .to(target)
+                        .input(TransactionInput::new(expected_input.clone().into())),
+                )
+                .await?;
+            assert_eq!(
+                &result, expected_call_result,
+                "{}: Solidity ABI output differs from the SDK oracle",
+                case.name
+            );
+        }
         midnight
-            .submit_is_even(nonce, target.into_array(), argument, output_type)
+            .submit_is_even_with_schemas(
+                nonce as u64,
+                target.into_array(),
+                case.argument,
+                &case.output_schema,
+                &case.response_schema,
+            )
             .await?;
         let ChainEvent::SignRequest { request, .. } = events
             .wait_for(
@@ -139,8 +282,6 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
             signed.unsigned_hash,
             format!("{:#x}", keccak256(&sign_event.serialized_transaction))
         );
-        let mut expected_input = hex::decode("2a2e1320")?;
-        expected_input.extend_from_slice(&argument);
         assert_eq!(
             hex::decode(signed.data.trim_start_matches("0x"))?,
             expected_input
@@ -148,11 +289,20 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         anvil
             .anvil_set_balance(expected_sender, U256::from(10_000_000_000_000_000_000u128))
             .await?;
+        if case.cache_outage {
+            // Accepted deviation: configured-cache failure does not gate publication.
+            // This final output case leaves the test-owned cache unavailable.
+            midnight.output_storage.stop().await?;
+        }
         let pending = anvil
             .send_raw_transaction(&hex::decode(signed.serialized.trim_start_matches("0x"))?)
             .await?;
         let receipt = pending.get_receipt().await?;
-        assert_eq!(receipt.status(), !failed, "unexpected EVM execution status");
+        assert_eq!(
+            receipt.status(),
+            !case.failed,
+            "unexpected EVM execution status"
+        );
 
         let response_event = events
         .wait_for(
@@ -172,7 +322,20 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         let metadata = response_event
             .attestation
             .context("Midnight event has no attestation metadata")?;
-        let output = midnight.stored_output(request_id).await?;
+        let output = if case.cache_outage {
+            let error = midnight.stored_output(request_id).await.unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(reqwest::Error::is_connect),
+                "expected unavailable configured cache, got {error:#}"
+            );
+            // The independently checked Solidity/SDK output still settles the
+            // published attestation, without claiming cache recovery succeeded.
+            case.expected_output.clone()
+        } else {
+            midnight.stored_output(request_id).await?
+        };
         assert_eq!(metadata.serialized_output_length, output.len() as u64);
         let signing_metadata = mpc_primitives::AttestationMetadata {
             key_version: sign_event.key_version,
@@ -191,18 +354,19 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         );
         assert_eq!(
             metadata.outcome,
-            if failed {
+            if case.failed {
                 mpc_primitives::AttestationOutcomeKind::Failed
             } else {
                 mpc_primitives::AttestationOutcomeKind::Executed
             }
         );
-        assert_eq!(output.len(), expected_width);
-        if failed {
-            assert!(output.is_empty());
-        }
+        assert_eq!(
+            output, case.expected_output,
+            "{}: output bytes differ",
+            case.name
+        );
         midnight
-            .settle_response(request_id, &output, failed)
+            .settle_response(request_id, &output, case.failed)
             .await?;
         let ChainEvent::Block(final_block) = events
             .wait_for(|event| matches!(event, ChainEvent::Block(_)), EVENT_TIMEOUT)
@@ -232,25 +396,100 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         else {
             unreachable!("filtered above")
         };
-        anyhow::Ok(request.id.request_id)
+        anyhow::Ok(request)
     };
     midnight
-        .submit_is_even(4, [0x50; 20], argument, "bool")
+        .submit_is_even(next_nonce, [0x50; 20], argument, "bool")
         .await?;
     let victim_request = next_sign_request()
         .await
         .context("waiting for the victim's genuine SignRequest")?;
-    midnight.notify_as_caller(victim_request).await?;
+    let victim_id = victim_request.id.request_id;
+    midnight.notify_as_caller(victim_id).await?;
     midnight
-        .submit_is_even(5, [0x51; 20], argument, "bool")
+        .submit_is_even(next_nonce, [0x51; 20], argument, "bool")
         .await?;
     let after_impersonation = next_sign_request()
         .await
         .context("waiting for the SignRequest after the impersonation")?;
     assert_ne!(
-        after_impersonation, victim_request,
+        after_impersonation.id.request_id, victim_id,
         "a notification from a contract other than the named caller was indexed"
     );
+
+    // Accepted deviation: two signed requests occupy one EVM nonce; after the
+    // second executes, the displaced request stays pending instead of unviable.
+    let root_public_key =
+        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
+    for request in [&victim_request, &after_impersonation] {
+        let SignKind::SignBidirectional(sign_event) = &request.kind else {
+            anyhow::bail!("expected a bidirectional request");
+        };
+        let expected_sender = derive_user_address(root_public_key, sign_event.epsilon()?);
+        let signed = midnight
+            .signed_evm_transaction(request.id.request_id, &format!("{expected_sender:#x}"))
+            .await?;
+        if request.id.request_id == victim_id {
+            continue;
+        }
+        anvil
+            .anvil_set_code(
+                Address::repeat_byte(0x51),
+                hex::decode(RETURN_TRUE_RUNTIME_BYTECODE)?.into(),
+            )
+            .await?;
+        let receipt = anvil
+            .send_raw_transaction(&hex::decode(signed.serialized.trim_start_matches("0x"))?)
+            .await?
+            .get_receipt()
+            .await?;
+        assert!(
+            receipt.status(),
+            "replacement must consume the nonce successfully"
+        );
+    }
+    let replacement_id = after_impersonation.id.request_id;
+    let response = events
+        .wait_for(
+            |event| {
+                matches!(event, ChainEvent::RespondBidirectional(response)
+                if response.request_id == victim_id || response.request_id == replacement_id)
+            },
+            EVENT_TIMEOUT,
+        )
+        .await?;
+    let ChainEvent::RespondBidirectional(response) = response else {
+        unreachable!()
+    };
+    assert_eq!(
+        response.request_id, replacement_id,
+        "displaced request was attested"
+    );
+    midnight
+        .settle_response(replacement_id, &[1], false)
+        .await?;
+    let ChainEvent::Block(final_block) = events
+        .wait_for(|event| matches!(event, ChainEvent::Block(_)), EVENT_TIMEOUT)
+        .await?
+    else {
+        unreachable!()
+    };
+    wait_for_completed_checkpoint(&cluster, replacement_id, final_block).await?;
+    for node in 0..cluster.len() {
+        let checkpoint = cluster
+            .nodes
+            .fetch_checkpoint(node, Chain::Midnight)
+            .await?;
+        let pending = checkpoint
+            .pending_requests
+            .iter()
+            .find(|pending| pending.sign_id().request_id == victim_id)
+            .context("accepted deviation: displaced request must remain pending")?;
+        assert!(
+            pending.execution_tx().is_some(),
+            "displaced request must still await execution"
+        );
+    }
 
     midnight.shutdown().await?;
     Ok(())

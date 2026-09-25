@@ -167,6 +167,28 @@ impl MidnightContext {
         Ok(())
     }
 
+    pub async fn submit_is_even_with_schemas(
+        &self,
+        nonce: u64,
+        target: [u8; 20],
+        argument: [u8; 32],
+        output_schema: &[u8],
+        response_schema: &[u8],
+    ) -> anyhow::Result<()> {
+        let mut driver = self.driver.lock().await;
+        let _: serde_json::Value = driver
+            .request(&serde_json::json!({
+                "op": "submitIsEven",
+                "nonce": nonce.to_string(),
+                "target": hex::encode(target),
+                "argument": hex::encode(argument),
+                "outputSchema": hex::encode(output_schema),
+                "responseSchema": hex::encode(response_schema),
+            }))
+            .await?;
+        Ok(())
+    }
+
     /// Have a second caller contract notify the central Signet contract naming the real
     /// caller's request.
     pub async fn notify_as_caller(&self, request_id: [u8; 32]) -> anyhow::Result<()> {
