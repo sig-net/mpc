@@ -1543,25 +1543,81 @@ async fn recovered_midnight_final_publication_requires_canonical_metadata() {
 /// A terminal extraction failure means the transaction executed but its output
 /// could not be interpreted. No sign request is queued.
 #[tokio::test]
-async fn decode_failure_preserves_source_checkpoint_across_target_progress() {
-    for source_chain in [
-        Chain::Midnight,
-        Chain::Solana,
-        Chain::Canton,
-        Chain::Hydration,
-    ] {
+async fn midnight_decode_failure_preserves_source_checkpoint_across_target_progress() {
+    let source_chain = Chain::Midnight;
+    for caught_up in [false, true] {
+        let backlog = Backlog::new();
+        let tx = test_bidirectional_tx(97, source_chain, Chain::Ethereum);
+        backlog.insert_mock_executing(&tx).await;
+        backlog
+            .set_processed_block_interval(source_chain, 40, 0)
+            .await;
+        let before = backlog.checkpoint(source_chain).await.unwrap();
+        let observer = Backlog::new();
+        observer.recover_by_checkpoint(&before).await;
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let ctx = make_test_stream_context_with_generator_pk(observer, sign_tx, caught_up);
+        process_execution_confirmed(
+            tx.id,
+            7123,
+            ExecutionOutcome::ExtractionFailed,
+            &ctx,
+            Chain::Ethereum,
+        )
+        .await
+        .unwrap();
+        let after = ctx.backlog.checkpoint(source_chain).await.unwrap();
+        assert_eq!(before.block_height, after.block_height);
+        assert_eq!(
+            before.digest(),
+            after.digest(),
+            "unequal target progress must not change the same source checkpoint"
+        );
+        assert!(
+            sign_rx.try_recv().is_err(),
+            "decode failure must not sign or complete the request"
+        );
+        assert!(ctx
+            .backlog
+            .get(source_chain, &tx.sign_id())
+            .await
+            .unwrap()
+            .state()
+            .is_pending_execution());
+        assert_eq!(
+            ctx.backlog
+                .get_execution_watchers(Chain::Ethereum)
+                .await
+                .len(),
+            1,
+            "the live watch must be restored before checkpoint recovery"
+        );
+        let restored = Backlog::new();
+        restored.recover_by_checkpoint(&after).await;
+        assert_eq!(
+            restored.get_execution_watchers(Chain::Ethereum).await.len(),
+            1
+        );
+        assert_eq!(
+            before.digest(),
+            restored.checkpoint(source_chain).await.unwrap().digest()
+        );
+    }
+}
+
+#[tokio::test]
+async fn non_midnight_decode_failure_retires_request_without_response() {
+    for source_chain in [Chain::Solana, Chain::Canton, Chain::Hydration] {
         for caught_up in [false, true] {
             let backlog = Backlog::new();
-            let tx = test_bidirectional_tx(97, source_chain, Chain::Ethereum);
+            let tx = test_bidirectional_tx(98, source_chain, Chain::Ethereum);
             backlog.insert_mock_executing(&tx).await;
             backlog
                 .set_processed_block_interval(source_chain, 40, 0)
                 .await;
-            let before = backlog.checkpoint(source_chain).await.unwrap();
-            let observer = Backlog::new();
-            observer.recover_by_checkpoint(&before).await;
             let (sign_tx, mut sign_rx) = mpsc::channel(4);
-            let ctx = make_test_stream_context_with_generator_pk(observer, sign_tx, caught_up);
+            let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, caught_up);
+
             process_execution_confirmed(
                 tx.id,
                 7123,
@@ -1571,41 +1627,40 @@ async fn decode_failure_preserves_source_checkpoint_across_target_progress() {
             )
             .await
             .unwrap();
-            let after = ctx.backlog.checkpoint(source_chain).await.unwrap();
-            assert_eq!(before.block_height, after.block_height);
-            assert_eq!(
-                before.digest(),
-                after.digest(),
-                "unequal target progress must not change the same source checkpoint"
-            );
-            assert!(
-                sign_rx.try_recv().is_err(),
-                "decode failure must not sign or complete the request"
-            );
+
+            assert!(ctx.backlog.get(source_chain, &tx.sign_id()).await.is_none());
             assert!(ctx
                 .backlog
-                .get(source_chain, &tx.sign_id())
+                .get_execution_watchers(Chain::Ethereum)
                 .await
-                .unwrap()
-                .state()
-                .is_pending_execution());
-            assert_eq!(
-                ctx.backlog
-                    .get_execution_watchers(Chain::Ethereum)
-                    .await
-                    .len(),
-                1,
-                "the live watch must be restored before checkpoint recovery"
+                .is_empty());
+            assert_matches!(
+                sign_rx.try_recv().expect("retired request must stop its signing task"),
+                SignCommand::Completion(id) if id == tx.sign_id()
             );
+            assert!(sign_rx.try_recv().is_err(), "no response should be signed");
+
+            let checkpoint = ctx.backlog.checkpoint(source_chain).await.unwrap();
             let restored = Backlog::new();
-            restored.recover_by_checkpoint(&after).await;
-            assert_eq!(
-                restored.get_execution_watchers(Chain::Ethereum).await.len(),
-                1
-            );
-            assert_eq!(
-                before.digest(),
-                restored.checkpoint(source_chain).await.unwrap().digest()
+            restored.recover_by_checkpoint(&checkpoint).await;
+            assert!(restored.get(source_chain, &tx.sign_id()).await.is_none());
+            assert!(restored
+                .get_execution_watchers(Chain::Ethereum)
+                .await
+                .is_empty());
+
+            process_execution_confirmed(
+                tx.id,
+                7123,
+                ExecutionOutcome::ExtractionFailed,
+                &ctx,
+                Chain::Ethereum,
+            )
+            .await
+            .unwrap();
+            assert!(
+                sign_rx.try_recv().is_err(),
+                "duplicate event must not complete again"
             );
         }
     }
