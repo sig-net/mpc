@@ -694,18 +694,9 @@ and `recoveryId: u8`, the parity of `bigR.y`, all big-endian SEC1.
 
 ### 7.2 Request id: RequestIdPreimageV1
 
-The preimage is the request's first seven fields with the transaction
-replaced by its digest.
-
-| field | type |
-|---|---|
-| `keyVersion` | `u8` |
-| `sender` | `address` |
-| `path` | `bytes(32)` |
-| `algo` | `enum MPCSignatureAlgorithm` |
-| `txParamType` | `enum TxParamType` |
-| `txParamsDigest` | `bytes(32)`, the transaction type's digest `D` of `txParams` |
-| `executionDest` | `bytes(32)` |
+The preimage is 7.1's first seven fields, in that order, with `txParams`
+replaced by `txParamsDigest: bytes(32)`, the transaction type's digest `D`
+of `txParams`.
 
 ```
 rid = bytes32(H(E(preimage)))
