@@ -7,8 +7,8 @@
 # with the real client, which is what catches the two sides drifting apart.
 #
 # The required live end-to-end path runs in the Integration workflow's
-# Midnight Real Stack job; this workflow keeps the package and Rust seam fast.
-name: Midnight Publisher TS
+# Midnight Real-Stack Tests job; this workflow keeps the package and Rust seam fast.
+name: Midnight Publisher Tests
 
 on:
   pull_request:
