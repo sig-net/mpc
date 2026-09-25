@@ -879,9 +879,36 @@ digest = bytes32(H(E[
 ]))
 ```
 
-The output itself travels off chain. A reader recomputes the digest from
-the output bytes it obtained and verifies the signature against the
-attestation key.
+##### 7.4.2.2 Output Recovery
+
+The output itself travels off chain. Clients are responsible for recovering
+it from the destination chain so they can deliver the exact serialised
+output the MPC attested to the application contract. Each destination-chain
+integration must document how the MPC obtains the output so clients can
+follow the same procedure.
+
+The recovery method is chain-specific. For example, on EVM chains the MPC
+reads a mined call's return data with the `debug_traceTransaction` RPC method,
+using `callTracer`'s top call frame. A client retrieves that data, decodes it
+with the request's `outputDeserializationSchema` and re-serialises it with
+`respondSerializationSchema`, reproducing the MPC's conversions.
+
+As a convenience, MPC nodes may serve the serialised output they attest in
+a public cache. This helps dApp developers who lack access to a node that
+supports the required recovery method. For example, EVM RPC providers often
+make `debug_traceTransaction` available only on paid tiers.
+
+A node configured to provide this cache writes the serialised output to
+`<prefix>/<networkId>/<signetContractAddress>/<requestId>.bin` before posting
+the attestation to the source chain. Here `networkId` identifies the source
+network and `signetContractAddress` its signet contract. Clients can fetch
+the bytes by request ID from the endpoint advertised for their deployment
+and retry while they are not yet available. Providing a cache is optional.
+
+For `failed` and `unviable`, the serialised output is empty. Whichever route
+supplies the bytes, they remain untrusted until the application contract's
+library recomputes the attestation digest and verifies the signature against
+the attestation key (Section 4.1). Incorrect or forged bytes fail verification.
 
 ### 7.5 Midnight binding
 
