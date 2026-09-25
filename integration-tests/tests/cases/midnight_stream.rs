@@ -417,10 +417,11 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         "a notification from a contract other than the named caller was indexed"
     );
 
-    // Accepted deviation: two signed requests occupy one EVM nonce; after the
-    // second executes, the displaced request stays pending instead of unviable.
+    // Two signed requests occupy one EVM nonce. Executing the replacement must
+    // attest both its output and the displaced request at the same inclusion height.
     let root_public_key =
         mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
+    let mut replacement_height = None;
     for request in [&victim_request, &after_impersonation] {
         let SignKind::SignBidirectional(sign_event) = &request.kind else {
             anyhow::bail!("expected a bidirectional request");
@@ -447,24 +448,69 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
             receipt.status(),
             "replacement must consume the nonce successfully"
         );
+        replacement_height = receipt.block_number;
     }
+    let replacement_height = replacement_height.context("replacement receipt has no height")?;
     let replacement_id = after_impersonation.id.request_id;
-    let response = events
-        .wait_for(
-            |event| {
-                matches!(event, ChainEvent::RespondBidirectional(response)
-                if response.request_id == victim_id || response.request_id == replacement_id)
-            },
-            EVENT_TIMEOUT,
-        )
-        .await?;
-    let ChainEvent::RespondBidirectional(response) = response else {
-        unreachable!()
-    };
-    assert_eq!(
-        response.request_id, replacement_id,
-        "displaced request was attested"
-    );
+    let mut victim_attested = false;
+    let mut replacement_attested = false;
+    // Collect both responses before settling either: publication order is not
+    // specified, and waiting for settlement blocks would consume the other event.
+    while !victim_attested || !replacement_attested {
+        let response = events
+            .wait_for(
+                |event| {
+                    matches!(event, ChainEvent::RespondBidirectional(response)
+                    if (response.request_id == victim_id && !victim_attested)
+                        || (response.request_id == replacement_id && !replacement_attested))
+                },
+                EVENT_TIMEOUT,
+            )
+            .await
+            .context("waiting for replacement and displaced-request attestations")?;
+        let ChainEvent::RespondBidirectional(response) = response else {
+            unreachable!()
+        };
+        let (request, output, outcome) = if response.request_id == victim_id {
+            victim_attested = true;
+            (
+                &victim_request,
+                &[][..],
+                mpc_primitives::AttestationOutcomeKind::Unviable,
+            )
+        } else {
+            replacement_attested = true;
+            (
+                &after_impersonation,
+                &[1][..],
+                mpc_primitives::AttestationOutcomeKind::Executed,
+            )
+        };
+        let SignKind::SignBidirectional(sign_event) = &request.kind else {
+            unreachable!("both requests were checked above")
+        };
+        let metadata = response
+            .attestation
+            .context("Midnight event has no attestation metadata")?;
+        assert_eq!(metadata.block_height, replacement_height);
+        assert_eq!(metadata.outcome, outcome);
+        assert_eq!(metadata.serialized_output_length, output.len() as u64);
+        assert_eq!(
+            metadata.digest,
+            mpc_compact_hashing::compute_attestation_hash(
+                &response.request_id,
+                &mpc_primitives::AttestationMetadata {
+                    key_version: sign_event.key_version,
+                    block_height: replacement_height,
+                    outcome,
+                },
+                output,
+            )?
+        );
+    }
+    // The zero-width caller circuit accepts Unviable and rejects padded/replayed
+    // responses using the same signature checks as a finalized EVM revert.
+    midnight.settle_response(victim_id, &[], true).await?;
     midnight
         .settle_response(replacement_id, &[1], false)
         .await?;
@@ -474,22 +520,8 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
     else {
         unreachable!()
     };
+    wait_for_completed_checkpoint(&cluster, victim_id, final_block).await?;
     wait_for_completed_checkpoint(&cluster, replacement_id, final_block).await?;
-    for node in 0..cluster.len() {
-        let checkpoint = cluster
-            .nodes
-            .fetch_checkpoint(node, Chain::Midnight)
-            .await?;
-        let pending = checkpoint
-            .pending_requests
-            .iter()
-            .find(|pending| pending.sign_id().request_id == victim_id)
-            .context("accepted deviation: displaced request must remain pending")?;
-        assert!(
-            pending.execution_tx().is_some(),
-            "displaced request must still await execution"
-        );
-    }
 
     midnight.shutdown().await?;
     Ok(())

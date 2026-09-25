@@ -1411,6 +1411,11 @@ async fn midnight_execution_response_binds_receipt_height_and_outcome() {
             mpc_primitives::AttestationOutcomeKind::Failed,
             vec![],
         ),
+        (
+            ExecutionOutcome::Unviable,
+            mpc_primitives::AttestationOutcomeKind::Unviable,
+            vec![],
+        ),
     ] {
         let backlog = Backlog::new();
         let tx = test_bidirectional_tx(92, Chain::Midnight, Chain::Ethereum);
@@ -1577,30 +1582,87 @@ async fn midnight_decode_failure_preserves_source_checkpoint_across_target_progr
             sign_rx.try_recv().is_err(),
             "decode failure must not sign or complete the request"
         );
-        assert!(ctx
-            .backlog
-            .get(source_chain, &tx.sign_id())
-            .await
-            .unwrap()
-            .state()
-            .is_pending_execution());
+        assert_matches!(
+            ctx.backlog
+                .get(source_chain, &tx.sign_id())
+                .await
+                .unwrap()
+                .state(),
+            SignStatus::Bidirectional(BidirectionalProgress::Parked(_))
+        );
         assert_eq!(
             ctx.backlog
                 .get_execution_watchers(Chain::Ethereum)
                 .await
                 .len(),
-            1,
-            "the live watch must be restored before checkpoint recovery"
+            0,
+            "terminal decode failure must stop watching before checkpoint recovery"
         );
+        // Exercise the same CBOR representation used by durable checkpoints.
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&after, &mut encoded).unwrap();
+        let checkpoint: crate::backlog::Checkpoint =
+            ciborium::from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(after, checkpoint);
         let restored = Backlog::new();
-        restored.recover_by_checkpoint(&after).await;
+        restored.recover_by_checkpoint(&checkpoint).await;
         assert_eq!(
             restored.get_execution_watchers(Chain::Ethereum).await.len(),
-            1
+            0
         );
         assert_eq!(
             before.digest(),
             restored.checkpoint(source_chain).await.unwrap().digest()
+        );
+        assert!(restored.requeueable_requests(source_chain).await.is_empty());
+
+        // Neither repeated target callbacks nor repeated initial signatures may
+        // re-enable a parked watch or start final response signing.
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let restored_ctx = make_test_stream_context_with_generator_pk(restored, sign_tx, caught_up);
+        process_execution_confirmed(
+            tx.id,
+            7123,
+            ExecutionOutcome::ExtractionFailed,
+            &restored_ctx,
+            Chain::Ethereum,
+        )
+        .await
+        .unwrap();
+        let parked = restored_ctx
+            .backlog
+            .get(source_chain, &tx.sign_id())
+            .await
+            .unwrap();
+        let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
+        process_respond_event(
+            SignatureRespondedEvent {
+                request_id: tx.request_id,
+                signature: mpc_crypto::generate_signature(&root_sk, &parked.request().args),
+                chain: source_chain,
+            },
+            &restored_ctx,
+            root_sk.public_key().into(),
+        )
+        .await
+        .unwrap();
+        requeue_pending_sign_requests(&restored_ctx, source_chain)
+            .await
+            .unwrap();
+        assert!(sign_rx.try_recv().is_err());
+        assert!(restored_ctx
+            .backlog
+            .get_execution_watchers(Chain::Ethereum)
+            .await
+            .is_empty());
+        assert_eq!(
+            before.digest(),
+            restored_ctx
+                .backlog
+                .checkpoint(source_chain)
+                .await
+                .unwrap()
+                .digest()
         );
     }
 }

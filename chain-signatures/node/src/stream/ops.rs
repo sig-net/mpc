@@ -371,13 +371,13 @@ pub async fn process_execution_confirmed(
         if source_chain == Chain::Midnight {
             // Destination streams advance independently of Midnight checkpoints.
             // Keep membership until a source-observable transition can settle it.
+            entry.park().await?;
             tracing::error!(
                 ?sign_id,
                 ?tx_id,
                 ?source_chain,
-                "output extraction failed; leaving execution pending without an attestation"
+                "output extraction failed terminally; parking request without an attestation"
             );
-            entry.watch_execution().await;
         } else {
             tracing::error!(
                 ?sign_id,
@@ -400,7 +400,10 @@ pub async fn process_execution_confirmed(
         }
         return Ok(());
     }
-    let execution_failed = matches!(result, ExecutionOutcome::Failed);
+    let execution_failed = matches!(
+        result,
+        ExecutionOutcome::Failed | ExecutionOutcome::Unviable
+    );
 
     let entry = entry
         .advance(result, block_height)

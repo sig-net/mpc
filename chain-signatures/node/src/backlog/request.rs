@@ -319,7 +319,9 @@ impl SignEntry<Generating> {
                 }
                 *progress = SignProgress::Publishing(publish.clone());
             }
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(_)) => {
+            SignStatus::Bidirectional(
+                BidirectionalProgress::Executing(_) | BidirectionalProgress::Parked(_),
+            ) => {
                 return Err(BacklogError::InvalidPublishTransition);
             }
         }
@@ -552,6 +554,22 @@ impl SignEntry<Bidirectional<Executing>> {
         self.backlog.watch_execution(self).await;
     }
 
+    /// Retain a terminal extraction failure without retrying target-chain execution.
+    pub async fn park(self) -> Result<(), BacklogError> {
+        let mut pending = self.backlog.pending(&self.chain).write().await;
+        let entry = pending
+            .requests
+            .get_mut(&self.request.id)
+            .ok_or(BacklogError::NotFound {
+                chain: self.chain,
+                id: self.request.id,
+            })?;
+        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Parked(Arc::clone(
+            self.execution_tx(),
+        )));
+        Ok(())
+    }
+
     /// Advance destination-chain `Executing` into Phase 2 response signing based on
     /// the target-chain execution outcome.
     ///
@@ -584,6 +602,7 @@ impl SignEntry<Bidirectional<Executing>> {
                 completed_tx.create_sign_request_from_serialized_output(output)?
             }
             ExecutionOutcome::Failed => completed_tx.create_failed_sign_request().await?,
+            ExecutionOutcome::Unviable => completed_tx.create_unviable_sign_request()?,
 
             ExecutionOutcome::ExtractionFailed => {
                 anyhow::bail!("output extraction failure cannot enter response signing")

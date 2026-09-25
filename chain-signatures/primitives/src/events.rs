@@ -89,6 +89,9 @@ pub enum ExecutionOutcome {
     /// The transaction executed, but its output could not be interpreted against
     /// the request's own schemas.
     ExtractionFailed,
+    /// A finalized different transaction consumed this transaction's nonce.
+    /// Emitted for Midnight only, at the observed replacement block's height.
+    Unviable,
 }
 
 #[derive(Clone, Debug)]

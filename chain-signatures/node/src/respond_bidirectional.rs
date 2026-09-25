@@ -66,6 +66,14 @@ impl CompletedTx {
         self.process_failed_tx().await
     }
 
+    pub(crate) fn create_unviable_sign_request(&self) -> anyhow::Result<IndexedSignRequest> {
+        anyhow::ensure!(
+            self.tx.source_chain == Chain::Midnight,
+            "unviable attestations are only supported for Midnight"
+        );
+        self.create_respond_bidirectional_sign_request(Vec::new(), AttestationOutcomeKind::Unviable)
+    }
+
     pub(crate) fn create_sign_request_from_serialized_output(
         &self,
         serialized_output: RespondBidirectionalSerializedOutput,
@@ -511,6 +519,60 @@ mod tests {
         assert_eq!(request.chain, Chain::Midnight);
         assert_eq!(request.args.payload, expected_payload);
         assert_eq!(request.args.path, MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH);
+    }
+
+    #[tokio::test]
+    async fn midnight_unviable_binds_replacement_height_and_empty_output() {
+        let request_id = [0x2f; 32];
+        let tx = sample_bidirectional_tx(Chain::Midnight, request_id);
+        let completed = CompletedTx::new(tx, None, Some(100), 456);
+        let request = completed.create_unviable_sign_request().unwrap();
+        let SignKind::RespondBidirectional(response) = &request.kind else {
+            panic!("expected a response");
+        };
+        let metadata = AttestationMetadata {
+            key_version: request.args.key_version,
+            block_height: 456,
+            outcome: AttestationOutcomeKind::Unviable,
+        };
+        assert_eq!(response.attestation, Some(metadata));
+        assert!(response.output.is_empty());
+        assert_eq!(response.origin_indexed_at, Some(100));
+        assert_eq!(request.args.path, MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH);
+        assert_eq!(
+            request.args.payload,
+            Scalar::from_bytes(
+                mpc_compact_hashing::compute_attestation_hash(&request_id, &metadata, &[]).unwrap()
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            request.args.payload,
+            completed
+                .create_failed_sign_request()
+                .await
+                .unwrap()
+                .args
+                .payload
+        );
+        assert_ne!(
+            request.args.payload,
+            completed
+                .create_sign_request_from_serialized_output(vec![])
+                .unwrap()
+                .args
+                .payload
+        );
+        assert!(is_failed_execution_response(response));
+
+        for chain in [Chain::Solana, Chain::Canton, Chain::Hydration] {
+            assert!(
+                CompletedTx::new(sample_bidirectional_tx(chain, request_id), None, None, 456)
+                    .create_unviable_sign_request()
+                    .is_err(),
+                "{chain}"
+            );
+        }
     }
 
     /// The network's own leg-2 attestation and the attack name the same path, so the
