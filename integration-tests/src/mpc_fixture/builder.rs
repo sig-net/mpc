@@ -634,9 +634,19 @@ impl MpcFixtureNodeBuilder {
         );
         tokio::spawn(sync_task.run());
 
+        let network = config_tx.borrow().local.network.clone();
+        let participant_info = mpc_node::protocol::ParticipantInfo {
+            id: self.me.into(),
+            account_id: self.participant_info.account_id.as_str().parse().unwrap(),
+            url: self.participant_info.url.clone(),
+            cipher_pk: network.cipher_sk.public_key(),
+            sign_pk: network.sign_sk.public_key(),
+        };
+
         let mut node = MpcFixtureNode {
             me: self.me,
             account_id: self.participant_info.account_id.clone(),
+            participant_info,
             state: node_state,
             mesh: mesh_tx,
             config: config_tx,

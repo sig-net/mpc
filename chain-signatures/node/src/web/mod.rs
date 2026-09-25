@@ -10,7 +10,7 @@ use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
-use crate::protocol::sync::{SyncChannel, SyncUpdate};
+use crate::protocol::sync::SyncChannel;
 use crate::protocol::{Chain, MessageChannel};
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
@@ -297,7 +297,7 @@ async fn bench_metrics() -> Json<BenchMetrics> {
 async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Cbor(update), _): WithRejection<Cbor<Ciphered>, Error>,
-) -> Result<Cbor<SyncUpdate>> {
+) -> Result<Cbor<Ciphered>> {
     let start = Instant::now();
     let response = state.sync_channel.request_update(update).await?;
     WEB_ENDPOINT_LATENCY

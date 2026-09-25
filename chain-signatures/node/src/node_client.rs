@@ -1,6 +1,5 @@
 use crate::backlog::Checkpoint;
 use crate::protocol::message::cbor_to_bytes;
-use crate::protocol::sync::SyncUpdate;
 use crate::protocol::Chain;
 use crate::web::{CheckpointResponse, StateView, StatusResponse};
 
@@ -207,7 +206,7 @@ impl NodeClient {
         &self,
         base: impl IntoUrl,
         update: &Ciphered,
-    ) -> Result<SyncUpdate, RequestError> {
+    ) -> Result<Ciphered, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("sync");
         self.post_cbor_response(

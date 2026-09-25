@@ -7,13 +7,15 @@ use crate::mpc_fixture::mock_chain::MockChain;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
+use mpc_keys::hpke::{self, Ciphered};
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
-use mpc_node::protocol::message::SignedMessage;
+use mpc_node::protocol::contract::primitives::ParticipantInfo;
+use mpc_node::protocol::message::{MessageError, SignedMessage};
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
-use mpc_node::protocol::sync::{SyncChannel, SyncError, SyncUpdate};
+use mpc_node::protocol::sync::{open_reply_for_test, SyncChannel, SyncError, SyncUpdate};
 use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_node::types::SignCommand;
@@ -37,6 +39,7 @@ pub struct MpcFixture {
 pub struct MpcFixtureNode {
     pub me: Participant,
     pub account_id: AccountId,
+    pub participant_info: ParticipantInfo,
     pub state: NodeStateWatcher,
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
@@ -413,10 +416,22 @@ impl MpcFixtureNode {
             triples,
             presignatures,
         };
-        let sign_sk = from.config.borrow().local.network.sign_sk.clone();
-        self.try_sync(from.me, &sign_sk, &update)
+        let network = from.config.borrow().local.network.clone();
+        let reply = self
+            .try_sync(from.me, &network.sign_sk, &update)
             .await
-            .expect("sync_channel request_update failed")
+            .expect("sync_channel request_update failed");
+        self.open_reply(&reply, &network.cipher_sk)
+            .expect("failed to open sync reply")
+    }
+
+    /// Open a sync reply from this node, as the caller holding `cipher_sk`.
+    pub fn open_reply(
+        &self,
+        reply: &Ciphered,
+        cipher_sk: &hpke::SecretKey,
+    ) -> Result<SyncUpdate, MessageError> {
+        open_reply_for_test(reply, cipher_sk, self.me, &self.participant_info)
     }
 
     /// Deliver `update` to this node as a sync request that claims to come
@@ -426,7 +441,7 @@ impl MpcFixtureNode {
         claimed: Participant,
         sign_sk: &near_crypto::SecretKey,
         update: &SyncUpdate,
-    ) -> Result<SyncUpdate, SyncError> {
+    ) -> Result<Ciphered, SyncError> {
         let cipher_pk = self.config.borrow().local.network.cipher_sk.public_key();
         let encrypted = SignedMessage::encrypt(update, claimed, sign_sk, &cipher_pk)
             .expect("failed to encrypt sync update");

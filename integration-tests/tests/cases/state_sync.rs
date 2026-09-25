@@ -1,6 +1,7 @@
 use cait_sith::protocol::Participant;
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::{MpcFixtureBuilder, MpcFixtureNode};
+use mpc_node::protocol::message::SignedMessage;
 use mpc_node::protocol::sync::SyncUpdate;
 use test_log::test;
 
@@ -723,7 +724,8 @@ async fn test_sync_rejects_impersonation() {
         "node1 should hold shares of every owner's artifacts: {before:?}"
     );
 
-    let node2_sk = node2.config.borrow().local.network.sign_sk.clone();
+    let node2_network = node2.config.borrow().local.network.clone();
+    let node2_sk = node2_network.sign_sk.clone();
 
     // node2's key, but the signed envelope claims another sender.
     for victim in [node0.me, node1.me] {
@@ -744,12 +746,76 @@ async fn test_sync_rejects_impersonation() {
         triples: node2.owned_triples().await,
         presignatures: node2.owned_presignatures().await,
     };
-    let response = node1
+    let reply = node1
         .try_sync(node2.me, &node2_sk, &update)
         .await
         .expect("node2 signing as itself should be accepted");
+    // The reply goes to the signer, so only node2 can open it.
+    let response = node1
+        .open_reply(&reply, &node2_network.cipher_sk)
+        .expect("node2 should open the reply");
     assert_eq!(response.from, node1.me);
     assert!(response.triples.is_empty() && response.presignatures.is_empty());
 
     assert_eq!(shares_by_owner(node1, &owners).await, before);
+}
+
+/// A caller only accepts a reply signed by the node it asked. Otherwise a
+/// forged reply listing the caller's artifacts as missing would make it drop
+/// that node as a holder and prune them.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_reply_rejects_forged_responder() {
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let node2 = &fixture.nodes[2];
+    let node0_network = node0.config.borrow().local.network.clone();
+    let node0_triples = node0.owned_triples().await;
+    let node0_presigs = node0.owned_presignatures().await;
+    let update = SyncUpdate {
+        from: node0.me,
+        triples: node0_triples.clone(),
+        presignatures: node0_presigs.clone(),
+    };
+
+    // Control: node1's genuine reply opens as node1's.
+    let reply = node1
+        .try_sync(node0.me, &node0_network.sign_sk, &update)
+        .await
+        .expect("node0's update should be accepted");
+    let response = node1
+        .open_reply(&reply, &node0_network.cipher_sk)
+        .expect("genuine reply should open");
+    assert_eq!(response.from, node1.me);
+
+    // A reply from a node other than the one asked: node0 asked node2 but
+    // got node1's reply.
+    assert!(
+        node2.open_reply(&reply, &node0_network.cipher_sk).is_err(),
+        "reply signed by node1 should not pass as node2's"
+    );
+
+    // A reply forged with a key the contract doesn't know, claiming to be
+    // node1 and listing all of node0's artifacts as missing.
+    let outsider_sk = near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
+    let forged = SyncUpdate {
+        from: node1.me,
+        triples: node0_triples,
+        presignatures: node0_presigs,
+    };
+    let forged = SignedMessage::encrypt(
+        &forged,
+        node1.me,
+        &outsider_sk,
+        &node0_network.cipher_sk.public_key(),
+    )
+    .expect("encrypt forged reply");
+    assert!(
+        node1.open_reply(&forged, &node0_network.cipher_sk).is_err(),
+        "forged reply should be rejected"
+    );
 }
