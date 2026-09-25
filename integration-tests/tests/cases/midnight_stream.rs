@@ -354,7 +354,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         );
         assert_eq!(
             metadata.outcome_kind,
-            if failed {
+            if case.failed {
                 mpc_primitives::AttestationOutcomeKind::Failed
             } else {
                 mpc_primitives::AttestationOutcomeKind::Executed
@@ -493,7 +493,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
             .attestation
             .context("Midnight event has no attestation metadata")?;
         assert_eq!(metadata.block_height, replacement_height);
-        assert_eq!(metadata.outcome, outcome);
+        assert_eq!(metadata.outcome_kind, outcome);
         assert_eq!(metadata.serialized_output_length, output.len() as u64);
         assert_eq!(
             metadata.digest,
@@ -502,7 +502,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
                 &mpc_primitives::AttestationMetadata {
                     key_version: sign_event.key_version,
                     block_height: replacement_height,
-                    outcome,
+                    outcome_kind: outcome,
                 },
                 output,
             )?
