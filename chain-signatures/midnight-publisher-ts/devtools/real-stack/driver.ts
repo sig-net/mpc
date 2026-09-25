@@ -80,6 +80,11 @@ interface SettleResponseRequest {
   rejectPaddedReplay?: boolean;
 }
 
+interface NotifyAsCallerRequest {
+  op: "notifyAsCaller";
+  requestId: string;
+}
+
 interface ShutdownRequest {
   op: "shutdown";
 }
@@ -90,12 +95,14 @@ type Request =
   | SubmitRequest
   | SignedTransactionRequest
   | SettleResponseRequest
+  | NotifyAsCallerRequest
   | ShutdownRequest;
 
 interface Session {
   facade: WalletFacade;
   caller: CallerHandle;
   callerAddress: string;
+  impersonator: CallerHandle;
   publicDataProvider: SignetPublicStateSource;
   reader: SignetRequestResponseReader;
   responseKey?: Secp256k1Point;
@@ -252,10 +259,8 @@ async function bootstrap(request: BootstrapRequest) {
   const deployerKeys = deriveAccountKeys(DEPLOYER_SEED, request.config.networkId);
   const deployerSecret = bytes(DEPLOYER_SEED, 32);
   const deployerCommitment = pureCircuits.deployerCommitment(deployerSecret);
-  const callerDeployment = await withSyncedWalletFacade(
-    deployerKeys,
-    request.config,
-    async (facade) => {
+  const deployCaller = () =>
+    withSyncedWalletFacade(deployerKeys, request.config, async (facade) => {
       const built = await buildDeployTransaction(
         callerCompiledContract,
         request.config.networkId,
@@ -266,8 +271,10 @@ async function bootstrap(request: BootstrapRequest) {
       );
       await submitUnprovenTransaction(facade, deployerKeys, built.serializedTransaction);
       return { contractAddress: built.contractAddress };
-    },
-  );
+    });
+  const callerDeployment = await deployCaller();
+  diagnostics("deploying impersonating Compact caller");
+  const impersonatorDeployment = await deployCaller();
   const invokerKeys = deriveAccountKeys(INVOKER_SEED, request.config.networkId);
   const facade = await initialiseWalletFacade(invokerKeys, request.config);
   await facade.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
@@ -278,16 +285,20 @@ async function bootstrap(request: BootstrapRequest) {
     request.config,
     join(request.artifactDir, "caller.leveldb"),
   );
-  const caller = await findDeployedContract(providers, {
-    contractAddress: callerDeployment.contractAddress,
-    compiledContract: callerCompiledContract,
-    privateStateId: CALLER_PRIVATE_STATE_ID,
-    initialPrivateState: createCallerPrivateState(deployerSecret),
-  });
+  const findCaller = (contractAddress: string) =>
+    findDeployedContract(providers, {
+      contractAddress,
+      compiledContract: callerCompiledContract,
+      privateStateId: CALLER_PRIVATE_STATE_ID,
+      initialPrivateState: createCallerPrivateState(deployerSecret),
+    });
+  const caller = await findCaller(callerDeployment.contractAddress);
+  const impersonator = await findCaller(impersonatorDeployment.contractAddress);
   session = {
     facade,
     caller,
     callerAddress: callerDeployment.contractAddress,
+    impersonator,
     publicDataProvider: providers.publicDataProvider,
     reader: new SignetRequestResponseReader({
       requesterContractAddress: callerDeployment.contractAddress,
@@ -320,6 +331,14 @@ async function dispatch(request: Request): Promise<unknown> {
     const responseKey = parseSecp256k1PublicKey(request.responsePublicKey);
     await active.caller.callTx.initialise(responseKey);
     active.responseKey = responseKey;
+    return {};
+  }
+  if (request.op === "notifyAsCaller") {
+    const requestId = parseRequestIdHex(request.requestId);
+    await active.impersonator.callTx.notifyAs(
+      contractAddressFromHex(active.callerAddress),
+      requestIdBytes(requestId),
+    );
     return {};
   }
   if (request.op === "signedTransaction") {

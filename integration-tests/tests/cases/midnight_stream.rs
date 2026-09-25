@@ -213,6 +213,45 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         };
         wait_for_completed_checkpoint(&cluster, request_id, final_block).await?;
     }
+
+    // Impersonation: another contract notifies the central Signet contract naming the caller's
+    // filed, still-pending request. Blocks index in order, so the next sign request seen after
+    // a later genuine submission must be that submission, never the impersonated one.
+    let mut argument = [0; 32];
+    argument[31] = 6;
+    let mut next_sign_request = async || {
+        let ChainEvent::SignRequest { request, .. } = events
+            .wait_for(
+                |event| {
+                    matches!(event, ChainEvent::SignRequest { request, .. }
+                        if request.chain == Chain::Midnight)
+                },
+                EVENT_TIMEOUT,
+            )
+            .await?
+        else {
+            unreachable!("filtered above")
+        };
+        anyhow::Ok(request.id.request_id)
+    };
+    midnight
+        .submit_is_even(4, [0x50; 20], argument, "bool")
+        .await?;
+    let victim_request = next_sign_request()
+        .await
+        .context("waiting for the victim's genuine SignRequest")?;
+    midnight.notify_as_caller(victim_request).await?;
+    midnight
+        .submit_is_even(5, [0x51; 20], argument, "bool")
+        .await?;
+    let after_impersonation = next_sign_request()
+        .await
+        .context("waiting for the SignRequest after the impersonation")?;
+    assert_ne!(
+        after_impersonation, victim_request,
+        "a notification from a contract other than the named caller was indexed"
+    );
+
     midnight.shutdown().await?;
     Ok(())
 }

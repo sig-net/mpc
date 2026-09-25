@@ -137,6 +137,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 call_index,
                 physical_segment,
                 phase,
+                caller,
                 emissions,
             } in candidate.calls
             {
@@ -161,6 +162,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 .process_entry(
                                     source,
                                     notification,
+                                    caller,
                                     &block.hash,
                                     block.number,
                                     indexed_ts,
@@ -257,6 +259,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         &self,
         source: &C,
         notification: SignBidirectionalEventNotification,
+        caller: Option<[u8; 32]>,
         at_hash: &str,
         height: u64,
         indexed_ts: u64,
@@ -284,17 +287,32 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         };
         let caller_hex = hex::encode(unpacked.caller_address);
 
-        // TODO: decide whether `caller_address` must be checked against the
-        // cross-contract-call initiator of the transaction that filed this notification.
-        // It is producer-supplied, so any contract can notify naming another, which
-        // triggers a signature over a record that contract filed. What that record says
-        // is already authenticated below: `resolve_verified_record` recomputes the
-        // request id and `generate_sign_request` requires `sender` to equal the address the
-        // record was read from. The exposure is therefore third-party triggering, not
-        // forgery, and the open question is whether that is worth gating. Gating it
-        // means joining each notification to the central call it came from through the
-        // claimed communication commitment, which the ledger validates for uniqueness
-        // and for corresponding to a real call.
+        // `caller_address` is producer-supplied, since a Midnight callee cannot see its caller.
+        // Bind it to the ledger-recorded direct caller so no contract can notify as another.
+        match caller {
+            Some(caller) if caller == unpacked.caller_address => {}
+            Some(caller) => {
+                return Ok(drop_entry(
+                    "caller-mismatch",
+                    height,
+                    Some(rid),
+                    &format!(
+                        "notification names {caller_hex}, direct caller is {}",
+                        hex::encode(caller)
+                    ),
+                ));
+            }
+            None => {
+                return Ok(drop_entry(
+                    "caller-absent",
+                    height,
+                    Some(rid),
+                    &format!(
+                        "notification names {caller_hex}, singleton call has no direct caller"
+                    ),
+                ));
+            }
+        }
 
         // Authority: the caller's own ledger at the SAME finalized hash the
         // notification was read at.
@@ -726,6 +744,7 @@ mod tests {
             phase: crate::emissions::TranscriptPhase::Guaranteed,
             physical_segment: 1,
             call_index: 1,
+            caller: Some(CALLER),
             emissions: vec![Emission { kind, payload }],
         }]
     }
@@ -1114,6 +1133,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1154,6 +1174,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1180,6 +1201,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_notification_not_from_its_named_caller_is_dropped() {
+        let (record, rid) = named_record_and_rid(7);
+        for caller in [Some([0x99; 32]), None] {
+            let mut source = FixtureSource::default();
+            let mut calls = one_call(EmissionKind::SignBidirectional, notification(rid));
+            calls[0].caller = caller;
+            source.set_emissions(9, calls);
+            source.set_state(CALLER, 9, caller_state(&record, rid));
+
+            let events = direct_indexer()
+                .await
+                .process_block(&source, &block_ref(9))
+                .await
+                .expect("a caller mismatch is a per-entry drop, not a block failure");
+
+            assert!(
+                events.is_empty(),
+                "a record {CALLER:?} filed must not be signed when the direct caller is {caller:?}"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn successful_request_logs_ledger_hash_and_sign_id_together() {
         let (record, rid) = named_record_and_rid(7);
@@ -1193,6 +1237,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1290,6 +1335,11 @@ mod tests {
             );
         };
         assert_eq!(emission.kind, EmissionKind::SignBidirectional);
+        assert_eq!(
+            call.caller,
+            Some(hex_32(CAPTURE_CALLER)),
+            "the captured integrator is the ledger-recorded direct caller of the singleton"
+        );
         let mut notification = decode_notification(&emission.payload);
 
         let caller_tree = crate::state::decode_contract_state(CAPTURE_CALLER_STATE)
@@ -1306,6 +1356,7 @@ mod tests {
             .process_entry(
                 &source,
                 notification.clone(),
+                call.caller,
                 CAPTURE_BLOCK_HASH,
                 CAPTURE_HEIGHT,
                 0,
@@ -1362,7 +1413,14 @@ mod tests {
 
         let request = direct_indexer()
             .await
-            .process_entry(&source, notification, CAPTURE_BLOCK_HASH, CAPTURE_HEIGHT, 0)
+            .process_entry(
+                &source,
+                notification,
+                call.caller,
+                CAPTURE_BLOCK_HASH,
+                CAPTURE_HEIGHT,
+                0,
+            )
             .await
             .expect("legacy entry processing does not hold");
         assert!(
@@ -1391,6 +1449,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 4,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignatureResponded,
@@ -1463,6 +1522,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignatureResponded,
@@ -1564,6 +1624,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1633,6 +1694,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 6,
+                caller: Some(CALLER),
                 emissions: Vec::new(),
             }],
         );
@@ -1851,6 +1913,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
