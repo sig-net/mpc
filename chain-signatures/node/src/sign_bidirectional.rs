@@ -50,6 +50,8 @@ pub enum BidirectionalProgress {
         respond_request: Arc<IndexedSignRequest>,
         progress: SignProgress,
     },
+    /// Terminal output extraction failure; retained for source checkpoint agreement.
+    Parked(Arc<BidirectionalTx>),
 }
 
 /// Overall status of any request held in the backlog.
@@ -69,7 +71,9 @@ impl SignStatus {
             Self::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
                 progress.is_generating()
             }
-            Self::Bidirectional(BidirectionalProgress::Executing(_)) => false,
+            Self::Bidirectional(
+                BidirectionalProgress::Executing(_) | BidirectionalProgress::Parked(_),
+            ) => false,
         }
     }
 
@@ -94,19 +98,23 @@ impl SignStatus {
             Self::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
                 progress.publishing()
             }
-            Self::Bidirectional(BidirectionalProgress::Executing(_)) => None,
+            Self::Bidirectional(
+                BidirectionalProgress::Executing(_) | BidirectionalProgress::Parked(_),
+            ) => None,
         }
     }
 
     /// Project this status onto what is observable at a checkpoint's own chain height.
     ///
     /// * `0` — the initial source-chain phase (standard Sign or initial Bidirectional).
-    /// * `1` — the post-initial phase (Bidirectional awaiting target execution or final response).
+    /// * `1` — the post-initial phase (Bidirectional awaiting target execution, parked, or final response).
     pub fn consensus_tag(&self) -> u8 {
         match self {
             Self::Sign(_) | Self::Bidirectional(BidirectionalProgress::Initial(_)) => 0,
             Self::Bidirectional(
-                BidirectionalProgress::Executing(_) | BidirectionalProgress::Final { .. },
+                BidirectionalProgress::Executing(_)
+                | BidirectionalProgress::Final { .. }
+                | BidirectionalProgress::Parked(_),
             ) => 1,
         }
     }

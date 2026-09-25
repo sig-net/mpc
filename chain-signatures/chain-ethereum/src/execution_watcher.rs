@@ -475,11 +475,18 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         block_number: u64,
     ) -> (
         Vec<ChainEvent>,
-        HashSet<(Address, u64)>,
+        HashMap<(Address, u64), Arc<BidirectionalTx>>,
         HashSet<BidirectionalTxId>,
     ) {
         let mut events = Vec::new();
-        let mut consumed_slots = HashSet::new();
+        // Midnight must agree on replacement height despite receipt RPC failures.
+        // Its validated signed hash in this finalized block proves consumption.
+        // Other source chains retain their receipt-based replacement policy.
+        let mut consumed_slots: HashMap<_, _> = mined
+            .iter()
+            .filter(|(_, (_, tx))| tx.source_chain == Chain::Midnight)
+            .map(|(_, (_, tx))| ((Address::from(tx.from_address), tx.nonce), Arc::clone(tx)))
+            .collect();
         let mut failed = HashSet::new();
 
         for (tx_id, sign_id, pending_tx, result) in
@@ -487,10 +494,10 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         {
             match result {
                 Ok(BackfillOutcome::Observed { confirmation }) => {
-                    // The tx mined regardless of extraction outcome, so its
-                    // nonce slot is consumed either way.
-                    consumed_slots
-                        .insert((Address::from(pending_tx.from_address), pending_tx.nonce));
+                    consumed_slots.insert(
+                        (Address::from(pending_tx.from_address), pending_tx.nonce),
+                        pending_tx,
+                    );
                     match confirmation {
                         ConfirmationOutcome::Confirmed(event) => events.push(event),
                         ConfirmationOutcome::RetryExtraction => {
@@ -535,23 +542,37 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     }
 
     /// Resolves pending watchers whose (sender, nonce) slot was consumed by a
-    /// different tx mined in this block: since only the network can sign for
-    /// these sender addresses, the consuming tx is necessarily another
-    /// watcher, making replacement a pure function of block content + local
-    /// watcher state (no RPC, deterministic `block_height` across nodes).
+    /// different watched tx mined in this block. A Midnight verdict requires
+    /// different unsigned bytes: another signature over the same transaction
+    /// is not evidence that the requested execution became unviable.
+    /// The supplied height belongs to the block containing the consuming tx,
+    /// never a later nonce sweep that cannot recover the replacement height.
     /// Returns the events and the remaining unmined watchers.
     fn resolve_replaced_siblings(
         unmined: Vec<WatcherEntry>,
-        consumed_slots: &HashSet<(Address, u64)>,
+        consumed_slots: &HashMap<(Address, u64), Arc<BidirectionalTx>>,
         block_number: u64,
     ) -> (Vec<ChainEvent>, Vec<WatcherEntry>) {
         let mut events = Vec::new();
         let mut remaining = Vec::new();
         for (tx_id, (sign_id, tx)) in unmined {
-            if consumed_slots.contains(&(Address::from(tx.from_address), tx.nonce)) {
-                if let Some(event) =
+            if let Some(consuming_tx) =
+                consumed_slots.get(&(Address::from(tx.from_address), tx.nonce))
+            {
+                let event = if tx.source_chain == Chain::Midnight {
+                    (tx.serialized_transaction != consuming_tx.serialized_transaction).then_some(
+                        ChainEvent::ExecutionConfirmed {
+                            tx_id,
+                            sign_id,
+                            source_chain: tx.source_chain,
+                            block_height: block_number,
+                            result: ExecutionOutcome::Unviable,
+                        },
+                    )
+                } else {
                     Self::consumed_nonce_fallback(tx_id, sign_id, &tx, block_number)
-                {
+                };
+                if let Some(event) = event {
                     tracing::info!(
                         ?tx_id,
                         ?sign_id,
@@ -656,7 +677,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 #[cfg(test)]
 mod tests {
     use crate::test_utils;
-    use alloy::primitives::{address, b256};
+    use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::{Block, BlockTransactions};
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::StateManager;
@@ -1770,35 +1791,138 @@ mod tests {
     }
 
     #[test]
-    fn midnight_replaced_sibling_stays_pending_without_changing_legacy_policy() {
+    fn observed_replacement_resolves_midnight_without_changing_legacy_policy() {
         let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
-        for source_chain in [Chain::Midnight, Chain::Solana] {
+        for source_chain in [
+            Chain::Midnight,
+            Chain::Solana,
+            Chain::Canton,
+            Chain::Hydration,
+        ] {
             let tx_hash = b256!("dddd000000000000000000000000000000000000000000000000000000000000");
             let mut tx = test_watcher_tx(tx_hash, from_address, 7);
             Arc::make_mut(&mut tx).source_chain = source_chain;
+            let mut consuming_tx = tx.clone();
+            Arc::make_mut(&mut consuming_tx)
+                .serialized_transaction
+                .push(1);
             let (events, remaining) = super::ExecutionWatcher::<
                 mpc_chain_integration_core::MockStateManager,
                 test_utils::CountingChainTelemetry,
             >::resolve_replaced_siblings(
                 vec![(BidirectionalTxId(tx_hash.0), (SignId::new([0xdd; 32]), tx))],
-                &std::collections::HashSet::from([(from_address, 7)]),
+                &std::collections::HashMap::from([((from_address, 7), consuming_tx)]),
                 5,
             );
-            if source_chain == Chain::Midnight {
-                assert!(events.is_empty());
-                assert_eq!(remaining.len(), 1);
-                assert_eq!(remaining[0].0, BidirectionalTxId(tx_hash.0));
-                continue;
-            }
             assert!(remaining.is_empty());
             assert_eq!(events.len(), 1);
-            let ChainEvent::ExecutionConfirmed { result, .. } = &events[0] else {
+            let ChainEvent::ExecutionConfirmed {
+                result,
+                block_height,
+                ..
+            } = &events[0]
+            else {
                 panic!("unexpected event {:?}", events[0]);
             };
-            assert_eq!(
-                std::mem::discriminant(result),
-                std::mem::discriminant(&ExecutionOutcome::Failed)
+            assert_eq!(*block_height, 5);
+            if source_chain == Chain::Midnight {
+                assert!(matches!(result, ExecutionOutcome::Unviable));
+            } else {
+                assert!(matches!(result, ExecutionOutcome::Failed));
+            }
+        }
+    }
+
+    #[test]
+    fn midnight_unviable_requires_different_unsigned_bytes_at_the_same_nonce() {
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let tx_hash = alloy::primitives::B256::repeat_byte(0xdd);
+        let mut tx = test_watcher_tx(tx_hash, from_address, 7);
+        Arc::make_mut(&mut tx).source_chain = Chain::Midnight;
+        for case in [
+            "same unsigned transaction",
+            "different sender",
+            "different nonce",
+            "no observation",
+        ] {
+            let mut consuming_tx = tx.clone();
+            Arc::make_mut(&mut consuming_tx).id = BidirectionalTxId([0xee; 32]);
+            if case != "same unsigned transaction" {
+                Arc::make_mut(&mut consuming_tx)
+                    .serialized_transaction
+                    .push(1);
+            }
+            let slot = match case {
+                "different sender" => (Address::repeat_byte(0x44), 7),
+                "different nonce" => (from_address, 8),
+                _ => (from_address, 7),
+            };
+            let consumed = if case == "no observation" {
+                std::collections::HashMap::new()
+            } else {
+                std::collections::HashMap::from([(slot, consuming_tx)])
+            };
+            let (events, remaining) = super::ExecutionWatcher::<
+                mpc_chain_integration_core::MockStateManager,
+                test_utils::CountingChainTelemetry,
+            >::resolve_replaced_siblings(
+                vec![(
+                    BidirectionalTxId(tx_hash.0),
+                    (SignId::new([0xdd; 32]), tx.clone()),
+                )],
+                &consumed,
+                5,
             );
+            assert!(events.is_empty(), "{case}: must not infer Unviable");
+            assert_eq!(remaining.len(), 1, "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn midnight_replacement_does_not_depend_on_receipt_rpc_availability() {
+        for status in [200, 500] {
+            let mut server = Server::new_async().await;
+            let from = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+            let consuming_hash = alloy::primitives::B256::repeat_byte(0xaa);
+            let displaced_hash = alloy::primitives::B256::repeat_byte(0xbb);
+            let receipt = server.mock("POST", "/")
+                .match_body(Matcher::PartialJson(json!({
+                    "method": "eth_getTransactionReceipt", "params": [format!("{consuming_hash:#x}")]
+                })))
+                .with_status(status)
+                .with_header("content-type", "application/json")
+                .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": null}).to_string())
+                .expect_at_least(1)
+                .create_async().await;
+            let nonce = server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(
+                    json!({"method": "eth_getTransactionCount"}),
+                ))
+                .expect(0)
+                .create_async()
+                .await;
+            let harness = test_utils::WatcherHarness::new(&server.url()).await;
+            for hash in [consuming_hash, displaced_hash] {
+                let mut tx = test_watcher_tx(hash, from, 7);
+                let tx_fields = Arc::make_mut(&mut tx);
+                tx_fields.source_chain = Chain::Midnight;
+                tx_fields.serialized_transaction = hash.to_vec();
+                harness
+                    .state_manager
+                    .watch_execution(Chain::Ethereum, SignId::new(hash.0), tx)
+                    .await;
+            }
+            let mut block: Block = Block::default();
+            block.header.number = 5;
+            block.transactions = BlockTransactions::Hashes(vec![consuming_hash]);
+            let events = harness.watcher().collect(&block).await.unwrap();
+            assert_eq!(events.len(), 1, "receipt HTTP {status}");
+            assert!(matches!(&events[0], ChainEvent::ExecutionConfirmed {
+                tx_id, block_height: 5, result: ExecutionOutcome::Unviable, ..
+            } if tx_id.0 == displaced_hash.0));
+            receipt.assert_async().await;
+            nonce.assert_async().await;
         }
     }
 
@@ -2169,148 +2293,159 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replaced_sibling_fails_at_replacement_block_without_rpc() {
-        let mut server = Server::new_async().await;
+    async fn replaced_sibling_uses_source_policy_at_replacement_block_without_rpc() {
+        for source_chain in [Chain::Solana, Chain::Midnight] {
+            let mut server = Server::new_async().await;
 
-        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
-        let tx_hash_a = b256!("7777777777777777777777777777777777777777777777777777777777777777");
-        let tx_hash_b = b256!("8888888888888888888888888888888888888888888888888888888888888888");
-        let block_hash = b256!("6e4e53d1de650d5a5ebed19b38321db369ef1dc357904284ecf4d89b8834969c");
-        let receipt_response = json!({
-            "transactionHash": format!("{tx_hash_a:#x}"),
-            "blockHash": format!("{block_hash:#x}"),
-            "blockNumber": "0x5",
-            "transactionIndex": "0x0",
-            "from": format!("{from_address:#x}"),
-            "to": format!("{from_address:#x}"),
-            "gasUsed": "0x5208",
-            "effectiveGasPrice": "0x3a29f0f8",
-            "contractAddress": null,
-            "logsBloom": format!("0x{}", "0".repeat(512)),
-            "cumulativeGasUsed": "0x5208",
-            "type": "0x2",
-            "logs": [],
-            "status": "0x0"
-        });
+            let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+            let tx_hash_a =
+                b256!("7777777777777777777777777777777777777777777777777777777777777777");
+            let tx_hash_b =
+                b256!("8888888888888888888888888888888888888888888888888888888888888888");
+            let block_hash =
+                b256!("6e4e53d1de650d5a5ebed19b38321db369ef1dc357904284ecf4d89b8834969c");
+            let receipt_response = json!({
+                "transactionHash": format!("{tx_hash_a:#x}"),
+                "blockHash": format!("{block_hash:#x}"),
+                "blockNumber": "0x5",
+                "transactionIndex": "0x0",
+                "from": format!("{from_address:#x}"),
+                "to": format!("{from_address:#x}"),
+                "gasUsed": "0x5208",
+                "effectiveGasPrice": "0x3a29f0f8",
+                "contractAddress": null,
+                "logsBloom": format!("0x{}", "0".repeat(512)),
+                "cumulativeGasUsed": "0x5208",
+                "type": "0x2",
+                "logs": [],
+                "status": "0x0"
+            });
 
-        // Phase 1 (block 4): both watchers appear; one-shot gate checks the
-        // (deduped) sender once, nonce not yet consumed
-        let nonce_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getTransactionCount",
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x0" }).to_string())
-            .expect(1)
-            .create_async()
-            .await;
+            // Phase 1 (block 4): both watchers appear; one-shot gate checks the
+            // (deduped) sender once, nonce not yet consumed
+            let nonce_mock = server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(json!({
+                    "method": "eth_getTransactionCount",
+                })))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x0" }).to_string())
+                .expect(1)
+                .create_async()
+                .await;
 
-        let receipt_a_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getTransactionReceipt",
-                "params": [format!("{tx_hash_a:#x}")]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": receipt_response }).to_string())
-            .expect(1)
-            .create_async()
-            .await;
+            let receipt_a_mock = server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(json!({
+                    "method": "eth_getTransactionReceipt",
+                    "params": [format!("{tx_hash_a:#x}")]
+                })))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(
+                    json!({ "jsonrpc": "2.0", "id": 1, "result": receipt_response }).to_string(),
+                )
+                .expect(1)
+                .create_async()
+                .await;
 
-        // The replaced sibling must never be queried over RPC
-        let receipt_b_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "eth_getTransactionReceipt",
-                "params": [format!("{tx_hash_b:#x}")]
-            })))
-            .expect(0)
-            .create_async()
-            .await;
+            // The replaced sibling must never be queried over RPC
+            let receipt_b_mock = server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(json!({
+                    "method": "eth_getTransactionReceipt",
+                    "params": [format!("{tx_hash_b:#x}")]
+                })))
+                .expect(0)
+                .create_async()
+                .await;
 
-        let harness = test_utils::WatcherHarness::new(&server.url()).await;
-        let create_tx = |hash: alloy::primitives::B256| {
-            Arc::new(BidirectionalTx {
-                id: BidirectionalTxId(hash.0),
-                sender: [0u8; 32],
-                serialized_transaction: vec![],
-                source_chain: Chain::Solana,
-                target_chain: Chain::Ethereum,
-                caip2_id: "eip155:31337".to_string(),
-                key_version: LATEST_MPC_KEY_VERSION,
-                deposit: 0,
-                path: "m/44'/60'/0'/0/0".to_string(),
-                algo: "secp256k1".to_string(),
-                dest: Chain::Ethereum.to_string(),
-                params: "{}".to_string(),
-                output_deserialization_schema: vec![],
-                respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-                request_id: hash.0,
-                from_address: **from_address,
-                nonce: 0,
-            })
-        };
+            let harness = test_utils::WatcherHarness::new(&server.url()).await;
+            let create_tx = |hash: alloy::primitives::B256| {
+                Arc::new(BidirectionalTx {
+                    id: BidirectionalTxId(hash.0),
+                    sender: [0u8; 32],
+                    serialized_transaction: hash.to_vec(),
+                    source_chain,
+                    target_chain: Chain::Ethereum,
+                    caip2_id: "eip155:31337".to_string(),
+                    key_version: LATEST_MPC_KEY_VERSION,
+                    deposit: 0,
+                    path: "m/44'/60'/0'/0/0".to_string(),
+                    algo: "secp256k1".to_string(),
+                    dest: Chain::Ethereum.to_string(),
+                    params: "{}".to_string(),
+                    output_deserialization_schema: vec![],
+                    respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+                    request_id: hash.0,
+                    from_address: **from_address,
+                    nonce: 0,
+                })
+            };
 
-        harness
-            .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
-            .await;
-        harness
-            .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
-            .await;
+            harness
+                .state_manager
+                .watch_execution(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
+                .await;
+            harness
+                .state_manager
+                .watch_execution(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
+                .await;
 
-        let mut block4: Block = Block::default();
-        block4.header.number = 4;
-        block4.transactions = BlockTransactions::Hashes(Vec::new());
+            let mut block4: Block = Block::default();
+            block4.header.number = 4;
+            block4.transactions = BlockTransactions::Hashes(Vec::new());
 
-        let events = harness
-            .watcher()
-            .collect(&block4)
-            .await
-            .expect("should succeed");
-        assert!(events.is_empty());
-        nonce_mock.assert_async().await;
-        nonce_mock.remove_async().await;
+            let events = harness
+                .watcher()
+                .collect(&block4)
+                .await
+                .expect("should succeed");
+            assert!(events.is_empty());
+            nonce_mock.assert_async().await;
+            nonce_mock.remove_async().await;
 
-        // Phase 2 (block 5, NOT a tick): tx A mines; sibling B is failed
-        // purely from local watcher state, no nonce RPC
-        let mut block5: Block = Block::default();
-        block5.header.number = 5;
-        block5.transactions = BlockTransactions::Hashes(vec![tx_hash_a]);
+            // Phase 2: the mined transaction reverted; the displaced sibling is
+            // Unviable for Midnight or Failed under the legacy policy. No nonce RPC.
+            let mut block5: Block = Block::default();
+            block5.header.number = 5;
+            block5.transactions = BlockTransactions::Hashes(vec![tx_hash_a]);
 
-        let events = harness
-            .watcher()
-            .collect(&block5)
-            .await
-            .expect("should succeed");
+            let events = harness
+                .watcher()
+                .collect(&block5)
+                .await
+                .expect("should succeed");
 
-        assert_eq!(events.len(), 2);
-        let mut resolved: Vec<_> = events
-            .iter()
-            .map(|e| match e {
-                ChainEvent::ExecutionConfirmed {
-                    tx_id,
-                    block_height,
-                    result,
-                    ..
-                } => {
-                    assert_eq!(*block_height, 5, "both events at the replacement block");
-                    assert!(matches!(result, ExecutionOutcome::Failed));
-                    tx_id.0
-                }
-                other => panic!("expected ExecutionConfirmed, got {other:?}"),
-            })
-            .collect();
-        resolved.sort();
-        let mut expected = vec![tx_hash_a.0, tx_hash_b.0];
-        expected.sort();
-        assert_eq!(resolved, expected);
+            assert_eq!(events.len(), 2);
+            let mut resolved: Vec<_> = events
+                .iter()
+                .map(|e| match e {
+                    ChainEvent::ExecutionConfirmed {
+                        tx_id,
+                        block_height,
+                        result,
+                        ..
+                    } => {
+                        assert_eq!(*block_height, 5, "both events at the replacement block");
+                        if source_chain == Chain::Midnight && tx_id.0 == tx_hash_b.0 {
+                            assert!(matches!(result, ExecutionOutcome::Unviable));
+                        } else {
+                            assert!(matches!(result, ExecutionOutcome::Failed));
+                        }
+                        tx_id.0
+                    }
+                    other => panic!("expected ExecutionConfirmed, got {other:?}"),
+                })
+                .collect();
+            resolved.sort();
+            let mut expected = vec![tx_hash_a.0, tx_hash_b.0];
+            expected.sort();
+            assert_eq!(resolved, expected);
 
-        receipt_a_mock.assert_async().await;
-        receipt_b_mock.assert_async().await;
+            receipt_a_mock.assert_async().await;
+            receipt_b_mock.assert_async().await;
+        }
     }
 }
