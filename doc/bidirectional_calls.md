@@ -731,7 +731,13 @@ Enums: `MPCSignatureAlgorithm { ecdsa, reserved }`,
 
 `RequestId` is `bytes(32)`. `Signature` is the MPC's ECDSA signature:
 `bigR`, an affine point `{ x: bytes(32), y: bytes(32) }`, `s: bytes(32)`
-and `recoveryId: u8`, the parity of `bigR.y`, all big-endian SEC1.
+and `recoveryId: u8`, the recovery flag that recovers the signer from the
+supplied signature, with coordinates and `s` encoded as big-endian SEC1
+values. When converting a high-`s` signature to low-`s`, replace `s` with
+`n - s` (where `n` is the curve's group order) and flip the recovery parity
+bit together. EVM transactions require the low-`s` form. The recovery flag
+must match the supplied `s`, even if `bigR` retains the nonce point from
+before that conversion.
 
 ### 7.2 Request id: RequestIdPreimageV1
 
