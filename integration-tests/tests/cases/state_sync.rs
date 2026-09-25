@@ -1,5 +1,7 @@
+use cait_sith::protocol::Participant;
 use deadpool_redis::redis::AsyncCommands;
-use integration_tests::mpc_fixture::MpcFixtureBuilder;
+use integration_tests::mpc_fixture::{MpcFixtureBuilder, MpcFixtureNode};
+use mpc_node::protocol::sync::SyncUpdate;
 use test_log::test;
 
 use std::time::Duration;
@@ -643,4 +645,111 @@ async fn test_sync_matrix() {
         // Wait for async Drop cleanup.
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// How many triple and presignature shares a node holds for each owner.
+async fn shares_by_owner(
+    node: &MpcFixtureNode,
+    owners: &[Participant],
+) -> Vec<(Participant, usize, usize)> {
+    let mut shares = Vec::new();
+    for &owner in owners {
+        shares.push((
+            owner,
+            node.triple_storage.len_by_owner(owner).await,
+            node.presignature_storage.len_by_owner(owner).await,
+        ));
+    }
+    shares
+}
+
+fn empty_update(from: Participant) -> SyncUpdate {
+    SyncUpdate {
+        from,
+        triples: vec![],
+        presignatures: vec![],
+    }
+}
+
+/// A caller with a key the contract doesn't know can't make a node drop shares,
+/// whether it claims to be the receiver (the owner of its own artifacts) or
+/// another owner.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_rejects_outside_caller() {
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let owners = fixture.sorted_participants();
+    let before = shares_by_owner(node1, &owners).await;
+    assert!(
+        before.iter().all(|&(_, t, p)| t > 0 && p > 0),
+        "node1 should hold shares of every owner's artifacts: {before:?}"
+    );
+
+    let outsider_sk = near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
+    for claimed in [node1.me, node0.me] {
+        let result = node1
+            .try_sync(claimed, &outsider_sk, &empty_update(claimed))
+            .await;
+        assert!(
+            result.is_err(),
+            "outsider claiming {claimed:?} should be rejected"
+        );
+    }
+
+    assert_eq!(shares_by_owner(node1, &owners).await, before);
+}
+
+/// A participant can't pass as another node: claiming another sender fails the
+/// signature check, and a `from` inside the payload is ignored for the signer.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_rejects_impersonation() {
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let node2 = &fixture.nodes[2];
+    let owners = fixture.sorted_participants();
+    let before = shares_by_owner(node1, &owners).await;
+    assert!(
+        before.iter().all(|&(_, t, p)| t > 0 && p > 0),
+        "node1 should hold shares of every owner's artifacts: {before:?}"
+    );
+
+    let node2_sk = node2.config.borrow().local.network.sign_sk.clone();
+
+    // node2's key, but the signed envelope claims another sender.
+    for victim in [node0.me, node1.me] {
+        let result = node1
+            .try_sync(victim, &node2_sk, &empty_update(victim))
+            .await;
+        assert!(
+            result.is_err(),
+            "node2 signing as {victim:?} should be rejected"
+        );
+    }
+
+    // Signed honestly as node2, with node0 named inside the payload. If that
+    // `from` were trusted, node1 would drop its shares of node0's artifacts,
+    // since none of them are in node2's list.
+    let update = SyncUpdate {
+        from: node0.me,
+        triples: node2.owned_triples().await,
+        presignatures: node2.owned_presignatures().await,
+    };
+    let response = node1
+        .try_sync(node2.me, &node2_sk, &update)
+        .await
+        .expect("node2 signing as itself should be accepted");
+    assert_eq!(response.from, node1.me);
+    assert!(response.triples.is_empty() && response.presignatures.is_empty());
+
+    assert_eq!(shares_by_owner(node1, &owners).await, before);
 }

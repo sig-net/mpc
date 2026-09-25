@@ -13,7 +13,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::protocol::message::SignedMessage;
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
-use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
+use mpc_node::protocol::sync::{SyncChannel, SyncError, SyncUpdate};
 use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_node::types::SignCommand;
@@ -414,13 +414,23 @@ impl MpcFixtureNode {
             presignatures,
         };
         let sign_sk = from.config.borrow().local.network.sign_sk.clone();
-        let cipher_pk = self.config.borrow().local.network.cipher_sk.public_key();
-        let encrypted = SignedMessage::encrypt(&update, from.me, &sign_sk, &cipher_pk)
-            .expect("failed to encrypt sync update");
-        self.sync_channel
-            .request_update(encrypted)
+        self.try_sync(from.me, &sign_sk, &update)
             .await
             .expect("sync_channel request_update failed")
+    }
+
+    /// Deliver `update` to this node as a sync request that claims to come
+    /// from `claimed` and is signed with `sign_sk`, so tests can forge either.
+    pub async fn try_sync(
+        &self,
+        claimed: Participant,
+        sign_sk: &near_crypto::SecretKey,
+        update: &SyncUpdate,
+    ) -> Result<SyncUpdate, SyncError> {
+        let cipher_pk = self.config.borrow().local.network.cipher_sk.public_key();
+        let encrypted = SignedMessage::encrypt(update, claimed, sign_sk, &cipher_pk)
+            .expect("failed to encrypt sync update");
+        self.sync_channel.request_update(encrypted).await
     }
 
     /// Get the list of triple IDs this node owns in storage (sorted).
