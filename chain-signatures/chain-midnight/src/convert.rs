@@ -207,7 +207,7 @@ mod tests {
         record.output_deserialization_schema = [output_json.as_slice(), b"\0junk\0\0"].concat();
         record.respond_serialization_schema =
             [respond_json.as_slice(), b"\0nonzero-suffix\0"].concat();
-        let request_id_before = crate::hashing::compute_request_id(&record);
+        let request_id_before = crate::hashing::compute_request_id(&record).unwrap();
 
         let request = generate_sign_request(&record, &READ_ADDRESS, request_id_before, INDEXED_TS)
             .expect("the caller record converts");
@@ -215,7 +215,7 @@ mod tests {
         forwarded_record.output_deserialization_schema = output_json.clone();
         forwarded_record.respond_serialization_schema = respond_json.clone();
         assert_eq!(
-            crate::hashing::compute_request_id(&forwarded_record),
+            crate::hashing::compute_request_id(&forwarded_record).unwrap(),
             request_id_before,
             "schemas and their padding do not participate in request identity"
         );

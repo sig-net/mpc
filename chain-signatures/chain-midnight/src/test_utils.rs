@@ -86,12 +86,10 @@ pub(crate) fn trim(bytes: &[u8]) -> Vec<u8> {
 pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>> {
     let tx = &record.tx_params;
     let mut atoms: Vec<Vec<u8>> = vec![
-        trim(&record.sender),
         trim(&[record.key_version]),
+        trim(&record.sender),
         trim(&record.path),
         trim(&[record.algo]),
-        trim(&[record.signature_dest]),
-        trim(&record.params),
         trim(&[record.tx_param_type]),
         trim(&tx.chain_id.to_le_bytes()),
         trim(&tx.nonce.to_le_bytes()),
@@ -120,10 +118,10 @@ pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>
         }
     }
     atoms.push(trim(&record.execution_dest));
-    // Schemas are exact-length by protocol convention, never ending in a zero byte, so
-    // stored length equals declared length.
-    atoms.push(record.output_deserialization_schema.clone());
-    atoms.push(record.respond_serialization_schema.clone());
+    atoms.push(trim(&[record.signature_dest]));
+    atoms.push(trim(&record.params));
+    atoms.push(trim(&record.output_deserialization_schema));
+    atoms.push(trim(&record.respond_serialization_schema));
     atoms
 }
 
@@ -132,12 +130,10 @@ pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>
 pub(crate) fn widths_from_record(record: &SignBidirectionalRecord) -> Vec<u32> {
     let tx = &record.tx_params;
     let mut widths: Vec<u32> = vec![
-        32, // sender
         1,  // key_version
+        32, // sender
         32, // path
         1,  // algo
-        1,  // signature_dest
-        64, // params
         1,  // tx_param_type
         8,  // chain_id
         8,  // nonce
@@ -158,6 +154,8 @@ pub(crate) fn widths_from_record(record: &SignBidirectionalRecord) -> Vec<u32> {
         widths.extend(std::iter::repeat_n(32, entry.storage_keys.len()));
     }
     widths.push(32); // execution_dest
+    widths.push(1); // signature_dest
+    widths.push(64); // params
     widths.push(record.output_deserialization_schema.len() as u32);
     widths.push(record.respond_serialization_schema.len() as u32);
     widths

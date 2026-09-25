@@ -4,6 +4,7 @@ import { createCircuitContext, createConstructorContext } from "@midnight-ntwrk/
 import { SigningKey, getBytes } from "ethers";
 import {
   calculateRequestId,
+  calculateEvmType2TxParamsDigest,
   decodeSignetLogEvents,
   decodeRespondBidirectionalEventPayload,
 } from "@sig-net/midnight";
@@ -19,12 +20,10 @@ const padded = (text: string, width: number): Uint8Array => {
 };
 
 const record: Parameters<typeof pureCircuits.requestId34>[0] = {
-  sender: { bytes: new Uint8Array(32).fill(0xab) },
   keyVersion: 1n,
+  sender: { bytes: new Uint8Array(32).fill(0xab) },
   path: padded("caller-path", 32),
   algo: 0,
-  signatureDest: 0,
-  params: new Uint8Array(64),
   txParamType: 0,
   txParams: {
     chainId: 31337n,
@@ -46,6 +45,8 @@ const record: Parameters<typeof pureCircuits.requestId34>[0] = {
     accessList: [],
   },
   executionDest: padded("eip155:31337", 32),
+  signatureDest: 0,
+  params: new Uint8Array(64),
   outputDeserializationSchema: padded("uint256", 34),
   respondSerializationSchema: padded("uint256", 34),
 };
@@ -61,12 +62,141 @@ assert.deepEqual(
   }),
   requestId,
 );
-const { currentContractState } = await new Contract({}).initialState(
-  createConstructorContext({}, "44".repeat(32)),
-  record,
-);
-const cell = currentContractState.data.state.asArray()?.[0]?.asCell();
-assert.ok(cell);
+const minimal: Parameters<typeof pureCircuits.requestId000>[0] = {
+  ...record,
+  txParams: {
+    ...record.txParams,
+    calldata: { is_some: false, value: { selector: new Uint8Array(4), noWords: 0n, words: [] } },
+  },
+};
+const unused: Parameters<typeof pureCircuits.requestId122>[0] = {
+  ...record,
+  txParams: {
+    ...record.txParams,
+    accessList: [0, 1].map(() => ({
+      address: new Uint8Array(20),
+      storageKeyCount: 0n,
+      storageKeys: [new Uint8Array(32), new Uint8Array(32)],
+    })),
+  },
+};
+const partial: Parameters<typeof pureCircuits.requestId223>[0] = {
+  ...record,
+  txParams: {
+    ...record.txParams,
+    calldata: {
+      is_some: true,
+      value: {
+        ...record.txParams.calldata.value,
+        noWords: 2n,
+        words: [new Uint8Array(32).fill(0x11), new Uint8Array(32).fill(0x22)],
+      },
+    },
+    accessListEntryCount: 1n,
+    accessList: [
+      {
+        address: new Uint8Array(20).fill(0xef),
+        storageKeyCount: 3n,
+        storageKeys: [1, 2, 3].map((byte) => new Uint8Array(32).fill(byte)),
+      },
+      {
+        address: new Uint8Array(20),
+        storageKeyCount: 0n,
+        storageKeys: [0, 0, 0].map(() => new Uint8Array(32)),
+      },
+    ],
+  },
+};
+type Records = [typeof record, typeof minimal, typeof unused, typeof partial];
+const defaults: Records = [record, minimal, unused, partial];
+async function requestVector(name: string, index: 0 | 1 | 2 | 3, records = defaults) {
+  const ids = [
+    pureCircuits.requestId34(records[0]),
+    pureCircuits.requestId000(records[1]),
+    pureCircuits.requestId122(records[2]),
+    pureCircuits.requestId223(records[3]),
+  ];
+  const digests = [
+    pureCircuits.txParamsDigest34(records[0].txParams),
+    pureCircuits.txParamsDigest000(records[1].txParams),
+    pureCircuits.txParamsDigest122(records[2].txParams),
+    pureCircuits.txParamsDigest223(records[3].txParams),
+  ];
+  assert.deepEqual(ids[index], calculateRequestId(records[index]));
+  assert.deepEqual(digests[index], calculateEvmType2TxParamsDigest(records[index].txParams));
+  const { currentContractState } = await new Contract({}).initialState(
+    createConstructorContext({}, "44".repeat(32)),
+    ...records,
+  );
+  const cell = currentContractState.data.state.asArray()?.[index]?.asCell();
+  assert.ok(cell);
+  return {
+    name,
+    requestId: hex(ids[index]!),
+    txParamsDigest: hex(digests[index]!),
+    atoms: cell.value.map(hex),
+    widths: cell.alignment.map((segment) => {
+      assert.ok(segment.tag === "atom" && segment.value.tag === "bytes");
+      return segment.value.length;
+    }),
+  };
+}
+const requestVectors = await Promise.all([
+  requestVector("sample", 0),
+  requestVector("minimal", 1),
+  requestVector("unused-access-list", 2),
+  requestVector("partial-access-list", 3),
+]);
+for (const [name, modify] of [
+  [
+    "unused-slots",
+    (value) => {
+      value.txParams.calldata.value.noWords = 1n;
+      value.txParams.calldata.value.words[1]!.fill(0xfa);
+      value.txParams.accessList[0]!.storageKeyCount = 1n;
+      value.txParams.accessList[0]!.storageKeys[1]!.fill(0xfb);
+      value.txParams.accessList[0]!.storageKeys[2]!.fill(0xfc);
+      value.txParams.accessList[1]!.address.fill(0xfd);
+      value.txParams.accessList[1]!.storageKeyCount = 3n;
+      for (const key of value.txParams.accessList[1]!.storageKeys) key.fill(0xfe);
+    },
+  ],
+  [
+    "absent-calldata",
+    (value) => {
+      value.txParams.calldata.is_some = false;
+    },
+  ],
+  [
+    "empty-calldata",
+    (value) => {
+      value.txParams.calldata.value.noWords = 0n;
+    },
+  ],
+  [
+    "full-access-list",
+    (value) => {
+      value.txParams.accessListEntryCount = 2n;
+    },
+  ],
+  [
+    "integer-boundaries",
+    (value) => {
+      value.keyVersion = 255n;
+      value.txParams.chainId = 0xffffffffffffffffn;
+      value.txParams.nonce = 0xffffffffffffffffn;
+      value.txParams.gasLimit = 0xffffffffffffffffn;
+      value.txParams.maxPriorityFeePerGas = 0xffffffffffffffffffffffffffffffffn;
+      value.txParams.maxFeePerGas = 0xffffffffffffffffffffffffffffffffn;
+      value.txParams.value = 0xffffffffffffffffffffffffffffffffn;
+    },
+  ],
+] satisfies [string, (value: typeof partial) => void][]) {
+  const records = structuredClone(defaults);
+  modify(records[3]);
+  requestVectors.push(await requestVector(name, 3, records));
+}
+assert.equal(requestVectors[0]!.requestId, requestVectors[2]!.requestId);
 
 const rid = new Uint8Array(32).fill(0x2f);
 const data = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
@@ -202,15 +332,10 @@ const fixture = {
   responseEvent,
   compiler: "0.33.0-rc.2",
   runtime: "0.18.0-rc.1",
-  reference: "@sig-net/midnight@0.24.0-rc.2/src/Signet.compact",
-  request: {
-    requestId: hex(requestId),
-    atoms: cell.value.map(hex),
-    widths: cell.alignment.map((segment) => {
-      assert.ok(segment.tag === "atom" && segment.value.tag === "bytes");
-      return segment.value.length;
-    }),
-  },
+  reference: "@sig-net/midnight@0.24.0-rc.3/src/Signet.compact",
+  referenceCommit: "5caf03623a1a5055b884f594e297076de689be2a",
+  request: requestVectors[0],
+  requestVectors,
   attestations: vectors.map((vector) => ({
     requestId: hex(rid),
     keyVersion: Number(vector.keyVersion),
@@ -226,5 +351,5 @@ writeFileSync(
   `${JSON.stringify(fixture, null, 2)}\n`,
 );
 console.log(
-  `generated request ${hex(requestId)} and ${vectors.length} Compact attestation vectors`,
+  `generated ${requestVectors.length} request and ${vectors.length} Compact attestation vectors`,
 );

@@ -737,7 +737,7 @@ mod tests {
     fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
         let mut record = sample_record();
         record.tx_params.nonce = nonce;
-        let rid = crate::hashing::compute_request_id(&record);
+        let rid = crate::hashing::compute_request_id(&record).unwrap();
         (record, rid)
     }
 
@@ -1843,7 +1843,7 @@ mod tests {
         let mut bad_record = sample_record();
         bad_record.tx_params.nonce = 8;
         bad_record.algo = 1;
-        let bad_rid = crate::hashing::compute_request_id(&bad_record);
+        let bad_rid = crate::hashing::compute_request_id(&bad_record).unwrap();
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,

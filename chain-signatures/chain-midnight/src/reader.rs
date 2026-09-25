@@ -16,14 +16,14 @@ use crate::tx::TX_PARAM_TYPE_EVM_TYPE2;
 /// `Maybe`'s three atoms count even when `is_some` is false.
 const EVM_TYPE2_FIXED_ATOMS: usize = 21;
 
-/// `sender` through `calldata.no_words`; the calldata words begin here.
-const EVM_TYPE2_HEAD_ATOMS: usize = 17;
+/// `key_version` through `calldata.no_words`; the calldata words begin here.
+const EVM_TYPE2_HEAD_ATOMS: usize = 15;
 
-/// `execution_dest` and the two schemas.
-const EVM_TYPE2_TAIL_ATOMS: usize = 3;
+/// `execution_dest`, reserved destination/params, and the two schemas.
+const EVM_TYPE2_TAIL_ATOMS: usize = 5;
 
-/// `tx_param_type`'s fixed position: seventh field of `SignBidirectionalEvent`.
-const TX_PARAM_TYPE_ATOM: usize = 6;
+/// `tx_param_type`'s fixed position: fifth field of `SignBidirectionalEventV1`.
+const TX_PARAM_TYPE_ATOM: usize = 4;
 
 pub type Node = StateValue<DefaultDB>;
 
@@ -213,7 +213,15 @@ pub fn resolve_verified_record(map: &Node, request_id: [u8; 32]) -> Resolved {
             };
         }
     };
-    let recomputed = compute_request_id(&record);
+    let recomputed = match compute_request_id(&record) {
+        Ok(request_id) => request_id,
+        Err(err) => {
+            return Resolved::Dropped {
+                reason: "record-undecodable",
+                detail: format!("{err:#}"),
+            };
+        }
+    };
     if recomputed != request_id {
         return Resolved::Dropped {
             reason: "rid-mismatch",
@@ -483,22 +491,20 @@ fn decode_sign_bidirectional(
         widths,
         pos: 0,
     };
-    // Field order mirrors, field for field, `SignBidirectionalEvent` in signet-midnight's
-    // Signet.compact: each call consumes the next atom, so a reorder between same-width
-    // neighbours (chain_id/nonce, the two fees, algo/signature_dest) decodes cleanly and surfaces
-    // only as an rid-mismatch drop on every record, which reads like caller fault.
+    // Each call consumes the next atom in Signet.compact's SignBidirectionalEventV1
+    // declaration order. Width checks alone cannot detect swapped same-width fields.
     // `decode_tx_params` likewise mirrors `EvmType2TxParams`.
     let record = SignBidirectionalRecord {
-        sender: bytes_n::<32>(cursor, "sender")?,
         key_version: uint::<u8>(cursor, 1, "key_version")?,
+        sender: bytes_n::<32>(cursor, "sender")?,
         path: bytes_n::<32>(cursor, "path")?,
         algo: bounded_enum(cursor, "algo")?,
-        signature_dest: bounded_enum(cursor, "signature_dest")?,
-        params: bytes_n::<64>(cursor, "params")?,
         // Width-checked only: `ensure_evm_type2_param_type` already pinned the value.
         tx_param_type: uint::<u8>(cursor, 1, "tx_param_type")?,
         tx_params: decode_tx_params(cursor, capacities)?,
         execution_dest: bytes_n::<32>(cursor, "execution_dest")?,
+        signature_dest: bounded_enum(cursor, "signature_dest")?,
+        params: bytes_n::<64>(cursor, "params")?,
         output_deserialization_schema: bytes_dyn(cursor, "output_deserialization_schema")?,
         respond_serialization_schema: bytes_dyn(cursor, "respond_serialization_schema")?,
     };
@@ -918,6 +924,43 @@ mod tests {
     }
 
     #[test]
+    fn decode_record_matches_compiled_v1_layout_and_rejects_previous_order() {
+        let (reference_cell, _) = crate::test_utils::api_reference_cell();
+        assert_eq!(
+            decode_record(&StateValue::from(reference_cell.clone())).unwrap(),
+            sample_record()
+        );
+        assert_eq!(
+            reference_cell,
+            crate::test_utils::aligned_value_from_record(&sample_record()),
+            "test cells must use the compiled constructor's layout and trimmed atoms"
+        );
+
+        // Recreate the previous field order from the real current constructor cell.
+        let tail = reference_cell.value.0.len() - EVM_TYPE2_TAIL_ATOMS;
+        let order: Vec<_> = [1, 0, 2, 3, tail + 1, tail + 2]
+            .into_iter()
+            .chain(4..=tail)
+            .chain(tail + 3..reference_cell.value.0.len())
+            .collect();
+        let old_cell = AlignedValue {
+            value: midnight_base_crypto::fab::Value(
+                order
+                    .iter()
+                    .map(|index| reference_cell.value.0[*index].clone())
+                    .collect(),
+            ),
+            alignment: midnight_base_crypto::fab::Alignment(
+                order
+                    .iter()
+                    .map(|index| reference_cell.alignment.0[*index].clone())
+                    .collect(),
+            ),
+        };
+        assert!(decode_record(&StateValue::from(old_cell)).is_err());
+    }
+
+    #[test]
     fn decode_record_reads_capacities_from_declared_widths() {
         // Counts below capacity throughout, so a decode inferring the split from
         // anything but the widths would misread it.
@@ -938,7 +981,7 @@ mod tests {
         );
 
         // One atom below the boundary is refused rather than underflowing the tail.
-        // Atom 6 is zeroed so the tx_param_type gate passes and the count check fires.
+        // Zero the discriminator so its gate passes and the count check fires.
         let mut atoms = vec![vec![0xab]; 20];
         atoms[TX_PARAM_TYPE_ATOM] = Vec::new();
         let err = decode_record(&cell_from_atoms(&atoms, &[1u32; 20]))
@@ -958,12 +1001,27 @@ mod tests {
     }
 
     #[test]
+    fn decode_record_checks_the_v1_discriminators_declared_width() {
+        let record = sample_record();
+        let mut widths = widths_from_record(&record);
+        widths[TX_PARAM_TYPE_ATOM] = 8;
+        let err = decode_record(&cell_from_atoms(&atoms_from_record(&record), &widths))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tx_param_type"), "{err}");
+        assert!(
+            err.contains("Bytes<8>") && err.contains("Bytes<1>"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn decode_record_rejects_a_width_the_layout_does_not_declare() {
         // A sender stored in 20 bytes fits a Bytes<20> perfectly well, so only the
         // alignment catches this.
         let record = sample_record();
         let mut widths = widths_from_record(&record);
-        widths[0] = 20;
+        widths[1] = 20;
         let err = decode_record(&cell_from_atoms(&atoms_from_record(&record), &widths))
             .expect_err("a sender declared Bytes<20> is not a signet record")
             .to_string();
@@ -1050,14 +1108,14 @@ mod tests {
         let widths = widths_from_record(&record);
 
         let mut not_boolean = atoms_from_record(&record);
-        not_boolean[14] = vec![2];
+        not_boolean[12] = vec![2];
         let err = decode_record(&cell_from_atoms(&not_boolean, &widths))
             .expect_err("a non-Boolean calldata.is_some atom must reject")
             .to_string();
         assert!(err.contains("calldata.is_some"), "err: {err}");
 
         let mut over_wide = atoms_from_record(&record);
-        over_wide[0] = vec![0xab; 33];
+        over_wide[1] = vec![0xab; 33];
         assert!(
             decode_record(&cell_from_atoms(&over_wide, &widths)).is_err(),
             "a 33-byte sender atom must reject"
@@ -1065,10 +1123,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_verified_record_accepts_transient_id_and_rejects_legacy_id() {
+    fn resolve_verified_record_accepts_v1_id_and_rejects_previous_ids() {
         let record = sample_record();
         let (reference_cell, rid) = crate::test_utils::api_reference_cell();
-        let legacy = hex_32("b3d7090a8236265efcbf6be5021de3c49961f85ed6339eaa0a4e83c4510e91bf");
         let cell = StateValue::from(reference_cell);
 
         let map = map_of(vec![(key_of(rid), cell.clone())]);
@@ -1081,20 +1138,26 @@ mod tests {
             decode_record(&cell).is_ok(),
             "the decode never sees the id, so only the gate can drop this"
         );
-        let map = map_of(vec![(key_of(legacy), cell)]);
-        assert!(matches!(
-            resolve_verified_record(&map, legacy),
-            Resolved::Dropped {
-                reason: "rid-mismatch",
-                ..
-            }
-        ));
+        for previous in [
+            "b3d7090a8236265efcbf6be5021de3c49961f85ed6339eaa0a4e83c4510e91bf",
+            "b599c1e0876e270ff0b1418e957f0e7c613868c38934dc08696feb784bc29000",
+        ] {
+            let previous = hex_32(previous);
+            let map = map_of(vec![(key_of(previous), cell.clone())]);
+            assert!(matches!(
+                resolve_verified_record(&map, previous),
+                Resolved::Dropped {
+                    reason: "rid-mismatch",
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
     fn resolve_verified_record_reports_absent_and_dropped() {
         let record = sample_record();
-        let rid = compute_request_id(&record);
+        let rid = compute_request_id(&record).unwrap();
         let poisoned = [0x55; 32];
         let map = map_of(vec![
             (
@@ -1126,6 +1189,48 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn resolve_verified_record_drops_over_capacity_used_counts() {
+        let record = sample_record_with_partial_access_list();
+        let rid = compute_request_id(&record).unwrap();
+        let mut invalid_records = vec![record.clone(); 3];
+        invalid_records[0].tx_params.calldata.value.no_words = 3;
+        invalid_records[1].tx_params.access_list_entry_count = 3;
+        invalid_records[2].tx_params.access_list[0].storage_key_count = 4;
+        for invalid in invalid_records {
+            let cell = cell_from_record(&invalid);
+            assert!(decode_record(&cell).is_ok(), "the field types remain valid");
+            let map = map_of(vec![(key_of(rid), cell)]);
+            assert!(matches!(
+                resolve_verified_record(&map, rid),
+                Resolved::Dropped {
+                    reason: "record-undecodable",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn resolve_verified_record_ignores_absent_body_and_unused_entries() {
+        let mut record = sample_record_with_partial_access_list();
+        record.tx_params.calldata.is_some = false;
+        let rid = compute_request_id(&record).unwrap();
+        record.tx_params.calldata.value.no_words = u16::MAX;
+        record.tx_params.calldata.value.selector = [0xff; 4];
+        record.tx_params.calldata.value.words.fill([0xee; 32]);
+        record.tx_params.access_list[1].storage_key_count = u8::MAX;
+        record.tx_params.access_list[1].address = [0xdd; 20];
+        record.tx_params.access_list[1]
+            .storage_keys
+            .fill([0xcc; 32]);
+        let map = map_of(vec![(key_of(rid), cell_from_record(&record))]);
+        assert_eq!(
+            resolve_verified_record(&map, rid),
+            Resolved::Found(Box::new(record))
+        );
     }
 
     #[test]
