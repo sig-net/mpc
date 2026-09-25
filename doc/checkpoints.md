@@ -13,11 +13,11 @@ without replaying every block.
 Checkpoints are due at fixed heights, the same grid for every node. A node
 reaching one votes in the governance contract for a digest of its backlog
 there, and the contract settles that height once f+1 nodes have voted for
-the same digest (n nodes, at most f of them faulty, section 1), enough that
-at least one correct node holds the body behind it; section 2 says why f+1
+the same digest (n nodes, at most f of them faulty, Section 1), enough that
+at least one correct node holds the checkpoint behind it; Section 2 says why f+1
 rather than the signing threshold. Every node polls for what settled. A node
 that derived that digest itself carries on indexing; any other fetches the
-body from a peer and promotes it, and everything it derives from then on
+checkpoint from a peer and promotes it, and everything it derives from then on
 hangs off that checkpoint.
 
 A node that has passed the height under vote and sees nothing settle there
@@ -34,7 +34,7 @@ faulty nodes may deviate from it arbitrarily. Protocol upgrades, committee
 and threshold changes.
 
 A correct node is told the truth by its RPC provider, and keeps up: it indexes
-faster than the chain produces blocks, so it reaches the tip from wherever it
+faster than the chain produces blocks, so it reaches the head from wherever it
 starts. A provider that misleads a node otherwise following the protocol
 leaves it neither faulty nor in agreement, but diverged, which is what L2
 is for. The governance chain is assumed live and readable throughout, so a
@@ -42,7 +42,7 @@ node that cannot see a settlement or get a vote recorded is a node with its
 own problem rather than a network without a contract.
 
 The indexer reports coverage rather than events: it tells the node it has
-reached height h, and most heights change nothing. The cursor therefore
+reached height h, and most heights change nothing. The processed height therefore
 lands on every boundary. An indexer that reports in jumps instead, as one
 scanning a range of Solana slots does, has to record the boundaries it
 passed over, with the backlog it held at each; that is an implementation
@@ -68,7 +68,7 @@ Vocabulary, per node per source chain:
 
 * **Checkpoint**: a height and a snapshot of the backlog at that height. Its
   *digest* binds the chain, the height and the entries over a canonical
-  encoding (section 2).
+  encoding (Section 2).
 
   * **Open height**: the first boundary above the node's base, the one
     height it may vote at.
@@ -120,8 +120,8 @@ rejected, and votes at heights it has passed are discarded.
 
 Note that the contract does not hold one vote per node per height:
 a node that votes for two different digests at a height counts behind both
-digests. Thanks to retention (section 5), a node still holds both bodies, so
-the node can serve the body for whichever settles. However, a node voting twice
+digests. Thanks to retention (Section 5), a node still holds both checkpoints, so
+the node can serve the checkpoint for whichever settles. However, a node voting twice
 for the same digest, does not increase the vote count for that digest. 
 
 Settling a checkpoint requires a threshold of f+1 to guarantee that at least
@@ -202,7 +202,7 @@ persistent:
                                                    // that height is promoted
 
 in memory:
-    backlog           RequestId -> Entry
+    requests          RequestId -> Entry
     processed_height  Height
     pending           Height -> (Digest, Backlog)  // checkpoints above base
     want              (Height, Digest)?            // a settled checkpoint we
@@ -232,7 +232,7 @@ on settlement poll period expiry:
                                 // answer for the wrong one
   if body is none:
     want = (h, d)               // S3(i): indexing stops until we hold it
-    return                      // asking peers is section 2's get_checkpoint
+    return                      // asking peers is Section 2's get_checkpoint
   promote(h, d, body)
 ```
 Interacting with peers
@@ -246,7 +246,7 @@ Indexing
 on block b finalised, the next one above the processed height:
   if want is set or len(pending) >= CAP:
     return                           
-  backlog.update(b)                  // add/change/remove entries, idempotent
+  requests.update(b)                 // add/change/remove entries, idempotent
   processed_height = height(b)
   if processed_height is a boundary:
     pending[processed_height] = (digest(processed_height, backlog), backlog)
@@ -256,9 +256,9 @@ on block b finalised, the next one above the processed height:
                                        // each entry whatever it still needs
 ```
 
-No two handlers run their bodies at once, and none runs against itself.
+No two handlers run at once, and none runs against itself.
 
-`backlog.update` changes state and nothing else; effects (signing,
+`requests.update` changes state and nothing else; effects (signing,
 publishing, attesting) only happen later if at all, and only once the node
 is caught up. A node behind the head indexes and votes but does not act, so
 it opens no signing round for a request the network finished while it was
@@ -269,7 +269,7 @@ Acting on the backlog is a sweep: for each entry, whatever it still needs
 that has not been started. What has been started is #1301's state, not the
 backlog's, which is what lets the sweep run at every block without repeating
 itself. A crash loses what was in flight, and the replay starts it again,
-which is the case the target already has to absorb.
+which is the case the destination already has to absorb.
 
 Instead of `len(pending) >= CAP` other conditions can be defined without
 changing the properties materially.
@@ -278,7 +278,7 @@ changing the properties materially.
 
 ```
 rebase():
-  backlog, processed_height = base
+  requests, processed_height = base
   pending = {}                     
 ```
 ```
@@ -322,7 +322,7 @@ vote_if_ready():
 ### Asking peers
 
 While `want` is set the node keeps asking peers for
-`get_checkpoint(chain, want)`. The reply handler above promotes a body whose
+`get_checkpoint(chain, want)`. The reply handler above promotes a checkpoint whose
 digest matches.
 
 Asking for a superseded height goes unanswered, since every holder of that
@@ -360,19 +360,19 @@ the head: the replay of that last stretch is caught up almost at once and
 starts again whatever was in flight when the node went down. That is why
 harmless matters: on the source chain the contract emits the event either
 way and the receiving library drops a response whose request it no longer
-has outstanding, and on a target chain the effect is the same signed
+has outstanding, and on a destination chain the effect is the same signed
 transaction arriving twice.
 
 ### *S2, a settled digest is derived by a correct node, chained from genesis.*
 An entry enters by admission from a finalised block this node fetched, or by
 promoting a digest that f+1 nodes voted for. At most f of those voters are
 faulty, so one of them is correct, and a correct node votes only for a
-backlog it built itself. The digest covers the entries, so a body that
-matches it is that backlog, and the supplier can substitute nothing. The
+backlog it built itself. The digest covers the entries, so a checkpoint that
+matches it holds that backlog, and the supplier can substitute nothing. The
 contract settles a height once, so all that is left to want is a correct
-voter behind the digest, and f+1 gives one. This rests on section 1's
+voter behind the digest, and f+1 gives one. This rests on Section 1's
 provider assumption; one node misled for a single round settles its reading,
-which section 6 owns.
+which Section 6 owns.
 
 The chain comes from the open-height rule. A node's open height is the first
 boundary above its own base, so one that has not promoted the settlement at
@@ -384,7 +384,7 @@ they settle nothing between them. So S1's induction has its base.
 ### *S3, nodes act and vote inside a window around settled height.*
 (i) relies on `want`. A poll that reads a settled checkpoint the node
 cannot produce sets it, and the indexing handler returns while it is set, so
-the node stops indexing, acting and voting until it holds that body. The
+the node stops indexing, acting and voting until it holds that checkpoint. The
 poll period is what bounds the staleness, the contract being read nowhere
 else. (ii) relies on the cap. A node that has crossed `CAP` boundaries beyond
 its base stops in the same handler, and the base is a settled height, so the
@@ -406,7 +406,7 @@ promotion to trigger the first.
 ### *L2, a node that disagrees with a settled checkpoint ends up holding one.*
 Promoting replaces the backlog wholesale rather than reconciling entry by
 entry: a node behind moves forward and keeps indexing, one that diverged
-takes the settled body and rebases onto it.
+takes the settled checkpoint and rebases onto it.
 
 Retention: Every digest a node has voted at a height is one it can still
 produce the backlog for, until that height is settled and the node has
@@ -414,9 +414,9 @@ promoted it or a later one. A node keeps what it votes, a later vote for the
 same height evicting nothing: the bound is what it holds, not what it
 currently believes.
 
-That is what makes the body available. The f+1 behind a settled digest
+That is what keeps a settled checkpoint available. The f+1 behind a settled digest
 hold it the moment it settles, and one of them is correct. Promoting it
-loses nothing, the body becoming the base. A holder stops being able to
+loses nothing, the checkpoint becoming the base. A holder stops being able to
 serve it only when it promotes a later checkpoint, and by then the
 settlement the fetcher is chasing has moved too, so its next poll asks for
 that one instead. Voting again at the same height is no way out of holding
@@ -424,7 +424,7 @@ it: that would drop what the voter had, and where a node's reading of a
 block is not reproducible it could take the last copy of a digest the
 network had just settled. One guaranteed holder is thin, and it is what the
 threshold costs. Where no node can produce it at all there is no recovery
-here, which section 6 owns.
+here, which Section 6 owns.
 
 
 ## 6. Limits and failure modes
@@ -447,8 +447,8 @@ here, which section 6 owns.
     their readings are stable they land on the same split and go round again
     on a growing backoff.
   * Every copy of the settled backlog lost: nothing here recovers, a peer
-    being the only source of a body. What makes it unlikely is `voted` being
-    durable, and a new vote never evicting the body behind an earlier one, so
+    being the only source of a checkpoint. What makes it unlikely is `voted` being
+    durable, and a new vote never evicting the checkpoint behind an earlier one, so
     the f+1 behind a settled digest still hold a copy across a restart, one
     of them correct.
 * A node whose votes never reach the contract runs ahead to the cap and
@@ -459,8 +459,8 @@ here, which section 6 owns.
   has simply run out of room to claim anything new, which a node whose
   reading of a block is not reproducible will do and a node whose reading is
   will not.
-* A restart loses the processed height and replays from `base`to the tip. 
-  A long absence does not replay the absence: the first poll takes the body in
+* A restart loses the processed height and replays from `base` to the head. 
+  A long absence does not replay the absence: the first poll takes the checkpoint in
   one reply, so the cost is the settlement lag either way.
 * A storage format change must read the old layout or migrate it in place. A
   node coming up empty is only behind, but doing that to every node at once,
