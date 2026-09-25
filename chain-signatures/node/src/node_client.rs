@@ -206,7 +206,7 @@ impl NodeClient {
     pub async fn sync(
         &self,
         base: impl IntoUrl,
-        update: &SyncUpdate,
+        update: &Ciphered,
     ) -> Result<SyncUpdate, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("sync");

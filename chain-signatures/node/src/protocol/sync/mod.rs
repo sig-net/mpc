@@ -2,16 +2,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
+use mpc_keys::hpke::Ciphered;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
+use crate::config::NetworkConfig;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, StorageError, TripleStorage};
 
-use super::contract::primitives::ParticipantInfo;
+use super::contract::primitives::{ParticipantInfo, ParticipantMap};
+use super::message::SignedMessage;
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 
@@ -66,7 +69,8 @@ impl SyncUpdate {
 }
 
 pub struct SyncRequest {
-    pub update: SyncUpdate,
+    /// A `SyncUpdate` signed by its sender and encrypted to us.
+    pub update: Ciphered,
     pub response_tx: oneshot::Sender<Result<SyncUpdate, StorageError>>,
 }
 
@@ -76,13 +80,27 @@ impl SyncRequest {
         triples: TripleStorage,
         presignatures: PresignatureStorage,
         me: Participant,
+        cipher_sk: mpc_keys::hpke::SecretKey,
+        participants: ParticipantMap,
     ) {
         let start = Instant::now();
 
-        let outdated_triples = match triples
-            .remove_outdated(self.update.from, &self.update.triples)
-            .await
-        {
+        // `from` decides whose artifacts get removed, so it must be the signer,
+        // not the claim inside the payload.
+        let update = match SignedMessage::decrypt_with::<SyncUpdate, _>(
+            &self.update,
+            &cipher_sk,
+            &participants,
+            |_| Ok(()),
+        ) {
+            Ok((from, update)) => SyncUpdate { from, ..update },
+            Err(err) => {
+                tracing::warn!(?err, "rejected sync update");
+                return;
+            }
+        };
+
+        let outdated_triples = match triples.remove_outdated(update.from, &update.triples).await {
             Ok(result) => result,
             Err(err) => {
                 let _ = self.response_tx.send(Err(err));
@@ -90,7 +108,7 @@ impl SyncRequest {
             }
         };
         let outdated_presignatures = match presignatures
-            .remove_outdated(self.update.from, &self.update.presignatures)
+            .remove_outdated(update.from, &update.presignatures)
             .await
         {
             Ok(result) => result,
@@ -131,6 +149,7 @@ pub struct SyncTask {
     contract: ContractStateWatcher,
     requests: SyncRequestReceiver,
     sync_report_tx: SyncReportSender,
+    network: NetworkConfig,
 }
 
 // TODO: add a watch channel for mesh active participants.
@@ -142,6 +161,7 @@ impl SyncTask {
         mesh_state: watch::Receiver<MeshState>,
         contract: ContractStateWatcher,
         sync_report_tx: SyncReportSender,
+        network: NetworkConfig,
     ) -> (SyncChannel, Self) {
         let (requests, channel) = SyncChannel::new();
         let task = Self {
@@ -152,6 +172,7 @@ impl SyncTask {
             contract,
             requests,
             sync_report_tx,
+            network,
         };
         (channel, task)
     }
@@ -200,6 +221,7 @@ impl SyncTask {
                         update,
                         receivers.into_iter(),
                         me,
+                        self.network.sign_sk.clone(),
                     ));
                     broadcast = Some((start, task));
                 }
@@ -228,7 +250,14 @@ impl SyncTask {
                     }
                 }
                 Some(sync_req) = self.requests.updates.recv() => {
-                    tokio::spawn(sync_req.process(self.triples.clone(), self.presignatures.clone(), me));
+                    let participants = self.contract.participant_map().await;
+                    tokio::spawn(sync_req.process(
+                        self.triples.clone(),
+                        self.presignatures.clone(),
+                        me,
+                        self.network.cipher_sk.clone(),
+                        participants,
+                    ));
                 }
             }
         }
@@ -376,6 +405,7 @@ async fn broadcast_sync(
     update: SyncUpdate,
     receivers: impl Iterator<Item = (Participant, ParticipantInfo)>,
     me: Participant,
+    sign_sk: near_crypto::SecretKey,
 ) -> Vec<(Participant, SyncPeerResponse)> {
     let mut tasks = JoinSet::new();
     let update = Arc::new(update);
@@ -383,11 +413,15 @@ async fn broadcast_sync(
     for (p, info) in receivers {
         let client = client.clone();
         let update = update.clone();
+        let sign_sk = sign_sk.clone();
         let url = info.url;
         tasks.spawn(async move {
             let sync_result = if p != me {
-                match client.sync(&url, &update).await {
-                    Ok(response) => SyncPeerResponse::Success(response),
+                match SignedMessage::encrypt(&*update, me, &sign_sk, &info.cipher_pk) {
+                    Ok(encrypted) => match client.sync(&url, &encrypted).await {
+                        Ok(response) => SyncPeerResponse::Success(response),
+                        Err(err) => SyncPeerResponse::Failed(err.to_string()),
+                    },
                     Err(err) => SyncPeerResponse::Failed(err.to_string()),
                 }
             } else {
@@ -449,10 +483,10 @@ impl SyncChannel {
         (requests, channel)
     }
 
-    pub async fn request_update(&self, update: SyncUpdate) -> Result<SyncUpdate, SyncError> {
+    pub async fn request_update(&self, update: Ciphered) -> Result<SyncUpdate, SyncError> {
         let (response_tx, response_rx) = oneshot::channel();
         let request = SyncRequest {
-            update: update.clone(),
+            update,
             response_tx,
         };
 

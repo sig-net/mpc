@@ -296,7 +296,7 @@ async fn bench_metrics() -> Json<BenchMetrics> {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
-    WithRejection(Cbor(update), _): WithRejection<Cbor<SyncUpdate>, Error>,
+    WithRejection(Cbor(update), _): WithRejection<Cbor<Ciphered>, Error>,
 ) -> Result<Cbor<SyncUpdate>> {
     let start = Instant::now();
     let response = state.sync_channel.request_update(update).await?;
