@@ -139,11 +139,7 @@ impl Node {
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
         let near_rpc = ctx.worker.rpc_addr();
 
-        let mut cfg = cfg.clone();
-        if let Some(ref mut eth_config) = cfg.eth {
-            eth_config.helios_data_path =
-                format!("{}_{}", eth_config.helios_data_path, account.id());
-        }
+        let cfg = cfg.clone();
 
         Self::spawn(
             ctx,

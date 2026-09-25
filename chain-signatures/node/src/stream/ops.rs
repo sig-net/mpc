@@ -5,7 +5,7 @@ use anyhow::Context;
 use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign, SignEntry};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
-use crate::respond_bidirectional::is_failed_execution_output;
+use crate::respond_bidirectional::{claims_attestation_key, is_failed_execution_output};
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -34,10 +34,24 @@ pub(crate) async fn process_sign_request(
         SignKind::Sign => {}
     }
 
+    // The attestation key is derived from the requesting contract under a fixed
+    // path, so a request naming that path forges a response to itself. Here
+    // rather than in `validate`, which plain `sign` never reaches.
+    anyhow::ensure!(
+        !claims_attestation_key(&sign_request),
+        "rejecting sign request {:?} on the reserved attestation path",
+        sign_request.id
+    );
+
+    let sign_id = sign_request.id;
     let (entry, is_new) = ctx.backlog.insert(sign_request).await;
+    if !is_new {
+        tracing::debug!(?sign_id, "sign request already pending; keeping its entry");
+        return Ok(false);
+    }
     ctx.try_enqueue(SignCommand::Request(entry)).await?;
 
-    Ok(is_new)
+    Ok(true)
 }
 
 pub(crate) async fn requeue_pending_sign_requests(
@@ -133,7 +147,11 @@ pub(crate) async fn process_respond_event(
         entry.verify_signature(root_pk, &respond_event.signature)?;
         tracing::info!(?sign_id, "sign request completed successfully");
         entry.complete().await;
-        ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
+        // Sent even during catchup: unlike a request, nothing requeues it later.
+        ctx.sign_tx
+            .send(SignCommand::Completion(sign_id))
+            .await
+            .context("sign command channel closed")?;
         return Ok(());
     }
 
@@ -259,7 +277,11 @@ pub(crate) async fn process_respond_bidirectional_event(
 
     entry.complete().await;
     tracing::info!(?sign_id, "bidirectional tx completed");
-    ctx.try_enqueue(SignCommand::Completion(sign_id)).await?;
+    // Sent even during catchup: unlike a request, nothing requeues it later.
+    ctx.sign_tx
+        .send(SignCommand::Completion(sign_id))
+        .await
+        .context("sign command channel closed")?;
 
     Ok(())
 }
@@ -312,14 +334,23 @@ pub async fn process_execution_confirmed(
     let awaiting_execution = entry.awaiting_execution();
     let execution_failed = matches!(result, ExecutionOutcome::Failed);
 
-    let entry = entry
+    let Some(entry) = entry
         .advance(result)
         .await
         .with_context(|| {
             format!(
                 "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
             )
-        })?;
+        })?
+    else {
+        // Retire the id: a leg-1 task on a node that lagged the publish would
+        // outlive its request.
+        ctx.sign_tx
+            .send(SignCommand::Completion(sign_id))
+            .await
+            .context("failed to send completion into queue")?;
+        return Ok(());
+    };
     tracing::info!(
         ?tx_id,
         ?sign_id,

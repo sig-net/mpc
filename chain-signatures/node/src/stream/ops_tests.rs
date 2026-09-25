@@ -496,6 +496,39 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
     );
 }
 
+/// Plain `sign` takes a free-text path and never reaches `validate`, so without
+/// this check a contract asks for its own chain's attestation path with a payload
+/// of keccak(request_id || output) and gets a valid attestation for any outcome.
+#[tokio::test]
+async fn process_sign_request_rejects_the_reserved_attestation_path() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
+
+    let mut reserved = mock_sign_request(SignId::new([31u8; 32]), Chain::Solana);
+    Arc::make_mut(&mut reserved).args.path = "solana response key".to_string();
+    let err = process_sign_request(reserved, &ctx)
+        .await
+        .expect_err("a sign request on the attestation path must be rejected");
+    assert!(err.to_string().contains("reserved attestation path"));
+    assert_eq!(
+        backlog.len(),
+        0,
+        "a rejected request must not reach the backlog"
+    );
+
+    // Only this request's own source chain's path is reserved. Another chain's
+    // cannot derive this one's attestation key, so it stays admitted, which is
+    // what distinguishes the check from one that matches all four strings.
+    let foreign_id = SignId::new([32u8; 32]);
+    let mut foreign = mock_sign_request(foreign_id, Chain::Solana);
+    Arc::make_mut(&mut foreign).args.path = "canton response key".to_string();
+    process_sign_request(foreign, &ctx)
+        .await
+        .expect("another chain's attestation path must still be admitted");
+    assert!(backlog.get(Chain::Solana, &foreign_id).await.is_some());
+}
+
 #[tokio::test]
 async fn process_sign_request_duplicate_is_idempotent() {
     let backlog = Backlog::new();
@@ -551,6 +584,46 @@ async fn process_sign_request_duplicate_is_idempotent() {
             .await
             .is_err(),
         "the replayed duplicate must not produce a second command"
+    );
+}
+
+#[tokio::test]
+async fn process_sign_request_replay_keeps_an_advanced_entry() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::new([21u8; 32]);
+    let request = mock_sign_request(sign_id, Chain::Ethereum);
+    let (pk, output) = mock_signature_output(&request.args);
+
+    // The entry is past Generating: it holds a signature and waits to publish.
+    backlog
+        .insert_sign(Arc::clone(&request))
+        .await
+        .advance(pk, &output, mock_participants(), true)
+        .await
+        .expect("advance to pending publish");
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+
+    // The same request id is emitted again while the first is in flight.
+    let is_new = process_sign_request(request, &ctx)
+        .await
+        .expect("a replayed sign request is accepted");
+
+    assert!(!is_new, "the replay must not report a new entry");
+    assert_eq!(backlog.len(), 1, "the entry must still be there");
+    assert!(
+        backlog
+            .requeueable_requests(Chain::Ethereum)
+            .await
+            .is_empty(),
+        "the replay must not reset the entry to pending generation"
+    );
+    assert!(
+        timeout(Duration::from_millis(100), sign_rx.recv())
+            .await
+            .is_err(),
+        "the replay must not enqueue a second signing task"
     );
 }
 
@@ -859,6 +932,90 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     }
 }
 
+/// A terminal extraction failure means the transaction executed but its output
+/// could not be interpreted. The watcher and the backlog entry are dropped and
+/// no sign request is queued.
+#[tokio::test]
+async fn process_execution_confirmed_extraction_failed_signs_nothing() {
+    let backlog = Backlog::new();
+
+    let tx = test_bidirectional_tx(2, Chain::Solana, Chain::Ethereum);
+    let sign_id = tx.sign_id();
+    backlog
+        .insert_mock_executing(&tx)
+        .await
+        .watch_execution()
+        .await;
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+
+    process_execution_confirmed(
+        tx.id,
+        456u64,
+        ExecutionOutcome::ExtractionFailed,
+        &ctx,
+        tx.target_chain,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        ctx.backlog
+            .get_execution_watchers(tx.target_chain)
+            .await
+            .is_empty(),
+        "the watcher is dropped: retrying re-runs the same deterministic decode"
+    );
+    assert!(
+        ctx.backlog.get(tx.source_chain, &sign_id).await.is_none(),
+        "the entry is removed on every node, so checkpoints stay aligned"
+    );
+    match sign_rx.try_recv() {
+        Ok(SignCommand::Completion(id)) => assert_eq!(id, sign_id, "the id is retired"),
+        other => panic!("expected only a completion, got {other:?}"),
+    }
+    assert!(
+        sign_rx.try_recv().is_err(),
+        "no response is signed for an execution that actually happened"
+    );
+}
+
+/// The completion refers to an entry that was just removed, so nothing can
+/// requeue it once dropped: it must not sit behind the target chain's catchup
+/// barrier the way an ordinary follow-up sign request does.
+#[tokio::test]
+async fn process_execution_confirmed_extraction_failed_retires_id_before_catchup() {
+    let backlog = Backlog::new();
+
+    let tx = test_bidirectional_tx(3, Chain::Solana, Chain::Ethereum);
+    let sign_id = tx.sign_id();
+    backlog
+        .insert_mock_executing(&tx)
+        .await
+        .watch_execution()
+        .await;
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    // Not caught up on the target chain, which is where the confirmation is observed.
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+
+    process_execution_confirmed(
+        tx.id,
+        456u64,
+        ExecutionOutcome::ExtractionFailed,
+        &ctx,
+        tx.target_chain,
+    )
+    .await
+    .unwrap();
+
+    match sign_rx.try_recv() {
+        Ok(SignCommand::Completion(id)) => assert_eq!(id, sign_id),
+        other => panic!("expected the id to be retired during catchup, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
     let backlog = Backlog::new();
@@ -1110,7 +1267,8 @@ async fn publish_failover_fires_once_per_leg() {
     let fin_gen = exec
         .advance(ExecutionOutcome::Success { output: vec![] })
         .await
-        .unwrap();
+        .unwrap()
+        .expect("a success outcome yields a response to sign");
     let (pk2, output2) = mock_signature_output(&fin_gen.request().args);
     fin_gen
         .advance(pk2, &output2, mock_participants(), false)
@@ -1207,4 +1365,32 @@ async fn publish_failover_needs_catchup() {
         next_publish(&mut rpc_rx).await.is_some(),
         "the deadline was past all along; catchup is what held it back"
     );
+}
+
+/// A stream restart clears `caught_up` while the sign loop still runs the
+/// request's task, and the completed entry is gone from the backlog, so a
+/// completion dropped during replay would leave that task running.
+#[tokio::test]
+async fn process_respond_bidirectional_event_sends_completion_before_catchup() {
+    let backlog = Backlog::new();
+    let tx = test_bidirectional_tx(82, Chain::Solana, Chain::Ethereum);
+    let sign_id = tx.sign_id();
+    let entry = backlog.insert_mock_final(&tx).await;
+
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let signature = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
+    let public_key = root_sk.public_key().into();
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+
+    process_respond_bidirectional_event(respond_event(sign_id, signature), &ctx, public_key)
+        .await
+        .expect("respond event should complete the request");
+
+    let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_matches!(msg, SignCommand::Completion(id) if id == sign_id);
 }

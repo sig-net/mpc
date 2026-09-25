@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: prod
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Login to GCP Artifact Registry Mainnet
         if: github.event.inputs.network == 'mainnet'
@@ -39,7 +39,7 @@ jobs:
         # Since the Mainnet and Testnet nodes are polling this image repository, only the image needs to be updated in order to trigger a deployment
       - name: Build Docker image and deploy partner nodes
         id: docker-push-tagged-partner
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@0a97817b6ade9f46837855d676c4cca3a2471fc9 # v4
         with:
           push: true
           file: ./Dockerfile

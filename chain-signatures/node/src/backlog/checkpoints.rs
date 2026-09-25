@@ -238,6 +238,14 @@ impl Checkpoints {
             .map_err(|source| CheckpointError::Storage { chain, source })
     }
 
+    /// Returns whether a pending or confirmed checkpoint is stored for `chain`.
+    pub(crate) async fn has_checkpoint(&self, chain: Chain) -> Result<bool, CheckpointError> {
+        self.storage
+            .has_checkpoint(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
     /// Loads the durable unconfirmed checkpoints for `chain`, ordered by height.
     pub(crate) async fn load_pending(
         &self,
