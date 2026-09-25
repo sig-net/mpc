@@ -3,11 +3,13 @@
 use midnight_transient_crypto::curve::Fr;
 use midnight_transient_crypto::hash::{transient_hash, upgrade_from_transient};
 use midnight_transient_crypto::repr::FieldRepr as _;
+use mpc_compact_hashing::HashDomain;
 
 use crate::records::{EvmType2TxParams, SignBidirectionalRecord};
 use crate::tx::TX_PARAM_TYPE_EVM_TYPE2;
 
-/// Hash `RequestIdPreimageV1` from an already decoded EVM type-2 record.
+/// Hash `RequestIdPreimageV1`, after its domain tag, from an already decoded
+/// EVM type-2 record.
 ///
 /// Reserved signature destination/params and serialization schemas are excluded.
 /// The transaction enters as a digest of its used entries, independent of capacity.
@@ -18,6 +20,7 @@ pub(crate) fn compute_request_id(record: &SignBidirectionalRecord) -> anyhow::Re
         record.tx_param_type
     );
     let preimage = (
+        HashDomain::RequestId as u8,
         record.key_version,
         record.sender,
         record.path,
@@ -32,7 +35,8 @@ pub(crate) fn compute_request_id(record: &SignBidirectionalRecord) -> anyhow::Re
 
 /// Mirror `calculateEvmType2TxParamsDigestV1`: hash the scalar/count head, then
 /// fold used words and access-list entries. Inner storage-key folds start at zero.
-/// Running hashes stay Fields until the final upgrade to Bytes<32>.
+/// Every hash input starts with its domain tag. Running hashes stay Fields until
+/// the final upgrade to Bytes<32>.
 fn compute_evm_type2_tx_params_digest_v1(tx: &EvmType2TxParams) -> anyhow::Result<[u8; 32]> {
     let no_words = if tx.calldata.is_some {
         tx.calldata.value.no_words
@@ -77,6 +81,7 @@ fn compute_evm_type2_tx_params_digest_v1(tx: &EvmType2TxParams) -> anyhow::Resul
 
     let mut hash = transient_hash(
         &(
+            HashDomain::EvmType2TxHeader as u8,
             tx.chain_id,
             tx.nonce,
             tx.max_priority_fee_per_gas,
@@ -92,15 +97,25 @@ fn compute_evm_type2_tx_params_digest_v1(tx: &EvmType2TxParams) -> anyhow::Resul
             .field_vec(),
     );
     for word in &tx.calldata.value.words[..usize::from(no_words)] {
-        hash = transient_hash(&(hash, *word).field_vec());
+        hash = transient_hash(&(HashDomain::EvmType2TxWord as u8, hash, *word).field_vec());
     }
     for entry in entries {
         let mut keys_hash = Fr::from(0u64);
         for key in &entry.storage_keys[..usize::from(entry.storage_key_count)] {
-            keys_hash = transient_hash(&(keys_hash, *key).field_vec());
+            keys_hash = transient_hash(
+                &(HashDomain::EvmType2TxStorageKey as u8, keys_hash, *key).field_vec(),
+            );
         }
-        hash =
-            transient_hash(&(hash, entry.address, entry.storage_key_count, keys_hash).field_vec());
+        hash = transient_hash(
+            &(
+                HashDomain::EvmType2TxAccessEntry as u8,
+                hash,
+                entry.address,
+                entry.storage_key_count,
+                keys_hash,
+            )
+                .field_vec(),
+        );
     }
     Ok(upgrade_from_transient(hash).0)
 }
@@ -118,6 +133,43 @@ mod tests {
                 .expect("compiled Compact record decodes");
         assert_eq!(compute_request_id(&record).unwrap(), expected);
         assert_eq!(compute_request_id(&sample_record()).unwrap(), expected);
+    }
+
+    // The SDK's RECORD_2_1_2 vector from tests/circuits.test.ts at
+    // @sig-net/midnight 0.24.0-rc.4. Every capacity is used, so every
+    // request-side domain tag enters a hash.
+    #[test]
+    fn request_id_and_transaction_digest_match_sdk_domain_vector() {
+        let mut record = sample_record();
+        record.sender = [0x01; 32];
+        record.path = [0x03; 32];
+        record.execution_dest = [0x02; 32];
+        record.output_deserialization_schema = vec![0x07; 34];
+        record.respond_serialization_schema = vec![0x08; 34];
+        let tx = &mut record.tx_params;
+        tx.nonce = 1;
+        tx.max_priority_fee_per_gas = 1_000_000_000;
+        tx.max_fee_per_gas = 30_000_000_000;
+        tx.gas_limit = 100_000;
+        tx.to = [0xaa; 20];
+        tx.value = 0;
+        tx.calldata.value.selector = [0xab; 4];
+        tx.calldata.value.no_words = 2;
+        tx.calldata.value.words = vec![[0x11; 32], [0x12; 32]];
+        tx.access_list_entry_count = 1;
+        tx.access_list = vec![crate::records::EvmAccessListEntry {
+            address: [0xcc; 20],
+            storage_key_count: 2,
+            storage_keys: vec![[0x22; 32], [0x23; 32]],
+        }];
+        assert_eq!(
+            hex::encode(compute_evm_type2_tx_params_digest_v1(tx).unwrap()),
+            "e5e11cd48153d16da6d9ec69b471848bafa6c1258a234b30359d383e3fba0b00"
+        );
+        assert_eq!(
+            hex::encode(compute_request_id(&record).unwrap()),
+            "4c4e839b3257b4d73de4a362aabf435de1a4a137c0b220479d874c6b6b80fd00"
+        );
     }
 
     #[test]
@@ -238,26 +290,27 @@ mod tests {
     }
 
     // Boundary digests come from Compact 0.33.0-rc.2 compiling the unmodified
-    // PR #127 Signet.compact at 5caf03623a1a5055b884f594e297076de689be2a
-    // with the capacities exercised below. The folds increment their counters
-    // even for unused slots, but skip the key fold for an unused access entry.
+    // @sig-net/midnight 0.24.0-rc.4 Signet.compact, published from
+    // f3c3e3906d193db903430f101bdf56aea9713dcf, with the capacities exercised
+    // below. The folds increment their counters even for unused slots, but skip
+    // the key fold for an unused access entry.
     #[test]
     fn calldata_capacity_matches_compact_counter_boundaries() {
         for (is_some, no_words, expected) in [
             (
                 false,
                 0,
-                "0b2bbac062ad94623a2abb01224d762677ae19755b292cc291ea882470f91500",
+                "236eb84cf68556327107473b32c37c130c61ba97a1e83b851474462da098ce00",
             ),
             (
                 true,
                 0,
-                "fc6dcfc13b4fb663c9ec03903b42bd54e89b2267097f11ac307d6b5df275eb00",
+                "8c4dfa0baf04ba0904f359020156ad4d5d63f39eea74104b82bc2c17e39a5000",
             ),
             (
                 true,
                 1,
-                "ee33630ecbe7dc3785bb73383b2d215d1da0178bf18e3db9b438fc2b91daff00",
+                "2e2f17aed8b2b6618dd3219fe2904343964140b0681d73cf5c1494884379db00",
             ),
         ] {
             let mut tx = sample_record().tx_params;
@@ -281,15 +334,15 @@ mod tests {
         for (used, expected) in [
             (
                 0,
-                "fc6dcfc13b4fb663c9ec03903b42bd54e89b2267097f11ac307d6b5df275eb00",
+                "8c4dfa0baf04ba0904f359020156ad4d5d63f39eea74104b82bc2c17e39a5000",
             ),
             (
                 1,
-                "885d4b02bcd6a6d6fe8693f42c17b89eae5d418e3148d2036cacabfadc411000",
+                "6c422c71b692207849e9dd1a0884dd5156df03ee40eaee964696966b41e1a600",
             ),
             (
                 u8::MAX,
-                "d12095d3131447e739c262f1062657d461ea67e072ffb3e822c29c9d53b28f00",
+                "47664bbc1405de0d88af438901c6161ad88d246db61fe72c7ef1288164427000",
             ),
         ] {
             let mut tx = sample_record().tx_params;
@@ -319,15 +372,15 @@ mod tests {
         for (used_keys, expected) in [
             (
                 0,
-                "885d4b02bcd6a6d6fe8693f42c17b89eae5d418e3148d2036cacabfadc411000",
+                "6c422c71b692207849e9dd1a0884dd5156df03ee40eaee964696966b41e1a600",
             ),
             (
                 1,
-                "b90bb5710a7bd152fdcc6af74d4cef5cddf521b3df7ab836a882115104a00200",
+                "653423539b015d0adbb73c5d2b269798bef56a38f403a67684fec1e557d76f00",
             ),
             (
                 u8::MAX,
-                "45e87aa4e293aa9470cb785d4bdf63598306b52484137392d852bbf366cd5a00",
+                "1a3c3cc6eb756cb0beb291facb7c5704a6fc0731c854e231af4323a8555d9900",
             ),
         ] {
             let mut tx = sample_record().tx_params;
@@ -351,7 +404,7 @@ mod tests {
             tx.access_list_entry_count = 0;
             assert_eq!(
                 hex::encode(compute_evm_type2_tx_params_digest_v1(&tx).unwrap()),
-                "fc6dcfc13b4fb663c9ec03903b42bd54e89b2267097f11ac307d6b5df275eb00",
+                "8c4dfa0baf04ba0904f359020156ad4d5d63f39eea74104b82bc2c17e39a5000",
                 "unused entries do not evaluate the storage-key fold",
             );
         }

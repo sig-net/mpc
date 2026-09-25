@@ -1141,6 +1141,7 @@ mod tests {
         for previous in [
             "b3d7090a8236265efcbf6be5021de3c49961f85ed6339eaa0a4e83c4510e91bf",
             "b599c1e0876e270ff0b1418e957f0e7c613868c38934dc08696feb784bc29000",
+            "39b32903564569dc2f6f3b7a5c8ca35b4bc57ace5b0c25054a5ca862528c0300",
         ] {
             let previous = hex_32(previous);
             let map = map_of(vec![(key_of(previous), cell.clone())]);

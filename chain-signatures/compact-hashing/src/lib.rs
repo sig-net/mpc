@@ -3,8 +3,21 @@
 use midnight_transient_crypto::hash::{transient_hash, upgrade_from_transient};
 use midnight_transient_crypto::repr::FieldRepr as _;
 
+/// Variant indices of the SDK Compact `HashDomain` enum, the tag each protocol
+/// hash input starts with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HashDomain {
+    RequestId = 0,
+    AttestationDigest = 1,
+    EvmType2TxHeader = 2,
+    EvmType2TxWord = 3,
+    EvmType2TxAccessEntry = 4,
+    EvmType2TxStorageKey = 5,
+}
+
 /// Matches the SDK's `calculateSignetAttestationDigest` tuple:
-/// `[RequestId, Uint<64>, OutputKind, Uint<64>, Bytes<N>]`.
+/// `[HashDomain, RequestId, Uint<64>, OutputKind, Uint<64>, Bytes<N>]`.
 /// The separate length field prevents zero padding from aliasing different outputs.
 pub fn compute_attestation_hash(
     request_id: &[u8; 32],
@@ -12,7 +25,8 @@ pub fn compute_attestation_hash(
     output: &[u8],
 ) -> Result<[u8; 32], mpc_primitives::AttestationError> {
     metadata.validate_output(output)?;
-    let mut preimage = Vec::with_capacity(request_id.field_size() + 3 + output.field_size());
+    let mut preimage = Vec::with_capacity(1 + request_id.field_size() + 3 + output.field_size());
+    (HashDomain::AttestationDigest as u8).field_repr(&mut preimage);
     request_id.field_repr(&mut preimage);
     metadata.block_height.field_repr(&mut preimage);
     (metadata.outcome_kind as u8).field_repr(&mut preimage);
@@ -54,6 +68,27 @@ mod tests {
             );
             assert_eq!(hex::encode(&output), vector["cache"].as_str().unwrap());
         }
+    }
+
+    #[test]
+    fn attestation_hash_matches_sdk_domain_vector() {
+        use mpc_primitives::{AttestationMetadata, AttestationOutcomeKind};
+        // The SDK pins this digest in tests/circuits.test.ts at
+        // @sig-net/midnight 0.24.0-rc.4, over its RECORD_2_1_2 request id.
+        let request_id: [u8; 32] =
+            hex::decode("4c4e839b3257b4d73de4a362aabf435de1a4a137c0b220479d874c6b6b80fd00")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let metadata = AttestationMetadata {
+            key_version: 1,
+            block_height: 42,
+            outcome_kind: AttestationOutcomeKind::Executed,
+        };
+        assert_eq!(
+            hex::encode(compute_attestation_hash(&request_id, &metadata, &[0xab; 32]).unwrap()),
+            "41a1845ae55860bc1d9bf08d2581cbc5f2a34005e99ea51743db252040165400"
+        );
     }
 
     #[test]
