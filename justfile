@@ -130,7 +130,7 @@ test-eth-unit:
     cd chain-signatures/contract-eth && npx hardhat test
 
 # Midnight real-stack test (ignored by default; needs Midnight node/indexer/proof-server + anvil)
-test-midnight: (setup "")
+test-midnight: (build "eth") (setup "")
     cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
 
 # Midnight TS/Rust seam differential (needs dist/ built via npm test in midnight-publisher-ts)
