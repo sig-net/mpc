@@ -112,10 +112,12 @@ Happy path:
   used for nothing but attestations to that contract.
 * *Attestation*: a statement (rid, height, outcome) signed with the
   attestation key of rid's contract at the request's key version. The MPC
-  nodes sign `H(rid || att)`, where
-  `att = height || outcome.kind || len(outcome.data) || outcome.data`, so
-  no signed statement can be read as two different outcomes. `height` is
-  the height, in the destination chain's own numbering (a slot on Solana),
+  nodes sign `attestationDigest(rid, att)` as defined in
+  [Section 7.4.2.1](#7421-attestation-digest), where
+  `att = (height, outcome.kind, outcome.data)`. The digest commits to its
+  domain tag and the output length, so no signed statement can be read as
+  two different outcomes. `height` is the height, in the destination
+  chain's own numbering (a slot on Solana),
   of the final block that holds the transaction the outcome describes:
   req.tx for Executed and Failed, the transaction that used up its replay
   protection for Unviable.
@@ -263,8 +265,11 @@ on response(rid, att = (height, kind, data), sig):
     if rid not in outstanding:                          // C3a
         drop
     e = outstanding[rid]
-    if not verify(sig, H(rid || att),                   // C3b
-                  attestation_key[e.key_version]):
+    if not verify(
+        sig,
+        attestationDigest(rid, att),
+        attestation_key[e.key_version]
+    ):                                                  // C3b
         drop
     if height <= e.known:                               // C3c
         drop
@@ -443,7 +448,10 @@ on destination block at height h finalised on chain dest:
 attest(rid, att):
     e = tracked[rid]
     e.status = attested
-    sig = threshold_sign(H(rid || att), attestation_key(e.contract))     // M2
+    sig = threshold_sign(
+        attestationDigest(rid, att),
+        attestation_key(e.contract)
+    )                                                   // M2
     publish_response(e.contract, rid, att, sig)
 
 on Response { contract, rid, att, sig } finalised on the source chain:
@@ -660,14 +668,31 @@ Shared vocabulary (`RequestId`, `OutputKind`, `Signature`, the enums, the
 transaction parameter structures) carries none, nor does the self-versioned
 notification (7.5) or the signet contract's entry points.
 
-`OutputKind` is hashed by position, so variants may only be appended.
-Reordering them would make a digest signed under the old order attest a
-different kind.
+`OutputKind` and `HashDomain` are hashed by position. Their variant indices
+are permanent, and variants may only be appended.
 
 Types: `u8` to `u128` unsigned integers, `bool`, `bytes(N)`, `address` (a
 source-chain contract), `enum`, `T[n]` a vector of capacity n, `hash` the
 native output of `H`. `E[a: t, ...]` encodes a typed tuple, `bytes32(h)` is
 a hash's 32-byte form.
+
+Every protocol hash input starts with a `HashDomain` tag, encoded as `u8`.
+The single append-only enum has at most 256 variants and assigns these indices:
+
+| variant | u8 |
+|---|---|
+| `requestId` | 0 |
+| `attestationDigest` | 1 |
+| `evmType2TxHeader` | 2 |
+| `evmType2TxWord` | 3 |
+| `evmType2TxAccessEntry` | 4 |
+| `evmType2TxStorageKey` | 5 |
+
+`E` must preserve the leading tag: inputs with different tags must have
+different encodings, including when their remaining tuple shapes differ.
+Within each domain, `E` must encode the declared fields unambiguously.
+The tags distinguish hash domains and fold steps. The counts commit to
+the number of used entries within each step sequence.
 
 The names of Section 2 map onto the fields below as follows.
 
@@ -696,8 +721,8 @@ stay out.
 | `txParamType` | `enum TxParamType` | yes | which transaction structure `txParams` holds |
 | `txParams` | per `txParamType` (7.3) | as its digest | the transaction |
 | `executionDest` | `bytes(32)` | yes | CAIP-2 id of the destination chain |
-| `signatureDest` | `enum MPCDestination` | no | reserved, set to `unused` |
-| `params` | `bytes(64)` | no | reserved, zero |
+| `signatureDest` | `enum MPCDestination` | no | reserved, request construction refuses any value except `unused` |
+| `params` | `bytes(64)` | no | reserved, request construction refuses any non-zero byte |
 | `outputDeserializationSchema` | `bytes` | no | how the MPC decodes the execution output |
 | `respondSerializationSchema` | `bytes` | no | how the MPC serialises that output into the response |
 
@@ -715,7 +740,10 @@ replaced by `txParamsDigest: bytes(32)`, the transaction type's digest `D`
 of `txParams`.
 
 ```
-rid = bytes32(H(E(preimage)))
+rid = bytes32(H(E[
+    HashDomain.requestId: u8,
+    preimage: RequestIdPreimageV1
+]))
 ```
 
 `D` is defined with each transaction type (7.3 for `evmType2`). It covers
@@ -749,20 +777,47 @@ The digest `D_evmType2(txParams)`:
 ```
 noWords  = calldata present ? calldata.noWords  : 0
 selector = calldata present ? calldata.selector : bytes(4) of zero
-require noWords <= w, accessListEntryCount <= e, and storageKeyCount <= k for every used entry
+require noWords <= w,
+        accessListEntryCount <= e,
+        and storageKeyCount <= k for every used entry
 
-acc = H(E[chainId: u64, nonce: u64, maxPriorityFeePerGas: u128, maxFeePerGas: u128, gasLimit: u64,
-          to: bytes(20), value: u128, calldata present: bool, selector: bytes(4), noWords: u16,
-          accessListEntryCount: u8])
+acc = H(E[
+    HashDomain.evmType2TxHeader: u8,
+    chainId: u64,
+    nonce: u64,
+    maxPriorityFeePerGas: u128,
+    maxFeePerGas: u128,
+    gasLimit: u64,
+    to: bytes(20),
+    value: u128,
+    calldata present: bool,
+    selector: bytes(4),
+    noWords: u16,
+    accessListEntryCount: u8
+])
 
 for each calldata word at index < noWords, in order:
-    acc = H(E[acc: hash, word: bytes(32)])
+    acc = H(E[
+        HashDomain.evmType2TxWord: u8,
+        acc: hash,
+        word: bytes(32)
+    ])
 
 for each access-list entry at index < accessListEntryCount, in order:
     keys = hash zero
     for each storage key at index < entry.storageKeyCount, in order:
-        keys = H(E[keys: hash, key: bytes(32)])
-    acc = H(E[acc: hash, entry.address: bytes(20), entry.storageKeyCount: u8, keys: hash])
+        keys = H(E[
+            HashDomain.evmType2TxStorageKey: u8,
+            keys: hash,
+            key: bytes(32)
+        ])
+    acc = H(E[
+        HashDomain.evmType2TxAccessEntry: u8,
+        acc: hash,
+        entry.address: bytes(20),
+        entry.storageKeyCount: u8,
+        keys: hash
+    ])
 
 D = bytes32(acc)
 ```
@@ -778,6 +833,10 @@ structure.
 
 ### 7.4 Responses
 
+The MPC publishes these responses to a `SignBidirectionalEventV1` request.
+
+#### 7.4.1 Signature Responded Event
+
 `SignatureRespondedEventV1`, the signature a request asked for:
 
 | field | type | meaning |
@@ -785,7 +844,15 @@ structure.
 | `requestId` | `RequestId` | the request it answers |
 | `signature` | `Signature` | over the transaction the request describes, by the request's key |
 
-`RespondBidirectionalEventV1`, the attestation of the execution:
+#### 7.4.2 Respond Bidirectional Event
+
+`RespondBidirectionalEventV1` attests the requested transaction's outcome:
+`executed`, `failed` or `unviable`. The first two
+attest execution of the transaction signed in `SignatureRespondedEventV1`.
+An `unviable` outcome attests that a different transaction used up the
+requested transaction's replay protection.
+
+The event carries:
 
 | field | type | meaning |
 |---|---|---|
@@ -793,15 +860,23 @@ structure.
 | `blockHeight` | `u64` | height of the final destination block, in that chain's numbering |
 | `outputKind` | `enum OutputKind { executed, failed, unviable }` | the outcome's kind |
 | `serializedOutputLength` | `u64` | byte width of the serialised output |
-| `digest` | `bytes(32)` | the attestation digest below |
+| `digest` | `bytes(32)` | the [attestation digest](#7421-attestation-digest) |
 | `signature` | `Signature` | over `digest`, by the attestation key of `requestId`'s contract at the request's key version |
+
+##### 7.4.2.1 Attestation Digest
 
 The attestation digest, over the serialised output the request's schema
 produced (empty for `failed` and `unviable`):
 
 ```
-digest = bytes32(H(E[requestId: bytes(32), blockHeight: u64, outputKind: enum,
-                     serializedOutputLength: u64, serializedOutput: bytes(serializedOutputLength)]))
+digest = bytes32(H(E[
+    HashDomain.attestationDigest: u8,
+    requestId: bytes(32),
+    blockHeight: u64,
+    outputKind: enum,
+    serializedOutputLength: u64,
+    serializedOutput: bytes(serializedOutputLength)
+]))
 ```
 
 The output itself travels off chain. A reader recomputes the digest from
