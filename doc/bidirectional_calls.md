@@ -83,13 +83,16 @@ Happy path:
   (Section 7) make it sufficient: otherwise two encodings of one key, or
   one transaction at two capacities or with different bytes in unused
   slots, would be two rids for one execution.
+* *Admitted*: the MPC has found a request authentic and processable
+  (Section 4.4) and tracks it. Only an admitted request is ever signed or
+  attested.
 * *Outcome*: a pair (kind, data), with three kinds.
 
   | kind | what happened to req.tx | data |
   |---|---|---|
   | Executed | included in a final destination block, succeeded, and its return data decodes against req.schemas | the decoded return data |
   | Failed | included in a final destination block and reverted | empty |
-  | Unviable | can never be included, because a different transaction from the same key has already used up its replay protection (Section 3.3) | empty |
+  | Unviable | can never be included, because a transaction whose unsigned bytes are not req.tx, from the same key, has already used up req.tx's replay protection (Section 3.3) | empty |
 
   Empty data is a zero-length field; the kind is the whole information.
   Every outcome is final: once req.tx has executed or its replay protection is
@@ -101,18 +104,21 @@ Happy path:
   A transaction that succeeded but whose return data does not decode
   against req.schemas, because the schema is wrong or the destination
   contract changed its return type, has no outcome. The MPC reports
-  nothing, drops the request and logs why (Section 4.4). A node
+  nothing, stops watching the request and logs why (Section 4.4). A node
   cannot tell a wrong schema from a changed contract, and the contract
   could not act on bytes it cannot decode.
 * *Attestation key*: a signing key the MPC derives from its root key, the
   source chain, the contract, a reserved path and the request's key version,
   used for nothing but attestations to that contract.
 * *Attestation*: a statement (rid, height, outcome) signed with the
-  attestation key of rid's contract at the request's key version, each field
-  length-committed. `height` is the height, in the destination chain's own
-  numbering (a slot on Solana), of the final block that holds the transaction
-  the outcome describes: req.tx for Executed and Failed, the transaction that
-  used up its replay protection for Unviable.
+  attestation key of rid's contract at the request's key version. The MPC
+  nodes sign `H(rid || att)`, where
+  `att = height || outcome.kind || len(outcome.data) || outcome.data`, so
+  no signed statement can be read as two different outcomes. `height` is
+  the height, in the destination chain's own numbering (a slot on Solana),
+  of the final block that holds the transaction the outcome describes:
+  req.tx for Executed and Failed, the transaction that used up its replay
+  protection for Unviable.
 * *Response*: an attestation delivered to the contract that made rid's
   request.
 
@@ -253,7 +259,7 @@ on sign_bidirectional(req) from the application logic:
     signet.sign_bidirectional(rid, req)
     return rid
 
-on response(rid, att = (kind, height, data), sig):
+on response(rid, att = (height, kind, data), sig):
     if rid not in outstanding:                          // C3a
         drop
     e = outstanding[rid]
@@ -396,8 +402,9 @@ processable(req): bool
 
 state:
     tracked: RequestId -> Entry
-    Entry = { req, contract, signatures: Set<Signature>, attestation? }
-    // a set: a second signature for one request is a second
+    Entry = { req, contract, signatures: Set<Signature>, status }
+    status: watching | attested | parked
+    // signatures is a set: a second signature for one request is a second
     // transaction ID to watch (see below)
 
 on SignRequest { contract, rid, req } finalised on the source chain:
@@ -405,7 +412,7 @@ on SignRequest { contract, rid, req } finalised on the source chain:
         drop
     if rid in tracked or not processable(req):            // M4
         drop
-    tracked[rid] = { req, contract, signatures: {} }
+    tracked[rid] = { req, contract, signatures: {}, status: watching }
     signature = threshold_sign(req.tx, derived_key(contract, req.key))   // M1
     tracked[rid].signatures.add(signature)
     publish_signature(rid, signature)
@@ -417,7 +424,7 @@ on Signature { rid, signature } finalised on the source chain:
         e.signatures.add(signature)
 
 on destination block at height h finalised on chain dest:
-    for (rid, e) in tracked for dest and no e.attestation:
+    for (rid, e) in tracked for dest and e.status == watching:
         ours = { txid(s, e.req.tx) for s in e.signatures }
         account = derived_address(e.contract, e.req.key)
         if some id in ours has a receipt r in a final block at height h',
@@ -425,17 +432,17 @@ on destination block at height h finalised on chain dest:
           or this block holds a transaction sent by account with
           receipt r whose unsigned bytes are e.req.tx, with h' = h:
             if decode(r, e.req.schemas) gives (kind, data):
-                attest(rid, (kind, h', data))
+                attest(rid, (h', kind, data))
             else:
-                delete tracked[rid], log why                // M5
+                e.status = parked, log why                  // M5
         else if this block holds a transaction sent by account that uses
           up e.req.tx's replay protection and whose unsigned bytes are not
           e.req.tx:
-            attest(rid, (Unviable, h, empty))               // M6
+            attest(rid, (h, Unviable, empty))               // M6
 
 attest(rid, att):
     e = tracked[rid]
-    e.attestation = att
+    e.status = attested
     sig = threshold_sign(H(rid || att), attestation_key(e.contract))     // M2
     publish_response(e.contract, rid, att, sig)
 
@@ -462,7 +469,7 @@ attest from the destination block alone, so the attestation does not wait
 on the source chain.
 
 Unviable is detected only in the blocks being processed after admission,
-So replay protection used up soon after the request is made may be seen
+so replay protection used up soon after the request is made may be seen
 by fewer than t nodes: Unviable is best-effort.
 
 A node keeps `tracked` and its position on every chain durably, advances
@@ -470,6 +477,11 @@ the position only once an event's effects are persisted, and resumes from
 it, so no block is skipped and a restart repeats at most the step in
 progress. A repeated attestation has the same content (Section 5) and is
 dropped (C3a).
+
+Only source-chain events add or remove entries of `tracked`. Nodes
+reach a destination block at different source heights, so a removal
+driven by it would make them disagree on `tracked` at the same source
+height.
 
 A request made again after it was answered (Section 2) is signed again, or
 dropped as still tracked. Its transaction cannot execute again, and the
@@ -484,9 +496,8 @@ Properties:
   under a reserved path that no request on any signing API may name
   (`processable` covers this one); otherwise a contract could have its own
   attestation key sign an arbitrary hash and forge a response to itself.
-* M2 An attestation binds rid, kind, height and data as separate
-  length-committed fields, and describes only destination state final at
-  that height.
+* M2 An attestation binds rid, height, kind and data, with data's length
+  in the hash, and describes only destination state final at that height.
 * M3 The MPC attests an outcome only from a transaction in a final block
   sent by the request's own account, which only the network controls: the
   receipt of one whose unsigned bytes are req.tx, or, for Unviable, one
@@ -496,11 +507,10 @@ Properties:
   or whose rid is still tracked, and keeps no new state for it. A rid still
   tracked is the same transaction, already being watched, so nothing is
   lost.
-* M5 An execution whose return data does not decode is not attested, and
-  the MPC drops the request.
-* M6 Unviable is attested only from a block a node processed after
-  admitting the request, so replay protection used up before that is not
-  reported.
+* M5 An execution whose return data does not decode is not attested; its
+  entry stays tracked but unwatched.
+* M6 Unviable is attested only from a destination block this node scanned
+  itself, at that block's height.
 
 ## 5. Why the guarantees hold (sketch)
 
@@ -516,10 +526,14 @@ design.
   request's schemas only.
 * Distinct keys (ACCOUNT_DERIVATION.md). The derivation path contains the
   source chain and the requesting contract, so different (source chain,
-  contract, key parameters) derive different keys, and the sender of an
-  executed transaction tells the MPC which contract and key parameters
-  asked for it. Assumed here: the attestation key sits on a path no request
-  may name, and two signing schemes never share a key.
+  contract, key parameters) derive different keys, where the key
+  parameters are a request's derivation path, key version and signing
+  scheme. So the sender of an executed transaction tells the MPC which
+  contract and key parameters asked for it. Two kinds of key come out of
+  this derivation: signing keys, from the path a request names, and one
+  attestation key per contract and key version, on a reserved path. Assumed
+  here: no request may name that path, and two signing schemes never share
+  a key.
 
 * G1, in short: an execution this contract has already accepted is at or below
   last_seen, so a request made later records it as known and C3c drops any
@@ -615,16 +629,18 @@ a path from B48 through A15; the first at A12 has none.
   `process` batch carrying its message, so `process` has to isolate
   handler failures. Removing the entry before the handler runs is not an
   alternative, since C3a would then drop the re-delivery.
-* A dropped request strands its rid. After M4 or M5 the MPC keeps nothing
-  while the library's entry stays outstanding, so C1 refuses that rid for
-  good and the application can only retry with a different transaction.
+* An unanswerable request strands its rid. After M4 the MPC keeps nothing,
+  after M5 an unwatched entry, while the library's entry stays outstanding,
+  so C1 refuses that rid for good and the application can only retry with a
+  different transaction.
 * A key version can be retired only once no entry that recorded it is
   outstanding, and an unanswered request is outstanding forever. Until
   then a compromised key can forge responses to the requests made under
   it, and to no others (C3b).
 * `tracked` and `outstanding` can grow without bound. An entry lives until a
-  verified Response, and a request whose signature nobody broadcasts never
-  produces one. A cancel transaction that uses up the replay protection
+  verified Response, and a request whose signature nobody broadcasts, or
+  whose output does not decode (M5), never produces one. A cancel
+  transaction that uses up the replay protection
   ends the MPC's entry when enough nodes see it (M6), and the library's
   when that is attested, so an application has a way out, but nothing
   bounds the entries nobody clears. Checking old entries less often bounds
