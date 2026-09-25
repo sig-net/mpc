@@ -6,9 +6,10 @@ use super::{handle_chain_event, StreamContext};
 
 use crate::backlog::{Backlog, Checkpoint};
 use crate::types::CheckpointWatcher;
+use crate::types::SignCommand;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
-use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, SignCommand};
+use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, CheckpointDigest};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -75,8 +76,8 @@ async fn detect_regression(
     let is_reset =
         Checkpoint::reset(chain, checkpoint_digest.height).digest() == checkpoint_digest.digest;
     if !is_reset {
-        match backlog.checkpoints().latest(chain).await {
-            Ok(None) => {
+        match backlog.checkpoints().has_checkpoint(chain).await {
+            Ok(false) => {
                 tracing::info!(?chain, "no local checkpoint; skipping regression check");
                 return false;
             }
@@ -84,11 +85,11 @@ async fn detect_regression(
                 tracing::warn!(
                     ?chain,
                     %err,
-                    "transient storage error checking latest checkpoint; retrying on next change"
+                    "transient storage error checking for a local checkpoint; retrying on next change"
                 );
                 return false;
             }
-            Ok(Some(_)) => {}
+            Ok(true) => {}
         }
     }
 
@@ -116,6 +117,34 @@ async fn detect_regression(
 
     // No match → regression detected.
     true
+}
+
+/// Re-emits votes for the checkpoints pending in durable storage.
+///
+/// Vote tasks live only in memory, and after a process restart the indexer
+/// resumes past the pending checkpoints, so nothing else votes them again.
+/// Runs as part of startup recovery only; the dispatcher drops votes consensus
+/// has already settled.
+async fn resubmit_pending_checkpoint_votes(
+    chain: Chain,
+    ctx: &StreamContext,
+) -> anyhow::Result<()> {
+    let pending = ctx.backlog.checkpoints().load_pending(chain).await?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    tracing::info!(
+        %chain,
+        count = pending.len(),
+        "resubmitting votes for pending checkpoints recovered at startup"
+    );
+    for checkpoint in &pending {
+        ctx.rpc
+            .vote_checkpoint(CheckpointDigest::from(checkpoint))
+            .await?;
+    }
+    Ok(())
 }
 
 /// Delay before respawning a `run()` that returned an error.
@@ -155,22 +184,35 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     }
 
     let mut load_local = true;
+    // Startup recovery is complete only once the recovered pending checkpoints'
+    // votes have been resubmitted.
+    let mut resubmit_votes = true;
     let mut recovery_retry_delay = ERROR_RESTART_DELAY;
     loop {
         // Cleared before recovery, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
         ctx.caught_up = false;
-        if let Err(err) = recover_backlog(
-            chain,
-            load_local,
-            &ctx.backlog,
-            &mut ctx.checkpoints_rx,
-            &mut ctx.mesh_state,
-            &ctx.node_client,
-            &my_account_id,
-        )
-        .await
-        {
+        let recovered = async {
+            recover_backlog(
+                chain,
+                load_local,
+                &ctx.backlog,
+                &mut ctx.checkpoints_rx,
+                &mut ctx.mesh_state,
+                &ctx.node_client,
+                &my_account_id,
+            )
+            .await?;
+            load_local = false;
+
+            if resubmit_votes {
+                resubmit_pending_checkpoint_votes(chain, &ctx).await?;
+                resubmit_votes = false;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(err) = recovered {
             tracing::error!(
                 %chain,
                 %err,
@@ -182,7 +224,6 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             continue;
         }
         recovery_retry_delay = ERROR_RESTART_DELAY;
-        load_local = false;
 
         let (events_tx, mut events_rx) = chain_event_channel();
         let cancel = CancellationToken::new();
@@ -202,14 +243,21 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 event = events_rx.recv(), if ctx.backlog.checkpoints().has_slot(chain) => {
                     let Some(event) = event else {
                         run_finished = true;
-                        // `run()` exited on its own: Ok shuts the chain down,
-                        // Err (or panic) is treated as a crash and restarted.
-                        break match (&mut run_handle).await {
-                            Ok(Ok(())) => Exit::Shutdown,
-                            result => {
-                                // anyhow error or JoinError::Panic — both can
-                                // hot-loop, so back off before restarting.
-                                tracing::warn!(?result, %chain, "chain run() failed; restarting");
+                        // `run()` exited on its own: Ok shuts the chain down; an anyhow
+                        // error or JoinError::Panic is a crash — either can hot-loop,
+                        // so back off before restarting.
+                        let result = match (&mut run_handle).await {
+                            Ok(r) => r,
+                            Err(e) => Err(anyhow::Error::from(e)),
+                        };
+                        break match result {
+                            Ok(()) => Exit::Shutdown,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %format_args!("{e:#}"),
+                                    %chain,
+                                    "chain run() failed; restarting"
+                                );
                                 tokio::time::sleep(ERROR_RESTART_DELAY).await;
                                 Exit::Restart
                             }
@@ -221,7 +269,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                     if let Err(err) =
                         handle_chain_event(event, &mut ctx, &telemetry, root_pk, chain).await
                     {
-                        tracing::error!(?err, %chain, "failed to process chain event");
+                        tracing::error!(error = %format_args!("{err:#}"), %chain, "failed to process chain event");
                     }
                 }
                 result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
@@ -275,11 +323,13 @@ mod tests {
     use crate::backlog::Backlog;
     use crate::mesh::MeshState;
     use crate::rpc::RpcAction;
+    use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::test_utils::make_test_stream_context;
+    use crate::types::SignCommand;
 
     use k256::ProjectivePoint;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
-    use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
+    use mpc_primitives::{Chain, CheckpointDigest};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, watch, Notify};
 
@@ -556,6 +606,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_resubmits_pending_checkpoint_votes_once() {
+        let chain = Chain::Ethereum;
+        let backlog = Backlog::new();
+        let mut expected = Vec::new();
+        for height in [100, 200] {
+            let checkpoint = backlog.set_processed_block(chain, height).await.unwrap();
+            expected.push(CheckpointDigest {
+                chain,
+                height,
+                digest: checkpoint.digest(),
+            });
+        }
+
+        // The first run stalls until the watchdog restarts it; the in-process
+        // restart must not resubmit what startup already resubmitted.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let indexer = StalledRunIndexer {
+            attempts: attempts.clone(),
+            first_cancel: Arc::new(Notify::new()),
+        };
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (ctx, _cp_tx, _mesh_tx, mut rpc_rx) = test_ctx(backlog, sign_tx);
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_supervised_with_watchdog(
+                indexer,
+                ctx,
+                NoopChainTelemetry,
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("supervisor should shut down after the restarted run() exits");
+        assert!(attempts.load(Ordering::SeqCst) >= 2, "run() was restarted");
+
+        let mut voted = Vec::new();
+        while let Ok(Some(action)) =
+            tokio::time::timeout(Duration::from_millis(200), rpc_rx.recv()).await
+        {
+            if let RpcAction::VoteCheckpoint { checkpoint, .. } = action {
+                voted.push(checkpoint);
+            }
+        }
+        voted.sort_by_key(|checkpoint| checkpoint.height);
+        assert_eq!(voted, expected);
+    }
+
+    #[tokio::test]
+    async fn startup_retries_resubmission_after_a_storage_error() {
+        /// Records that `run()` started, then exits Ok.
+        struct ExitIndexer {
+            attempts: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ChainIndexer for ExitIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn run(
+                &self,
+                _events_tx: mpsc::Sender<ChainEvent>,
+                _cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let chain = Chain::Ethereum;
+        let storage = CheckpointStorage::in_memory();
+        let backlog = Backlog::persisted(storage.clone());
+        let checkpoint = backlog.set_processed_block(chain, 100).await.unwrap();
+        let expected = CheckpointDigest {
+            chain,
+            height: 100,
+            digest: checkpoint.digest(),
+        };
+        storage.fail_next_load_pending(1);
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let indexer = ExitIndexer {
+            attempts: attempts.clone(),
+        };
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (ctx, _cp_tx, _mesh_tx, mut rpc_rx) = test_ctx(backlog, sign_tx);
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_supervised_with_watchdog(indexer, ctx, NoopChainTelemetry, Duration::from_secs(60)),
+        )
+        .await
+        .expect("supervisor should shut down after run() exits");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "run() starts only once startup recovery, including resubmission, succeeds"
+        );
+
+        let mut voted = Vec::new();
+        while let Ok(Some(action)) =
+            tokio::time::timeout(Duration::from_millis(200), rpc_rx.recv()).await
+        {
+            if let RpcAction::VoteCheckpoint { checkpoint, .. } = action {
+                voted.push(checkpoint);
+            }
+        }
+        assert_eq!(voted, vec![expected]);
+    }
+
+    #[tokio::test]
     async fn dispatches_events_and_shuts_down_when_run_exits() {
         let backlog = Backlog::new();
         let (sign_tx, _sign_rx) = mpsc::channel(8);
@@ -639,10 +800,20 @@ mod tests {
                 digest: [0xab; 32],
             }))
             .unwrap();
+        // Startup also resubmits the seeded pending checkpoint's vote, which may
+        // be delivered on either side of the abort.
+        let abort = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match rpc_rx.recv().await {
+                    Some(RpcAction::VoteCheckpoint { .. }) => continue,
+                    other => break other,
+                }
+            }
+        })
+        .await
+        .expect("regression should abort RPC work immediately");
         assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(1), rpc_rx.recv())
-                .await
-                .expect("regression should abort RPC work immediately"),
+            abort,
             Some(RpcAction::AbortCheckpoints(Chain::Ethereum))
         ));
         assert!(matches!(

@@ -5,6 +5,7 @@ pub mod cluster;
 pub mod containers;
 pub mod eth;
 pub mod execute;
+pub mod gcs;
 pub mod local;
 pub mod midnight;
 pub mod mpc_fixture;
@@ -277,7 +278,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                 .secret_key
                 .parse()
                 .context("invalid ethereum sandbox secret key")?,
-            consensus_rpc_http_url: rpc_endpoint.clone(),
             execution_rpc_http_url: rpc_endpoint
                 .parse()
                 .context("invalid ethereum sandbox rpc endpoint")?,
@@ -285,10 +285,8 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                 .parse()
                 .context("invalid deployed contract address")?,
             network: "anvil".to_string(),
-            helios_data_path: format!("/tmp/helios-{contract_address_hex}"),
             refresh_finalized_interval: 1_000,
             optimistic_requests: true,
-            light_client: false,
             gas: Default::default(),
             indexer: Default::default(),
             publisher: Default::default(),

@@ -2,10 +2,14 @@ use super::limiter::SignPermit;
 use super::organize::OrganizingPhase;
 use super::task::SignPhase;
 use super::*;
+use crate::backlog::{Generating, SignEntry};
 
 pub struct SignState {
     round: usize,
-    pub request: Arc<IndexedSignRequest>,
+    /// Round of the last reorganize warn; reorganizations are sampled against
+    /// it so `bump_round` jumps can't skip the sampling points.
+    last_warned_round: usize,
+    pub entry: SignEntry<Generating>,
     pub mesh_state: watch::Receiver<MeshState>,
     /// Budget for the current organizing+posit attempt.
     pub budget: TimeoutBudget,
@@ -28,15 +32,19 @@ pub struct SignState {
 
 impl SignState {
     pub fn new(
-        request: Arc<IndexedSignRequest>,
+        entry: SignEntry<Generating>,
         mesh_state: watch::Receiver<MeshState>,
         carried_round: Arc<AtomicUsize>,
     ) -> Self {
+        let round = carried_round.load(Ordering::Relaxed);
         Self {
-            round: carried_round.load(Ordering::Relaxed),
-            request,
+            round,
+            last_warned_round: 0,
+            entry,
             mesh_state,
-            budget: TimeoutBudget::new(round_timeout(0)),
+            // A respawn restarts the round clock, and the skew it injects does
+            // not shrink with the round, so floor the budget at round 0's.
+            budget: TimeoutBudget::new(round_timeout(round).max(ORGANIZE_POSIT_TIMEOUT)),
             permit: None,
             highest_seen_round: 0,
             buffered_messages: HashMap::new(),
@@ -55,7 +63,7 @@ impl SignState {
     }
 
     pub fn request(&self) -> &IndexedSignRequest {
-        &self.request
+        self.entry.request()
     }
 
     /// Abandon the current attempt: advance to the next round (releasing the
@@ -63,12 +71,25 @@ impl SignState {
     /// machine from the Organizing phase. The single back-edge of the sign
     /// state machine.
     pub fn reorganize(&mut self, reason: &str) -> SignPhase {
-        tracing::warn!(
-            sign_id = ?self.request.id,
-            round = self.round,
-            reason,
-            "reorganizing sign request"
-        );
+        // Wedged requests rotate forever; a watermark on the last warned round
+        // keeps the warn rate at ~1 per 10 rounds even when StaleRound jumps
+        // `bump_round` past whole decades.
+        if self.round == 0 || self.round >= self.last_warned_round + 10 {
+            tracing::warn!(
+                sign_id = ?self.entry.sign_id(),
+                round = self.round,
+                reason,
+                "reorganizing sign request"
+            );
+            self.last_warned_round = self.round;
+        } else {
+            tracing::info!(
+                sign_id = ?self.entry.sign_id(),
+                round = self.round,
+                reason,
+                "reorganizing sign request"
+            );
+        }
         self.bump_round();
         SignPhase::Organizing(OrganizingPhase)
     }
@@ -126,21 +147,8 @@ impl SignState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn request() -> IndexedSignRequest {
-        IndexedSignRequest::sign(
-            SignId::new([0u8; 32]),
-            mpc_primitives::SignArgs {
-                entropy: [0u8; 32],
-                epsilon: k256::Scalar::from(1u64),
-                payload: k256::Scalar::from(2u64),
-                path: "test".to_string(),
-                key_version: 0,
-            },
-            Chain::Ethereum,
-            0,
-        )
-    }
+    use crate::backlog::mock::mock_sign_request;
+    use crate::backlog::Backlog;
 
     /// A respawn rebuilds `SignState`; the round must resume from the carried
     /// value, not restart at 0 — peers read a round reset as time travel.
@@ -148,16 +156,88 @@ mod tests {
     fn round_survives_a_respawn() {
         let carried = Arc::new(AtomicUsize::new(0));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let backlog = Backlog::new();
+        let entry = SignEntry::generating(
+            mock_sign_request(SignId::new([0u8; 32]), Chain::Ethereum),
+            &backlog,
+        );
 
-        let mut state = SignState::new(Arc::new(request()), mesh_rx.clone(), Arc::clone(&carried));
+        let mut state = SignState::new(entry.clone(), mesh_rx.clone(), Arc::clone(&carried));
         state.reorganize("test");
         state.highest_seen_round = 9;
         state.reorganize("test");
         assert_eq!(state.round(), 9);
+    }
 
-        // The task is aborted and a new incarnation takes over.
+    #[test]
+    fn warn_watermark_survives_round_jumps() {
+        let carried = Arc::new(AtomicUsize::new(0));
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let backlog = Backlog::new();
+        let entry = SignEntry::generating(
+            mock_sign_request(SignId::new([0u8; 32]), Chain::Ethereum),
+            &backlog,
+        );
+        let mut state = SignState::new(entry.clone(), mesh_rx.clone(), Arc::clone(&carried));
+
+        state.reorganize("test");
+        assert_eq!(state.last_warned_round, 0);
+
+        state.highest_seen_round = 9;
+        state.reorganize("test");
+        assert_eq!(state.round(), 9);
+        assert_eq!(state.last_warned_round, 0);
+
+        state.highest_seen_round = 20;
+        state.reorganize("test");
+        assert_eq!(state.round(), 20);
+        assert_eq!(state.last_warned_round, 0);
+
+        state.reorganize("test");
+        assert_eq!(state.last_warned_round, 20);
+
+        // A respawned incarnation resumes at the carried round; its watermark
+        // starts fresh, but the high carried round re-arms the next warn.
         drop(state);
-        let respawned = SignState::new(Arc::new(request()), mesh_rx, carried);
-        assert_eq!(respawned.round(), 9);
+        let respawned = SignState::new(entry, mesh_rx, carried);
+        assert_eq!(respawned.round(), 21);
+        assert_eq!(respawned.last_warned_round, 0);
+    }
+
+    /// A respawn rebuilds `SignState` at the carried round, so it has to take
+    /// that round's budget -- but never less than round 0's, because the skew a
+    /// respawn injects does not shrink with the round.
+    #[test]
+    fn respawn_budget_is_the_carried_round_floored_at_round_zero() {
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let backlog = Backlog::new();
+        let entry = SignEntry::generating(
+            mock_sign_request(SignId::new([0u8; 32]), Chain::Ethereum),
+            &backlog,
+        );
+
+        // 0 and 3 sit below the floor and 18 and 40 above it, in both the
+        // production and `test-feature` constants.
+        for round in [0, 3, 18, 40] {
+            let carried = Arc::new(AtomicUsize::new(round));
+            let first = SignState::new(entry.clone(), mesh_rx.clone(), Arc::clone(&carried));
+            drop(first);
+            let respawned = SignState::new(entry.clone(), mesh_rx.clone(), carried);
+
+            assert_eq!(respawned.round(), round);
+            let expected = round_timeout(round).max(ORGANIZE_POSIT_TIMEOUT);
+            let remaining = respawned.budget.remaining();
+            assert!(
+                remaining <= expected && expected - remaining < Duration::from_millis(100),
+                "round {round}: budget {remaining:?} should be {expected:?}"
+            );
+        }
+
+        // Non-vacuous only if the set spans both sides of the floor.
+        assert_eq!(
+            round_timeout(3).max(ORGANIZE_POSIT_TIMEOUT),
+            ORGANIZE_POSIT_TIMEOUT
+        );
+        assert!(round_timeout(18) > ORGANIZE_POSIT_TIMEOUT);
     }
 }

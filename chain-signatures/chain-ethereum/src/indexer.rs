@@ -142,14 +142,16 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         #[cfg(feature = "bench")]
         let start = std::time::Instant::now();
 
-        self.telemetry.block_indexed(block_number);
         let parsed = self.parse_block(block, relevant_logs).await?;
         self.emit_block_events(events_tx, parsed).await?;
+
+        // Indexed means emitted: catchup retries a failed block until it succeeds.
+        self.telemetry.block_indexed(block_number);
 
         #[cfg(feature = "bench")]
         {
             crate::bench::add_process_time(start.elapsed());
-            if crate::bench::inc_block() % 100 == 0 {
+            if crate::bench::inc_block().is_multiple_of(100) {
                 crate::bench::report_metrics("catchup_progress");
             }
         }
@@ -831,7 +833,6 @@ mod tests {
     async fn missing_catchup_block_propagates_error_when_refetch_rpc_fails() {
         let indexer = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1")
             .client_url("http://127.0.0.1:1")
-            .rpc_urls("", "http://127.0.0.1:1")
             .build()
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();

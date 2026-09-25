@@ -302,11 +302,9 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
     /// Construct a `ChainEvent::ExecutionConfirmed` for a mined transaction.
     ///
-    /// A terminal extraction failure resolves the execution as
-    /// [`ExecutionOutcome::Failed`] rather than dropping the event, so the
-    /// bidirectional request completes with an explicit failure instead of
-    /// staying pending forever. A retryable one emits nothing and asks for
-    /// another attempt on the next block.
+    /// A terminal extraction failure resolves as
+    /// [`ExecutionOutcome::ExtractionFailed`], never `Failed`: the transaction
+    /// executed. A retryable one emits nothing and retries on the next block.
     async fn execution_confirmed_event(
         &self,
         tx_id: BidirectionalTxId,
@@ -358,9 +356,9 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                                 ?sign_id,
                                 ?err,
                                 "unrecoverable transaction output extraction failure; \
-                                 resolving bidirectional execution as failed"
+                                 the transaction executed, so this is not a failed execution"
                             );
-                            ExecutionOutcome::Failed
+                            ExecutionOutcome::ExtractionFailed
                         }
                     }
                 }
@@ -535,7 +533,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         let events = replaced
             .into_iter()
             .map(|(tx_id, (sign_id, tx))| {
-                tracing::warn!(
+                tracing::info!(
                     ?tx_id,
                     ?sign_id,
                     nonce = tx.nonce,
@@ -611,7 +609,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                     }
                 },
                 Ok(BackfillOutcome::NotObserved) => {
-                    tracing::warn!(
+                    tracing::info!(
                         ?tx_id,
                         ?sign_id,
                         expected_nonce = pending_tx.nonce,
@@ -654,6 +652,32 @@ mod tests {
     };
     use serde_json::json;
     use std::sync::Arc;
+
+    fn test_watcher_tx(
+        tx_hash: alloy::primitives::B256,
+        from_address: alloy::primitives::Address,
+        nonce: u64,
+    ) -> Arc<BidirectionalTx> {
+        Arc::new(BidirectionalTx {
+            id: BidirectionalTxId(tx_hash.0),
+            sender: [0u8; 32],
+            serialized_transaction: vec![],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: "eip155:31337".to_string(),
+            key_version: LATEST_MPC_KEY_VERSION,
+            deposit: 0,
+            path: "m/44'/60'/0'/0/0".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: Chain::Ethereum.to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+            request_id: tx_hash.0,
+            from_address: **from_address,
+            nonce,
+        })
+    }
 
     #[tokio::test]
     async fn late_watcher_backfill_uses_tx_hash_and_mined_block() {
@@ -715,30 +739,12 @@ mod tests {
             .await;
 
         let sign_id = SignId::new([0x55; 32]);
-        let tx = BidirectionalTx {
-            id: BidirectionalTxId(tx_hash.0),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: "eip155:31337".to_string(),
-            key_version: LATEST_MPC_KEY_VERSION,
-            deposit: 0,
-            path: "m/44'/60'/0'/0/0".to_string(),
-            algo: "secp256k1".to_string(),
-            dest: Chain::Ethereum.to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-            request_id: sign_id.request_id,
-            from_address: **from_address,
-            nonce: 0,
-        };
+        let tx = test_watcher_tx(tx_hash, from_address, 0);
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, Arc::new(tx))
+            .watch_execution(Chain::Ethereum, sign_id, tx)
             .await;
 
         // Construct mock block at height 10 (triggers modulo 10 check)
@@ -822,34 +828,12 @@ mod tests {
         // Setup Indexer & Watchers
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
 
-        let create_tx = |hash: alloy::primitives::B256, nonce: u64| {
-            Arc::new(BidirectionalTx {
-                id: BidirectionalTxId(hash.0),
-                sender: [0u8; 32],
-                serialized_transaction: vec![],
-                source_chain: Chain::Solana,
-                target_chain: Chain::Ethereum,
-                caip2_id: "eip155:31337".to_string(),
-                key_version: LATEST_MPC_KEY_VERSION,
-                deposit: 0,
-                path: "m/44'/60'/0'/0/0".to_string(),
-                algo: "secp256k1".to_string(),
-                dest: Chain::Ethereum.to_string(),
-                params: "{}".to_string(),
-                output_deserialization_schema: vec![],
-                respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-                request_id: hash.0,
-                from_address: **from_address,
-                nonce,
-            })
-        };
-
         harness
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([0; 32]),
-                create_tx(tx_hash_0, 0),
+                test_watcher_tx(tx_hash_0, from_address, 0),
             )
             .await;
         harness
@@ -857,7 +841,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([1; 32]),
-                create_tx(tx_hash_1, 1),
+                test_watcher_tx(tx_hash_1, from_address, 1),
             )
             .await;
         harness
@@ -865,7 +849,7 @@ mod tests {
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([2; 32]),
-                create_tx(tx_hash_2, 2),
+                test_watcher_tx(tx_hash_2, from_address, 2),
             )
             .await;
 
@@ -940,30 +924,12 @@ mod tests {
             .await;
 
         let sign_id = SignId::new([0x55; 32]);
-        let tx = BidirectionalTx {
-            id: BidirectionalTxId(tx_hash.0),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: "eip155:31337".to_string(),
-            key_version: LATEST_MPC_KEY_VERSION,
-            deposit: 0,
-            path: "m/44'/60'/0'/0/0".to_string(),
-            algo: "secp256k1".to_string(),
-            dest: Chain::Ethereum.to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-            request_id: sign_id.request_id,
-            from_address: **from_address,
-            nonce: 0,
-        };
+        let tx = test_watcher_tx(tx_hash, from_address, 0);
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, Arc::new(tx))
+            .watch_execution(Chain::Ethereum, sign_id, tx)
             .await;
 
         // Block height 5 (NOT a modulo 10 block), but contains tx_hash in block.transactions
@@ -1035,38 +1001,20 @@ mod tests {
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
 
-        let create_tx = |hash: alloy::primitives::B256| {
-            Arc::new(BidirectionalTx {
-                id: BidirectionalTxId(hash.0),
-                sender: [0u8; 32],
-                serialized_transaction: vec![],
-                source_chain: Chain::Solana,
-                target_chain: Chain::Ethereum,
-                caip2_id: "eip155:31337".to_string(),
-                key_version: LATEST_MPC_KEY_VERSION,
-                deposit: 0,
-                path: "m/44'/60'/0'/0/0".to_string(),
-                algo: "secp256k1".to_string(),
-                dest: Chain::Ethereum.to_string(),
-                params: "{}".to_string(),
-                output_deserialization_schema: vec![],
-                respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-                request_id: hash.0,
-                from_address: **from_address,
-                nonce: 0,
-            })
-        };
-
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([1; 32]), create_tx(tx_hash_ok))
+            .watch_execution(
+                Chain::Ethereum,
+                SignId::new([1; 32]),
+                test_watcher_tx(tx_hash_ok, from_address, 0),
+            )
             .await;
         harness
             .state_manager
             .watch_execution(
                 Chain::Ethereum,
                 SignId::new([2; 32]),
-                create_tx(tx_hash_err),
+                test_watcher_tx(tx_hash_err, from_address, 0),
             )
             .await;
 
@@ -1133,30 +1081,12 @@ mod tests {
             .create_async()
             .await;
 
-        let tx = BidirectionalTx {
-            id: BidirectionalTxId(tx_hash.0),
-            sender: [0u8; 32],
-            serialized_transaction: vec![],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: "eip155:31337".to_string(),
-            key_version: LATEST_MPC_KEY_VERSION,
-            deposit: 0,
-            path: "m/44'/60'/0'/0/0".to_string(),
-            algo: "secp256k1".to_string(),
-            dest: Chain::Ethereum.to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-            request_id: tx_hash.0,
-            from_address: **from_address,
-            nonce: 0,
-        };
+        let tx = test_watcher_tx(tx_hash, from_address, 0);
 
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([3; 32]), Arc::new(tx))
+            .watch_execution(Chain::Ethereum, SignId::new([3; 32]), tx)
             .await;
 
         // Block height 10 triggers the throttled nonce check
@@ -1619,11 +1549,11 @@ mod tests {
         })
     }
 
-    /// A deterministic extraction failure — trace return data that contradicts
-    /// the declared output schema — resolves the execution as failed instead of
-    /// silently dropping the event and wedging the request.
+    /// A deterministic extraction failure — trace return data contradicting the
+    /// declared output schema — resolves as `ExtractionFailed`, never `Failed`:
+    /// the transaction executed, so it must not be attested as one that did not.
     #[tokio::test]
-    async fn terminal_extraction_failure_emits_failed_event() {
+    async fn terminal_extraction_failure_emits_extraction_failed_event() {
         let mut server = Server::new_async().await;
 
         let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
@@ -1717,7 +1647,10 @@ mod tests {
             } => {
                 assert_eq!(tx_id.0, tx_hash.0);
                 assert_eq!(*block_height, 5, "event height is the mined block");
-                assert!(matches!(result, ExecutionOutcome::Failed));
+                assert!(
+                    matches!(result, ExecutionOutcome::ExtractionFailed),
+                    "the receipt succeeded: this must not be attested as a failed execution"
+                );
             }
             other => panic!("expected ExecutionConfirmed, got {other:?}"),
         }

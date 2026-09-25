@@ -78,7 +78,7 @@ impl Node {
             account_sk: account_sk.to_string().parse()?,
             web_port,
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
-            sign_sk: Some(sign_sk.clone()),
+            sign_sk: sign_sk.clone(),
             eth,
             sol,
             hydration,
@@ -139,11 +139,7 @@ impl Node {
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
         let near_rpc = ctx.worker.rpc_addr();
 
-        let mut cfg = cfg.clone();
-        if let Some(ref mut eth_config) = cfg.eth {
-            eth_config.helios_data_path =
-                format!("{}_{}", eth_config.helios_data_path, account.id());
-        }
+        let cfg = cfg.clone();
 
         Self::spawn(
             ctx,
@@ -176,7 +172,7 @@ impl Node {
             account_sk: config.account.secret_key().to_string().parse()?,
             web_port,
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
-            sign_sk: Some(config.sign_sk.clone()),
+            sign_sk: config.sign_sk.clone(),
             eth,
             sol,
             hydration,

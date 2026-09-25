@@ -135,6 +135,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         for candidate in candidates {
             for SingletonCallEmissions {
                 call_index,
+                physical_segment,
+                phase,
+                caller,
                 emissions,
             } in candidate.calls
             {
@@ -144,6 +147,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         height = block.number,
                         extrinsic_index = candidate.extrinsic_index,
                         call_index,
+                        physical_segment,
+                        ?phase,
                         "midnight singleton call emitted no decoded events"
                     );
                 }
@@ -151,18 +156,31 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     match emission.kind {
                         EmissionKind::SignBidirectional => {
                             let notification = decode_notification(&emission.payload);
+                            let request_id = hex::encode(notification.request_id);
                             let indexed_ts = *indexed_ts.get_or_insert_with(current_unix_timestamp);
                             if let Some(request) = self
                                 .process_entry(
                                     source,
                                     notification,
+                                    caller,
                                     &block.hash,
                                     block.number,
                                     indexed_ts,
                                 )
-                                .await?
+                                .await
+                                .with_context(|| format!(
+                                    "midnight notification tx_hash={} request_id={request_id} height={} extrinsic_index={} call_index={call_index} segment={physical_segment} phase={phase:?}",
+                                    hex::encode(candidate.ledger_tx_hash), block.number, candidate.extrinsic_index,
+                                ))?
                             {
                                 tracing::info!(
+                                    request_id,
+                                    height = block.number,
+                                    block_hash = %block.hash,
+                                    extrinsic_index = candidate.extrinsic_index,
+                                    call_index,
+                                    physical_segment,
+                                    ?phase,
                                     tx_hash = %hex::encode(candidate.ledger_tx_hash),
                                     sign_id = ?request.id,
                                     "midnight signature requested"
@@ -171,6 +189,19 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     request: Arc::new(request),
                                     block_timestamp: None,
                                 });
+                            } else {
+                                tracing::warn!(
+                                    reason = "notification-not-indexed",
+                                    tx_hash = %hex::encode(candidate.ledger_tx_hash),
+                                    request_id,
+                                    height = block.number,
+                                    block_hash = %block.hash,
+                                    extrinsic_index = candidate.extrinsic_index,
+                                    call_index,
+                                    physical_segment,
+                                    ?phase,
+                                    "midnight notification produced no sign request; see request reason"
+                                );
                             }
                         }
                         EmissionKind::SignatureResponded => {
@@ -227,6 +258,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         &self,
         source: &C,
         notification: SignBidirectionalEventNotification,
+        caller: Option<[u8; 32]>,
         at_hash: &str,
         height: u64,
         indexed_ts: u64,
@@ -254,17 +286,32 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         };
         let caller_hex = hex::encode(unpacked.caller_address);
 
-        // TODO: decide whether `caller_address` must be checked against the
-        // cross-contract-call initiator of the transaction that filed this notification.
-        // It is producer-supplied, so any contract can notify naming another, which
-        // triggers a signature over a record that contract filed. What that record says
-        // is already authenticated below: `resolve_verified_record` recomputes the
-        // request id and `generate_sign_request` requires `sender` to equal the address the
-        // record was read from. The exposure is therefore third-party triggering, not
-        // forgery, and the open question is whether that is worth gating. Gating it
-        // means joining each notification to the central call it came from through the
-        // claimed communication commitment, which the ledger validates for uniqueness
-        // and for corresponding to a real call.
+        // `caller_address` is producer-supplied, since a Midnight callee cannot see its caller.
+        // Bind it to the ledger-recorded direct caller so no contract can notify as another.
+        match caller {
+            Some(caller) if caller == unpacked.caller_address => {}
+            Some(caller) => {
+                return Ok(drop_entry(
+                    "caller-mismatch",
+                    height,
+                    Some(rid),
+                    &format!(
+                        "notification names {caller_hex}, direct caller is {}",
+                        hex::encode(caller)
+                    ),
+                ));
+            }
+            None => {
+                return Ok(drop_entry(
+                    "caller-absent",
+                    height,
+                    Some(rid),
+                    &format!(
+                        "notification names {caller_hex}, singleton call has no direct caller"
+                    ),
+                ));
+            }
+        }
 
         // Authority: the caller's own ledger at the SAME finalized hash the
         // notification was read at.
@@ -317,7 +364,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             Resolved::Found(record) => *record,
             Resolved::Absent => {
                 // Not a fault: the id is absent from the caller's own index.
-                tracing::debug!(
+                tracing::warn!(
                     reason = "request-absent",
                     height,
                     request_id = %hex::encode(rid),
@@ -693,7 +740,10 @@ mod tests {
 
     fn one_call(kind: EmissionKind, payload: [u8; 256]) -> Vec<SingletonCallEmissions> {
         vec![SingletonCallEmissions {
+            phase: crate::emissions::TranscriptPhase::Guaranteed,
+            physical_segment: 1,
             call_index: 1,
+            caller: Some(CALLER),
             emissions: vec![Emission { kind, payload }],
         }]
     }
@@ -1081,7 +1131,10 @@ mod tests {
         let expected = batch(
             42,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1119,7 +1172,10 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1146,6 +1202,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_notification_not_from_its_named_caller_is_dropped() {
+        let (record, rid) = named_record_and_rid(7);
+        for caller in [Some([0x99; 32]), None] {
+            let mut source = FixtureSource::default();
+            let mut calls = one_call(EmissionKind::SignBidirectional, notification(rid));
+            calls[0].caller = caller;
+            source.set_emissions(9, calls);
+            source.set_state(CALLER, 9, caller_state(&record, rid));
+
+            let events = direct_indexer()
+                .await
+                .process_block(&source, &block_ref(9))
+                .await
+                .expect("a caller mismatch is a per-entry drop, not a block failure");
+
+            assert!(
+                events.is_empty(),
+                "a record {CALLER:?} filed must not be signed when the direct caller is {caller:?}"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn successful_request_logs_ledger_hash_and_sign_id_together() {
         let (record, rid) = named_record_and_rid(7);
@@ -1156,7 +1235,10 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1199,7 +1281,7 @@ mod tests {
         let recorded = recorder.snapshot();
         let correlations = recorded
             .iter()
-            .filter(|fields| fields.contains_key("tx_hash") || fields.contains_key("sign_id"))
+            .filter(|fields| fields.contains_key("sign_id"))
             .collect::<Vec<_>>();
         assert_eq!(correlations.len(), 2);
         let expected_tx_hash = hex::encode(LEDGER_TX_HASH);
@@ -1211,6 +1293,29 @@ mod tests {
             );
             assert_eq!(fields.get("tx_hash"), Some(&expected_tx_hash));
             assert_eq!(fields.get("sign_id"), Some(&expected_sign_id));
+            assert_eq!(
+                fields.get("request_id"),
+                Some(&format!("{:?}", hex::encode(rid)))
+            );
+            assert_eq!(fields.get("height").map(String::as_str), Some("9"));
+            assert_eq!(fields.get("phase").map(String::as_str), Some("Guaranteed"));
+        }
+        let skipped = recorded
+            .iter()
+            .filter(|fields| {
+                fields.get("reason").map(String::as_str) == Some("\"notification-not-indexed\"")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(skipped.len(), 2);
+        for (fields, request_id) in skipped.into_iter().zip([absent_rid, rid]) {
+            assert_eq!(fields.get("tx_hash"), Some(&expected_tx_hash));
+            assert_eq!(
+                fields.get("request_id"),
+                Some(&format!("{:?}", hex::encode(request_id)))
+            );
+            assert_eq!(fields.get("height").map(String::as_str), Some("9"));
+            assert_eq!(fields.get("call_index").map(String::as_str), Some("1"));
+            assert_eq!(fields.get("phase").map(String::as_str), Some("Guaranteed"));
         }
     }
 
@@ -1231,6 +1336,11 @@ mod tests {
             );
         };
         assert_eq!(emission.kind, EmissionKind::SignBidirectional);
+        assert_eq!(
+            call.caller,
+            Some(hex_32(CAPTURE_CALLER)),
+            "the captured integrator is the ledger-recorded direct caller of the singleton"
+        );
         let mut notification = decode_notification(&emission.payload);
 
         let caller_tree = crate::state::decode_contract_state(CAPTURE_CALLER_STATE)
@@ -1247,6 +1357,7 @@ mod tests {
             .process_entry(
                 &source,
                 notification.clone(),
+                call.caller,
                 CAPTURE_BLOCK_HASH,
                 CAPTURE_HEIGHT,
                 0,
@@ -1291,7 +1402,14 @@ mod tests {
 
         let request = direct_indexer()
             .await
-            .process_entry(&source, notification, CAPTURE_BLOCK_HASH, CAPTURE_HEIGHT, 0)
+            .process_entry(
+                &source,
+                notification,
+                call.caller,
+                CAPTURE_BLOCK_HASH,
+                CAPTURE_HEIGHT,
+                0,
+            )
             .await
             .expect("captured entry processing does not hold")
             .expect("captured entry produces a request");
@@ -1321,7 +1439,10 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 4,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignatureResponded,
@@ -1368,7 +1489,10 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignatureResponded,
@@ -1451,7 +1575,10 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1518,7 +1645,10 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 6,
+                caller: Some(CALLER),
                 emissions: Vec::new(),
             }],
         );
@@ -1736,7 +1866,10 @@ mod tests {
         source.set_emissions(
             9,
             vec![SingletonCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Guaranteed,
+                physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1789,10 +1922,14 @@ mod tests {
             fn block_indexed(&self, _block_number: u64) {}
             fn block_finalized(&self, _block_number: u64) {}
             fn checkpoint_created(&self, _block_number: u64) {}
-            fn request_indexed_at(&self, _block_timestamp: u64) {
+            fn request_indexed_at(
+                &self,
+                _block_timestamp: u64,
+                _kind: mpc_primitives::RequestKind,
+            ) {
                 self.0.fetch_add(1, Ordering::Relaxed);
             }
-            fn request_indexed(&self) {
+            fn request_indexed(&self, _kind: mpc_primitives::RequestKind) {
                 self.0.fetch_add(1, Ordering::Relaxed);
             }
             fn bidirectional_extraction_failed(

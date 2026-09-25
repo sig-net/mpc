@@ -3,27 +3,28 @@ import { join } from "node:path";
 import { findDeployedContract, type FoundContract } from "@midnight-ntwrk/midnight-js/contracts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js/network-id";
 import {
-  assertRootFunded,
   buildDeployTransaction,
-  contractAddressToReference,
   deploySignetContract,
   deriveAccountKeys,
-  fundChildFromRoot,
+  deriveWalletAddresses,
   GENESIS_MINT_WALLET_SEED,
   initialiseWalletFacade,
-  isFeeReady,
-  readAccountFunding,
+  isLocalStandaloneNetwork,
+  registerNightForDustGeneration,
   submitUnprovenTransaction,
+  transferNight,
+  waitForSpendableDust,
   withSyncedWalletFacade,
+  type FacadeState,
   type MidnightNodeConfig,
   type WalletFacade,
 } from "@sig-net/midnight-contract-deploy";
 import {
+  contractAddressFromHex,
   parseRequestIdHex,
   parseSecp256k1PublicKey,
   requestIdBytes,
   respondBidirectionalEventToCircuitInput,
-  serializeRespondOutput,
   signetEventSourceFromPublicDataProvider,
   SignetRequestResponseReader,
   type RequestIdHex,
@@ -60,6 +61,7 @@ interface SubmitRequest {
   nonce: string;
   target: string;
   argument: string;
+  outputType: "bool" | "uint64" | "bytes32";
 }
 
 interface SignedTransactionRequest {
@@ -70,6 +72,13 @@ interface SignedTransactionRequest {
 
 interface SettleResponseRequest {
   op: "settleResponse";
+  requestId: string;
+  serializedOutput: string;
+  rejectPaddedReplay?: boolean;
+}
+
+interface NotifyAsCallerRequest {
+  op: "notifyAsCaller";
   requestId: string;
 }
 
@@ -83,12 +92,14 @@ type Request =
   | SubmitRequest
   | SignedTransactionRequest
   | SettleResponseRequest
+  | NotifyAsCallerRequest
   | ShutdownRequest;
 
 interface Session {
   facade: WalletFacade;
   caller: CallerHandle;
   callerAddress: string;
+  impersonator: CallerHandle;
   publicDataProvider: SignetPublicStateSource;
   reader: SignetRequestResponseReader;
   responseKey?: Secp256k1Point;
@@ -153,35 +164,85 @@ function isDustBalancingShortfall(error: unknown): boolean {
   return /Wallet\.InsufficientFunds|Insufficient Funds|could not balance dust/i.test(text);
 }
 
-async function fundChildWaitingForRootDust(
-  config: MidnightNodeConfig,
-  childSeed: string,
-  amount: bigint,
-): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await fundChildFromRoot(config, GENESIS_MINT_WALLET_SEED, childSeed, amount);
-      return;
-    } catch (error) {
-      if (attempt >= 11 || !isDustBalancingShortfall(error)) throw error;
-      diagnostics(
-        `root DUST is not yet enough to cover the transfer fee; retrying child funding (attempt ${attempt + 1})`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, 5_000));
-    }
-  }
+function totalNight(state: FacadeState): bigint {
+  return Object.values(state.unshielded.balances).reduce((sum, value) => sum + value, 0n);
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// Mirrors the package's per-child flow but amortizes the expensive part: a
+// root facade re-syncs from genesis once (that re-sync dominates wall time),
+// funds every role wallet sequentially from that live facade, and the
+// independent child verifications run concurrently afterwards.
 async function fundRoles(config: MidnightNodeConfig): Promise<void> {
-  const root = await assertRootFunded(config, GENESIS_MINT_WALLET_SEED, undefined);
-  const amount = root.night / 5n;
-  if (amount === 0n) throw new Error("local genesis wallet cannot fund role wallets");
-  for (const seed of [DEPLOYER_SEED, INVOKER_SEED, PUBLISHER_SEED]) {
-    const current = await readAccountFunding(config, seed);
-    if (!isFeeReady(current)) {
-      await fundChildWaitingForRootDust(config, seed, amount);
+  const networkId = config.networkId;
+  const rootKeys = deriveAccountKeys(GENESIS_MINT_WALLET_SEED, networkId);
+  const roles = [
+    ["deployer", DEPLOYER_SEED],
+    ["invoker", INVOKER_SEED],
+    ["publisher", PUBLISHER_SEED],
+  ] as const;
+
+  await withSyncedWalletFacade(rootKeys, config, async (rootFacade, initialState) => {
+    // Local standalone genesis funds root by construction, but the indexer can
+    // lag before the UTXO is visible; poll like assertRootFunded does.
+    let state = initialState;
+    if (isLocalStandaloneNetwork(networkId)) {
+      const deadline = Date.now() + 120_000;
+      while (totalNight(state) === 0n && Date.now() < deadline) {
+        await sleep(3_000);
+        state = await rootFacade.waitForSyncedState();
+      }
     }
-  }
+    const amount = totalNight(state) / 5n;
+    if (amount === 0n) throw new Error("local genesis wallet cannot fund role wallets");
+    await registerNightForDustGeneration(rootFacade, rootKeys, state);
+    if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade);
+
+    // Sequential: every transfer spends root UTXOs selected from `state`.
+    for (const [name, seed] of roles) {
+      const startedAt = Date.now();
+      const unshielded = deriveWalletAddresses(seed, config).unshielded;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          await transferNight(rootFacade, rootKeys, state, unshielded, networkId, amount);
+          break;
+        } catch (error) {
+          if (attempt >= 11 || !isDustBalancingShortfall(error)) throw error;
+          diagnostics(
+            `root DUST is not yet enough to cover the ${name} transfer; retrying (attempt ${attempt + 1})`,
+          );
+          await sleep(5_000);
+          state = await rootFacade.waitForSyncedState();
+        }
+      }
+      // Let the transfer block land before selecting UTXOs for the next one.
+      await sleep(3_000);
+      state = await rootFacade.waitForSyncedState();
+      diagnostics(`funded ${name} wallet in ${Date.now() - startedAt}ms`);
+    }
+  });
+
+  await Promise.all(
+    roles.map(async ([name, seed]) => {
+      const startedAt = Date.now();
+      const keys = deriveAccountKeys(seed, networkId);
+      await withSyncedWalletFacade(keys, config, async (facade, initialState) => {
+        let state = initialState;
+        const deadline = Date.now() + 120_000;
+        while (totalNight(state) === 0n && Date.now() < deadline) {
+          await sleep(3_000);
+          state = await facade.waitForSyncedState();
+        }
+        if (totalNight(state) === 0n) {
+          throw new Error(`${name} wallet shows no NIGHT after funding from root`);
+        }
+        await registerNightForDustGeneration(facade, keys, state);
+        if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade);
+      });
+      diagnostics(`verified ${name} wallet in ${Date.now() - startedAt}ms`);
+    }),
+  );
 }
 
 async function bootstrap(request: BootstrapRequest) {
@@ -195,22 +256,22 @@ async function bootstrap(request: BootstrapRequest) {
   const deployerKeys = deriveAccountKeys(DEPLOYER_SEED, request.config.networkId);
   const deployerSecret = bytes(DEPLOYER_SEED, 32);
   const deployerCommitment = pureCircuits.deployerCommitment(deployerSecret);
-  const callerDeployment = await withSyncedWalletFacade(
-    deployerKeys,
-    request.config,
-    async (facade) => {
+  const deployCaller = () =>
+    withSyncedWalletFacade(deployerKeys, request.config, async (facade) => {
       const built = await buildDeployTransaction(
         callerCompiledContract,
         request.config.networkId,
         deployerKeys.shieldedSecretKeys.coinPublicKey,
         createCallerPrivateState(deployerSecret),
         deployerCommitment,
-        contractAddressToReference(central.contractAddress),
+        contractAddressFromHex(central.contractAddress),
       );
       await submitUnprovenTransaction(facade, deployerKeys, built.serializedTransaction);
       return { contractAddress: built.contractAddress };
-    },
-  );
+    });
+  const callerDeployment = await deployCaller();
+  diagnostics("deploying impersonating Compact caller");
+  const impersonatorDeployment = await deployCaller();
   const invokerKeys = deriveAccountKeys(INVOKER_SEED, request.config.networkId);
   const facade = await initialiseWalletFacade(invokerKeys, request.config);
   await facade.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
@@ -221,16 +282,20 @@ async function bootstrap(request: BootstrapRequest) {
     request.config,
     join(request.artifactDir, "caller.leveldb"),
   );
-  const caller = await findDeployedContract(providers, {
-    contractAddress: callerDeployment.contractAddress,
-    compiledContract: callerCompiledContract,
-    privateStateId: CALLER_PRIVATE_STATE_ID,
-    initialPrivateState: createCallerPrivateState(deployerSecret),
-  });
+  const findCaller = (contractAddress: string) =>
+    findDeployedContract(providers, {
+      contractAddress,
+      compiledContract: callerCompiledContract,
+      privateStateId: CALLER_PRIVATE_STATE_ID,
+      initialPrivateState: createCallerPrivateState(deployerSecret),
+    });
+  const caller = await findCaller(callerDeployment.contractAddress);
+  const impersonator = await findCaller(impersonatorDeployment.contractAddress);
   session = {
     facade,
     caller,
     callerAddress: callerDeployment.contractAddress,
+    impersonator,
     publicDataProvider: providers.publicDataProvider,
     reader: new SignetRequestResponseReader({
       requesterContractAddress: callerDeployment.contractAddress,
@@ -265,6 +330,14 @@ async function dispatch(request: Request): Promise<unknown> {
     active.responseKey = responseKey;
     return {};
   }
+  if (request.op === "notifyAsCaller") {
+    const requestId = parseRequestIdHex(request.requestId);
+    await active.impersonator.callTx.notifyAs(
+      contractAddressFromHex(active.callerAddress),
+      requestIdBytes(requestId),
+    );
+    return {};
+  }
   if (request.op === "signedTransaction") {
     const requestId = parseRequestIdHex(request.requestId);
     const transaction = await waitFor("a verified signed EVM transaction", () =>
@@ -283,17 +356,44 @@ async function dispatch(request: Request): Promise<unknown> {
     const responseKey = active.responseKey;
     if (responseKey === undefined) throw new Error("caller is not initialised");
     const requestId = parseRequestIdHex(request.requestId);
-    const serializedOutput = serializeRespondOutput([{ name: "success", type: "bool" }], {
-      success: true,
-    });
+    const serializedOutput = bytes(request.serializedOutput);
     const response = await waitFor("a verified respondBidirectional entry", () =>
       active.reader.getVerifiedRespondBidirectionalEvent(requestId, serializedOutput, responseKey),
     );
-    await active.caller.callTx.verifyResponse(
-      requestIdBytes(requestId),
-      respondBidirectionalEventToCircuitInput(response),
-      serializedOutput,
-    );
+    const circuitInput = respondBidirectionalEventToCircuitInput(response);
+    if (request.rejectPaddedReplay === true) {
+      const padded = new Uint8Array(8);
+      padded.set(serializedOutput);
+      const replay = await active.reader.getVerifiedRespondBidirectionalEvent(
+        requestId,
+        padded,
+        responseKey,
+      );
+      if (replay !== undefined) throw new Error("SDK accepted a zero-padded failure replay");
+      let rejected = false;
+      try {
+        await active.caller.callTx.verifyResponse8(requestIdBytes(requestId), circuitInput, padded);
+      } catch (error) {
+        if (!String(error).includes("Invalid attestation signature")) throw error;
+        rejected = true;
+      }
+      if (!rejected) throw new Error("Compact accepted a zero-padded failure replay");
+      if (!(await callerHasRequest(active, requestId)))
+        throw new Error("replay consumed the pending request");
+    }
+    const verify =
+      serializedOutput.length === 1
+        ? active.caller.callTx.verifyResponse
+        : serializedOutput.length === 5
+          ? active.caller.callTx.verifyResponse5
+          : serializedOutput.length === 8
+            ? active.caller.callTx.verifyResponse8
+            : serializedOutput.length === 32
+              ? active.caller.callTx.verifyResponse32
+              : undefined;
+    if (verify === undefined)
+      throw new Error(`unsupported real-stack output width ${serializedOutput.length}`);
+    await verify(requestIdBytes(requestId), circuitInput, serializedOutput);
     await waitFor("the caller request to be removed", async () =>
       (await callerHasRequest(active, requestId)) ? undefined : true,
     );
@@ -304,6 +404,12 @@ async function dispatch(request: Request): Promise<unknown> {
     1n,
     bytes(request.target, 20),
     bytes(request.argument, 32),
+    new TextEncoder().encode(
+      JSON.stringify([{ name: "success", type: request.outputType }]).padEnd(64, " "),
+    ),
+    new TextEncoder().encode(
+      JSON.stringify([{ name: "success", type: request.outputType }]).padEnd(64, " "),
+    ),
   );
   return {};
 }

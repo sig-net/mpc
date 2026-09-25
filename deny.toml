@@ -1,0 +1,64 @@
+# cargo-deny configuration
+#
+# Replaces .cargo/audit.toml (cargo-audit). cargo-deny resolves the actual
+# feature-enabled dependency graph, so lock-only entries from optional feature
+# subtrees (libp2p's quic stack, tracing-subscriber 0.2, idna 0.2.3, quinn-proto
+# 0.9) are no longer flagged and do not need ignore entries.
+#
+# `unmaintained` and `unsound` advisories are downgraded to warnings in CI
+# (`-W unmaintained -W unsound`), matching the previous cargo-audit behavior
+# where they never failed the build. Vulnerabilities always deny.
+
+[graph]
+# Match production builds and cover dev-only features in the same pass.
+all-features = true
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2026-0222", reason = "wasmtime 45 type-index mixup; only reachable via near-sdk unit-testing dev-only feature (near-vm-runner pins wasmtime ^45, no patched release)" },
+    { id = "RUSTSEC-2026-0269", reason = "wasmtime 45 filesystem sandbox escape; same chain as RUSTSEC-2026-0222; dev-only, no WASI filesystem exposed to guest code" },
+    { id = "RUSTSEC-2026-0285", reason = "rustls 0.23 accepts TLS 1.3 handshake messages across encryption-level boundaries; spec-compliance issue, transcript still authenticated, outgoing client TLS only; 0.23.45 needs aws-lc-rs ^1.18 but near-crypto 0.37.x pins aws-lc-rs =1.16.2 and google-cloud-storage =1.17.0 forces rustls' aws-lc provider" },
+]
+
+[licenses]
+# Permissive licenses only
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+
+# ck-meow ships a deliberately mangled ("uwuified") MIT license text, pin the file hash to MIT.
+[[licenses.clarify]]
+name = "ck-meow"
+version = "0.1.0"
+expression = "MIT"
+license-files = [{ path = "LICENSE", hash = 0xe0d600d3 }]
+
+# Ignore private licenses for workspace members and git-pinned crates.
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# Fail on any dependency from a registry or git repo not explicitly
+# allow-listed below.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/dalek-cryptography/curve25519-dalek",
+    "https://github.com/midnightntwrk/midnight-ledger",
+    "https://github.com/sig-net/cait-sith",
+]

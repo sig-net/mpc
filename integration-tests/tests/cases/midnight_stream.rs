@@ -73,78 +73,88 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         .context("Ethereum context was not started")?;
     let anvil =
         ProviderBuilder::new().connect_http(ethereum.sandbox.external_http_endpoint.parse()?);
-    let target = Address::repeat_byte(0x42);
-    anvil
-        .anvil_set_code(
-            target,
-            Bytes::from(hex::decode(RETURN_TRUE_RUNTIME_BYTECODE)?),
-        )
-        .await?;
+    for (nonce, output_type, expected_width, failed) in [
+        (0, "bool", 1, false),
+        (1, "uint64", 8, false),
+        (2, "bytes32", 32, false),
+        (3, "uint64", 5, true),
+    ] {
+        let target = Address::repeat_byte(0x42 + nonce as u8);
+        anvil
+            .anvil_set_code(
+                target,
+                Bytes::from(hex::decode(if failed {
+                    "60006000fd"
+                } else {
+                    RETURN_TRUE_RUNTIME_BYTECODE
+                })?),
+            )
+            .await?;
 
-    let mut argument = [0; 32];
-    argument[31] = 6;
-    midnight
-        .submit_is_even(0, target.into_array(), argument)
-        .await?;
-    let ChainEvent::SignRequest { request, .. } = events
-        .wait_for(
-            |event| {
-                matches!(
-                    event,
-                    ChainEvent::SignRequest { request, .. }
-                        if request.chain == Chain::Midnight
-                            && matches!(request.kind, SignKind::SignBidirectional(_))
-                )
-            },
-            EVENT_TIMEOUT,
-        )
-        .await
-        .context("waiting for the caller SignRequest")?
-    else {
-        unreachable!("filtered above")
-    };
-    let request_id = request.id.request_id;
-    let SignKind::SignBidirectional(sign_event) = &request.kind else {
-        unreachable!("filtered above")
-    };
-    assert_eq!(sign_event.caip2_id, Chain::Ethereum.caip2_chain_id());
+        let mut argument = [0; 32];
+        argument[31] = 6;
+        midnight
+            .submit_is_even(nonce, target.into_array(), argument, output_type)
+            .await?;
+        let ChainEvent::SignRequest { request, .. } = events
+            .wait_for(
+                |event| {
+                    matches!(
+                        event,
+                        ChainEvent::SignRequest { request, .. }
+                            if request.chain == Chain::Midnight
+                                && matches!(request.kind, SignKind::SignBidirectional(_))
+                    )
+                },
+                EVENT_TIMEOUT,
+            )
+            .await
+            .context("waiting for the caller SignRequest")?
+        else {
+            unreachable!("filtered above")
+        };
+        let request_id = request.id.request_id;
+        let SignKind::SignBidirectional(sign_event) = &request.kind else {
+            unreachable!("filtered above")
+        };
+        assert_eq!(sign_event.caip2_id, Chain::Ethereum.caip2_chain_id());
 
-    events
+        events
         .wait_for(
             |event| matches!(event, ChainEvent::Respond(response) if response.request_id == request_id),
             EVENT_TIMEOUT,
         )
         .await
         .context("waiting for the finalized respond entry")?;
-    let root_public_key =
-        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
-    let expected_sender = derive_user_address(root_public_key, sign_event.epsilon()?);
-    let signed = midnight
-        .signed_evm_transaction(request_id, &format!("{expected_sender:#x}"))
-        .await?;
-    assert_eq!(signed.from.parse::<Address>()?, expected_sender);
-    assert_eq!(signed.to.parse::<Address>()?, target);
-    assert_eq!(signed.chain_id, "31337");
-    assert_eq!(
-        signed.unsigned_hash,
-        format!("{:#x}", keccak256(&sign_event.serialized_transaction))
-    );
-    let mut expected_input = hex::decode("2a2e1320")?;
-    expected_input.extend_from_slice(&argument);
-    assert_eq!(
-        hex::decode(signed.data.trim_start_matches("0x"))?,
-        expected_input
-    );
-    anvil
-        .anvil_set_balance(expected_sender, U256::from(10_000_000_000_000_000_000u128))
-        .await?;
-    let pending = anvil
-        .send_raw_transaction(&hex::decode(signed.serialized.trim_start_matches("0x"))?)
-        .await?;
-    let receipt = pending.get_receipt().await?;
-    anyhow::ensure!(receipt.status(), "the MPC-signed EVM transaction reverted");
+        let root_public_key =
+            mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
+        let expected_sender = derive_user_address(root_public_key, sign_event.epsilon()?);
+        let signed = midnight
+            .signed_evm_transaction(request_id, &format!("{expected_sender:#x}"))
+            .await?;
+        assert_eq!(signed.from.parse::<Address>()?, expected_sender);
+        assert_eq!(signed.to.parse::<Address>()?, target);
+        assert_eq!(signed.chain_id, "31337");
+        assert_eq!(
+            signed.unsigned_hash,
+            format!("{:#x}", keccak256(&sign_event.serialized_transaction))
+        );
+        let mut expected_input = hex::decode("2a2e1320")?;
+        expected_input.extend_from_slice(&argument);
+        assert_eq!(
+            hex::decode(signed.data.trim_start_matches("0x"))?,
+            expected_input
+        );
+        anvil
+            .anvil_set_balance(expected_sender, U256::from(10_000_000_000_000_000_000u128))
+            .await?;
+        let pending = anvil
+            .send_raw_transaction(&hex::decode(signed.serialized.trim_start_matches("0x"))?)
+            .await?;
+        let receipt = pending.get_receipt().await?;
+        assert_eq!(receipt.status(), !failed, "unexpected EVM execution status");
 
-    events
+        events
         .wait_for(
             |event| {
                 matches!(
@@ -156,15 +166,62 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         )
         .await
         .context("waiting for the finalized respondBidirectional entry")?;
-    midnight.settle_response(request_id).await?;
-    let ChainEvent::Block(final_block) = events
-        .wait_for(|event| matches!(event, ChainEvent::Block(_)), EVENT_TIMEOUT)
-        .await
-        .context("waiting for a block after respondBidirectional")?
-    else {
-        unreachable!("filtered above")
+        let output = midnight.stored_output(request_id).await?;
+        assert_eq!(output.len(), expected_width);
+        if failed {
+            assert_eq!(output, [0xde, 0xad, 0xbe, 0xef, 1]);
+        }
+        midnight
+            .settle_response(request_id, &output, failed)
+            .await?;
+        let ChainEvent::Block(final_block) = events
+            .wait_for(|event| matches!(event, ChainEvent::Block(_)), EVENT_TIMEOUT)
+            .await
+            .context("waiting for a block after respondBidirectional")?
+        else {
+            unreachable!("filtered above")
+        };
+        wait_for_completed_checkpoint(&cluster, request_id, final_block).await?;
+    }
+
+    // Impersonation: another contract notifies the central Signet contract naming the caller's
+    // filed, still-pending request. Blocks index in order, so the next sign request seen after
+    // a later genuine submission must be that submission, never the impersonated one.
+    let mut argument = [0; 32];
+    argument[31] = 6;
+    let mut next_sign_request = async || {
+        let ChainEvent::SignRequest { request, .. } = events
+            .wait_for(
+                |event| {
+                    matches!(event, ChainEvent::SignRequest { request, .. }
+                        if request.chain == Chain::Midnight)
+                },
+                EVENT_TIMEOUT,
+            )
+            .await?
+        else {
+            unreachable!("filtered above")
+        };
+        anyhow::Ok(request.id.request_id)
     };
-    wait_for_completed_checkpoint(&cluster, request_id, final_block).await?;
+    midnight
+        .submit_is_even(4, [0x50; 20], argument, "bool")
+        .await?;
+    let victim_request = next_sign_request()
+        .await
+        .context("waiting for the victim's genuine SignRequest")?;
+    midnight.notify_as_caller(victim_request).await?;
+    midnight
+        .submit_is_even(5, [0x51; 20], argument, "bool")
+        .await?;
+    let after_impersonation = next_sign_request()
+        .await
+        .context("waiting for the SignRequest after the impersonation")?;
+    assert_ne!(
+        after_impersonation, victim_request,
+        "a notification from a contract other than the named caller was indexed"
+    );
+
     midnight.shutdown().await?;
     Ok(())
 }

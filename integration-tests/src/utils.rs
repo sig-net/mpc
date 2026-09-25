@@ -1,5 +1,4 @@
 use anyhow::Context;
-use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use near_workspaces::{
     network::Sandbox,
     types::{KeyType, SecretKey},
@@ -183,21 +182,8 @@ pub async fn vote_threshold(
     Ok(())
 }
 
-pub async fn get<U>(uri: U) -> anyhow::Result<StatusCode>
-where
-    Uri: TryFrom<U>,
-    <Uri as TryFrom<U>>::Error: Into<hyper::http::Error>,
-{
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::empty())
-        .context("failed to build the request")?;
-
-    let client = Client::new();
-    let response = client
-        .request(req)
+pub async fn get(uri: &str) -> anyhow::Result<reqwest::StatusCode> {
+    let response = reqwest::get(uri)
         .await
         .context("failed to send the request")?;
     Ok(response.status())
@@ -352,7 +338,7 @@ pub async fn ping_until_ok(
         }
 
         if let Ok(status) = get(addr).await {
-            if status == StatusCode::OK {
+            if status == reqwest::StatusCode::OK {
                 return Ok(());
             }
         }

@@ -1,7 +1,22 @@
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, fail } from 'k6';
 
 const PINGER_URL = "https://contract-ping.sig.network/ping";
+
+// Since #1169 the Solana indexer waits for finalized blocks (~13s behind the
+// tip). The node budgets 15s for that plus a 5s buffer; same here.
+const SOLANA_EXPECTED_FINALITY_S = 15;
+const BUFFER_S = 5;
+const P95_BUDGET_MS = (SOLANA_EXPECTED_FINALITY_S + BUFFER_S) * 1000;
+
+// Shared by every strategy so a tier cannot silently lack a check.
+const thresholds = {
+  http_req_failed: ['rate<0.03'],
+  http_req_duration: [`p(95)<${P95_BUDGET_MS}`],
+  // k6 skips iterations when every VU is still waiting on a signature. A
+  // run that silently sent less than it was asked to is not a pass.
+  dropped_iterations: ['count<10'],
+};
 
 const strategies = {
   "rps_0_1": {
@@ -14,10 +29,7 @@ const strategies = {
         maxVUs: 10,
       },
     },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<10000'],
-    },
+    thresholds,
   },
   "rps_1": {
     scenarios: {
@@ -29,10 +41,7 @@ const strategies = {
         maxVUs: 50,
       },
     },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<10000'],
-    },
+    thresholds,
   },
   "rps_5": {
     scenarios: {
@@ -44,10 +53,7 @@ const strategies = {
         maxVUs: 100,
       },
     },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<10000'],
-    },
+    thresholds,
   },
   "rps_10": {
     scenarios: {
@@ -59,10 +65,28 @@ const strategies = {
         maxVUs: 200,
       },
     },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<10000'],
+    thresholds,
+  },
+
+  // Steps up through the constant-rate tiers in one run so a single test shows
+  // where latency breaks instead of a pass/fail at one rate. ~3,240 requests.
+  "ramp_1_10": {
+    scenarios: {
+      ramp: {
+        executor: 'ramping-arrival-rate',
+        startRate: 1,
+        timeUnit: '1s',
+        preAllocatedVUs: 40,
+        maxVUs: 300,
+        stages: [
+          { target: 1, duration: '3m' },
+          { target: 2, duration: '3m' },
+          { target: 5, duration: '3m' },
+          { target: 10, duration: '3m' },
+        ],
+      },
     },
+    thresholds,
   },
 
 };
@@ -80,7 +104,9 @@ export const options = (() => {
   // Deep clone to avoid mutating the shared `strategies` object
   const opts = JSON.parse(JSON.stringify(base));
   for (const scen of Object.keys(opts.scenarios || {})) {
-    opts.scenarios[scen].duration = duration;
+    if (!opts.scenarios[scen].stages) {
+      opts.scenarios[scen].duration = duration;
+    }
   }
   return opts;
 })();

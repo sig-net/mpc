@@ -11,22 +11,20 @@ anyhow.workspace = true
 async-process = "1"
 async-trait = "0.1"
 backon.workspace = true
-bollard = "0.17.0"
+bollard = "0.21"
 borsh.workspace = true
 bs58 = "0.5.1"
 ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
 futures = "0.3"
-generic-array = { version = "0.14.7", default-features = false }
 hex.workspace = true
-hyper.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-escape = "0.1.5"
-testcontainers = "0.23.1"
+testcontainers = "0.28"
 tokio = { version = "1.45.1", features = ["full", "test-util"] }
 tokio-util.workspace = true
 tracing.workspace = true
@@ -42,6 +40,7 @@ rlp = "0.5"
 anchor-client.workspace = true
 signet-program.workspace = true
 solana-sdk.workspace = true
+solana-commitment-config.workspace = true
 solana-client.workspace = true
 solana-transaction-status.workspace = true
 
@@ -104,4 +103,3 @@ harness = false
 
 [features]
 default = []
-helios = ["mpc-chain-ethereum/helios", "mpc-node/helios"]

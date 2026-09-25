@@ -16,6 +16,9 @@ pub enum CheckpointStorage {
     InMemory {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
+        /// Number of upcoming `load_pending` calls to fail, for tests of transient errors.
+        #[cfg(test)]
+        load_pending_failures: Arc<std::sync::atomic::AtomicUsize>,
     },
     /// A storage configured to fail operations, used to exercise error paths in tests.
     #[cfg(test)]
@@ -33,12 +36,44 @@ impl CheckpointStorage {
         Self::InMemory {
             latest: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(test)]
+            load_pending_failures: Arc::default(),
         }
     }
 
     #[cfg(test)]
     pub fn failing() -> Self {
         Self::Failing
+    }
+
+    /// Makes the next `times` calls to `load_pending` fail; in-memory storage only.
+    #[cfg(test)]
+    pub fn fail_next_load_pending(&self, times: usize) {
+        if let Self::InMemory {
+            load_pending_failures,
+            ..
+        } = self
+        {
+            load_pending_failures.store(times, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(test)]
+    fn take_injected_load_pending_failure(&self) -> bool {
+        let Self::InMemory {
+            load_pending_failures,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        load_pending_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
     }
 
     fn key(&self, kind: &str, chain: Chain) -> String {
@@ -161,6 +196,10 @@ impl CheckpointStorage {
 
     /// Load unconfirmed checkpoints ordered by block height.
     pub async fn load_pending(&self, chain: Chain) -> anyhow::Result<Vec<Checkpoint>> {
+        #[cfg(test)]
+        if self.take_injected_load_pending_failure() {
+            anyhow::bail!("injected load_pending failure");
+        }
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
@@ -408,6 +447,40 @@ impl CheckpointStorage {
         }
     }
 
+    /// Returns whether a pending or confirmed checkpoint exists for `chain`,
+    /// without reading its body. Mirrors [`Self::latest`]'s key selection, so it
+    /// answers `true` whenever `latest` would return a body, and may also answer
+    /// `true` for stored state `latest` cannot read back.
+    pub async fn has_checkpoint(&self, chain: Chain) -> anyhow::Result<bool> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                // An empty hash does not exist in Redis, so these two keys cover
+                // exactly the pending-or-confirmed states `latest` looks at.
+                let found: usize = conn
+                    .exists((
+                        self.pending_checkpoint_key(chain),
+                        self.checkpoint_key(chain),
+                    ))
+                    .await
+                    .context("failed to check for a stored checkpoint in redis")?;
+                Ok(found > 0)
+            }
+            CheckpointStorage::InMemory {
+                latest, pending, ..
+            } => {
+                let has_pending = pending
+                    .read()
+                    .await
+                    .get(&chain)
+                    .is_some_and(|checkpoints| !checkpoints.is_empty());
+                Ok(has_pending || latest.read().await.contains_key(&chain))
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+    }
+
     /// Finds a checkpoint by digest, searching durable latest and pending storage.
     pub async fn find(&self, chain: Chain, digest: [u8; 32]) -> anyhow::Result<Option<Checkpoint>> {
         match self {
@@ -613,5 +686,19 @@ mod tests {
         let encoded = encode_checkpoint(&checkpoint).unwrap();
         let decoded = decode_checkpoint(&encoded).unwrap();
         assert_eq!(checkpoint, decoded);
+    }
+
+    /// `promote_pending` leaves an empty map behind for a chain that has no
+    /// checkpoints, so "pending is present" must not be read as "non-empty".
+    /// The Redis arm is covered in integration-tests/tests/cases/store.rs.
+    #[tokio::test]
+    async fn has_checkpoint_ignores_an_empty_pending_map() -> anyhow::Result<()> {
+        let chain = Chain::Solana;
+        let storage = CheckpointStorage::in_memory();
+        storage.promote_pending(chain, [0u8; 32]).await?;
+
+        assert!(!storage.has_checkpoint(chain).await?);
+        assert!(storage.latest(chain).await?.is_none());
+        Ok(())
     }
 }
