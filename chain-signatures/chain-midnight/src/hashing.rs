@@ -23,7 +23,7 @@ pub(crate) fn compute_request_id(record: &SignBidirectionalRecord) -> anyhow::Re
         record.path,
         record.algo,
         record.tx_param_type,
-        compute_tx_params_digest(&record.tx_params)?,
+        compute_evm_type2_tx_params_digest_v1(&record.tx_params)?,
         record.execution_dest,
     )
         .field_vec();
@@ -33,7 +33,7 @@ pub(crate) fn compute_request_id(record: &SignBidirectionalRecord) -> anyhow::Re
 /// Mirror `calculateEvmType2TxParamsDigestV1`: hash the scalar/count head, then
 /// fold used words and access-list entries. Inner storage-key folds start at zero.
 /// Running hashes stay Fields until the final upgrade to Bytes<32>.
-fn compute_tx_params_digest(tx: &EvmType2TxParams) -> anyhow::Result<[u8; 32]> {
+fn compute_evm_type2_tx_params_digest_v1(tx: &EvmType2TxParams) -> anyhow::Result<[u8; 32]> {
     let no_words = if tx.calldata.is_some {
         tx.calldata.value.no_words
     } else {
@@ -44,6 +44,16 @@ fn compute_tx_params_digest(tx: &EvmType2TxParams) -> anyhow::Result<[u8; 32]> {
     } else {
         [0; 4]
     };
+    // Compact increments the fold counters across the entire declared vector,
+    // including unused slots. Reject capacities that overflow those counters.
+    anyhow::ensure!(
+        tx.calldata.value.words.len() <= usize::from(u16::MAX),
+        "calldata capacity exceeds the Compact Uint<16> fold counter"
+    );
+    anyhow::ensure!(
+        tx.access_list.len() <= usize::from(u8::MAX),
+        "access-list capacity exceeds the Compact Uint<8> fold counter"
+    );
     anyhow::ensure!(
         usize::from(no_words) <= tx.calldata.value.words.len(),
         "calldata no_words exceeds capacity"
@@ -54,6 +64,11 @@ fn compute_tx_params_digest(tx: &EvmType2TxParams) -> anyhow::Result<[u8; 32]> {
     );
     let entries = &tx.access_list[..usize::from(tx.access_list_entry_count)];
     for entry in entries {
+        // The inner fold runs only for used entries, even at zero used keys.
+        anyhow::ensure!(
+            entry.storage_keys.len() <= usize::from(u8::MAX),
+            "a used entry's storage-key capacity exceeds the Compact Uint<8> fold counter"
+        );
         anyhow::ensure!(
             usize::from(entry.storage_key_count) <= entry.storage_keys.len(),
             "a used entry's storage_key_count exceeds capacity"
@@ -222,6 +237,126 @@ mod tests {
         }
     }
 
+    // Boundary digests come from Compact 0.33.0-rc.2 compiling the unmodified
+    // PR #127 Signet.compact at 5caf03623a1a5055b884f594e297076de689be2a
+    // with the capacities exercised below. The folds increment their counters
+    // even for unused slots, but skip the key fold for an unused access entry.
+    #[test]
+    fn calldata_capacity_matches_compact_counter_boundaries() {
+        for (is_some, no_words, expected) in [
+            (
+                false,
+                0,
+                "0b2bbac062ad94623a2abb01224d762677ae19755b292cc291ea882470f91500",
+            ),
+            (
+                true,
+                0,
+                "fc6dcfc13b4fb663c9ec03903b42bd54e89b2267097f11ac307d6b5df275eb00",
+            ),
+            (
+                true,
+                1,
+                "ee33630ecbe7dc3785bb73383b2d215d1da0178bf18e3db9b438fc2b91daff00",
+            ),
+        ] {
+            let mut tx = sample_record().tx_params;
+            tx.calldata.is_some = is_some;
+            tx.calldata.value.no_words = no_words;
+            tx.calldata.value.words = vec![[0x11; 32]; usize::from(u16::MAX)];
+            assert_eq!(
+                hex::encode(compute_evm_type2_tx_params_digest_v1(&tx).unwrap()),
+                expected
+            );
+            tx.calldata.value.words.push([0x11; 32]);
+            assert!(compute_evm_type2_tx_params_digest_v1(&tx)
+                .unwrap_err()
+                .to_string()
+                .contains("calldata capacity"));
+        }
+    }
+
+    #[test]
+    fn access_list_capacity_matches_compact_counter_boundaries() {
+        for (used, expected) in [
+            (
+                0,
+                "fc6dcfc13b4fb663c9ec03903b42bd54e89b2267097f11ac307d6b5df275eb00",
+            ),
+            (
+                1,
+                "885d4b02bcd6a6d6fe8693f42c17b89eae5d418e3148d2036cacabfadc411000",
+            ),
+            (
+                u8::MAX,
+                "d12095d3131447e739c262f1062657d461ea67e072ffb3e822c29c9d53b28f00",
+            ),
+        ] {
+            let mut tx = sample_record().tx_params;
+            tx.calldata.value.no_words = 0;
+            tx.calldata.value.words.clear();
+            tx.access_list_entry_count = used;
+            let entry = crate::records::EvmAccessListEntry {
+                address: [0xef; 20],
+                storage_key_count: 0,
+                storage_keys: Vec::new(),
+            };
+            tx.access_list = vec![entry.clone(); usize::from(u8::MAX)];
+            assert_eq!(
+                hex::encode(compute_evm_type2_tx_params_digest_v1(&tx).unwrap()),
+                expected
+            );
+            tx.access_list.push(entry);
+            assert!(compute_evm_type2_tx_params_digest_v1(&tx)
+                .unwrap_err()
+                .to_string()
+                .contains("access-list capacity"));
+        }
+    }
+
+    #[test]
+    fn storage_key_capacity_matches_compact_counter_boundaries() {
+        for (used_keys, expected) in [
+            (
+                0,
+                "885d4b02bcd6a6d6fe8693f42c17b89eae5d418e3148d2036cacabfadc411000",
+            ),
+            (
+                1,
+                "b90bb5710a7bd152fdcc6af74d4cef5cddf521b3df7ab836a882115104a00200",
+            ),
+            (
+                u8::MAX,
+                "45e87aa4e293aa9470cb785d4bdf63598306b52484137392d852bbf366cd5a00",
+            ),
+        ] {
+            let mut tx = sample_record().tx_params;
+            tx.calldata.value.no_words = 0;
+            tx.calldata.value.words.clear();
+            tx.access_list_entry_count = 1;
+            tx.access_list = vec![crate::records::EvmAccessListEntry {
+                address: [0xef; 20],
+                storage_key_count: used_keys,
+                storage_keys: vec![[0x22; 32]; usize::from(u8::MAX)],
+            }];
+            assert_eq!(
+                hex::encode(compute_evm_type2_tx_params_digest_v1(&tx).unwrap()),
+                expected
+            );
+            tx.access_list[0].storage_keys.push([0x22; 32]);
+            assert!(compute_evm_type2_tx_params_digest_v1(&tx)
+                .unwrap_err()
+                .to_string()
+                .contains("storage-key capacity"));
+            tx.access_list_entry_count = 0;
+            assert_eq!(
+                hex::encode(compute_evm_type2_tx_params_digest_v1(&tx).unwrap()),
+                "fc6dcfc13b4fb663c9ec03903b42bd54e89b2267097f11ac307d6b5df275eb00",
+                "unused entries do not evaluate the storage-key fold",
+            );
+        }
+    }
+
     #[test]
     fn request_id_digest_and_transaction_match_reference_capacity_vectors() {
         let fixture: serde_json::Value =
@@ -253,7 +388,7 @@ mod tests {
                 vector["name"]
             );
             assert_eq!(
-                hex::encode(compute_tx_params_digest(&record.tx_params).unwrap()),
+                hex::encode(compute_evm_type2_tx_params_digest_v1(&record.tx_params).unwrap()),
                 vector["txParamsDigest"].as_str().unwrap(),
                 "{}",
                 vector["name"]

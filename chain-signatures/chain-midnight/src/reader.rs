@@ -321,7 +321,7 @@ pub(crate) fn decode_bidirectional_response_payload(
             block_height: u64::from_le_bytes(
                 emitted[32..40].try_into().expect("fixed height width"),
             ),
-            outcome: emitted[40].try_into()?,
+            outcome_kind: emitted[40].try_into()?,
             serialized_output_length: u64::from_le_bytes(
                 emitted[41..49]
                     .try_into()
@@ -330,7 +330,7 @@ pub(crate) fn decode_bidirectional_response_payload(
             digest: emitted[49..81].try_into().expect("fixed digest width"),
         };
         anyhow::ensure!(
-            attestation.outcome == mpc_primitives::AttestationOutcomeKind::Executed
+            attestation.outcome_kind == mpc_primitives::AttestationOutcomeKind::Executed
                 || attestation.serialized_output_length == 0,
             "failed and unviable responses require zero output length"
         );
@@ -832,7 +832,7 @@ mod tests {
             event["blockHeight"].as_str().unwrap()
         );
         assert_eq!(
-            attestation.outcome as u64,
+            attestation.outcome_kind as u64,
             event["outputKind"].as_u64().unwrap()
         );
         assert_eq!(
@@ -877,7 +877,7 @@ mod tests {
             [0x31; 32],
             PublishedAttestation {
                 block_height: u64::MAX,
-                outcome: AttestationOutcomeKind::Executed,
+                outcome_kind: AttestationOutcomeKind::Executed,
                 serialized_output_length: 0,
                 digest: [0x41; 32],
             },

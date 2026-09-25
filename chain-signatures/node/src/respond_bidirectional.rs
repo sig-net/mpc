@@ -14,7 +14,7 @@ const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 
 pub(crate) fn is_failed_execution_response(response: &RespondBidirectionalTx) -> bool {
     match response.attestation {
-        Some(metadata) => metadata.outcome != AttestationOutcomeKind::Executed,
+        Some(metadata) => metadata.outcome_kind != AttestationOutcomeKind::Executed,
         None => response.output.starts_with(&MAGIC_ERROR_PREFIX),
     }
 }
@@ -126,7 +126,7 @@ impl CompletedTx {
     fn create_respond_bidirectional_sign_request(
         &self,
         serialized_output: RespondBidirectionalSerializedOutput,
-        outcome: AttestationOutcomeKind,
+        outcome_kind: AttestationOutcomeKind,
     ) -> anyhow::Result<IndexedSignRequest> {
         let source_chain = self.tx.source_chain;
         let request_id_bytes = self.tx.request_id;
@@ -137,7 +137,7 @@ impl CompletedTx {
         let attestation = (source_chain == Chain::Midnight).then_some(AttestationMetadata {
             key_version: self.tx.key_version,
             block_height: self.block_height,
-            outcome,
+            outcome_kind,
         });
         let message = calculate_respond_bidirectional_hash_message_for_chain(
             source_chain,
@@ -303,7 +303,7 @@ mod tests {
             AttestationMetadata {
                 key_version: 0,
                 block_height: 456,
-                outcome: AttestationOutcomeKind::Failed
+                outcome_kind: AttestationOutcomeKind::Failed
             }
         );
     }
@@ -467,7 +467,7 @@ mod tests {
         let metadata = AttestationMetadata {
             key_version: 1,
             block_height: 456,
-            outcome: AttestationOutcomeKind::Executed,
+            outcome_kind: AttestationOutcomeKind::Executed,
         };
         let hash = calculate_respond_bidirectional_hash_message_for_chain(
             Chain::Midnight,
@@ -477,7 +477,7 @@ mod tests {
         )
         .unwrap();
         let failed = AttestationMetadata {
-            outcome: AttestationOutcomeKind::Failed,
+            outcome_kind: AttestationOutcomeKind::Failed,
             ..metadata
         };
         assert_ne!(
@@ -508,7 +508,7 @@ mod tests {
                 &AttestationMetadata {
                     key_version: 0,
                     block_height: 456,
-                    outcome: AttestationOutcomeKind::Executed,
+                    outcome_kind: AttestationOutcomeKind::Executed,
                 },
                 &(1..=32).collect::<Vec<_>>(),
             )
@@ -533,7 +533,7 @@ mod tests {
         let metadata = AttestationMetadata {
             key_version: request.args.key_version,
             block_height: 456,
-            outcome: AttestationOutcomeKind::Unviable,
+            outcome_kind: AttestationOutcomeKind::Unviable,
         };
         assert_eq!(response.attestation, Some(metadata));
         assert!(response.output.is_empty());

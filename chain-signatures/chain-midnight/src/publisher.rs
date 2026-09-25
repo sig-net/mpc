@@ -259,7 +259,7 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
                 circuit: RespondCircuit::RespondBidirectional,
                 attestation: Some(WireAttestation {
                     block_height: attestation.block_height.to_string(),
-                    output_kind: attestation.outcome as u8,
+                    output_kind: attestation.outcome_kind as u8,
                     serialized_output_length: attestation.serialized_output_length.to_string(),
                     digest: hex::encode(attestation.digest),
                 }),
@@ -601,7 +601,7 @@ mod tests {
     const METADATA: AttestationMetadata = AttestationMetadata {
         key_version: 1,
         block_height: 42,
-        outcome: mpc_primitives::AttestationOutcomeKind::Executed,
+        outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
     };
 
     fn bidirectional_action(output: Vec<u8>) -> PublishAction {
@@ -643,11 +643,11 @@ mod tests {
                 0 => response.attestation = None,
                 1 => response.attestation.as_mut().unwrap().key_version += 1,
                 2 => {
-                    response.attestation.as_mut().unwrap().outcome =
+                    response.attestation.as_mut().unwrap().outcome_kind =
                         mpc_primitives::AttestationOutcomeKind::Failed
                 }
                 3 => {
-                    response.attestation.as_mut().unwrap().outcome =
+                    response.attestation.as_mut().unwrap().outcome_kind =
                         mpc_primitives::AttestationOutcomeKind::Unviable
                 }
                 4 => response.attestation.as_mut().unwrap().block_height += 1,
@@ -655,7 +655,7 @@ mod tests {
                 6 => response.output.push(0),
                 7 => request.id.request_id[0] ^= 1,
                 8 => {
-                    response.attestation.as_mut().unwrap().outcome =
+                    response.attestation.as_mut().unwrap().outcome_kind =
                         mpc_primitives::AttestationOutcomeKind::Failed
                 }
                 9 => request.args.payload += k256::Scalar::ONE,

@@ -114,7 +114,7 @@ async fn recovered_midnight_requests_require_current_attestation_semantics_befor
     let metadata = mpc_primitives::AttestationMetadata {
         key_version: 1,
         block_height: 456,
-        outcome: mpc_primitives::AttestationOutcomeKind::Executed,
+        outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
     };
     let current = Arc::make_mut(&mut current_final);
     let SignKind::RespondBidirectional(response) = &mut current.kind else {
@@ -1437,7 +1437,7 @@ async fn midnight_execution_response_binds_receipt_height_and_outcome() {
             Some(mpc_primitives::AttestationMetadata {
                 key_version: tx.key_version,
                 block_height: 7123,
-                outcome: kind,
+                outcome_kind: kind,
             })
         );
         assert!(ctx
@@ -1472,7 +1472,7 @@ async fn midnight_completion_requires_the_published_metadata_to_match_the_signat
             chain: Chain::Midnight,
             attestation: Some(mpc_primitives::PublishedAttestation {
                 block_height: metadata.block_height,
-                outcome: metadata.outcome,
+                outcome_kind: metadata.outcome_kind,
                 serialized_output_length: response.output.len() as u64,
                 digest,
             }),
@@ -1481,7 +1481,7 @@ async fn midnight_completion_requires_the_published_metadata_to_match_the_signat
             0 => event.attestation = None,
             1 => event.attestation.as_mut().unwrap().block_height += 1,
             2 => {
-                event.attestation.as_mut().unwrap().outcome =
+                event.attestation.as_mut().unwrap().outcome_kind =
                     mpc_primitives::AttestationOutcomeKind::Failed
             }
             3 => event.attestation.as_mut().unwrap().serialized_output_length += 1,

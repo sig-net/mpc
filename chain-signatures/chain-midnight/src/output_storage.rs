@@ -223,7 +223,7 @@ mod tests {
     const METADATA: AttestationMetadata = AttestationMetadata {
         key_version: 1,
         block_height: 42,
-        outcome: mpc_primitives::AttestationOutcomeKind::Executed,
+        outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
     };
 
     const REQUEST_ID: [u8; 32] = [0x5c; 32];
