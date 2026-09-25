@@ -39,7 +39,6 @@ pub struct MpcFixture {
 pub struct MpcFixtureNode {
     pub me: Participant,
     pub account_id: AccountId,
-    pub participant_info: ParticipantInfo,
     pub state: NodeStateWatcher,
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
@@ -412,7 +411,6 @@ impl MpcFixtureNode {
         presignatures: Vec<u64>,
     ) -> SyncUpdate {
         let update = SyncUpdate {
-            from: from.me,
             triples,
             presignatures,
         };
@@ -431,7 +429,12 @@ impl MpcFixtureNode {
         reply: &Ciphered,
         cipher_sk: &hpke::SecretKey,
     ) -> Result<SyncUpdate, MessageError> {
-        open_reply_for_test(reply, cipher_sk, self.me, &self.participant_info)
+        // Only the signing key is checked.
+        let info = ParticipantInfo {
+            sign_pk: self.config.borrow().local.network.sign_sk.public_key(),
+            ..ParticipantInfo::new(self.me.into())
+        };
+        open_reply_for_test(reply, cipher_sk, self.me, &info)
     }
 
     /// Deliver `update` to this node as a sync request that claims to come

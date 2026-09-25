@@ -600,10 +600,6 @@ async fn test_sync_matrix() {
 
         // Verify the full SyncUpdate response from the responder.
         assert_eq!(
-            response.from, responder.me,
-            "case {i}: response.from should be the responder",
-        );
-        assert_eq!(
             response.triples.contains(&id),
             case.expected_responder.missing,
             "case {i}: caller={:?}, responder={:?} → expected missing={}",
@@ -664,14 +660,6 @@ async fn shares_by_owner(
     shares
 }
 
-fn empty_update(from: Participant) -> SyncUpdate {
-    SyncUpdate {
-        from,
-        triples: vec![],
-        presignatures: vec![],
-    }
-}
-
 /// A caller with a key the contract doesn't know can't make a node drop shares,
 /// whether it claims to be the receiver (the owner of its own artifacts) or
 /// another owner.
@@ -694,7 +682,7 @@ async fn test_sync_rejects_outside_caller() {
     let outsider_sk = near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
     for claimed in [node1.me, node0.me] {
         let result = node1
-            .try_sync(claimed, &outsider_sk, &empty_update(claimed))
+            .try_sync(claimed, &outsider_sk, &SyncUpdate::empty())
             .await;
         assert!(
             result.is_err(),
@@ -705,8 +693,8 @@ async fn test_sync_rejects_outside_caller() {
     assert_eq!(shares_by_owner(node1, &owners).await, before);
 }
 
-/// A participant can't pass as another node: claiming another sender fails the
-/// signature check, and a `from` inside the payload is ignored for the signer.
+/// A participant can't pass as another node: signing with its own key while
+/// claiming another sender fails the signature check.
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_sync_rejects_impersonation() {
     let fixture = MpcFixtureBuilder::default()
@@ -724,38 +712,18 @@ async fn test_sync_rejects_impersonation() {
         "node1 should hold shares of every owner's artifacts: {before:?}"
     );
 
-    let node2_network = node2.config.borrow().local.network.clone();
-    let node2_sk = node2_network.sign_sk.clone();
+    let node2_sk = node2.config.borrow().local.network.sign_sk.clone();
 
     // node2's key, but the signed envelope claims another sender.
     for victim in [node0.me, node1.me] {
         let result = node1
-            .try_sync(victim, &node2_sk, &empty_update(victim))
+            .try_sync(victim, &node2_sk, &SyncUpdate::empty())
             .await;
         assert!(
             result.is_err(),
             "node2 signing as {victim:?} should be rejected"
         );
     }
-
-    // Signed honestly as node2, with node0 named inside the payload. If that
-    // `from` were trusted, node1 would drop its shares of node0's artifacts,
-    // since none of them are in node2's list.
-    let update = SyncUpdate {
-        from: node0.me,
-        triples: node2.owned_triples().await,
-        presignatures: node2.owned_presignatures().await,
-    };
-    let reply = node1
-        .try_sync(node2.me, &node2_sk, &update)
-        .await
-        .expect("node2 signing as itself should be accepted");
-    // The reply goes to the signer, so only node2 can open it.
-    let response = node1
-        .open_reply(&reply, &node2_network.cipher_sk)
-        .expect("node2 should open the reply");
-    assert_eq!(response.from, node1.me);
-    assert!(response.triples.is_empty() && response.presignatures.is_empty());
 
     assert_eq!(shares_by_owner(node1, &owners).await, before);
 }
@@ -777,7 +745,6 @@ async fn test_sync_reply_rejects_forged_responder() {
     let node0_triples = node0.owned_triples().await;
     let node0_presigs = node0.owned_presignatures().await;
     let update = SyncUpdate {
-        from: node0.me,
         triples: node0_triples.clone(),
         presignatures: node0_presigs.clone(),
     };
@@ -787,10 +754,9 @@ async fn test_sync_reply_rejects_forged_responder() {
         .try_sync(node0.me, &node0_network.sign_sk, &update)
         .await
         .expect("node0's update should be accepted");
-    let response = node1
+    node1
         .open_reply(&reply, &node0_network.cipher_sk)
         .expect("genuine reply should open");
-    assert_eq!(response.from, node1.me);
 
     // A reply from a node other than the one asked: node0 asked node2 but
     // got node1's reply.
@@ -803,7 +769,6 @@ async fn test_sync_reply_rejects_forged_responder() {
     // node1 and listing all of node0's artifacts as missing.
     let outsider_sk = near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
     let forged = SyncUpdate {
-        from: node1.me,
         triples: node0_triples,
         presignatures: node0_presigs,
     };

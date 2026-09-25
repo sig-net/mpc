@@ -49,7 +49,6 @@ pub enum SyncPeerResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
-    pub from: Participant,
     pub triples: Vec<TripleId>,
     pub presignatures: Vec<PresignatureId>,
 }
@@ -57,7 +56,6 @@ pub struct SyncUpdate {
 impl SyncUpdate {
     pub fn empty() -> Self {
         Self {
-            from: Participant::from(u32::MAX),
             triples: Vec::new(),
             presignatures: Vec::new(),
         }
@@ -86,22 +84,21 @@ impl SyncRequest {
     ) {
         let start = Instant::now();
 
-        // `from` picks the owner whose shares we drop, so it must be the
-        // signer, not the claim inside the payload.
-        let update = match SignedMessage::decrypt_with::<SyncUpdate, _>(
+        // The signer is the owner whose shares we drop.
+        let (from, update) = match SignedMessage::decrypt_with::<SyncUpdate, _>(
             &self.update,
             &network.cipher_sk,
             &participants,
             |_| Ok(()),
         ) {
-            Ok((from, update)) => SyncUpdate { from, ..update },
+            Ok(verified) => verified,
             Err(err) => {
                 tracing::warn!(?err, "rejected sync update");
                 return;
             }
         };
 
-        let outdated_triples = match triples.remove_outdated(update.from, &update.triples).await {
+        let outdated_triples = match triples.remove_outdated(from, &update.triples).await {
             Ok(result) => result,
             Err(err) => {
                 let _ = self.response_tx.send(Err(err));
@@ -109,7 +106,7 @@ impl SyncRequest {
             }
         };
         let outdated_presignatures = match presignatures
-            .remove_outdated(update.from, &update.presignatures)
+            .remove_outdated(from, &update.presignatures)
             .await
         {
             Ok(result) => result,
@@ -129,12 +126,11 @@ impl SyncRequest {
         );
 
         let response = SyncUpdate {
-            from: me,
             triples: outdated_triples.not_found,
             presignatures: outdated_presignatures.not_found,
         };
         // The signature check above found the sender in `participants`.
-        let Some(info) = participants.get(&update.from) else {
+        let Some(info) = participants.get(&from) else {
             return;
         };
         let response =
@@ -221,7 +217,7 @@ impl SyncTask {
                         continue;
                     }
 
-                    let Some(update) = self.new_update(me).await else {
+                    let Some(update) = self.new_update().await else {
                         continue;
                     };
                     let start = Instant::now();
@@ -276,7 +272,7 @@ impl SyncTask {
         }
     }
 
-    async fn new_update(&self, me: Participant) -> Option<SyncUpdate> {
+    async fn new_update(&self) -> Option<SyncUpdate> {
         let triples = match self.triples.fetch_owned_with_reserved().await {
             Ok(ids) => ids,
             Err(err) => {
@@ -299,7 +295,6 @@ impl SyncTask {
         };
 
         Some(SyncUpdate {
-            from: me,
             triples,
             presignatures,
         })
@@ -512,7 +507,7 @@ fn open_reply(
             "sync reply was not signed by the peer we asked",
         ));
     }
-    Ok(SyncUpdate { from, ..reply })
+    Ok(reply)
 }
 
 #[cfg(any(test, feature = "test-feature"))]
