@@ -1493,7 +1493,7 @@ async fn midnight_completion_requires_the_published_metadata_to_match_the_signat
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
         let result =
             process_respond_bidirectional_event(event, &ctx, root_sk.public_key().into()).await;
-        assert_eq!(result.is_ok(), case == 5, "case {case}: {result:?}");
+        assert_eq!(result.is_ok(), case == 5, "case {case}");
         assert_eq!(
             ctx.backlog
                 .get(Chain::Midnight, &tx.sign_id())
@@ -1896,7 +1896,7 @@ async fn midnight_unobserved_entries_keep_responses_they_cannot_bind() {
         assert_eq!(
             result.is_ok(),
             matches!(case, "response with output" | "legacy source chain"),
-            "{case}: {result:?}"
+            "{case}"
         );
         assert!(
             ctx.backlog
