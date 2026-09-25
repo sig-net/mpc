@@ -53,6 +53,27 @@ pub(crate) fn response_payload(
     payload
 }
 
+pub(crate) fn bidirectional_response_payload(
+    request_id: [u8; 32],
+    attestation: mpc_primitives::PublishedAttestation,
+    x: [u8; 32],
+    y: [u8; 32],
+    s: [u8; 32],
+    recovery_id: u8,
+) -> [u8; crate::emissions::MISC_PAYLOAD_LEN] {
+    let mut payload = [0; crate::emissions::MISC_PAYLOAD_LEN];
+    payload[..32].copy_from_slice(&request_id);
+    payload[32..40].copy_from_slice(&attestation.block_height.to_le_bytes());
+    payload[40] = attestation.outcome as u8;
+    payload[41..49].copy_from_slice(&attestation.serialized_output_length.to_le_bytes());
+    payload[49..81].copy_from_slice(&attestation.digest);
+    payload[81..113].copy_from_slice(&x);
+    payload[113..145].copy_from_slice(&y);
+    payload[145..177].copy_from_slice(&s);
+    payload[177] = recovery_id;
+    payload
+}
+
 /// Trailing-zero trim, the form the state layer stores every atom in.
 pub(crate) fn trim(bytes: &[u8]) -> Vec<u8> {
     let end = bytes.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
@@ -66,11 +87,10 @@ pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>
     let tx = &record.tx_params;
     let mut atoms: Vec<Vec<u8>> = vec![
         trim(&record.sender),
-        trim(&record.request_nonce.to_le_bytes()),
         trim(&[record.key_version]),
         trim(&record.path),
         trim(&[record.algo]),
-        trim(&[record.dest]),
+        trim(&[record.signature_dest]),
         trim(&record.params),
         trim(&[record.tx_param_type]),
         trim(&tx.chain_id.to_le_bytes()),
@@ -99,7 +119,7 @@ pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>
             atoms.push(trim(key));
         }
     }
-    atoms.push(trim(&record.caip2_id));
+    atoms.push(trim(&record.execution_dest));
     // Schemas are exact-length by protocol convention, never ending in a zero byte, so
     // stored length equals declared length.
     atoms.push(record.output_deserialization_schema.clone());
@@ -113,11 +133,10 @@ pub(crate) fn widths_from_record(record: &SignBidirectionalRecord) -> Vec<u32> {
     let tx = &record.tx_params;
     let mut widths: Vec<u32> = vec![
         32, // sender
-        8,  // request_nonce
         1,  // key_version
         32, // path
         1,  // algo
-        1,  // dest
+        1,  // signature_dest
         64, // params
         1,  // tx_param_type
         8,  // chain_id
@@ -138,7 +157,7 @@ pub(crate) fn widths_from_record(record: &SignBidirectionalRecord) -> Vec<u32> {
         widths.push(1);
         widths.extend(std::iter::repeat_n(32, entry.storage_keys.len()));
     }
-    widths.push(32); // caip2_id
+    widths.push(32); // execution_dest
     widths.push(record.output_deserialization_schema.len() as u32);
     widths.push(record.respond_serialization_schema.len() as u32);
     widths
@@ -185,6 +204,39 @@ pub(crate) fn aligned_value_from_record(record: &SignBidirectionalRecord) -> Ali
     }
 }
 
+/// Cell emitted by the compiled Compact reference constructor, not a Rust codec.
+pub(crate) fn api_reference_cell() -> (AlignedValue, [u8; 32]) {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Request {
+        request_id: String,
+        atoms: Vec<String>,
+        widths: Vec<u32>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        request: Request,
+    }
+    let fixture: Fixture =
+        serde_json::from_str(include_str!("../fixtures/api-parity-vectors.json"))
+            .expect("generated Compact reference fixture");
+    let value = Value(
+        fixture
+            .request
+            .atoms
+            .iter()
+            .map(|atom| ValueAtom(hex::decode(atom).unwrap()))
+            .collect(),
+    );
+    (
+        AlignedValue {
+            value,
+            alignment: alignment_of(&fixture.request.widths),
+        },
+        hex_32(&fixture.request.request_id),
+    )
+}
+
 /// A `Bytes<32>` map key, the shape both counter maps and a caller's request index use.
 pub(crate) fn key_of(bytes: [u8; 32]) -> AlignedValue {
     AlignedValue::from(bytes)
@@ -223,11 +275,10 @@ fn ascii_padded_vec(text: &[u8], width: usize) -> Vec<u8> {
 pub(crate) fn sample_record() -> SignBidirectionalRecord {
     SignBidirectionalRecord {
         sender: [0xab; 32],
-        request_nonce: 7,
         key_version: 1,
         path: ascii_padded(b"caller-path"),
         algo: 0,
-        dest: 0,
+        signature_dest: 0,
         params: [0u8; 64],
         tx_param_type: 0,
         tx_params: EvmType2TxParams {
@@ -249,7 +300,7 @@ pub(crate) fn sample_record() -> SignBidirectionalRecord {
             access_list_entry_count: 0,
             access_list: Vec::new(),
         },
-        caip2_id: ascii_padded(b"eip155:31337"),
+        execution_dest: ascii_padded(b"eip155:31337"),
         output_deserialization_schema: ascii_padded_vec(b"uint256", 34),
         respond_serialization_schema: ascii_padded_vec(b"uint256", 34),
     }

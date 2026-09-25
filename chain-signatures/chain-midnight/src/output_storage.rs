@@ -5,13 +5,19 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use bytes::Bytes;
 use google_cloud_storage::client::Storage;
+use mpc_primitives::AttestationMetadata;
 use mpc_utils::task::AbortOnDrop;
 
 use crate::config::{MidnightAddress, OutputStorageConfig};
 
 #[async_trait]
 pub(crate) trait OutputStore: Send + Sync {
-    async fn ensure_output(&self, request_id: &[u8; 32], output: &[u8]) -> anyhow::Result<()>;
+    async fn ensure_output(
+        &self,
+        request_id: &[u8; 32],
+        metadata: &AttestationMetadata,
+        output: &[u8],
+    ) -> anyhow::Result<()>;
 }
 
 /// Keeps optional caching recoverable without making publishers wait for initialization.
@@ -86,11 +92,16 @@ impl RecoveringOutputStore {
 
 #[async_trait]
 impl OutputStore for RecoveringOutputStore {
-    async fn ensure_output(&self, request_id: &[u8; 32], output: &[u8]) -> anyhow::Result<()> {
+    async fn ensure_output(
+        &self,
+        request_id: &[u8; 32],
+        metadata: &AttestationMetadata,
+        output: &[u8],
+    ) -> anyhow::Result<()> {
         self.ready
             .get()
             .context("Midnight output storage is initializing; retrying in background")?
-            .ensure_output(request_id, output)
+            .ensure_output(request_id, metadata, output)
             .await
     }
 }
@@ -187,7 +198,13 @@ impl GcsOutputStore {
 
 #[async_trait]
 impl OutputStore for GcsOutputStore {
-    async fn ensure_output(&self, request_id: &[u8; 32], output: &[u8]) -> anyhow::Result<()> {
+    async fn ensure_output(
+        &self,
+        request_id: &[u8; 32],
+        metadata: &AttestationMetadata,
+        output: &[u8],
+    ) -> anyhow::Result<()> {
+        metadata.validate_output(output)?;
         let object = format!("{}/{}.bin", self.prefix, hex::encode(request_id));
         tokio::time::timeout(self.timeout, self.upload(&object, output))
             .await
@@ -202,6 +219,12 @@ mod tests {
     use super::*;
     use google_cloud_auth::credentials::anonymous;
     use mockito::{Matcher, Server};
+
+    const METADATA: AttestationMetadata = AttestationMetadata {
+        key_version: 1,
+        block_height: 42,
+        outcome: mpc_primitives::AttestationOutcomeKind::Executed,
+    };
 
     const REQUEST_ID: [u8; 32] = [0x5c; 32];
 
@@ -278,7 +301,10 @@ mod tests {
             .with_body(r#"{"bucket":"outputs","generation":"1"}"#)
             .create_async()
             .await;
-        store.ensure_output(&REQUEST_ID, &output).await.unwrap();
+        store
+            .ensure_output(&REQUEST_ID, &METADATA, &output)
+            .await
+            .unwrap();
         write.assert_async().await;
     }
 
@@ -303,7 +329,7 @@ mod tests {
                 .with_body(existing)
                 .create_async()
                 .await;
-            let result = store.ensure_output(&REQUEST_ID, &output).await;
+            let result = store.ensure_output(&REQUEST_ID, &METADATA, &output).await;
             assert_eq!(result.is_ok(), accepted, "{result:#?}");
             read.assert_async().await;
             read.remove_async().await;
@@ -316,7 +342,10 @@ mod tests {
         let mut server = Server::new_async().await;
         let store = store(&server).await;
         let write = upload(&mut server).with_status(403).create_async().await;
-        let error = store.ensure_output(&REQUEST_ID, &[1]).await.unwrap_err();
+        let error = store
+            .ensure_output(&REQUEST_ID, &METADATA, &[1])
+            .await
+            .unwrap_err();
         assert!(format!("{error:#}").contains("403"));
         assert!(format!("{error:#}").contains(&object_name()));
         write.assert_async().await;
@@ -338,7 +367,10 @@ mod tests {
             client,
         )
         .unwrap();
-        let error = store.ensure_output(&REQUEST_ID, &[1]).await.unwrap_err();
+        let error = store
+            .ensure_output(&REQUEST_ID, &METADATA, &[1])
+            .await
+            .unwrap_err();
         assert!(format!("{error:#}").contains("timed out"));
     }
 
@@ -405,7 +437,10 @@ mod tests {
             tokio::task::yield_now().await;
             assert_eq!(attempts.load(Ordering::SeqCst), expected);
             let started = tokio::time::Instant::now();
-            store.ensure_output(&REQUEST_ID, &[1]).await.unwrap_err();
+            store
+                .ensure_output(&REQUEST_ID, &METADATA, &[1])
+                .await
+                .unwrap_err();
             assert_eq!(started.elapsed(), Duration::ZERO);
         }
     }
@@ -462,7 +497,7 @@ mod tests {
             .unwrap();
         tokio::task::yield_now().await;
         assert!(store
-            .ensure_output(&REQUEST_ID, &[1])
+            .ensure_output(&REQUEST_ID, &METADATA, &[1])
             .await
             .unwrap_err()
             .to_string()

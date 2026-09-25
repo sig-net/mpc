@@ -6,21 +6,20 @@ pub struct SignBidirectionalRecord {
     /// `ContractAddress { bytes: Bytes<32> }`, a single-field wrapper that contributes
     /// exactly 32 preimage bytes
     pub sender: [u8; 32],
-    pub request_nonce: u64,
     /// `Uint<8>`: one byte in the preimage, not four
     pub key_version: u8,
     pub path: [u8; 32],
     /// `MPCSignatureAlgorithm` enum, one byte: ecdsa = 0, reserved = 1
     pub algo: u8,
     /// `MPCDestination` enum, one byte: unused = 0, reserved = 1
-    pub dest: u8,
+    pub signature_dest: u8,
     pub params: [u8; 64],
     /// `TxParamType` enum, one byte: evmType2 = 0, reserved = 1
     pub tx_param_type: u8,
     pub tx_params: EvmType2TxParams,
     /// ASCII `Bytes<32>`, trailing-zero-trimmed on the wire and re-padded to 32 bytes
     /// in the preimage
-    pub caip2_id: [u8; 32],
+    pub execution_dest: [u8; 32],
     /// `Bytes<LenOut>`, runtime width chosen per integrator
     pub output_deserialization_schema: Vec<u8>,
     /// `Bytes<LenResp>`, runtime width chosen per integrator

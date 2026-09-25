@@ -47,16 +47,23 @@ pub fn generate_sign_request(
         ALGO_ECDSA => "ecdsa".to_string(),
         reserved => anyhow::bail!("unsupported algo {reserved}: only ecdsa (0) is real"),
     };
-    let dest = match record.dest {
+    let dest = match record.signature_dest {
         DEST_UNUSED => String::new(),
-        reserved => anyhow::bail!("unsupported dest {reserved}: only unused (0) is real"),
+        reserved => anyhow::bail!("unsupported signature_dest {reserved}: only unused (0) is real"),
     };
+
+    let mut response_key_path = [0; 32];
+    response_key_path[..21].copy_from_slice(b"midnight response key");
+    anyhow::ensure!(
+        record.path != response_key_path,
+        "path is reserved for the MPC response key"
+    );
 
     // The contract declares path as 32 opaque bytes (a raw commitment is the common
     // case), so the rendering must accept any of them: full-width lowercase hex, never
     // trimmed, or `0xab..00` and `0xab..` would derive the same key.
     let path = hex::encode(record.path);
-    let caip2_id = render_padded_ascii(&record.caip2_id, "caip2_id")?;
+    let caip2_id = render_padded_ascii(&record.execution_dest, "execution_dest")?;
     anyhow::ensure!(
         record.params == [0u8; 64],
         "params is reserved and must be blank, got {}",
@@ -110,7 +117,7 @@ fn schema_prefix(bytes: &[u8]) -> Vec<u8> {
         .to_vec()
 }
 
-/// The `pad(N, "text")` convention `caip2_id` uses: trailing NULs are padding and are
+/// The `pad(N, "text")` convention `execution_dest` uses: trailing NULs are padding and are
 /// trimmed, and what remains must be UTF-8 with no interior NULs.
 fn render_padded_ascii(bytes: &[u8], field: &str) -> anyhow::Result<String> {
     let trimmed_len = bytes.len() - bytes.iter().rev().take_while(|byte| **byte == 0).count();
@@ -165,9 +172,30 @@ mod tests {
         assert_eq!(event.respond_serialization_schema, b"uint256".to_vec());
         assert_eq!(event.params, "", "params is reserved and travels blank");
         assert_eq!(event.chain, Chain::Midnight);
-        assert_eq!(
-            event.chain_ctx, None,
-            "the respond target is config, so the request carries no per-chain blob"
+        assert_eq!(event.chain_ctx, None);
+    }
+
+    #[test]
+    fn reserved_response_key_path_is_rejected_exactly() {
+        let reserved = "midnight response key";
+        let mut record = caller_record();
+        record.path = ascii_padded(reserved.as_bytes());
+        let error = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+            .expect_err("SDK constructor reserves the exact padded response key path");
+        assert!(error.to_string().contains("path is reserved"));
+
+        record.path[31] = 1;
+        let request =
+            generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS).unwrap();
+        assert_eq!(request.args.path, hex::encode(record.path));
+        assert_ne!(request.args.path, reserved);
+        assert_ne!(
+            request.args.epsilon,
+            mpc_crypto::kdf::derive_epsilon_midnight(
+                request.args.key_version,
+                &hex::encode(READ_ADDRESS),
+                reserved,
+            ),
         );
     }
 
@@ -179,21 +207,17 @@ mod tests {
         record.output_deserialization_schema = [output_json.as_slice(), b"\0junk\0\0"].concat();
         record.respond_serialization_schema =
             [respond_json.as_slice(), b"\0nonzero-suffix\0"].concat();
-        let request_id_before = crate::hashing::compute_request_id(
-            &crate::test_utils::aligned_value_from_record(&record),
-        );
+        let request_id_before = crate::hashing::compute_request_id(&record);
 
         let request = generate_sign_request(&record, &READ_ADDRESS, request_id_before, INDEXED_TS)
             .expect("the caller record converts");
         let mut forwarded_record = record.clone();
         forwarded_record.output_deserialization_schema = output_json.clone();
         forwarded_record.respond_serialization_schema = respond_json.clone();
-        assert_ne!(
-            crate::hashing::compute_request_id(&crate::test_utils::aligned_value_from_record(
-                &forwarded_record,
-            )),
+        assert_eq!(
+            crate::hashing::compute_request_id(&forwarded_record),
             request_id_before,
-            "request ID must remain bound to the full schema buffers, not the forwarded prefixes"
+            "schemas and their padding do not participate in request identity"
         );
         assert_eq!(
             request.id,
@@ -270,14 +294,15 @@ mod tests {
     #[test]
     fn render_padded_ascii_gates_caip2() {
         assert_eq!(
-            render_padded_ascii(&ascii_padded::<32>(b"eip155:1"), "caip2_id").expect("renders"),
+            render_padded_ascii(&ascii_padded::<32>(b"eip155:1"), "execution_dest")
+                .expect("renders"),
             "eip155:1"
         );
         for bytes in [[0xff; 32], ascii_padded::<32>(b"a\0b")] {
-            let err = render_padded_ascii(&bytes, "caip2_id")
+            let err = render_padded_ascii(&bytes, "execution_dest")
                 .expect_err("malformed caip2 bytes must fail closed")
                 .to_string();
-            assert!(err.contains("caip2_id"), "err: {err}");
+            assert!(err.contains("execution_dest"), "err: {err}");
         }
     }
 

@@ -6,7 +6,9 @@ description = "Compact FAB transient hashing for MPC protocol messages"
 publish = false
 
 [dependencies]
+mpc-primitives.workspace = true
 midnight-transient-crypto.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 hex.workspace = true

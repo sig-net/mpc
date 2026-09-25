@@ -196,6 +196,7 @@ mod tests {
             test_sign_request(SignKind::RespondBidirectional(RespondBidirectionalTx {
                 tx_id,
                 output: vec![],
+                attestation: None,
                 chain_ctx: None,
                 origin_indexed_at: None,
             }));

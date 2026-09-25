@@ -83,8 +83,8 @@ pub enum ExecutionOutcome {
     Success {
         output: Vec<u8>,
     },
-    /// The transaction did not execute: reverted, replaced by a sibling, or its
-    /// nonce consumed.
+    /// Reverted execution, or a replacement/consumed nonce under a source
+    /// chain's legacy failure policy.
     Failed,
     /// The transaction executed, but its output could not be interpreted against
     /// the request's own schemas.

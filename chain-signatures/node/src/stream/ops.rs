@@ -5,7 +5,7 @@ use anyhow::Context;
 use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign, SignEntry};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
-use crate::respond_bidirectional::{claims_attestation_key, is_failed_execution_output};
+use crate::respond_bidirectional::{claims_attestation_key, is_failed_execution_response};
 use crate::sign_bidirectional::SignBidirectionalEventExt;
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -16,6 +16,22 @@ use mpc_primitives::{
     SignKind, SignatureRespondedEvent,
 };
 use mpc_utils::time::unix_elapsed_checked;
+
+/// Recovered final responses must bind their stored metadata to the signing payload.
+fn validate_midnight_signing_request(request: &IndexedSignRequest) -> anyhow::Result<()> {
+    if request.chain != Chain::Midnight {
+        return Ok(());
+    }
+
+    match &request.kind {
+        SignKind::RespondBidirectional(_) => {
+            mpc_chain_midnight::validate_attestation_response(request)?;
+        }
+        SignKind::SignBidirectional(_) | SignKind::Sign => {}
+    }
+
+    Ok(())
+}
 
 pub(crate) async fn process_sign_request(
     sign_request: Arc<IndexedSignRequest>,
@@ -61,6 +77,10 @@ pub(crate) async fn requeue_pending_sign_requests(
     for entry in ctx.backlog.requeueable_requests(source_chain).await {
         let sign_id = entry.sign_id();
         let source_chain = entry.chain();
+        if let Err(error) = validate_midnight_signing_request(entry.request()) {
+            tracing::error!(?sign_id, %source_chain, ?error, "leaving incompatible restored Midnight request pending without signing");
+            continue;
+        }
         ctx.sign_tx
             .send(SignCommand::Request(entry))
             .await
@@ -75,6 +95,10 @@ pub(crate) async fn requeue_pending_sign_requests(
 
 pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_chain: Chain) {
     for entry in ctx.backlog.publishable_requests(source_chain).await {
+        if let Err(error) = validate_midnight_signing_request(entry.request()) {
+            tracing::error!(sign_id = ?entry.sign_id(), %source_chain, ?error, "leaving incompatible Midnight publication pending");
+            continue;
+        }
         if !entry.is_proposer() {
             continue;
         }
@@ -102,6 +126,10 @@ pub(crate) async fn publish_failover_due(ctx: &StreamContext, chain: Chain) {
     let me = ctx.contract_watcher.account_id().clone();
     let now = mpc_utils::time::current_unix_timestamp();
     for entry in ctx.backlog.publishable_requests(chain).await {
+        if let Err(error) = validate_midnight_signing_request(entry.request()) {
+            tracing::error!(sign_id = ?entry.sign_id(), %chain, ?error, "leaving incompatible Midnight publication pending");
+            continue;
+        }
         if entry.publish_dispatched() {
             continue;
         }
@@ -249,6 +277,13 @@ pub(crate) async fn process_respond_bidirectional_event(
         return Ok(());
     };
 
+    if source_chain == Chain::Midnight {
+        let expected = mpc_chain_midnight::validate_attestation_response(entry.request())?;
+        anyhow::ensure!(
+            event.attestation == Some(expected),
+            "Midnight event metadata differs from the signed response",
+        );
+    }
     entry.verify_signature(root_pk, &event.signature)?;
 
     // The whole round trip, measured against when the initial request was
@@ -262,7 +297,7 @@ pub(crate) async fn process_respond_bidirectional_event(
                 Some(elapsed) => record_request_latency(
                     source_chain,
                     SignRequestStep::BidirectionalTotal,
-                    execution_status(is_failed_execution_output(&response.output)),
+                    execution_status(is_failed_execution_response(response)),
                     RequestKind::RespondBidirectional,
                     elapsed,
                 ),
@@ -332,25 +367,28 @@ pub async fn process_execution_confirmed(
     // Captured before `advance` consumes the entry: the wait ends here, and the
     // outcome is what distinguishes a healthy round trip from a reverted one.
     let awaiting_execution = entry.awaiting_execution();
+    if matches!(result, ExecutionOutcome::ExtractionFailed) {
+        // Destination streams advance independently of source checkpoints.
+        // Keep membership until a source-observable transition can settle it.
+        tracing::error!(
+            ?sign_id,
+            ?tx_id,
+            ?source_chain,
+            "output extraction failed; leaving execution pending without an attestation"
+        );
+        entry.watch_execution().await;
+        return Ok(());
+    }
     let execution_failed = matches!(result, ExecutionOutcome::Failed);
 
-    let Some(entry) = entry
-        .advance(result)
+    let entry = entry
+        .advance(result, block_height)
         .await
         .with_context(|| {
             format!(
                 "failed to transition pending tx to final response for sign id {sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
             )
-        })?
-    else {
-        // Retire the id: a leg-1 task on a node that lagged the publish would
-        // outlive its request.
-        ctx.sign_tx
-            .send(SignCommand::Completion(sign_id))
-            .await
-            .context("failed to send completion into queue")?;
-        return Ok(());
-    };
+        })?;
     tracing::info!(
         ?tx_id,
         ?sign_id,
