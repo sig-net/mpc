@@ -21,6 +21,7 @@ import {
   type WalletFacade,
 } from "@sig-net/midnight-contract-deploy";
 import {
+  bytesToHex,
   contractAddressFromHex,
   assembleCalldata,
   signatureRespondedEventToSignature,
@@ -34,19 +35,24 @@ import {
   type Secp256k1Point,
   type SignetPublicStateSource,
 } from "@sig-net/midnight";
-import { ledger, pureCircuits, type Contract } from "./managed/caller/contract/index.js";
+import { submitPlacement, type IsEvenCall, type PlacementScenario } from "./fallible.js";
+import { ledger, pureCircuits } from "./managed/caller/contract/index.js";
+import type { CallPlacement } from "./placement.js";
 import {
   buildCallerProviders,
   callerCompiledContract,
   CALLER_PRIVATE_STATE_ID,
+  type CallerContract,
+  type CallerProviders,
 } from "./providers.js";
-import { createCallerPrivateState, type CallerPrivateState } from "./witnesses.js";
+import { runVault } from "./vault.js";
+import { createCallerPrivateState } from "./witnesses.js";
 
 const DEPLOYER_SEED = "02".repeat(32);
 const INVOKER_SEED = "03".repeat(32);
 const PUBLISHER_SEED = "04".repeat(32);
 
-type CallerHandle = FoundContract<Contract<CallerPrivateState>>;
+type CallerHandle = FoundContract<CallerContract>;
 
 interface BootstrapRequest {
   op: "bootstrap";
@@ -87,6 +93,25 @@ interface NotifyAsCallerRequest {
   requestId: string;
 }
 
+interface PlacementCall {
+  nonce: string;
+  target: string;
+  argument: string;
+}
+
+interface SubmitPlacementRequest {
+  op: "submitPlacement";
+  scenario: PlacementScenario;
+  calls: PlacementCall[];
+}
+
+interface RunVaultRequest {
+  op: "runVault";
+  mpcPublicKey: string;
+  evmRpcUrl: string;
+  evmFunderKey: string;
+}
+
 interface ShutdownRequest {
   op: "shutdown";
 }
@@ -98,16 +123,24 @@ type Request =
   | SignedTransactionRequest
   | SettleResponseRequest
   | NotifyAsCallerRequest
+  | SubmitPlacementRequest
+  | RunVaultRequest
   | ShutdownRequest;
 
 interface Session {
+  config: MidnightNodeConfig;
+  artifactDir: string;
   facade: WalletFacade;
+  providers: CallerProviders;
   caller: CallerHandle;
   callerAddress: string;
+  centralAddress: string;
   impersonator: CallerHandle;
   publicDataProvider: SignetPublicStateSource;
   reader: SignetRequestResponseReader;
   responseKey?: Secp256k1Point;
+  /** Placement of the transaction most recently handed to the proof server. */
+  lastPlacement?: CallPlacement[];
 }
 
 let session: Session | undefined;
@@ -133,22 +166,27 @@ function bytes(hex: string, width?: number): Uint8Array {
   return result;
 }
 
+function padSchema(schema: Uint8Array): Uint8Array {
+  if (schema.length > 64) throw new Error(`schema exceeds 64 bytes: ${schema.length}`);
+  const padded = new Uint8Array(64).fill(0x20);
+  padded.set(schema);
+  return padded;
+}
+
+function outputSchema(outputType: string): Uint8Array {
+  return padSchema(
+    new TextEncoder().encode(JSON.stringify([{ name: "success", type: outputType }])),
+  );
+}
+
 function requestSchemas(request: SubmitRequest): [Uint8Array, Uint8Array] {
-  const padSchema = (schema: Uint8Array): Uint8Array => {
-    if (schema.length > 64) throw new Error(`schema exceeds 64 bytes: ${schema.length}`);
-    const padded = new Uint8Array(64).fill(0x20);
-    padded.set(schema);
-    return padded;
-  };
   if (request.outputSchema !== undefined || request.responseSchema !== undefined) {
     if (request.outputSchema === undefined || request.responseSchema === undefined)
       throw new Error("outputSchema and responseSchema must both be provided");
     return [padSchema(bytes(request.outputSchema)), padSchema(bytes(request.responseSchema))];
   }
   if (request.outputType === undefined) throw new Error("outputType or raw schemas are required");
-  const schema = padSchema(
-    new TextEncoder().encode(JSON.stringify([{ name: "success", type: request.outputType }])),
-  );
+  const schema = outputSchema(request.outputType);
   return [schema, schema];
 }
 
@@ -305,6 +343,9 @@ async function bootstrap(request: BootstrapRequest) {
     invokerKeys,
     request.config,
     join(request.artifactDir, "caller.leveldb"),
+    (placement) => {
+      if (session !== undefined) session.lastPlacement = placement;
+    },
   );
   const findCaller = (contractAddress: string) =>
     findDeployedContract(providers, {
@@ -316,9 +357,13 @@ async function bootstrap(request: BootstrapRequest) {
   const caller = await findCaller(callerDeployment.contractAddress);
   const impersonator = await findCaller(impersonatorDeployment.contractAddress);
   session = {
+    config: request.config,
+    artifactDir: request.artifactDir,
     facade,
+    providers,
     caller,
     callerAddress: callerDeployment.contractAddress,
+    centralAddress: central.contractAddress,
     impersonator,
     publicDataProvider: providers.publicDataProvider,
     reader: new SignetRequestResponseReader({
@@ -361,6 +406,37 @@ async function dispatch(request: Request): Promise<unknown> {
       requestIdBytes(requestId),
     );
     return {};
+  }
+  if (request.op === "runVault") {
+    return runVault({
+      config: active.config,
+      artifactDir: active.artifactDir,
+      centralAddress: active.centralAddress,
+      mpcPublicKey: request.mpcPublicKey,
+      evmRpcUrl: request.evmRpcUrl,
+      evmFunderKey: request.evmFunderKey,
+      deployerSeed: DEPLOYER_SEED,
+      userSeed: INVOKER_SEED,
+      userFacade: active.facade,
+    });
+  }
+  if (request.op === "submitPlacement") {
+    const calls = request.calls.map((call): IsEvenCall => ({
+      evmNonce: BigInt(call.nonce),
+      to: bytes(call.target, 20),
+      argWord: bytes(call.argument, 32),
+    }));
+    return submitPlacement(
+      {
+        providers: active.providers,
+        callerAddress: active.callerAddress,
+        signetAddress: active.centralAddress,
+        schema: outputSchema("bool"),
+        bumpGate: () => active.caller.callTx.bumpGate(),
+      },
+      request.scenario,
+      calls,
+    );
   }
   if (request.op === "signedTransaction") {
     const requestId = parseRequestIdHex(request.requestId);
@@ -526,16 +602,16 @@ async function dispatch(request: Request): Promise<unknown> {
       throw new Error("duplicate settlement restored the consumed request");
     return {};
   }
-  const [outputSchema, responseSchema] = requestSchemas(request);
-  await active.caller.callTx.submitIsEvenRequest(
+  const [requestOutputSchema, requestResponseSchema] = requestSchemas(request);
+  const submitted = await active.caller.callTx.submitIsEvenRequest(
     BigInt(request.nonce),
     1n,
     bytes(request.target, 20),
     bytes(request.argument, 32),
-    outputSchema,
-    responseSchema,
+    requestOutputSchema,
+    requestResponseSchema,
   );
-  return {};
+  return { requestId: bytesToHex(submitted.private.result), placement: active.lastPlacement };
 }
 
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });

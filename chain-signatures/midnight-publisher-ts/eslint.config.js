@@ -13,9 +13,7 @@ export default defineConfig([
     extends: [js.configs.recommended, tseslint.configs.recommended],
     languageOptions: {
       parserOptions: {
-        projectService: {
-          allowDefaultProject: ["devtools/real-stack/*.ts"],
-        },
+        projectService: true,
         tsconfigRootDir: import.meta.dirname,
       },
     },

@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::primitives::{keccak256, Address, Bytes, U256};
@@ -6,11 +8,16 @@ use alloy::providers::{Provider as _, ProviderBuilder};
 use alloy::rpc::types::{TransactionInput, TransactionRequest};
 use anyhow::Context as _;
 use integration_tests::cluster;
+use integration_tests::midnight::{CallPlacement, PlacementScenario};
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_integration_core::utils::test::ChainIndexerStream;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
 use mpc_chain_midnight::MidnightIndexer;
 use mpc_node::sign_bidirectional::{derive_user_address, SignBidirectionalEventExt as _};
-use mpc_primitives::{Chain, ChainEvent, SignKind};
+use mpc_primitives::{
+    AttestationMetadata, AttestationOutcomeKind, Chain, ChainEvent, IndexedSignRequest,
+    PublishedAttestation, SignKind,
+};
 use serde::Deserialize;
 use serial_test::serial;
 use test_log::test;
@@ -230,7 +237,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
                 case.name
             );
         }
-        midnight
+        let submitted = midnight
             .submit_is_even_with_schemas(
                 nonce as u64,
                 target.into_array(),
@@ -239,6 +246,11 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
                 &case.response_schema,
             )
             .await?;
+        anyhow::ensure!(
+            notification_phase(&submitted.placement, &submitted.request_id) == Some("guaranteed"),
+            "{}: the caller request must notify in the guaranteed transcript",
+            case.name
+        );
         let ChainEvent::SignRequest { request, .. } = events
             .wait_for(
                 |event| {
@@ -257,6 +269,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
             unreachable!("filtered above")
         };
         let request_id = request.id.request_id;
+        assert_eq!(hex::encode(request_id), submitted.request_id);
         let SignKind::SignBidirectional(sign_event) = &request.kind else {
             unreachable!("filtered above")
         };
@@ -523,6 +536,435 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
     wait_for_completed_checkpoint(&cluster, victim_id, final_block).await?;
     wait_for_completed_checkpoint(&cluster, replacement_id, final_block).await?;
 
+    midnight.shutdown().await?;
+    Ok(())
+}
+
+/// Midnight events the test's own indexer emitted, recorded in arrival order so waiting
+/// for one kind never discards another.
+#[derive(Default)]
+struct Observed {
+    sign_requests: Vec<Arc<IndexedSignRequest>>,
+    responded: BTreeSet<[u8; 32]>,
+    attested: BTreeMap<[u8; 32], PublishedAttestation>,
+    block: Option<u64>,
+}
+
+impl Observed {
+    fn record(&mut self, event: ChainEvent) {
+        match event {
+            ChainEvent::SignRequest { request, .. } if request.chain == Chain::Midnight => {
+                self.sign_requests.push(request);
+            }
+            ChainEvent::Respond(response) if response.chain == Chain::Midnight => {
+                self.responded.insert(response.request_id);
+            }
+            ChainEvent::RespondBidirectional(response) if response.chain == Chain::Midnight => {
+                if let Some(attestation) = response.attestation {
+                    self.attested.insert(response.request_id, attestation);
+                }
+            }
+            ChainEvent::Block(height) => self.block = Some(height),
+            _ => {}
+        }
+    }
+
+    async fn until(
+        &mut self,
+        events: &mut ChainIndexerStream,
+        what: &str,
+        done: impl Fn(&Self) -> bool,
+    ) -> anyhow::Result<()> {
+        tokio::time::timeout(EVENT_TIMEOUT, async {
+            while !done(self) {
+                let event = events
+                    .next_event()
+                    .await
+                    .context("Midnight indexer stopped")?;
+                self.record(event);
+            }
+            anyhow::Ok(())
+        })
+        .await
+        .with_context(|| format!("timed out waiting for {what}"))?
+    }
+
+    fn indexed(&self) -> Vec<[u8; 32]> {
+        self.sign_requests
+            .iter()
+            .map(|request| request.id.request_id)
+            .collect()
+    }
+
+    /// A block indexed after everything recorded so far.
+    async fn next_block(&mut self, events: &mut ChainIndexerStream) -> anyhow::Result<u64> {
+        self.block = None;
+        self.until(events, "a later Midnight block", |observed| {
+            observed.block.is_some()
+        })
+        .await?;
+        self.block.context("recorded block")
+    }
+}
+
+fn request_id(encoded: &str) -> anyhow::Result<[u8; 32]> {
+    let mut request_id = [0; 32];
+    hex::decode_to_slice(encoded.trim_start_matches("0x"), &mut request_id)
+        .with_context(|| format!("invalid request id {encoded}"))?;
+    Ok(request_id)
+}
+
+/// The transcript phase that emits `request_id`'s singleton notification.
+fn notification_phase(placement: &[CallPlacement], request_id: &str) -> Option<&'static str> {
+    placement.iter().find_map(|call| {
+        if call
+            .guaranteed_notifications
+            .iter()
+            .any(|id| id == request_id)
+        {
+            Some("guaranteed")
+        } else if call
+            .fallible_notifications
+            .iter()
+            .any(|id| id == request_id)
+        {
+            Some("fallible")
+        } else {
+            None
+        }
+    })
+}
+
+fn expect_executed_attestation(
+    request_id: &[u8; 32],
+    attestation: &PublishedAttestation,
+    block_height: u64,
+    output: &[u8],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        attestation.block_height == block_height
+            && attestation.outcome_kind == AttestationOutcomeKind::Executed
+            && attestation.serialized_output_length == output.len() as u64,
+        "{}: unexpected attestation {attestation:?} for block {block_height}",
+        hex::encode(request_id)
+    );
+    let metadata = AttestationMetadata {
+        key_version: mpc_primitives::LATEST_MPC_KEY_VERSION,
+        block_height,
+        outcome_kind: AttestationOutcomeKind::Executed,
+    };
+    anyhow::ensure!(
+        attestation.digest
+            == mpc_compact_hashing::compute_attestation_hash(request_id, &metadata, output)?,
+        "{}: attestation digest does not bind the executed output",
+        hex::encode(request_id)
+    );
+    Ok(())
+}
+
+#[ignore = "starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster"]
+#[serial]
+#[test(tokio::test)]
+async fn midnight_indexes_notifications_by_transcript_placement() -> anyhow::Result<()> {
+    let cluster = cluster::spawn().ethereum().midnight().await?;
+    cluster.wait().signable().await?;
+    let midnight = cluster
+        .midnight
+        .as_ref()
+        .context("Midnight context was not started")?;
+    let indexer = MidnightIndexer::new(
+        midnight.config.clone(),
+        MockStateManager::new(),
+        NoopChainTelemetry,
+    )
+    .await?;
+    let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
+    let ethereum = cluster
+        .nodes
+        .ctx()
+        .ethereum
+        .as_ref()
+        .context("Ethereum context was not started")?;
+    let anvil =
+        ProviderBuilder::new().connect_http(ethereum.sandbox.external_http_endpoint.parse()?);
+    let target = Address::repeat_byte(0x61);
+    anvil
+        .anvil_set_code(target, hex::decode(RETURN_TRUE_RUNTIME_BYTECODE)?.into())
+        .await?;
+    let mut argument = [0; 32];
+    argument[31] = 6;
+
+    // The driver checks each transaction's placement before submitting it; the phases
+    // below are the requests' in call order.
+    let scenarios = [
+        (PlacementScenario::FallibleOnly, &["fallible"][..]),
+        (
+            PlacementScenario::GuaranteedTranscriptPair,
+            &["guaranteed", "guaranteed"][..],
+        ),
+        (
+            PlacementScenario::FallibleTranscriptPair,
+            &["fallible", "fallible"][..],
+        ),
+        (
+            PlacementScenario::GuaranteedThenFallibleSegments,
+            &["guaranteed", "fallible"][..],
+        ),
+        (
+            PlacementScenario::FallibleSegmentPair,
+            &["fallible", "fallible"][..],
+        ),
+    ];
+    let mut nonces = BTreeMap::new();
+    let mut expected = Vec::new();
+    for (scenario, phases) in scenarios {
+        let first_nonce = nonces.len() as u64;
+        let calls = (first_nonce..first_nonce + phases.len() as u64)
+            .map(|nonce| (nonce, target.into_array()))
+            .collect::<Vec<_>>();
+        let outcome = midnight
+            .submit_placement(scenario, &calls, argument)
+            .await?;
+        tracing::info!(?scenario, notifications = ?outcome.notifications, "placement submitted");
+        anyhow::ensure!(
+            outcome.status == "SucceedEntirely" && outcome.committed == outcome.requests,
+            "{scenario:?} did not apply every request: {outcome:?}"
+        );
+        for ((request, phase), (nonce, _)) in outcome.requests.iter().zip(phases).zip(&calls) {
+            anyhow::ensure!(
+                notification_phase(&outcome.placement, request) == Some(*phase),
+                "{scenario:?} did not notify {request} in the {phase} transcript"
+            );
+            nonces.insert(request_id(request)?, *nonce);
+        }
+        if scenario == PlacementScenario::FallibleSegmentPair {
+            // The second request's intent has the lower segment, so the ledger applies it first.
+            let reversed = outcome.requests.iter().rev().cloned().collect::<Vec<_>>();
+            anyhow::ensure!(
+                outcome.notifications == reversed,
+                "fallible segments were not ordered by segment: {outcome:?}"
+            );
+        }
+        for notification in &outcome.notifications {
+            expected.push(request_id(notification)?);
+        }
+    }
+
+    // A guaranteed intent commits while the fallible intent after it fails. The MPC indexes
+    // only fully applied transactions, so neither request is ever signed; their nonces lie
+    // beyond the executed range.
+    let partial = midnight
+        .submit_placement(
+            PlacementScenario::PartialSuccess,
+            &[(1_000, target.into_array()), (1_001, target.into_array())],
+            argument,
+        )
+        .await?;
+    anyhow::ensure!(
+        partial.status == "FailFallible" && partial.committed == partial.requests[..1],
+        "expected only the guaranteed intent to commit: {partial:?}"
+    );
+    let skipped = partial
+        .requests
+        .iter()
+        .map(|id| request_id(id))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // Blocks index in order, so once this later request is indexed every earlier
+    // notification has been indexed or skipped.
+    let sentinel = midnight
+        .submit_is_even(nonces.len() as u64, target.into_array(), argument, "bool")
+        .await?;
+    anyhow::ensure!(
+        notification_phase(&sentinel.placement, &sentinel.request_id) == Some("guaranteed"),
+        "a plain caller request must notify in the guaranteed transcript"
+    );
+    let sentinel_id = request_id(&sentinel.request_id)?;
+    nonces.insert(sentinel_id, nonces.len() as u64);
+    expected.push(sentinel_id);
+    let mut observed = Observed::default();
+    observed
+        .until(&mut events, "the sentinel SignRequest", |observed| {
+            observed.indexed().contains(&sentinel_id)
+        })
+        .await?;
+    anyhow::ensure!(
+        observed.indexed() == expected,
+        "indexed {:?}, expected {:?}",
+        observed
+            .indexed()
+            .iter()
+            .map(hex::encode)
+            .collect::<Vec<_>>(),
+        expected.iter().map(hex::encode).collect::<Vec<_>>()
+    );
+
+    let root_public_key =
+        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
+    let SignKind::SignBidirectional(sign_event) = &observed.sign_requests[0].kind else {
+        anyhow::bail!("expected a bidirectional request");
+    };
+    let sender = derive_user_address(root_public_key, sign_event.epsilon()?);
+    anvil
+        .anvil_set_balance(sender, U256::from(10_000_000_000_000_000_000u128))
+        .await?;
+    let mut heights = BTreeMap::new();
+    let mut by_nonce = nonces
+        .iter()
+        .map(|(id, nonce)| (*nonce, *id))
+        .collect::<Vec<_>>();
+    by_nonce.sort();
+    for (_, id) in by_nonce {
+        observed
+            .until(&mut events, "the MPC signature", |observed| {
+                observed.responded.contains(&id)
+            })
+            .await?;
+        let signed = midnight
+            .signed_evm_transaction(id, &format!("{sender:#x}"))
+            .await?;
+        let receipt = anvil
+            .send_raw_transaction(&hex::decode(signed.serialized.trim_start_matches("0x"))?)
+            .await?
+            .get_receipt()
+            .await?;
+        anyhow::ensure!(receipt.status(), "{} reverted", hex::encode(id));
+        heights.insert(
+            id,
+            receipt
+                .block_number
+                .context("receipt has no inclusion height")?,
+        );
+    }
+    observed
+        .until(&mut events, "every attestation", |observed| {
+            expected.iter().all(|id| observed.attested.contains_key(id))
+        })
+        .await?;
+    for id in &expected {
+        expect_executed_attestation(id, &observed.attested[id], heights[id], &[1])?;
+    }
+    let final_block = observed.next_block(&mut events).await?;
+    for id in expected.iter().chain(&skipped) {
+        wait_for_completed_checkpoint(&cluster, *id, final_block).await?;
+    }
+    anyhow::ensure!(
+        skipped
+            .iter()
+            .all(|id| !observed.responded.contains(id) && !observed.indexed().contains(id)),
+        "a request from the partially successful transaction was signed"
+    );
+
+    midnight.shutdown().await?;
+    Ok(())
+}
+
+#[ignore = "starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster"]
+#[serial]
+#[test(tokio::test)]
+async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()> {
+    let cluster = cluster::spawn().ethereum().midnight().await?;
+    cluster.wait().signable().await?;
+    let midnight = cluster
+        .midnight
+        .as_ref()
+        .context("Midnight context was not started")?;
+    let ethereum = cluster
+        .nodes
+        .ctx()
+        .ethereum
+        .as_ref()
+        .context("Ethereum context was not started")?;
+    let indexer = MidnightIndexer::new(
+        midnight.config.clone(),
+        MockStateManager::new(),
+        NoopChainTelemetry,
+    )
+    .await?;
+    let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
+    let root_public_key =
+        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
+    let mpc_public_key = format!(
+        "0x{}",
+        hex::encode(root_public_key.to_encoded_point(false).as_bytes())
+    );
+
+    let mut observed = Observed::default();
+    let run = midnight.run_vault(
+        &mpc_public_key,
+        &ethereum.sandbox.external_http_endpoint,
+        &ethereum.sandbox.secret_key,
+    );
+    tokio::pin!(run);
+    let result = tokio::time::timeout(Duration::from_secs(60 * 60), async {
+        loop {
+            tokio::select! {
+                result = &mut run => return result,
+                event = events.next_event() => {
+                    observed.record(event.context("Midnight indexer stopped during the vault run")?);
+                }
+            }
+        }
+    })
+    .await
+    .context("the vault run exceeded an hour")??;
+
+    let operations = result
+        .operations
+        .iter()
+        .map(|operation| operation.operation.as_str())
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        operations
+            == BTreeSet::from([
+                "deposit",
+                "approveRouter",
+                "approveStata",
+                "withdraw",
+                "swap",
+                "supply",
+                "redeem",
+            ])
+            && result.operations.len() == operations.len(),
+        "unexpected vault operations {operations:?}"
+    );
+    let mut request_ids = BTreeSet::new();
+    for operation in &result.operations {
+        // The vault's send circuits exceed the guaranteed budget, so every notification
+        // comes from a fallible transcript of a fully applied transaction.
+        anyhow::ensure!(
+            notification_phase(&operation.placement, &operation.request_id) == Some("fallible"),
+            "{} did not notify in the fallible transcript: {:?}",
+            operation.operation,
+            operation.placement
+        );
+        anyhow::ensure!(
+            request_ids.insert(request_id(&operation.request_id)?),
+            "the vault repeated a request id"
+        );
+    }
+    observed
+        .until(&mut events, "every vault request's events", |observed| {
+            request_ids.iter().all(|id| {
+                observed.indexed().contains(id)
+                    && observed.responded.contains(id)
+                    && observed.attested.contains_key(id)
+            })
+        })
+        .await?;
+    for operation in &result.operations {
+        let id = request_id(&operation.request_id)?;
+        expect_executed_attestation(
+            &id,
+            &observed.attested[&id],
+            operation.evm_block_height,
+            &hex::decode(&operation.output)?,
+        )?;
+    }
+    let final_block = observed.next_block(&mut events).await?;
+    for id in &request_ids {
+        wait_for_completed_checkpoint(&cluster, *id, final_block).await?;
+    }
     midnight.shutdown().await?;
     Ok(())
 }

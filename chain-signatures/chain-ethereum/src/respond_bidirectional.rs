@@ -386,7 +386,7 @@ mod tests {
             let mut huge_length = encoded.clone();
             huge_length[32..64].fill(0xff);
 
-            // @sig-net/midnight 0.24.0-rc.3's deserializeEvmOutput (ethers
+            // @sig-net/midnight 0.24.0-rc.4's deserializeEvmOutput (ethers
             // 6.17.0) rejects each of these malformed versions of the golden rows.
             for (corruption, malformed) in [
                 ("truncated offset", encoded[..31].to_vec()),

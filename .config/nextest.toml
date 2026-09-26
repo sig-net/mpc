@@ -2,8 +2,12 @@
 slow-timeout = { period = "60s", terminate-after = 4 }
 
 [[profile.default.overrides]]
-filter = 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
+filter = 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response) | test(=cases::midnight_stream::midnight_indexes_notifications_by_transcript_placement)'
 slow-timeout = { period = "60s", terminate-after = 30 }
+
+[[profile.default.overrides]]
+filter = 'test(=cases::midnight_stream::midnight_vault_operations_complete_with_real_mpc)'
+slow-timeout = { period = "60s", terminate-after = 60 }
 
 [test-groups]
 cluster = { max-threads = "num-cpus" }

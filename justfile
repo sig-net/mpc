@@ -104,7 +104,7 @@ build target="":
     elif [ "{{target}}" = "contract" ]; then \
       ./build-contract.sh && mkdir -p target/wasm32-unknown-unknown/release && cp target/near/mpc_contract/mpc_contract.wasm target/wasm32-unknown-unknown/release/mpc_contract.wasm; \
     elif [ "{{target}}" = "midnight" ]; then \
-      cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-caller && npm run typecheck:real-stack; \
+      cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-caller && npm run compile:real-stack-vault && npm run typecheck:real-stack; \
     elif [ "{{target}}" = "tests" ]; then \
       cargo build -p integration-tests --tests; \
     elif [ "{{target}}" = "compat" ]; then \
@@ -129,9 +129,11 @@ lint-eth: (build "eth")
 test-eth-unit:
     cd chain-signatures/contract-eth && npx hardhat test
 
-# Midnight real-stack test (ignored by default; needs Midnight node/indexer/proof-server + anvil)
-test-midnight: (build "eth") (setup "")
-    cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
+# Midnight real-stack tests (ignored by default; each starts a Midnight node/indexer/proof-server,
+# Anvil and an MPC cluster). Runs one named test from cases::midnight_stream, or all of them.
+# Usage: just test-midnight [test]
+test-midnight test="": (build "eth") (setup "")
+    cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E '{{ if test == "" { "test(/^cases::midnight_stream::/)" } else { "test(=cases::midnight_stream::" + test + ")" } }}'
 
 # Midnight TS/Rust seam differential (needs dist/ built via npm test in midnight-publisher-ts)
 test-midnight-seam:

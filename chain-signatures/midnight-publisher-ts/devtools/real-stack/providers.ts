@@ -18,21 +18,29 @@ import {
   type MidnightNodeConfig,
 } from "@sig-net/midnight-contract-deploy";
 import { Contract } from "./managed/caller/contract/index.js";
+import { recordingProofProvider, type CallPlacement } from "./placement.js";
 import { witnesses, type CallerPrivateState } from "./witnesses.js";
 
-type CallerCircuitId = keyof InstanceType<typeof Contract>["provableCircuits"] & string;
+export type CallerContract = Contract<CallerPrivateState>;
+export type CallerCircuitId = keyof CallerContract["provableCircuits"] & string;
 type CallerPrivateStateId = "rust-real-stack-caller";
 export const CALLER_PRIVATE_STATE_ID: CallerPrivateStateId = "rust-real-stack-caller";
-type CallerProviders = MidnightProviders<CallerCircuitId, CallerPrivateStateId, CallerPrivateState>;
+export type CallerProviders = MidnightProviders<
+  CallerCircuitId,
+  CallerPrivateStateId,
+  CallerPrivateState
+>;
 
 const callerManagedPath = fileURLToPath(new URL("./managed/caller", import.meta.url));
 
-export const callerCompiledContract = makeCompiledContract<
-  Contract<CallerPrivateState>,
-  CallerPrivateState
->("rust-real-stack-caller", Contract, witnesses, callerManagedPath);
+export const callerCompiledContract = makeCompiledContract<CallerContract, CallerPrivateState>(
+  "rust-real-stack-caller",
+  Contract,
+  witnesses,
+  callerManagedPath,
+);
 
-function walletProvider(
+export function walletProvider(
   facade: WalletFacade,
   keys: AccountKeys,
 ): WalletProvider & MidnightProvider {
@@ -57,6 +65,7 @@ export function buildCallerProviders(
   keys: AccountKeys,
   config: MidnightNodeConfig,
   databasePath: string,
+  onPlacement: (placement: CallPlacement[]) => void,
 ): CallerProviders {
   const callerZk = new NodeZkConfigProvider<CallerCircuitId>(callerManagedPath);
   const signetZk = new NodeZkConfigProvider<string>(signetContractManagedPath);
@@ -76,9 +85,9 @@ export function buildCallerProviders(
     zkConfigProvider: callerZk,
     // `submitIsEvenRequest` calls into the Signet singleton, so one transaction carries a
     // proof per contract; the registry binds each call to its bundle by deployed verifier key.
-    proofProvider: httpClientProofProvider(
-      config.proofServerUrl,
-      new ZKConfigRegistry([callerZk, signetZk]),
+    proofProvider: recordingProofProvider(
+      httpClientProofProvider(config.proofServerUrl, new ZKConfigRegistry([callerZk, signetZk])),
+      onPlacement,
     ),
     walletProvider: wallet,
     midnightProvider: wallet,
