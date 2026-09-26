@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn request_id_and_transaction_digest_match_compact_capacity_vectors() {
+    fn request_id_digest_and_transaction_match_reference_capacity_vectors() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/api-parity-vectors.json")).unwrap();
         let vectors = fixture["requestVectors"].as_array().unwrap();
@@ -445,6 +445,13 @@ mod tests {
                 vector["txParamsDigest"].as_str().unwrap(),
                 "{}",
                 vector["name"]
+            );
+            assert_eq!(
+                hex::encode(crate::tx::serialized_transaction(&record).unwrap()),
+                vector["serializedTransaction"].as_str().unwrap(),
+                "{} ({})",
+                vector["name"],
+                vector["transactionOracle"]
             );
         }
     }

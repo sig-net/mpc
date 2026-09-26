@@ -136,6 +136,15 @@ export pure circuit checkResponse8(response: RespondBidirectionalEventV1, serial
   return verifyRespondBidirectionalEventV1<8>(serializedOutput, response, responseKey);
 }
 
+export circuit verifyResponse16(response: RespondBidirectionalEventV1, serializedOutput: Bytes<16>): [] {
+  consumeResponse<16>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
+}
+
+export pure circuit checkResponse16(response: RespondBidirectionalEventV1, serializedOutput: Bytes<16>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<16>(serializedOutput, response, responseKey);
+}
+
 export circuit verifyResponse32(response: RespondBidirectionalEventV1, serializedOutput: Bytes<32>): [] {
   consumeResponse<32>(response, serializedOutput);
   assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
