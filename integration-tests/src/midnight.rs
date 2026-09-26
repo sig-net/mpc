@@ -61,6 +61,75 @@ struct BootstrapResult {
     publisher_seed: String,
 }
 
+/// Where the ledger runs one contract call of a submitted transaction, as the driver read
+/// it from the transaction it built.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallPlacement {
+    pub segment: u16,
+    pub action: u32,
+    pub address: String,
+    pub entry_point: String,
+    pub guaranteed: bool,
+    pub fallible: bool,
+    /// Request ids, hex, of the singleton notifications each transcript emits.
+    pub guaranteed_notifications: Vec<String>,
+    pub fallible_notifications: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmittedRequest {
+    pub request_id: String,
+    pub placement: Vec<CallPlacement>,
+}
+
+/// Transaction shapes the caller builds to place singleton notifications in guaranteed and
+/// fallible transcripts; see `fallible.ts` in the real-stack driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlacementScenario {
+    FallibleOnly,
+    GuaranteedTranscriptPair,
+    FallibleTranscriptPair,
+    GuaranteedThenFallibleSegments,
+    FallibleSegmentPair,
+    PartialSuccess,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlacementOutcome {
+    /// The indexer's status for the transaction: `SucceedEntirely` or `FailFallible`.
+    pub status: String,
+    /// Request ids, hex, in the order of the scenario's calls.
+    pub requests: Vec<String>,
+    /// Notified request ids in ledger application order.
+    pub notifications: Vec<String>,
+    /// Requests the caller's ledger holds after the transaction.
+    pub committed: Vec<String>,
+    pub placement: Vec<CallPlacement>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultOperation {
+    pub operation: String,
+    pub request_id: String,
+    pub placement: Vec<CallPlacement>,
+    pub evm_transaction: String,
+    pub evm_block_height: u64,
+    pub output: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultRunResult {
+    pub vault_address: String,
+    pub targets: serde_json::Value,
+    pub operations: Vec<VaultOperation>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedEvmTransaction {
@@ -153,9 +222,9 @@ impl MidnightContext {
         target: [u8; 20],
         argument: [u8; 32],
         output_type: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<SubmittedRequest> {
         let mut driver = self.driver.lock().await;
-        let _: serde_json::Value = driver
+        driver
             .request(&serde_json::json!({
                 "op": "submitIsEven",
                 "nonce": nonce.to_string(),
@@ -163,8 +232,81 @@ impl MidnightContext {
                 "argument": hex::encode(argument),
                 "outputType": output_type,
             }))
+            .await
+    }
+
+    pub async fn submit_is_even_with_schemas(
+        &self,
+        nonce: u64,
+        target: [u8; 20],
+        argument: [u8; 32],
+        output_schema: &[u8],
+        response_schema: &[u8],
+    ) -> anyhow::Result<SubmittedRequest> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "submitIsEven",
+                "nonce": nonce.to_string(),
+                "target": hex::encode(target),
+                "argument": hex::encode(argument),
+                "outputSchema": hex::encode(output_schema),
+                "responseSchema": hex::encode(response_schema),
+            }))
+            .await
+    }
+
+    /// Build, check and submit one placement scenario of Boolean isEven requests, each
+    /// given as its EVM nonce and target.
+    pub async fn submit_placement(
+        &self,
+        scenario: PlacementScenario,
+        calls: &[(u64, [u8; 20])],
+        argument: [u8; 32],
+    ) -> anyhow::Result<PlacementOutcome> {
+        let calls = calls
+            .iter()
+            .map(|(nonce, target)| {
+                serde_json::json!({
+                    "nonce": nonce.to_string(),
+                    "target": hex::encode(target),
+                    "argument": hex::encode(argument),
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "submitPlacement",
+                "scenario": scenario,
+                "calls": calls,
+            }))
+            .await
+    }
+
+    /// Deploy the ERC20 vault and its local EVM targets, then run every request kind it
+    /// sends through the MPC and settle each on Midnight.
+    pub async fn run_vault(
+        &self,
+        mpc_public_key: &str,
+        evm_rpc_url: &str,
+        evm_funder_key: &str,
+    ) -> anyhow::Result<VaultRunResult> {
+        let mut driver = self.driver.lock().await;
+        let result: VaultRunResult = driver
+            .request(&serde_json::json!({
+                "op": "runVault",
+                "mpcPublicKey": mpc_public_key,
+                "evmRpcUrl": evm_rpc_url,
+                "evmFunderKey": evm_funder_key,
+            }))
             .await?;
-        Ok(())
+        std::fs::write(
+            self._stack.artifact_dir.join("vault-result.json"),
+            serde_json::to_vec_pretty(&result)?,
+        )
+        .context("saving the vault operation results")?;
+        Ok(result)
     }
 
     /// Have a second caller contract notify the central Signet contract naming the real

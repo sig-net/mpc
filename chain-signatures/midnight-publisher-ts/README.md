@@ -38,7 +38,7 @@ Final attestations bind `(requestId, blockHeight, outputKind, serializedOutputLe
 
 A `build` request for `respondBidirectional` requires `attestation: { blockHeight, outputKind, serializedOutputLength, digest }`. Both uint64 fields are decimal strings, `outputKind` is a numeric enum index, and `digest` is 64 lowercase hex characters. The existing `requestId` and `signature` fields remain common to both response circuits. `respond` rejects attestation metadata. Both circuits receive one SDK record containing the request ID.
 
-`devtools/real-stack/caller.compact` imports the canonical SDK request and attestation circuits directly. The vector generator compares its compiled Compact digests with the SDK TypeScript helper and extracts the response payload from the installed singleton's emitted event.
+`devtools/real-stack/caller.compact` imports the canonical SDK request and attestation circuits directly. The vector generator compares its compiled Compact digests with the SDK TypeScript helper and extracts the response payload from the installed singleton's emitted event. `devtools/real-stack/erc20-vault.compact` is an unmodified copy of the example vault the real-stack vault test drives; `provenance.json` records its source commit, compiler, and SHA-256.
 
 ## Deadlines and retry policy
 
@@ -76,7 +76,7 @@ npm run typecheck
 npm test
 ```
 
-`npm run gen:api-parity-vectors` compiles the pinned Compact oracle and regenerates the request-cell, attestation-digest, and cache fixtures consumed by Rust tests. Run `npm run compile:real-stack-caller` before `npm run typecheck:real-stack`; it also compiles the oracle bindings.
+`npm run gen:api-parity-vectors` compiles the pinned Compact oracle and regenerates the request-cell, attestation-digest, and cache fixtures consumed by Rust tests. Run `npm run compile:real-stack-caller` and `npm run compile:real-stack-vault` before `npm run typecheck:real-stack`; the caller compile also compiles the oracle bindings.
 
 `npm run start` runs the TypeScript entry point during development. `npm run format` and `npm run lint:fix` apply the local formatting and lint fixes. `npm test` builds first because the process tests execute `dist/main.js`; `npm run build` emits that runtime entry point without opening or synchronizing a wallet.
 

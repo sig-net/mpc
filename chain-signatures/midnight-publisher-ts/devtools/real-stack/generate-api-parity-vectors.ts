@@ -1,12 +1,13 @@
 import { writeFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { createCircuitContext, createConstructorContext } from "@midnight-ntwrk/compact-runtime";
-import { SigningKey, getBytes } from "ethers";
+import { SigningKey, decodeRlp, encodeRlp, getBytes, toBeArray } from "ethers";
 import {
   calculateRequestId,
   calculateEvmType2TxParamsDigest,
   decodeSignetLogEvents,
   decodeRespondBidirectionalEventPayload,
+  signBidirectionalEventToUnsignedEvmTransaction,
 } from "@sig-net/midnight";
 import { calculateSignetAttestationDigest } from "@sig-net/midnight/testing";
 import { Contract as SingletonContract } from "@sig-net/midnight-contract";
@@ -109,6 +110,29 @@ const partial: Parameters<typeof pureCircuits.requestId223>[0] = {
 };
 type Records = [typeof record, typeof minimal, typeof unused, typeof partial];
 const defaults: Records = [record, minimal, unused, partial];
+function unsignedTransaction(request: Records[number]) {
+  if (request.txParams.nonce <= BigInt(Number.MAX_SAFE_INTEGER)) {
+    return {
+      serializedTransaction:
+        signBidirectionalEventToUnsignedEvmTransaction(request).unsignedSerialized.slice(2),
+      transactionOracle: "SDK signBidirectionalEventToUnsignedEvmTransaction",
+    };
+  }
+  // The SDK converts nonce to a JS number; ethers rejects non-safe integers.
+  // Retain its field assembly but encode the full-width nonce with ethers RLP.
+  assert.throws(() => signBidirectionalEventToUnsignedEvmTransaction(request), /overflow/);
+  const transaction = signBidirectionalEventToUnsignedEvmTransaction({
+    ...request,
+    txParams: { ...request.txParams, nonce: 0n },
+  });
+  const fields = decodeRlp(`0x${transaction.unsignedSerialized.slice(4)}`);
+  assert.ok(Array.isArray(fields));
+  fields[1] = `0x${hex(toBeArray(request.txParams.nonce))}`;
+  return {
+    serializedTransaction: `02${encodeRlp(fields).slice(2)}`,
+    transactionOracle: "SDK field assembly with ethers RLP full-width nonce",
+  };
+}
 async function requestVector(name: string, index: 0 | 1 | 2 | 3, records = defaults) {
   const ids = [
     pureCircuits.requestId34(records[0]),
@@ -134,6 +158,7 @@ async function requestVector(name: string, index: 0 | 1 | 2 | 3, records = defau
     name,
     requestId: hex(ids[index]!),
     txParamsDigest: hex(digests[index]!),
+    ...unsignedTransaction(records[index]),
     atoms: cell.value.map(hex),
     widths: cell.alignment.map((segment) => {
       assert.ok(segment.tag === "atom" && segment.value.tag === "bytes");
