@@ -530,6 +530,7 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
             events_tx
                 .send(ChainEvent::RespondBidirectional(
                     RespondBidirectionalEvent {
+                        attestation: None,
                         request_id,
                         signature,
                         chain: Chain::Hydration,

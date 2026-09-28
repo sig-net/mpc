@@ -58,6 +58,16 @@ export async function respondInput(
     ledgerParameters: toHex(LedgerParameters.initialParameters().serialize()),
     coinPublicKey: "44".repeat(32),
     ttlSeconds: 1_800_000_000,
+    ...(overrides.circuit === "respondBidirectional"
+      ? {
+          attestation: {
+            blockHeight: "42",
+            outputKind: 0 as const,
+            serializedOutputLength: "32",
+            digest: "55".repeat(32),
+          },
+        }
+      : {}),
     ...overrides,
   };
 }

@@ -90,8 +90,9 @@ impl TransactionOutput {
 
         let tuple_type = DynSolType::Tuple(types);
 
+        // Return values form an ABI parameter sequence, without an outer tuple offset.
         let DynSolValue::Tuple(values) = tuple_type
-            .abi_decode(call_result)
+            .abi_decode_params(call_result)
             .map_err(|e| anyhow::anyhow!("Failed to tuple types: {e:?}"))?
         else {
             anyhow::bail!("Can't decode to tuple type");
