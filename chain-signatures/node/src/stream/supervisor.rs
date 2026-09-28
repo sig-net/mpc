@@ -12,6 +12,8 @@ use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry};
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, CheckpointDigest};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
+use tokio_stream::wrappers::WatchStream;
+use tokio_stream::{Stream, StreamExt as _};
 use tokio_util::sync::CancellationToken;
 
 /// Per-chain watchdog timeout. Chains whose processing synchronously waits for
@@ -29,32 +31,25 @@ pub(crate) fn live_block_timeout(chain: Chain) -> Duration {
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RegressionOutcome {
-    /// Consensus digest mismatches local backlog — transition to Recovery.
-    Recovery,
-    /// Local backlog is aligned with consensus, continue current state.
-    Aligned,
-    /// Consensus checkpoint feed shut down — pipeline should stop.
-    Shutdown,
-}
-
-/// Waits for a consensus checkpoint digest change, then checks for regression.
-pub(crate) async fn wait_detected_regression(
-    checkpoints_rx: &mut CheckpointWatcher,
-    backlog: &Backlog,
+/// One checked consensus digest per item, `true` when the local backlog has
+/// regressed, starting with whichever digest is current at the first poll. That
+/// first item is what re-checks a digest recovery consumed without aligning. The
+/// stream owns the in-flight check, so a `select!` that drops the item future
+/// resumes it rather than losing or restarting it. Ends when the feed shuts down.
+///
+/// Takes its inputs by value: a borrow of `ctx` would collide with the events arm,
+/// which needs `&mut ctx`.
+fn regression_stream(
+    checkpoints_rx: CheckpointWatcher,
+    backlog: Backlog,
     chain: Chain,
-) -> RegressionOutcome {
-    if detect_regression(chain, backlog, checkpoints_rx).await {
-        return RegressionOutcome::Recovery;
-    }
-    if checkpoints_rx.changed().await.is_err() {
-        return RegressionOutcome::Shutdown;
-    }
-    if detect_regression(chain, backlog, checkpoints_rx).await {
-        return RegressionOutcome::Recovery;
-    }
-    RegressionOutcome::Aligned
+) -> impl Stream<Item = bool> {
+    WatchStream::new(checkpoints_rx)
+        .filter_map(|digest| digest)
+        .then(move |digest| {
+            let backlog = backlog.clone();
+            async move { detect_regression(chain, &backlog, digest).await }
+        })
 }
 
 /// Returns `true` if a regression is detected. When the consensus digest matches
@@ -65,12 +60,8 @@ pub(crate) async fn wait_detected_regression(
 async fn detect_regression(
     chain: Chain,
     backlog: &Backlog,
-    checkpoints_rx: &mut CheckpointWatcher,
+    checkpoint_digest: CheckpointDigest,
 ) -> bool {
-    let Some(checkpoint_digest) = checkpoints_rx.borrow_and_update().as_ref().cloned() else {
-        return false;
-    };
-
     // A node holding no checkpoint still has to re-anchor its cursor on a
     // reset. Any other digest is unmatchable without one to compare against.
     let is_reset =
@@ -235,6 +226,11 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 
         let mut last_block_event = Instant::now();
         let mut run_finished = false;
+        // Built per run attempt, so it re-checks the digest recovery just consumed:
+        // recovery can return without having aligned. Pinned outside the `select!`
+        // so a dropped item future resumes its check instead of restarting it.
+        let regression = regression_stream(ctx.checkpoints_rx.clone(), ctx.backlog.clone(), chain);
+        tokio::pin!(regression);
 
         let exit = loop {
             tokio::select! {
@@ -272,19 +268,17 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                         tracing::error!(error = %format_args!("{err:#}"), %chain, "failed to process chain event");
                     }
                 }
-                result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
-                    match result {
-                        RegressionOutcome::Recovery => {
-                            ctx.rpc.abort_checkpoints(chain).await;
-                            if let Err(err) =
-                                ctx.sign_tx.send(SignCommand::AbortChain(chain)).await
-                            {
-                                tracing::error!(?err, %chain, "failed to abort sign tasks on regression");
-                            }
-                            break Exit::Restart;
+                regressed = regression.next() => {
+                    let Some(regressed) = regressed else { break Exit::Shutdown };
+                    // Every checked digest resolves this branch, regressed or not,
+                    // and that is what makes the next `select!` re-read the events
+                    // branch's `has_slot` precondition.
+                    if regressed {
+                        ctx.rpc.abort_checkpoints(chain).await;
+                        if let Err(err) = ctx.sign_tx.send(SignCommand::AbortChain(chain)).await {
+                            tracing::error!(?err, %chain, "failed to abort sign tasks on regression");
                         }
-                        RegressionOutcome::Aligned => {}
-                        RegressionOutcome::Shutdown => break Exit::Shutdown,
+                        break Exit::Restart;
                     }
                 }
                 // Watchdog: restart when no `ChainEvent::Block` was observed within
@@ -353,29 +347,40 @@ mod tests {
         )
     }
 
-    fn make_digest(
-        chain: Chain,
-        height: u64,
-        digest: [u8; 32],
-    ) -> (
-        watch::Sender<Option<CheckpointDigest>>,
-        watch::Receiver<Option<CheckpointDigest>>,
-    ) {
-        watch::channel(Some(CheckpointDigest {
+    /// Fills the pending-checkpoint cap so `has_slot` is false, returning the
+    /// newest checkpoint, whose digest confirms it and frees a slot again.
+    async fn fill_checkpoint_cap(backlog: &Backlog, chain: Chain) -> Checkpoint {
+        let interval = chain.checkpoint_interval().unwrap();
+        let mut newest = None;
+        for i in 1..=crate::backlog::MAX_PENDING_CHECKPOINTS {
+            newest = backlog
+                .set_processed_block(chain, i as u64 * interval)
+                .await;
+        }
+        assert!(!backlog.checkpoints().has_slot(chain));
+        newest.expect("filling the cap yields checkpoints")
+    }
+
+    fn digest_of(chain: Chain, height: u64, digest: [u8; 32]) -> CheckpointDigest {
+        CheckpointDigest {
             chain,
             height,
             digest,
-        }))
+        }
     }
 
-    #[tokio::test]
-    async fn test_empty_digest_returns_false() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-        let (_tx, mut rx) = watch::channel(None);
+    /// Fails rather than hanging when the stream does not yield.
+    async fn next_outcome(stream: &mut (impl Stream<Item = bool> + Unpin)) -> Option<bool> {
+        tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("the stream must yield")
+    }
 
-        let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(!result, "empty digest should not trigger regression");
+    /// Whether the stream has nothing ready, decided by one poll rather than by
+    /// waiting out a timer. `futures_util`'s `Next` is `Unpin`; `tokio_stream`'s
+    /// is not, hence the qualified call.
+    async fn nothing_ready(stream: &mut (impl Stream<Item = bool> + Unpin)) -> bool {
+        futures_util::poll!(futures_util::StreamExt::next(stream)).is_pending()
     }
 
     #[tokio::test]
@@ -387,9 +392,7 @@ mod tests {
         let cp = backlog.checkpoint(chain).await.unwrap();
         let digest = cp.digest();
 
-        let (_tx, mut rx) = make_digest(chain, 100, digest);
-
-        let result = detect_regression(chain, &backlog, &mut rx).await;
+        let result = detect_regression(chain, &backlog, digest_of(chain, 100, digest)).await;
         assert!(!result, "matching digest should not trigger regression");
 
         let persisted = backlog
@@ -416,9 +419,7 @@ mod tests {
         backlog.checkpoint(chain).await.unwrap();
 
         let digest1 = cp1.digest();
-        let (_tx, mut rx) = make_digest(chain, 100, digest1);
-
-        let result = detect_regression(chain, &backlog, &mut rx).await;
+        let result = detect_regression(chain, &backlog, digest_of(chain, 100, digest1)).await;
         assert!(!result, "ahead with match should not trigger regression");
 
         let persisted = backlog
@@ -440,9 +441,8 @@ mod tests {
         backlog.checkpoint(chain).await.unwrap();
 
         let different_digest = [0xabu8; 32];
-        let (_tx, mut rx) = make_digest(chain, 200, different_digest);
-
-        let result = detect_regression(chain, &backlog, &mut rx).await;
+        let result =
+            detect_regression(chain, &backlog, digest_of(chain, 200, different_digest)).await;
         assert!(result, "mismatched digest should trigger regression");
     }
 
@@ -452,9 +452,7 @@ mod tests {
         let chain = Chain::Ethereum;
 
         let digest = [0x42u8; 32];
-        let (_tx, mut rx) = make_digest(chain, 100, digest);
-
-        let result = detect_regression(chain, &backlog, &mut rx).await;
+        let result = detect_regression(chain, &backlog, digest_of(chain, 100, digest)).await;
         assert!(!result, "no local checkpoint should not trigger regression");
     }
 
@@ -464,14 +462,14 @@ mod tests {
         let chain = Chain::Ethereum;
 
         // "I hold no checkpoint" is not evidence there is nothing to do.
-        let (_tx, mut rx) = make_digest(
+        let reset = digest_of(
             chain,
             42,
             mpc_primitives::reset_checkpoint_digest(chain, 42),
         );
 
         assert!(
-            detect_regression(chain, &backlog, &mut rx).await,
+            detect_regression(chain, &backlog, reset).await,
             "a reset must be applied even with no local checkpoint"
         );
     }
@@ -495,72 +493,57 @@ mod tests {
             .await
             .unwrap());
 
-        let (_tx, mut rx) = make_digest(
+        let reset = digest_of(
             chain,
             42,
             mpc_primitives::reset_checkpoint_digest(chain, 42),
         );
 
         assert!(
-            !detect_regression(chain, &backlog, &mut rx).await,
+            !detect_regression(chain, &backlog, reset).await,
             "an already-applied reset must not keep restarting the indexer"
         );
     }
 
+    /// One item per digest, starting with the one already current, which is what
+    /// re-checks a digest recovery consumed without aligning. The feed ending ends
+    /// the stream.
     #[tokio::test]
-    async fn test_wait_detects_regression_after_consumed() {
-        let backlog = Backlog::new();
-        let chain = Chain::Ethereum;
-
-        backlog.set_processed_block(chain, 100).await.unwrap();
-        backlog.checkpoint(chain).await.unwrap();
-
-        let (mut _tx, mut rx) = make_digest(chain, 200, [0xabu8; 32]);
-        let _ = rx.borrow_and_update();
-
-        let result = tokio::time::timeout(
-            Duration::from_millis(500),
-            wait_detected_regression(&mut rx, &backlog, chain),
-        )
-        .await
-        .expect("should not hang — upfront check catches mismatch");
-        assert_eq!(
-            result,
-            RegressionOutcome::Recovery,
-            "should detect regression even when receiver state was consumed"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_wait_detects_regression_after_change() {
+    async fn one_outcome_per_digest_until_the_feed_ends() {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
         backlog.set_processed_block(chain, 100).await.unwrap();
         let cp = backlog.checkpoint(chain).await.unwrap();
-        let matching_digest = cp.digest();
 
-        let (tx, mut rx) = make_digest(chain, 100, matching_digest);
-
-        let handle =
-            tokio::spawn(async move { wait_detected_regression(&mut rx, &backlog, chain).await });
-
-        tx.send(Some(CheckpointDigest {
-            chain,
-            height: 200,
-            digest: [0xabu8; 32],
-        }))
-        .unwrap();
-
-        let result = tokio::time::timeout(Duration::from_secs(1), handle)
-            .await
-            .expect("timeout")
-            .expect("task should not panic");
+        let (tx, mut rx) = watch::channel(Some(digest_of(chain, 100, cp.digest())));
+        // Recovery consumes the digest before the stream is built.
+        let _ = rx.borrow_and_update();
+        let stream = regression_stream(rx, backlog, chain);
+        tokio::pin!(stream);
 
         assert_eq!(
-            result,
-            RegressionOutcome::Recovery,
-            "should detect regression after new mismatched value"
+            next_outcome(&mut stream).await,
+            Some(false),
+            "the current digest is checked, and it is aligned"
+        );
+
+        tx.send(Some(digest_of(chain, 200, [0xabu8; 32]))).unwrap();
+        assert_eq!(
+            next_outcome(&mut stream).await,
+            Some(true),
+            "a changed digest that does not match is a regression"
+        );
+        assert!(
+            nothing_ready(&mut stream).await,
+            "one item per digest, not more"
+        );
+
+        drop(tx);
+        assert_eq!(
+            next_outcome(&mut stream).await,
+            None,
+            "the feed ending ends the stream"
         );
     }
 
@@ -960,6 +943,84 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
+    /// A `select!` precondition gates arming a branch, so once the cap is full the
+    /// events branch stays disabled until some other branch resolves. Confirming a
+    /// checkpoint frees the slot, and the digest change that confirmed it is what
+    /// resolves the regression branch, so dispatch resumes without the watchdog.
+    #[tokio::test]
+    async fn freed_checkpoint_slot_resumes_dispatch() {
+        /// Emits one event on demand, then exits Ok on demand, closing the event
+        /// channel. The supervisor can only observe that through the events branch.
+        struct StagedIndexer {
+            started: Arc<Notify>,
+            emit: Arc<Notify>,
+            exit: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl ChainIndexer for StagedIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn run(
+                &self,
+                events_tx: mpsc::Sender<ChainEvent>,
+                _cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                self.started.notify_one();
+                self.emit.notified().await;
+                events_tx.send(ChainEvent::Block(1)).await.unwrap();
+                self.exit.notified().await;
+                Ok(())
+            }
+        }
+
+        let chain = Chain::Ethereum;
+        let backlog = Backlog::new();
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (ctx, cp_tx, _mesh_tx, _rpc_rx) = test_ctx(backlog.clone(), sign_tx);
+
+        let started = Arc::new(Notify::new());
+        let emit = Arc::new(Notify::new());
+        let exit = Arc::new(Notify::new());
+        // Long enough that only the digest change can resolve anything.
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            StagedIndexer {
+                started: started.clone(),
+                emit: emit.clone(),
+                exit: exit.clone(),
+            },
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(3600),
+        ));
+
+        // Recovery is done and the loop is running before the cap is filled.
+        started.notified().await;
+        let newest = fill_checkpoint_cap(&backlog, chain).await;
+
+        // The event resolves the events branch if it is armed, and the next
+        // `select!` then re-reads `has_slot`, which is now false. Either way the
+        // close that follows is not observable while the cap is full.
+        emit.notify_one();
+        exit.notify_one();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !task.is_finished(),
+            "run()'s exit must not be observable while the cap is full"
+        );
+
+        // Confirming this digest promotes the pending checkpoint, freeing a slot,
+        // and resolves the regression branch as aligned.
+        cp_tx
+            .send(Some(digest_of(chain, newest.block_height, newest.digest())))
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("a freed slot must resume dispatch without the watchdog")
+            .expect("supervisor task should not panic");
+    }
+
     #[tokio::test]
     async fn full_checkpoint_cap_pauses_exit_and_watchdog_restarts() {
         let chain = Chain::Ethereum;
@@ -983,13 +1044,7 @@ mod tests {
         while attempts.load(Ordering::SeqCst) == 0 {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        // Fill the pending-checkpoint cap so `has_checkpoint_slot` returns false.
-        let interval = chain.checkpoint_interval().unwrap();
-        for i in 1..=crate::backlog::MAX_PENDING_CHECKPOINTS {
-            let h = (i as u64) * interval;
-            assert!(backlog.set_processed_block(chain, h).await.is_some());
-        }
-        assert!(!backlog.checkpoints().has_slot(chain));
+        fill_checkpoint_cap(&backlog, chain).await;
 
         // The first (stalled) run is restarted by the watchdog; afterwards the
         // instant-Ok exits cannot be observed while the cap is full, so the
