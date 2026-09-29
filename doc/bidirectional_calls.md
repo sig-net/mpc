@@ -56,8 +56,8 @@ Happy path:
 * *Transaction ID*: the identifier under which the destination chain records
   a submitted transaction, computable from the transaction and the signature
   in the encoding that chain accepts. One transaction can be signed more
-  than once, for instance by two signing rounds for one request (Section
-  4.4), and each signature gives a different transaction ID. Replay
+  than once, for instance by two signing rounds for one request, and each
+  signature gives a different transaction ID. Replay
   protection (Section 3.3) lets at most one of them execute, and all of
   them belong to the same request.
 * *Request*: what the contract asks for, the tuple (tx, dest, key, schemas):
@@ -70,22 +70,13 @@ Happy path:
 * *Request ID*: rid(contract, req.tx, req.dest, req.key), a collision-
   resistant hash in a length-committing encoding, so within one source
   chain two requests have the same rid exactly when they agree on all four.
-  The key version is part of req.key, so it is in the rid. One rid names
-  one execution, and one execution names one rid: the executed transaction
-  gives tx and dest, and its sender address gives the contract and key
-  parameters, since different ones derive different addresses (Section 5).
-  Two things keep that a one-to-one mapping. Leaving the schemas out of
-  the hash is necessary: they are the only part of a request that does not
-  change the execution, so they are the only way two requests for one
-  execution could get two rids; with them in, both would be outstanding
-  and signed, and the single execution would be attested twice. Canonical
-  key parameters and a transaction digest over the used entries only
-  (Section 7) make it sufficient: otherwise two encodings of one key, or
-  one transaction at two capacities or with different bytes in unused
-  slots, would be two rids for one execution.
+  One execution has one rid (Section 5).
 * *Admitted*: the MPC has found a request authentic and processable
-  (Section 4.4) and tracks it. Only an admitted request is ever signed or
-  attested.
+  (Section 4.4) and added it to its backlog. Only an admitted request is
+  ever signed or attested.
+* *Publish*: to submit a signature or an attestation to the signet
+  contract, which anyone may do. It is *published* once the event carrying
+  it is final on the source chain.
 * *Outcome*: a pair (kind, data), with three kinds.
 
   | kind | what happened to req.tx | data |
@@ -141,12 +132,15 @@ A request is *outstanding* from the moment it is made until a response to
 it is accepted; the library records it as an entry in `outstanding`
 (Section 4.1). An unanswered request is outstanding forever, and from
 inside the contract this is indistinguishable from a response that has not
-arrived yet. Making it again is refused while it is outstanding (Section
-4.1), so a retry needs a different transaction. Nor may a request be made
-again once it was answered: its execution happens-before the second
-making, so the causal-order guarantee (Section 3.2) forbids answering it,
-and the library cannot refuse it without remembering every answered rid.
-The application has to keep that rule.
+arrived yet.
+
+A request with the rid of an outstanding one is refused (Section 4.1),
+whether it is the same request made again or one that differs in its
+schemas only. A retry needs a different transaction. Once a request was
+answered, the application must not make one with its rid again. The
+library cannot refuse it without remembering every answered rid, and it
+is never answered: its execution happens-before the second making, so the
+causal-order guarantee (Section 3.2) forbids accepting it.
 
 *Happens-before*, for one application contract, is the smallest transitive
 relation with these edges:
@@ -180,38 +174,32 @@ on_response(rid: RequestId, outcome: (kind, data))
 ```
 
 The application configures the library with its attestation public key
-(Section 2) and adds each new key version (Section 4).
-
-The transaction is passed in full rather than as a commitment. On EVM the
-transaction ID is computable only from the bytes and the signature. Where
-the bytes travel, call data or an event, is a cost question this design does
-not settle.
+(Section 2) and adds each new key version.
 
 ### 3.2 Guarantees
 
 G1 to G3 are safety, G4 is liveness. G2 and G4 together give "exactly one
-accepted response per request that meets G4's premise".
+accepted response per request that G4 covers".
 
 * G1 Causal order: an accepted response to req reports destination state
   that does not happen-before req was made.
 * G2 At-most-once: for each execution, at most one response reporting it
   as the outcome of its own transaction is ever accepted, however often its
   request is made and however often it is attested. All attestations of one
-  execution carry one rid (Section 2), so this is a statement about that
-  rid.
+  execution carry one rid, so this is a statement about that rid.
 * G3 Integrity and finality: an accepted response to req carries the true,
   final outcome of req.tx, never of another transaction.
-* G4 Delivery: if req.tx is included in a final destination block, whether
-  it succeeded or reverted, under a signature the MPC issued and published
-  for this making of req, and its return data, if any, decodes against
-  req.schemas, then a response to req is eventually accepted.
+* G4 Delivery: if req.tx is included in a final destination block after req
+  was made, a response to req is eventually accepted unless (i) the return
+  data does not decode against req.schemas, (ii) the signature the
+  transaction executed under is never published, or (iii) the response
+  handler fails.
 
-Nothing is promised for a transaction that never executes, for an execution
-whose return data does not decode, for a request the MPC does not admit
-(both Section 4.4), or for a request made again after its transaction ran
-(Section 2). Reporting any of them needs machinery the rest of this design
-does without. G1 and G2 have one transitional exception, after the library
-upgrade that introduces last_seen (Section 4.1).
+Nothing is promised for a transaction that never executes, for a request
+the MPC does not admit, or for a request made again after its transaction
+ran. Reporting any of them needs machinery the rest of this design does
+without. G1 and G2 do not cover transactions that executed before the
+contract upgraded to this library.
 
 ### 3.3 Assumptions
 
@@ -235,26 +223,22 @@ upgrade that introduces last_seen (Section 4.1).
 ## 4. Pseudocode and properties per entity
 
 Each entity is an event handler over its own state. `drop` means the event
-has no effect. The library keeps the attestation key of every key version
-it has been given, and each entry records the key version its request
-named; a response is verified only under that key, so a key version
-cannot answer requests made under another. A key version may change the
-root key or only the derivation path; a resharing changes neither, so it
-keeps the key version.
+has no effect.
 
 ### 4.1 Library (inside the application contract)
 
 ```
 state (per application contract):
     attestation_key: KeyVersion -> PublicKey   // Section 3.1
-    last_seen:   ChainId -> Height       // 0 for every chain, see below
+    last_seen:   ChainId -> Height       // 0 for every chain
     outstanding: RequestId -> Entry
     Entry = { dest: ChainId, known: Height, key_version: KeyVersion }
     // a rid is a hash and cannot yield dest or key_version
 
 on sign_bidirectional(req) from the application logic:
     rid = request_id(self, req)
-    if rid in outstanding:                                // C1
+    if rid in outstanding
+      or req.key.key_version not in attestation_key:      // C1
         return Refused
     outstanding[rid] = { req.dest, known: last_seen[req.dest],   // C2
                          req.key.key_version }
@@ -286,15 +270,6 @@ application's handler run in one transaction, a failing handler reverts
 the whole transaction, C3d and C4 included: the entry stays outstanding and
 the same response can be delivered again (Section 6).
 
-last_seen starts at 0 for every destination, and so does `known` for any
-entry already outstanding when a contract upgrades to this design. Until
-an acceptance raises last_seen[dest] above every execution from before the
-upgrade, G1 and G2 are suspended for that destination: a request made
-again for a transaction that executed before the upgrade can accept a
-replay of its old response. A start height supplied by an operator would
-avoid that, but set too high it drops every execution at or below it for
-good (C4).
-
 The library relies on its state surviving contract upgrades and
 migrations: a contract that keeps its key and loses `outstanding` and
 `last_seen` will accept a response to a request it already answered
@@ -304,7 +279,8 @@ Who delivers it is in Section 4.2 for Midnight and 4.3 elsewhere.
 
 Properties:
 
-* C1 A request is refused while an entry with the same rid is outstanding.
+* C1 A request is refused while an entry with the same rid is outstanding,
+  and if the library has no attestation key for its key version.
 * C2 Every outstanding entry records last_seen[dest] at creation.
 * C3 A response is accepted only if it verifies, an entry for its rid is
   outstanding, and its height is strictly above that entry's recorded
@@ -406,95 +382,78 @@ processable(req): bool
     req.schemas are valid for dest and source chain respectively
 
 state:
-    tracked: RequestId -> Entry
-    Entry = { req, contract, signatures: Set<Signature>, status }
-    status: watching | attested | parked
-    // signatures is a set: a second signature for one request is a second
-    // transaction ID to watch (see below)
+    backlog: RequestId -> Entry
+    Entry = { req, contract, signatures: Set<Signature> }
+    // backlog is a function of the finalised source chain only,
+    // the same on every correct node that processed the same height
+
+    local: RequestId -> Local
+    Local = { issued: Set<Signature>,         // participated in signing
+              outcome: Found(att) | Parked,   // read on destination chain
+              attestation: (att, sig) }       // participated in attesting
+    // outcome and attestation are empty at first
+    // local may differ between nodes that processed the same height
 
 on SignRequest { contract, rid, req } finalised on the source chain:
     if not authentic(contract, rid, req):                 // M1
         drop
-    if rid in tracked or not processable(req):            // M4
+    if rid in backlog or not processable(req):            // M4
         drop
-    tracked[rid] = { req, contract, signatures: {}, status: watching }
+    backlog[rid] = { req, contract, signatures: {} }
     signature = threshold_sign(req.tx, derived_key(contract, req.key))   // M1
-    tracked[rid].signatures.add(signature)
+    local[rid].issued.add(signature)                                     // M7
     publish_signature(rid, signature)
 
 on Signature { rid, signature } finalised on the source chain:
-    e = tracked[rid] if rid in tracked
+    e = backlog[rid] if rid in backlog
     if e and signature verifies over e.req.tx
       under derived_key(e.contract, e.req.key):
         e.signatures.add(signature)
 
 on destination block at height h finalised on chain dest:
-    for (rid, e) in tracked for dest and e.status == watching:
-        ours = { txid(s, e.req.tx) for s in e.signatures }
-        account = derived_address(e.contract, e.req.key)
+    for (rid, e) in backlog for dest and no local[rid].outcome:
+        ours = { txid(s, e.req.tx)
+                 for s in e.signatures + local[rid].issued }
         if some id in ours has a receipt r in a final block at height h',
-          this block or any earlier one,                            // M3
-          or this block holds a transaction sent by account with
-          receipt r whose unsigned bytes are e.req.tx, with h' = h:
+          this block or any earlier one:                            // M3
             if decode(r, e.req.schemas) gives (kind, data):
                 attest(rid, (h', kind, data))
             else:
-                e.status = parked, log why                  // M5
-        else if this block holds a transaction sent by account that uses
-          up e.req.tx's replay protection and whose unsigned bytes are not
-          e.req.tx:
+                local[rid].outcome = Parked, log why        // M5
+        else if this block holds a transaction whose ID the node holds
+          for another request and that uses up e.req.tx's replay
+          protection:
             attest(rid, (h, Unviable, empty))               // M6
 
 attest(rid, att):
-    e = tracked[rid]
-    e.status = attested
+    e = backlog[rid]
+    local[rid].outcome = Found(att)
     sig = threshold_sign(
         attestationDigest(rid, att),
-        attestation_key(e.contract)
+        attestation_key(e.contract, e.req.key.key_version)
     )                                                   // M2
+    local[rid].attestation = (att, sig)                 // M7
     publish_response(e.contract, rid, att, sig)
 
 on Response { contract, rid, att, sig } finalised on the source chain:
-    if sig verifies under attestation_key(contract):
-        delete tracked[rid]
+    e = backlog[rid] if rid in backlog
+    if e and sig verifies over attestationDigest(rid, att)
+      under attestation_key(e.contract, e.req.key.key_version):
+        delete backlog[rid]
 ```
 
-The MPC looks for a request's execution in two ways. (i) By transaction ID,
-under every signature it holds for the request, in any final block, so a
-node that starts looking late still finds it. There can be several
-signatures, for instance when a node whose share went into one run
-restarts and joins another, and replay protection lets at most one of them
-execute. And (ii) in the block being processed, by sender and unsigned bytes:
-the sender is the request's own account, which only the network controls,
-and the bytes alone would not do, since another contract or key may have
-requested the same bytes.
+The MPC looks for a request's execution by transaction ID, under every
+signature it holds for the request, in any final block, so a node that
+starts looking late still finds it. A node holds the signatures published
+for the request and those it took part in producing. An execution under a
+signature it does not hold is not found (Section 6).
 
-(ii) is an optimisation. A node that was not in the signing
-round does not know the signature until the `Signature` event is published
-on the source chain and indexed, and the attestation may need such nodes
-when some participants of the round are faulty. The block scan lets them
-attest from the destination block alone, so the attestation does not wait
-on the source chain.
+A repeated attestation has the same content (Section 5) and is dropped
+(C3a).
 
-Unviable is detected only in the blocks being processed after admission,
-so replay protection used up soon after the request is made may be seen
-by fewer than t nodes: Unviable is best-effort.
-
-A node keeps `tracked` and its position on every chain durably, advances
-the position only once an event's effects are persisted, and resumes from
-it, so no block is skipped and a restart repeats at most the step in
-progress. A repeated attestation has the same content (Section 5) and is
-dropped (C3a).
-
-Only source-chain events add or remove entries of `tracked`. Nodes
-reach a destination block at different source heights, so a removal
-driven by it would make them disagree on `tracked` at the same source
-height.
-
-A request made again after it was answered (Section 2) is signed again, or
-dropped as still tracked. Its transaction cannot execute again, and the
-old execution is under another signature in a past block, so no lookup
-matches: the entry stays tracked forever, as does the library's.
+A node has to be able to check a `Response` from the event alone, since it
+removes the request on every node, so the event has to carry what the
+attestation digest is computed from (Section 7).
 
 Properties:
 
@@ -512,36 +471,42 @@ Properties:
   whose unsigned bytes are not req.tx and that used up req.tx's replay
   protection. Nothing else.
 * M4 The MPC drops a request that is not authentic, that it cannot process,
-  or whose rid is still tracked, and keeps no new state for it. A rid still
-  tracked is the same transaction, already being watched, so nothing is
-  lost.
+  or whose rid is still in the backlog, and keeps no new state for it. A
+  rid still in the backlog is the same transaction, already being watched,
+  so nothing is lost.
 * M5 An execution whose return data does not decode is not attested; its
-  entry stays tracked but unwatched.
-* M6 Unviable is attested only from a destination block this node scanned
-  itself, at that block's height.
+  entry stays in the backlog, parked and unwatched.
+* M6 Unviable is attested from a transaction in the block being processed
+  whose ID the node holds for another request, at that block's height. It
+  is best-effort: fewer than t nodes may see it.
+* M7 Durability. A node writes every signature and attestation it took
+  part in producing to stable storage before it publishes it, publishes
+  it until the event carrying it is final, and keeps it at least until
+  the `Response` that removes the request is final.
 
 ## 5. Why the guarantees hold (sketch)
 
 The sketches treat the MPC as one process, as Section 4.4 writes it. Three
 properties of the network make that legitimate. None is specific to this
-design.
+design. The network is n nodes, at most f < n/3 of them faulty, the rest
+correct, with a signing threshold t, f+1 <= t <= n - f.
 
 * Threshold (Section 2 of protocol_properties.md). Fewer than t nodes cannot
-  produce a signature or an attestation, honest nodes alone can, and honest
-  nodes eventually publish what they produce.
-* Agreement. Honest nodes admit the same requests and compute the same
-  attestation for a rid, as a function of final destination state and the
-  request's schemas only.
+  produce a signature or an attestation, correct nodes alone can, and
+  correct nodes eventually produce and publish what a request in their
+  backlog needs.
+* Agreement. Correct nodes hold the same backlog at a source height, so
+  they admit the same requests and hold the same published signatures for
+  them, and
+  they compute the same attestation for a rid, as a function of final
+  destination state and the request's schemas only.
 * Distinct keys (ACCOUNT_DERIVATION.md). The derivation path contains the
   source chain and the requesting contract, so different (source chain,
   contract, key parameters) derive different keys, where the key
   parameters are a request's derivation path, key version and signing
   scheme. So the sender of an executed transaction tells the MPC which
-  contract and key parameters asked for it. Two kinds of key come out of
-  this derivation: signing keys, from the path a request names, and one
-  attestation key per contract and key version, on a reserved path. Assumed
-  here: no request may name that path, and two signing schemes never share
-  a key.
+  contract and key parameters asked for it. Assumed here: two signing
+  schemes never share a key.
 
 * G1, in short: an execution this contract has already accepted is at or below
   last_seen, so a request made later records it as known and C3c drops any
@@ -601,18 +566,20 @@ a path from B48 through A15; the first at A12 has none.
   replay protection, which blocks req.tx for good (Section 3.3).
 
 * G4, in three steps.
-  1. The execution is above e.known: the signature was issued after this
-     making of req was final (Section 4.4, signing follows the finalised
-     SignRequest), and e.known is a height some accepted response attested
-     before req was made (C2, C3d), hence final by then (M2).
-  2. It is attested: the MPC finds the execution by its transaction ID or
-     in its own block (M3), whenever it started looking; the return data
-     decodes (G4's premise), so M5 does not apply; and honest nodes compute
-     the same attestation and publish it (threshold and agreement, above).
+  1. The execution is above e.known: e.known is a height some accepted
+     response attested before req was made (C2, C3d), hence final by then
+     (M2), and the execution came after.
+  2. It is attested: no exception applies, so the signature is published
+     and the return data decodes. Every correct node then holds the
+     signature (agreement, above) and finds the execution by its
+     transaction ID (Section 4.4), whenever it started looking, and
+     correct nodes compute the same attestation and publish it (threshold
+     and agreement, above).
   3. It is accepted: by C4 the entry is still outstanding unless a
      response for the rid of req was accepted first, and any such response
      reports this execution too, since at most one signature executes and
-     no Unviable can follow an execution (replay protection, Section 3.3),
+     an execution and an Unviable exclude each other (replay protection,
+     Section 3.3),
      and M3 attests only that receipt. So a response reporting the
      execution passes C3 and is accepted.
 
@@ -622,37 +589,35 @@ a path from B48 through A15; the first at A12 has none.
   Section 3.3. It can be made to work if the MPC remembers completed rids
   for as long as a differently signed copy could still execute, about a
   minute.
-* Unviability by expiry. A transaction that expires by height or timebound
-  never executes and uses up no replay protection, so nothing in Section
-  4.4 notices, and the request stays outstanding on both sides. Reporting it
-  needs a per-chain expiry rule and a block to attest it at.
+* Lost signatures. An execution under a signature that is not published
+  is not found, and its request goes unanswered. That takes every correct
+  node of a signing round losing the signature before it publishes it, or
+  a faulty node of the round withholding its share and keeping the
+  signature to itself. The remedy needs nothing new: the executed
+  transaction carries its signature, and anyone may publish it, after
+  which every node finds the execution.
 * Agreement has no enforcement point. A change to `authentic`,
   `processable` or the attestation function must apply only to requests
   made at or after a source height the upgrade names; applied to requests
   in flight, it leaves them unanswered. Nothing in a request names the
   function version, so a misconfigured node splits the network silently.
 * A failing `on_response`. The entry stays outstanding and the MPC has
-  closed the request (Section 4.3), so the re-delivery is anyone calling
+  closed the request (Section 4.4), so the re-delivery is anyone calling
   `response` again. On Midnight a handler that always fails blocks every
   `process` batch carrying its message, so `process` has to isolate
   handler failures. Removing the entry before the handler runs is not an
   alternative, since C3a would then drop the re-delivery.
-* An unanswerable request strands its rid. After M4 the MPC keeps nothing,
-  after M5 an unwatched entry, while the library's entry stays outstanding,
-  so C1 refuses that rid for good and the application can only retry with a
-  different transaction.
 * A key version can be retired only once no entry that recorded it is
   outstanding, and an unanswered request is outstanding forever. Until
   then a compromised key can forge responses to the requests made under
   it, and to no others (C3b).
-* `tracked` and `outstanding` can grow without bound. An entry lives until a
-  verified Response, and a request whose signature nobody broadcasts, or
-  whose output does not decode (M5), never produces one. A cancel
-  transaction that uses up the replay protection
-  ends the MPC's entry when enough nodes see it (M6), and the library's
-  when that is attested, so an application has a way out, but nothing
-  bounds the entries nobody clears. Checking old entries less often bounds
-  the work per block, which is the part that matters.
+* The MPC's backlog and the library's `outstanding` can grow without
+  bound. An entry lives until a verified Response, and a request whose
+  signature nobody broadcasts, or whose output does not decode (M5),
+  never produces one. A cancel transaction that uses up the replay
+  protection, itself requested through `sign_bidirectional`, ends both
+  entries if at least t nodes see it (M6), so an application may have a
+  way out, but nothing bounds the entries nobody clears.
 
 
 ## 7. Canonical Protocol Structures
