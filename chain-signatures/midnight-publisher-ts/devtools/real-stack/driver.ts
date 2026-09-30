@@ -499,9 +499,11 @@ async function dispatch(request: Request): Promise<unknown> {
           ? pureCircuits.checkResponse1
           : serializedOutput.length === 8
             ? pureCircuits.checkResponse8
-            : serializedOutput.length === 32
-              ? pureCircuits.checkResponse32
-              : undefined;
+            : serializedOutput.length === 16
+              ? pureCircuits.checkResponse16
+              : serializedOutput.length === 32
+                ? pureCircuits.checkResponse32
+                : undefined;
     if (check === undefined) throw new Error(`unsupported output width ${serializedOutput.length}`);
     const response = await waitFor("a verified respondBidirectional entry", async () => {
       for (const candidate of await active.reader.getRespondBidirectionalEvents(requestId)) {
