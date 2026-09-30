@@ -23,6 +23,8 @@
     "name": "sample",
     "requestId": "56fcf90aa44c64eedcc2eacb0f9f546f751b982dfd361286cf85527eaa5ea600",
     "txParamsDigest": "2e2f17aed8b2b6618dd3219fe2904343964140b0681d73cf5c1494884379db00",
+    "serializedTransaction": "02f845827a6903010282520894cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd05a4ca11ab1e1111111111111111111111111111111111111111111111111111111111111111c0",
+    "transactionOracle": "SDK signBidirectionalEventToUnsignedEvmTransaction",
     "atoms": [
       "01",
       "abababababababababababababababababababababababababababababababab",
@@ -77,6 +79,8 @@
       "name": "sample",
       "requestId": "56fcf90aa44c64eedcc2eacb0f9f546f751b982dfd361286cf85527eaa5ea600",
       "txParamsDigest": "2e2f17aed8b2b6618dd3219fe2904343964140b0681d73cf5c1494884379db00",
+      "serializedTransaction": "02f845827a6903010282520894cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd05a4ca11ab1e1111111111111111111111111111111111111111111111111111111111111111c0",
+      "transactionOracle": "SDK signBidirectionalEventToUnsignedEvmTransaction",
       "atoms": [
         "01",
         "abababababababababababababababababababababababababababababababab",
@@ -130,6 +134,8 @@
       "name": "minimal",
       "requestId": "7231ba231af56a60ddcfb1a471eff0fd7ae44b5d5b8dc2976d5e7f311b05cd00",
       "txParamsDigest": "236eb84cf68556327107473b32c37c130c61ba97a1e83b851474462da098ce00",
+      "serializedTransaction": "02e1827a6903010282520894cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0580c0",
+      "transactionOracle": "SDK signBidirectionalEventToUnsignedEvmTransaction",
       "atoms": [
         "01",
         "abababababababababababababababababababababababababababababababab",
@@ -181,6 +187,8 @@
       "name": "unused-access-list",
       "requestId": "56fcf90aa44c64eedcc2eacb0f9f546f751b982dfd361286cf85527eaa5ea600",
       "txParamsDigest": "2e2f17aed8b2b6618dd3219fe2904343964140b0681d73cf5c1494884379db00",
+      "serializedTransaction": "02f845827a6903010282520894cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd05a4ca11ab1e1111111111111111111111111111111111111111111111111111111111111111c0",
+      "transactionOracle": "SDK signBidirectionalEventToUnsignedEvmTransaction",
       "atoms": [
         "01",
         "abababababababababababababababababababababababababababababababab",
@@ -250,6 +258,8 @@
       "name": "partial-access-list",
       "requestId": "bcf0266436dab31514a7a21d076dffbe1281fba87d2a03a70d21a97933d74c00",
       "txParamsDigest": "e297105a20b930dcd62f411e0a8339ccb8d10430b520448929bc8abb219ca700",
+      "serializedTransaction": "02f8e3827a6903010282520894cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd05b844ca11ab1e11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222f87cf87a94efefefefefefefefefefefefefefefefefefefeff863a00101010101010101010101010101010101010101010101010101010101010101a00202020202020202020202020202020202020202020202020202020202020202a00303030303030303030303030303030303030303030303030303030303030303",
+      "transactionOracle": "SDK signBidirectionalEventToUnsignedEvmTransaction",
       "atoms": [
         "01",
         "abababababababababababababababababababababababababababababababab",
@@ -325,6 +335,8 @@
       "name": "unused-slots",
       "requestId": "f58d05e28773a80c750a90fb60f9e98332b69a2f779e3e18172b34973bf7dd00",
       "txParamsDigest": "4b93da850a6f8cdbefdb19315ea5cc0379ac52870757a5b5e9684270dfb8ab00",
+      "serializedTransaction": "02f87e827a6903010282520894cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd05a4ca11ab1e1111111111111111111111111111111111111111111111111111111111111111f838f794efefefefefefefefefefefefefefefefefefefefe1a00101010101010101010101010101010101010101010101010101010101010101",
+      "transactionOracle": "SDK signBidirectionalEventToUnsignedEvmTransaction",
       "atoms": [
         "01",
         "abababababababababababababababababababababababababababababababab",
@@ -400,6 +412,8 @@
       "name": "absent-calldata",
       "requestId": "027997b5c2912243e3c1d22136b97faa72e41068bfb6b3fcec22db05e1aeda00",
       "txParamsDigest": "26439eb8374b6cde1dea23929b72ef439cce45ebabcb2f148b37e3beaa8abf00",
+      "serializedTransaction": "02f89e827a6903010282520894cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0580f87cf87a94efefefefefefefefefefefefefefefefefefefeff863a00101010101010101010101010101010101010101010101010101010101010101a00202020202020202020202020202020202020202020202020202020202020202a00303030303030303030303030303030303030303030303030303030303030303",
+      "transactionOracle": "SDK signBidirectionalEventToUnsignedEvmTransaction",
       "atoms": [
         "01",
         "abababababababababababababababababababababababababababababababab",
@@ -475,6 +489,8 @@
       "name": "empty-calldata",
       "requestId": "12820c43d19df6eb47fbec5c8c5ea6798797e534252d18550b4c6218428d1000",
       "txParamsDigest": "7b35fb911123c21eec6363884c7549058210b813a3a072a7f1bb89c35aa46100",
+      "serializedTransaction": "02f8a2827a6903010282520894cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0584ca11ab1ef87cf87a94efefefefefefefefefefefefefefefefefefefeff863a00101010101010101010101010101010101010101010101010101010101010101a00202020202020202020202020202020202020202020202020202020202020202a00303030303030303030303030303030303030303030303030303030303030303",
+      "transactionOracle": "SDK signBidirectionalEventToUnsignedEvmTransaction",
       "atoms": [
         "01",
         "abababababababababababababababababababababababababababababababab",
@@ -550,6 +566,8 @@
       "name": "full-access-list",
       "requestId": "394afc603b40dab756aad4fc24053b572b3826669f8bdd4db8d0f8338e579300",
       "txParamsDigest": "bd1c7039258beea44e87c9ce9397ff884bf3b586ff9fede3bc24b4303cafdb00",
+      "serializedTransaction": "02f8fa827a6903010282520894cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd05b844ca11ab1e11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222f893f87a94efefefefefefefefefefefefefefefefefefefeff863a00101010101010101010101010101010101010101010101010101010101010101a00202020202020202020202020202020202020202020202020202020202020202a00303030303030303030303030303030303030303030303030303030303030303d6940000000000000000000000000000000000000000c0",
+      "transactionOracle": "SDK signBidirectionalEventToUnsignedEvmTransaction",
       "atoms": [
         "01",
         "abababababababababababababababababababababababababababababababab",
@@ -625,6 +643,8 @@
       "name": "integer-boundaries",
       "requestId": "c0880c69d96c2ee2b700750095eeb9fdc3ce9613481c4a31c1580a1e0ec1df00",
       "txParamsDigest": "43235c17e2d0a6ae0a1509e62e7e0a77114c5326fec2eaebf09ec057dcb9ce00",
+      "serializedTransaction": "02f9012788ffffffffffffffff88ffffffffffffffff90ffffffffffffffffffffffffffffffff90ffffffffffffffffffffffffffffffff88ffffffffffffffff94cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd90ffffffffffffffffffffffffffffffffb844ca11ab1e11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222f87cf87a94efefefefefefefefefefefefefefefefefefefeff863a00101010101010101010101010101010101010101010101010101010101010101a00202020202020202020202020202020202020202020202020202020202020202a00303030303030303030303030303030303030303030303030303030303030303",
+      "transactionOracle": "SDK field assembly with ethers RLP full-width nonce",
       "atoms": [
         "ff",
         "abababababababababababababababababababababababababababababababab",

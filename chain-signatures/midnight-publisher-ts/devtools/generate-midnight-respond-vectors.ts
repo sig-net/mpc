@@ -303,16 +303,58 @@ const validInputs: ValidVectorInput[] = [
     values: ["Midnight 🌙"],
   },
   {
+    name: "empty string retains maxBytes capacity",
+    outputSchema: [{ name: "message", type: "string" }],
+    respondSchema: [{ name: "message", type: "string", maxBytes: 13 }],
+    values: [""],
+    expectedOutputLength: 21,
+  },
+  {
+    name: "UTF-8 string exactly fills maxBytes capacity",
+    outputSchema: [{ name: "message", type: "string" }],
+    respondSchema: [{ name: "message", type: "string", maxBytes: 13 }],
+    values: ["Midnight 🌙"],
+    expectedOutputLength: 21,
+  },
+  {
     name: "dynamic bytes use length and maxBytes capacity",
     outputSchema: [{ name: "payload", type: "bytes" }],
     respondSchema: [{ name: "payload", type: "bytes", maxBytes: 8 }],
     values: ["0xdeadbeef00"],
   },
   {
+    name: "empty dynamic bytes retain maxBytes capacity",
+    outputSchema: [{ name: "payload", type: "bytes" }],
+    respondSchema: [{ name: "payload", type: "bytes", maxBytes: 8 }],
+    values: ["0x"],
+    expectedOutputLength: 16,
+  },
+  {
+    name: "dynamic bytes exactly fill maxBytes capacity",
+    outputSchema: [{ name: "payload", type: "bytes" }],
+    respondSchema: [{ name: "payload", type: "bytes", maxBytes: 8 }],
+    values: ["0xdeadbeef00010203"],
+    expectedOutputLength: 16,
+  },
+  {
     name: "dynamic ABI array maps into fixed-capacity response array",
     outputSchema: [{ name: "values", type: "uint64[]" }],
     respondSchema: [{ name: "values", type: "uint64[]", maxItems: 3 }],
     values: [[7n, 8n]],
+  },
+  {
+    name: "empty dynamic ABI array retains maxItems capacity",
+    outputSchema: [{ name: "values", type: "uint64[]" }],
+    respondSchema: [{ name: "values", type: "uint64[]", maxItems: 3 }],
+    values: [[]],
+    expectedOutputLength: 32,
+  },
+  {
+    name: "dynamic ABI array exactly fills maxItems capacity",
+    outputSchema: [{ name: "values", type: "uint64[]" }],
+    respondSchema: [{ name: "values", type: "uint64[]", maxItems: 3 }],
+    values: [[7n, 8n, 9n]],
+    expectedOutputLength: 32,
   },
   {
     name: "fixed ABI array maps into fixed-capacity response array",
@@ -355,6 +397,37 @@ const validInputs: ValidVectorInput[] = [
     expectedOutputLength: MAX_RESPOND_PACKED_BYTES,
   },
 ];
+
+for (const [type, bound, width] of [
+  ["uint8", 1n << 8n, 1],
+  ["uint248", 1n << 248n, 31],
+  ["field", FIELD_MODULUS, 32],
+  ["uint256", FIELD_MODULUS, 32],
+] as const) {
+  for (const [boundary, value] of [
+    ["minimum", 0n],
+    ["maximum", bound - 1n],
+  ] as const) {
+    validInputs.push({
+      name: `${type} response accepts ${boundary} carrier value`,
+      outputSchema: [{ name: "value", type: "uint256" }],
+      respondSchema: [{ name: "value", type }],
+      values: [value],
+      expectedOutputLength: width,
+    });
+  }
+}
+for (const width of [1, 32]) {
+  for (const byte of ["00", "ff"]) {
+    validInputs.push({
+      name: `bytes${String(width)} response preserves all-${byte} value`,
+      outputSchema: [{ name: "value", type: `bytes${String(width)}` }],
+      respondSchema: [{ name: "value", type: `bytes${String(width)}` }],
+      values: [`0x${byte.repeat(width)}`],
+      expectedOutputLength: width,
+    });
+  }
+}
 
 const rejectionInputs: VectorInput[] = [
   {
@@ -427,6 +500,12 @@ const rejectionInputs: VectorInput[] = [
     values: ["0x01"],
   },
   {
+    name: "reject zero maxBytes capacity even for empty dynamic bytes",
+    outputSchema: [{ name: "payload", type: "bytes" }],
+    respondSchema: [{ name: "payload", type: "bytes", maxBytes: 0 }],
+    values: ["0x"],
+  },
+  {
     name: "reject fractional maxItems capacity",
     outputSchema: [{ name: "values", type: "uint64[]" }],
     respondSchema: [{ name: "values", type: "uint64[]", maxItems: 1.5 }],
@@ -495,6 +574,24 @@ const rejectionInputs: VectorInput[] = [
     assertRejection: assertPackedWidthCeilingRejection,
   },
 ];
+
+for (const [type, bound] of [
+  ["uint8", 1n << 8n],
+  ["uint248", 1n << 248n],
+  ["uint256", FIELD_MODULUS],
+] as const) {
+  for (const [boundary, value] of [
+    ["negative", -1n],
+    ["upper-bound", bound],
+  ] as const) {
+    rejectionInputs.push({
+      name: `reject ${boundary} ${type} response value`,
+      outputSchema: [{ name: "value", type: "int256" }],
+      respondSchema: [{ name: "value", type }],
+      values: [value],
+    });
+  }
+}
 
 const vectors = [...validInputs.map(validVector), ...rejectionInputs.map(rejectedVector)];
 

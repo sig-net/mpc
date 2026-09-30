@@ -14,9 +14,20 @@ env:
 
 jobs:
   midnight-real-stack:
-    name: Midnight Real-Stack Tests
+    # The first name is the required check; each test starts its own stack and cluster.
+    name: ${{ matrix.name }}
     runs-on: warp-ubuntu-latest-x64-4x
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Midnight Real-Stack Tests
+            test: midnight_to_ethereum_to_midnight_consumes_caller_response
+          - name: Midnight Transcript Placement Tests
+            test: midnight_indexes_notifications_by_transcript_placement
+          - name: Midnight Vault Tests
+            test: midnight_vault_operations_complete_with_real_mpc
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -163,7 +174,7 @@ jobs:
       # nextest fails on an empty selection, so a renamed test cannot turn this
       # step into a silent no-op.
       - name: Test Midnight end-to-end stream
-        run: just test-midnight
+        run: just test-midnight ${{ matrix.test }}
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
@@ -172,6 +183,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: midnight-real-stack-logs
+          name: midnight-real-stack-logs-${{ matrix.test }}
           path: target/tmp_*/midnight
           if-no-files-found: warn

@@ -339,6 +339,72 @@ mod tests {
     }
 
     #[test]
+    fn production_decoder_rejects_malformed_dynamic_abi() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/midnight_respond_vectors.json"
+        ))
+        .unwrap();
+
+        for name in [
+            "UTF-8 string uses byte length and maxBytes capacity",
+            "dynamic bytes use length and maxBytes capacity",
+            "dynamic ABI array maps into fixed-capacity response array",
+        ] {
+            let vector = fixture["vectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|vector| vector["name"] == name)
+                .unwrap();
+            let bytes = |key: &str| hex::decode(vector[key].as_str().unwrap()).unwrap();
+            let schema = bytes("outputSchemaHex");
+            let encoded = bytes("callResultHex");
+            let output = TransactionOutput::from_call_result(&schema, &encoded.clone().into())
+                .unwrap_or_else(|error| panic!("{name}: positive control failed: {error:#}"));
+            assert_eq!(
+                output
+                    .output
+                    .serialize(SerDeserFormat::Fab, &bytes("respondSchemaHex"))
+                    .unwrap(),
+                bytes("expectedOutputHex"),
+                "{name}: positive control output differs"
+            );
+
+            // These oracle rows each contain one dynamic parameter. Corrupt used
+            // data, rather than only padding, whose acceptance can differ by decoder.
+            let schema_fields: Vec<AbiField> = serde_json::from_slice(&schema).unwrap();
+            let count = U256::from_be_slice(&encoded[32..64]).to::<usize>();
+            let used_bytes = if schema_fields[0].typ.ends_with("[]") {
+                count * 32
+            } else {
+                count
+            };
+            let mut end_offset = encoded.clone();
+            end_offset[..32].copy_from_slice(&U256::from(encoded.len()).to_be_bytes::<32>());
+            let mut huge_offset = encoded.clone();
+            huge_offset[..32].fill(0xff);
+            let mut huge_length = encoded.clone();
+            huge_length[32..64].fill(0xff);
+
+            // @sig-net/midnight 0.24.0-rc.4's deserializeEvmOutput (ethers
+            // 6.17.0) rejects each of these malformed versions of the golden rows.
+            for (corruption, malformed) in [
+                ("truncated offset", encoded[..31].to_vec()),
+                ("truncated length", encoded[..63].to_vec()),
+                ("truncated payload", encoded[..64 + used_bytes - 1].to_vec()),
+                ("offset at end", end_offset),
+                ("oversized offset", huge_offset),
+                ("oversized length", huge_length),
+            ] {
+                assert!(
+                    TransactionOutput::from_call_result(&schema, &malformed.into()).is_err(),
+                    "{name}: accepted {corruption}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn all_response_formats_share_evm_decode_acceptance() {
         let output_schema = br#"[{"name":"message","type":"string"}]"#;
         let trace = Bytes::from(

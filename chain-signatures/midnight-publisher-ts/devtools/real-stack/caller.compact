@@ -15,8 +15,18 @@ sealed ledger signetSigner: SignetSigner;
 export ledger requests: Map<RequestId, SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 64, 64>>;
 sealed ledger deployer: Bytes<32>;
 export ledger initialised: Counter;
+// Test-only transcript ballast; see addBallast.
+export ledger ballast: Map<Uint<8>, Bytes<32>>;
+// Test-only value the gated circuit reads in its fallible section.
+export ledger gate: Counter;
 
 witness deployerSecretKey(): Bytes<32>;
+
+struct IsEvenCall {
+  evmNonce: Uint<64>;
+  to: Bytes<20>;
+  argWord: Bytes<32>;
+}
 
 export pure circuit deployerCommitment(sk: Bytes<32>): Bytes<32> {
   return persistentHash<Vector<2, Bytes<32>>>([pad(32, "signet-caller:deployer:"), sk]);
@@ -34,26 +44,24 @@ export circuit initialise(responseKey: Secp256k1Point): [] {
   mpcResponseKey = disclose(responseKey);
 }
 
-export circuit submitIsEvenRequest(
-  evmNonce: Uint<64>,
+circuit fileIsEvenRequest(
+  call: IsEvenCall,
   keyVersion: Uint<8>,
-  to: Bytes<20>,
-  argWord: Bytes<32>,
   outputSchema: Bytes<64>,
   responseSchema: Bytes<64>
-): [] {
+): RequestId {
   const calldata = EvmCalldata<1> {
     selector: Bytes [0x2a, 0x2e, 0x13, 0x20],
     noWords: 1 as Uint<16>,
-    words: [argWord]
+    words: [call.argWord]
   };
   const txParams = EvmType2TxParams<1, 0, 0> {
     chainId: 31337 as Uint<64>,
-    nonce: evmNonce,
+    nonce: call.evmNonce,
     maxPriorityFeePerGas: 1000000000 as Uint<128>,
     maxFeePerGas: 30000000000 as Uint<128>,
     gasLimit: 100000 as Uint<64>,
-    to: to,
+    to: call.to,
     value: 0 as Uint<128>,
     calldata: some<EvmCalldata<1>>(calldata),
     accessListEntryCount: 0,
@@ -76,7 +84,10 @@ export circuit submitIsEvenRequest(
 
   assert(!requests.member(requestId), "Request already exists");
   requests.insert(requestId, disclose(request));
+  return requestId;
+}
 
+circuit notifySigner(requestId: RequestId): RequestId {
   signetSigner.signBidirectional(
     requestId,
     constructSignBidirectionalEventNotificationV1(
@@ -85,6 +96,70 @@ export circuit submitIsEvenRequest(
       [2, 0, 0, 0] as Vector<4, Uint<8>>,
     ),
   );
+  return requestId;
+}
+
+// The partitioner keeps a call guaranteed only while its estimated cost fits the
+// guaranteed budget. These writes exceed it with margin, moving the call that makes
+// them, singleton calls included, to the fallible transcript.
+circuit addBallast(): [] {
+  for (const slot of 0..32) {
+    ballast.insert(slot as Uint<8>, pad(32, "signet-caller:ballast"));
+  }
+}
+
+export circuit submitIsEvenRequest(
+  evmNonce: Uint<64>,
+  keyVersion: Uint<8>,
+  to: Bytes<20>,
+  argWord: Bytes<32>,
+  outputSchema: Bytes<64>,
+  responseSchema: Bytes<64>
+): RequestId {
+  return notifySigner(fileIsEvenRequest(
+    IsEvenCall { evmNonce: evmNonce, to: to, argWord: argWord },
+    keyVersion,
+    outputSchema,
+    responseSchema
+  ));
+}
+
+// Test-only transcript placements. Each circuit files and notifies Boolean-schema
+// requests at key version 1. Without `kernel.checkpoint()`, which this compiler's ZKIR v3
+// backend does not implement, a call is either wholly guaranteed or wholly fallible.
+
+export circuit submitPlacedRequest(call: IsEvenCall, schema: Bytes<64>, fallible: Boolean): RequestId {
+  if (disclose(fallible)) {
+    addBallast();
+  }
+  return notifySigner(fileIsEvenRequest(call, 1, schema, schema));
+}
+
+// Both singleton calls take this call's phase and notify in call order.
+export circuit submitPlacedRequestPair(
+  first: IsEvenCall,
+  second: IsEvenCall,
+  schema: Bytes<64>,
+  fallible: Boolean
+): [RequestId, RequestId] {
+  if (disclose(fallible)) {
+    addBallast();
+  }
+  const firstId = notifySigner(fileIsEvenRequest(first, 1, schema, schema));
+  const secondId = notifySigner(fileIsEvenRequest(second, 1, schema, schema));
+  return [firstId, secondId];
+}
+
+// A fallible request that applies only while `gate` still equals the value the
+// transaction was built against.
+export circuit submitGatedRequest(call: IsEvenCall, schema: Bytes<64>, expectedGate: Uint<64>): RequestId {
+  addBallast();
+  assert(gate == disclose(expectedGate), "Gate moved");
+  return notifySigner(fileIsEvenRequest(call, 1, schema, schema));
+}
+
+export circuit bumpGate(): [] {
+  gate.increment(1);
 }
 
 // Test-only impersonation: notify the central Signet contract naming another contract's request.
@@ -134,6 +209,15 @@ export circuit verifyResponse8(response: RespondBidirectionalEventV1, serialized
 
 export pure circuit checkResponse8(response: RespondBidirectionalEventV1, serializedOutput: Bytes<8>, responseKey: Secp256k1Point): Boolean {
   return verifyRespondBidirectionalEventV1<8>(serializedOutput, response, responseKey);
+}
+
+export circuit verifyResponse16(response: RespondBidirectionalEventV1, serializedOutput: Bytes<16>): [] {
+  consumeResponse<16>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
+}
+
+export pure circuit checkResponse16(response: RespondBidirectionalEventV1, serializedOutput: Bytes<16>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<16>(serializedOutput, response, responseKey);
 }
 
 export circuit verifyResponse32(response: RespondBidirectionalEventV1, serializedOutput: Bytes<32>): [] {

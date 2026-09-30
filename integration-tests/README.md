@@ -68,9 +68,9 @@ just to test_basic_action.           # run specific test
 
 The available profiles and their concurrency settings are defined in [`.config/nextest.toml`](../.config/nextest.toml).
 
-### Midnight real-stack test
+### Midnight real-stack tests
 
-The Midnight real-stack test exercises the complete Midnight → Ethereum → Midnight response lifecycle. It starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster, so it is ignored by default and must be selected explicitly.
+The Midnight real-stack tests exercise the complete Midnight → Ethereum → Midnight response lifecycle: API conformance, notifications placed in guaranteed and fallible transcripts, and the example vault's flows. Each starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster, so they are ignored by default and must be selected explicitly.
 
 In addition to the prerequisites above, it requires:
 
@@ -79,16 +79,17 @@ In addition to the prerequisites above, it requires:
 - [cargo-near](https://github.com/near/cargo-near)
 - Compact launcher 0.5.1 with `compactc` 0.33.0-rc.2 available as `compact`; see the [Midnight CI workflow](../.github/workflows/test-chain-midnight.yml) for the pinned Linux installation
 
-From the repository root, prepare the TypeScript publisher and test caller,
-then build the MPC contract and host node and run the ignored test:
+From the repository root, prepare the TypeScript publisher and the test caller and vault contracts,
+then build the MPC contract and host node and run the ignored tests:
 
 ```bash
 just build midnight
 just setup
-just test-midnight
+just test-midnight                   # all three tests
+just test-midnight <test>            # one test from cases::midnight_stream
 ```
 
-The test requires the host `mpc-node` binary. Midnight node, indexer, proof-server, and fixture-driver logs are written under `target/tmp_*/midnight`.
+The tests require the host `mpc-node` binary. Midnight node, indexer, proof-server, and fixture-driver logs are written under `target/tmp_*/midnight`.
 
 ## Logging and Tracing
 
