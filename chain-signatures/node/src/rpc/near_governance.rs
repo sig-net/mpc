@@ -1,5 +1,7 @@
 use crate::protocol::Governance;
-use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff};
+use mpc_chain_integration_core::utils::retry::{
+    is_provider_throttled, retry_rpc_gated, RetryConfig, SharedBackoff,
+};
 use mpc_chain_near::NearRpcGates;
 use mpc_contract::errors::CheckpointError;
 pub use mpc_contract::primitives::{Read, View};
@@ -73,23 +75,40 @@ impl NearGovernanceClient {
         &self.gates.provider
     }
 
-    /// Read views from the MPC contract.
+    /// Read views from the MPC contract without internal retries.
+    ///
+    /// Relies on the caller's periodic polling loop to retry on failure.
     pub async fn read(&self, reads: Vec<Read>) -> anyhow::Result<Vec<View>> {
-        retry_rpc_gated!(
-            NEAR_GOVERNANCE_TIMEOUT,
-            NEAR_GOVERNANCE_RETRY,
-            self.gates.provider,
-            "governance_read",
-            {
-                let views: Vec<View> = self
-                    .client
-                    .view(&self.contract_id, "read")
-                    .args_json(json!({ "reads": reads.clone() }))
-                    .await?
-                    .json()?;
+        self.gates.provider.wait().await;
+        let fut = async {
+            let views: Vec<View> = self
+                .client
+                .view(&self.contract_id, "read")
+                .args_json(json!({ "reads": reads }))
+                .await?
+                .json()?;
+            Ok(views)
+        };
+        let Ok(result) = tokio::time::timeout(NEAR_GOVERNANCE_TIMEOUT, fut).await else {
+            anyhow::bail!("governance_read timed out after {NEAR_GOVERNANCE_TIMEOUT:?}");
+        };
+        match result {
+            Ok(views) => {
+                self.gates.provider.report_success();
                 Ok(views)
             }
-        )
+            Err(e) => {
+                if is_provider_throttled(&e) {
+                    let cooldown = self.gates.provider.extend_cooldown();
+                    tracing::warn!(
+                        operation = "governance_read",
+                        ?cooldown,
+                        "provider throttled (429/402), engaging global cooldown"
+                    );
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Submit a checkpoint vote.
