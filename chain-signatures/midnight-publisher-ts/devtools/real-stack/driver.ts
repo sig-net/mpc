@@ -1,3 +1,4 @@
+import { Transaction, hexlify, recoverAddress } from "ethers";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { findDeployedContract, type FoundContract } from "@midnight-ntwrk/midnight-js/contracts";
@@ -21,11 +22,13 @@ import {
 } from "@sig-net/midnight-contract-deploy";
 import {
   contractAddressFromHex,
+  assembleCalldata,
+  signatureRespondedEventToSignature,
   parseRequestIdHex,
   parseSecp256k1PublicKey,
   requestIdBytes,
   respondBidirectionalEventToCircuitInput,
-  signetEventSourceFromPublicDataProvider,
+  signetEventSourceFromIndexer,
   SignetRequestResponseReader,
   type RequestIdHex,
   type Secp256k1Point,
@@ -77,6 +80,11 @@ interface SettleResponseRequest {
   rejectPaddedReplay?: boolean;
 }
 
+interface NotifyAsCallerRequest {
+  op: "notifyAsCaller";
+  requestId: string;
+}
+
 interface ShutdownRequest {
   op: "shutdown";
 }
@@ -87,12 +95,14 @@ type Request =
   | SubmitRequest
   | SignedTransactionRequest
   | SettleResponseRequest
+  | NotifyAsCallerRequest
   | ShutdownRequest;
 
 interface Session {
   facade: WalletFacade;
   caller: CallerHandle;
   callerAddress: string;
+  impersonator: CallerHandle;
   publicDataProvider: SignetPublicStateSource;
   reader: SignetRequestResponseReader;
   responseKey?: Secp256k1Point;
@@ -190,7 +200,7 @@ async function fundRoles(config: MidnightNodeConfig): Promise<void> {
     const amount = totalNight(state) / 5n;
     if (amount === 0n) throw new Error("local genesis wallet cannot fund role wallets");
     await registerNightForDustGeneration(rootFacade, rootKeys, state);
-    if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade);
+    if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade, 1n);
 
     // Sequential: every transfer spends root UTXOs selected from `state`.
     for (const [name, seed] of roles) {
@@ -231,7 +241,7 @@ async function fundRoles(config: MidnightNodeConfig): Promise<void> {
           throw new Error(`${name} wallet shows no NIGHT after funding from root`);
         }
         await registerNightForDustGeneration(facade, keys, state);
-        if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade);
+        if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade, 1n);
       });
       diagnostics(`verified ${name} wallet in ${Date.now() - startedAt}ms`);
     }),
@@ -249,10 +259,8 @@ async function bootstrap(request: BootstrapRequest) {
   const deployerKeys = deriveAccountKeys(DEPLOYER_SEED, request.config.networkId);
   const deployerSecret = bytes(DEPLOYER_SEED, 32);
   const deployerCommitment = pureCircuits.deployerCommitment(deployerSecret);
-  const callerDeployment = await withSyncedWalletFacade(
-    deployerKeys,
-    request.config,
-    async (facade) => {
+  const deployCaller = () =>
+    withSyncedWalletFacade(deployerKeys, request.config, async (facade) => {
       const built = await buildDeployTransaction(
         callerCompiledContract,
         request.config.networkId,
@@ -263,8 +271,10 @@ async function bootstrap(request: BootstrapRequest) {
       );
       await submitUnprovenTransaction(facade, deployerKeys, built.serializedTransaction);
       return { contractAddress: built.contractAddress };
-    },
-  );
+    });
+  const callerDeployment = await deployCaller();
+  diagnostics("deploying impersonating Compact caller");
+  const impersonatorDeployment = await deployCaller();
   const invokerKeys = deriveAccountKeys(INVOKER_SEED, request.config.networkId);
   const facade = await initialiseWalletFacade(invokerKeys, request.config);
   await facade.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
@@ -275,23 +285,27 @@ async function bootstrap(request: BootstrapRequest) {
     request.config,
     join(request.artifactDir, "caller.leveldb"),
   );
-  const caller = await findDeployedContract(providers, {
-    contractAddress: callerDeployment.contractAddress,
-    compiledContract: callerCompiledContract,
-    privateStateId: CALLER_PRIVATE_STATE_ID,
-    initialPrivateState: createCallerPrivateState(deployerSecret),
-  });
+  const findCaller = (contractAddress: string) =>
+    findDeployedContract(providers, {
+      contractAddress,
+      compiledContract: callerCompiledContract,
+      privateStateId: CALLER_PRIVATE_STATE_ID,
+      initialPrivateState: createCallerPrivateState(deployerSecret),
+    });
+  const caller = await findCaller(callerDeployment.contractAddress);
+  const impersonator = await findCaller(impersonatorDeployment.contractAddress);
   session = {
     facade,
     caller,
     callerAddress: callerDeployment.contractAddress,
+    impersonator,
     publicDataProvider: providers.publicDataProvider,
     reader: new SignetRequestResponseReader({
       requesterContractAddress: callerDeployment.contractAddress,
-      requesterRequestsPath: [3],
+      requesterRequestsPath: [2],
       signetContractAddress: central.contractAddress,
       publicDataProvider: providers.publicDataProvider,
-      eventSource: signetEventSourceFromPublicDataProvider(providers.publicDataProvider),
+      eventSource: signetEventSourceFromIndexer({ queryUrl: request.config.indexerUrl }),
     }),
   };
   return {
@@ -319,11 +333,54 @@ async function dispatch(request: Request): Promise<unknown> {
     active.responseKey = responseKey;
     return {};
   }
+  if (request.op === "notifyAsCaller") {
+    const requestId = parseRequestIdHex(request.requestId);
+    await active.impersonator.callTx.notifyAs(
+      contractAddressFromHex(active.callerAddress),
+      requestIdBytes(requestId),
+    );
+    return {};
+  }
   if (request.op === "signedTransaction") {
     const requestId = parseRequestIdHex(request.requestId);
-    const transaction = await waitFor("a verified signed EVM transaction", () =>
-      active.reader.getSignedEvmTransaction(requestId, request.expectedSigner),
-    );
+    const state = await active.publicDataProvider.queryContractState(active.callerAddress);
+    if (!state) throw new Error("caller state is missing");
+    const record = ledger(state.data).requests.lookup(requestIdBytes(requestId));
+    const params = record.txParams;
+    if (params.nonce > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("unsafe EVM nonce");
+    const unsigned = Transaction.from({
+      type: 2,
+      chainId: params.chainId,
+      nonce: Number(params.nonce),
+      maxPriorityFeePerGas: params.maxPriorityFeePerGas,
+      maxFeePerGas: params.maxFeePerGas,
+      gasLimit: params.gasLimit,
+      to: hexlify(params.to),
+      value: params.value,
+      data: assembleCalldata(params.calldata),
+      accessList: params.accessList.slice(0, Number(params.accessListEntryCount)).map((entry) => ({
+        address: hexlify(entry.address),
+        storageKeys: entry.storageKeys.slice(0, Number(entry.storageKeyCount)).map(hexlify),
+      })),
+    });
+    const transaction = await waitFor("a verified signed EVM transaction", async () => {
+      for (const response of await active.reader.getSignatureRespondedEvents(requestId)) {
+        try {
+          const signature = signatureRespondedEventToSignature(response);
+          if (
+            recoverAddress(unsigned.unsignedHash, signature).toLowerCase() !==
+            request.expectedSigner.toLowerCase()
+          )
+            continue;
+          const signed = unsigned.clone();
+          signed.signature = signature;
+          return signed;
+        } catch {
+          // Response logs are unauthenticated; skip malformed posts.
+        }
+      }
+      return undefined;
+    });
     return {
       serialized: transaction.serialized,
       unsignedHash: transaction.unsignedHash,
@@ -338,43 +395,60 @@ async function dispatch(request: Request): Promise<unknown> {
     if (responseKey === undefined) throw new Error("caller is not initialised");
     const requestId = parseRequestIdHex(request.requestId);
     const serializedOutput = bytes(request.serializedOutput);
-    const response = await waitFor("a verified respondBidirectional entry", () =>
-      active.reader.getVerifiedRespondBidirectionalEvent(requestId, serializedOutput, responseKey),
-    );
+    const check =
+      serializedOutput.length === 0
+        ? pureCircuits.checkResponse0
+        : serializedOutput.length === 1
+          ? pureCircuits.checkResponse1
+          : serializedOutput.length === 8
+            ? pureCircuits.checkResponse8
+            : serializedOutput.length === 32
+              ? pureCircuits.checkResponse32
+              : undefined;
+    if (check === undefined) throw new Error(`unsupported output width ${serializedOutput.length}`);
+    const response = await waitFor("a verified respondBidirectional entry", async () => {
+      for (const candidate of await active.reader.getRespondBidirectionalEvents(requestId)) {
+        try {
+          if (
+            check(respondBidirectionalEventToCircuitInput(candidate), serializedOutput, responseKey)
+          )
+            return candidate;
+        } catch {
+          // Response logs are unauthenticated; skip malformed posts.
+        }
+      }
+      return undefined;
+    });
     const circuitInput = respondBidirectionalEventToCircuitInput(response);
     if (request.rejectPaddedReplay === true) {
       const padded = new Uint8Array(8);
       padded.set(serializedOutput);
-      const replay = await active.reader.getVerifiedRespondBidirectionalEvent(
-        requestId,
-        padded,
-        responseKey,
-      );
-      if (replay !== undefined) throw new Error("SDK accepted a zero-padded failure replay");
+      if (pureCircuits.checkResponse8({ ...circuitInput, outputKind: 0 }, padded, responseKey))
+        throw new Error("accepted a padded failure as an executed outcome");
       let rejected = false;
       try {
-        await active.caller.callTx.verifyResponse8(requestIdBytes(requestId), circuitInput, padded);
+        await active.caller.callTx.verifyResponse8({ ...circuitInput, outputKind: 0 }, padded);
       } catch (error) {
         if (!String(error).includes("Invalid attestation signature")) throw error;
         rejected = true;
       }
-      if (!rejected) throw new Error("Compact accepted a zero-padded failure replay");
+      if (!rejected) throw new Error("Compact accepted a padded failure as an executed outcome");
       if (!(await callerHasRequest(active, requestId)))
         throw new Error("replay consumed the pending request");
     }
     const verify =
-      serializedOutput.length === 1
-        ? active.caller.callTx.verifyResponse
-        : serializedOutput.length === 5
-          ? active.caller.callTx.verifyResponse5
+      serializedOutput.length === 0
+        ? active.caller.callTx.verifyResponse0
+        : serializedOutput.length === 1
+          ? active.caller.callTx.verifyResponse
           : serializedOutput.length === 8
             ? active.caller.callTx.verifyResponse8
             : serializedOutput.length === 32
               ? active.caller.callTx.verifyResponse32
               : undefined;
     if (verify === undefined)
-      throw new Error(`unsupported real-stack output width ${serializedOutput.length}`);
-    await verify(requestIdBytes(requestId), circuitInput, serializedOutput);
+      throw new Error(`unsupported output width ${serializedOutput.length}`);
+    await verify(circuitInput, serializedOutput);
     await waitFor("the caller request to be removed", async () =>
       (await callerHasRequest(active, requestId)) ? undefined : true,
     );

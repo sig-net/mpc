@@ -43,7 +43,8 @@ permissions:
   contents: read
 
 jobs:
-  loadtest:
+  load-test:
+    name: Bidirectional Load Test (${{ matrix.environment }})
     strategy:
       # Add an option above without adding it here and the run fails rather
       # than silently driving both. A schedule carries no inputs, hence ''.

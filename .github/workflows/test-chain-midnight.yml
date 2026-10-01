@@ -1,4 +1,4 @@
-name: Midnight Integration Tests
+name: Midnight Tests
 
 on:
   pull_request:
@@ -6,7 +6,7 @@ on:
   # Cache policy: docs/ci-caching.md
   push:
     branches: [develop]
-    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "rust-toolchain*", .github/workflows/midnight.yml]
+    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "rust-toolchain*", .github/workflows/test-chain-midnight.yml]
   workflow_dispatch:
 
 env:
@@ -14,7 +14,7 @@ env:
 
 jobs:
   midnight-real-stack:
-    name: Midnight Real Stack
+    name: Midnight Real-Stack Tests
     runs-on: warp-ubuntu-latest-x64-4x
     timeout-minutes: 90
 

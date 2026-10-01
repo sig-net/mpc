@@ -77,7 +77,7 @@ In addition to the prerequisites above, it requires:
 - Docker
 - [Node.js](https://nodejs.org/) 22.13 or newer
 - [cargo-near](https://github.com/near/cargo-near)
-- Compact launcher 0.5.1 with `compactc` 0.33.0-rc.2 available as `compact`; see the [Midnight CI workflow](../.github/workflows/midnight.yml) for the pinned Linux installation
+- Compact launcher 0.5.1 with `compactc` 0.33.0-rc.2 available as `compact`; see the [Midnight CI workflow](../.github/workflows/test-chain-midnight.yml) for the pinned Linux installation
 
 From the repository root, prepare the TypeScript publisher and test caller,
 then build the MPC contract and host node and run the ignored test:

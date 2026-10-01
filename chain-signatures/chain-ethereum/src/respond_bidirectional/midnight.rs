@@ -652,12 +652,13 @@ fn source_variant(value: &DynSolValue) -> &'static str {
 mod tests {
     use std::collections::HashMap;
 
-    use alloy::dyn_abi::{DynSolType, DynSolValue};
+    use alloy::dyn_abi::DynSolValue;
     use alloy::primitives::{Address, I256, U256};
+    use mpc_primitives::SerDeserFormat;
     use serde::Deserialize;
 
     use super::serialize;
-    use crate::respond_bidirectional::{AbiField, Output};
+    use crate::respond_bidirectional::{Output, TransactionOutput};
 
     const FIXTURE_ADDRESS: [u8; 20] = [
         0x8b, 0xa1, 0xf1, 0x09, 0x55, 0x1b, 0xd4, 0x32, 0x80, 0x30, 0x12, 0x64, 0x5a, 0xc1, 0x36,
@@ -699,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn replays_every_typescript_oracle_vector() {
+    fn replays_every_typescript_oracle_vector_through_production_decoder() {
         let fixture: OracleFixture = serde_json::from_str(include_str!(
             "../../tests/fixtures/midnight_respond_vectors.json"
         ))
@@ -707,30 +708,16 @@ mod tests {
         assert!(!fixture.vectors.is_empty());
 
         for vector in fixture.vectors {
-            let output_schema: Vec<AbiField> =
-                serde_json::from_slice(&hex::decode(&vector.output_schema_hex).unwrap()).unwrap();
+            let output_schema = hex::decode(&vector.output_schema_hex).unwrap();
             let respond_schema = hex::decode(&vector.respond_schema_hex).unwrap();
             let call_result = hex::decode(&vector.call_result_hex).unwrap();
-            let types = output_schema
-                .iter()
-                .map(|field| field.typ.parse())
-                .collect::<Result<Vec<DynSolType>, _>>()
-                .unwrap();
-            let DynSolValue::Tuple(values) = DynSolType::Tuple(types)
-                .abi_decode_params(&call_result)
-                .unwrap()
-            else {
-                panic!("{}: test setup did not decode a tuple", vector.name);
-            };
-            let output = Output {
-                fields: output_schema
-                    .into_iter()
-                    .zip(values)
-                    .map(|(field, value)| (field.name, value))
-                    .collect::<HashMap<_, _>>(),
-                from_contract_call: true,
-            };
-            let result = serialize(&output, &respond_schema);
+            let output = TransactionOutput::from_call_result(&output_schema, &call_result.into())
+                .unwrap_or_else(|error| {
+                    panic!("{}: ABI output decoding failed: {error:#}", vector.name)
+                });
+            let result = output
+                .output
+                .serialize(SerDeserFormat::Fab, &respond_schema);
 
             if vector.expected_reject == Some(true) {
                 assert!(

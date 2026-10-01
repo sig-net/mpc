@@ -62,12 +62,20 @@ export interface WireSignature {
   readonly recoveryId: 0 | 1;
 }
 
+export interface WireAttestation {
+  readonly blockHeight: string;
+  readonly outputKind: 0 | 1 | 2;
+  readonly serializedOutputLength: string;
+  readonly digest: string;
+}
+
 export interface BuildIntentInput {
   readonly circuit: RespondCircuit;
   readonly contractAddress: string;
   readonly requestId: string;
   /** SEC1 big-endian throughout; nothing here re-encodes. */
   readonly signature: WireSignature;
+  readonly attestation?: WireAttestation;
   readonly contractState: string;
   readonly ledgerParameters: string;
   readonly coinPublicKey: string;
@@ -134,7 +142,13 @@ export async function buildIntent(input: BuildIntentInput): Promise<Uint8Array> 
     ledgerParameters: LedgerParameters.deserialize(fromHex(input.ledgerParameters)),
   };
   const requestId = fromHex(input.requestId);
-  const event = { signature: signatureStruct(input.signature) };
+  const event = { requestId, signature: signatureStruct(input.signature) };
+  if ((input.circuit === "respondBidirectional") !== (input.attestation !== undefined)) {
+    throw new PublisherError(
+      "bad_request",
+      "attestation is required only for respondBidirectional",
+    );
+  }
   const layer = executionContext(input.coinPublicKey);
   const result =
     input.circuit === "respond"
@@ -143,7 +157,7 @@ export async function buildIntent(input: BuildIntentInput): Promise<Uint8Array> 
             .circuit(
               RESPOND_CIRCUIT_ID,
               context,
-              ...([requestId, event] satisfies CircuitArguments<"respond">),
+              ...([event] satisfies CircuitArguments<"respond">),
             )
             .pipe(Effect.provide(layer)),
         )
@@ -152,7 +166,15 @@ export async function buildIntent(input: BuildIntentInput): Promise<Uint8Array> 
             .circuit(
               RESPOND_BIDIRECTIONAL_CIRCUIT_ID,
               context,
-              ...([requestId, event] satisfies CircuitArguments<"respondBidirectional">),
+              ...([
+                {
+                  ...event,
+                  blockHeight: BigInt(input.attestation!.blockHeight),
+                  outputKind: input.attestation!.outputKind,
+                  serializedOutputLength: BigInt(input.attestation!.serializedOutputLength),
+                  digest: fromHex(input.attestation!.digest),
+                },
+              ] satisfies CircuitArguments<"respondBidirectional">),
             )
             .pipe(Effect.provide(layer)),
         );

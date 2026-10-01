@@ -348,7 +348,12 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync_task.run());
-            tokio::spawn(rpc_executor.run(contract_state_tx, config_tx.clone(), checkpoints_tx));
+            tokio::spawn(rpc_executor.run(
+                backlog.clone(),
+                contract_state_tx,
+                config_tx.clone(),
+                checkpoints_tx,
+            ));
 
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics().await;
