@@ -28,7 +28,7 @@ Organization:
 * *Application contract*: the contract a developer writes on the source
   chain. "The contract" below means this one.
 * *Library*: code we ship, embedded in the application contract. Everything
-  in Sections 4.1 and 4.2 runs inside the application contract's own
+  in Section 4.1 runs inside the application contract's own
   transactions and storage. A contract that bypasses the library is on its
   own.
 * *Signet contract*: our contract on the source chain, through which
@@ -72,7 +72,7 @@ Happy path:
   chain two requests have the same rid exactly when they agree on all four.
   One execution has one rid (Section 5).
 * *Admitted*: the MPC has found a request authentic and processable
-  (Section 4.4) and added it to its backlog. Only an admitted request is
+  (Section 4.3) and added it to its backlog. Only an admitted request is
   ever signed or attested.
 * *Publish*: to submit a signature or an attestation to the signet
   contract, which anyone may do. It is *published* once the event carrying
@@ -89,13 +89,13 @@ Happy path:
   Every outcome is final: once req.tx has executed or its replay protection is
   used up, no later block changes that. A transaction can become unviable in
   other ways on some chains, an expiry height or a timebound; the MPC detects
-  only the replay-protection case, and that one best-effort (Section 4.4).
+  only the replay-protection case, and that one best-effort (Section 4.3).
   An expired transaction goes unanswered, as does one nobody broadcasts.
 
   A transaction that succeeded but whose return data does not decode
   against req.schemas, because the schema is wrong or the destination
   contract changed its return type, has no outcome. The MPC reports
-  nothing, stops watching the request and logs why (Section 4.4). A node
+  nothing, stops watching the request and logs why (Section 4.3). A node
   cannot tell a wrong schema from a changed contract, and the contract
   could not act on bytes it cannot decode.
 * *Attestation key*: a signing key the MPC derives from its root key, the
@@ -275,7 +275,7 @@ migrations: a contract that keeps its key and loses `outstanding` and
 `last_seen` will accept a response to a request it already answered
 when a request with a rid used earlier is made again.
 It also relies on every published response eventually reaching `response`.
-Who delivers it is in Section 4.2 for Midnight and 4.3 elsewhere.
+Who delivers it is in Section 4.2.
 
 Properties:
 
@@ -287,58 +287,11 @@ Properties:
   height. Acceptance raises last_seen to at least that height.
 * C4 Entries are removed by acceptance only. No timers.
 
-### 4.2 Library on Midnight: inbox and processing
-
-Midnight has two programming languages, Compact and Impact.
-
-Compact generates a proof against a snapshot of the contract's state and
-fails at inclusion if any state it read has changed; it then issues Impact
-instructions to change the state of the ledger. Some of our circuits take
-30 seconds to prove. Section 4.1 reads last_seen on every request (C2) and
-writes it on every response (C3d), so a response landing while a request is
-being proven fails that request, and the contract handles at most one
-message per proving time.
-
-Impact runs on the tip of the chain and is a simple stack machine.
-
-To avoid this, ordering and processing are separated:
-
-First we put the request, or validated response, into the inbox/outbox, as
-a Compact call.
-
-We then issue Impact ops which stamp with and update the last seen on these
-requests/responses.
-
-```
-case message of
-    Request(rid, dest) =>
-        outstanding[rid].known <- copy last_seen[dest]
-    Response(rid, chain_id, height, outcome, sig) =>
-        last_seen[chain_id] <- max height last_seen[chain_id]
-```
-
-We then emit the sign_bidirectional request, or process the response.
-
-* A request is made, in the sense of C2, when it is processed rather than
-  enqueued, so its known height is last_seen at processing time. A Request
-  message carries the application's continuation, which runs then with the
-  return value of sign_bidirectional, Refused included: this is where a
-  Midnight caller learns of a refusal.
-
-What must hold is that every message enters through the inbox, is processed
-exactly once, and that `process` touches only the entries it deletes.
-
-Property:
-
-* C5 On Midnight, requests and responses are enqueued without touching
-  shared state and processed in one total order; C1 to C4 hold for the
-  processed sequence.
-
-### 4.3 Signet contract (per source chain)
+### 4.2 Signet contract (per source chain)
 
 It holds no per-application state, verifies nothing, and anyone may call
 it. It records the caller of `sign_bidirectional` as `contract` in the
-event it emits, which is all that `authentic` in Section 4.4 rests on. It
+event it emits, which is all that `authentic` in Section 4.3 rests on. It
 emits three events:
 
 * `SignRequest { contract, rid, req }`, when a contract asks for a
@@ -353,15 +306,7 @@ emits three events:
   directly, which is how a response is delivered where the signet contract
   cannot call it, and again after a failed handler.
 
-On Midnight, `SignRequest` is split in two. The application contract keeps
-the request in its own ledger, and the signet contract emits only a
-notification with the rid, the caller's address and where in the caller's
-ledger the request is stored; the MPC reads the request from there
-(Section 7). Midnight's signet contract also cannot see which contract
-called it, so there `authentic` rests on the MPC checking that the caller
-named in the notification is the contract that made the call.
-
-### 4.4 MPC network
+### 4.3 MPC network
 
 Written as if the network were one process; the real one is a threshold
 protocol whose result is what this process outputs, and Section 5 says what
@@ -486,7 +431,7 @@ Properties:
 
 ## 5. Why the guarantees hold (sketch)
 
-The sketches treat the MPC as one process, as Section 4.4 writes it. Three
+The sketches treat the MPC as one process, as Section 4.3 writes it. Three
 properties of the network make that legitimate. None is specific to this
 design. The network is n nodes, at most f < n/3 of them faulty, the rest
 correct, with a signing threshold t, f+1 <= t <= n - f.
@@ -572,7 +517,7 @@ a path from B48 through A15; the first at A12 has none.
   2. It is attested: no exception applies, so the signature is published
      and the return data decodes. Every correct node then holds the
      signature (agreement, above) and finds the execution by its
-     transaction ID (Section 4.4), whenever it started looking, and
+     transaction ID (Section 4.3), whenever it started looking, and
      correct nodes compute the same attestation and publish it (threshold
      and agreement, above).
   3. It is accepted: by C4 the entry is still outstanding unless a
@@ -602,10 +547,8 @@ a path from B48 through A15; the first at A12 has none.
   in flight, it leaves them unanswered. Nothing in a request names the
   function version, so a misconfigured node splits the network silently.
 * A failing `on_response`. The entry stays outstanding and the MPC has
-  closed the request (Section 4.4), so the re-delivery is anyone calling
-  `response` again. On Midnight a handler that always fails blocks every
-  `process` batch carrying its message, so `process` has to isolate
-  handler failures. Removing the entry before the handler runs is not an
+  closed the request (Section 4.3), so the re-delivery is anyone calling
+  `response` again. Removing the entry before the handler runs is not an
   alternative, since C3a would then drop the re-delivery.
 * A key version can be retired only once no entry that recorded it is
   outstanding, and an unanswered request is outstanding forever. Until
@@ -622,16 +565,16 @@ a path from B48 through A15; the first at A12 has none.
 
 ## 7. Canonical Protocol Structures
 
-The structures the library, the signet contract and the MPC agree on. 7.1
-to 7.4 are source-chain neutral: the fields, which of them each hash covers
-and the order it walks them, over an abstract hash `H` and encoding `E`.
-Each source chain binds `H` and `E` in its own SDK (7.5, Midnight).
+The structures the library, the signet contract and the MPC agree on. They
+are source-chain neutral: the fields, which of them each hash covers and
+the order it walks them, over an abstract hash `H` and encoding `E`. Each
+source chain binds `H` and `E` in its own SDK.
 
 Naming: the `V1` suffix marks the types a contract stores or the signet
 contract emits and the functions that hash, verify or construct them.
 Shared vocabulary (`RequestId`, `OutputKind`, `Signature`, the enums, the
-transaction parameter structures) carries none, nor does the self-versioned
-notification (7.5) or the signet contract's entry points.
+transaction parameter structures) carries none, nor do the signet
+contract's entry points.
 
 `OutputKind` and `HashDomain` are hashed by position. Their variant indices
 are permanent, and variants may only be appended.
@@ -880,18 +823,3 @@ For `failed` and `unviable`, the serialised output is empty. Whichever route
 supplies the bytes, they remain untrusted until the application contract's
 library recomputes the attestation digest and verifies the signature against
 the attestation key (Section 4.1). Incorrect or forged bytes fail verification.
-
-### 7.5 Midnight binding
-
-The Midnight binding of `H`, `E` and every declaration above is the
-`Signet` Compact module of the `@sig-net/midnight` SDK:
-[`packages/signet-midnight/src/Signet.compact`](https://github.com/sig-net/midnight-integration/blob/main/packages/signet-midnight/src/Signet.compact).
-
-On Midnight the signet contract cannot emit a structure whose type the
-caller chooses, so the application contract stores its
-`SignBidirectionalEventV1` in its own ledger and the signet contract emits
-only a notification per request: a version byte, the request id, and a
-128-byte payload. In version 1 the payload is the caller's address (32
-bytes), the depth of the ledger path to the caller's request index (1 to
-4), that path (4 bytes, only the first depth bytes used), and zero padding.
-The MPC reads the request from that index under the request id.
