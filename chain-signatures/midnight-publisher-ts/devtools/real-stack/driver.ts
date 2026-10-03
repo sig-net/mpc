@@ -64,7 +64,7 @@ interface SubmitRequest {
   nonce: string;
   target: string;
   argument: string;
-  outputType: "bool" | "uint64" | "bytes32";
+  outputType: "bool" | "uint256" | "bytes32";
 }
 
 interface SignedTransactionRequest {
@@ -116,6 +116,14 @@ const diagnostics = (...values: unknown[]) => {
 console.log = diagnostics;
 console.info = diagnostics;
 console.warn = diagnostics;
+
+function nulPadded(text: string, width: number): Uint8Array {
+  const encoded = new TextEncoder().encode(text);
+  if (encoded.length > width) throw new Error(`'${text}' exceeds ${String(width)} bytes`);
+  const padded = new Uint8Array(width);
+  padded.set(encoded);
+  return padded;
+}
 
 function bytes(hex: string, width?: number): Uint8Array {
   const bare = hex.replace(/^0x/i, "");
@@ -459,12 +467,10 @@ async function dispatch(request: Request): Promise<unknown> {
     1n,
     bytes(request.target, 20),
     bytes(request.argument, 32),
-    new TextEncoder().encode(
-      JSON.stringify([{ name: "success", type: request.outputType }]).padEnd(64, " "),
-    ),
-    new TextEncoder().encode(
-      JSON.stringify([{ name: "success", type: request.outputType }]).padEnd(64, " "),
-    ),
+    // The output schema must be canonical JSON NUL-padded to the field width, and the
+    // reserved respond schema stays empty.
+    nulPadded(JSON.stringify([{ name: "success", type: request.outputType }]), 64),
+    new Uint8Array(64),
   );
   return {};
 }

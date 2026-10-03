@@ -75,9 +75,9 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         ProviderBuilder::new().connect_http(ethereum.sandbox.external_http_endpoint.parse()?);
     for (nonce, output_type, expected_width, failed) in [
         (0, "bool", 1, false),
-        (1, "uint64", 8, false),
+        (1, "uint256", 32, false),
         (2, "bytes32", 32, false),
-        (3, "uint64", 0, true),
+        (3, "uint256", 0, true),
     ] {
         let target = Address::repeat_byte(0x42 + nonce as u8);
         anvil

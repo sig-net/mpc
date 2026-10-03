@@ -42,12 +42,10 @@ impl Output {
         format: SerDeserFormat,
         schema_json_bytes: &[u8],
     ) -> anyhow::Result<Vec<u8>> {
-        // FAB uses Midnight schema capacities and Compact layout, unlike the shared ABI/Borsh encoders.
-        // TODO: Extract FAB serialization when another execution target needs to respond to
-        // Midnight. See https://github.com/sig-net/mpc/issues/1196.
-        if format == SerDeserFormat::Fab {
-            return midnight::serialize(self, schema_json_bytes);
-        }
+        anyhow::ensure!(
+            format != SerDeserFormat::Fab,
+            "Midnight responses derive from the output schema; use build_serialized_output"
+        );
         let schema = parse_schema_fields(schema_json_bytes)?;
         let data_owned;
         let data = if self.is_contract_call() {
@@ -125,6 +123,9 @@ pub enum TraceOutput {
 /// calls may have no return data; in that case, this follows the existing
 /// plain-transfer behavior and synthesizes response defaults from
 /// `respond_serialization_schema` (for example, `bool true`).
+///
+/// Midnight (FAB) derives its encoding from the output schema alone and ignores
+/// `respond_serialization_schema`; plain transfers and void calls attest an empty output.
 pub fn build_serialized_output(
     is_contract_call: bool,
     output_deserialization_schema: &[u8],
@@ -132,6 +133,15 @@ pub fn build_serialized_output(
     respond_serialization_format: SerDeserFormat,
     respond_serialization_schema: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
+    // TODO: Extract FAB serialization when another execution target needs to respond to
+    // Midnight. See https://github.com/sig-net/mpc/issues/1196.
+    if respond_serialization_format == SerDeserFormat::Fab {
+        return midnight::executed_output(
+            is_contract_call,
+            output_deserialization_schema,
+            trace_output,
+        );
+    }
     let transaction_output = match OUTPUT_DESERIALIZATION_FORMAT {
         SerDeserFormat::Abi if is_contract_call => {
             let expects_no_output = output_schema_is_empty(output_deserialization_schema)?;
@@ -339,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn all_response_formats_share_evm_decode_acceptance() {
+    fn build_serialized_output_fab_rejects_output_types_midnight_cannot_carry() {
         let output_schema = br#"[{"name":"message","type":"string"}]"#;
         let trace = Bytes::from(
             DynSolValue::Tuple(vec![DynSolValue::String("hello".to_string())]).abi_encode_params(),
@@ -357,10 +367,12 @@ mod tests {
             output_schema,
             TraceOutput::Output(trace),
             SerDeserFormat::Fab,
-            br#"[{"name":"message","type":"string","maxBytes":32}]"#,
+            b"",
         );
 
-        assert_eq!(abi_result.is_ok(), fab_result.is_ok());
+        assert!(abi_result.is_ok());
+        let err = fab_result.expect_err("Midnight responses carry no string outputs");
+        assert!(format!("{err}").contains("unsupported ABI output types"));
     }
 
     #[test]
@@ -371,7 +383,7 @@ mod tests {
             bool_schema,
             TraceOutput::Output(abi_bool(true)),
             SerDeserFormat::Fab,
-            bool_schema,
+            b"",
         )
         .unwrap();
 
@@ -379,21 +391,30 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_non_contract_default_skips_output_schema() {
+    fn build_serialized_output_fab_plain_transfer_attests_empty_output() {
         let out = build_serialized_output(
             false,
-            b"not JSON",
+            b"[]",
             TraceOutput::NotTraced,
             SerDeserFormat::Fab,
             br#"[{"name":"ok","type":"bool"}]"#,
         )
         .unwrap();
+        assert!(out.is_empty());
 
-        assert_eq!(out, vec![1]);
+        let err = build_serialized_output(
+            false,
+            br#"[{"name":"ok","type":"bool"}]"#,
+            TraceOutput::NotTraced,
+            SerDeserFormat::Fab,
+            br#"[{"name":"ok","type":"bool"}]"#,
+        )
+        .expect_err("a plain transfer cannot fill a non-empty output schema");
+        assert!(format!("{err}").contains("plain transfer returns nothing"));
     }
 
     #[test]
-    fn build_serialized_output_fab_void_call_uses_default() {
+    fn build_serialized_output_fab_void_call_attests_empty_output() {
         let out = build_serialized_output(
             true,
             b"[]",
@@ -403,7 +424,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(out, vec![1]);
+        assert!(out.is_empty());
     }
 
     #[test]
