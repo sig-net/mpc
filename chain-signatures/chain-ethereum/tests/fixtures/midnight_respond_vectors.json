@@ -1,9 +1,8 @@
 {
   "oracle": {
-    "midnightIntegrationCommit": "119a1d50f85e4b306950bca7d3846e882aafc405",
     "midnightPackage": "@sig-net/midnight@0.24.0-rc.10",
     "serializerPackage": "@sig-net/midnight-serde@0.24.0-rc.10",
-    "ethers": "6.17.0",
+    "ethers": "ethers@6.17.0",
     "sweepSeed": 1592593157
   },
   "vectors": [
@@ -839,6 +838,15 @@
       "expectedReject": true
     },
     {
+      "name": "a leading NUL followed by a non-NUL byte is refused",
+      "outputSchemaHex": "005b5d",
+      "isContractCall": true,
+      "trace": {
+        "kind": "NoReturnData"
+      },
+      "expectedReject": true
+    },
+    {
       "name": "bool word 2 is refused",
       "outputSchemaHex": "5b7b226e616d65223a226f6b222c2274797065223a22626f6f6c227d5d",
       "isContractCall": true,
@@ -869,6 +877,16 @@
       "expectedReject": true
     },
     {
+      "name": "bytes4 dirty only at the first padding byte is refused",
+      "outputSchemaHex": "5b7b226e616d65223a22746167222c2274797065223a22627974657334227d5d",
+      "isContractCall": true,
+      "trace": {
+        "kind": "Output",
+        "returnDataHex": "1234567801000000000000000000000000000000000000000000000000000000"
+      },
+      "expectedReject": true
+    },
+    {
       "name": "bytes32 uses the whole word",
       "outputSchemaHex": "5b7b226e616d65223a22746167222c2274797065223a2262797465733332227d5d",
       "isContractCall": true,
@@ -895,6 +913,16 @@
       "trace": {
         "kind": "Output",
         "returnDataHex": "0100000000000000000000001111111111111111111111111111111111111111"
+      },
+      "expectedReject": true
+    },
+    {
+      "name": "an address dirty only at the last padding byte is refused",
+      "outputSchemaHex": "5b7b226e616d65223a22746f222c2274797065223a2261646472657373227d5d",
+      "isContractCall": true,
+      "trace": {
+        "kind": "Output",
+        "returnDataHex": "0000000000000000000000011111111111111111111111111111111111111111"
       },
       "expectedReject": true
     },

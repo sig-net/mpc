@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
   executedEvmRespondOutput,
   type EvmTraceOutput,
@@ -21,10 +21,9 @@ interface OracleVector {
 
 interface OracleFixture {
   oracle: {
-    midnightIntegrationCommit: "119a1d50f85e4b306950bca7d3846e882aafc405";
-    midnightPackage: "@sig-net/midnight@0.24.0-rc.10";
-    serializerPackage: "@sig-net/midnight-serde@0.24.0-rc.10";
-    ethers: "6.17.0";
+    midnightPackage: string;
+    serializerPackage: string;
+    ethers: string;
     sweepSeed: number;
   };
   vectors: OracleVector[];
@@ -44,6 +43,18 @@ interface Case {
 }
 
 const coder = AbiCoder.defaultAbiCoder();
+
+/**
+ * `name@version` of an installed package. The oracle alias has no nested dependencies, so
+ * it resolves the top-level serializer and ethers.
+ */
+const installedPackage = (directory: string): string => {
+  const manifest = JSON.parse(
+    readFileSync(new URL(`../node_modules/${directory}/package.json`, import.meta.url), "utf8"),
+  ) as { name: string; version: string };
+  return `${manifest.name}@${manifest.version}`;
+};
+
 const textEncoder = new TextEncoder();
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
 const fromHex = (value: string): Uint8Array =>
@@ -268,7 +279,13 @@ const handwritten: Case[] = [
   call("[ ] is refused", "[ ]", { kind: "NoReturnData" }),
   call("whitespace-only schema is refused", "  ", { kind: "NoReturnData" }),
   call("NEL-only schema is refused", "\u0085", { kind: "NoReturnData" }),
-  call("NBSP-only schema is refused", " ", { kind: "NoReturnData" }),
+  call("NBSP-only schema is refused", "\u00a0", { kind: "NoReturnData" }),
+  call(
+    "a leading NUL followed by a non-NUL byte is refused",
+    "",
+    { kind: "NoReturnData" },
+    concat(Uint8Array.of(0), schemaBytes("[]")),
+  ),
 
   // Canonical return data.
   call("bool word 2 is refused", fieldsJson(BOOL), output(word(2))),
@@ -281,6 +298,11 @@ const handwritten: Case[] = [
     "bytes4 dirty right padding is refused",
     fieldsJson([{ name: "tag", type: "bytes4" }]),
     output(`12345678${"00".repeat(27)}01`),
+  ),
+  call(
+    "bytes4 dirty only at the first padding byte is refused",
+    fieldsJson([{ name: "tag", type: "bytes4" }]),
+    output(`1234567801${"00".repeat(27)}`),
   ),
   call(
     "bytes32 uses the whole word",
@@ -296,6 +318,11 @@ const handwritten: Case[] = [
     "a single dirty address padding byte is refused",
     fieldsJson(ADDRESS),
     output(`01${"00".repeat(11)}${"11".repeat(20)}`),
+  ),
+  call(
+    "an address dirty only at the last padding byte is refused",
+    fieldsJson(ADDRESS),
+    output(`${"00".repeat(11)}01${"11".repeat(20)}`),
   ),
   call("uint256 accepts any word", fieldsJson(UINT), output("ff".repeat(32))),
   call(
@@ -442,10 +469,9 @@ if (accepted === 0 || accepted === vectors.length) {
 
 const fixture: OracleFixture = {
   oracle: {
-    midnightIntegrationCommit: "119a1d50f85e4b306950bca7d3846e882aafc405",
-    midnightPackage: "@sig-net/midnight@0.24.0-rc.10",
-    serializerPackage: "@sig-net/midnight-serde@0.24.0-rc.10",
-    ethers: "6.17.0",
+    midnightPackage: installedPackage("@sig-net/midnight-respond-oracle"),
+    serializerPackage: installedPackage("@sig-net/midnight-serde"),
+    ethers: installedPackage("ethers"),
     sweepSeed: SWEEP_SEED,
   },
   vectors,

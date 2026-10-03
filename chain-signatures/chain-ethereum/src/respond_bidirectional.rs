@@ -42,10 +42,13 @@ impl Output {
         format: SerDeserFormat,
         schema_json_bytes: &[u8],
     ) -> anyhow::Result<Vec<u8>> {
-        anyhow::ensure!(
-            format != SerDeserFormat::Fab,
-            "Midnight responses derive from the output schema; use build_serialized_output"
-        );
+        let encode: fn(&Output, &[AbiField]) -> anyhow::Result<Vec<u8>> = match format {
+            SerDeserFormat::Abi => encode_abi,
+            SerDeserFormat::Borsh => encode_borsh,
+            SerDeserFormat::Fab => anyhow::bail!(
+                "Midnight responses derive from the output schema; use build_serialized_output"
+            ),
+        };
         let schema = parse_schema_fields(schema_json_bytes)?;
         let data_owned;
         let data = if self.is_contract_call() {
@@ -54,11 +57,7 @@ impl Output {
             data_owned = default_output_for_non_contract_call(&schema)?;
             &data_owned
         };
-        match format {
-            SerDeserFormat::Abi => encode_abi(data, &schema),
-            SerDeserFormat::Borsh => encode_borsh(data, &schema),
-            SerDeserFormat::Fab => unreachable!(),
-        }
+        encode(data, &schema)
     }
 }
 
