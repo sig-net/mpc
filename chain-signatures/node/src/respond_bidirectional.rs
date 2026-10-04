@@ -216,6 +216,7 @@ fn calculate_respond_bidirectional_hash_message_for_chain(
             request_id,
             serialized_output,
         )),
+        Chain::Tron => anyhow::bail!("Tron is not a supported source chain"),
     }
 }
 
