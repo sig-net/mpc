@@ -104,8 +104,10 @@ mod tests {
     #[test]
     fn debug_redacts_the_api_key() {
         let key = "secret-trongrid-key";
-        let mut config = TronConfig::default();
-        config.api_key = Some(key.to_string());
+        let config = TronConfig {
+            api_key: Some(key.to_string()),
+            ..TronConfig::default()
+        };
 
         let rendered = format!("{config:?}");
         assert!(
