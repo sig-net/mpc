@@ -35,7 +35,7 @@ impl Default for TronConfig {
     }
 }
 
-/// Custom `Debug` implementation that redacts the `api_key` field 
+/// Custom `Debug` implementation that redacts the `api_key` field
 impl fmt::Debug for TronConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TronConfig")
