@@ -492,7 +492,7 @@ mod tests {
         let tx_id = test_hash(9);
         let usdt_topic = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
         let data_hex = "00000000000000000000000000000000000000000000000000000000001e8480";
-        // Log address is the 20-byte EVM form. 
+        // Log address is the 20-byte EVM form.
         // The 21-byte 0x41-prefixed form stays tolerated.
         server
             .mock("POST", "/walletsolidity/gettransactioninfobyid")
