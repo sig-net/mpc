@@ -35,7 +35,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
-mod delay_monitor;
 mod limiter;
 mod mailbox;
 mod metrics;
@@ -44,7 +43,6 @@ mod posit;
 mod state;
 mod task;
 
-use delay_monitor::DelayMonitor;
 use limiter::SignLimiter;
 use task::SignTask;
 
@@ -126,6 +124,45 @@ struct SignEntry {
     entry: backlog::SignEntry<Generating>,
     is_proposer: Arc<AtomicBool>,
     round: Arc<AtomicUsize>,
+    /// Fires the delayed metric once the chain's expected response time
+    /// passes; cancelled with the entry.
+    delay_watch: Option<JoinHandle<()>>,
+}
+
+impl Drop for SignEntry {
+    fn drop(&mut self) {
+        if let Some(watch) = &self.delay_watch {
+            watch.abort();
+        }
+    }
+}
+
+/// Logs and, if this node is the proposer by then, counts the request as
+/// delayed once `remaining` has passed.
+fn watch_delay(
+    sign_id: SignId,
+    chain: Chain,
+    kind: RequestKind,
+    unix_timestamp_indexed: u64,
+    remaining: Duration,
+    is_proposer: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(remaining).await;
+        tracing::warn!(
+            ?sign_id,
+            ?chain,
+            kind = kind.as_str(),
+            elapsed_secs = unix_elapsed(unix_timestamp_indexed).as_secs(),
+            expected_secs = chain.expected_response_time_secs(),
+            "signature request delayed beyond expected response time"
+        );
+        if is_proposer.load(Ordering::Relaxed) {
+            crate::metrics::requests::SIGN_REQUEST_DELAYED
+                .with_label_values(&[chain.as_str(), kind.as_str()])
+                .inc();
+        }
+    })
 }
 
 /// Router and lifecycle owner for all in-flight sign tasks: one task per
@@ -141,7 +178,6 @@ pub struct SignatureSpawner {
     /// task spawns.
     posit_mailboxes: HashMap<SignId, Arc<PositMailbox>>,
     /// Monitor alerting when signature requests exceed their expected response time.
-    delay_monitor: DelayMonitor,
     /// In-flight requests: enables chain-scoped abort and respawning.
     requests: HashMap<SignId, SignEntry>,
     /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan mailboxes.
@@ -173,7 +209,6 @@ impl SignatureSpawner {
             presignatures,
             tasks: JoinMap::new(),
             posit_mailboxes: HashMap::new(),
-            delay_monitor: DelayMonitor::spawn(),
             requests: HashMap::new(),
             dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             mesh_state,
@@ -204,14 +239,6 @@ impl SignatureSpawner {
         let is_proposer = Arc::new(AtomicBool::new(false));
         let chain = entry.chain();
         let request = Arc::clone(entry.request());
-        self.requests.insert(
-            sign_id,
-            SignEntry {
-                entry,
-                is_proposer: Arc::clone(&is_proposer),
-                round: Arc::new(AtomicUsize::new(0)),
-            },
-        );
 
         // Watcher that increments the delayed metric if not completed within the expected response time.
         let unix_timestamp_indexed = request.unix_timestamp_indexed;
@@ -219,13 +246,30 @@ impl SignatureSpawner {
         let already_elapsed = unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
-        self.delay_monitor.watch(
+        let delay_watch = if remaining_time > Duration::ZERO {
+            Some(watch_delay(
+                sign_id,
+                chain,
+                request.request_kind(),
+                unix_timestamp_indexed,
+                remaining_time,
+                Arc::clone(&is_proposer),
+            ))
+        } else {
+            tracing::warn!(
+                ?sign_id,
+                "sign request admitted past its expected response time"
+            );
+            None
+        };
+        self.requests.insert(
             sign_id,
-            chain,
-            request.request_kind(),
-            unix_timestamp_indexed,
-            remaining_time,
-            Arc::clone(&is_proposer),
+            SignEntry {
+                entry,
+                is_proposer,
+                round: Arc::new(AtomicUsize::new(0)),
+                delay_watch,
+            },
         );
 
         if !governance.is_running {
@@ -380,8 +424,8 @@ impl SignatureSpawner {
     }
 
     /// Common teardown when a sign request ends: abort its task if one is still
-    /// running, mark the id dead, forget the request, drop its mailbox and
-    /// unwatch its delay monitoring. Returns whether a task was aborted.
+    /// running, mark the id dead, forget the request (which cancels its delay
+    /// watch) and drop its mailbox. Returns whether a task was aborted.
     fn retire_task(&mut self, sign_id: SignId, reason: &'static str) -> bool {
         self.mark_dead(sign_id);
         self.drop_task(sign_id, reason)
@@ -391,9 +435,10 @@ impl SignatureSpawner {
     /// request carrying it is admitted instead of skipped as a duplicate.
     fn drop_task(&mut self, sign_id: SignId, reason: &'static str) -> bool {
         let aborted = self.tasks.abort(sign_id);
-        self.requests.remove(&sign_id);
+        if self.requests.remove(&sign_id).is_some() {
+            tracing::info!(?sign_id, %reason, "dropped sign request");
+        }
         self.posit_mailboxes.remove(&sign_id);
-        self.delay_monitor.unwatch(sign_id, reason);
         aborted
     }
 
@@ -606,6 +651,41 @@ mod tests {
     use deadpool_redis::Runtime;
     use tokio::sync::Notify;
 
+    /// Only a proposer past the deadline is counted; cancelling the watch
+    /// before then counts nothing.
+    #[tokio::test(start_paused = true)]
+    async fn delay_watch_counts_only_a_proposer_past_the_deadline() {
+        let chain = Chain::Ethereum;
+        let kind = RequestKind::Sign;
+        let delayed = || {
+            crate::metrics::requests::SIGN_REQUEST_DELAYED
+                .with_label_values(&[chain.as_str(), kind.as_str()])
+                .get() as u64
+        };
+        let before = delayed();
+        let sign_id = SignId::new([1u8; 32]);
+        let remaining = Duration::from_millis(20);
+
+        let proposer = Arc::new(AtomicBool::new(true));
+        let watch = watch_delay(sign_id, chain, kind, 0, remaining, Arc::clone(&proposer));
+        tokio::time::advance(Duration::from_millis(5)).await;
+        assert_eq!(delayed() - before, 0, "nothing before the deadline");
+        watch.await.unwrap();
+        assert_eq!(delayed() - before, 1, "proposer past the deadline");
+
+        let deliberator = Arc::new(AtomicBool::new(false));
+        watch_delay(sign_id, chain, kind, 0, remaining, deliberator)
+            .await
+            .unwrap();
+        assert_eq!(delayed() - before, 1, "a deliberator is not counted");
+
+        let watch = watch_delay(sign_id, chain, kind, 0, remaining, proposer);
+        watch.abort();
+        let _ = watch.await;
+        tokio::time::advance(remaining * 2).await;
+        assert_eq!(delayed() - before, 1, "a cancelled watch is not counted");
+    }
+
     #[tokio::test]
     async fn test_abort_chain_dead_ids_lifecycle() {
         let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
@@ -667,6 +747,7 @@ mod tests {
                 entry,
                 is_proposer: Arc::new(AtomicBool::new(false)),
                 round: Arc::new(AtomicUsize::new(0)),
+                delay_watch: None,
             },
         );
         spawner.tasks.spawn(probe_id, async move {
