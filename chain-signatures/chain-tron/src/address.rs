@@ -1,12 +1,11 @@
-//! Address forms at the Tron boundary.
-//!
-//! - Wallet/RPC boundary: 21-byte `0x41 ‖ eth20`, rendered base58check (`T…`).
-//! - Inside the TVM and in receipt logs: plain 20-byte EVM form.
+//! Address forms at the Tron boundary: 21-byte `0x41 ‖ eth20` base58check
+//! (`T…`) at the wallet/RPC boundary, plain 20-byte EVM inside the TVM.
 
 use std::fmt;
 use std::str::FromStr;
 
 use alloy::primitives::Address;
+use anyhow::{anyhow, Context};
 use sha2::{Digest, Sha256};
 
 /// Byte prepended to the 20-byte EVM form on Tron mainnet.
@@ -91,6 +90,21 @@ pub enum ParseTronAddressError {
     Checksum,
     #[error("expected 0x41 address prefix, got {0:#04x}")]
     Prefix(u8),
+}
+
+/// Parses a hex address as emitted in Tron JSON: either the plain 20-byte
+/// EVM form or the 21-byte `0x41`-prefixed wallet form.
+pub fn parse_hex(s: &str) -> anyhow::Result<Address> {
+    let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
+    .with_context(|| format!("decoding hex address {s}"))?;
+match bytes.len() {
+    20 => Ok(Address::from_slice(&bytes)),
+    21 if bytes[0] == TRON_ADDRESS_PREFIX => Ok(Address::from_slice(&bytes[1..])),
+    _ => Err(anyhow!(
+        "hex address must be 20 bytes or 0x41-prefixed 21 bytes, got {} bytes",
+        bytes.len()
+    )),
+}
 }
 
 /// Computes the base58check checksum for a given payload.
@@ -181,5 +195,26 @@ mod tests {
         // 0, O, I, l are excluded from the base58 alphabet.
         let err = "0OIl".parse::<TronAddress>().unwrap_err();
         assert!(matches!(err, ParseTronAddressError::Base58(_)));
+    }
+
+    #[test]
+    fn hex_forms_normalize_to_evm() {
+        let usdt = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+            .parse::<TronAddress>()
+            .unwrap();
+        let evm = usdt.to_evm();
+        assert_eq!(
+            parse_hex("41a614f803b6fd780986a42c78ec9c7f77e6ded13c").unwrap(),
+            evm
+        );
+        assert_eq!(
+            parse_hex("a614f803b6fd780986a42c78ec9c7f77e6ded13c").unwrap(),
+            evm
+        );
+        assert_eq!(
+            parse_hex("0xa614f803b6fd780986a42c78ec9c7f77e6ded13c").unwrap(),
+            evm
+        );
+        assert!(parse_hex("a614f803b6fd78098").is_err());
     }
 }
