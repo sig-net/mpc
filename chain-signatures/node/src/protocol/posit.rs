@@ -47,7 +47,7 @@ impl<S> Positor<PositCounter<S>> {
 }
 
 /// All actions that can be taken when a new posit is introduced for a protocol.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PositAction {
     Propose,
     Start(Vec<Participant>),
@@ -86,16 +86,42 @@ pub enum PositInternalAction<S> {
 }
 
 /// A counter for a posit. This is used to track the participants that have
-/// accepted the posit alongside storing an intermediary state for the protocol
-/// that the proposer needs to keep track of.
+/// accepted or rejected the posit alongside storing an intermediary state for
+/// the protocol that the proposer needs to keep track of.
 pub struct PositCounter<S> {
-    pub participants: HashSet<Participant>,
+    participants: HashSet<Participant>,
     accepts: HashSet<Participant>,
-    rejects: HashSet<Participant>,
+    /// Who rejected and why; kept ordered so logs render deterministically.
+    rejects: BTreeMap<Participant, PositRejectReason>,
     store: S,
 }
 
-impl<T> PositCounter<T> {
+impl<S> PositCounter<S> {
+    /// Count votes for a posit `me` proposes to `participants`. `me` counts
+    /// as accepted.
+    pub fn new(me: Participant, participants: &[Participant], store: S) -> Self {
+        let mut accepts = HashSet::new();
+        accepts.insert(me);
+        Self {
+            participants: participants.iter().copied().collect(),
+            accepts,
+            rejects: BTreeMap::new(),
+            store,
+        }
+    }
+
+    pub fn accepts(&self) -> &HashSet<Participant> {
+        &self.accepts
+    }
+
+    pub fn rejects(&self) -> &BTreeMap<Participant, PositRejectReason> {
+        &self.rejects
+    }
+
+    pub fn into_accepts(self) -> Vec<Participant> {
+        self.accepts.into_iter().collect()
+    }
+
     pub fn enough_accepts(&self, threshold: usize) -> bool {
         self.accepts.len() >= threshold
     }
@@ -106,6 +132,30 @@ impl<T> PositCounter<T> {
 
     pub fn meets_totality(&self) -> bool {
         self.accepts.len() + self.rejects.len() == self.participants.len()
+    }
+
+    /// Peers whose reject says they never stored the artifact, which is proof
+    /// our holder list for it is stale. Ordered by participant.
+    pub fn missing_artifact_rejectors(&self) -> impl Iterator<Item = Participant> + '_ {
+        self.rejects
+            .iter()
+            .filter(|(_, reason)| matches!(reason, PositRejectReason::MissingArtifact))
+            .map(|(peer, _)| *peer)
+    }
+
+    /// Record `from`'s vote. `None` when `from` is not a participant or the
+    /// action is not a vote; otherwise whether the vote was new.
+    pub fn process_action(&mut self, from: Participant, action: &PositAction) -> Option<bool> {
+        if !self.participants.contains(&from) {
+            return None;
+        }
+        match action {
+            PositAction::Accept => Some(self.accepts.insert(from)),
+            PositAction::RejectWithReason(reason) => {
+                Some(self.rejects.insert(from, *reason).is_none())
+            }
+            _ => None,
+        }
     }
 }
 
@@ -139,17 +189,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
             }
         };
 
-        let mut accepts = HashSet::new();
-        accepts.insert(self.me);
-        let positor = Positor::Proposer(
-            self.me,
-            PositCounter {
-                participants: participants.iter().copied().collect(),
-                accepts,
-                rejects: HashSet::new(),
-                store,
-            },
-        );
+        let positor = Positor::Proposer(self.me, PositCounter::new(self.me, participants, store));
         let timestamp = Instant::now();
         entry.insert((positor, timestamp));
         true
@@ -279,26 +319,20 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                     return PositInternalAction::None;
                 };
 
-                if !counter.participants.contains(&from) {
-                    tracing::warn!(
-                        ?id,
-                        ?from,
-                        ?action,
-                        "received ACCEPT/REJECT from participant not in protocol",
-                    );
-                    return PositInternalAction::None;
-                }
-
-                if action.is_accept() {
-                    if counter.accepts.insert(from) {
-                        tracing::info!(?id, ?from, "posit ACCEPT processed");
-                    } else {
-                        tracing::warn!(?id, ?from, "posit ACCEPT duplicate ignored");
+                match counter.process_action(from, action) {
+                    None => {
+                        tracing::warn!(
+                            ?id,
+                            ?from,
+                            ?action,
+                            "received ACCEPT/REJECT from participant not in protocol",
+                        );
+                        return PositInternalAction::None;
                     }
-                } else if counter.rejects.insert(from) {
-                    tracing::info!(?id, ?from, "posit REJECT processed");
-                } else {
-                    tracing::warn!(?id, ?from, "posit REJECT duplicate ignored");
+                    Some(true) => tracing::info!(?id, ?from, ?action, "posit vote processed"),
+                    Some(false) => {
+                        tracing::warn!(?id, ?from, ?action, "posit vote duplicate ignored")
+                    }
                 }
 
                 // TODO: broadcast aborting the protocol if we have enough rejections
@@ -433,64 +467,6 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
             );
         }
         actions
-    }
-}
-
-/// A single posit counter that tracks participants accepting/rejecting a proposal.
-/// This is used by individual signature tasks instead of the global Posits mapping.
-pub struct SinglePositCounter {
-    participants: HashSet<Participant>,
-    /// Who rejected and why; kept ordered so logs render deterministically.
-    pub rejects: BTreeMap<Participant, PositRejectReason>,
-    pub accepts: HashSet<Participant>,
-}
-
-impl SinglePositCounter {
-    pub fn new(me: Participant, participants: &[Participant]) -> Self {
-        let mut accepts = HashSet::new();
-        accepts.insert(me);
-        Self {
-            participants: participants.iter().copied().collect(),
-            rejects: BTreeMap::new(),
-            accepts,
-        }
-    }
-
-    pub fn enough_accepts(&self, threshold: usize) -> bool {
-        self.accepts.len() >= threshold
-    }
-
-    pub fn enough_rejects(&self, threshold: usize) -> bool {
-        self.rejects.len() > self.participants.len() - threshold
-    }
-
-    pub fn meets_totality(&self) -> bool {
-        self.accepts.len() + self.rejects.len() == self.participants.len()
-    }
-
-    /// Peers whose reject says they never stored the artifact, which is proof
-    /// our holder list for it is stale. Ordered by participant.
-    pub fn missing_artifact_rejectors(&self) -> impl Iterator<Item = Participant> + '_ {
-        self.rejects
-            .iter()
-            .filter(|(_, reason)| matches!(reason, PositRejectReason::MissingArtifact))
-            .map(|(peer, _)| *peer)
-    }
-
-    pub fn process_action(&mut self, from: Participant, action: &PositAction) -> bool {
-        if !self.participants.contains(&from) {
-            return false;
-        }
-        match action {
-            PositAction::Accept => {
-                self.accepts.insert(from);
-            }
-            PositAction::RejectWithReason(reason) => {
-                self.rejects.insert(from, *reason);
-            }
-            _ => return false,
-        }
-        true
     }
 }
 
