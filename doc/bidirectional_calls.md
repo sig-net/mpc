@@ -18,6 +18,7 @@ Organization:
 * Section 4 describes the library, signet contract and MPC nodes.
 * Section 5 argues that Section 4 delivers Section 3.
 * Section 6 collects notes: limits of the design and what is still open.
+* Section 7 gives the canonical structures on the wire.
 
 ## 1. Entities and happy path
 
@@ -60,11 +61,12 @@ Happy path:
   signature gives a different transaction ID. Replay
   protection (Section 3.3) lets at most one of them execute, and all of
   them belong to the same request.
-* *Request*: what the contract asks for, the tuple (tx, dest, key, schemas):
+* *Request*: what the contract asks for, the tuple (tx, dest, key, schema):
   the transaction, its destination chain, the key parameters to sign it
-  with (a derivation path, key version and signing scheme), and the schemas
-  for decoding its output and encoding the response. Written `req`, with
-  fields `req.tx`, `req.dest`, `req.key` and `req.schemas`. A request is
+  with (a derivation path, key version and signing scheme), and the schema
+  of its output. The MPC decodes the output with that schema and encodes
+  the response from it, in the source chain's types. Written `req`, with
+  fields `req.tx`, `req.dest`, `req.key` and `req.schema`. A request is
   *made* when the contract passes it to `sign_bidirectional` (Section 3.1).
   The same tuple can be made again, and then it is the same request.
 * *Request ID*: rid(contract, req.tx, req.dest, req.key), a collision-
@@ -81,7 +83,7 @@ Happy path:
 
   | kind | what happened to req.tx | data |
   |---|---|---|
-  | Executed | included in a final destination block, succeeded, and its return data decodes against req.schemas | the decoded return data |
+  | Executed | included in a final destination block, succeeded, and its return data decodes against req.schema | the decoded return data |
   | Failed | included in a final destination block and reverted | empty |
   | Unviable | can never be included, because a transaction whose unsigned bytes are not req.tx, from the same key, has already used up req.tx's replay protection (Section 3.3) | empty |
 
@@ -89,11 +91,11 @@ Happy path:
   Every outcome is final: once req.tx has executed or its replay protection is
   used up, no later block changes that. A transaction can become unviable in
   other ways on some chains, an expiry height or a timebound; the MPC reports
-  only the replay-protection case (Section 4.3).
+  only the replay-protection case.
   An expired transaction goes unanswered, as does one nobody broadcasts.
 
   A transaction that succeeded but whose return data does not decode
-  against req.schemas, because the schema is wrong or the destination
+  against req.schema, because the schema is wrong or the destination
   contract changed its return type, has no outcome. The MPC reports
   nothing, stops watching the request and logs why (Section 4.3). A node
   cannot tell a wrong schema from a changed contract, and the contract
@@ -124,7 +126,8 @@ How a request ends, as seen by the application contract:
   3.1). A response the library does not accept is dropped without a trace:
   there is no rejected ending, and the contract is not told.
 * *Unanswered*: no response is ever accepted, because none is ever
-  published (the transaction never executes, its output does not decode,
+  published (the transaction neither executes nor becomes Unviable, its
+  output does not decode,
   or the MPC did not admit the request) or because every published one is
   dropped.
 
@@ -136,7 +139,7 @@ arrived yet.
 
 A request with the rid of an outstanding one is refused (Section 4.1),
 whether it is the same request made again or one that differs in its
-schemas only. A retry needs a different transaction. Once a request was
+schema only. A retry needs a different transaction. Once a request was
 answered, the application must not make one with its rid again. The
 library cannot refuse it without remembering every answered rid, and it
 is never answered: its execution happens-before the second making, so the
@@ -165,7 +168,7 @@ sign_bidirectional(
     transaction: SerializedTransaction,
     destination: ChainId,
     key:         (DerivationPath, KeyVersion, SigningScheme),
-    schemas:     (OutputDeserialization, ResponseSerialization),
+    schema:      OutputSchema,
 ) -> RequestId | Refused
 // the four arguments together are the request, written req below
 
@@ -181,29 +184,43 @@ The application configures the library with its attestation public key
 G1 to G3 are safety, G4 and G5 are liveness. G2 and G4 together give
 "exactly one accepted response per request that G4 covers".
 
-* G1 Causal order: an accepted response to req reports destination state
-  that does not happen-before req was made.
-* G2 At-most-once: for each execution, at most one response reporting it
-  as the outcome of its own transaction is ever accepted, however often its
-  request is made and however often it is attested. All attestations of one
-  execution carry one rid, so this is a statement about that rid.
-* G3 Integrity and finality: an accepted response to req carries the true,
-  final outcome of req.tx, never of another transaction.
-* G4 Delivery: if req.tx is included in a final destination block after req
-  was made, a response to req is eventually accepted unless (i) the return
-  data does not decode against req.schemas, (ii) the transaction's ID
-  depends on its signature and that signature is never published, or
-  (iii) the response handler fails.
-* G5 Unviable: if another request's transaction uses up req.tx's replay
-  protection after req was made, and that request is answered Executed or
-  Failed, a response to req saying Unviable is eventually accepted, unless
-  the response handler fails.
+* G1 Causal order. The answer to a request is always about something newer
+  than everything you had been told when you made it. Precisely: an
+  accepted response to req reports destination state that does not
+  happen-before req was made.
+* G2 At most once. The result of each execution is reported to you at most
+  once. Precisely: for each execution, at most one response reporting it
+  as the outcome of its own transaction is ever accepted, however often
+  its request is made and however often it is attested. All such
+  attestations carry one rid, so this is a statement about that rid.
+* G3 Integrity and finality. What you are told is true, final, and about
+  your transaction. Precisely: an accepted response to req carries the
+  true, final outcome of req.tx, never of another transaction.
+* G4 Delivery. If your transaction runs, you are told, as long as your
+  schema fits its output and your handler does not fail. One rare
+  fault on the MPC side can also leave a request unanswered, and anyone
+  can repair it. Precisely: if req.tx is included in a final destination
+  block after req was made, a response to req is eventually accepted
+  unless (i) the return data does not decode against req.schema, (ii) the
+  response handler fails, or (iii) the transaction's ID depends on its
+  signature and that signature is never published.
+* G5 Unviable. If another of your requests takes this one's place and is
+  answered, you are told that this one can never run. Precisely: suppose
+  the transaction of another request has the same replay protection as
+  req.tx on the same destination chain, the same account and nonce on EVM
+  for instance. If it is included after req was made and that request is
+  answered Executed or Failed, a response to req saying Unviable is
+  eventually accepted, unless the response handler fails or that answer
+  cannot be checked (Section 6).
 
-Exception G4 (ii) concerns destinations like EVM, where a transaction can
-only be looked up once its signature is known. The signature stays
-unknown if every correct node that signed loses it before publishing it,
-or if a faulty node keeps it to itself. The fix is simple: the executed
-transaction carries its signature, and anyone can publish it (Section 6).
+G4's exceptions (i) and (ii) are in the application's hands: a schema that
+does not match what the destination contract returns, and a handler that
+fails. Exception (iii) is not. It concerns destinations like EVM, where a
+transaction can only be looked up once its signature is known. The
+signature stays unknown if every correct node that signed loses it before
+publishing it, or if a faulty node keeps it to itself. The fix is simple:
+the executed transaction carries its signature, and anyone can publish it
+(Section 6).
 
 Beyond G5, nothing is promised for a transaction that never executes, for
 a request the MPC does not admit, or for a request made again after its
@@ -360,7 +377,8 @@ processable(req): bool
     req.tx is non-empty, parses as an unsigned transaction in dest's
       format, commits to dest (EVM: carries its chain id), and attaching
       any signature yields a well-formed signed transaction
-    req.schemas are valid for dest and source chain respectively
+    req.schema is well formed: it is empty, or it parses and names only
+      types the MPC can decode from dest and encode for the source chain
 
 on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
@@ -372,8 +390,12 @@ on destination block at height h finalised on chain dest:
     for (rid, e) in backlog for dest and no local[rid].outcome:
         ours = { txid(s, e.req.tx)
                  for s in e.signatures + local[rid].issued }
-        if some id in ours has receipt r in a final block at height h',  // M3
-            if decode(r, e.req.schemas) gives (kind, data):
+        if some id in ours has receipt r in a final block at height h':  // M3
+            for (rid', e') in backlog for dest, other than rid, with e's
+              account and e.req.tx's replay protection, and no
+              local[rid'].outcome:
+                attest(rid', (h', Unviable, empty))             // M4
+            if decode(r, e.req.schema) gives (kind, data):
                 attest(rid, (h', kind, data))
             else:
                 local[rid].outcome = Parked, log why        // M3
@@ -393,8 +415,9 @@ on Response { contract, rid, att, sig } finalised on the source chain:
     if e and sig verifies over attestationDigest(rid, att)
       under attestation_key(e.contract, e.req.key.key_version):
         if att.kind is Executed or Failed:        // e.req.tx was included
-            for (rid', e') in backlog, other than rid, with e's account
-              and e.req.tx's replay protection, and no local[rid'].outcome:
+            for (rid', e') in backlog for e.req.dest, other than rid,
+              with e's account and e.req.tx's replay protection, and no
+              local[rid'].outcome:
                 attest(rid', (att.height, Unviable, empty))     // M4
         delete backlog[rid], local[rid]
 ```
@@ -414,20 +437,20 @@ starts looking late still finds it. A node holds the signatures published
 for the request and those it took part in producing. An execution under a
 signature it does not hold is not found (see Section 6 for alternatives).
 
-Unviable follows from the answer to another request. Only the network can
-send from a request's account, so a transaction from that account always
-belongs to some request. When a `Response` says that one of them was
-included, every other request waiting on the same replay protection can
-never execute, and the MPC attests Unviable for each, at the height in
-that response. All correct nodes read the same `Response`, so they agree.
-A node that is behind notes the outcome and attests once caught up.
+When the transaction of one request is included, every other request
+waiting on the same account and replay protection can never execute, and
+the MPC attests Unviable for each, at that transaction's height. A node
+learns of it in one of two ways: it finds the execution itself, or it reads the
+`Response` that reports it. The second reaches every node that reads the
+source chain. A node that is behind notes the outcome and attests once
+caught up.
 
 A repeated attestation has the same content (Section 5) and is dropped
 (C3a).
 
-A node has to be able to check a `Response` from the event alone, since it
-removes the request on every node, so the event has to carry what the
-attestation digest is computed from (Section 7).
+A node has to be able to check a `Response` from the event alone, since a
+`Response` removes the request on every node. The event of Section 7 allows that
+only when the output is empty; Section 6 says what is missing.
 
 Properties:
 
@@ -447,10 +470,11 @@ Properties:
   that account. If the transaction succeeded but its return data does not
   decode, the MPC attests nothing, and the entry stays in the backlog,
   parked and unwatched.
-* M4 The MPC attests Unviable for a request if and only if another
-  request, from the same account and with the same replay protection, was
-  answered Executed or Failed. That answer shows that a different
-  transaction used up req.tx's replay protection, and at which height.
+* M4 The MPC attests Unviable for a request only when another request's
+  transaction, from the same account, on the same destination chain and
+  with the same replay protection, was included in a final block: a node
+  finds that execution itself, or reads a `Response` saying Executed or
+  Failed. It attests at that block's height.
 * M5 An attestation binds rid, height, kind and data, with data's length
   in the hash, and describes only destination state final at that height.
 
@@ -467,9 +491,8 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
   backlog needs.
 * Agreement. Correct nodes hold the same backlog at a source height, so
   they admit the same requests and hold the same published signatures for
-  them, and
-  they compute the same attestation for a rid, as a function of final
-  destination state and the request's schemas only.
+  them, and they compute the same attestation for a rid, as a function of
+  final destination state and the request's schema only.
 * Distinct keys (ACCOUNT_DERIVATION.md). The derivation path contains the
   source chain and the requesting contract, so different (source chain,
   contract, key parameters) derive different keys, where the key
@@ -532,10 +555,10 @@ a path from B48 through A15; the first at A12 has none.
   committing hash), and the MPC reports only the receipt of a transaction
   with req.tx's bytes from req.tx's account (M3). So the reported receipt
   is req.tx's own, and final (M5, finality assumption). For Unviable, M4
-  attests only after a response said that another transaction from
-  req.tx's account, with the same replay protection, was included. That
-  response is true by M3, and such a transaction blocks req.tx for good
-  (Section 3.3).
+  attests only when another transaction from req.tx's account with the
+  same replay protection was included in a final block. The node saw it
+  itself, or a response reported it, and that response is true by M3.
+  Such a transaction blocks req.tx for good (Section 3.3).
 
 * G4, in three steps.
   1. The execution is above e.known: e.known is a height some accepted
@@ -556,11 +579,12 @@ a path from B48 through A15; the first at A12 has none.
      execution passes C3 and is accepted.
 
 * G5: the other request's `Response` is final on the source chain, so
-  every correct node processes it, and req is still in its backlog unless
-  it was answered before. Each attests Unviable for req at the height in
-  that response (M4), and they agree. The other transaction was included
-  after req was made, so that height is above e.known, as in step 1 of
-  G4, and the library accepts the response (C3).
+  every correct node reads it, and can check it by G5's premise. Req is
+  still in each node's backlog unless it was answered before. Each node
+  attests Unviable for req at the height in that response (M4), and they
+  agree. The other transaction was included after req was made, so that
+  height is above e.known, as in step 1 of G4, and the library accepts
+  the response (C3).
 
 ## 6. Notes
 
@@ -577,13 +601,17 @@ a path from B48 through A15; the first at A12 has none.
   which every node finds the execution.
 * Finding an execution without its signature. Where the transaction ID is
   computed from the unsigned bytes alone (Tron, Zcash from version 5), a
-  node needs no signature and G4's exception (ii) does not arise. On EVM
+  node needs no signature and G4's exception (iii) does not arise. On EVM
   and Solana it does. EVM offers a way around it that this design does
   not use: a binary search on the account's nonce over block heights
   finds the block where req.tx's nonce was used up, and with it the
   transaction that used it. At least t nodes would need providers that
   serve account state at old blocks. On Solana, listing
   the account's transactions does the same.
+* A `Response` cannot always be checked. The signature in a `Response`
+  covers the output, but the event carries only the output's length. A
+  node that does not have the output cannot check the response. Signing a
+  hash of the output and putting that hash in the event would fix this.
 * Agreement has no enforcement point. A change to `authentic`,
   `processable` or the attestation function must apply only to requests
   made at or after a source height the upgrade names; applied to requests
@@ -653,7 +681,7 @@ The names of Section 2 map onto the fields below as follows.
 | req.tx | `txParamType` with `txParams` |
 | req.dest | `executionDest` |
 | req.key | `keyVersion`, `path`, `algo` |
-| req.schemas | `outputDeserializationSchema`, `respondSerializationSchema` |
+| req.schema | `outputDeserializationSchema` |
 | rid | `RequestId` |
 | height, outcome | `blockHeight`, `outputKind` with the serialised output |
 
@@ -675,7 +703,7 @@ stay out.
 | `signatureDest` | `enum MPCDestination` | no | reserved, request construction refuses any value except `unused` |
 | `params` | `bytes(64)` | no | reserved, request construction refuses any non-zero byte |
 | `outputDeserializationSchema` | `bytes` | no | how the MPC decodes the execution output |
-| `respondSerializationSchema` | `bytes` | no | how the MPC serialises that output into the response |
+| `respondSerializationSchema` | `bytes` | no | no longer used where the MPC derives the response encoding from `outputDeserializationSchema` and the source chain's types; integrations not yet migrated still read it |
 
 Enums: `MPCSignatureAlgorithm { ecdsa, reserved }`,
 `MPCDestination { unused, reserved }`, `TxParamType { evmType2, reserved }`.
@@ -847,8 +875,9 @@ follow the same procedure.
 The recovery method is chain-specific. For example, on EVM chains the MPC
 reads a mined call's return data with the `debug_traceTransaction` RPC method,
 using `callTracer`'s top call frame. A client retrieves that data, decodes it
-with the request's `outputDeserializationSchema` and re-serialises it with
-`respondSerializationSchema`, reproducing the MPC's conversions.
+with the request's `outputDeserializationSchema` and re-serialises it in
+the source chain's encoding, which that schema determines, reproducing
+the MPC's conversions.
 
 As a convenience, MPC nodes may serve the serialised output they attest in
 a public cache. This helps dApp developers who lack access to a node that
@@ -862,7 +891,10 @@ network and `signetContractAddress` its signet contract. Clients can fetch
 the bytes by request ID from the endpoint advertised for their deployment
 and retry while they are not yet available. Providing a cache is optional.
 
-For `failed` and `unviable`, the serialised output is empty. Whichever route
-supplies the bytes, they remain untrusted until the application contract's
-library recomputes the attestation digest and verifies the signature against
-the attestation key (Section 4.1). Incorrect or forged bytes fail verification.
+For `failed` and `unviable`, the serialised output is empty. It is also
+empty for an `executed` transaction that returns nothing, a plain transfer
+or a call without a return value, which requires an empty output schema.
+Whichever route supplies the bytes, they remain untrusted until the
+application contract's library recomputes the attestation digest and
+verifies the signature against the attestation key (Section 4.1). Incorrect
+or forged bytes fail verification.
