@@ -604,7 +604,9 @@ impl BacklogEntry {
         match &self.status {
             SignStatus::Sign(_)
             | SignStatus::Bidirectional(
-                BidirectionalProgress::Initial(_) | BidirectionalProgress::Executing(_),
+                BidirectionalProgress::Initial(_)
+                | BidirectionalProgress::Executing(_)
+                | BidirectionalProgress::Parked(_),
             ) => &self.request,
             SignStatus::Bidirectional(BidirectionalProgress::Final {
                 respond_request, ..

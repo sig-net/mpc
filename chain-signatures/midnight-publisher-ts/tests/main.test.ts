@@ -25,7 +25,7 @@ const STARTUP_ENV: NodeJS.ProcessEnv = {
   MIDNIGHT_PUB_FUNDING_SEED: "ab".repeat(32),
 };
 
-const ready = (): string => JSON.stringify({ id: 0, op: "ready", protocolVersion: 1 });
+const ready = (): string => JSON.stringify({ id: 0, op: "ready", protocolVersion: 2 });
 
 const envFor = (port: number): NodeJS.ProcessEnv => ({
   ...STARTUP_ENV,
@@ -141,7 +141,7 @@ describe("dist/main.js over a pipe", () => {
       ...Array.from({ length: BURST }, (_, i) => i + 1),
       null,
     ]);
-    expect(replies[0]).toMatchObject({ ok: true, ready: true, protocolVersion: 1 });
+    expect(replies[0]).toMatchObject({ ok: true, ready: true, protocolVersion: 2 });
     expect(replies.slice(1, BURST + 1).every((reply) => reply.ok === true)).toBe(true);
     expect(
       replies.slice(1, BURST + 1).every((reply) => /^(?:[0-9a-f]{2})+$/.test(reply.intent)),
@@ -168,7 +168,7 @@ describe("dist/main.js over a pipe", () => {
           JSON.stringify({
             id: 40,
             op: "ready",
-            protocolVersion: 1,
+            protocolVersion: 2,
           }),
         ],
         {
@@ -194,7 +194,7 @@ describe("dist/main.js over a pipe", () => {
           id: 40,
           ok: true,
           ready: true,
-          protocolVersion: 1,
+          protocolVersion: 2,
           submitTimeoutMs: 6 * 60 * 1_000,
           recipeTtlMs: 5 * 60 * 1_000,
         },

@@ -1,19 +1,19 @@
-name: Unit
+name: Unit Tests
 on:
   pull_request:
   merge_group:
   # Cache policy: docs/ci-caching.md
   push:
     branches: [develop]
-    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "deny.toml", "rust-toolchain*", .github/workflows/unit.yml]
+    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "deny.toml", "rust-toolchain*", .github/workflows/test-unit.yml]
   workflow_dispatch:
 
 env:
   RUSTFLAGS: -D warnings
 jobs:
-  test:
+  lint-and-test:
     runs-on: warp-ubuntu-latest-x64-4x
-    name: Check & Test
+    name: Lint & Unit Tests
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -88,7 +88,7 @@ jobs:
         run: cargo test -p mpc-chain-midnight --lib --features sandbox output_storage::tests
 
   audit:
-    name: Audit
+    name: Dependency Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

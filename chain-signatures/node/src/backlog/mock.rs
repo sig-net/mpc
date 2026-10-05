@@ -75,7 +75,7 @@ impl BacklogTestExt for Backlog {
     ) -> SignEntry<Bidirectional<Final<Generating>>> {
         self.insert_mock_executing(tx)
             .await
-            .advance(ExecutionOutcome::Success { output: vec![] })
+            .advance(ExecutionOutcome::Success { output: vec![] }, 456)
             .await
             .expect("advance to final generating")
     }
@@ -251,6 +251,7 @@ pub fn mock_bidi_response_request(
         RespondBidirectionalTx {
             tx_id,
             output: vec![],
+            attestation: None,
             origin_indexed_at: None,
             chain_ctx: None,
         },
