@@ -3,7 +3,7 @@ use std::future::{Future, IntoFuture};
 use anyhow::Context;
 use backon::{ConstantBuilder, Retryable};
 use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
-use mpc_node::web::StateView;
+use mpc_node::protocol::state::NodeStatus;
 use near_account_id::AccountId;
 
 use crate::cluster::Cluster;
@@ -191,12 +191,11 @@ impl<'a> IntoFuture for WaitAction<'a, RunningContractStateView> {
 
 async fn require_node_state(nodes: &Cluster, state: NodeState, id: usize) -> anyhow::Result<()> {
     let is_ready = || async {
-        let node_state = match nodes.fetch_state(id).await? {
-            StateView::Running { .. } => NodeState::Running,
-            StateView::Resharing { .. } => NodeState::Resharing,
-            StateView::Joining { .. } => NodeState::Joining,
-            StateView::NotRunning => NodeState::NotRunning,
-            _ => anyhow::bail!("unexpected variant for checking node state"),
+        let node_state = match nodes.fetch_status(id).await? {
+            NodeStatus::Running { .. } => NodeState::Running,
+            NodeStatus::Resharing { .. } => NodeState::Resharing,
+            NodeStatus::Joining { .. } => NodeState::Joining,
+            _ => NodeState::NotRunning,
         };
 
         if node_state != state {
@@ -298,88 +297,49 @@ pub async fn require_presignatures(
     nodes: &Cluster,
     expected: usize,
     mine: bool,
-) -> anyhow::Result<Vec<StateView>> {
-    let is_enough = || async {
-        let state_views = nodes.fetch_states().await?;
-        let enough = state_views
-            .iter()
-            .filter(|state| match state {
-                StateView::Running {
-                    presignature_mine_count,
-                    presignature_count,
-                    ..
-                } => {
-                    if mine {
-                        *presignature_mine_count >= expected
-                    } else {
-                        *presignature_count >= expected
-                    }
-                }
-                _ => {
-                    tracing::warn!("state=NotRunning while checking presignatures");
-                    false
-                }
-            })
-            .count();
-        if enough >= nodes.len() {
-            Ok(state_views)
-        } else {
-            anyhow::bail!("not enough nodes with presignatures")
-        }
+) -> anyhow::Result<()> {
+    let metric = if mine {
+        "multichain_num_presignatures_mine"
+    } else {
+        "multichain_num_presignatures_total"
     };
-
-    let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(1))
-        .with_max_times(expected * 100);
-
-    let state_views = is_enough.retry(&strategy).await.with_context(|| {
-        format!("mpc nodes failed to generate {expected} presignatures before deadline")
-    })?;
-
-    Ok(state_views)
+    require_stockpile(nodes, "presignatures", metric, expected).await
 }
 
-pub async fn require_triples(
+pub async fn require_triples(nodes: &Cluster, expected: usize, mine: bool) -> anyhow::Result<()> {
+    let metric = if mine {
+        "multichain_num_triples_mine"
+    } else {
+        "multichain_num_triples_total"
+    };
+    require_stockpile(nodes, "triples", metric, expected).await
+}
+
+/// Waits until every node is running and its `metric` gauge reaches `expected`.
+async fn require_stockpile(
     nodes: &Cluster,
+    kind: &str,
+    metric: &str,
     expected: usize,
-    mine: bool,
-) -> anyhow::Result<Vec<StateView>> {
+) -> anyhow::Result<()> {
     let is_enough = || async {
-        let state_views = nodes.fetch_states().await?;
-        let enough = state_views
-            .iter()
-            .filter(|state| match state {
-                StateView::Running {
-                    triple_mine_count,
-                    triple_count,
-                    ..
-                } => {
-                    if mine {
-                        *triple_mine_count >= expected
-                    } else {
-                        *triple_count >= expected
-                    }
-                }
-                _ => {
-                    tracing::warn!("state=NotRunning while checking triples");
-                    false
-                }
-            })
-            .count();
-        if enough >= nodes.len() {
-            Ok(state_views)
-        } else {
-            anyhow::bail!("not enough nodes with triples")
+        for id in 0..nodes.len() {
+            if !matches!(nodes.fetch_status(id).await?, NodeStatus::Running { .. }) {
+                tracing::warn!(id, "node not running while checking {kind}");
+                anyhow::bail!("node {id} not running");
+            }
+            if nodes.fetch_gauge(id, metric).await? < expected as i64 {
+                anyhow::bail!("not enough nodes with {kind}");
+            }
         }
+        Ok(())
     };
 
     let strategy = ConstantBuilder::default()
         .with_delay(std::time::Duration::from_secs(1))
         .with_max_times(expected * 100);
 
-    let state_views = is_enough.retry(&strategy).await.with_context(|| {
-        format!("mpc nodes failed to generate {expected} triples before deadline")
-    })?;
-
-    Ok(state_views)
+    is_enough.retry(&strategy).await.with_context(|| {
+        format!("mpc nodes failed to generate {expected} {kind} before deadline")
+    })
 }
