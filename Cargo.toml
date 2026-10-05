@@ -17,6 +17,7 @@ members = [
     "chain-signatures/chain-hydration",
     "chain-signatures/chain-midnight",
     "chain-signatures/compact-hashing",
+    "chain-signatures/midnight-respond-codec",
     "chain-signatures/utils",
 ]
 resolver = "2"
@@ -106,6 +107,7 @@ mpc-chain-near = { path = "./chain-signatures/chain-near" }
 mpc-chain-hydration = { path = "./chain-signatures/chain-hydration" }
 mpc-chain-midnight = { path = "./chain-signatures/chain-midnight" }
 mpc-compact-hashing = { path = "./chain-signatures/compact-hashing" }
+mpc-midnight-respond-codec = { path = "./chain-signatures/midnight-respond-codec" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-utils = { path = "./chain-signatures/utils" }
 mpc-node = { path = "./chain-signatures/node" }

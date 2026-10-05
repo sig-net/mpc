@@ -7611,11 +7611,11 @@ dependencies = [
  "mockito",
  "mpc-chain-integration-core",
  "mpc-crypto",
+ "mpc-midnight-respond-codec",
  "mpc-primitives",
  "mpc-utils",
  "serde",
  "serde_json",
- "signet-midnight-serde",
  "tokio",
  "tokio-util",
  "tracing",
@@ -7818,6 +7818,18 @@ dependencies = [
  "hpke",
  "rand 0.8.5",
  "serde",
+]
+
+[[package]]
+name = "mpc-midnight-respond-codec"
+version = "1.20.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "hex",
+ "serde",
+ "serde_json",
+ "signet-midnight-serde",
 ]
 
 [[package]]

@@ -5,6 +5,11 @@
 //! encoding derives from the output schema alone and the request's respond schema is
 //! ignored. Byte-level behavior is pinned by the TypeScript oracle corpus in
 //! `tests/fixtures/midnight_respond_vectors.json`.
+//!
+//! `TracedReturn` is deliberately neutral: an execution target converts its own trace
+//! result into it, and a void call's missing return data is empty output, so only trace
+//! availability is distinguished. Schema parsing keeps `alloy::json_abi::Param` because it
+//! enforces Solidity-identifier validation whose exact rules the oracle corpus does not pin.
 
 use std::collections::HashSet;
 
@@ -18,7 +23,7 @@ const EVM_ADDRESS_BYTES: usize = 20;
 
 /// The traced return data an attestation derives from
 #[derive(Debug, Clone)]
-pub(super) enum TracedReturn {
+pub enum TracedReturn {
     NotTraced,
     Returned(Bytes),
 }
@@ -98,7 +103,7 @@ struct CanonicalField<'a> {
 /// An empty schema with no return data (a plain transfer, or a call that returned nothing)
 /// attests an empty output. A non-empty schema with canonical return data encodes every
 /// field. Any other combination, a non-canonical schema, or an unsupported type is refused.
-pub(super) fn executed_output(
+pub fn executed_output(
     is_contract_call: bool,
     output_schema: &[u8],
     trace: TracedReturn,
@@ -305,7 +310,7 @@ mod tests {
     #[test]
     fn replays_every_typescript_oracle_vector() {
         let fixture: OracleFixture = serde_json::from_str(include_str!(
-            "../../tests/fixtures/midnight_respond_vectors.json"
+            "../tests/fixtures/midnight_respond_vectors.json"
         ))
         .unwrap();
         assert!(!fixture.vectors.is_empty());

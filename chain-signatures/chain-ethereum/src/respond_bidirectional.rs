@@ -1,8 +1,7 @@
-mod midnight;
-
 use alloy::dyn_abi::{DynSolType, DynSolValue};
 use alloy::primitives::{Bytes, I256, U256};
 use borsh::BorshSerialize;
+use mpc_midnight_respond_codec::{executed_output, TracedReturn};
 use mpc_primitives::SerDeserFormat;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -116,7 +115,7 @@ pub enum TraceOutput {
     NoReturnData,
 }
 
-impl From<TraceOutput> for midnight::TracedReturn {
+impl From<TraceOutput> for TracedReturn {
     fn from(trace: TraceOutput) -> Self {
         match trace {
             TraceOutput::NotTraced => Self::NotTraced,
@@ -143,11 +142,8 @@ pub fn build_serialized_output(
     respond_serialization_format: SerDeserFormat,
     respond_serialization_schema: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
-    // TODO: Extract the Midnight attestation codec when another execution target
-    // needs to respond to Midnight. See doc/midnight-respond-codec-extraction-plan.md
-    // and https://github.com/sig-net/mpc/issues/1196.
     if respond_serialization_format == SerDeserFormat::Fab {
-        return midnight::executed_output(
+        return executed_output(
             is_contract_call,
             output_deserialization_schema,
             trace_output.into(),
