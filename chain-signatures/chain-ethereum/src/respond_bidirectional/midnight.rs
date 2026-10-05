@@ -256,10 +256,9 @@ fn parse_output_schema(bytes: &[u8]) -> anyhow::Result<Vec<OutputField>> {
 #[cfg(test)]
 mod tests {
     use alloy::primitives::Bytes;
-    use mpc_primitives::SerDeserFormat;
     use serde::Deserialize;
 
-    use crate::respond_bidirectional::{build_serialized_output, TraceOutput};
+    use super::{executed_output, TracedReturn};
 
     #[derive(Deserialize)]
     struct OracleFixture {
@@ -291,26 +290,16 @@ mod tests {
     fn respond(
         is_contract_call: bool,
         output_schema: &[u8],
-        trace: TraceOutput,
+        trace: OracleTrace,
     ) -> anyhow::Result<Vec<u8>> {
-        // The respond schema is ignored: pass one that no format could parse.
-        build_serialized_output(
-            is_contract_call,
-            output_schema,
-            trace,
-            SerDeserFormat::Fab,
-            b"not a schema",
-        )
-    }
-
-    fn words(words: &[[u8; 32]]) -> Bytes {
-        Bytes::from(words.concat())
-    }
-
-    fn word(last: u8) -> [u8; 32] {
-        let mut word = [0; 32];
-        word[31] = last;
-        word
+        let trace = match trace {
+            OracleTrace::NotTraced => TracedReturn::NotTraced,
+            OracleTrace::NoReturnData => TracedReturn::Returned(Bytes::new()),
+            OracleTrace::Output { return_data_hex } => {
+                TracedReturn::Returned(hex::decode(return_data_hex).unwrap().into())
+            }
+        };
+        executed_output(is_contract_call, output_schema, trace)
     }
 
     #[test]
@@ -323,14 +312,7 @@ mod tests {
 
         for vector in fixture.vectors {
             let output_schema = hex::decode(&vector.output_schema_hex).unwrap();
-            let trace = match vector.trace {
-                OracleTrace::NotTraced => TraceOutput::NotTraced,
-                OracleTrace::NoReturnData => TraceOutput::NoReturnData,
-                OracleTrace::Output { return_data_hex } => {
-                    TraceOutput::Output(hex::decode(return_data_hex).unwrap().into())
-                }
-            };
-            let result = respond(vector.is_contract_call, &output_schema, trace);
+            let result = respond(vector.is_contract_call, &output_schema, vector.trace);
 
             if vector.expected_reject == Some(true) {
                 assert!(
@@ -346,22 +328,6 @@ mod tests {
             });
             let expected = hex::decode(vector.expected_output_hex.as_ref().unwrap()).unwrap();
             assert_eq!(actual, expected, "{}: output bytes differ", vector.name);
-        }
-    }
-
-    #[test]
-    fn ignores_the_respond_schema() {
-        let schema = br#"[{"name":"ok","type":"bool"}]"#;
-        for respond_schema in [&b""[..], b"[]", br#"{"struct":{"ok":"u8"}}"#] {
-            let output = build_serialized_output(
-                true,
-                schema,
-                TraceOutput::Output(words(&[word(1)])),
-                SerDeserFormat::Fab,
-                respond_schema,
-            )
-            .unwrap();
-            assert_eq!(output, vec![1]);
         }
     }
 }

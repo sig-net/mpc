@@ -400,6 +400,22 @@ mod tests {
     }
 
     #[test]
+    fn build_serialized_output_fab_ignores_the_respond_schema() {
+        let output_schema = br#"[{"name":"ok","type":"bool"}]"#;
+        for respond_schema in [&b""[..], b"[]", br#"{"struct":{"ok":"u8"}}"#] {
+            let out = build_serialized_output(
+                true,
+                output_schema,
+                TraceOutput::Output(abi_bool(true)),
+                SerDeserFormat::Fab,
+                respond_schema,
+            )
+            .unwrap();
+            assert_eq!(out, vec![1]);
+        }
+    }
+
+    #[test]
     fn build_serialized_output_fab_plain_transfer_attests_empty_output() {
         let out = build_serialized_output(
             false,
