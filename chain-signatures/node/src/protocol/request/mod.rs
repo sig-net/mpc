@@ -6,7 +6,7 @@ use crate::metrics::requests::{
 };
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId};
-use crate::protocol::posit::{PositAction, PositRejectReason, SinglePositCounter};
+use crate::protocol::posit::{PositAction, PositCounter, PositRejectReason};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::signature::{GenerateCtx, SignError, SignGenerator};
 use crate::protocol::sync::{SyncKind, SyncReportSender};

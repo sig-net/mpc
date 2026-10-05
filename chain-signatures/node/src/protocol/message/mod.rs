@@ -121,6 +121,42 @@ impl MessageChannel {
         }
     }
 
+    /// Send one posit message as `me`.
+    pub async fn send_posit(
+        &self,
+        me: Participant,
+        to: Participant,
+        id: PositProtocolId,
+        action: PositAction,
+    ) {
+        self.send(
+            me,
+            to,
+            PositMessage {
+                id,
+                from: me,
+                action,
+            },
+        )
+        .await;
+    }
+
+    /// Send the same posit message to every participant in `to` except `me`.
+    pub async fn broadcast_posit(
+        &self,
+        me: Participant,
+        to: &[Participant],
+        id: PositProtocolId,
+        action: PositAction,
+    ) {
+        for &p in to {
+            if p == me {
+                continue;
+            }
+            self.send_posit(me, p, id, action.clone()).await;
+        }
+    }
+
     /// Raw sender into the inbox, for test fixtures that route messages
     /// between in-process nodes directly instead of over HTTP.
     #[cfg(feature = "test-feature")]
