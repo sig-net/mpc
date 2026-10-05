@@ -70,7 +70,9 @@ interface SubmitRequest {
   nonce: string;
   target: string;
   argument: string;
-  outputType: "bool" | "uint256" | "bytes32";
+  outputType?: "bool" | "uint256" | "bytes32";
+  /** Raw output schema bytes as hex, in place of `outputType`. */
+  outputSchema?: string;
 }
 
 interface SignedTransactionRequest {
@@ -150,14 +152,6 @@ console.log = diagnostics;
 console.info = diagnostics;
 console.warn = diagnostics;
 
-function nulPadded(text: string, width: number): Uint8Array {
-  const encoded = new TextEncoder().encode(text);
-  if (encoded.length > width) throw new Error(`'${text}' exceeds ${String(width)} bytes`);
-  const padded = new Uint8Array(width);
-  padded.set(encoded);
-  return padded;
-}
-
 function bytes(hex: string, width?: number): Uint8Array {
   const bare = hex.replace(/^0x/i, "");
   if (!/^[0-9a-fA-F]*$/.test(bare) || bare.length % 2 !== 0) {
@@ -172,9 +166,10 @@ function bytes(hex: string, width?: number): Uint8Array {
   return result;
 }
 
+// The output schema must be canonical JSON NUL-padded to the caller's 64-byte field.
 function padSchema(schema: Uint8Array): Uint8Array {
   if (schema.length > 64) throw new Error(`schema exceeds 64 bytes: ${schema.length}`);
-  const padded = new Uint8Array(64).fill(0x20);
+  const padded = new Uint8Array(64);
   padded.set(schema);
   return padded;
 }
@@ -185,15 +180,13 @@ function outputSchema(outputType: string): Uint8Array {
   );
 }
 
-function requestSchemas(request: SubmitRequest): [Uint8Array, Uint8Array] {
-  if (request.outputSchema !== undefined || request.responseSchema !== undefined) {
-    if (request.outputSchema === undefined || request.responseSchema === undefined)
-      throw new Error("outputSchema and responseSchema must both be provided");
-    return [padSchema(bytes(request.outputSchema)), padSchema(bytes(request.responseSchema))];
+function requestOutputSchema(request: SubmitRequest): Uint8Array {
+  if (request.outputSchema !== undefined) {
+    if (request.outputType !== undefined) throw new Error("give outputType or outputSchema");
+    return padSchema(bytes(request.outputSchema));
   }
-  if (request.outputType === undefined) throw new Error("outputType or raw schemas are required");
-  const schema = outputSchema(request.outputType);
-  return [schema, schema];
+  if (request.outputType === undefined) throw new Error("outputType or outputSchema is required");
+  return outputSchema(request.outputType);
 }
 
 async function waitFor<T>(description: string, read: () => Promise<T | undefined>): Promise<T> {
@@ -505,8 +498,8 @@ async function dispatch(request: Request): Promise<unknown> {
           ? pureCircuits.checkResponse1
           : serializedOutput.length === 8
             ? pureCircuits.checkResponse8
-            : serializedOutput.length === 16
-              ? pureCircuits.checkResponse16
+            : serializedOutput.length === 20
+              ? pureCircuits.checkResponse20
               : serializedOutput.length === 32
                 ? pureCircuits.checkResponse32
                 : undefined;
@@ -541,10 +534,10 @@ async function dispatch(request: Request): Promise<unknown> {
       if (check(circuitInput, wrongOutput, responseKey))
         throw new Error("accepted tampered serialized output");
     }
-    const wrongWidth = new Uint8Array(serializedOutput.length === 32 ? 16 : 32);
+    const wrongWidth = new Uint8Array(serializedOutput.length === 32 ? 20 : 32);
     wrongWidth.set(serializedOutput.subarray(0, wrongWidth.length));
     const checkWrongWidth =
-      wrongWidth.length === 16 ? pureCircuits.checkResponse16 : pureCircuits.checkResponse32;
+      wrongWidth.length === 20 ? pureCircuits.checkResponse20 : pureCircuits.checkResponse32;
     if (checkWrongWidth(circuitInput, wrongWidth, responseKey))
       throw new Error("accepted serialized output at a different width");
     // The upstream checker commits the actual Bytes<N> width; these two event
@@ -585,8 +578,8 @@ async function dispatch(request: Request): Promise<unknown> {
           ? active.caller.callTx.verifyResponse
           : serializedOutput.length === 8
             ? active.caller.callTx.verifyResponse8
-            : serializedOutput.length === 16
-              ? active.caller.callTx.verifyResponse16
+            : serializedOutput.length === 20
+              ? active.caller.callTx.verifyResponse20
               : serializedOutput.length === 32
                 ? active.caller.callTx.verifyResponse32
                 : undefined;
@@ -608,15 +601,13 @@ async function dispatch(request: Request): Promise<unknown> {
       throw new Error("duplicate settlement restored the consumed request");
     return {};
   }
-  const [requestOutputSchema, requestResponseSchema] = requestSchemas(request);
   const submitted = await active.caller.callTx.submitIsEvenRequest(
     BigInt(request.nonce),
     1n,
     bytes(request.target, 20),
     bytes(request.argument, 32),
-    // The output schema must be canonical JSON NUL-padded to the field width, and the
-    // reserved respond schema stays empty.
-    nulPadded(JSON.stringify([{ name: "success", type: request.outputType }]), 64),
+    requestOutputSchema(request),
+    // The reserved respond schema stays empty.
     new Uint8Array(64),
   );
   return { requestId: bytesToHex(submitted.private.result), placement: active.lastPlacement };

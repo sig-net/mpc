@@ -3,25 +3,29 @@ pragma solidity ^0.8.27;
 
 // Each target uses the caller fixture's selector while Solidity produces the
 // actual ABI return encoding. Values match the pinned SDK conformance vectors.
-contract MidnightStringOutput {
-    function isEven(uint256) external pure returns (string memory) {
-        return unicode"Midnight 🌙";
+contract MidnightUint256Output {
+    function isEven(uint256) external pure returns (uint256) {
+        return 1 << 128;
     }
 }
 
-contract MidnightBytesOutput {
-    function isEven(uint256 variant) external pure returns (bytes memory) {
-        if (variant == 0) return hex"deadbeef00";
-        if (variant == 1) return hex"deadbeef00010203";
-        require(variant == 2, "Unknown fixture variant");
-        return hex"";
+contract MidnightAddressOutput {
+    function isEven(uint256) external pure returns (address) {
+        return 0x0102030405060708090a0B0c0d0e0f1011121314;
     }
 }
 
-contract MidnightArrayOutput {
-    function isEven(uint256) external pure returns (uint64[] memory values) {
-        values = new uint64[](2);
-        values[0] = 7;
-        values[1] = 8;
+contract MidnightTagThenAddressOutput {
+    function isEven(uint256) external pure returns (bytes12 tag, address to) {
+        tag = bytes12(0xa1a2a3a4a5a6a7a8a9aaabac);
+        to = 0x0102030405060708090a0B0c0d0e0f1011121314;
+    }
+}
+
+// Returns a second word that the single-field output schema does not declare.
+contract MidnightTrailingWordOutput {
+    function isEven(uint256) external pure returns (bool ok, uint256 extra) {
+        ok = true;
+        extra = type(uint256).max;
     }
 }

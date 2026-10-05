@@ -1,32 +1,59 @@
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { rawTokenType } from "@midnight-ntwrk/compact-runtime";
-import { findDeployedContract, type FoundContract } from "@midnight-ntwrk/midnight-js/contracts";
-import type { WalletFacade } from "@midnightntwrk/wallet-sdk-facade";
 import {
-  asciiPadded,
-  bytesToHex,
-  deriveEvmAddress,
-  deriveMidnightResponseKey,
-  deserializeEvmOutput,
-  hexToBytes,
-  requestIdHex,
-  respondBidirectionalEventToCircuitInput,
-  serializeRespondOutput,
-  signetEventSourceFromIndexer,
-  SignetRequestResponseReader,
-  type RequestIdHex,
-  type RespondBidirectionalEvent,
-  type Secp256k1Point,
-} from "@sig-net/midnight";
+  createCallTxOptions,
+  createUnprovenCallTx,
+  findDeployedContract,
+  submitTx,
+  type FoundContract,
+} from "@midnight-ntwrk/midnight-js/contracts";
+import {
+  encodeContractKeyLocation,
+  hashVerifierKey,
+  SucceedEntirely,
+} from "@midnight-ntwrk/midnight-js/types";
+import {
+  communicationCommitmentRandomness,
+  ContractCallPrototype,
+  ContractState,
+  Intent,
+  Transaction,
+} from "@midnightntwrk/ledger-v9";
+import type { WalletFacade } from "@midnightntwrk/wallet-sdk-facade";
 import {
   deriveAccountKeys,
   withSyncedWalletFacade,
   type AccountKeys,
   type MidnightNodeConfig,
 } from "@sig-net/midnight-contract-deploy";
+// The vault is written against @sig-net/midnight 0.24.0-rc.10, installed under this alias.
+import {
+  asciiPadded,
+  bytesToHex,
+  deriveEvmAddress,
+  deriveMidnightResponseKey,
+  deserializeEvmOutput,
+  EvmTraceOutputKind,
+  executedEvmRespondOutput,
+  hexToBytes,
+  requestIdHex,
+  respondBidirectionalEventToCircuitInput,
+  signetEventSourceFromIndexer,
+  SignetRequestResponseReader,
+  type RequestIdHex,
+  type RespondBidirectionalEvent,
+  type Secp256k1Point,
+} from "@sig-net/midnight-respond-oracle";
 import { JsonRpcProvider } from "ethers";
-import { ledger, pureCircuits } from "./managed/erc20-vault/contract/index.js";
+import {
+  Action,
+  FlushChannel,
+  ledger,
+  pureCircuits,
+  type FlushSlot,
+  type GasParams,
+} from "./managed/erc20-vault/contract/index.js";
 import type { CallPlacement } from "./placement.js";
 import {
   buildVaultProviders,
@@ -41,18 +68,26 @@ import { VaultEvm, type VaultTargets } from "./vault-evm.js";
 type VaultHandle = FoundContract<VaultContract>;
 type VaultLedger = ReturnType<typeof ledger>;
 
-/** The request maps the vault's notifications name, as compiled ledger paths. */
-const REQUEST_PATHS = {
-  signBidirectionalEventMap: [0, 0],
-  depositEventMap: [1, 3],
-  swapEventMap: [1, 7],
-  supplyEventMap: [1, 11],
-  redeemEventMap: [1, 13],
+/** Each action's request map: its ledger field and compiled ledger path. */
+const REQUEST_MAPS = {
+  [Action.approve]: { field: "bidirectionalApproveMap", path: [2, 3] },
+  [Action.deposit]: { field: "bidirectionalDepositMap", path: [2, 5] },
+  [Action.withdraw]: { field: "bidirectionalWithdrawMap", path: [2, 7] },
+  [Action.swap]: { field: "bidirectionalSwapMap", path: [2, 9] },
+  [Action.supply]: { field: "bidirectionalSupplyMap", path: [2, 11] },
+  [Action.redeem]: { field: "bidirectionalRedeemMap", path: [2, 13] },
 } as const;
-type RequestMap = keyof typeof REQUEST_PATHS;
+type VaultAction = keyof typeof REQUEST_MAPS;
 
-const FLUSH_WIDTH = 20;
+const FLUSH_WIDTH = 10;
+const FLUSH_TTL_MS = 5 * 60_000;
 const CHAIN_ID = 31337n;
+const DEPOSIT_GAS: GasParams = {
+  gasLimit: 100_000n,
+  maxFeePerGas: 30_000_000_000n,
+  maxPriorityFeePerGas: 1_000_000_000n,
+};
+const SWAP_FEE = 500n;
 const WITHDRAW_AMOUNT = 100_000n;
 const SWAP_AMOUNT_OUT = 1_000_000n;
 const SWAP_AMOUNT_IN_MAXIMUM = 1_650_000n;
@@ -90,12 +125,19 @@ export interface VaultRunResult {
   operations: VaultOperation[];
 }
 
-interface SentRequest {
+/** A request its start circuit queued under `inIndex`. */
+interface StartedRequest {
   operation: string;
-  map: RequestMap;
+  action: VaultAction;
+  inIndex: bigint;
+  /** The EVM account the MPC signs the request's transaction with. */
+  signer: string;
+  outputSchema: Uint8Array;
+}
+
+interface SentRequest extends StartedRequest {
   requestId: RequestIdHex;
   placement: CallPlacement[];
-  signer: string;
 }
 
 interface AttestedRequest extends SentRequest {
@@ -114,9 +156,31 @@ function attestedOf(attested: Map<string, AttestedRequest>, operation: string): 
   return request;
 }
 
-function padded(keys: readonly Uint8Array[]): Uint8Array[] {
-  if (keys.length > FLUSH_WIDTH) throw new Error(`a flush takes at most ${FLUSH_WIDTH} keys`);
-  return [...keys, ...Array.from({ length: FLUSH_WIDTH - keys.length }, () => new Uint8Array(32))];
+/** A fresh input buffer index for a start circuit: 64 random bits. */
+function newInputIndex(): bigint {
+  return randomBytes(8).readBigUInt64BE();
+}
+
+// Attestation slots first, so the request slots behind them record those heights as
+// their lastSeen, then empty slots to the width.
+function flushSlots(inIndexes: readonly bigint[], requestIds: readonly Uint8Array[]): FlushSlot[] {
+  if (inIndexes.length + requestIds.length > FLUSH_WIDTH) {
+    throw new Error(`a flush takes at most ${String(FLUSH_WIDTH)} items`);
+  }
+  const empty = new Uint8Array(32);
+  return [
+    ...requestIds.map((requestId) => ({
+      channel: FlushChannel.attestation,
+      inIndex: 0n,
+      requestId,
+    })),
+    ...inIndexes.map((inIndex) => ({ channel: FlushChannel.request, inIndex, requestId: empty })),
+    ...Array.from({ length: FLUSH_WIDTH - inIndexes.length - requestIds.length }, () => ({
+      channel: FlushChannel.empty,
+      inIndex: 0n,
+      requestId: empty,
+    })),
+  ];
 }
 
 async function poll<T>(description: string, read: () => Promise<T | undefined>): Promise<T> {
@@ -179,21 +243,22 @@ class VaultRun {
     );
   }
 
-  private reader(map: RequestMap): SignetRequestResponseReader {
+  private reader(action: VaultAction): SignetRequestResponseReader {
     return new SignetRequestResponseReader({
       requesterContractAddress: this.vaultAddress,
-      requesterRequestsPath: REQUEST_PATHS[map],
+      requesterRequestsPath: REQUEST_MAPS[action].path,
       signetContractAddress: this.input.centralAddress,
       publicDataProvider: this.providers.publicDataProvider,
       eventSource: signetEventSourceFromIndexer({ queryUrl: this.input.config.indexerUrl }),
     });
   }
 
+  // The user's secret is also the vault's deployer identity, which gates the
+  // configuration and approval circuits; the deployer wallet only pays for the deploy.
   async deployAndInitialise(): Promise<void> {
     const { config } = this.input;
     this.targets = await this.evm.deployTargets();
     const deployerKeys = deriveAccountKeys(this.input.deployerSeed, config.networkId);
-    const deployerSecret = hexToBytes(this.input.deployerSeed);
     await withSyncedWalletFacade(deployerKeys, config, async (facade) => {
       const providers = this.providersFor(facade, deployerKeys, "vault-deployer.leveldb");
       diagnostics("deploying the vault");
@@ -203,32 +268,15 @@ class VaultRun {
         providers.publicDataProvider,
         config.networkId,
         this.input.centralAddress,
-        deployerSecret,
-      );
-      this.responseKey = deriveMidnightResponseKey(this.input.mpcPublicKey, this.vaultAddress);
-      this.vaultEvm = deriveEvmAddress(
-        this.input.mpcPublicKey,
-        this.vaultAddress,
-        bytesToHex(asciiPadded("vault", 32)),
-      );
-      const deployer = await findDeployedContract(providers, {
-        contractAddress: this.vaultAddress,
-        compiledContract: vaultCompiledContract,
-        privateStateId: VAULT_PRIVATE_STATE_ID,
-        initialPrivateState: { secretKey: deployerSecret },
-      });
-      diagnostics("initialising the vault");
-      await deployer.callTx.initialise(
-        hexToBytes(this.vaultEvm),
-        hexToBytes(this.targets.router),
-        hexToBytes(this.targets.usdc),
-        hexToBytes(this.targets.stata),
-        CHAIN_ID,
-        this.responseKey,
-        1n,
-        BigInt(await this.evm.provider.getBlockNumber()),
+        this.userSecret,
       );
     });
+    this.responseKey = deriveMidnightResponseKey(this.input.mpcPublicKey, this.vaultAddress);
+    this.vaultEvm = deriveEvmAddress(
+      this.input.mpcPublicKey,
+      this.vaultAddress,
+      bytesToHex(asciiPadded("vault", 32)),
+    );
     this.providers = this.providersFor(
       this.input.userFacade,
       deriveAccountKeys(this.input.userSeed, config.networkId),
@@ -240,8 +288,25 @@ class VaultRun {
       privateStateId: VAULT_PRIVATE_STATE_ID,
       initialPrivateState: { secretKey: this.userSecret },
     });
+    diagnostics("initialising the vault");
+    await this.vault.callTx.initialise(
+      hexToBytes(this.vaultEvm),
+      hexToBytes(this.targets.router),
+      hexToBytes(this.targets.usdc),
+      hexToBytes(this.targets.stata),
+      CHAIN_ID,
+      this.responseKey,
+      1n,
+      BigInt(await this.evm.provider.getBlockNumber()),
+    );
+    // initialise allows the stata underlying; the swap buys the output token.
+    await this.vault.callTx.addAllowedToken(hexToBytes(this.targets.output));
     const configured = await this.readLedger();
-    if (configured.initialised !== 1n || configured.evmChainId !== CHAIN_ID) {
+    if (
+      !configured.initialised ||
+      configured.evmChainId !== CHAIN_ID ||
+      !configured.allowedTokens.member(hexToBytes(this.targets.output))
+    ) {
       throw new Error("the vault did not initialise");
     }
     this.userEvm = deriveEvmAddress(
@@ -266,57 +331,120 @@ class VaultRun {
     );
   }
 
-  private async flush(): Promise<void> {
-    const state = await this.readLedger();
-    const unstamped = [...state.pendingVaultRequests]
-      .map(([key]) => key)
-      .filter((key) => !state.stamps.member(key));
-    const seen = [...state.seenEvmHeights].map(([requestId]) => requestId);
-    await this.vault.callTx.flush(padded(unstamped), padded(seen.slice(0, FLUSH_WIDTH)));
-    const flushed = await this.readLedger();
-    if (unstamped.some((key) => !flushed.stamps.member(key))) {
-      throw new Error("the flush left a queued request unstamped");
+  // The flush's ledger work goes wholly in the fallible section: midnight-js sections a
+  // call before the wallet adds its fee payment, and a guaranteed flush plus that payment
+  // can exceed the node's time-to-dismiss cap. Mirrors submitFlush in the vault package.
+  private async flush(inIndexes: readonly bigint[], requestIds: readonly Uint8Array[]) {
+    const call = await createUnprovenCallTx(this.providers, {
+      ...createCallTxOptions(
+        vaultCompiledContract,
+        "flushQueue",
+        this.vaultAddress,
+        VAULT_PRIVATE_STATE_ID,
+        undefined,
+        [flushSlots(inIndexes, requestIds)],
+      ),
+      privateStateId: VAULT_PRIVATE_STATE_ID,
+    });
+    const [guaranteed, fallible] = call.public.partitionedTranscript;
+    const raw = await this.providers.publicDataProvider.queryContractState(this.vaultAddress);
+    // The ledger's ContractCallPrototype takes only its own ContractOperation.
+    const operation = raw && ContractState.deserialize(raw.serialize()).operation("flushQueue");
+    if (!operation?.verifierKey) throw new Error("flushQueue has no verifier key on chain");
+    const prototype = new ContractCallPrototype(
+      this.vaultAddress,
+      "flushQueue",
+      operation,
+      undefined,
+      guaranteed ?? fallible,
+      call.private.privateTranscriptOutputs,
+      call.private.input,
+      call.private.output,
+      communicationCommitmentRandomness(),
+      encodeContractKeyLocation({
+        contractAddress: this.vaultAddress,
+        circuitId: "flushQueue",
+        verifierKeyHash: hashVerifierKey(operation.verifierKey),
+      }),
+    );
+    const unprovenTx = Transaction.fromPartsRandomized(
+      this.input.config.networkId,
+      undefined,
+      undefined,
+      Intent.new(new Date(Date.now() + FLUSH_TTL_MS)).addCall(prototype),
+    );
+    const finalized = await submitTx(this.providers, { unprovenTx, circuitId: "flushQueue" });
+    if (finalized.status !== SucceedEntirely) {
+      throw new Error(`the flush finalized as ${finalized.status}`);
     }
   }
 
-  // Sends one stamped request and identifies it as the single id its map gained.
-  private async send(
-    operation: string,
-    map: RequestMap,
-    signer: string,
-    submit: () => Promise<unknown>,
-  ): Promise<SentRequest> {
-    const before = new Set([...(await this.readLedger())[map]].map(([id]) => bytesToHex(id)));
-    await submit();
-    const added = [...(await this.readLedger())[map]]
-      .map(([id]) => bytesToHex(id))
-      .filter((id) => !before.has(id));
-    const [requestId] = added;
-    if (requestId === undefined || added.length !== 1) {
-      throw new Error(`${operation} added ${added.length} requests`);
+  private sendCircuit(action: VaultAction) {
+    const calls = this.vault.callTx;
+    switch (action) {
+      case Action.approve:
+        return calls.sendApprove;
+      case Action.deposit:
+        return calls.sendDeposit;
+      case Action.withdraw:
+        return calls.sendWithdraw;
+      case Action.swap:
+        return calls.sendSwap;
+      case Action.supply:
+        return calls.sendSupply;
+      case Action.redeem:
+        return calls.sendRedeem;
     }
-    const placement = this.lastPlacement;
-    const phase = placement.some((call) => call.fallibleNotifications.includes(requestId))
-      ? "fallible"
-      : placement.some((call) => call.guaranteedNotifications.includes(requestId))
-        ? "guaranteed"
-        : "missing";
-    diagnostics(`${operation} notified ${requestId} in the ${phase} transcript`);
-    return { operation, map, requestId: requestIdHex(hexToBytes(requestId)), placement, signer };
+  }
+
+  // Flushes the started requests into the output buffer, then sends each, reading its
+  // request id from the eviction map entry its send wrote.
+  private async flushAndSend(started: readonly StartedRequest[]): Promise<SentRequest[]> {
+    await this.flush(
+      started.map((request) => request.inIndex),
+      [],
+    );
+    const flushed = await this.readLedger();
+    const sent: SentRequest[] = [];
+    for (const request of started) {
+      const outIndex = [...flushed.outputRequestBuffer].find(
+        ([, { entry }]) => entry.action === request.action && entry.inIndex === request.inIndex,
+      )?.[0];
+      if (outIndex === undefined) throw new Error(`the flush did not move ${request.operation}`);
+      await this.sendCircuit(request.action)(outIndex);
+      const outHex = bytesToHex(outIndex);
+      const ids = [...(await this.readLedger()).evictionMap]
+        .filter(([, index]) => bytesToHex(index) === outHex)
+        .map(([id]) => id);
+      const [requestId] = ids;
+      if (requestId === undefined || ids.length !== 1) {
+        throw new Error(`${request.operation} recorded ${String(ids.length)} request ids`);
+      }
+      const id = requestIdHex(requestId);
+      const placement = this.lastPlacement;
+      const phase = placement.some((call) => call.fallibleNotifications.includes(id))
+        ? "fallible"
+        : placement.some((call) => call.guaranteedNotifications.includes(id))
+          ? "guaranteed"
+          : "missing";
+      diagnostics(`${request.operation} notified ${id} in the ${phase} transcript`);
+      sent.push({ ...request, requestId: id, placement });
+    }
+    return sent;
   }
 
   // Waits for every MPC signature, executes the transactions in nonce order, recomputes the
   // output the MPC attests and waits for attestations that verify against the response key.
+  // Then queues each attestation and flushes them, ready for the complete circuits.
   private async executeAll(
     requests: readonly SentRequest[],
-    schemas: (request: SentRequest) => [Uint8Array, Uint8Array],
     beforeExecution?: () => Promise<void>,
   ): Promise<Map<string, AttestedRequest>> {
     const signed = await Promise.all(
       requests.map(async (request) => ({
         request,
         transaction: await poll(`${request.operation} signature`, () =>
-          this.reader(request.map).getSignedEvmTransaction(request.requestId, request.signer),
+          this.reader(request.action).getSignedEvmTransaction(request.requestId, request.signer),
         ),
       })),
     );
@@ -329,8 +457,8 @@ class VaultRun {
     const executed = [];
     for (const { request, transaction } of signed) {
       const receipt = await this.evm.execute(transaction);
-      const [outputSchema, respondSchema] = schemas(request);
-      const decoded = deserializeEvmOutput(outputSchema, await this.evm.returnData(receipt.hash));
+      const returnData = await this.evm.returnData(receipt.hash);
+      const decoded = deserializeEvmOutput(request.outputSchema, returnData);
       if ("success" in decoded && decoded.success !== true) {
         throw new Error(`${request.operation} returned false`);
       }
@@ -340,13 +468,16 @@ class VaultRun {
         evmTransaction: receipt.hash,
         evmBlockHeight: receipt.blockNumber,
         decoded,
-        output: serializeRespondOutput(respondSchema, decoded),
+        output: executedEvmRespondOutput(request.outputSchema, true, {
+          kind: EvmTraceOutputKind.Output,
+          returnData,
+        }),
       });
     }
     const attested = new Map<string, AttestedRequest>();
     for (const request of executed) {
       const event = await poll(`${request.operation} attestation`, () =>
-        this.reader(request.map).getVerifiedRespondBidirectionalEvent(
+        this.reader(request.action).getVerifiedRespondBidirectionalEvent(
           request.requestId,
           request.output,
           this.responseKey,
@@ -354,6 +485,14 @@ class VaultRun {
       );
       if (event.blockHeight !== BigInt(request.evmBlockHeight)) {
         throw new Error(`${request.operation} attested height ${event.blockHeight}`);
+      }
+      const circuitInput = respondBidirectionalEventToCircuitInput(event);
+      if (request.output.length === 1) {
+        await this.vault.callTx.queueAttestation1(circuitInput, request.output);
+      } else if (request.output.length === 32) {
+        await this.vault.callTx.queueAttestation32(circuitInput, request.output);
+      } else {
+        throw new Error(`no queue circuit takes ${String(request.output.length)} output bytes`);
       }
       attested.set(request.operation, { ...request, event });
       this.operations.push({
@@ -365,55 +504,74 @@ class VaultRun {
         output: bytesToHex(request.output),
       });
     }
+    const requestIds = executed.map((request) => hexToBytes(request.requestId));
+    await this.flush([], requestIds);
+    const flushed = await this.readLedger();
+    if (requestIds.some((id) => !flushed.outputAttestationBuffer.member(id))) {
+      throw new Error("the flush left an attestation queued");
+    }
     return attested;
   }
 
-  private async removed(map: RequestMap, requestId: RequestIdHex): Promise<void> {
-    if ((await this.readLedger())[map].member(hexToBytes(requestId))) {
-      throw new Error(`${map} still holds the settled request ${requestId}`);
+  private async removed(request: SentRequest): Promise<void> {
+    const map = (await this.readLedger())[REQUEST_MAPS[request.action].field];
+    if (map.member(hexToBytes(request.requestId))) {
+      throw new Error(`${request.operation} still holds the settled request ${request.requestId}`);
     }
   }
 
   async run(): Promise<VaultRunResult> {
-    const transferSchemas = (): [Uint8Array, Uint8Array] => [
-      pureCircuits.vaultResponseSchema(),
-      pureCircuits.vaultResponseSchema(),
-    ];
-    const { usdc, output, stata, router } = this.targets;
+    const transferSchema = pureCircuits.vaultOutputSchema();
+    const { usdc, output, stata } = this.targets;
     const wallet = this.input.userFacade;
 
     // One deposit funds every later leg; both approvals ride the same flush.
     diagnostics("queueing the deposit and approvals");
-    const depositNonce = BigInt(await this.evm.provider.getTransactionCount(this.userEvm));
-    const depositKey = pureCircuits.refundCommitment(
-      this.userSecret,
-      pureCircuits.depositBinder(depositNonce),
-    );
-    await this.vault.callTx.startDeposit(depositNonce, 100_000n, 30_000_000_000n, 1_000_000_000n, {
-      erc20Address: hexToBytes(usdc),
-      amount: DEPOSIT_AMOUNT,
-    });
-    await this.vault.callTx.approveRouter(hexToBytes(usdc));
-    await this.vault.callTx.approveStata();
-    await this.flush();
-    const opening = [
-      await this.send("deposit", "depositEventMap", this.userEvm, () =>
-        this.vault.callTx.sendDeposit(depositKey),
-      ),
-      await this.send("approveRouter", "signBidirectionalEventMap", this.vaultEvm, () =>
-        this.vault.callTx.sendApproveRouter(pureCircuits.approveRouterBinder(hexToBytes(usdc))),
-      ),
-      await this.send("approveStata", "signBidirectionalEventMap", this.vaultEvm, () =>
-        this.vault.callTx.sendApproveStata(pureCircuits.approveStataBinder()),
-      ),
+    const opening: StartedRequest[] = [
+      {
+        operation: "deposit",
+        action: Action.deposit,
+        inIndex: newInputIndex(),
+        signer: this.userEvm,
+        outputSchema: transferSchema,
+      },
+      {
+        operation: "approveRouter",
+        action: Action.approve,
+        inIndex: newInputIndex(),
+        signer: this.vaultEvm,
+        outputSchema: transferSchema,
+      },
+      {
+        operation: "approveStata",
+        action: Action.approve,
+        inIndex: newInputIndex(),
+        signer: this.vaultEvm,
+        outputSchema: transferSchema,
+      },
     ];
+    const [depositStart, routerStart, stataStart] = opening as [
+      StartedRequest,
+      StartedRequest,
+      StartedRequest,
+    ];
+    await this.vault.callTx.startDeposit(
+      depositStart.inIndex,
+      BigInt(await this.evm.provider.getTransactionCount(this.userEvm)),
+      DEPOSIT_GAS,
+      { erc20Address: hexToBytes(usdc), amount: DEPOSIT_AMOUNT },
+    );
+    await this.vault.callTx.startApproveRouter(routerStart.inIndex, hexToBytes(usdc));
+    await this.vault.callTx.startApproveStata(stataStart.inIndex);
+    const openingSent = await this.flushAndSend(opening);
     const vaultBefore = await this.evm.balanceOf(usdc, this.vaultEvm);
-    const deposit = attestedOf(await this.executeAll(opening, transferSchemas), "deposit");
+    const openingSettled = await this.executeAll(openingSent);
     if ((await this.evm.balanceOf(usdc, this.vaultEvm)) - vaultBefore !== DEPOSIT_AMOUNT) {
       throw new Error("the deposit did not move the ERC20 into the vault account");
     }
+    const deposit = attestedOf(openingSettled, "deposit");
     await this.vault.callTx.completeDeposit(
-      respondBidirectionalEventToCircuitInput(deposit.event),
+      hexToBytes(deposit.requestId),
       deposit.output,
       randomBytes(32),
       {
@@ -425,127 +583,139 @@ class VaultRun {
         },
       },
     );
-    await this.removed("depositEventMap", deposit.requestId);
+    for (const operation of ["approveRouter", "approveStata"]) {
+      const approval = attestedOf(openingSettled, operation);
+      await this.vault.callTx.completeApprove(hexToBytes(approval.requestId), approval.output);
+      await this.removed(approval);
+    }
+    await this.removed(deposit);
     await this.expectBalance(usdc, DEPOSIT_AMOUNT);
 
     diagnostics("queueing the withdraw, swap and supply");
-    const withdrawKey = randomBytes(32);
-    const swapKey = randomBytes(32);
-    const supplyKey = randomBytes(32);
+    const legs: StartedRequest[] = [
+      {
+        operation: "withdraw",
+        action: Action.withdraw,
+        inIndex: newInputIndex(),
+        signer: this.vaultEvm,
+        outputSchema: transferSchema,
+      },
+      {
+        operation: "swap",
+        action: Action.swap,
+        inIndex: newInputIndex(),
+        signer: this.vaultEvm,
+        outputSchema: pureCircuits.swapOutputSchema(),
+      },
+      {
+        operation: "supply",
+        action: Action.supply,
+        inIndex: newInputIndex(),
+        signer: this.vaultEvm,
+        outputSchema: pureCircuits.supplyOutputSchema(),
+      },
+    ];
+    const [withdrawStart, swapStart, supplyStart] = legs as [
+      StartedRequest,
+      StartedRequest,
+      StartedRequest,
+    ];
     await this.vault.callTx.startWithdraw(
+      withdrawStart.inIndex,
       {
         erc20Address: hexToBytes(usdc),
         amount: WITHDRAW_AMOUNT,
         destEvmAddress: hexToBytes(this.userEvm),
       },
       this.coin(usdc, WITHDRAW_AMOUNT),
-      withdrawKey,
     );
     // Each surrendered coin is split from the wallet's change of the previous one.
     await wallet.waitForSyncedState();
     await this.vault.callTx.startSwap(
+      swapStart.inIndex,
       {
-        tokenIn: hexToBytes(usdc),
-        tokenOut: hexToBytes(output),
-        fee: 500n,
+        erc20AddressIn: hexToBytes(usdc),
+        erc20AddressOut: hexToBytes(output),
+        fee: SWAP_FEE,
         amountOut: SWAP_AMOUNT_OUT,
         amountInMaximum: SWAP_AMOUNT_IN_MAXIMUM,
       },
       this.coin(usdc, SWAP_AMOUNT_IN_MAXIMUM),
-      swapKey,
     );
     await wallet.waitForSyncedState();
     await this.vault.callTx.startSupply(
+      supplyStart.inIndex,
       { amount: SUPPLY_AMOUNT },
       this.coin(usdc, SUPPLY_AMOUNT),
-      supplyKey,
     );
-    await this.flush();
-    const legs = [
-      await this.send("withdraw", "signBidirectionalEventMap", this.vaultEvm, () =>
-        this.vault.callTx.sendWithdraw(withdrawKey),
-      ),
-      await this.send("swap", "swapEventMap", this.vaultEvm, () =>
-        this.vault.callTx.sendSwap(swapKey),
-      ),
-      await this.send("supply", "supplyEventMap", this.vaultEvm, () =>
-        this.vault.callTx.sendSupply(supplyKey),
-      ),
-    ];
+    const legsSent = await this.flushAndSend(legs);
     const userBefore = await this.evm.balanceOf(usdc, this.userEvm);
-    const settled = await this.executeAll(legs, (request) =>
-      request.operation === "swap"
-        ? [pureCircuits.swapOutputSchema(), pureCircuits.swapRespondSchema()]
-        : request.operation === "supply"
-          ? [pureCircuits.supplyOutputSchema(), pureCircuits.supplyRespondSchema()]
-          : transferSchemas(),
-    );
+    const settled = await this.executeAll(legsSent);
     const withdraw = attestedOf(settled, "withdraw");
     const swap = attestedOf(settled, "swap");
     const supply = attestedOf(settled, "supply");
     if ((await this.evm.balanceOf(usdc, this.userEvm)) - userBefore !== WITHDRAW_AMOUNT) {
       throw new Error("the withdraw did not pay the destination");
     }
-    const amountIn = await this.evm.quoteSwap(router, SWAP_AMOUNT_OUT);
+    const amountIn = await this.evm.quoteSwap(this.targets.router, SWAP_AMOUNT_OUT);
     if (swap.decoded.amountIn !== amountIn) throw new Error("the swap attested another amountIn");
     const shares = supply.decoded.shares;
     if (shares !== SUPPLY_AMOUNT) throw new Error(`the supply attested ${String(shares)} shares`);
     await this.vault.callTx.completeWithdraw(
-      respondBidirectionalEventToCircuitInput(withdraw.event),
+      hexToBytes(withdraw.requestId),
       withdraw.output,
       randomBytes(32),
     );
     await this.vault.callTx.completeSwap(
-      respondBidirectionalEventToCircuitInput(swap.event),
+      hexToBytes(swap.requestId),
       swap.output,
       randomBytes(32),
       randomBytes(32),
     );
     await this.vault.callTx.completeSupply(
-      respondBidirectionalEventToCircuitInput(supply.event),
+      hexToBytes(supply.requestId),
       supply.output,
       randomBytes(32),
     );
-    await this.removed("signBidirectionalEventMap", withdraw.requestId);
-    await this.removed("swapEventMap", swap.requestId);
-    await this.removed("supplyEventMap", supply.requestId);
+    await this.removed(withdraw);
+    await this.removed(swap);
+    await this.removed(supply);
     const usdcAfterLegs = DEPOSIT_AMOUNT - WITHDRAW_AMOUNT - amountIn - SUPPLY_AMOUNT;
     await this.expectBalance(usdc, usdcAfterLegs);
     await this.expectBalance(output, SWAP_AMOUNT_OUT);
     await this.expectBalance(stata, SUPPLY_AMOUNT);
 
     diagnostics("queueing the redeem");
-    const redeemKey = randomBytes(32);
+    const redeemStart: StartedRequest = {
+      operation: "redeem",
+      action: Action.redeem,
+      inIndex: newInputIndex(),
+      signer: this.vaultEvm,
+      outputSchema: pureCircuits.redeemOutputSchema(),
+    };
     await this.vault.callTx.startRedeem(
+      redeemStart.inIndex,
       { shares: SUPPLY_AMOUNT },
       this.coin(stata, SUPPLY_AMOUNT),
-      redeemKey,
     );
-    await this.flush();
-    const redeemSent = await this.send("redeem", "redeemEventMap", this.vaultEvm, () =>
-      this.vault.callTx.sendRedeem(redeemKey),
-    );
+    const redeemSent = await this.flushAndSend([redeemStart]);
     let assets = 0n;
     const redeem = attestedOf(
-      await this.executeAll(
-        [redeemSent],
-        () => [pureCircuits.redeemOutputSchema(), pureCircuits.redeemRespondSchema()],
-        async () => {
-          await this.evm.mint(usdc, stata, REDEEM_YIELD);
-          assets = await this.evm.previewRedeem(stata, SUPPLY_AMOUNT);
-        },
-      ),
+      await this.executeAll(redeemSent, async () => {
+        await this.evm.mint(usdc, stata, REDEEM_YIELD);
+        assets = await this.evm.previewRedeem(stata, SUPPLY_AMOUNT);
+      }),
       "redeem",
     );
     if (assets <= SUPPLY_AMOUNT || redeem.decoded.assets !== assets) {
       throw new Error(`the redeem attested ${String(redeem.decoded.assets)}, expected ${assets}`);
     }
     await this.vault.callTx.completeRedeem(
-      respondBidirectionalEventToCircuitInput(redeem.event),
+      hexToBytes(redeem.requestId),
       redeem.output,
       randomBytes(32),
     );
-    await this.removed("redeemEventMap", redeem.requestId);
+    await this.removed(redeem);
     await this.expectBalance(usdc, usdcAfterLegs + assets);
     await this.expectBalance(stata, 0n);
 

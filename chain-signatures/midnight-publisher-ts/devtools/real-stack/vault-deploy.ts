@@ -16,7 +16,7 @@ import { vaultCompiledContract, vaultManagedPath } from "./vault-contract.js";
 
 // Every verifier key in one deploy overflows a block, so the base deploy registers one
 // small circuit and maintenance updates install the rest, a few kilobytes of keys each.
-const BASE_CIRCUIT = "approveRouter";
+const BASE_CIRCUIT = "addAllowedToken";
 const MAINTENANCE_BATCH_BYTES = 12_000;
 const TTL_MS = 30 * 60_000;
 

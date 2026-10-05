@@ -28,9 +28,7 @@ const RETURN_TRUE_RUNTIME_BYTECODE: &str = "600160005260206000f3";
 struct OutputCase {
     name: String,
     runtime: Bytes,
-    argument: [u8; 32],
     output_schema: Vec<u8>,
-    response_schema: Vec<u8>,
     expected_output: Vec<u8>,
     expected_call_result: Option<Bytes>,
     failed: bool,
@@ -42,28 +40,27 @@ struct OutputCase {
 struct OutputVector {
     name: String,
     output_schema_hex: String,
-    respond_schema_hex: String,
-    call_result_hex: String,
+    is_contract_call: bool,
+    trace: OutputTrace,
     expected_output_hex: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OutputTrace {
+    return_data_hex: Option<String>,
 }
 
 fn output_cases() -> anyhow::Result<Vec<OutputCase>> {
     let mut cases = Vec::new();
-    for (output_type, width, failed) in [
-        ("bool", 1, false),
-        ("uint64", 8, false),
-        ("bytes32", 32, false),
-        ("uint64", 0, true),
+    // The target returns the ABI word 1. A uint256 is attested little-endian, a bytes32 in
+    // wire order, and a reverted call attests an empty output.
+    for (output_type, expected_output, failed) in [
+        ("bool", "01".to_string(), false),
+        ("uint256", format!("01{}", "00".repeat(31)), false),
+        ("bytes32", format!("{}01", "00".repeat(31)), false),
+        ("uint256", String::new(), true),
     ] {
-        let schema = serde_json::to_vec(&serde_json::json!([
-            {"name": "success", "type": output_type}
-        ]))?;
-        let mut expected_output = vec![0; width];
-        if !failed {
-            expected_output[if output_type == "bytes32" { 31 } else { 0 }] = 1;
-        }
-        let mut argument = [0; 32];
-        argument[31] = 6;
         cases.push(OutputCase {
             name: if failed { "reverted" } else { output_type }.into(),
             runtime: hex::decode(if failed {
@@ -72,10 +69,10 @@ fn output_cases() -> anyhow::Result<Vec<OutputCase>> {
                 RETURN_TRUE_RUNTIME_BYTECODE
             })?
             .into(),
-            argument,
-            output_schema: schema.clone(),
-            response_schema: schema,
-            expected_output,
+            output_schema: serde_json::to_vec(&serde_json::json!([
+                {"name": "success", "type": output_type}
+            ]))?,
+            expected_output: hex::decode(expected_output)?,
             expected_call_result: None,
             failed,
             cache_outage: false,
@@ -89,35 +86,25 @@ fn output_cases() -> anyhow::Result<Vec<OutputCase>> {
     let oracle: Oracle = serde_json::from_str(include_str!(
         "../../../chain-signatures/chain-ethereum/tests/fixtures/midnight_respond_vectors.json"
     ))?;
-    for (name, contract, variant, cache_outage) in [
+    for (name, contract, cache_outage) in [
         (
-            "UTF-8 string uses byte length and maxBytes capacity",
-            "MidnightStringOutput",
-            0,
+            "uint256 340282366920938463463374607431768211456 is little-endian",
+            "MidnightUint256Output",
             false,
         ),
         (
-            "dynamic bytes use length and maxBytes capacity",
-            "MidnightBytesOutput",
-            0,
+            "address keeps wire byte order",
+            "MidnightAddressOutput",
             false,
         ),
         (
-            "dynamic ABI array maps into fixed-capacity response array",
-            "MidnightArrayOutput",
-            0,
+            "bytes12 then address keep schema order in a 64-byte schema",
+            "MidnightTagThenAddressOutput",
             false,
         ),
         (
-            "dynamic bytes exactly fill maxBytes capacity",
-            "MidnightBytesOutput",
-            1,
-            false,
-        ),
-        (
-            "empty dynamic bytes retain maxBytes capacity",
-            "MidnightBytesOutput",
-            2,
+            "trailing words past the last field are ignored",
+            "MidnightTrailingWordOutput",
             true,
         ),
     ] {
@@ -126,6 +113,7 @@ fn output_cases() -> anyhow::Result<Vec<OutputCase>> {
             .iter()
             .find(|vector| vector.name == name)
             .with_context(|| format!("missing SDK oracle case: {name}"))?;
+        anyhow::ensure!(vector.is_contract_call, "{name}: not a contract call");
         let artifact = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
             "../chain-signatures/contract-eth/artifacts/contracts/MidnightConformance.sol/{contract}.json"
         ));
@@ -136,21 +124,26 @@ fn output_cases() -> anyhow::Result<Vec<OutputCase>> {
         let runtime = artifact["deployedBytecode"]
             .as_str()
             .context("Solidity fixture has no deployed bytecode")?;
-        let mut argument = [0; 32];
-        argument[31] = variant;
         cases.push(OutputCase {
             name: name.into(),
             runtime: hex::decode(runtime.trim_start_matches("0x"))?.into(),
-            argument,
             output_schema: hex::decode(&vector.output_schema_hex)?,
-            response_schema: hex::decode(&vector.respond_schema_hex)?,
             expected_output: hex::decode(
                 vector
                     .expected_output_hex
                     .as_ref()
                     .context("live output case must be accepted by the SDK")?,
             )?,
-            expected_call_result: Some(hex::decode(&vector.call_result_hex)?.into()),
+            expected_call_result: Some(
+                hex::decode(
+                    vector
+                        .trace
+                        .return_data_hex
+                        .as_ref()
+                        .context("live output case must have return data")?,
+                )?
+                .into(),
+            ),
             failed: false,
             cache_outage,
         });
@@ -217,20 +210,14 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         .context("Ethereum context was not started")?;
     let anvil =
         ProviderBuilder::new().connect_http(ethereum.sandbox.external_http_endpoint.parse()?);
-    // The target returns the ABI word 1. A uint256 is attested little-endian, a bytes32 in
-    // wire order, and a reverted call attests an empty output.
-    let uint256_one = format!("01{}", "00".repeat(31));
-    let bytes32_one = format!("{}01", "00".repeat(31));
-    for (nonce, output_type, expected_output, failed) in [
-        (0, "bool", "01", false),
-        (1, "uint256", uint256_one.as_str(), false),
-        (2, "bytes32", bytes32_one.as_str(), false),
-        (3, "uint256", "", true),
-    ] {
+    let mut argument = [0; 32];
+    argument[31] = 6;
+    for (nonce, case) in cases.into_iter().enumerate() {
+        tracing::info!(case = case.name, nonce, "checking Midnight API conformance");
         let target = Address::repeat_byte(0x42 + nonce as u8);
         anvil.anvil_set_code(target, case.runtime).await?;
         let mut expected_input = hex::decode("2a2e1320")?;
-        expected_input.extend_from_slice(&case.argument);
+        expected_input.extend_from_slice(&argument);
         if let Some(expected_call_result) = &case.expected_call_result {
             let result = anvil
                 .call(
@@ -246,12 +233,11 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
             );
         }
         let submitted = midnight
-            .submit_is_even_with_schemas(
+            .submit_is_even_with_schema(
                 nonce as u64,
                 target.into_array(),
-                case.argument,
+                argument,
                 &case.output_schema,
-                &case.response_schema,
             )
             .await?;
         anyhow::ensure!(
@@ -381,7 +367,11 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
                 mpc_primitives::AttestationOutcomeKind::Executed
             }
         );
-        assert_eq!(hex::encode(&output), expected_output);
+        assert_eq!(
+            output, case.expected_output,
+            "{}: output bytes differ",
+            case.name
+        );
         midnight
             .settle_response(request_id, &output, case.failed)
             .await?;
@@ -398,8 +388,6 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
     // Impersonation: another contract notifies the central Signet contract naming the caller's
     // filed, still-pending request. Blocks index in order, so the next sign request seen after
     // a later genuine submission must be that submission, never the impersonated one.
-    let mut argument = [0; 32];
-    argument[31] = 6;
     let mut next_sign_request = async || {
         let ChainEvent::SignRequest { request, .. } = events
             .wait_for(
@@ -934,11 +922,18 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
     );
     let mut request_ids = BTreeSet::new();
     for operation in &result.operations {
-        // The vault's send circuits exceed the guaranteed budget, so every notification
-        // comes from a fallible transcript of a fully applied transaction.
+        // Whether a send stays within the guaranteed budget depends on its circuit and the
+        // ledger state, so a notification may come from either transcript; the placement
+        // test pins both. Each must come from the transaction that sent it.
+        let phase = notification_phase(&operation.placement, &operation.request_id);
+        tracing::info!(
+            operation = operation.operation,
+            ?phase,
+            "vault request notified"
+        );
         anyhow::ensure!(
-            notification_phase(&operation.placement, &operation.request_id) == Some("fallible"),
-            "{} did not notify in the fallible transcript: {:?}",
+            phase.is_some(),
+            "{} did not notify in its own transaction: {:?}",
             operation.operation,
             operation.placement
         );

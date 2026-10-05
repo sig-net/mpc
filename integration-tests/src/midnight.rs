@@ -235,13 +235,14 @@ impl MidnightContext {
             .await
     }
 
-    pub async fn submit_is_even_with_schemas(
+    /// Submit with raw output schema bytes, which the driver NUL-pads to the caller's
+    /// 64-byte field.
+    pub async fn submit_is_even_with_schema(
         &self,
         nonce: u64,
         target: [u8; 20],
         argument: [u8; 32],
         output_schema: &[u8],
-        response_schema: &[u8],
     ) -> anyhow::Result<SubmittedRequest> {
         let mut driver = self.driver.lock().await;
         driver
@@ -251,7 +252,6 @@ impl MidnightContext {
                 "target": hex::encode(target),
                 "argument": hex::encode(argument),
                 "outputSchema": hex::encode(output_schema),
-                "responseSchema": hex::encode(response_schema),
             }))
             .await
     }

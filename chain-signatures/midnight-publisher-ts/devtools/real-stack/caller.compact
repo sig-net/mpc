@@ -125,14 +125,14 @@ export circuit submitIsEvenRequest(
 }
 
 // Test-only transcript placements. Each circuit files and notifies Boolean-schema
-// requests at key version 1. Without `kernel.checkpoint()`, which this compiler's ZKIR v3
+// requests, with the reserved respond schema left empty, at key version 1. Without `kernel.checkpoint()`, which this compiler's ZKIR v3
 // backend does not implement, a call is either wholly guaranteed or wholly fallible.
 
 export circuit submitPlacedRequest(call: IsEvenCall, schema: Bytes<64>, fallible: Boolean): RequestId {
   if (disclose(fallible)) {
     addBallast();
   }
-  return notifySigner(fileIsEvenRequest(call, 1, schema, schema));
+  return notifySigner(fileIsEvenRequest(call, 1, schema, default<Bytes<64>>));
 }
 
 // Both singleton calls take this call's phase and notify in call order.
@@ -145,8 +145,8 @@ export circuit submitPlacedRequestPair(
   if (disclose(fallible)) {
     addBallast();
   }
-  const firstId = notifySigner(fileIsEvenRequest(first, 1, schema, schema));
-  const secondId = notifySigner(fileIsEvenRequest(second, 1, schema, schema));
+  const firstId = notifySigner(fileIsEvenRequest(first, 1, schema, default<Bytes<64>>));
+  const secondId = notifySigner(fileIsEvenRequest(second, 1, schema, default<Bytes<64>>));
   return [firstId, secondId];
 }
 
@@ -155,7 +155,7 @@ export circuit submitPlacedRequestPair(
 export circuit submitGatedRequest(call: IsEvenCall, schema: Bytes<64>, expectedGate: Uint<64>): RequestId {
   addBallast();
   assert(gate == disclose(expectedGate), "Gate moved");
-  return notifySigner(fileIsEvenRequest(call, 1, schema, schema));
+  return notifySigner(fileIsEvenRequest(call, 1, schema, default<Bytes<64>>));
 }
 
 export circuit bumpGate(): [] {
@@ -211,13 +211,13 @@ export pure circuit checkResponse8(response: RespondBidirectionalEventV1, serial
   return verifyRespondBidirectionalEventV1<8>(serializedOutput, response, responseKey);
 }
 
-export circuit verifyResponse16(response: RespondBidirectionalEventV1, serializedOutput: Bytes<16>): [] {
-  consumeResponse<16>(response, serializedOutput);
+export circuit verifyResponse20(response: RespondBidirectionalEventV1, serializedOutput: Bytes<20>): [] {
+  consumeResponse<20>(response, serializedOutput);
   assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
 }
 
-export pure circuit checkResponse16(response: RespondBidirectionalEventV1, serializedOutput: Bytes<16>, responseKey: Secp256k1Point): Boolean {
-  return verifyRespondBidirectionalEventV1<16>(serializedOutput, response, responseKey);
+export pure circuit checkResponse20(response: RespondBidirectionalEventV1, serializedOutput: Bytes<20>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<20>(serializedOutput, response, responseKey);
 }
 
 export circuit verifyResponse32(response: RespondBidirectionalEventV1, serializedOutput: Bytes<32>): [] {
