@@ -101,6 +101,7 @@ impl TronHttp {
                         res_message: response.res_message.as_deref().map(decode_hex_ascii),
                         energy_usage: response.receipt.energy_usage,
                         net_usage: response.receipt.net_usage,
+                        receipt_result: response.receipt.result,
                         logs: response.log,
                     })),
                     None => Ok(None),
@@ -259,6 +260,8 @@ struct ReceiptUsage {
     energy_usage: u64,
     #[serde(default, rename = "net_usage")]
     net_usage: u64,
+    #[serde(default)]
+    result: Option<String>,
 }
 
 /// Receipt logs arrive as Tron-encoded hex JSON; parse them into
@@ -489,8 +492,8 @@ mod tests {
         let tx_id = test_hash(9);
         let usdt_topic = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
         let data_hex = "00000000000000000000000000000000000000000000000000000000001e8480";
-        // java-tron renders 21-byte 0x41-prefixed hex, the official event-log
-        // doc describes 20-byte EVM form. The parser normalizes both.
+        // Log address is the 20-byte EVM form. 
+        // The 21-byte 0x41-prefixed form stays tolerated.
         server
             .mock("POST", "/walletsolidity/gettransactioninfobyid")
             .with_status(200)
@@ -530,6 +533,7 @@ mod tests {
         assert_eq!(receipt.block_number, 3035010);
         assert_eq!(receipt.fee, 2765000);
         assert_eq!(receipt.contract_ret.as_deref(), Some("SUCCESS"));
+        assert_eq!(receipt.receipt_result.as_deref(), Some("SUCCESS"));
         assert_eq!(receipt.res_message.as_deref(), Some("SUCCESS"));
         assert_eq!(receipt.energy_usage, 262);
         assert_eq!(receipt.net_usage, 343);

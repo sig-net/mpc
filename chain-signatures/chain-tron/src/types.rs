@@ -20,7 +20,7 @@ pub enum BroadcastOutcome {
     Rejected { code: String, message: String },
 }
 
-/// Solidity-router receipt.
+/// Receipt from the solidity router; presence means executed and final.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TronReceipt {
     pub id: B256,
@@ -28,9 +28,11 @@ pub struct TronReceipt {
     pub block_timestamp: u64,
     /// Total fee in sun.
     pub fee: u64,
-    /// `SUCCESS`, `REVERT`, `OUT_OF_ENERGY`, etc.
+    /// Execution result; java-tron only — absent on TronGrid.
     pub contract_ret: Option<String>,
-    /// Node-readable revert reason, hex-decoded when present.
+    /// Execution result from the nested `receipt` object; TronGrid's form.
+    pub receipt_result: Option<String>,
+    /// Revert reason, hex-decoded when present.
     pub res_message: Option<String>,
     pub energy_usage: u64,
     pub net_usage: u64,
