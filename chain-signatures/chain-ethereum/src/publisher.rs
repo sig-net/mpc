@@ -45,6 +45,16 @@ impl From<&Signature> for ChainSignatures::Signature {
     }
 }
 
+/// Convert a publish action into its contract `respond` payload.
+impl From<&PublishAction> for ChainSignatures::Response {
+    fn from(action: &PublishAction) -> Self {
+        Self {
+            requestId: action.request.id.request_id.into(),
+            signature: (&action.signature).into(),
+        }
+    }
+}
+
 /// An Ethereum client that implements the `ChainPublisher` trait for publishing signatures to an Ethereum smart contract.
 /// This client is separate from the client used by the indexer (separation of concerns: read vs write).
 #[derive(Clone)]
@@ -146,7 +156,8 @@ impl BatchPublisher {
                     if received == 0 {
                         // All senders dropped: flush what's left and shut down.
                         if !actions_batch.is_empty() {
-                            self.execute_batch_publish(&mut actions_batch).await;
+                            self.execute_batch_publish(std::mem::take(&mut actions_batch))
+                                .await;
                         }
                         return;
                     }
@@ -158,40 +169,40 @@ impl BatchPublisher {
                 }
                 // Flush the batch if the flush timer has elapsed and the batch is not empty.
                 _ = &mut flush_timer, if !actions_batch.is_empty() => {
-                    self.execute_batch_publish(&mut actions_batch).await;
+                    self.execute_batch_publish(std::mem::take(&mut actions_batch))
+                        .await;
                 }
             }
 
             // Flush the batch if it has reached the maximum batch size.
             if actions_batch.len() >= self.config.max_batch_size {
-                self.execute_batch_publish(&mut actions_batch).await;
+                self.execute_batch_publish(std::mem::take(&mut actions_batch))
+                    .await;
             }
         }
     }
 
     /// Attempt one batch publish and report the outcome to every awaiting caller;
     /// retries belong to the node-level publish loop.
-    async fn execute_batch_publish(&self, actions: &mut Vec<QueuedAction>) {
+    async fn execute_batch_publish(&self, mut actions: Vec<QueuedAction>) {
         tracing::info!(
             num_requests = actions.len(),
             "publishing batch of ethereum signatures",
         );
-        let res = self.batch_publish_signatures(actions).await;
+        let res = self.batch_publish_signatures(&actions).await;
 
-        match &res {
-            Ok(()) => {
-                for queued in actions.iter() {
-                    self.telemetry.record_publish_metrics(&queued.action);
-                }
-            }
-            Err(err) => tracing::error!(%err, "batch publish failed"),
+        if let Err(err) = &res {
+            tracing::error!(%err, "batch publish failed");
         }
 
         for queued in actions.drain(..) {
-            let result = match &res {
-                Ok(()) => Ok(()),
-                Err(err) => Err(anyhow::anyhow!("{err}")),
-            };
+            if res.is_ok() {
+                self.telemetry.record_publish_metrics(&queued.action);
+            }
+            let result = res
+                .as_ref()
+                .map_err(|err| anyhow::anyhow!("{err}"))
+                .map(|_| ());
             let _ = queued.done.send(result);
         }
     }
@@ -335,10 +346,7 @@ impl BatchPublisher {
 
         let responses: Vec<ChainSignatures::Response> = actions
             .iter()
-            .map(|queued| ChainSignatures::Response {
-                requestId: queued.action.request.id.request_id.into(),
-                signature: (&queued.action.signature).into(),
-            })
+            .map(|queued| (&queued.action).into())
             .collect();
 
         let gas = self
@@ -355,7 +363,6 @@ impl BatchPublisher {
 #[async_trait::async_trait]
 impl ChainPublisher for EthClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        // Send the publish action to the batch processing channel and await the result.
         let (done, result) = oneshot::channel();
         self.batch_tx
             .send(QueuedAction {
@@ -364,12 +371,9 @@ impl ChainPublisher for EthClient {
             })
             .await
             .map_err(|e| anyhow::anyhow!("eth: batch channel closed: {e}"))?;
-
-        // Await the result from the batch processing channel.
-        match result.await {
-            Ok(res) => res,
-            Err(_) => anyhow::bail!("eth: batch task exited before publishing"),
-        }
+        result
+            .await
+            .map_err(|_| anyhow::anyhow!("eth: batch task exited before publishing"))?
     }
 }
 
@@ -390,9 +394,7 @@ mod tests {
     }
 
     /// Queues a publish action for testing, returning the queued action and the oneshot receiver for the result.
-    fn queue(
-        action: PublishAction,
-    ) -> (QueuedAction, oneshot::Receiver<anyhow::Result<()>>) {
+    fn queue(action: PublishAction) -> (QueuedAction, oneshot::Receiver<anyhow::Result<()>>) {
         let (done, result) = oneshot::channel();
         (QueuedAction { action, done }, result)
     }
