@@ -346,6 +346,13 @@ impl CheckpointQuery {
             let chain = chain_part.parse::<Chain>().map_err(|e| {
                 Error::InvalidParameters(format!("Invalid chain '{}': {}", chain_part, e))
             })?;
+            // One storage lookup per entry: cap the work a single request can trigger.
+            if selections.iter().any(|(selected, _)| *selected == chain) {
+                return Err(Error::InvalidParameters(format!(
+                    "chain '{}' appears more than once",
+                    chain_part
+                )));
+            }
 
             let digest = match parts.next() {
                 Some(suffix) => {
@@ -427,5 +434,25 @@ async fn checkpoint(
 mod debug {
     pub async fn page() -> axum::response::Html<String> {
         "<html><body>Debug page disabled. Compile the node with --features=debug-page to show useful information here.</bod></html>".to_string().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(query: &str) -> Result<Vec<ChainAndDigest>, Error> {
+        CheckpointQuery {
+            query: Some(query.to_string()),
+        }
+        .parse()
+    }
+
+    #[test]
+    fn checkpoint_query_rejects_repeated_chain() {
+        assert!(parse("Ethereum,Solana").is_ok());
+        assert!(parse("Ethereum,Ethereum").is_err());
+        let digest = format!("0x{}", "00".repeat(32));
+        assert!(parse(&format!("Solana:{digest},Solana")).is_err());
     }
 }
