@@ -22,7 +22,7 @@ const ABI_WORD_BYTES: usize = 32;
 const EVM_ADDRESS_BYTES: usize = 20;
 
 /// The traced return data an attestation derives from
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TracedReturn {
     NotTraced,
     Returned(Bytes),
@@ -176,11 +176,7 @@ fn encode(fields: &[OutputField], return_data: &[u8]) -> anyhow::Result<Vec<u8>>
                     .serialize(&mut out)?;
             }
             // A Borsh `[u8; N]` is its N bytes.
-            OutputKind::FixedBytes(length) => {
-                for byte in &word[..length] {
-                    byte.serialize(&mut out)?;
-                }
-            }
+            OutputKind::FixedBytes(length) => out.extend_from_slice(&word[..length]),
         }
     }
     debug_assert_eq!(out.len(), width);
