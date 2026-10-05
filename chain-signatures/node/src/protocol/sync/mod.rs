@@ -161,7 +161,6 @@ pub struct SyncTask {
     network: NetworkConfig,
 }
 
-// TODO: add a watch channel for mesh active participants.
 impl SyncTask {
     pub fn new(
         client: &NodeClient,

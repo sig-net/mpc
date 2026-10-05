@@ -117,7 +117,6 @@ async fn publishes_across_multiple_batches() {
     }
 
     // All 6 must be responded, grouped into exactly 2 batched transactions of 3
-    // TODO: assert the exact 3+3 split once BatchPublisher lands (PR #1144)
     let mut by_tx: HashMap<B256, Vec<B256>> = HashMap::new();
     for rid in &request_ids {
         let (responder, tx_hash) = wait_for_responded(&env, *rid, Duration::from_secs(10))
@@ -126,14 +125,8 @@ async fn publishes_across_multiple_batches() {
         assert_eq!(responder, env.signer.address());
         by_tx.entry(tx_hash).or_default().push(*rid);
     }
-    assert!(
-        by_tx.len() >= 2,
-        "expected responses across multiple batches, got {by_tx:?}"
-    );
+    assert_eq!(by_tx.len(), 2, "expected exactly two batches, got {by_tx:?}");
     for (tx, rids) in &by_tx {
-        assert!(
-            rids.len() <= 3,
-            "batch {tx:?} exceeds max_batch_size: {rids:?}"
-        );
+        assert_eq!(rids.len(), 3, "batch {tx:?} is not full: {rids:?}");
     }
 }

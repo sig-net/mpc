@@ -130,7 +130,6 @@ impl CantonClient {
             .bearer_auth(token))
     }
 
-    // TODO: this method is only used in integration tests, cosider hiding it behind a feature flag
     async fn auth_get(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
         let token = self.bearer_token().await?;
         Ok(self

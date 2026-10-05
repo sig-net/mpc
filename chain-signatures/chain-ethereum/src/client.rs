@@ -378,8 +378,6 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
 
-    // TODO: add more tests for non HTTP-related functionality, e.g. clamp_oldest_supported_with
-
     #[test]
     fn catchup_start_is_clamped_to_supported_window() {
         let max_catchup_blocks = 8191;
