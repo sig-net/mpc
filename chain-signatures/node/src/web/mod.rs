@@ -8,10 +8,12 @@ pub mod debug;
 
 use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
+use crate::config::NetworkConfig;
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
-use crate::protocol::sync::SyncChannel;
+use crate::protocol::sync::{self, SyncError};
 use crate::protocol::{Chain, MessageChannel};
+use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;
@@ -39,7 +41,8 @@ struct AxumState {
     node: NodeStateWatcher,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
-    sync_channel: SyncChannel,
+    contract: ContractStateWatcher,
+    network: NetworkConfig,
     msg_channel: MessageChannel,
     /// Only used to label the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
@@ -54,7 +57,8 @@ pub async fn run(
     node: NodeStateWatcher,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
-    sync_channel: SyncChannel,
+    contract: ContractStateWatcher,
+    network: NetworkConfig,
     my_account_id: AccountId,
     backlog: Backlog,
 ) {
@@ -64,7 +68,8 @@ pub async fn run(
         node,
         triple_storage,
         presignature_storage,
-        sync_channel,
+        contract,
+        network,
         my_account_id,
         backlog,
     };
@@ -299,7 +304,17 @@ async fn sync(
     WithRejection(Cbor(update), _): WithRejection<Cbor<Ciphered>, Error>,
 ) -> Result<Cbor<Ciphered>> {
     let start = Instant::now();
-    let response = state.sync_channel.request_update(update).await?;
+    let me = state.contract.me().await.ok_or(SyncError::NotParticipant)?;
+    let participants = state.contract.participant_map().await;
+    let response = sync::process_sync_update(
+        &update,
+        &state.triple_storage,
+        &state.presignature_storage,
+        me,
+        &state.network,
+        &participants,
+    )
+    .await?;
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["sync"])
         .observe(start.elapsed().as_millis() as f64);

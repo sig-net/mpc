@@ -621,14 +621,14 @@ impl MpcFixtureNodeBuilder {
             mock_chain,
         );
 
-        // --- SyncChannel and SyncTask setup ---
+        // --- SyncTask setup ---
         let node_client = NodeClient::new(&NodeClientOptions::default());
-        let (sync_channel, sync_task) = SyncTask::new(
+        let sync_task = SyncTask::new(
             &node_client,
             triple_storage.clone(),
             presignature_storage.clone(),
             mesh_rx.clone(),
-            context.contract_state,
+            context.contract_state.clone(),
             mpc_node::protocol::sync::SyncTask::sync_report_channel().0,
             config_tx.borrow().local.network.clone(),
         );
@@ -647,7 +647,7 @@ impl MpcFixtureNodeBuilder {
             presignature_storage,
             backlog,
             checkpoint_tx,
-            sync_channel,
+            contract: context.contract_state,
             web_handle: None,
         };
 
