@@ -18,7 +18,7 @@ use mpc_chain_integration_core::{
 use mpc_primitives::{SignId, Signature};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 type EthContractFillProvider = FillProvider<
     JoinFill<
@@ -50,7 +50,13 @@ impl From<&Signature> for ChainSignatures::Signature {
 #[derive(Clone)]
 pub struct EthClient {
     /// Channel used to send actions to the background batching task
-    batch_tx: mpsc::Sender<PublishAction>,
+    batch_tx: mpsc::Sender<QueuedAction>,
+}
+
+/// A queued publish action and the channel to report its batch outcome.
+struct QueuedAction {
+    action: PublishAction,
+    done: oneshot::Sender<anyhow::Result<()>>,
 }
 
 /// Publishing machinery for the background batching task.
@@ -115,9 +121,10 @@ impl BatchPublisher {
     /// Run the background batching loop that collects publish actions and sends them in batches to the Ethereum contract.
     ///
     /// A batch is flushed once it reaches `max_batch_size`, or `batch_flush_interval` after its
-    /// first action was queued.
-    async fn run_batch_respond(self, mut actions_rx: mpsc::Receiver<PublishAction>) {
-        let mut actions_batch: Vec<PublishAction> = Vec::with_capacity(self.config.max_batch_size);
+    /// first action was queued. Each flush is one attempt whose outcome is reported to the
+    /// awaiting callers; retries and duplicate suppression belong to the node-level publish loop.
+    async fn run_batch_respond(self, mut actions_rx: mpsc::Receiver<QueuedAction>) {
+        let mut actions_batch: Vec<QueuedAction> = Vec::with_capacity(self.config.max_batch_size);
         // Starts with a sleep of Duration::MAX, which will be reset when the first action is received.
         let flush_timer = tokio::time::sleep(Duration::MAX);
         tokio::pin!(flush_timer);
@@ -162,34 +169,31 @@ impl BatchPublisher {
         }
     }
 
-    /// Execute a batch publish of signatures to the Ethereum contract, with retry logic.
-    async fn execute_batch_publish(&self, actions: &mut Vec<PublishAction>) {
+    /// Attempt one batch publish and report the outcome to every awaiting caller;
+    /// retries belong to the node-level publish loop.
+    async fn execute_batch_publish(&self, actions: &mut Vec<QueuedAction>) {
         tracing::info!(
             num_requests = actions.len(),
             "publishing batch of ethereum signatures",
         );
-        let res = retry_rpc_gated!(
-            Duration::MAX, // Prevent from timing out
-            self.config.batch_publish_retry,
-            self.shared_backoff,
-            |attempt, err, sleep| {
-                tracing::warn!(
-                    "batch publish failed (attempt {attempt}): {err}, retrying in {sleep:?}"
-                );
-            },
-            { self.batch_publish_signatures(actions).await }
-        );
+        let res = self.batch_publish_signatures(actions).await;
 
-        // Log metrics for successful publishes, or log an error if all retries failed
-        if res.is_ok() {
-            for action in actions.iter() {
-                self.telemetry.record_publish_metrics(action);
+        match &res {
+            Ok(()) => {
+                for queued in actions.iter() {
+                    self.telemetry.record_publish_metrics(&queued.action);
+                }
             }
-        } else {
-            tracing::error!("exceeded max retries, trashing publish request");
+            Err(err) => tracing::error!(%err, "batch publish failed"),
         }
 
-        actions.clear();
+        for queued in actions.drain(..) {
+            let result = match &res {
+                Ok(()) => Ok(()),
+                Err(err) => Err(anyhow::anyhow!("{err}")),
+            };
+            let _ = queued.done.send(result);
+        }
     }
 
     /// Wait for transaction receipt with the configured attempts and exponential delay backoff
@@ -325,15 +329,15 @@ impl BatchPublisher {
         }
     }
 
-    async fn batch_publish_signatures(&self, actions: &[PublishAction]) -> anyhow::Result<()> {
+    async fn batch_publish_signatures(&self, actions: &[QueuedAction]) -> anyhow::Result<()> {
         let num_requests = actions.len();
-        let sign_ids: Vec<_> = actions.iter().map(|a| a.request.id).collect();
+        let sign_ids: Vec<_> = actions.iter().map(|a| a.action.request.id).collect();
 
         let responses: Vec<ChainSignatures::Response> = actions
             .iter()
-            .map(|action| ChainSignatures::Response {
-                requestId: action.request.id.request_id.into(),
-                signature: (&action.signature).into(),
+            .map(|queued| ChainSignatures::Response {
+                requestId: queued.action.request.id.request_id.into(),
+                signature: (&queued.action.signature).into(),
             })
             .collect();
 
@@ -351,11 +355,21 @@ impl BatchPublisher {
 #[async_trait::async_trait]
 impl ChainPublisher for EthClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        // Push to internal batching queue
+        // Send the publish action to the batch processing channel and await the result.
+        let (done, result) = oneshot::channel();
         self.batch_tx
-            .send(action.clone())
+            .send(QueuedAction {
+                action: action.clone(),
+                done,
+            })
             .await
-            .map_err(|e| anyhow::anyhow!("eth: batch channel closed: {e}"))
+            .map_err(|e| anyhow::anyhow!("eth: batch channel closed: {e}"))?;
+
+        // Await the result from the batch processing channel.
+        match result.await {
+            Ok(res) => res,
+            Err(_) => anyhow::bail!("eth: batch task exited before publishing"),
+        }
     }
 }
 
@@ -375,16 +389,12 @@ mod tests {
         make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new([id; 32]))
     }
 
-    /// Poll until `mock` has been hit the expected number of times, or panic.
-    async fn wait_for_hits(mock: &Mock, timeout: Duration) {
-        let deadline = tokio::time::Instant::now() + timeout;
-        while !mock.matched_async().await {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "timed out waiting for expected mock hits"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    /// Queues a publish action for testing, returning the queued action and the oneshot receiver for the result.
+    fn queue(
+        action: PublishAction,
+    ) -> (QueuedAction, oneshot::Receiver<anyhow::Result<()>>) {
+        let (done, result) = oneshot::channel();
+        (QueuedAction { action, done }, result)
     }
 
     /// Mocks the full happy-path publish pipeline: nonce fetch, tx send and a success receipt.
@@ -901,11 +911,17 @@ mod tests {
         tokio::spawn(batcher.run_batch_respond(rx));
 
         // 20 actions: two full batches must be published without waiting on the interval.
+        let mut results = Vec::with_capacity(20);
         for i in 0u8..20 {
-            tx.send(mock_publish_action(i)).await.unwrap();
+            let (queued, result) = queue(mock_publish_action(i));
+            tx.send(queued).await.unwrap();
+            results.push(result);
         }
 
-        wait_for_hits(&send_mock, Duration::from_millis(1500)).await;
+        for result in results {
+            result.await.unwrap().expect("batch publish succeeds");
+        }
+        send_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -923,11 +939,17 @@ mod tests {
         tokio::spawn(batcher.run_batch_respond(rx));
 
         // Fewer actions than a full batch: must still flush once the interval elapses.
+        let mut results = Vec::with_capacity(3);
         for i in 0u8..3 {
-            tx.send(mock_publish_action(i)).await.unwrap();
+            let (queued, result) = queue(mock_publish_action(i));
+            tx.send(queued).await.unwrap();
+            results.push(result);
         }
 
-        wait_for_hits(&send_mock, Duration::from_secs(5)).await;
+        for result in results {
+            result.await.unwrap().expect("batch publish succeeds");
+        }
+        send_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -945,11 +967,63 @@ mod tests {
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(batcher.run_batch_respond(rx));
 
-        tx.send(mock_publish_action(1)).await.unwrap();
+        let (queued, result) = queue(mock_publish_action(1));
+        tx.send(queued).await.unwrap();
         // Drop the only sender: the channel closes, so the loop must flush the
         // leftover batch and exit.
         drop(tx);
 
-        wait_for_hits(&send_mock, Duration::from_secs(5)).await;
+        result.await.unwrap().expect("final flush succeeds");
+        send_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_run_batch_respond_reports_failure_to_waiters() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "mock error"}})
+                    .to_string(),
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let mut batcher = test_publisher(&server.url());
+        batcher.config.max_batch_size = 10;
+        batcher.config.batch_flush_interval = Duration::from_millis(50);
+        batcher.config.send_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 1,
+            jitter: false,
+        };
+
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(batcher.run_batch_respond(rx));
+
+        let (queued, result) = queue(mock_publish_action(9));
+        tx.send(queued).await.unwrap();
+
+        let err = result.await.unwrap().expect_err("batch publish must fail");
+        assert!(err.to_string().contains("mock error"), "got: {err}");
     }
 }
