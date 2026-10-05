@@ -32,8 +32,12 @@ use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tracing::Instrument;
+
+const MAX_CONCURRENT_CHECKPOINT_REQUESTS: usize = 8;
+const CHECKPOINT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct AxumState {
     node: NodeStateWatcher,
@@ -45,6 +49,9 @@ struct AxumState {
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     my_account_id: AccountId,
     backlog: Backlog,
+    /// Bounds concurrent `/checkpoint` lookups so the endpoint cannot starve
+    /// the Redis pool the protocol shares.
+    checkpoint_permits: Semaphore,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -67,6 +74,7 @@ pub async fn run(
         sync_channel,
         my_account_id,
         backlog,
+        checkpoint_permits: Semaphore::new(MAX_CONCURRENT_CHECKPOINT_REQUESTS),
     };
 
     // Sync can be a large payload, so we set a higher limit for payload.
@@ -396,29 +404,39 @@ async fn checkpoint(
 ) -> Result<Cbor<CheckpointResponse>> {
     let start = Instant::now();
 
-    let mut resp = HashMap::new();
     let selections = query.parse()?;
+    let _permit = state
+        .checkpoint_permits
+        .try_acquire()
+        .map_err(|_| Error::Busy)?;
 
-    for (chain, digest) in selections {
-        let checkpoint = if let Some(digest) = digest {
-            state.backlog.checkpoints().find(chain, digest).await
-        } else {
-            state
-                .backlog
-                .checkpoints()
-                .latest(chain)
-                .await
-                .ok()
-                .flatten()
-        };
+    let lookups = async {
+        let mut resp = HashMap::new();
+        for (chain, digest) in selections {
+            let checkpoint = if let Some(digest) = digest {
+                state.backlog.checkpoints().find(chain, digest).await
+            } else {
+                state
+                    .backlog
+                    .checkpoints()
+                    .latest(chain)
+                    .await
+                    .ok()
+                    .flatten()
+            };
 
-        let Some(checkpoint) = checkpoint else {
-            tracing::debug!(?chain, ?digest, "unable to find checkpoint");
-            continue;
-        };
+            let Some(checkpoint) = checkpoint else {
+                tracing::debug!(?chain, ?digest, "unable to find checkpoint");
+                continue;
+            };
 
-        resp.insert(chain, checkpoint);
-    }
+            resp.insert(chain, checkpoint);
+        }
+        resp
+    };
+    let resp = tokio::time::timeout(CHECKPOINT_REQUEST_TIMEOUT, lookups)
+        .await
+        .map_err(|_| Error::Busy)?;
 
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["checkpoint"])
