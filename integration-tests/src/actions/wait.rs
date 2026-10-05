@@ -339,7 +339,8 @@ async fn require_stockpile(
         .with_delay(std::time::Duration::from_secs(1))
         .with_max_times(expected * 100);
 
-    is_enough.retry(&strategy).await.with_context(|| {
-        format!("mpc nodes failed to generate {expected} {kind} before deadline")
-    })
+    is_enough
+        .retry(&strategy)
+        .await
+        .with_context(|| format!("mpc nodes failed to generate {expected} {kind} before deadline"))
 }
