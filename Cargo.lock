@@ -7759,6 +7759,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-chain-tron"
+version = "1.20.0"
+dependencies = [
+ "anyhow",
+ "mpc-chain-integration-core",
+ "url",
+]
+
+[[package]]
 name = "mpc-compact-hashing"
 version = "1.20.0"
 dependencies = [
@@ -7856,6 +7865,7 @@ dependencies = [
  "mpc-chain-midnight",
  "mpc-chain-near",
  "mpc-chain-solana",
+ "mpc-chain-tron",
  "mpc-compact-hashing",
  "mpc-contract",
  "mpc-crypto",
