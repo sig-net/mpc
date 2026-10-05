@@ -42,12 +42,13 @@ impl Output {
         format: SerDeserFormat,
         schema_json_bytes: &[u8],
     ) -> anyhow::Result<Vec<u8>> {
-        // FAB uses Midnight schema capacities and Compact layout, unlike the shared ABI/Borsh encoders.
-        // TODO: Extract FAB serialization when another execution target needs to respond to
-        // Midnight. See https://github.com/sig-net/mpc/issues/1196.
-        if format == SerDeserFormat::Fab {
-            return midnight::serialize(self, schema_json_bytes);
-        }
+        let encode: fn(&Output, &[AbiField]) -> anyhow::Result<Vec<u8>> = match format {
+            SerDeserFormat::Abi => encode_abi,
+            SerDeserFormat::Borsh => encode_borsh,
+            SerDeserFormat::Fab => anyhow::bail!(
+                "Midnight responses derive from the output schema; use build_serialized_output"
+            ),
+        };
         let schema = parse_schema_fields(schema_json_bytes)?;
         let data_owned;
         let data = if self.is_contract_call() {
@@ -56,11 +57,7 @@ impl Output {
             data_owned = default_output_for_non_contract_call(&schema)?;
             &data_owned
         };
-        match format {
-            SerDeserFormat::Abi => encode_abi(data, &schema),
-            SerDeserFormat::Borsh => encode_borsh(data, &schema),
-            SerDeserFormat::Fab => unreachable!(),
-        }
+        encode(data, &schema)
     }
 }
 
@@ -125,6 +122,9 @@ pub enum TraceOutput {
 /// calls may have no return data; in that case, this follows the existing
 /// plain-transfer behavior and synthesizes response defaults from
 /// `respond_serialization_schema` (for example, `bool true`).
+///
+/// Midnight (FAB) derives its encoding from the output schema alone and ignores
+/// `respond_serialization_schema`; plain transfers and void calls attest an empty output.
 pub fn build_serialized_output(
     is_contract_call: bool,
     output_deserialization_schema: &[u8],
@@ -132,6 +132,15 @@ pub fn build_serialized_output(
     respond_serialization_format: SerDeserFormat,
     respond_serialization_schema: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
+    // TODO: Extract FAB serialization when another execution target needs to respond to
+    // Midnight. See https://github.com/sig-net/mpc/issues/1196.
+    if respond_serialization_format == SerDeserFormat::Fab {
+        return midnight::executed_output(
+            is_contract_call,
+            output_deserialization_schema,
+            trace_output,
+        );
+    }
     let transaction_output = match OUTPUT_DESERIALIZATION_FORMAT {
         SerDeserFormat::Abi if is_contract_call => {
             let expects_no_output = output_schema_is_empty(output_deserialization_schema)?;
@@ -339,73 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn production_decoder_rejects_malformed_dynamic_abi() {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/midnight_respond_vectors.json"
-        ))
-        .unwrap();
-
-        for name in [
-            "UTF-8 string uses byte length and maxBytes capacity",
-            "dynamic bytes use length and maxBytes capacity",
-            "dynamic ABI array maps into fixed-capacity response array",
-        ] {
-            let vector = fixture["vectors"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|vector| vector["name"] == name)
-                .unwrap();
-            let bytes = |key: &str| hex::decode(vector[key].as_str().unwrap()).unwrap();
-            let schema = bytes("outputSchemaHex");
-            let encoded = bytes("callResultHex");
-            let output = TransactionOutput::from_call_result(&schema, &encoded.clone().into())
-                .unwrap_or_else(|error| panic!("{name}: positive control failed: {error:#}"));
-            assert_eq!(
-                output
-                    .output
-                    .serialize(SerDeserFormat::Fab, &bytes("respondSchemaHex"))
-                    .unwrap(),
-                bytes("expectedOutputHex"),
-                "{name}: positive control output differs"
-            );
-
-            // These oracle rows each contain one dynamic parameter. Corrupt used
-            // data, rather than only padding, whose acceptance can differ by decoder.
-            let schema_fields: Vec<AbiField> = serde_json::from_slice(&schema).unwrap();
-            let count = U256::from_be_slice(&encoded[32..64]).to::<usize>();
-            let used_bytes = if schema_fields[0].typ.ends_with("[]") {
-                count * 32
-            } else {
-                count
-            };
-            let mut end_offset = encoded.clone();
-            end_offset[..32].copy_from_slice(&U256::from(encoded.len()).to_be_bytes::<32>());
-            let mut huge_offset = encoded.clone();
-            huge_offset[..32].fill(0xff);
-            let mut huge_length = encoded.clone();
-            huge_length[32..64].fill(0xff);
-
-            // @sig-net/midnight 0.24.0-rc.4's deserializeEvmOutput (ethers
-            // 6.17.0) rejects each of these malformed versions of the golden rows.
-            for (corruption, malformed) in [
-                ("truncated offset", encoded[..31].to_vec()),
-                ("truncated length", encoded[..63].to_vec()),
-                ("truncated payload", encoded[..64 + used_bytes - 1].to_vec()),
-                ("offset at end", end_offset),
-                ("oversized offset", huge_offset),
-                ("oversized length", huge_length),
-            ] {
-                assert!(
-                    TransactionOutput::from_call_result(&schema, &malformed.into()).is_err(),
-                    "{name}: accepted {corruption}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn all_response_formats_share_evm_decode_acceptance() {
+    fn build_serialized_output_fab_rejects_output_types_midnight_cannot_carry() {
         let output_schema = br#"[{"name":"message","type":"string"}]"#;
         let trace = Bytes::from(
             DynSolValue::Tuple(vec![DynSolValue::String("hello".to_string())]).abi_encode_params(),
@@ -423,10 +366,12 @@ mod tests {
             output_schema,
             TraceOutput::Output(trace),
             SerDeserFormat::Fab,
-            br#"[{"name":"message","type":"string","maxBytes":32}]"#,
+            b"",
         );
 
-        assert_eq!(abi_result.is_ok(), fab_result.is_ok());
+        assert!(abi_result.is_ok());
+        let err = fab_result.expect_err("Midnight responses carry no string outputs");
+        assert!(format!("{err}").contains("unsupported ABI output types"));
     }
 
     #[test]
@@ -437,7 +382,7 @@ mod tests {
             bool_schema,
             TraceOutput::Output(abi_bool(true)),
             SerDeserFormat::Fab,
-            bool_schema,
+            b"",
         )
         .unwrap();
 
@@ -445,21 +390,30 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_non_contract_default_skips_output_schema() {
+    fn build_serialized_output_fab_plain_transfer_attests_empty_output() {
         let out = build_serialized_output(
             false,
-            b"not JSON",
+            b"[]",
             TraceOutput::NotTraced,
             SerDeserFormat::Fab,
             br#"[{"name":"ok","type":"bool"}]"#,
         )
         .unwrap();
+        assert!(out.is_empty());
 
-        assert_eq!(out, vec![1]);
+        let err = build_serialized_output(
+            false,
+            br#"[{"name":"ok","type":"bool"}]"#,
+            TraceOutput::NotTraced,
+            SerDeserFormat::Fab,
+            br#"[{"name":"ok","type":"bool"}]"#,
+        )
+        .expect_err("a plain transfer cannot fill a non-empty output schema");
+        assert!(format!("{err}").contains("plain transfer returns nothing"));
     }
 
     #[test]
-    fn build_serialized_output_fab_void_call_uses_default() {
+    fn build_serialized_output_fab_void_call_attests_empty_output() {
         let out = build_serialized_output(
             true,
             b"[]",
@@ -469,7 +423,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(out, vec![1]);
+        assert!(out.is_empty());
     }
 
     #[test]

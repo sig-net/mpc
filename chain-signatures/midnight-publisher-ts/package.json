@@ -53,6 +53,7 @@
     "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.6",
     "@midnightntwrk/wallet-sdk-facade": "5.0.0-beta.2",
     "@sig-net/midnight": "0.24.0-rc.4",
+    "@sig-net/midnight-respond-oracle": "npm:@sig-net/midnight@0.24.0-rc.10",
     "@types/node": "^22.20.1",
     "@vitest/eslint-plugin": "^1.6.26",
     "eslint": "^10.8.0",
@@ -63,5 +64,10 @@
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.66.0",
     "vitest": "^3.0.0"
+  },
+  "overrides": {
+    "@sig-net/midnight@0.24.0-rc.4": {
+      "@sig-net/midnight-serde": "0.24.0-rc.4"
+    }
   }
 }

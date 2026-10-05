@@ -217,8 +217,16 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         .context("Ethereum context was not started")?;
     let anvil =
         ProviderBuilder::new().connect_http(ethereum.sandbox.external_http_endpoint.parse()?);
-    for (nonce, case) in cases.into_iter().enumerate() {
-        tracing::info!(case = case.name, nonce, "checking Midnight API conformance");
+    // The target returns the ABI word 1. A uint256 is attested little-endian, a bytes32 in
+    // wire order, and a reverted call attests an empty output.
+    let uint256_one = format!("01{}", "00".repeat(31));
+    let bytes32_one = format!("{}01", "00".repeat(31));
+    for (nonce, output_type, expected_output, failed) in [
+        (0, "bool", "01", false),
+        (1, "uint256", uint256_one.as_str(), false),
+        (2, "bytes32", bytes32_one.as_str(), false),
+        (3, "uint256", "", true),
+    ] {
         let target = Address::repeat_byte(0x42 + nonce as u8);
         anvil.anvil_set_code(target, case.runtime).await?;
         let mut expected_input = hex::decode("2a2e1320")?;
@@ -373,11 +381,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
                 mpc_primitives::AttestationOutcomeKind::Executed
             }
         );
-        assert_eq!(
-            output, case.expected_output,
-            "{}: output bytes differ",
-            case.name
-        );
+        assert_eq!(hex::encode(&output), expected_output);
         midnight
             .settle_response(request_id, &output, case.failed)
             .await?;
