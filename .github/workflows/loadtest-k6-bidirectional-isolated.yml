@@ -1,0 +1,293 @@
+name: k6 Bidirectional Load Test (isolated pinger)
+
+# Runs a contract pinger of its own on the runner, funds the addresses it will
+# use, and drives it with loadtests/k6-bidirectional.js. A high rate therefore
+# needs neither the deployed pinger resized nor its address pool and job caps;
+# the deployed pinger is exercised by loadtest-k6-bidirectional.yml.
+#
+# The pinger's addresses follow from the requester key, the path prefix and an
+# index. The prefix is fixed, so the same funded set is reused from run to run,
+# and it must differ from the deployed pinger's or the two would lease the same
+# addresses and collide on nonces. ETH sent to an address can only be moved by
+# an MPC-signed transaction, so nothing here takes it back.
+#
+# Manual only: every job spends Sepolia gas and Solana fees, so a recurring run
+# is a standing cost that should be chosen rather than inherited.
+on:
+  workflow_dispatch:
+    inputs:
+      lt_strategy:
+        description: Arrival rate (ramp_1_10 steps 1, 2, 5, 10 rps and ignores lt_duration)
+        type: choice
+        options:
+          - rps_1
+          - rps_3
+          - rps_10
+          - ramp_1_10
+        default: rps_3
+        required: true
+      lt_duration:
+        description: How long to submit for, not how long the run takes
+        type: choice
+        options:
+          - 2m
+          - 5m
+          - 20m
+          - 1h
+        default: 5m
+        required: true
+      environment:
+        description: MPC network
+        type: choice
+        options:
+          - dev
+          - testnet
+        default: dev
+        required: true
+      pinger_ref:
+        description: contract-pinger ref to run (must be on main)
+        type: string
+        default: main
+        required: true
+      path_prefix:
+        description: Address prefix; must differ from the deployed pinger's
+        type: string
+        default: burst
+        required: true
+      fund:
+        description: Top up addresses holding less than the run needs
+        type: boolean
+        default: true
+        required: true
+
+permissions:
+  contents: read
+
+# The funded addresses are shared state: two runs on one prefix would lease the
+# same ones and collide on their nonces. Queued, since cancelling mid-run
+# abandons jobs that have already paid for their transactions.
+concurrency:
+  group: k6-bidirectional-isolated-${{ inputs.environment }}-${{ inputs.path_prefix }}
+  cancel-in-progress: false
+
+jobs:
+  load-test:
+    name: Isolated Bidirectional Load Test (${{ inputs.environment }})
+    # Self-hosted: a run holds its runner for the first fill of the addresses,
+    # the submission, and then up to 45 minutes for the last jobs to settle.
+    runs-on: arc-runner-set
+    timeout-minutes: 240
+    # Holds the pinger's secrets, so add required reviewers to it: this job
+    # runs another repository's code with the funding key.
+    environment: Pinger Load Test
+    env:
+      PORT: '3001'
+      SIG_BIDIRECTIONAL_PATH_PREFIX: ${{ inputs.path_prefix }}
+      # Low enough that an address needs little to be leasable. The default
+      # floor would tie up several times what these runs spend.
+      SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: '300000000000000'
+      # A first fill of a few hundred addresses is past the default per-run cap,
+      # which is sized for the scheduled sweep.
+      SIG_BIDIRECTIONAL_FUND_MAX_PER_RUN_ETH: '1'
+      SIG_ETH_RPC_URL_SEPOLIA: ${{ secrets.SIG_ETH_RPC_URL_SEPOLIA }}
+      SIG_SOL_RPC_URL_DEV: ${{ secrets.SIG_SOL_RPC_URL_DEV }}
+      SIG_SOL_SK: ${{ secrets.SIG_SOL_SK }}
+      SIG_BIDIRECTIONAL_FUNDING_SK: ${{ secrets.SIG_BIDIRECTIONAL_FUNDING_SK }}
+      SIG_SOL_ROOT_PUBLIC_KEY: ${{ vars.SIG_SOL_ROOT_PUBLIC_KEY }}
+    steps:
+      # The k6 script, and the strategies the run is sized from.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: sig-net/contract-pinger
+          ref: ${{ inputs.pinger_ref }}
+          path: pinger
+          fetch-depth: 0
+
+      - name: Refuse a ref that is not on main
+        working-directory: pinger
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+            echo "::error::contract-pinger ${PINGER_REF} is not on main. This run holds the funding key, so it only runs reviewed code."
+            exit 1
+          fi
+        env:
+          PINGER_REF: ${{ inputs.pinger_ref }}
+
+      - name: Validate required secrets
+        run: |
+          set -euo pipefail
+          for name in SIG_ETH_RPC_URL_SEPOLIA SIG_SOL_RPC_URL_DEV SIG_SOL_SK SIG_BIDIRECTIONAL_FUNDING_SK; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required secret: ${name}"
+              exit 1
+            fi
+          done
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.14.0'
+
+      # corepack reads the pnpm version from the pinger's package.json.
+      - name: Install and build the pinger
+        working-directory: pinger
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      # From the same strategies the k6 script runs, so the pinger and its
+      # funding are sized for exactly what will be submitted.
+      - name: Size the run
+        id: plan
+        run: |
+          set -euo pipefail
+          node loadtests/plan.mjs "${LT_STRATEGY}" "${LT_DURATION}" | tee -a "${GITHUB_OUTPUT}"
+        env:
+          LT_STRATEGY: ${{ inputs.lt_strategy }}
+          LT_DURATION: ${{ inputs.lt_duration }}
+
+      # This run's own pinger, so its secret is generated rather than shared.
+      - name: Generate the pinger's API secret
+        run: |
+          set -euo pipefail
+          secret=$(openssl rand -hex 16)
+          echo "::add-mask::${secret}"
+          echo "LT_API_SECRET=${secret}" >> "${GITHUB_ENV}"
+
+      # Sized to the busiest address, and a no-op for any address already
+      # holding it. A first fill sends hundreds of transfers, sixteen at a time.
+      - name: Fund the addresses the run will use
+        if: inputs.fund
+        working-directory: pinger
+        run: |
+          set -euo pipefail
+          pnpm fund --env "${LT_CHAIN_ENV}" --address-jobs "${ADDRESS_JOBS}" 2>&1 | tee ../fund.log
+        env:
+          LT_CHAIN_ENV: ${{ inputs.environment }}
+          ADDRESS_JOBS: ${{ steps.plan.outputs.address_jobs }}
+          SIG_BIDIRECTIONAL_PATHS: ${{ steps.plan.outputs.paths }}
+
+      - name: Start the pinger
+        working-directory: pinger
+        run: |
+          set -euo pipefail
+          # `node` directly, not `pnpm start`: pnpm forks the server as a child,
+          # so `$!` would capture the wrapper and the stop step would leave the
+          # real process running.
+          node dist/index.js > ../pinger.log 2>&1 &
+          echo $! > ../pinger.pid
+          for _ in $(seq 1 30); do
+            if curl -sf "http://localhost:${PORT}/" > /dev/null; then
+              echo "pinger up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Pinger did not start"
+          cat ../pinger.log
+          exit 1
+        env:
+          API_SECRET: ${{ env.LT_API_SECRET }}
+          SIG_BIDIRECTIONAL_PATHS: ${{ steps.plan.outputs.paths }}
+          SIG_BIDIRECTIONAL_MAX_JOBS: ${{ steps.plan.outputs.jobs }}
+          SIG_BIDIRECTIONAL_RETAINED_JOBS: ${{ steps.plan.outputs.jobs }}
+
+      # The authoritative check, and the only one that reads what the addresses
+      # actually hold. A top-up that was skipped or refused is not a reason to
+      # submit jobs that cannot broadcast.
+      - name: Check worker funding
+        run: |
+          set -euo pipefail
+          curl -sS --fail-with-body --max-time 900 \
+            -H "x-api-secret: ${LT_API_SECRET}" \
+            "http://localhost:${PORT}/sign_bidirectional/workers?env=${LT_CHAIN_ENV}" \
+            > workers.json
+          short=$(jq '[.workers[] | select(.underfunded)] | length' workers.json)
+          total=$(jq '.workers | length' workers.json)
+          echo "${short}/${total} addresses below the minimum"
+          if [ "${short}" -gt 0 ]; then
+            jq -r '[.workers[] | select(.underfunded)][0:20][] | "::error::underfunded: \(.path) \(.address) holds \(.balanceWei) wei"' workers.json
+            echo "::error::${short}/${total} addresses are below the minimum. Re-run with fund enabled, or top up the funding wallet."
+            exit 1
+          fi
+        env:
+          LT_CHAIN_ENV: ${{ inputs.environment }}
+
+      # near-dev-github holds secretAccessor on the three secrets below and
+      # nothing else. The runner pods have no GCP identity of their own.
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          credentials_json: '${{ secrets.SIG_CREDENTIALS_DEV }}'
+
+      # The collectors' own credentials, read at run time so there is no second
+      # copy to keep level. Masked, which `gcloud ... >> GITHUB_ENV` is not.
+      - name: Read Grafana credentials
+        id: grafana
+        uses: google-github-actions/get-secretmanager-secrets@2b5f97c5a4b9c105e64646762ad4fc3f5128e6f5 # v2
+        with:
+          secrets: |-
+            push_url:near-cs-dev/prom-push-url
+            username:near-cs-dev/grafana-username
+            password:near-cs-dev/grafana_cloud_pswd
+
+      - uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1
+
+      # Run k6 directly, not through run-k6-action: the script's thresholds are
+      # the verdict, and --exit-on-running reports success once a test has
+      # merely started. `k6 run` is last in the step, so tee cannot mask it.
+      - name: Run k6
+        run: |
+          set -euo pipefail
+          k6 run -o experimental-prometheus-rw \
+            --tag env="${LT_CHAIN_ENV}" \
+            --tag kind=isolated \
+            loadtests/k6-bidirectional.js 2>&1 | tee k6-bidirectional.log
+        env:
+          K6_PROMETHEUS_RW_SERVER_URL: ${{ steps.grafana.outputs.push_url }}
+          K6_PROMETHEUS_RW_USERNAME: ${{ steps.grafana.outputs.username }}
+          K6_PROMETHEUS_RW_PASSWORD: ${{ steps.grafana.outputs.password }}
+          # Percentiles cannot be averaged, so pre-computed stats are wrong
+          # over any window but one scrape. Histograms are exact over any.
+          K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM: 'true'
+          LT_PINGER_URL: http://localhost:3001
+          LT_PINGER_API_KEY: ${{ env.LT_API_SECRET }}
+          LT_CHAIN_ENV: ${{ inputs.environment }}
+          LT_STRATEGY: ${{ inputs.lt_strategy }}
+          LT_DURATION: ${{ inputs.lt_duration }}
+
+      - name: Stop the pinger
+        if: always()
+        run: |
+          [ -f pinger.pid ] && kill "$(cat pinger.pid)" 2>/dev/null || true
+          echo "--- last 40 lines of the pinger log ---"
+          tail -40 pinger.log || true
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## k6 Bidirectional Load Test (isolated pinger)"
+            echo
+            echo "- Network: \`${{ inputs.environment }}\`"
+            echo "- Rate: \`${{ inputs.lt_strategy }}\` for \`${{ steps.plan.outputs.total_seconds }}s\`, about ${{ steps.plan.outputs.jobs }} jobs"
+            echo "- Addresses: ${{ steps.plan.outputs.paths }} under prefix \`${{ inputs.path_prefix }}\`, funded for ${{ steps.plan.outputs.address_jobs }} jobs each"
+            echo "- contract-pinger: \`${{ inputs.pinger_ref }}\`"
+            echo
+            if [ -f fund.log ]; then
+              echo '```'
+              tail -8 fund.log
+              echo '```'
+            fi
+            if [ -f k6-bidirectional.log ]; then
+              echo '```'
+              # Thresholds and the bidi_* metrics live in the trailing summary.
+              sed -n '/█ THRESHOLDS/,$p' k6-bidirectional.log | head -60
+              echo '```'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"

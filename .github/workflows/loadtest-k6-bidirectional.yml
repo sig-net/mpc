@@ -1,7 +1,8 @@
 name: k6 Bidirectional Load Test
 
-# Drives the Solana -> Ethereum bidirectional round trip via
-# loadtests/k6-bidirectional.js.
+# Drives the Solana -> Ethereum bidirectional round trip against the deployed
+# pinger via loadtests/k6-bidirectional.js. For high rates against a pinger of
+# its own, see loadtest-k6-bidirectional-isolated.yml.
 #
 # Every job spends gas from addresses only a funding sweep refills, so the
 # cadence is a standing cost. A tick landing mid-run creates no run, so the
@@ -12,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       lt_strategy:
-        description: Arrival rate per minute (the service caps at 10)
+        description: Arrival rate per minute
         type: choice
         options:
           - rpm_1
@@ -54,8 +55,7 @@ jobs:
           || ((inputs.environment == 'both' || inputs.environment == '')
               && fromJSON('["dev","testnet"]'))
           || fromJSON('["unmatched"]') }}
-      # The networks hold separate address pools and rate limits, so they
-      # need no max-parallel.
+      # The networks hold separate address pools, so they need no max-parallel.
       fail-fast: false
     # Per network: overlapping runs would double the arrival rate one claims
     # to apply. Queued, since cancelling abandons jobs already paid for.
@@ -64,8 +64,8 @@ jobs:
       cancel-in-progress: false
     # Self-hosted: every run holds a runner for over an hour.
     runs-on: arc-runner-set
-    # Submission runs for lt_duration, then the scenario's 45m gracefulStop
-    # lets in-flight jobs finish.
+    # Submission runs for lt_duration, then the collector waits up to 45m for
+    # in-flight jobs to settle.
     timeout-minutes: 200
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -128,6 +128,7 @@ jobs:
           # No run_id tag: runs are separated in time, so the range is the run,
           # and the label would fragment every panel wider than one. env is
           # needed: without it both networks write the same series.
+          LT_PINGER_URL: https://contract-ping.sig.network
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
           LT_CHAIN_ENV: ${{ matrix.environment }}
           LT_STRATEGY: ${{ inputs.lt_strategy || 'rpm_1' }}
