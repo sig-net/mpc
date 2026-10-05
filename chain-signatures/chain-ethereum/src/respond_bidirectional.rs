@@ -133,8 +133,9 @@ impl From<TraceOutput> for midnight::TracedReturn {
 /// plain-transfer behavior and synthesizes response defaults from
 /// `respond_serialization_schema` (for example, `bool true`).
 ///
-/// Midnight (FAB) derives its encoding from the output schema alone and ignores
-/// `respond_serialization_schema`; plain transfers and void calls attest an empty output.
+/// Midnight responses derive their encoding from the output schema alone and
+/// ignore `respond_serialization_schema`; plain transfers and void calls attest
+/// an empty output.
 pub fn build_serialized_output(
     is_contract_call: bool,
     output_deserialization_schema: &[u8],
@@ -142,8 +143,9 @@ pub fn build_serialized_output(
     respond_serialization_format: SerDeserFormat,
     respond_serialization_schema: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
-    // TODO: Extract FAB serialization when another execution target needs to respond to
-    // Midnight. See https://github.com/sig-net/mpc/issues/1196.
+    // TODO: Extract the Midnight attestation codec when another execution target
+    // needs to respond to Midnight. See doc/midnight-respond-codec-extraction-plan.md
+    // and https://github.com/sig-net/mpc/issues/1196.
     if respond_serialization_format == SerDeserFormat::Fab {
         return midnight::executed_output(
             is_contract_call,
@@ -358,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_rejects_output_types_midnight_cannot_carry() {
+    fn build_serialized_output_midnight_rejects_output_types_it_cannot_carry() {
         let output_schema = br#"[{"name":"message","type":"string"}]"#;
         let trace = Bytes::from(
             DynSolValue::Tuple(vec![DynSolValue::String("hello".to_string())]).abi_encode_params(),
@@ -385,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_contract_bool() {
+    fn build_serialized_output_midnight_contract_bool() {
         let bool_schema = br#"[{"name":"ok","type":"bool"}]"#;
         let out = build_serialized_output(
             true,
@@ -400,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_ignores_the_respond_schema() {
+    fn build_serialized_output_midnight_ignores_the_respond_schema() {
         let output_schema = br#"[{"name":"ok","type":"bool"}]"#;
         for respond_schema in [&b""[..], b"[]", br#"{"struct":{"ok":"u8"}}"#] {
             let out = build_serialized_output(
@@ -416,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_plain_transfer_attests_empty_output() {
+    fn build_serialized_output_midnight_plain_transfer_attests_empty_output() {
         let out = build_serialized_output(
             false,
             b"[]",
@@ -439,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_void_call_attests_empty_output() {
+    fn build_serialized_output_midnight_void_call_attests_empty_output() {
         let out = build_serialized_output(
             true,
             b"[]",
