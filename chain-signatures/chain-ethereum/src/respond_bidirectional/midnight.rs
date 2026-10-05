@@ -13,10 +13,15 @@ use alloy::primitives::Bytes;
 use anyhow::Context as _;
 use signet_midnight_serde::BorshSerialize;
 
-use super::TraceOutput;
-
 const ABI_WORD_BYTES: usize = 32;
 const EVM_ADDRESS_BYTES: usize = 20;
+
+/// The traced return data an attestation derives from
+#[derive(Debug, Clone)]
+pub(super) enum TracedReturn {
+    NotTraced,
+    Returned(Bytes),
+}
 
 /// The ABI output types a Midnight response can carry. Each is one static ABI word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,7 +101,7 @@ struct CanonicalField<'a> {
 pub(super) fn executed_output(
     is_contract_call: bool,
     output_schema: &[u8],
-    trace_output: TraceOutput,
+    trace: TracedReturn,
 ) -> anyhow::Result<Vec<u8>> {
     let fields = parse_output_schema(output_schema)?;
     let expects_output = !fields.is_empty();
@@ -107,12 +112,11 @@ pub(super) fn executed_output(
         );
         return Ok(Vec::new());
     }
-    let return_data = match trace_output {
-        TraceOutput::NotTraced => {
+    let return_data = match trace {
+        TracedReturn::NotTraced => {
             anyhow::bail!("contract-call output extraction requires trace output")
         }
-        TraceOutput::Output(data) => data,
-        TraceOutput::NoReturnData => Bytes::new(),
+        TracedReturn::Returned(data) => data,
     };
     if return_data.is_empty() {
         anyhow::ensure!(

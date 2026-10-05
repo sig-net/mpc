@@ -116,6 +116,16 @@ pub enum TraceOutput {
     NoReturnData,
 }
 
+impl From<TraceOutput> for midnight::TracedReturn {
+    fn from(trace: TraceOutput) -> Self {
+        match trace {
+            TraceOutput::NotTraced => Self::NotTraced,
+            TraceOutput::NoReturnData => Self::Returned(Bytes::new()),
+            TraceOutput::Output(data) => Self::Returned(data),
+        }
+    }
+}
+
 /// Decode a transaction's output and re-serialize it for the respond chain.
 ///
 /// Contract calls require a `debug_traceTransaction` result. Void-returning
@@ -138,7 +148,7 @@ pub fn build_serialized_output(
         return midnight::executed_output(
             is_contract_call,
             output_deserialization_schema,
-            trace_output,
+            trace_output.into(),
         );
     }
     let transaction_output = match OUTPUT_DESERIALIZATION_FORMAT {
