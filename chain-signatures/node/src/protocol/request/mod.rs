@@ -484,6 +484,7 @@ impl SignatureSpawner {
 
                 // Every route into signing passes here, checkpoint recovery included (it skips
                 // admission). After the duplicate guard, so a refusal can't retire a tracked request.
+                let kind = entry.request().request_kind();
                 if claims_attestation_key(entry.request()) {
                     tracing::error!(
                         ?sign_id,
@@ -491,8 +492,13 @@ impl SignatureSpawner {
                         "refusing to sign on the reserved attestation path"
                     );
                     // Drop posits peers sent ahead of the request, and any that arrive later.
-                    self.mark_dead(sign_id);
-                    self.posit_mailboxes.remove(&sign_id);
+                    self.mark_dead(sign_id, kind);
+                    self.posit_mailboxes.remove(&(sign_id, kind));
+                    if kind == RequestKind::SignBidirectional {
+                        self.mark_dead(sign_id, RequestKind::RespondBidirectional);
+                        self.posit_mailboxes
+                            .remove(&(sign_id, RequestKind::RespondBidirectional));
+                    }
                     return;
                 }
 
@@ -914,14 +920,14 @@ mod tests {
 
         // A peer that still admits the request proposes before this node sees it.
         let attack_id = SignId::new([10u8; 32]);
-        spawner.handle_posit(attack_id, propose());
+        spawner.handle_posit(attack_id, RequestKind::Sign, propose());
         spawner.handle_sign(&governance, SignCommand::Request(reserved(attack_id)), &cfg);
         assert!(!spawner.test_requests_contains(&attack_id));
-        assert!(!spawner.test_tasks_contains(attack_id));
-        assert!(!spawner.test_posit_mailboxes_contains(&attack_id));
-        spawner.handle_posit(attack_id, propose());
+        assert!(!spawner.test_tasks_contains(attack_id, RequestKind::Sign));
+        assert!(!spawner.test_posit_mailboxes_contains(&attack_id, RequestKind::Sign));
+        spawner.handle_posit(attack_id, RequestKind::Sign, propose());
         assert!(
-            !spawner.test_posit_mailboxes_contains(&attack_id),
+            !spawner.test_posit_mailboxes_contains(&attack_id, RequestKind::Sign),
             "late posits for a refused id must not reopen its mailbox"
         );
 
@@ -935,7 +941,7 @@ mod tests {
             SignCommand::Request(reserved(tracked_id)),
             &cfg,
         );
-        assert!(spawner.test_tasks_contains(tracked_id));
+        assert!(spawner.test_tasks_contains(tracked_id, RequestKind::Sign));
 
         let leg_two_id = SignId::new([11u8; 32]);
         let mut leg_two = crate::backlog::mock::mock_bidi_response_request(
@@ -946,7 +952,7 @@ mod tests {
         Arc::make_mut(&mut leg_two).args.path = "solana response key".to_string();
         let entry = backlog::SignEntry::generating(leg_two, &backlog);
         spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
-        assert!(spawner.test_tasks_contains(leg_two_id));
+        assert!(spawner.test_tasks_contains(leg_two_id, RequestKind::RespondBidirectional));
     }
 
     /// The duplicate guard admits a next leg over the leg it supersedes, while
