@@ -9,7 +9,7 @@ import { buildIntent, RESPOND_CIRCUITS, type BuildIntentInput } from "./intent.j
 import { handleSubmit, SUBMIT_TIMEOUT_MS, warmupPublisher } from "./submit.js";
 import { RECIPE_TTL_MS } from "./wallet.js";
 
-export const PUBLISHER_PROTOCOL_VERSION = 1 as const;
+export const PUBLISHER_PROTOCOL_VERSION = 2 as const;
 
 export type BuildRequest = { readonly id: number } & Omit<BuildIntentInput, "coinPublicKey">;
 
@@ -67,16 +67,32 @@ const ReadySchema = wireObject({
   id: wireId,
   protocolVersion: z.literal(PUBLISHER_PROTOCOL_VERSION, `must be ${PUBLISHER_PROTOCOL_VERSION}`),
 });
+const uint64 = z
+  .string()
+  .regex(/^(0|[1-9][0-9]*)$/, "must be an unsigned decimal integer")
+  .refine(
+    (value) => /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 0xffffffffffffffffn,
+    "must fit uint64",
+  );
 const BuildSchema = wireObject({
   id: wireId,
   contractAddress: hex32,
   circuit: z.literal(RESPOND_CIRCUITS, MUST_BE_A_CIRCUIT),
   requestId: hex32,
   signature: wireSignature,
+  attestation: wireObject({
+    blockHeight: uint64,
+    outputKind: z.literal([0, 1, 2]),
+    serializedOutputLength: uint64,
+    digest: hex32,
+  }).optional(),
   contractState: ledgerHex,
   ledgerParameters: ledgerHex,
   ttlSeconds: z.int(MUST_BE_A_TTL).positive(MUST_BE_A_TTL),
-});
+}).refine(
+  (value) => (value.circuit === "respondBidirectional") === (value.attestation !== undefined),
+  { path: ["attestation"], message: "is required only for respondBidirectional" },
+);
 
 function toBadRequest(error: z.ZodError): PublisherError {
   const issue = error.issues[0]!;

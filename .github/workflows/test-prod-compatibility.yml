@@ -1,4 +1,4 @@
-name: Production Compatibility
+name: Prod Compatibility Tests
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ env:
 
 jobs:
   compat:
-    name: Build tagged binaries and run compat tests
+    name: Prod Compatibility Tests
     runs-on: warp-ubuntu-latest-x64-4x
 
     steps:

@@ -35,6 +35,9 @@ impl BidirectionalTx {
 pub struct RespondBidirectionalTx {
     pub tx_id: BidirectionalTxId,
     pub output: crate::RespondBidirectionalSerializedOutput,
+    /// Absent in legacy checkpoints; Midnight publication requires explicit metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<crate::AttestationMetadata>,
     /// Unix timestamp at which the initial request was indexed. This remains
     /// distinct from the follow-up request's own indexing timestamp so queueing
     /// and per-leg latency metrics retain their existing semantics.
@@ -53,6 +56,9 @@ pub struct RespondBidirectionalEvent {
     pub request_id: [u8; 32],
     pub signature: Signature,
     pub chain: Chain,
+    /// Midnight's published metadata is untrusted until matched to the signed response.
+    /// Legacy source-chain integrations omit it; Midnight requires it for completion.
+    pub attestation: Option<crate::PublishedAttestation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
