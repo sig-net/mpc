@@ -101,7 +101,9 @@ pub fn generate_sign_request(
             algo,
             dest,
             params: String::new(),
-            output_deserialization_schema: schema_prefix(&record.output_deserialization_schema),
+            // Forwarded whole: the attested output requires the bytes after the first NUL to
+            // be NUL, so the padding must reach the respond path.
+            output_deserialization_schema: record.output_deserialization_schema.clone(),
             respond_serialization_schema: schema_prefix(&record.respond_serialization_schema),
             chain: Chain::Midnight,
             chain_ctx: None,
@@ -168,7 +170,10 @@ mod tests {
             event.path, "63616c6c65722d70617468000000000000000000000000000000000000000000",
             "the full 32 path bytes as lowercase hex, padding included"
         );
-        assert_eq!(event.output_deserialization_schema, b"uint256".to_vec());
+        assert_eq!(
+            event.output_deserialization_schema,
+            record.output_deserialization_schema
+        );
         assert_eq!(event.respond_serialization_schema, b"uint256".to_vec());
         assert_eq!(event.params, "", "params is reserved and travels blank");
         assert_eq!(event.chain, Chain::Midnight);
@@ -200,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_sign_request_forwards_schema_prefixes_without_changing_request_id_bytes() {
+    fn generate_sign_request_forwards_schemas_without_changing_request_id_bytes() {
         let output_json = br#"{"type":"bytes"}"#.to_vec();
         let respond_json = br#"{"type":"string"}"#.to_vec();
         let mut record = caller_record();
@@ -228,7 +233,10 @@ mod tests {
             panic!("expected SignBidirectional kind");
         };
 
-        assert_eq!(event.output_deserialization_schema, output_json);
+        assert_eq!(
+            event.output_deserialization_schema, record.output_deserialization_schema,
+            "the output schema keeps its padding"
+        );
         assert_eq!(event.respond_serialization_schema, respond_json);
     }
 
