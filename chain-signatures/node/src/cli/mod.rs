@@ -37,7 +37,7 @@ use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
-use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
+use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher};
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_chain_tron::TronConfig;
@@ -557,7 +557,7 @@ impl ChainStack {
         }
         if let Some(midnight) = &self.configs.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
-            match MidnightPublisher::connect(midnight, telemetry).await {
+            match RecoveringMidnightPublisher::start(midnight, telemetry) {
                 Ok(client) => {
                     publishers.insert(Chain::Midnight, Arc::new(client));
                 }
@@ -1282,24 +1282,9 @@ mod tests {
             "empty MidnightArgs must not produce a MidnightConfig"
         );
 
-        let account_id = AccountId::from_str("test.near").unwrap();
-        let signer = match InMemorySigner::from_secret_key(
-            account_id.clone(),
-            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
-        ) {
-            near_crypto::Signer::InMemory(signer) => signer,
-            _ => unreachable!(),
-        };
-        // Never dialed: publishers() only stores the client in the registry.
-        let near = near_fetch::Client::new("http://127.0.0.1:1");
-        let near = NearClient::new(
-            near,
-            &account_id,
-            signer,
-            NearRpcGates::new(SharedBackoff::new()),
-            Arc::new(NodeTelemetry::new(Chain::NEAR)),
-        );
-        let publishers = ChainStack::new(chains).publishers(near).await;
+        let publishers = ChainStack::new(chains)
+            .publishers(undialed_near_client())
+            .await;
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),
@@ -1311,5 +1296,58 @@ mod tests {
             "with no chain configured, only the NEAR publisher must exist"
         );
         assert!(publishers.contains_key(&Chain::NEAR));
+    }
+
+    /// A Midnight node that is unreachable at startup must not leave the node without a
+    /// Midnight publisher for its lifetime: the publisher registers and connects later.
+    #[tokio::test]
+    async fn midnight_publisher_registers_while_its_node_is_unreachable() {
+        let chains = ChainConfigs {
+            eth: None,
+            sol: None,
+            hydration: None,
+            canton: None,
+            midnight: Some(MidnightConfig {
+                // Nothing listens on port 1, so the startup dial is refused.
+                node_url: "http://127.0.0.1:1".to_string(),
+                central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
+                publisher: mpc_chain_midnight::PublisherConfig {
+                    funding_seed: "ab".repeat(32),
+                    proof_server_url: "http://127.0.0.1:1".to_string(),
+                    indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
+                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                    ..Default::default()
+                },
+                rpc: Default::default(),
+                indexer: Default::default(),
+            }),
+            tron: None,
+        };
+
+        let publishers = ChainStack::new(chains)
+            .publishers(undialed_near_client())
+            .await;
+
+        assert!(publishers.contains_key(&Chain::Midnight));
+    }
+
+    /// A NEAR client that is never dialed: publishers() only stores it in the registry.
+    fn undialed_near_client() -> NearClient {
+        let account_id = AccountId::from_str("test.near").unwrap();
+        let signer = match InMemorySigner::from_secret_key(
+            account_id.clone(),
+            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
+        ) {
+            near_crypto::Signer::InMemory(signer) => signer,
+            _ => unreachable!(),
+        };
+        let near = near_fetch::Client::new("http://127.0.0.1:1");
+        NearClient::new(
+            near,
+            &account_id,
+            signer,
+            NearRpcGates::new(SharedBackoff::new()),
+            Arc::new(NodeTelemetry::new(Chain::NEAR)),
+        )
     }
 }
