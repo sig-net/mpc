@@ -73,11 +73,15 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         .context("Ethereum context was not started")?;
     let anvil =
         ProviderBuilder::new().connect_http(ethereum.sandbox.external_http_endpoint.parse()?);
-    for (nonce, output_type, expected_width, failed) in [
-        (0, "bool", 1, false),
-        (1, "uint64", 8, false),
-        (2, "bytes32", 32, false),
-        (3, "uint64", 5, true),
+    // The target returns the ABI word 1. A uint256 is attested little-endian, a bytes32 in
+    // wire order, and a reverted call attests an empty output.
+    let uint256_one = format!("01{}", "00".repeat(31));
+    let bytes32_one = format!("{}01", "00".repeat(31));
+    for (nonce, output_type, expected_output, failed) in [
+        (0, "bool", "01", false),
+        (1, "uint256", uint256_one.as_str(), false),
+        (2, "bytes32", bytes32_one.as_str(), false),
+        (3, "uint256", "", true),
     ] {
         let target = Address::repeat_byte(0x42 + nonce as u8);
         anvil
@@ -154,7 +158,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         let receipt = pending.get_receipt().await?;
         assert_eq!(receipt.status(), !failed, "unexpected EVM execution status");
 
-        events
+        let response_event = events
         .wait_for(
             |event| {
                 matches!(
@@ -166,11 +170,38 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         )
         .await
         .context("waiting for the finalized respondBidirectional entry")?;
+        let ChainEvent::RespondBidirectional(response_event) = response_event else {
+            unreachable!()
+        };
+        let metadata = response_event
+            .attestation
+            .context("Midnight event has no attestation metadata")?;
         let output = midnight.stored_output(request_id).await?;
-        assert_eq!(output.len(), expected_width);
-        if failed {
-            assert_eq!(output, [0xde, 0xad, 0xbe, 0xef, 1]);
-        }
+        assert_eq!(metadata.serialized_output_length, output.len() as u64);
+        let signing_metadata = mpc_primitives::AttestationMetadata {
+            key_version: sign_event.key_version,
+            block_height: metadata.block_height,
+            outcome_kind: metadata.outcome_kind,
+        };
+        assert_eq!(
+            metadata.digest,
+            mpc_compact_hashing::compute_attestation_hash(&request_id, &signing_metadata, &output)?
+        );
+        assert_eq!(
+            metadata.block_height,
+            receipt
+                .block_number
+                .context("receipt has no inclusion height")?
+        );
+        assert_eq!(
+            metadata.outcome_kind,
+            if failed {
+                mpc_primitives::AttestationOutcomeKind::Failed
+            } else {
+                mpc_primitives::AttestationOutcomeKind::Executed
+            }
+        );
+        assert_eq!(hex::encode(&output), expected_output);
         midnight
             .settle_response(request_id, &output, failed)
             .await?;
@@ -183,6 +214,45 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         };
         wait_for_completed_checkpoint(&cluster, request_id, final_block).await?;
     }
+
+    // Impersonation: another contract notifies the central Signet contract naming the caller's
+    // filed, still-pending request. Blocks index in order, so the next sign request seen after
+    // a later genuine submission must be that submission, never the impersonated one.
+    let mut argument = [0; 32];
+    argument[31] = 6;
+    let mut next_sign_request = async || {
+        let ChainEvent::SignRequest { request, .. } = events
+            .wait_for(
+                |event| {
+                    matches!(event, ChainEvent::SignRequest { request, .. }
+                        if request.chain == Chain::Midnight)
+                },
+                EVENT_TIMEOUT,
+            )
+            .await?
+        else {
+            unreachable!("filtered above")
+        };
+        anyhow::Ok(request.id.request_id)
+    };
+    midnight
+        .submit_is_even(4, [0x50; 20], argument, "bool")
+        .await?;
+    let victim_request = next_sign_request()
+        .await
+        .context("waiting for the victim's genuine SignRequest")?;
+    midnight.notify_as_caller(victim_request).await?;
+    midnight
+        .submit_is_even(5, [0x51; 20], argument, "bool")
+        .await?;
+    let after_impersonation = next_sign_request()
+        .await
+        .context("waiting for the SignRequest after the impersonation")?;
+    assert_ne!(
+        after_impersonation, victim_request,
+        "a notification from a contract other than the named caller was indexed"
+    );
+
     midnight.shutdown().await?;
     Ok(())
 }

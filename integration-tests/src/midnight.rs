@@ -167,6 +167,19 @@ impl MidnightContext {
         Ok(())
     }
 
+    /// Have a second caller contract notify the central Signet contract naming the real
+    /// caller's request.
+    pub async fn notify_as_caller(&self, request_id: [u8; 32]) -> anyhow::Result<()> {
+        let mut driver = self.driver.lock().await;
+        let _: serde_json::Value = driver
+            .request(&serde_json::json!({
+                "op": "notifyAsCaller",
+                "requestId": format!("0x{}", hex::encode(request_id)),
+            }))
+            .await?;
+        Ok(())
+    }
+
     pub async fn signed_evm_transaction(
         &self,
         request_id: [u8; 32],

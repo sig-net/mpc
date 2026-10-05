@@ -386,6 +386,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
+    use deadpool_redis::redis;
     use mpc_node::backlog::Checkpoint;
     use mpc_node::storage::checkpoint_storage::CheckpointStorage;
     use mpc_primitives::Chain;
@@ -394,9 +395,10 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         .network("test-pending-checkpoint-persistence")
         .init_network()
         .await?;
-    let redis = containers::Redis::run(&spawner).await;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let pool = redis_container.pool();
     let account_id = "party0.near".parse()?;
-    let storage = CheckpointStorage::Redis(redis.pool(), account_id);
+    let storage = CheckpointStorage::Redis(pool.clone(), account_id);
     let checkpoint = |height| Checkpoint {
         chain: Chain::Solana,
         block_height: height,
@@ -404,10 +406,17 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         cumulative_digest: Checkpoint::empty_cumulative_digest(),
     };
 
+    // Neither key exists yet.
+    assert!(!storage.has_checkpoint(Chain::Solana).await?);
+
     let first = checkpoint(10);
     let second = checkpoint(20);
     storage.persist_pending(&first).await?;
     storage.persist_pending(&second).await?;
+
+    // Pending-only: no confirmed key exists yet, so this case rests on a
+    // non-empty hash being visible to EXISTS.
+    assert!(storage.has_checkpoint(Chain::Solana).await?);
 
     let restarted = storage.clone();
     assert_eq!(
@@ -450,5 +459,35 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     );
     assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(second));
     assert!(restarted.load_pending(Chain::Solana).await?.is_empty());
+    // Pending drained, so its hash no longer exists in Redis; only the confirmed
+    // key is left and `has_checkpoint` must still track `latest`.
+    assert!(restarted.has_checkpoint(Chain::Solana).await?);
+
+    // The point of `has_checkpoint` is that it does not read the body. Corrupt
+    // the body: `latest` has to decode it and fails, `has_checkpoint` must not
+    // care. This is what fails if it is ever reimplemented in terms of `latest`.
+    let mut conn = pool.get().await?;
+    let (_, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+        .arg(0)
+        .arg("MATCH")
+        .arg("*:checkpoint:latest:*")
+        .arg("COUNT")
+        .arg(1000)
+        .query_async(&mut conn)
+        .await?;
+    assert_eq!(
+        keys.len(),
+        1,
+        "expected exactly one confirmed checkpoint key"
+    );
+    let _: () = redis::cmd("SET")
+        .arg(&keys[0])
+        .arg("not cbor")
+        .query_async(&mut conn)
+        .await?;
+
+    assert!(restarted.latest(Chain::Solana).await.is_err());
+    assert!(restarted.has_checkpoint(Chain::Solana).await?);
+
     Ok(())
 }

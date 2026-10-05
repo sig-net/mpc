@@ -7,8 +7,8 @@ use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
 use crate::emissions::{EmissionKind, SingletonCallEmissions};
 use crate::reader::{
-    decode_notification, decode_response_payload, resolve_verified_record,
-    signet_field_node_by_path, unpack_notification_v1, Resolved,
+    decode_bidirectional_response_payload, decode_notification, decode_response_payload,
+    resolve_verified_record, signet_field_node_by_path, unpack_notification_v1, Resolved,
 };
 use crate::records::SignBidirectionalEventNotification;
 use crate::rpc::{is_oversized_contract_state, BlockRef};
@@ -137,6 +137,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 call_index,
                 physical_segment,
                 phase,
+                caller,
                 emissions,
             } in candidate.calls
             {
@@ -161,6 +162,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 .process_entry(
                                     source,
                                     notification,
+                                    caller,
                                     &block.hash,
                                     block.number,
                                     indexed_ts,
@@ -223,15 +225,16 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                             }
                         }
                         EmissionKind::RespondBidirectional => {
-                            let decoded = decode_response_payload(&emission.payload);
-                            match decoded.signature {
-                                Ok(signature) => events.push(ChainEvent::RespondBidirectional(
-                                    RespondBidirectionalEvent {
+                            let decoded = decode_bidirectional_response_payload(&emission.payload);
+                            match decoded.response {
+                                Ok((attestation, signature)) => events.push(
+                                    ChainEvent::RespondBidirectional(RespondBidirectionalEvent {
+                                        attestation: Some(attestation),
                                         request_id: decoded.request_id,
                                         signature,
                                         chain: Chain::Midnight,
-                                    },
-                                )),
+                                    }),
+                                ),
                                 Err(err) => {
                                     drop_entry::<()>(
                                         "response-signature-invalid",
@@ -256,6 +259,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         &self,
         source: &C,
         notification: SignBidirectionalEventNotification,
+        caller: Option<[u8; 32]>,
         at_hash: &str,
         height: u64,
         indexed_ts: u64,
@@ -283,17 +287,32 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         };
         let caller_hex = hex::encode(unpacked.caller_address);
 
-        // TODO: decide whether `caller_address` must be checked against the
-        // cross-contract-call initiator of the transaction that filed this notification.
-        // It is producer-supplied, so any contract can notify naming another, which
-        // triggers a signature over a record that contract filed. What that record says
-        // is already authenticated below: `resolve_verified_record` recomputes the
-        // request id and `generate_sign_request` requires `sender` to equal the address the
-        // record was read from. The exposure is therefore third-party triggering, not
-        // forgery, and the open question is whether that is worth gating. Gating it
-        // means joining each notification to the central call it came from through the
-        // claimed communication commitment, which the ledger validates for uniqueness
-        // and for corresponding to a real call.
+        // `caller_address` is producer-supplied, since a Midnight callee cannot see its caller.
+        // Bind it to the ledger-recorded direct caller so no contract can notify as another.
+        match caller {
+            Some(caller) if caller == unpacked.caller_address => {}
+            Some(caller) => {
+                return Ok(drop_entry(
+                    "caller-mismatch",
+                    height,
+                    Some(rid),
+                    &format!(
+                        "notification names {caller_hex}, direct caller is {}",
+                        hex::encode(caller)
+                    ),
+                ));
+            }
+            None => {
+                return Ok(drop_entry(
+                    "caller-absent",
+                    height,
+                    Some(rid),
+                    &format!(
+                        "notification names {caller_hex}, singleton call has no direct caller"
+                    ),
+                ));
+            }
+        }
 
         // Authority: the caller's own ledger at the SAME finalized hash the
         // notification was read at.
@@ -725,6 +744,7 @@ mod tests {
             phase: crate::emissions::TranscriptPhase::Guaranteed,
             physical_segment: 1,
             call_index: 1,
+            caller: Some(CALLER),
             emissions: vec![Emission { kind, payload }],
         }]
     }
@@ -735,10 +755,8 @@ mod tests {
 
     fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
         let mut record = sample_record();
-        record.request_nonce = nonce;
-        let rid = crate::hashing::compute_request_id(
-            &crate::test_utils::aligned_value_from_record(&record),
-        );
+        record.tx_params.nonce = nonce;
+        let rid = crate::hashing::compute_request_id(&record).unwrap();
         (record, rid)
     }
 
@@ -1115,6 +1133,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1155,6 +1174,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1181,6 +1201,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_notification_not_from_its_named_caller_is_dropped() {
+        let (record, rid) = named_record_and_rid(7);
+        for caller in [Some([0x99; 32]), None] {
+            let mut source = FixtureSource::default();
+            let mut calls = one_call(EmissionKind::SignBidirectional, notification(rid));
+            calls[0].caller = caller;
+            source.set_emissions(9, calls);
+            source.set_state(CALLER, 9, caller_state(&record, rid));
+
+            let events = direct_indexer()
+                .await
+                .process_block(&source, &block_ref(9))
+                .await
+                .expect("a caller mismatch is a per-entry drop, not a block failure");
+
+            assert!(
+                events.is_empty(),
+                "a record {CALLER:?} filed must not be signed when the direct caller is {caller:?}"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn successful_request_logs_ledger_hash_and_sign_id_together() {
         let (record, rid) = named_record_and_rid(7);
@@ -1194,6 +1237,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1275,7 +1319,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn captured_cell_decodes_resolves_and_converts_under_transient_id() {
+    async fn captured_legacy_request_remains_rejected_even_after_rehashing() {
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &CAPTURE_NOTIFY_TX[..])
                 .expect("captured notify transaction decodes");
@@ -1291,6 +1335,11 @@ mod tests {
             );
         };
         assert_eq!(emission.kind, EmissionKind::SignBidirectional);
+        assert_eq!(
+            call.caller,
+            Some(hex_32(CAPTURE_CALLER)),
+            "the captured integrator is the ledger-recorded direct caller of the singleton"
+        );
         let mut notification = decode_notification(&emission.payload);
 
         let caller_tree = crate::state::decode_contract_state(CAPTURE_CALLER_STATE)
@@ -1307,6 +1356,7 @@ mod tests {
             .process_entry(
                 &source,
                 notification.clone(),
+                call.caller,
                 CAPTURE_BLOCK_HASH,
                 CAPTURE_HEIGHT,
                 0,
@@ -1315,7 +1365,7 @@ mod tests {
             .expect("captured entry processing does not hold");
         assert!(
             legacy_request.is_none(),
-            "the pre-transient captured ID must not bypass the request-ID gate"
+            "the old nonce-bearing record must not bypass the request decoder"
         );
 
         let captured_tree = source
@@ -1336,7 +1386,19 @@ mod tests {
         let StateValue::Cell(cell) = &*entry else {
             panic!("captured request entry is not a cell");
         };
-        let request_id = crate::hashing::compute_request_id(cell);
+        // Reproduce a positional rehash without validating the legacy layout:
+        // changing the map key must not let an undecodable record reach signing.
+        use midnight_transient_crypto::fab::AlignedValueExt as _;
+        use midnight_transient_crypto::hash::{transient_hash, upgrade_from_transient};
+        let mut identity = (**cell).clone();
+        let identity_atoms = identity.value.0.len() - 2;
+        identity.value.0.truncate(identity_atoms);
+        identity.alignment.0.truncate(identity_atoms);
+        identity.value.0.drain(4..6);
+        identity.alignment.0.drain(4..6);
+        let mut preimage = Vec::new();
+        identity.value_only_field_repr(&mut preimage);
+        let request_id = upgrade_from_transient(transient_hash(&preimage)).0;
         notification.request_id = request_id;
         source.states.insert(
             (hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()),
@@ -1351,16 +1413,19 @@ mod tests {
 
         let request = direct_indexer()
             .await
-            .process_entry(&source, notification, CAPTURE_BLOCK_HASH, CAPTURE_HEIGHT, 0)
+            .process_entry(
+                &source,
+                notification,
+                call.caller,
+                CAPTURE_BLOCK_HASH,
+                CAPTURE_HEIGHT,
+                0,
+            )
             .await
-            .expect("captured entry processing does not hold")
-            .expect("captured entry produces a request");
-
-        assert_eq!(request.id, SignId::new(request_id));
-        assert_eq!(request.args.key_version, 1);
-        assert_eq!(
-            request.args.path,
-            "63616c6c65722d70617468000000000000000000000000000000000000000000"
+            .expect("legacy entry processing does not hold");
+        assert!(
+            request.is_none(),
+            "rehashing cannot migrate a legacy record"
         );
     }
 
@@ -1384,6 +1449,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 4,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignatureResponded,
@@ -1391,7 +1457,19 @@ mod tests {
                     },
                     Emission {
                         kind: EmissionKind::RespondBidirectional,
-                        payload: response_payload(bidirectional_rid, x, y, s2, 1),
+                        payload: crate::test_utils::bidirectional_response_payload(
+                            bidirectional_rid,
+                            mpc_primitives::PublishedAttestation {
+                                block_height: 0x0102030405060708,
+                                outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
+                                serialized_output_length: 32,
+                                digest: [0x54; 32],
+                            },
+                            x,
+                            y,
+                            s2,
+                            1,
+                        ),
                     },
                 ],
             }],
@@ -1413,6 +1491,17 @@ mod tests {
         };
         assert_eq!(respond.request_id, bidirectional_rid);
         assert_eq!(respond.signature.s, k256::Scalar::from(10u64));
+        let attestation = respond
+            .attestation
+            .as_ref()
+            .expect("Midnight response metadata");
+        assert_eq!(attestation.block_height, 0x0102030405060708);
+        assert_eq!(
+            attestation.outcome_kind,
+            mpc_primitives::AttestationOutcomeKind::Executed
+        );
+        assert_eq!(attestation.serialized_output_length, 32);
+        assert_eq!(attestation.digest, [0x54; 32]);
     }
 
     #[tokio::test]
@@ -1433,10 +1522,27 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignatureResponded,
                         payload: response_payload([0x43; 32], [0xff; 32], [0xff; 32], s, 0),
+                    },
+                    Emission {
+                        kind: EmissionKind::RespondBidirectional,
+                        payload: crate::test_utils::bidirectional_response_payload(
+                            [0x45; 32],
+                            mpc_primitives::PublishedAttestation {
+                                block_height: 42,
+                                outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
+                                serialized_output_length: 32,
+                                digest: [0x54; 32],
+                            },
+                            x,
+                            y,
+                            s,
+                            2,
+                        ),
                     },
                     Emission {
                         kind: EmissionKind::SignatureResponded,
@@ -1518,6 +1624,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1587,6 +1694,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 6,
+                caller: Some(CALLER),
                 emissions: Vec::new(),
             }],
         );
@@ -1795,11 +1903,9 @@ mod tests {
     async fn path_walk_and_conversion_failures_drop_only_the_affected_entry() {
         let (good_record, good_rid) = named_record_and_rid(7);
         let mut bad_record = sample_record();
-        bad_record.request_nonce = 8;
+        bad_record.tx_params.nonce = 8;
         bad_record.algo = 1;
-        let bad_rid = crate::hashing::compute_request_id(
-            &crate::test_utils::aligned_value_from_record(&bad_record),
-        );
+        let bad_rid = crate::hashing::compute_request_id(&bad_record).unwrap();
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,
@@ -1807,6 +1913,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,

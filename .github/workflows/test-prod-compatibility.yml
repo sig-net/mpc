@@ -1,27 +1,27 @@
-name: Canton Integration Tests
+name: Prod Compatibility Tests
 
 on:
-  pull_request:
-  merge_group:
+  workflow_dispatch:
+  # Temporarily disabled until finalized
+  # push:
+  #   branches:
+  #     - develop
+  #   paths:
+  #     - chain-signatures/**
+  # pull_request:
 
 env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  canton:
-    name: Canton ${{ matrix.suite.name }} Tests
+  compat:
+    name: Prod Compatibility Tests
     runs-on: warp-ubuntu-latest-x64-4x
-    strategy:
-      fail-fast: false
-      matrix:
-        suite:
-          - name: Stream
-            filter: canton_stream
-          - name: E2E
-            filter: cases::canton
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
 
       - name: Install just
         run: |
@@ -30,44 +30,25 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Pull the images in parallel. The images are used in Canton test harness
-      - name: Pull Redis and Foundry images
-        run: |
-          printf '%s\n' redis:7.4.2 ghcr.io/foundry-rs/foundry:nightly \
-            | xargs -P "$(nproc)" -n 1 docker pull
-
-      - name: Install Java 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Install dpm (Canton CLI)
-        run: |
-          curl -fsSL https://get.digitalasset.com/install/install.sh | sh
-          echo "$HOME/.dpm/bin" >> $GITHUB_PATH
-          export PATH="$HOME/.dpm/bin:$PATH"
-          # Pin the SDK (the harness uses the globally active one; the installer defaults to latest).
-          dpm install 3.5.1
-          dpm --version
+      - name: Pull Redis image
+        run: docker pull redis:7.4.2
 
       - name: Install Rust (1.93.0)
-        uses: dtolnay/rust-toolchain@1.93.0
+        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
         with:
+          toolchain: 1.93.0
           targets: wasm32-unknown-unknown
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
+          node-version: '20'
 
       - name: Install cargo-near
         run: |
@@ -75,12 +56,6 @@ jobs:
             curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
           fi
 
-      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
-      - name: Install system OpenSSL
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-      - name: Set OpenSSL to system
-        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
- 
       - name: Detect dependency changes vs develop
         id: depchange
         if: github.event_name == 'pull_request'
@@ -91,7 +66,7 @@ jobs:
             echo changed=true >> "$GITHUB_OUTPUT" || true
 
       # Cache policy: doc/ci-caching.md
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: workspace-full
           cache-targets: true
@@ -99,14 +74,26 @@ jobs:
           # Only save the cache if there are dependency changes or it's not a merge group
           save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
-      - name: Build eth contract
-        run: just build eth
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
+      - name: Build governance contract
+        run: just build contract
+
+      - name: Build node with stable toolchain
+        run: cargo build-node
+
+      - name: Build compatibility binaries from tags
+        run: just build compat
 
       - name: Build integration tests
         run: just build tests
 
-      - name: Run Canton ${{ matrix.suite.name }} tests
-        run: just test-canton ${{ matrix.suite.filter }}
+      - name: Run production compatibility tests
+        run: just test-compat
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1

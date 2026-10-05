@@ -1,8 +1,7 @@
 //! Benchmarking helpers, gated behind the `bench` feature.
 //!
-//! Only covers the direct-RPC backend
-//! (`indexer_eth_direct_rpc::RpcEthereumClient`). The Helios light-client backend
-//! (`indexer_eth_helios::HeliosEthereumClient`) is intentionally NOT instrumented
+//! Covers the RPC read client
+//! (`rpc::RpcEthereumClient`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -4,14 +4,11 @@ use alloy::rpc::types::{Block, BlockId, Log, TransactionReceipt};
 use futures_util::{stream, Stream, StreamExt};
 
 use crate::config::RpcConfig;
-use crate::indexer_eth_direct_rpc;
+use crate::rpc::RpcEthereumClient;
 use crate::EthConfig;
 #[cfg(test)]
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, SharedBackoff};
-
-#[cfg(feature = "helios")]
-use super::indexer_eth_helios;
 
 /// Block number alias shared by the client and indexer.
 pub type BlockNumber = u64;
@@ -145,17 +142,10 @@ async fn fetch_catchup_batch(
 
 #[derive(Clone)]
 pub struct EthereumClient {
-    inner: EthereumClientInner,
+    rpc_client: RpcEthereumClient,
     rpc: RpcConfig,
     /// Global 429 cooldown gate shared by all RPC calls through this client
     shared_backoff: SharedBackoff,
-}
-
-#[derive(Clone)]
-pub enum EthereumClientInner {
-    #[cfg(feature = "helios")]
-    Helios(indexer_eth_helios::HeliosEthereumClient),
-    DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient),
 }
 
 impl EthereumClient {
@@ -163,23 +153,8 @@ impl EthereumClient {
         eth: EthConfig,
         shared_backoff: SharedBackoff,
     ) -> anyhow::Result<EthereumClient> {
-        // Without the `helios` feature the CLI already forces `light_client`
-        // to false (with a warning), so only the direct-RPC client exists.
-        #[cfg(feature = "helios")]
-        let inner = if eth.light_client {
-            EthereumClientInner::Helios(indexer_eth_helios::build_client(eth.clone()).await?)
-        } else {
-            EthereumClientInner::DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient::new(
-                eth.execution_rpc_http_url,
-            ))
-        };
-        #[cfg(not(feature = "helios"))]
-        let inner = EthereumClientInner::DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient::new(
-            eth.execution_rpc_http_url,
-        ));
-
         Ok(Self {
-            inner,
+            rpc_client: RpcEthereumClient::new(eth.execution_rpc_http_url),
             rpc: eth.rpc.clone(),
             shared_backoff,
         })
@@ -197,14 +172,6 @@ impl EthereumClient {
         Ok(client)
     }
 
-    fn client_name(&self) -> &str {
-        match &self.inner {
-            #[cfg(feature = "helios")]
-            EthereumClientInner::Helios(_) => "Helios",
-            EthereumClientInner::DirectRpc(_) => "DirectRpc",
-        }
-    }
-
     /// Retrieves a block by its ID. Returns `Ok(Some(Block))` if the block is found,
     /// `Ok(None)` if the block is not found, or an error if the request fails.
     pub async fn get_block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
@@ -215,17 +182,10 @@ impl EthereumClient {
             self.shared_backoff,
             |attempt, err, sleep| {
                 tracing::warn!(
-                    client = self.client_name(),
                     "get_block failed (attempt {attempt}/{max_attempts}) for {block_id:?}: {err:#}; retrying in {sleep:?}"
                 );
             },
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => client.get_block(block_id).await,
-                    EthereumClientInner::DirectRpc(client) => client.get_block(block_id).await,
-                }
-            }
+            { self.rpc_client.get_block(block_id).await }
         )
     }
 
@@ -243,28 +203,17 @@ impl EthereumClient {
             self.shared_backoff,
             |attempt, err, sleep| {
                 tracing::warn!(
-                    client = self.client_name(),
                     num_blocks,
                     "get_blocks failed (attempt {attempt}/{max_attempts}): {err:#}; retrying in {sleep:?}"
                 );
             },
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => client.get_blocks(block_ids).await,
-                    EthereumClientInner::DirectRpc(client) => client.get_blocks(block_ids).await,
-                }
-            }
+            { self.rpc_client.get_blocks(block_ids).await }
         );
 
         match res {
             Ok(blocks) => blocks,
             Err(err) => {
-                tracing::warn!(
-                    client = self.client_name(),
-                    num_blocks,
-                    "get_blocks failed: {err:#}"
-                );
+                tracing::warn!(num_blocks, "get_blocks failed: {err:#}");
                 block_ids.iter().copied().map(MaybeBlock::Missing).collect()
             }
         }
@@ -282,17 +231,7 @@ impl EthereumClient {
             self.rpc.retry,
             self.shared_backoff,
             "get_transaction_receipt",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => {
-                        client.get_transaction_receipt(tx_hash).await
-                    }
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.get_transaction_receipt(tx_hash).await
-                    }
-                }
-            }
+            { self.rpc_client.get_transaction_receipt(tx_hash).await }
         )
     }
 
@@ -304,15 +243,7 @@ impl EthereumClient {
             self.rpc.retry,
             self.shared_backoff,
             "get_logs",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => client.get_logs(address, block_id).await,
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.get_logs(address, block_id).await
-                    }
-                }
-            }
+            { self.rpc_client.get_logs(address, block_id).await }
         )
     }
 
@@ -329,17 +260,7 @@ impl EthereumClient {
             self.rpc.retry,
             self.shared_backoff,
             "get_logs_batch",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => {
-                        client.get_logs_batch(address, block_ids).await
-                    }
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.get_logs_batch(address, block_ids).await
-                    }
-                }
-            }
+            { self.rpc_client.get_logs_batch(address, block_ids).await }
         )
     }
 
@@ -385,17 +306,7 @@ impl EthereumClient {
             self.rpc.retry,
             self.shared_backoff,
             "get_nonce",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => {
-                        client.get_nonce(address, block_id).await
-                    }
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.get_nonce(address, block_id).await
-                    }
-                }
-            }
+            { self.rpc_client.get_nonce(address, block_id).await }
         )
     }
 
@@ -408,17 +319,7 @@ impl EthereumClient {
             self.rpc.retry,
             self.shared_backoff,
             "get_transaction_by_hash",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => {
-                        client.get_transaction_by_hash(tx_hash).await
-                    }
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.get_transaction_by_hash(tx_hash).await
-                    }
-                }
-            }
+            { self.rpc_client.get_transaction_by_hash(tx_hash).await }
         )
     }
 
@@ -431,17 +332,7 @@ impl EthereumClient {
             self.rpc.retry,
             self.shared_backoff,
             "trace_transaction_output",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => {
-                        client.trace_transaction_output(tx_hash).await
-                    }
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.trace_transaction_output(tx_hash).await
-                    }
-                }
-            }
+            { self.rpc_client.trace_transaction_output(tx_hash).await }
         )
     }
 
@@ -450,11 +341,7 @@ impl EthereumClient {
         requested_start: u64,
         anchor_height: BlockNumber,
     ) -> BlockNumber {
-        let max_catchup_blocks = match &self.inner {
-            #[cfg(feature = "helios")]
-            EthereumClientInner::Helios(_) => indexer_eth_helios::MAX_CATCHUP_BLOCKS,
-            EthereumClientInner::DirectRpc(_) => indexer_eth_direct_rpc::MAX_CATCHUP_BLOCKS,
-        };
+        let max_catchup_blocks = crate::rpc::MAX_CATCHUP_BLOCKS;
         Self::clamp_oldest_supported_with(requested_start, anchor_height, max_catchup_blocks)
     }
 
