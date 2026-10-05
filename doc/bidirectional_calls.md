@@ -191,9 +191,9 @@ accepted response per request that G4 covers".
   final outcome of req.tx, never of another transaction.
 * G4 Delivery: if req.tx is included in a final destination block after req
   was made, a response to req is eventually accepted unless (i) the return
-  data does not decode against req.schemas, (ii) the signature the
-  transaction executed under is never published, or (iii) the response
-  handler fails.
+  data does not decode against req.schemas, (ii) the transaction's ID
+  depends on its signature and that signature is never published
+  (Section 6), or (iii) the response handler fails.
 
 Nothing is promised for a transaction that never executes, for a request
 the MPC does not admit, or for a request made again after its transaction
@@ -214,7 +214,9 @@ contract upgraded to this library.
   good. A Solana transaction with a recent blockhash has no such
   protection; see Section 6.
 * Progress. All source and destination chains keep producing final blocks.
-  An outage delays delivery and changes nothing else.
+  An outage delays delivery and changes nothing else. A correct node
+  processes final blocks faster than the chains produce them, so it
+  reaches the head from wherever it starts.
 * One id per chain. Two different chain ids the MPC accepts never name the
   same chain. Otherwise the same transaction could be made once under each
   id: two rids and two entries for one execution, with last_seen split
@@ -314,17 +316,6 @@ that rests on. The state below is per source chain, so a rid from one chain
 never meets a rid from another.
 
 ```
-authentic(contract, rid, req): bool
-    the request provably comes from `contract`, and rid recomputes from it
-
-processable(req): bool
-    req.dest parses to a chain this MPC can watch
-    key derivation is valid: parameters canonical, key derivable for the
-      source chain, path not the attestation key's
-    req.tx is non-empty, parses as an unsigned transaction in dest's
-      format, commits to dest (EVM: carries its chain id), and attaching
-      any signature yields a well-formed signed transaction
-    req.schemas are valid for dest and source chain respectively
 
 state:
     backlog: RequestId -> Entry
@@ -348,6 +339,18 @@ on SignRequest { contract, rid, req } finalised on the source chain:
     signature = threshold_sign(req.tx, derived_key(contract, req.key))   // M1
     local[rid].issued.add(signature)                                     // M7
     publish_signature(rid, signature)
+
+authentic(contract, rid, req): bool
+    the request provably comes from `contract`, and rid recomputes from it
+
+processable(req): bool
+    req.dest parses to a chain this MPC can watch
+    key derivation is valid: parameters canonical, key derivable for the
+      source chain, path not the attestation key's
+    req.tx is non-empty, parses as an unsigned transaction in dest's
+      format, commits to dest (EVM: carries its chain id), and attaching
+      any signature yields a well-formed signed transaction
+    req.schemas are valid for dest and source chain respectively
 
 on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
@@ -387,11 +390,20 @@ on Response { contract, rid, att, sig } finalised on the source chain:
         delete backlog[rid]
 ```
 
+A node is *caught up* on a source chain when it has processed it up to
+its finalised head. A node that is behind, after a restart for instance,
+applies only the changes to `backlog` in the handlers above: its backlog
+still holds requests the chain has already answered, and it cannot tell
+which of the signatures and attestations it holds are already published.
+Once caught up, it acts on each entry only for what is missing: it does
+not sign an entry that has a published signature or one it holds, and
+does not attest an entry it holds an attestation for.
+
 The MPC looks for a request's execution by transaction ID, under every
 signature it holds for the request, in any final block, so a node that
 starts looking late still finds it. A node holds the signatures published
 for the request and those it took part in producing. An execution under a
-signature it does not hold is not found (Section 6).
+signature it does not hold is not found (see Section 6 for alternatives).
 
 A repeated attestation has the same content (Section 5) and is dropped
 (C3a).
@@ -423,11 +435,14 @@ Properties:
   entry stays in the backlog, parked and unwatched.
 * M6 Unviable is attested from a transaction in the block being processed
   whose ID the node holds for another request, at that block's height. It
-  is best-effort: fewer than t nodes may see it.
+  is best-effort: fewer than t nodes may see it (Section 6 says how it
+  could be made exact).
 * M7 Durability. A node writes every signature and attestation it took
   part in producing to stable storage before it publishes it, publishes
-  it until the event carrying it is final, and keeps it at least until
-  the `Response` that removes the request is final.
+  it until the event carrying it is final, and keeps it until it is
+  caught up and the request is not in its backlog.
+* M8 A node signs, attests and publishes only while caught up on the
+  source chain.
 
 ## 5. Why the guarantees hold (sketch)
 
@@ -541,6 +556,16 @@ a path from B48 through A15; the first at A12 has none.
   signature to itself. The remedy needs nothing new: the executed
   transaction carries its signature, and anyone may publish it, after
   which every node finds the execution.
+* Finding an execution without its signature. Where the transaction ID is
+  computed from the unsigned bytes alone (Tron, Zcash from version 5), a
+  node needs no signature and G4's exception (ii) does not arise. On EVM
+  and Solana it does. EVM offers a way around it that this design does
+  not use: a binary search on the account's nonce over block heights
+  finds the block where req.tx's nonce was used up, and the transaction
+  that used it is either req.tx or one that makes it Unviable. That
+  would also make Unviable exact, but at least t nodes would need
+  providers that serve account state at old blocks. On Solana, listing
+  the account's transactions does the same.
 * Agreement has no enforcement point. A change to `authentic`,
   `processable` or the attestation function must apply only to requests
   made at or after a source height the upgrade names; applied to requests
