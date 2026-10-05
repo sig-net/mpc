@@ -96,15 +96,15 @@ pub enum ParseTronAddressError {
 /// EVM form or the 21-byte `0x41`-prefixed wallet form.
 pub fn parse_hex(s: &str) -> anyhow::Result<Address> {
     let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
-    .with_context(|| format!("decoding hex address {s}"))?;
-match bytes.len() {
-    20 => Ok(Address::from_slice(&bytes)),
-    21 if bytes[0] == TRON_ADDRESS_PREFIX => Ok(Address::from_slice(&bytes[1..])),
-    _ => Err(anyhow!(
-        "hex address must be 20 bytes or 0x41-prefixed 21 bytes, got {} bytes",
-        bytes.len()
-    )),
-}
+        .with_context(|| format!("decoding hex address {s}"))?;
+    match bytes.len() {
+        20 => Ok(Address::from_slice(&bytes)),
+        21 if bytes[0] == TRON_ADDRESS_PREFIX => Ok(Address::from_slice(&bytes[1..])),
+        _ => Err(anyhow!(
+            "hex address must be 20 bytes or 0x41-prefixed 21 bytes, got {} bytes",
+            bytes.len()
+        )),
+    }
 }
 
 /// Computes the base58check checksum for a given payload.
