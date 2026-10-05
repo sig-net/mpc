@@ -333,11 +333,11 @@ state:
 on SignRequest { contract, rid, req } finalised on the source chain:
     if not authentic(contract, rid, req):                 // M1
         drop
-    if rid in backlog or not processable(req):            // M4
+    if rid in backlog or not processable(req):            // M2
         drop
     backlog[rid] = { req, contract, signatures: {} }
     signature = threshold_sign(req.tx, derived_key(contract, req.key))   // M1
-    local[rid].issued.add(signature)                                     // M7
+    local[rid].issued.add(signature)       // stored before publishing
     publish_signature(rid, signature)
 
 authentic(contract, rid, req): bool
@@ -367,11 +367,11 @@ on destination block at height h finalised on chain dest:
             if decode(r, e.req.schemas) gives (kind, data):
                 attest(rid, (h', kind, data))
             else:
-                local[rid].outcome = Parked, log why        // M5
+                local[rid].outcome = Parked, log why        // M3
         else if this block holds a transaction whose ID the node holds
           for another request and that uses up e.req.tx's replay
           protection:
-            attest(rid, (h, Unviable, empty))               // M6
+            attest(rid, (h, Unviable, empty))               // M4
 
 attest(rid, att):
     e = backlog[rid]
@@ -379,15 +379,15 @@ attest(rid, att):
     sig = threshold_sign(
         attestationDigest(rid, att),
         attestation_key(e.contract, e.req.key.key_version)
-    )                                                   // M2
-    local[rid].attestation = (att, sig)                 // M7
+    )                                                   // M5
+    local[rid].attestation = (att, sig)    // stored before publishing
     publish_response(e.contract, rid, att, sig)
 
 on Response { contract, rid, att, sig } finalised on the source chain:
     e = backlog[rid] if rid in backlog
     if e and sig verifies over attestationDigest(rid, att)
       under attestation_key(e.contract, e.req.key.key_version):
-        delete backlog[rid]
+        delete backlog[rid], local[rid]
 ```
 
 A node is *caught up* on a source chain when it has processed it up to
@@ -420,29 +420,25 @@ Properties:
   under a reserved path that no request on any signing API may name
   (`processable` covers this one); otherwise a contract could have its own
   attestation key sign an arbitrary hash and forge a response to itself.
-* M2 An attestation binds rid, height, kind and data, with data's length
+* M2 The MPC drops a request that is not authentic, that it cannot
+  process, or whose rid is already in the backlog, and keeps nothing for
+  it. A rid already in the backlog is the same transaction, already being
+  watched, so nothing is lost.
+* M3 The MPC attests Executed or Failed only from the receipt of a
+  transaction in a final block that was sent by the request's own account
+  and whose unsigned bytes are req.tx. Only the network can send from
+  that account. If the transaction succeeded but its return data does not
+  decode, the MPC attests nothing, and the entry stays in the backlog,
+  parked and unwatched.
+* M4 The MPC attests Unviable only if a final block holds a transaction
+  sent by the request's own account that is not req.tx and uses up
+  req.tx's replay protection. A node notices this only in the block it is
+  processing, and only if it knows that transaction's ID from another
+  request. It attests at that block's height. This is best-effort: fewer
+  than t nodes may notice (Section 6 says how it could be made exact).
+  M3 and M4 are the only cases in which the MPC attests.
+* M5 An attestation binds rid, height, kind and data, with data's length
   in the hash, and describes only destination state final at that height.
-* M3 The MPC attests an outcome only from a transaction in a final block
-  sent by the request's own account, which only the network controls: the
-  receipt of one whose unsigned bytes are req.tx, or, for Unviable, one
-  whose unsigned bytes are not req.tx and that used up req.tx's replay
-  protection. Nothing else.
-* M4 The MPC drops a request that is not authentic, that it cannot process,
-  or whose rid is still in the backlog, and keeps no new state for it. A
-  rid still in the backlog is the same transaction, already being watched,
-  so nothing is lost.
-* M5 An execution whose return data does not decode is not attested; its
-  entry stays in the backlog, parked and unwatched.
-* M6 Unviable is attested from a transaction in the block being processed
-  whose ID the node holds for another request, at that block's height. It
-  is best-effort: fewer than t nodes may see it (Section 6 says how it
-  could be made exact).
-* M7 Durability. A node writes every signature and attestation it took
-  part in producing to stable storage before it publishes it, publishes
-  it until the event carrying it is final, and keeps it until it is
-  caught up and the request is not in its backlog.
-* M8 A node signs, attests and publishes only while caught up on the
-  source chain.
 
 ## 5. Why the guarantees hold (sketch)
 
@@ -471,7 +467,7 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
 * G1, in short: an execution this contract has already accepted is at or below
   last_seen, so a request made later records it as known and C3c drops any
   response about it. In full: an accepted response to req describes a
-  destination block at height h (M2) with h > e.known (C3c). Suppose that
+  destination block at height h (M5) with h > e.known (C3c). Suppose that
   block happens-before the making of req. The only edges into the source chain
   are this contract's acceptances, so the path runs along the destination
   chain to a block at height h'' >= h, from there to the transaction in which
@@ -507,7 +503,7 @@ a path from B48 through A15; the first at A12 has none.
   created after the first acceptance and records a height at or above the
   execution. In full: suppose two responses reporting the same execution
   (height h) are accepted by entries e1 and e2. An accepted response is for a
-  rid the MPC admitted (C3b), so its key parameters are canonical (M4) and its
+  rid the MPC admitted (C3b), so its key parameters are canonical (M2) and its
   dest names one chain (Section 3.3). Both then carry the same rid: the
   execution fixes the transaction and the destination, and its sender fixes
   the contract and key (distinct keys, above). By C1 they were not outstanding
@@ -518,17 +514,17 @@ a path from B48 through A15; the first at A12 has none.
   not something the library enforces.
 
 * G3: the attestation key binds the source chain and the contract (M1), the
-  attestation binds the rid (M2), the rid binds the transaction (a length-
+  attestation binds the rid (M5), the rid binds the transaction (a length-
   committing hash), and the MPC reports only the receipt of a transaction
   with req.tx's bytes from req.tx's account (M3). So the reported receipt
-  is req.tx's own, and final (M2, finality assumption). For Unviable, M3
-  and M6 report a transaction from req.tx's account using up req.tx's
+  is req.tx's own, and final (M5, finality assumption). For Unviable, M4
+  reports a transaction from req.tx's account using up req.tx's
   replay protection, which blocks req.tx for good (Section 3.3).
 
 * G4, in three steps.
   1. The execution is above e.known: e.known is a height some accepted
      response attested before req was made (C2, C3d), hence final by then
-     (M2), and the execution came after.
+     (M5), and the execution came after.
   2. It is attested: no exception applies, so the signature is published
      and the return data decodes. Every correct node then holds the
      signature (agreement, above) and finds the execution by its
@@ -581,10 +577,10 @@ a path from B48 through A15; the first at A12 has none.
   it, and to no others (C3b).
 * The MPC's backlog and the library's `outstanding` can grow without
   bound. An entry lives until a verified Response, and a request whose
-  signature nobody broadcasts, or whose output does not decode (M5),
+  signature nobody broadcasts, or whose output does not decode (M3),
   never produces one. A cancel transaction that uses up the replay
   protection, itself requested through `sign_bidirectional`, ends both
-  entries if at least t nodes see it (M6), so an application may have a
+  entries if at least t nodes see it (M4), so an application may have a
   way out, but nothing bounds the entries nobody clears.
 
 
