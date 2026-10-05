@@ -1,0 +1,11 @@
+[package]
+name = "mpc-chain-tron"
+edition = "2021"
+version.workspace = true
+publish.workspace = true
+description = "Tron chain integration for MPC"
+
+[dependencies]
+anyhow.workspace = true
+mpc-chain-integration-core.workspace = true
+url.workspace = true

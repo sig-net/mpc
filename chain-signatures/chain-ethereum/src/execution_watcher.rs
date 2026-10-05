@@ -1676,7 +1676,7 @@ mod tests {
                 Chain::Midnight,
                 Some(true),
                 Some("0x"),
-                Some(ExecutionOutcome::Success { output: vec![1] }),
+                Some(ExecutionOutcome::Success { output: vec![] }),
             ),
             (
                 "midnight nonce consumed",

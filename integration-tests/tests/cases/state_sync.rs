@@ -1,5 +1,8 @@
+use cait_sith::protocol::Participant;
 use deadpool_redis::redis::AsyncCommands;
-use integration_tests::mpc_fixture::MpcFixtureBuilder;
+use integration_tests::mpc_fixture::{MpcFixtureBuilder, MpcFixtureNode};
+use mpc_node::protocol::message::SignedMessage;
+use mpc_node::protocol::sync::SyncUpdate;
 use test_log::test;
 
 use std::time::Duration;
@@ -36,7 +39,7 @@ async fn test_sync_noop_when_fully_synced() {
 
     // Responder side: node1 receives node0's sync update and reports what it's missing.
     let response = node1
-        .sync(node0.me, node0_triples.clone(), node0_presigs.clone())
+        .sync(node0, node0_triples.clone(), node0_presigs.clone())
         .await;
     assert!(
         response.triples.is_empty(),
@@ -123,12 +126,12 @@ async fn test_sync_prune_below_threshold() {
     .await;
 
     // node0 tells node1 "I own id=99", node1 responds "I don't have it".
-    let response = node1.sync(node0.me, vec![99], vec![99]).await;
+    let response = node1.sync(node0, vec![99], vec![99]).await;
     assert_eq!(response.triples, vec![99]);
     assert_eq!(response.presignatures, vec![99]);
 
     // node2 also doesn't have it.
-    let response2 = node2.sync(node0.me, vec![99], vec![99]).await;
+    let response2 = node2.sync(node0, vec![99], vec![99]).await;
     assert_eq!(response2.triples, vec![99]);
     assert_eq!(response2.presignatures, vec![99]);
 
@@ -217,8 +220,8 @@ async fn test_sync_prunes_artifacts_with_missing_holders_metadata() {
     let _: usize = conn.del(&triple_holders_key).await.unwrap();
     let _: usize = conn.del(&presig_holders_key).await.unwrap();
 
-    let response1 = node1.sync(node0.me, vec![99], vec![99]).await;
-    let response2 = node2.sync(node0.me, vec![99], vec![99]).await;
+    let response1 = node1.sync(node0, vec![99], vec![99]).await;
+    let response2 = node2.sync(node0, vec![99], vec![99]).await;
     assert_eq!(response1.triples, vec![99]);
     assert_eq!(response1.presignatures, vec![99]);
     assert_eq!(response2.triples, vec![99]);
@@ -268,7 +271,7 @@ async fn test_sync_reports_missing_when_holders_metadata_is_missing_on_responder
     let _: usize = conn.del(&triple_holders_key).await.unwrap();
     let _: usize = conn.del(&presig_holders_key).await.unwrap();
 
-    let response = node1.sync(node0.me, vec![303], vec![303]).await;
+    let response = node1.sync(node0, vec![303], vec![303]).await;
     assert_eq!(
         response.triples,
         vec![303],
@@ -325,7 +328,7 @@ async fn test_sync_reports_missing_when_owner_mapping_is_missing_on_responder() 
     let _: usize = conn.srem(&triple_owner_key, 404).await.unwrap();
     let _: usize = conn.srem(&presig_owner_key, 404).await.unwrap();
 
-    let response = node1.sync(node0.me, vec![404], vec![404]).await;
+    let response = node1.sync(node0, vec![404], vec![404]).await;
     assert_eq!(
         response.triples,
         vec![404],
@@ -391,7 +394,7 @@ async fn test_sync_remove_outdated_orphan() {
     assert!(!node0_triples.contains(&77), "node0 should not own id=77");
 
     let response = node1
-        .sync(node0.me, node0_triples.clone(), node0_presigs.clone())
+        .sync(node0, node0_triples.clone(), node0_presigs.clone())
         .await;
     assert!(
         response.triples.is_empty(),
@@ -589,17 +592,13 @@ async fn test_sync_matrix() {
         // --- Responder processes the sync update ---
         let response = responder
             .sync(
-                caller.me,
+                caller,
                 caller_update,
                 vec![], // this matrix only tests triples
             )
             .await;
 
         // Verify the full SyncUpdate response from the responder.
-        assert_eq!(
-            response.from, responder.me,
-            "case {i}: response.from should be the responder",
-        );
         assert_eq!(
             response.triples.contains(&id),
             case.expected_responder.missing,
@@ -643,4 +642,145 @@ async fn test_sync_matrix() {
         // Wait for async Drop cleanup.
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// How many triple and presignature shares a node holds for each owner.
+async fn shares_by_owner(
+    node: &MpcFixtureNode,
+    owners: &[Participant],
+) -> Vec<(Participant, usize, usize)> {
+    let mut shares = Vec::new();
+    for &owner in owners {
+        shares.push((
+            owner,
+            node.triple_storage.len_by_owner(owner).await,
+            node.presignature_storage.len_by_owner(owner).await,
+        ));
+    }
+    shares
+}
+
+/// A caller with a key the contract doesn't know can't make a node drop shares,
+/// whether it claims to be the receiver (the owner of its own artifacts) or
+/// another owner.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_rejects_outside_caller() {
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let owners = fixture.sorted_participants();
+    let before = shares_by_owner(node1, &owners).await;
+    assert!(
+        before.iter().all(|&(_, t, p)| t > 0 && p > 0),
+        "node1 should hold shares of every owner's artifacts: {before:?}"
+    );
+
+    let outsider_sk = near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
+    for claimed in [node1.me, node0.me] {
+        let result = node1
+            .try_sync(claimed, &outsider_sk, &SyncUpdate::empty())
+            .await;
+        assert!(
+            result.is_err(),
+            "outsider claiming {claimed:?} should be rejected"
+        );
+    }
+
+    assert_eq!(shares_by_owner(node1, &owners).await, before);
+}
+
+/// A participant can't pass as another node: signing with its own key while
+/// claiming another sender fails the signature check.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_rejects_impersonation() {
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let node2 = &fixture.nodes[2];
+    let owners = fixture.sorted_participants();
+    let before = shares_by_owner(node1, &owners).await;
+    assert!(
+        before.iter().all(|&(_, t, p)| t > 0 && p > 0),
+        "node1 should hold shares of every owner's artifacts: {before:?}"
+    );
+
+    let node2_sk = node2.config.borrow().local.network.sign_sk.clone();
+
+    // node2's key, but the signed envelope claims another sender.
+    for victim in [node0.me, node1.me] {
+        let result = node1
+            .try_sync(victim, &node2_sk, &SyncUpdate::empty())
+            .await;
+        assert!(
+            result.is_err(),
+            "node2 signing as {victim:?} should be rejected"
+        );
+    }
+
+    assert_eq!(shares_by_owner(node1, &owners).await, before);
+}
+
+/// A caller only accepts a reply signed by the node it asked. Otherwise a
+/// forged reply listing the caller's artifacts as missing would make it drop
+/// that node as a holder and prune them.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_reply_rejects_forged_responder() {
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let node2 = &fixture.nodes[2];
+    let node0_network = node0.config.borrow().local.network.clone();
+    let node0_triples = node0.owned_triples().await;
+    let node0_presigs = node0.owned_presignatures().await;
+    let update = SyncUpdate {
+        triples: node0_triples.clone(),
+        presignatures: node0_presigs.clone(),
+    };
+
+    // Control: node1's genuine reply opens as node1's.
+    let reply = node1
+        .try_sync(node0.me, &node0_network.sign_sk, &update)
+        .await
+        .expect("node0's update should be accepted");
+    node1
+        .open_reply(&reply, &node0_network.cipher_sk)
+        .expect("genuine reply should open");
+
+    // A reply from a node other than the one asked: node0 asked node2 but
+    // got node1's reply.
+    assert!(
+        node2.open_reply(&reply, &node0_network.cipher_sk).is_err(),
+        "reply signed by node1 should not pass as node2's"
+    );
+
+    // A reply forged with a key the contract doesn't know, claiming to be
+    // node1 and listing all of node0's artifacts as missing.
+    let outsider_sk = near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
+    let forged = SyncUpdate {
+        triples: node0_triples,
+        presignatures: node0_presigs,
+    };
+    let forged = SignedMessage::encrypt(
+        &forged,
+        node1.me,
+        &outsider_sk,
+        &node0_network.cipher_sk.public_key(),
+    )
+    .expect("encrypt forged reply");
+    assert!(
+        node1.open_reply(&forged, &node0_network.cipher_sk).is_err(),
+        "forged reply should be rejected"
+    );
 }
