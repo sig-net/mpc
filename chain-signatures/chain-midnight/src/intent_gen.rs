@@ -47,6 +47,8 @@ pub struct IntentRequest {
     pub contract_address: String,
     pub request_id: String,
     pub signature: WireSignature,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<WireAttestation>,
     /// The reads this caller pinned, so the child stays a pure function of them.
     pub contract_state: String,
     pub ledger_parameters: String,
@@ -61,6 +63,16 @@ pub struct WireSignature {
     pub s: String,
     /// 0 or 1.
     pub recovery_id: u8,
+}
+
+/// Decimal strings preserve the SDK's Uint<64> fields across the JSON boundary.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireAttestation {
+    pub block_height: String,
+    pub output_kind: u8,
+    pub serialized_output_length: String,
+    pub digest: String,
 }
 
 /// SEC1 big-endian affine coordinates, reaching the ledger untouched.
@@ -362,7 +374,7 @@ async fn spawn_session(config: &MidnightConfig, network_id: &str) -> anyhow::Res
     )
 }
 
-const PUBLISHER_PROTOCOL_VERSION: u64 = 1;
+const PUBLISHER_PROTOCOL_VERSION: u64 = 2;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -657,7 +669,7 @@ mod tests {
     /// must pin its own, or it silently tests the default.
     fn stub_config(script: &str) -> MidnightConfig {
         let script = format!(
-            r#"read -r ready; ready_id=$(printf "%s" "$ready" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{{"id":%s,"ok":true,"ready":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}}\n' "$ready_id"; {script}"#
+            r#"read -r ready; ready_id=$(printf "%s" "$ready" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{{"id":%s,"ok":true,"ready":true,"protocolVersion":2,"submitTimeoutMs":2,"recipeTtlMs":1}}\n' "$ready_id"; {script}"#
         );
         MidnightConfig {
             node_url: NODE_URL.to_string(),
@@ -758,6 +770,7 @@ mod tests {
     fn sample_request() -> IntentRequest {
         IntentRequest {
             circuit: "respond",
+            attestation: None,
             contract_address: "ab".repeat(32),
             request_id: "cd".repeat(32),
             signature: WireSignature {
@@ -1287,15 +1300,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_sends_and_requires_protocol_generation_one() {
-        let script = r#"read -r ready; if [ "$ready" = '{"id":0,"op":"ready","protocolVersion":1}' ]; then printf '{"id":0,"ok":true,"ready":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}\n'; else printf '{"id":0,"ok":false,"code":"bad_request","message":"wrong ready request"}\n'; fi; sleep 30"#;
+    async fn readiness_sends_and_requires_protocol_generation_two() {
+        let script = r#"read -r ready; if [ "$ready" = '{"id":0,"op":"ready","protocolVersion":2}' ]; then printf '{"id":0,"ok":true,"ready":true,"protocolVersion":2,"submitTimeoutMs":2,"recipeTtlMs":1}\n'; else printf '{"id":0,"ok":false,"code":"bad_request","message":"wrong ready request"}\n'; fi; sleep 30"#;
         let mut config = stub_config("unreachable");
         config.publisher.intent_gen_command =
             vec!["sh".to_string(), "-c".to_string(), script.to_string()];
 
         IntentGen::spawn(&config, NETWORK_ID)
             .await
-            .expect("generation 1 readiness succeeds");
+            .expect("generation 2 readiness succeeds");
     }
 
     #[tokio::test]
@@ -1303,11 +1316,11 @@ mod tests {
         let invalid_replies = [
             (
                 "missing ready field",
-                r#"{"id":0,"ok":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
+                r#"{"id":0,"ok":true,"protocolVersion":2,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
                 "false ready field",
-                r#"{"id":0,"ok":true,"ready":false,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
+                r#"{"id":0,"ok":true,"ready":false,"protocolVersion":2,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
                 "missing protocol version",
@@ -1315,11 +1328,11 @@ mod tests {
             ),
             (
                 "older protocol version",
-                r#"{"id":0,"ok":true,"ready":true,"protocolVersion":0,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
+                r#"{"id":0,"ok":true,"ready":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
                 "newer protocol version",
-                r#"{"id":0,"ok":true,"ready":true,"protocolVersion":2,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
+                r#"{"id":0,"ok":true,"ready":true,"protocolVersion":3,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
                 "wrongly typed protocol version",

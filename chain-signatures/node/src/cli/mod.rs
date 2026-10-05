@@ -40,6 +40,7 @@ use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
 use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
+use mpc_chain_tron::TronConfig;
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
@@ -309,6 +310,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 contract_watcher.clone(),
                 sync_report_tx.clone(),
+                network.clone(),
             );
 
             log_startup(
@@ -348,7 +350,12 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync_task.run());
-            tokio::spawn(rpc_executor.run(contract_state_tx, config_tx.clone(), checkpoints_tx));
+            tokio::spawn(rpc_executor.run(
+                backlog.clone(),
+                contract_state_tx,
+                config_tx.clone(),
+                checkpoints_tx,
+            ));
 
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics().await;
@@ -467,6 +474,7 @@ struct ChainConfigs {
     hydration: Option<HydrationConfig>,
     canton: Option<CantonConfig>,
     midnight: Option<MidnightConfig>,
+    tron: Option<TronConfig>,
 }
 
 impl ChainConfigs {
@@ -483,6 +491,7 @@ impl ChainConfigs {
             hydration: hydration.into_config(),
             canton: canton.into_config(),
             midnight: midnight.into_config()?,
+            tron: None, // Tron is a target-only chain with no indexer
         })
     }
 }
@@ -596,6 +605,7 @@ fn log_startup(
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
         midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
+        tron_endpoint = %chains.tron.as_ref().map(|c| c.endpoint.as_str()).unwrap_or("None"),
         "starting node",
     );
 }
@@ -808,6 +818,7 @@ async fn spawn_indexers(
         hydration,
         canton,
         midnight,
+        tron,
     } = configs;
 
     tracing::info!(
@@ -816,6 +827,7 @@ async fn spawn_indexers(
         hydration = hydration.is_some(),
         canton = canton.is_some(),
         midnight = midnight.is_some(),
+        tron = tron.is_some(),
         "spawning chain indexers"
     );
 

@@ -76,8 +76,8 @@ async fn detect_regression(
     let is_reset =
         Checkpoint::reset(chain, checkpoint_digest.height).digest() == checkpoint_digest.digest;
     if !is_reset {
-        match backlog.checkpoints().latest(chain).await {
-            Ok(None) => {
+        match backlog.checkpoints().has_checkpoint(chain).await {
+            Ok(false) => {
                 tracing::info!(?chain, "no local checkpoint; skipping regression check");
                 return false;
             }
@@ -85,11 +85,11 @@ async fn detect_regression(
                 tracing::warn!(
                     ?chain,
                     %err,
-                    "transient storage error checking latest checkpoint; retrying on next change"
+                    "transient storage error checking for a local checkpoint; retrying on next change"
                 );
                 return false;
             }
-            Ok(Some(_)) => {}
+            Ok(true) => {}
         }
     }
 

@@ -11,6 +11,7 @@ use crate::protocol::presignature::PresignatureId;
 use crate::protocol::signature::{GenerateCtx, SignError, SignGenerator};
 use crate::protocol::sync::{SyncKind, SyncReportSender};
 use crate::protocol::Chain;
+use crate::respond_bidirectional::claims_attestation_key;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::PresignatureReservation;
 use crate::storage::PresignatureStorage;
@@ -453,6 +454,20 @@ impl SignatureSpawner {
                     self.drop_task(sign_id, "superseded by the next leg");
                 }
 
+                // Every route into signing passes here, checkpoint recovery included (it skips
+                // admission). After the duplicate guard, so a refusal can't retire a tracked request.
+                if claims_attestation_key(entry.request()) {
+                    tracing::error!(
+                        ?sign_id,
+                        chain = %entry.chain(),
+                        "refusing to sign on the reserved attestation path"
+                    );
+                    // Drop posits peers sent ahead of the request, and any that arrive later.
+                    self.mark_dead(sign_id);
+                    self.posit_mailboxes.remove(&sign_id);
+                    return;
+                }
+
                 record_request_latency_since(
                     entry.chain(),
                     SignRequestStep::AwaitingGeneration,
@@ -796,6 +811,98 @@ mod tests {
         spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
         assert!(spawner.test_requests_contains(&sign_id));
         assert!(spawner.test_tasks_contains(sign_id));
+    }
+
+    /// Checkpoint recovery hands the spawner entries that never passed admission, so
+    /// the refusal has to hold here too, without catching the legitimate leg 2.
+    #[tokio::test]
+    async fn test_refuses_the_reserved_attestation_path() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+
+        let mut spawner = SignatureSpawner::new(
+            account_id,
+            contract,
+            presignatures,
+            mesh_rx,
+            msg_channel,
+            RpcChannel { tx: rpc_tx },
+            sync_report_tx,
+        );
+        let backlog = crate::backlog::Backlog::new();
+        let cfg = ProtocolConfig::default();
+
+        let reserved = |id: SignId| {
+            let mut request = crate::backlog::mock::mock_sign_request(id, Chain::Solana);
+            Arc::make_mut(&mut request).args.path = "solana response key".to_string();
+            backlog::SignEntry::generating(request, &backlog)
+        };
+        let propose = || SignPositMessage {
+            presignature_id: 0,
+            round: 0,
+            from: Participant::from(1),
+            action: PositAction::Propose,
+        };
+
+        // A peer that still admits the request proposes before this node sees it.
+        let attack_id = SignId::new([10u8; 32]);
+        spawner.handle_posit(attack_id, propose());
+        spawner.handle_sign(&governance, SignCommand::Request(reserved(attack_id)), &cfg);
+        assert!(!spawner.test_requests_contains(&attack_id));
+        assert!(!spawner.test_tasks_contains(attack_id));
+        assert!(!spawner.test_posit_mailboxes_contains(&attack_id));
+        spawner.handle_posit(attack_id, propose());
+        assert!(
+            !spawner.test_posit_mailboxes_contains(&attack_id),
+            "late posits for a refused id must not reopen its mailbox"
+        );
+
+        // A refusal sharing a tracked request's id must not retire that request.
+        let tracked_id = SignId::new([12u8; 32]);
+        let tracked = crate::backlog::mock::mock_sign_request(tracked_id, Chain::Solana);
+        let entry = backlog::SignEntry::generating(tracked, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+        spawner.handle_sign(
+            &governance,
+            SignCommand::Request(reserved(tracked_id)),
+            &cfg,
+        );
+        assert!(spawner.test_tasks_contains(tracked_id));
+
+        let leg_two_id = SignId::new([11u8; 32]);
+        let mut leg_two = crate::backlog::mock::mock_bidi_response_request(
+            leg_two_id,
+            mpc_primitives::BidirectionalTxId([11u8; 32]),
+            Chain::Solana,
+        );
+        Arc::make_mut(&mut leg_two).args.path = "solana response key".to_string();
+        let entry = backlog::SignEntry::generating(leg_two, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+        assert!(spawner.test_tasks_contains(leg_two_id));
     }
 
     /// The duplicate guard admits a next leg over the leg it supersedes, while

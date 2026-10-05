@@ -476,6 +476,7 @@ pub async fn emit_events(
                 events_tx
                     .send(ChainEvent::RespondBidirectional(
                         mpc_primitives::RespondBidirectionalEvent {
+                            attestation: None,
                             request_id: ev.request_id,
                             signature,
                             chain: Chain::Solana,
