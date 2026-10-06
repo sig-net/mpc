@@ -463,7 +463,6 @@ impl MpcFixtureNode {
             web_port,
             self.msg_channel.clone(),
             self.state.clone(),
-            self.presignature_storage.clone(),
             SyncChannel::new().1,
             account_id,
             self.backlog.clone(),
