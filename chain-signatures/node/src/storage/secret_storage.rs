@@ -72,11 +72,7 @@ impl SecretNodeStorage for SecretManagerNodeStorage {
         let Some(data) = raw_data else {
             return Ok(None);
         };
-        let persistent_node_data = serde_json::from_slice(&data).map_err(|err| {
-            tracing::error!(%err, data_len = data.len(), "failed to decode stored key share");
-            err
-        })?;
-        Ok(Some(persistent_node_data))
+        Ok(Some(serde_json::from_slice(&data)?))
     }
 }
 
