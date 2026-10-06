@@ -1,5 +1,5 @@
 use alloy::dyn_abi::{DynSolType, DynSolValue};
-use alloy::primitives::{Bytes, I256, U256};
+use alloy::primitives::Bytes;
 use borsh::BorshSerialize;
 use mpc_midnight_respond_codec::{executed_output, TracedReturn};
 use mpc_primitives::SerDeserFormat;
@@ -241,9 +241,10 @@ fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> 
             b.serialize(w)?;
         }
         Address(a) => a.serialize(w)?,
-        Uint(u, size) => write_u256(w, *u, *size)?,
-        Int(i, size) => write_i256(w, *i, *size)?,
-        FixedBytes(b, _) => w.write_all(b.as_slice())?,
+        // Integer sizes are in bits; Borsh writes the native little-endian width.
+        Uint(u, bits) => w.write_all(&u.to_le_bytes::<32>()[..bits / 8])?,
+        Int(i, bits) => w.write_all(&i.to_le_bytes::<32>()[..bits / 8])?,
+        FixedBytes(b, size) => w.write_all(&b[..*size])?,
         Bytes(b) => b.serialize(w)?,
         String(s) => s.serialize(w)?,
         Array(xs) => {
@@ -265,18 +266,6 @@ fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> 
         other => anyhow::bail!("unsupported DynSolValue variant: {other:?}"),
     }
     Ok(())
-}
-
-fn write_u256<W: Write>(w: &mut W, x: U256, size: usize) -> anyhow::Result<()> {
-    let le = x.to_le_bytes::<{ U256::BYTES }>();
-    w.write_all(&le[..size.min(U256::BYTES)])
-        .map_err(Into::into)
-}
-
-fn write_i256<W: Write>(w: &mut W, x: I256, size: usize) -> anyhow::Result<()> {
-    let le = x.to_le_bytes::<{ I256::BYTES }>();
-    w.write_all(&le[..size.min(I256::BYTES)])
-        .map_err(Into::into)
 }
 
 fn parse_output_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
@@ -341,6 +330,7 @@ fn default_output_for_non_contract_call(schema: &[AbiField]) -> anyhow::Result<O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::{I256, U256};
 
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
 
@@ -545,6 +535,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, vec![1u8]);
+    }
+
+    #[test]
+    fn build_serialized_output_borsh_uses_native_widths() {
+        let bytes4 = alloy::primitives::B256::right_padding_from(&[0xde, 0xad, 0xbe, 0xef]);
+        let cases = [
+            (
+                "uint8",
+                DynSolValue::Uint(U256::from(7), 8),
+                borsh::to_vec(&7u8),
+            ),
+            (
+                "uint64",
+                DynSolValue::Uint(U256::from(7), 64),
+                borsh::to_vec(&7u64),
+            ),
+            (
+                "int32",
+                DynSolValue::Int(I256::MINUS_ONE, 32),
+                borsh::to_vec(&-1i32),
+            ),
+            (
+                "bytes4",
+                DynSolValue::FixedBytes(bytes4, 4),
+                borsh::to_vec(&[0xdeu8, 0xad, 0xbe, 0xef]),
+            ),
+            (
+                "uint64[]",
+                DynSolValue::Array(vec![DynSolValue::Uint(U256::from(7), 64)]),
+                borsh::to_vec(&vec![7u64]),
+            ),
+        ];
+        for (ty, value, expected) in cases {
+            let schema = format!(r#"[{{"name":"v","type":"{ty}"}}]"#);
+            let trace = Bytes::from(DynSolValue::Tuple(vec![value]).abi_encode_params());
+            let out = build_serialized_output(
+                true,
+                schema.as_bytes(),
+                TraceOutput::Output(trace),
+                SerDeserFormat::Borsh,
+                schema.as_bytes(),
+            )
+            .unwrap();
+            assert_eq!(out, expected.unwrap(), "{ty}");
+        }
     }
 
     #[test]
