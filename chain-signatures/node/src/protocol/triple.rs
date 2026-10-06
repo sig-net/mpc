@@ -170,6 +170,15 @@ impl TripleGenerator {
         struct OngoingGuard {
             tx: watch::Sender<usize>,
         }
+
+        impl OngoingGuard {
+            fn new(tx: watch::Sender<usize>) -> Self {
+                tx.send_modify(|v| *v += 1);
+                crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL.inc();
+                Self { tx }
+            }
+        }
+
         impl Drop for OngoingGuard {
             fn drop(&mut self) {
                 self.tx.send_modify(|v| *v = v.saturating_sub(1));
@@ -177,12 +186,8 @@ impl TripleGenerator {
             }
         }
 
-        self.ongoing_tx.send_modify(|v| *v += 1);
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.inc();
-        crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL.inc();
-        let _guard = OngoingGuard {
-            tx: self.ongoing_tx.clone(),
-        };
+        let _guard = OngoingGuard::new(self.ongoing_tx.clone());
 
         let mut early_presign_messages = Vec::new();
         let start_time = Instant::now();

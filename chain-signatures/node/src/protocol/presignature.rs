@@ -253,6 +253,15 @@ impl PresignatureGenerator {
         struct OngoingGuard {
             tx: watch::Sender<usize>,
         }
+
+        impl OngoingGuard {
+            fn new(tx: watch::Sender<usize>) -> Self {
+                tx.send_modify(|v| *v += 1);
+                crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL.inc();
+                Self { tx }
+            }
+        }
+
         impl Drop for OngoingGuard {
             fn drop(&mut self) {
                 self.tx.send_modify(|v| *v = v.saturating_sub(1));
@@ -260,15 +269,11 @@ impl PresignatureGenerator {
             }
         }
 
-        self.ongoing_tx.send_modify(|v| *v += 1);
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS.inc();
         if self.owner == self.me {
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE.inc();
         }
-        crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL.inc();
-        let _guard = OngoingGuard {
-            tx: self.ongoing_tx.clone(),
-        };
+        let _guard = OngoingGuard::new(self.ongoing_tx.clone());
 
         let start_time = Instant::now();
         let mut protocol: PresignatureProtocol = Box::new(cait_sith::presign(
