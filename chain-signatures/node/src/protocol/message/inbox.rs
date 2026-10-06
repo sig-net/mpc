@@ -15,8 +15,8 @@ use crate::protocol::Config;
 use crate::rpc::ContractStateWatcher;
 
 use crate::protocol::message::types::{
-    GeneratingMessage, Message, MessageError, PositProtocolId, PresignatureMessage, Protocols,
-    ReadyMessage, ResharingMessage, SignatureMessage, TripleMessage,
+    ArtifactMessage, GeneratingMessage, Message, MessageError, PositProtocolId, Protocols,
+    ReadyMessage, ResharingMessage, SignatureMessage,
 };
 
 use cait_sith::protocol::Participant;
@@ -29,9 +29,8 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// Metric labels for the per-generation subscriber maps
-const TRIPLE_TASK_LABEL: &str = "triple_task";
-const PRESIGNATURE_TASK_LABEL: &str = "presign_task";
 const SIGNATURE_TASK_LABEL: &str = "sign_task";
+const ARTIFACT_TASK_LABEL: &str = "artifact_task";
 
 /// Receiving half of the message system: accepts encrypted messages from peers,
 /// decrypts and dedups them, and routes each to its subscriber channel.
@@ -64,19 +63,16 @@ pub struct MessageInbox {
     resharing: Subscriber<ResharingMessage>,
     ready: Subscriber<ReadyMessage>,
 
-    /// Protocol messages per running triple generation; entries created on
-    /// demand and removed on unsubscribe.
-    triple: HashMap<TripleId, Subscriber<TripleMessage>>,
     /// Posit conversations for all triples; demuxed per-id by the TripleSpawner.
     triple_posit: Subscriber<(TripleId, Participant, PositAction)>,
-    /// Protocol messages per running presignature generation.
-    presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
     /// Posit conversations for all presignatures; demuxed by the PresignatureSpawner.
     presignature_posit: Subscriber<(FullPresignatureId, Participant, PositAction)>,
     /// Protocol messages per running signature generation.
     signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
     /// Posit conversations for all sign requests; demuxed per sign_id by the SignatureSpawner.
     signature_posit: Subscriber<(SignId, PresignatureId, Round, Participant, PositAction)>,
+    /// Protocol messages for unified artifact generation (triples + presignatures).
+    artifact: HashMap<u64, Subscriber<ArtifactMessage>>,
 }
 
 impl MessageInbox {
@@ -99,12 +95,10 @@ impl MessageInbox {
             generating: Subscriber::unsubscribed("generating"),
             resharing: Subscriber::unsubscribed("resharing"),
             ready: Subscriber::unsubscribed("ready"),
-            triple: HashMap::new(),
             triple_posit: Subscriber::unsubscribed_with_capacity(
                 "triple_posit",
                 sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
             ),
-            presignature: HashMap::new(),
             presignature_posit: Subscriber::unsubscribed_with_capacity(
                 "presignature_posit",
                 sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
@@ -114,6 +108,7 @@ impl MessageInbox {
                 "signature_posit",
                 sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
             ),
+            artifact: HashMap::new(),
         }
     }
 
@@ -156,22 +151,24 @@ impl MessageInbox {
                 self.ready.report_capacity_global();
             }
             Message::Triple(message) => {
+                let id = message.id;
                 let sub = self
-                    .triple
-                    .entry(message.id)
-                    .or_insert_with(|| Subscriber::unsubscribed(TRIPLE_TASK_LABEL));
-                let _ = sub.try_send_lossy(message);
+                    .artifact
+                    .entry(id)
+                    .or_insert_with(|| Subscriber::unsubscribed(ARTIFACT_TASK_LABEL));
+                let _ = sub.try_send_lossy(ArtifactMessage::Triple(message));
                 sub.report_capacity();
-                set_inbox_count(TRIPLE_TASK_LABEL, self.triple.len());
+                set_inbox_count(ARTIFACT_TASK_LABEL, self.artifact.len());
             }
             Message::Presignature(message) => {
+                let id = message.id;
                 let sub = self
-                    .presignature
-                    .entry(message.id)
-                    .or_insert_with(|| Subscriber::unsubscribed(PRESIGNATURE_TASK_LABEL));
-                let _ = sub.try_send_lossy(message);
+                    .artifact
+                    .entry(id)
+                    .or_insert_with(|| Subscriber::unsubscribed(ARTIFACT_TASK_LABEL));
+                let _ = sub.try_send_lossy(ArtifactMessage::Presignature(message));
                 sub.report_capacity();
-                set_inbox_count(PRESIGNATURE_TASK_LABEL, self.presignature.len());
+                set_inbox_count(ARTIFACT_TASK_LABEL, self.artifact.len());
             }
             Message::Signature(message) => {
                 let sub = self
@@ -302,43 +299,22 @@ impl MessageInbox {
                     tracing::warn!("unsubscribing from resharing not supported");
                 }
             },
-            SubscribeId::Triple(id) => match sub.action {
+            SubscribeId::Artifact(id) => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let sub = self
-                        .triple
+                        .artifact
                         .entry(id)
-                        .or_insert_with(|| Subscriber::unsubscribed(TRIPLE_TASK_LABEL));
+                        .or_insert_with(|| Subscriber::unsubscribed(ARTIFACT_TASK_LABEL));
                     let rx = sub.subscribe();
-                    let _ = resp.send(SubscribeResponse::Triple(rx));
+                    let _ = resp.send(SubscribeResponse::Artifact(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
-                    if let Some(sub) = self.triple.remove(&id) {
+                    if let Some(sub) = self.artifact.remove(&id) {
                         sub.clear_capacity_global();
                     } else {
-                        tracing::warn!(id, "trying to unsub from an unknown triple subscription");
+                        tracing::warn!(id, "trying to unsub from an unknown artifact subscription");
                     }
-                    set_inbox_count(TRIPLE_TASK_LABEL, self.triple.len());
-                }
-            },
-            SubscribeId::Presignature(id) => match sub.action {
-                SubscribeRequestAction::Subscribe(resp) => {
-                    let sub = self
-                        .presignature
-                        .entry(id)
-                        .or_insert_with(|| Subscriber::unsubscribed(PRESIGNATURE_TASK_LABEL));
-                    let rx = sub.subscribe();
-                    let _ = resp.send(SubscribeResponse::Presignature(rx));
-                }
-                SubscribeRequestAction::Unsubscribe => {
-                    if let Some(sub) = self.presignature.remove(&id) {
-                        sub.clear_capacity_global();
-                    } else {
-                        tracing::warn!(
-                            id,
-                            "trying to unsub from an unknown presignature subscription"
-                        );
-                    }
-                    set_inbox_count(PRESIGNATURE_TASK_LABEL, self.presignature.len());
+                    set_inbox_count(ARTIFACT_TASK_LABEL, self.artifact.len());
                 }
             },
             SubscribeId::Signature(sign_id, presignature_id) => match sub.action {
@@ -444,7 +420,9 @@ mod tests {
     use super::*;
     use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
     use crate::protocol::contract::primitives::Participants;
-    use crate::protocol::message::{MessageChannel, SignedMessage};
+    use crate::protocol::message::{
+        MessageChannel, PresignatureMessage, SignedMessage, TripleMessage,
+    };
     use crate::protocol::ParticipantInfo;
     use crate::rpc::ContractStateWatcher;
     use crate::util::NearPublicKeyExt;
@@ -550,18 +528,27 @@ mod tests {
             SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
         setup.channel.send_inbox(encrypted).await;
 
-        let mut recv1 = setup.channel.subscribe_triple(1).await;
-        let mut recv2 = setup.channel.subscribe_triple(2).await;
-        let mut recv3 = setup.channel.subscribe_triple(3).await;
+        let mut recv1 = setup.channel.subscribe_artifact(1).await;
+        let mut recv2 = setup.channel.subscribe_artifact(2).await;
+        let mut recv3 = setup.channel.subscribe_artifact(3).await;
 
         let (m1, m2, m3) = match tokio::join!(recv1.recv(), recv2.recv(), recv3.recv()) {
             (Some(m1), Some(m2), Some(m3)) => (m1, m2, m3),
             _ => panic!("failed to join on inbox"),
         };
 
-        assert_eq!(m1.id, 1);
-        assert_eq!(m2.id, 2);
-        assert_eq!(m3.id, 3);
+        match m1 {
+            ArtifactMessage::Triple(msg) => assert_eq!(msg.id, 1),
+            _ => panic!("expected triple message"),
+        }
+        match m2 {
+            ArtifactMessage::Triple(msg) => assert_eq!(msg.id, 2),
+            _ => panic!("expected triple message"),
+        }
+        match m3 {
+            ArtifactMessage::Triple(msg) => assert_eq!(msg.id, 3),
+            _ => panic!("expected triple message"),
+        }
 
         setup.inbox.abort();
     }
@@ -576,11 +563,11 @@ mod tests {
         let encrypted =
             SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
 
-        let mut recv1 = setup.channel.subscribe_triple(1).await;
-        let mut recv2 = setup.channel.subscribe_triple(filter_id).await;
-        let mut recv3 = setup.channel.subscribe_triple(3).await;
+        let mut recv1 = setup.channel.subscribe_artifact(1).await;
+        let mut recv2 = setup.channel.subscribe_artifact(filter_id).await;
+        let mut recv3 = setup.channel.subscribe_artifact(3).await;
 
-        setup.channel.filter_triple(filter_id).await;
+        setup.channel.filter_artifact(filter_id).await;
         setup.channel.send_inbox(encrypted).await;
 
         let (m1, m3) = match tokio::join!(recv1.recv(), recv3.recv()) {
@@ -588,12 +575,77 @@ mod tests {
             _ => panic!("failed to join on inbox"),
         };
 
-        assert_eq!(m1.id, 1);
-        assert_eq!(m3.id, 3);
+        match m1 {
+            ArtifactMessage::Triple(msg) => assert_eq!(msg.id, 1),
+            _ => panic!("expected triple message"),
+        }
+        match m3 {
+            ArtifactMessage::Triple(msg) => assert_eq!(msg.id, 3),
+            _ => panic!("expected triple message"),
+        }
 
         // Expect to timeout here since the message gets filtered out.
         let result = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
         assert!(result.is_err());
+
+        setup.inbox.abort();
+    }
+
+    /// Check that the inbox routes both Triple and Presignature messages to an artifact subscriber.
+    #[tokio::test]
+    async fn test_inbox_receives_artifact_messages() {
+        let setup = inbox_setup();
+        let artifact_id = 42;
+        let batch = vec![
+            Message::Triple(TripleMessage {
+                id: artifact_id,
+                epoch: setup.epoch,
+                from: setup.from,
+                data: vec![1, 2, 3],
+                timestamp: 1,
+            }),
+            Message::Presignature(PresignatureMessage {
+                id: artifact_id,
+                pair_id: artifact_id,
+                epoch: setup.epoch,
+                from: setup.from,
+                data: vec![4, 5, 6],
+                timestamp: 2,
+            }),
+        ];
+        let encrypted =
+            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+
+        let mut recv = setup.channel.subscribe_artifact(artifact_id).await;
+        setup.channel.send_inbox(encrypted).await;
+
+        let m1 = recv.recv().await.expect("expected triple artifact message");
+        let m2 = recv
+            .recv()
+            .await
+            .expect("expected presignature artifact message");
+
+        assert_eq!(
+            m1,
+            ArtifactMessage::Triple(TripleMessage {
+                id: artifact_id,
+                epoch: setup.epoch,
+                from: setup.from,
+                data: vec![1, 2, 3],
+                timestamp: 1,
+            })
+        );
+        assert_eq!(
+            m2,
+            ArtifactMessage::Presignature(PresignatureMessage {
+                id: artifact_id,
+                pair_id: artifact_id,
+                epoch: setup.epoch,
+                from: setup.from,
+                data: vec![4, 5, 6],
+                timestamp: 2,
+            })
+        );
 
         setup.inbox.abort();
     }
@@ -610,18 +662,18 @@ mod tests {
             SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
         setup.channel.send_inbox(encrypted).await;
 
-        let mut recv1 = setup.channel.subscribe_triple(1).await;
-        let mut recv2 = setup.channel.subscribe_triple(2).await;
-        let mut recv3 = setup.channel.subscribe_triple(3).await;
+        let mut recv1 = setup.channel.subscribe_artifact(1).await;
+        let mut recv2 = setup.channel.subscribe_artifact(2).await;
+        let mut recv3 = setup.channel.subscribe_artifact(3).await;
 
         match tokio::join!(recv1.recv(), recv2.recv(), recv3.recv()) {
             (Some(_), Some(_), Some(_)) => {}
             _ => panic!("failed to join on inbox"),
         }
 
-        setup.channel.unsubscribe_triple(1).await;
-        setup.channel.unsubscribe_triple(2).await;
-        setup.channel.unsubscribe_triple(3).await;
+        setup.channel.unsubscribe_artifact(1).await;
+        setup.channel.unsubscribe_artifact(2).await;
+        setup.channel.unsubscribe_artifact(3).await;
 
         // Encrypting the same batch again produces the same signature, so the
         // inbox should drop it as a duplicate.
@@ -630,19 +682,19 @@ mod tests {
         setup.channel.send_inbox(encrypted).await;
         let mut recv1 = tokio::time::timeout(
             Duration::from_millis(300),
-            setup.channel.subscribe_triple(1),
+            setup.channel.subscribe_artifact(1),
         )
         .await
         .unwrap();
         let mut recv2 = tokio::time::timeout(
             Duration::from_millis(300),
-            setup.channel.subscribe_triple(2),
+            setup.channel.subscribe_artifact(2),
         )
         .await
         .unwrap();
         let mut recv3 = tokio::time::timeout(
             Duration::from_millis(300),
-            setup.channel.subscribe_triple(3),
+            setup.channel.subscribe_artifact(3),
         )
         .await
         .unwrap();

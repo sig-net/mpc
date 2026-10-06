@@ -9,16 +9,21 @@ pub mod request;
 pub mod signature;
 pub mod state;
 pub mod sync;
+pub mod task;
 pub mod triple;
 
 #[cfg(feature = "test-feature")]
 pub mod test_setup;
+
+#[cfg(any(test, feature = "test-feature"))]
+pub mod test_cluster;
 
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use message::{Message, MessageChannel};
 pub use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, RespondBidirectionalTx};
 pub use state::{Node, NodeState};
+pub use task::{ProtocolSpawner, ProtocolTask};
 
 use crate::config::Config;
 use crate::mesh::MeshState;
@@ -29,7 +34,6 @@ use crate::protocol::request::SignatureSpawnerTask;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
-use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
 use semver::Version;
@@ -41,7 +45,6 @@ use tokio::sync::{mpsc, watch};
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
     pub(crate) secret_storage: SecretNodeStorageVariant,
-    pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
     pub(crate) sign_task: SignatureSpawnerTask,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,

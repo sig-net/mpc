@@ -1,7 +1,7 @@
 use cait_sith::protocol::Participant;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::state::NodeKeyInfo;
-use mpc_node::storage::triple_storage::TriplePair;
+use mpc_node::protocol::triple::TriplePair;
 use std::collections::BTreeMap;
 
 #[derive(serde::Deserialize, serde::Serialize)]

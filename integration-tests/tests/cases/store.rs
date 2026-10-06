@@ -2,180 +2,14 @@ use cait_sith::protocol::Participant;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use mpc_crypto::PublicKey;
-use mpc_node::protocol::presignature::PresignatureSpawner;
-use mpc_node::protocol::triple::TripleSpawner;
 use mpc_node::protocol::MessageChannel;
+use mpc_node::protocol::ProtocolSpawner;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
 
-use super::helpers::{dummy_backlog_entry, dummy_pair, dummy_presignature};
+use super::helpers::{dummy_backlog_entry, dummy_presignature};
 use mpc_primitives::SignId;
 
-#[test(tokio::test)]
-async fn test_triple_persistence() -> anyhow::Result<()> {
-    let spawner = ClusterSpawner::default()
-        .network("test-triple-persistence")
-        .init_network()
-        .await?;
-
-    let node0 = Participant::from(0);
-    let node1 = Participant::from(1);
-    let (_, _, msg) = MessageChannel::new();
-    let node0_id = "party0.near".parse().unwrap();
-    let redis = containers::Redis::run(&spawner).await;
-    let triple_storage = redis.triple_storage(&node0_id, node0);
-    let triple_spawner =
-        TripleSpawner::new(node0, 5, 123, &triple_storage, msg, node0_id.to_string());
-
-    let triple_id1: u64 = 1;
-    let triple_id2: u64 = 2;
-
-    // Check that the storage is empty at the start
-    assert!(!triple_storage.contains(triple_id1).await);
-    assert!(!triple_spawner.contains_mine(triple_id1).await);
-    assert_eq!(triple_storage.len_generated().await, 0);
-    assert_eq!(triple_storage.len_by_owner(node0).await, 0);
-    assert!(triple_storage.is_empty().await);
-    assert_eq!(triple_spawner.len_potential().await, 0);
-
-    triple_storage
-        .create_slot(triple_id1, node1)
-        .await
-        .unwrap()
-        .insert(dummy_pair(triple_id1), node1)
-        .await;
-    triple_storage
-        .create_slot(triple_id2, node1)
-        .await
-        .unwrap()
-        .insert(dummy_pair(triple_id2), node1)
-        .await;
-
-    // Check that the storage contains the foreign triple
-    assert!(triple_spawner.contains(triple_id1).await);
-    assert!(triple_spawner.contains(triple_id2).await);
-    assert!(!triple_spawner.contains_mine(triple_id1).await);
-    assert!(!triple_spawner.contains_mine(triple_id2).await);
-    assert_eq!(triple_storage.len_generated().await, 2);
-    assert_eq!(triple_storage.len_by_owner(node0).await, 0);
-    assert_eq!(triple_spawner.len_potential().await, 2);
-
-    // Take triple pairs and check that they are removed from the storage and marked as using
-    let _taken1 = triple_storage.take(triple_id1, node1).await.unwrap();
-    let _taken2 = triple_storage.take(triple_id2, node1).await.unwrap();
-    assert!(!triple_spawner.contains(triple_id1).await);
-    assert!(!triple_spawner.contains(triple_id2).await);
-    assert!(!triple_spawner.contains_mine(triple_id1).await);
-    assert!(!triple_spawner.contains_mine(triple_id2).await);
-    assert_eq!(triple_storage.len_generated().await, 0);
-    assert_eq!(triple_spawner.len_mine().await, 0);
-    assert_eq!(triple_spawner.len_potential().await, 0);
-    assert!(triple_storage.contains_using(triple_id1).await);
-    assert!(triple_storage.contains_using(triple_id2).await);
-
-    // Attempt to re-create slot for in-use triples and check that it fails
-    assert!(triple_storage
-        .create_slot(triple_id1, node1)
-        .await
-        .is_none());
-    assert!(triple_storage
-        .create_slot(triple_id2, node1)
-        .await
-        .is_none());
-
-    let id3 = 3;
-    let id4: u64 = 4;
-
-    // Add mine triple and check that it is in the storage
-    triple_storage
-        .create_slot(id3, node0)
-        .await
-        .unwrap()
-        .insert(dummy_pair(id3), node0)
-        .await;
-    triple_storage
-        .create_slot(id4, node0)
-        .await
-        .unwrap()
-        .insert(dummy_pair(id4), node0)
-        .await;
-    assert!(triple_spawner.contains(id3).await);
-    assert!(triple_spawner.contains(id4).await);
-    assert!(triple_spawner.contains_mine(id3).await);
-    assert!(triple_spawner.contains_mine(id4).await);
-    assert_eq!(triple_storage.len_generated().await, 2);
-    assert_eq!(triple_spawner.len_mine().await, 2);
-    assert_eq!(triple_spawner.len_potential().await, 2);
-
-    // Reserve and commit mine triple pairs and check that they are removed from
-    // the storage and marked as using
-    let _taken3 = triple_storage
-        .peek_mine(&[])
-        .await
-        .unwrap()
-        .commit()
-        .await
-        .unwrap();
-    let _taken4 = triple_storage
-        .peek_mine(&[])
-        .await
-        .unwrap()
-        .commit()
-        .await
-        .unwrap();
-    assert!(!triple_spawner.contains(id3).await);
-    assert!(!triple_spawner.contains(id4).await);
-    assert!(!triple_spawner.contains_mine(id3).await);
-    assert!(!triple_spawner.contains_mine(id4).await);
-    assert_eq!(triple_storage.len_generated().await, 0);
-    assert_eq!(triple_spawner.len_mine().await, 0);
-    assert!(triple_storage.is_empty().await);
-    assert_eq!(triple_spawner.len_potential().await, 0);
-    assert!(triple_storage.contains_using(id3).await);
-    assert!(triple_storage.contains_using(id4).await);
-
-    // Attempt to re-create slot for in-use mine triples and check that it fails
-    assert!(triple_storage.create_slot(id3, node0).await.is_none());
-    assert!(triple_storage.create_slot(id4, node0).await.is_none());
-
-    assert!(triple_storage.clear().await);
-    // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
-    for id in 10..=15 {
-        triple_storage
-            .create_slot(id, node1)
-            .await
-            .unwrap()
-            .insert(dummy_pair(id), node1)
-            .await;
-    }
-
-    // Have our node0 own 16 to 20
-    for id in 16..=20 {
-        triple_storage
-            .create_slot(id, node0)
-            .await
-            .unwrap()
-            .insert(dummy_pair(id), node0)
-            .await;
-    }
-
-    // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15.
-    // We also include ID 99 which doesn't exist to test the not_found tracking.
-    let result = triple_storage
-        .remove_outdated(node1, &[13, 14, 15, 99])
-        .await
-        .unwrap();
-    let mut outdated = result.removed;
-    outdated.sort();
-    assert_eq!(outdated, vec![10, 11, 12]);
-    assert_eq!(result.not_found, vec![99]);
-
-    assert_eq!(triple_storage.len_generated().await, 8);
-    assert_eq!(triple_spawner.len_mine().await, 5);
-    assert_eq!(triple_spawner.len_potential().await, 8);
-
-    Ok(())
-}
 
 #[test(tokio::test)]
 async fn test_presignature_persistence() -> anyhow::Result<()> {
@@ -189,15 +23,13 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let (_, _, msg) = MessageChannel::new();
     let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
-    let triple_storage = redis.triple_storage(&node0_id, node0);
     let presignature_storage = redis.presignature_storage(&node0_id, node0);
-    let presignature_spawner = PresignatureSpawner::new(
+    let presignature_spawner = ProtocolSpawner::new(
         Participant::from(0),
         5,
         123,
         &SecretKeyShare::default(),
         &PublicKey::default(),
-        &triple_storage,
         &presignature_storage,
         msg,
         node0_id.to_string(),

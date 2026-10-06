@@ -5,9 +5,8 @@ use super::state::{
 };
 use super::MpcSignProtocol;
 use crate::protocol::contract::primitives::Participants;
-use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::protocol::state::GeneratingState;
-use crate::protocol::triple::TripleSpawnerTask;
+use crate::protocol::task::ProtocolTask;
 use crate::protocol::Governance;
 use crate::types::{KeygenProtocol, SecretKeyShare};
 use crate::util::NearPublicKeyFromAffineExt;
@@ -97,10 +96,8 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
 
                             let threshold = contract_state.threshold;
                             // Initialize identity for storage; this is an entry point into Running.
-                            ctx.triple_storage.set_me(me);
                             ctx.presignature_storage.set_me(me);
-                            let triple_task = TripleSpawnerTask::run(me, threshold, epoch, ctx);
-                            let presign_task = PresignatureSpawnerTask::run(
+                            let protocol_task = ProtocolTask::run(
                                 me,
                                 threshold,
                                 epoch,
@@ -116,8 +113,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                                 threshold: contract_state.threshold,
                                 private_share,
                                 public_key,
-                                triple_task,
-                                presign_task,
+                                protocol_task,
                             })
                         }
                     }
@@ -393,10 +389,8 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                     };
 
                     // Initialize identity for storage; this is an entry point into Running.
-                    ctx.triple_storage.set_me(me);
                     ctx.presignature_storage.set_me(me);
-                    let triple_task = TripleSpawnerTask::run(me, self.threshold, self.epoch, ctx);
-                    let presign_task = PresignatureSpawnerTask::run(
+                    let protocol_task = ProtocolTask::run(
                         me,
                         self.threshold,
                         self.epoch,
@@ -411,8 +405,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         threshold: self.threshold,
                         private_share: self.private_share,
                         public_key: self.public_key,
-                        triple_task,
-                        presign_task,
+                        protocol_task,
                     })
                 }
             },

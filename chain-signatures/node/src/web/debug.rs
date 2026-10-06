@@ -112,7 +112,7 @@ pub(super) async fn page(Extension(web): Extension<Arc<AxumState>>) -> Html<Stri
         NodeStatus::Joining { .. } => "Node Joining".to_owned(),
     };
 
-    let current_t = web.triple_storage.len_generated().await;
+    let current_t = 0;
     let current_p = web.presignature_storage.len_generated().await;
 
     let markup = html! {

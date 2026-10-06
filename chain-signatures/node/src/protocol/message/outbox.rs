@@ -232,6 +232,13 @@ impl MessageOutbox {
     pub fn intercept_outgoing_messages(&mut self) -> &mut mpsc::Receiver<SendMessage> {
         &mut self.outbox_rx
     }
+
+    /// Allows in-memory test clusters to take ownership of the outgoing message receiver.
+    #[cfg(any(test, feature = "test-feature"))]
+    pub fn take_outgoing_receiver(&mut self) -> mpsc::Receiver<SendMessage> {
+        let (_tx, dummy_rx) = mpsc::channel(1);
+        std::mem::replace(&mut self.outbox_rx, dummy_rx)
+    }
 }
 
 /// Partition a list of messages into a list of partitions where each partition is at most 256kb

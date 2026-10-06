@@ -12,7 +12,7 @@ use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
 use crate::protocol::sync::SyncChannel;
 use crate::protocol::{Chain, MessageChannel};
-use crate::storage::{PresignatureStorage, TripleStorage};
+use crate::storage::PresignatureStorage;
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;
 
@@ -37,7 +37,6 @@ use tracing::Instrument;
 
 struct AxumState {
     node: NodeStateWatcher,
-    triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     msg_channel: MessageChannel,
@@ -52,7 +51,6 @@ pub async fn run(
     port: u16,
     msg_channel: MessageChannel,
     node: NodeStateWatcher,
-    triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     my_account_id: AccountId,
@@ -62,7 +60,6 @@ pub async fn run(
     let axum_state = AxumState {
         msg_channel,
         node,
-        triple_storage,
         presignature_storage,
         sync_channel,
         my_account_id,
@@ -187,9 +184,9 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
             ongoing_triple_gen,
             ongoing_presignature_gen,
         } => {
-            let triple_count = web.triple_storage.len_generated().await;
-            let triple_mine_count = web.triple_storage.len_by_owner(me).await;
-            let triple_potential_count = triple_count + ongoing_triple_gen;
+            let triple_count = 0;
+            let triple_mine_count = 0;
+            let triple_potential_count = ongoing_triple_gen;
             let presignature_count = web.presignature_storage.len_generated().await;
             let presignature_mine_count = web.presignature_storage.len_by_owner(me).await;
             let presignature_potential_count = presignature_count + ongoing_presignature_gen;

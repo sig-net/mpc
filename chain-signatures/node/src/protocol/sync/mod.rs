@@ -11,7 +11,7 @@ use crate::config::NetworkConfig;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::ContractStateWatcher;
-use crate::storage::{PresignatureStorage, StorageError, TripleStorage};
+use crate::storage::{PresignatureStorage, StorageError};
 
 use super::contract::primitives::{ParticipantInfo, ParticipantMap, Participants};
 use super::message::{MessageError, SignedMessage};
@@ -76,7 +76,6 @@ pub struct SyncRequest {
 impl SyncRequest {
     async fn process(
         self,
-        triples: TripleStorage,
         presignatures: PresignatureStorage,
         me: Participant,
         network: NetworkConfig,
@@ -98,13 +97,6 @@ impl SyncRequest {
             }
         };
 
-        let outdated_triples = match triples.remove_outdated(from, &update.triples).await {
-            Ok(result) => result,
-            Err(err) => {
-                let _ = self.response_tx.send(Err(err));
-                return;
-            }
-        };
         let outdated_presignatures = match presignatures
             .remove_outdated(from, &update.presignatures)
             .await
@@ -117,16 +109,14 @@ impl SyncRequest {
         };
 
         tracing::info!(
-            removed_triples = outdated_triples.removed.len(),
             removed_presignatures = outdated_presignatures.removed.len(),
-            not_found_triples = outdated_triples.not_found.len(),
             not_found_presignatures = outdated_presignatures.not_found.len(),
             elapsed = ?start.elapsed(),
             "processed sync update",
         );
 
         let response = SyncUpdate {
-            triples: outdated_triples.not_found,
+            triples: Vec::new(),
             presignatures: outdated_presignatures.not_found,
         };
         // The signature check above found the sender in `participants`.
@@ -152,7 +142,6 @@ pub struct SyncRequestReceiver {
 
 pub struct SyncTask {
     client: NodeClient,
-    triples: TripleStorage,
     presignatures: PresignatureStorage,
     mesh_state: watch::Receiver<MeshState>,
     contract: ContractStateWatcher,
@@ -165,7 +154,6 @@ pub struct SyncTask {
 impl SyncTask {
     pub fn new(
         client: &NodeClient,
-        triples: TripleStorage,
         presignatures: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
         contract: ContractStateWatcher,
@@ -175,7 +163,6 @@ impl SyncTask {
         let (requests, channel) = SyncChannel::new();
         let task = Self {
             client: client.clone(),
-            triples,
             presignatures,
             mesh_state,
             contract,
@@ -199,7 +186,6 @@ impl SyncTask {
         let (threshold, me) = self.contract.wait_info().await;
         tracing::info!(?me, elapsed = ?start.elapsed(), "starting sync loop...");
 
-        self.triples.set_me(me);
         self.presignatures.set_me(me);
 
         let mut broadcast = Option::<(Instant, JoinHandle<_>)>::None;
@@ -261,7 +247,6 @@ impl SyncTask {
                 Some(sync_req) = self.requests.updates.recv() => {
                     let participants = self.contract.participant_map().await;
                     tokio::spawn(sync_req.process(
-                        self.triples.clone(),
                         self.presignatures.clone(),
                         me,
                         self.network.clone(),
@@ -273,16 +258,6 @@ impl SyncTask {
     }
 
     async fn new_update(&self) -> Option<SyncUpdate> {
-        let triples = match self.triples.fetch_owned_with_reserved().await {
-            Ok(ids) => ids,
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    "failed to fetch owned triples, skipping sync broadcast"
-                );
-                return None;
-            }
-        };
         let presignatures = match self.presignatures.fetch_owned_with_reserved().await {
             Ok(ids) => ids,
             Err(err) => {
@@ -295,7 +270,7 @@ impl SyncTask {
         };
 
         Some(SyncUpdate {
-            triples,
+            triples: Vec::new(),
             presignatures,
         })
     }
@@ -324,16 +299,9 @@ impl SyncTask {
                 SyncPeerResponse::Success(response) => {
                     tracing::debug!(
                         ?peer,
-                        not_found_triples = response.triples.len(),
                         not_found_presignatures = response.presignatures.len(),
                         "received sync response"
                     );
-
-                    // Batch remove peer from all triples and prune
-                    let triple_res = self
-                        .triples
-                        .remove_holder_and_prune(peer, threshold, &response.triples)
-                        .await;
 
                     // Batch remove peer from all presignatures and prune
                     let presig_res = self
@@ -341,17 +309,14 @@ impl SyncTask {
                         .remove_holder_and_prune(peer, threshold, &response.presignatures)
                         .await;
 
-                    match (triple_res, presig_res) {
-                        (Ok((t_removed, t_updated)), Ok((p_removed, p_updated))) => {
+                    match presig_res {
+                        Ok((p_removed, p_updated)) => {
                             tracing::info!(
                                 ?peer,
-                                removed_triples = t_removed.len(),
-                                updated_triples = t_updated.len(),
                                 removed_presignatures = p_removed.len(),
                                 updated_presignatures = p_updated.len(),
-                                "batch removed peer from artifacts and pruned"
+                                "batch removed peer from presignatures and pruned"
                             );
-                            // Only notify mesh if both succeeded
                             if self
                                 .sync_report_tx
                                 .send((peer, SyncKind::Synced))
@@ -365,11 +330,10 @@ impl SyncTask {
                                 return Err("sync reporter is down".to_string());
                             }
                         }
-                        (triple_res, presig_res) => {
+                        Err(err) => {
                             tracing::warn!(
                                 ?peer,
-                                ?triple_res,
-                                ?presig_res,
+                                ?err,
                                 "sync batch failed, not notifying mesh"
                             );
                         }

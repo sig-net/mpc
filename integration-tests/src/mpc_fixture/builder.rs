@@ -33,7 +33,7 @@ use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
-use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
+use mpc_node::storage::{secret_storage, Options};
 use mpc_node::stream::StreamContext;
 use mpc_primitives::Chain;
 use near_sdk::AccountId;
@@ -541,7 +541,6 @@ impl MpcFixtureNodeBuilder {
 
         // build storage
         let storage = self.build_storage(&context, fixture_input).await;
-        let triple_storage = storage.triple_storage.clone();
         let presignature_storage = storage.presignature_storage.clone();
 
         // prepare all channels for the node
@@ -625,7 +624,6 @@ impl MpcFixtureNodeBuilder {
         let node_client = NodeClient::new(&NodeClientOptions::default());
         let (sync_channel, sync_task) = SyncTask::new(
             &node_client,
-            triple_storage.clone(),
             presignature_storage.clone(),
             mesh_rx.clone(),
             context.contract_state,
@@ -643,7 +641,6 @@ impl MpcFixtureNodeBuilder {
             sign_tx,
             msg_channel: self.messaging.channel,
             mock_streams: self.mock_streams,
-            triple_storage,
             presignature_storage,
             backlog,
             checkpoint_tx,
@@ -679,32 +676,6 @@ impl MpcFixtureNodeBuilder {
             )
         };
 
-        let triple_storage =
-            TriplePair::storage(&context.redis_pool, &self.participant_info.account_id);
-        triple_storage.set_me(self.me);
-
-        if fixture_input
-            .as_ref()
-            .is_some_and(|i| !i.triples.is_empty())
-        {
-            let my_shares = fixture_input
-                .as_mut()
-                .unwrap()
-                .triples
-                .remove(&self.me)
-                .unwrap();
-            for (owner, triple_shares) in my_shares {
-                for mut pair in triple_shares {
-                    let pair_id = pair.id;
-                    if pair.holders.is_none() {
-                        pair.holders = Some(pair.triple0.public.participants.clone());
-                    }
-                    let mut slot = triple_storage.create_slot(pair_id, owner).await.unwrap();
-                    slot.insert(pair, owner).await;
-                }
-            }
-        }
-
         let presignature_storage =
             Presignature::storage(&context.redis_pool, &self.participant_info.account_id);
         presignature_storage.set_me(self.me);
@@ -735,7 +706,6 @@ impl MpcFixtureNodeBuilder {
 
         protocol::test_setup::TestProtocolStorage {
             secret_storage,
-            triple_storage,
             presignature_storage,
         }
     }
