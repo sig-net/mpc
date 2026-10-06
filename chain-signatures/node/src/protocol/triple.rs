@@ -241,6 +241,10 @@ impl TripleGenerator {
                 if self.owner == self.me {
                     crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_OWNED_SUCCESS.inc();
                 }
+                crate::metrics::storage::NUM_TRIPLES_TOTAL.inc();
+                if self.owner == self.me {
+                    crate::metrics::storage::NUM_TRIPLES_MINE.inc();
+                }
                 Ok((pair, early_presign_messages))
             }
             Err(err) => {
