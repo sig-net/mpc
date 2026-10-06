@@ -6,9 +6,8 @@ use cait_sith::triples::{TriplePub, TripleShare};
 use chrono::Utc;
 use k256::Secp256k1;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
-
 use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, watch};
 
 /// Unique number used to identify a specific ongoing triple generation protocol.
 pub type TripleId = u64;
@@ -42,6 +41,7 @@ pub struct TripleGenerator {
     timeout: Duration,
     created: Instant,
     msg: MessageChannel,
+    ongoing_tx: watch::Sender<usize>,
     #[cfg(feature = "debug-page")]
     #[allow(dead_code)]
     debug_view: crate::web::debug::DebugPageTaskHandle,
@@ -66,6 +66,7 @@ impl TripleGenerator {
         participants: &[Participant],
         timeout: Duration,
         msg: &MessageChannel,
+        ongoing_tx: watch::Sender<usize>,
         _node_account_id: &str,
     ) -> Result<Self, InitializationError> {
         #[cfg(feature = "debug-page")]
@@ -88,6 +89,7 @@ impl TripleGenerator {
             timeout,
             created: Instant::now(),
             msg: msg.clone(),
+            ongoing_tx,
             #[cfg(feature = "debug-page")]
             debug_view: crate::web::debug::register_task(
                 node_account_id.to_string(),
@@ -165,16 +167,22 @@ impl TripleGenerator {
         inbox: &mut mpsc::Receiver<ArtifactMessage>,
         epoch: u64,
     ) -> Result<([Triple; 2], Vec<super::message::PresignatureMessage>), TripleGenerationError> {
-        struct OngoingGuard;
+        struct OngoingGuard {
+            tx: watch::Sender<usize>,
+        }
         impl Drop for OngoingGuard {
             fn drop(&mut self) {
+                self.tx.send_modify(|v| *v = v.saturating_sub(1));
                 crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL.dec();
             }
         }
 
+        self.ongoing_tx.send_modify(|v| *v += 1);
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.inc();
         crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL.inc();
-        let _guard = OngoingGuard;
+        let _guard = OngoingGuard {
+            tx: self.ongoing_tx.clone(),
+        };
 
         let mut early_presign_messages = Vec::new();
         let start_time = Instant::now();

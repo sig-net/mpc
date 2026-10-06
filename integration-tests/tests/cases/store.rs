@@ -24,6 +24,8 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let presignature_storage = redis.presignature_storage(&node0_id, node0);
+    let (ongoing_triples_tx, _) = tokio::sync::watch::channel(0);
+    let (ongoing_presignatures_tx, _) = tokio::sync::watch::channel(0);
     let presignature_spawner = ProtocolSpawner::new(
         Participant::from(0),
         5,
@@ -32,6 +34,8 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         &PublicKey::default(),
         &presignature_storage,
         msg,
+        ongoing_triples_tx,
+        ongoing_presignatures_tx,
         node0_id.to_string(),
     );
 

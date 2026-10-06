@@ -41,6 +41,8 @@ pub struct ProtocolSpawner {
     posits: Posits<FullPresignatureId, ()>,
 
     msg: MessageChannel,
+    ongoing_triples_tx: watch::Sender<usize>,
+    ongoing_presignatures_tx: watch::Sender<usize>,
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     node_account_id: String,
 
@@ -69,6 +71,8 @@ impl ProtocolSpawner {
         public_key: &PublicKey,
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
+        ongoing_triples_tx: watch::Sender<usize>,
+        ongoing_presignatures_tx: watch::Sender<usize>,
         node_account_id: String,
     ) -> Self {
         #[cfg(feature = "debug-page")]
@@ -88,6 +92,8 @@ impl ProtocolSpawner {
             ongoing_owned: HashSet::new(),
             posits: Posits::new(me),
             msg,
+            ongoing_triples_tx,
+            ongoing_presignatures_tx,
             node_account_id,
             #[cfg(feature = "debug-page")]
             posits_debug_view,
@@ -270,6 +276,7 @@ impl ProtocolSpawner {
             &participants,
             timeout,
             &msg,
+            self.ongoing_triples_tx.clone(),
             &node_account_id,
         )?;
 
@@ -283,6 +290,7 @@ impl ProtocolSpawner {
             timeout,
             slot,
             &msg,
+            self.ongoing_presignatures_tx.clone(),
             &node_account_id,
         );
 
@@ -306,8 +314,6 @@ impl ProtocolSpawner {
         mut self,
         mut mesh_state: watch::Receiver<MeshState>,
         mut cfg: watch::Receiver<Config>,
-        ongoing_triples_tx: watch::Sender<usize>,
-        ongoing_presignatures_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = time::interval(Duration::from_millis(100));
         stockpile_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -337,15 +343,6 @@ impl ProtocolSpawner {
                                 tracing::warn!(?id, ?err, "failed to start generation from expired posit");
                             }
                         }
-
-                        let triples_cnt = crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL.get().max(0) as usize;
-                        let presign_cnt = crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL.get().max(0) as usize;
-                        let _ = ongoing_triples_tx.send_if_modified(|val| {
-                            if *val != triples_cnt { *val = triples_cnt; true } else { false }
-                        });
-                        let _ = ongoing_presignatures_tx.send_if_modified(|val| {
-                            if *val != presign_cnt { *val = presign_cnt; true } else { false }
-                        });
 
                         crate::metrics::storage::NUM_PRESIGNATURES_MINE
                             .set(self.len_mine().await as i64);
@@ -459,14 +456,14 @@ impl ProtocolTask {
             public_key,
             &ctx.presignature_storage,
             ctx.msg_channel.clone(),
+            ongoing_triples_tx,
+            ongoing_presignatures_tx,
             ctx.my_account_id.to_string(),
         );
 
         let handle = tokio::spawn(spawner.run(
             ctx.mesh_state.clone(),
             ctx.config.clone(),
-            ongoing_triples_tx,
-            ongoing_presignatures_tx,
         ));
 
         Self {

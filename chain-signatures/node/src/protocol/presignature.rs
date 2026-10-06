@@ -12,7 +12,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// Unique number used to identify a specific ongoing presignature generation protocol.
 pub type PresignatureId = u64;
@@ -125,6 +125,7 @@ pub struct PresignatureGenerator {
     created: Instant,
     slot: PresignatureSlot,
     msg: MessageChannel,
+    ongoing_tx: watch::Sender<usize>,
     #[cfg(feature = "debug-page")]
     #[allow(dead_code)]
     debug_view: crate::web::debug::DebugPageTaskHandle,
@@ -142,6 +143,7 @@ impl PresignatureGenerator {
         timeout: Duration,
         slot: PresignatureSlot,
         msg: &MessageChannel,
+        ongoing_tx: watch::Sender<usize>,
         _node_account_id: &str,
     ) -> Self {
         #[cfg(feature = "debug-page")]
@@ -163,6 +165,7 @@ impl PresignatureGenerator {
             created: Instant::now(),
             slot,
             msg: msg.clone(),
+            ongoing_tx,
             #[cfg(feature = "debug-page")]
             debug_view: crate::web::debug::register_task(
                 node_account_id.to_string(),
@@ -247,19 +250,25 @@ impl PresignatureGenerator {
         inbox: &mut mpsc::Receiver<ArtifactMessage>,
         epoch: u64,
     ) -> Result<Presignature, PresignatureGenerationError> {
-        struct OngoingGuard;
+        struct OngoingGuard {
+            tx: watch::Sender<usize>,
+        }
         impl Drop for OngoingGuard {
             fn drop(&mut self) {
+                self.tx.send_modify(|v| *v = v.saturating_sub(1));
                 crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL.dec();
             }
         }
 
+        self.ongoing_tx.send_modify(|v| *v += 1);
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS.inc();
         if self.owner == self.me {
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE.inc();
         }
         crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL.inc();
-        let _guard = OngoingGuard;
+        let _guard = OngoingGuard {
+            tx: self.ongoing_tx.clone(),
+        };
 
         let start_time = Instant::now();
         let mut protocol: PresignatureProtocol = Box::new(cait_sith::presign(
