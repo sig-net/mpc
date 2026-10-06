@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use alloy::json_abi::Param;
 use alloy::primitives::Bytes;
 use anyhow::Context as _;
-use signet_midnight_serde::BorshSerialize;
+use borsh::BorshSerialize;
 
 const ABI_WORD_BYTES: usize = 32;
 const EVM_ADDRESS_BYTES: usize = 20;

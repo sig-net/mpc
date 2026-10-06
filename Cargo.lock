@@ -7835,10 +7835,10 @@ version = "1.20.0"
 dependencies = [
  "alloy",
  "anyhow",
+ "borsh",
  "hex",
  "serde",
  "serde_json",
- "signet-midnight-serde",
 ]
 
 [[package]]
@@ -11561,15 +11561,6 @@ dependencies = [
  "serde_json",
  "sha3 0.10.8",
  "signet-primitives",
-]
-
-[[package]]
-name = "signet-midnight-serde"
-version = "0.24.0-rc.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c09668957e8842b7b0a45d64dee1f280e3ba04ffebd1aa0ec1a3b04a827abea6"
-dependencies = [
- "borsh",
 ]
 
 [[package]]
