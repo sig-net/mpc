@@ -118,7 +118,6 @@ pub struct PresignatureGenerator {
     msg: MessageChannel,
     ongoing_tx: watch::Sender<usize>,
     #[cfg(feature = "debug-page")]
-    #[allow(dead_code)]
     debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
@@ -279,9 +278,17 @@ impl PresignatureGenerator {
             protocol.message(msg.from, msg.data);
         }
 
+        #[cfg(feature = "debug-page")]
+        let mut total_pokes = 0;
+
         let res = async {
             loop {
                 let action = self.poke(&mut protocol)?;
+                #[cfg(feature = "debug-page")]
+                {
+                    total_pokes += 1;
+                    self.render_debug(total_pokes);
+                }
                 match action {
                     Action::Wait => {
                         let msg = self.recv(inbox).await?;
@@ -342,5 +349,13 @@ impl PresignatureGenerator {
                 Err(err)
             }
         }
+    }
+
+    #[cfg(feature = "debug-page")]
+    fn render_debug(&self, total_pokes: usize) {
+        let markup = maud::html! {
+            p { (format!("{total_pokes} pokes")) }
+        };
+        self.debug_view.send(markup);
     }
 }

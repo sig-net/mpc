@@ -41,7 +41,6 @@ pub struct TripleGenerator {
     msg: MessageChannel,
     ongoing_tx: watch::Sender<usize>,
     #[cfg(feature = "debug-page")]
-    #[allow(dead_code)]
     debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
@@ -182,10 +181,17 @@ impl TripleGenerator {
 
         let mut early_presign_messages = Vec::new();
         let start_time = Instant::now();
+        #[cfg(feature = "debug-page")]
+        let mut total_pokes = 0;
 
         let res = async {
             loop {
                 let action = self.poke().await?;
+                #[cfg(feature = "debug-page")]
+                {
+                    total_pokes += 1;
+                    self.render_debug(total_pokes);
+                }
                 match action {
                     Action::Wait => {
                         let msg = self.recv(inbox).await?;
@@ -246,5 +252,13 @@ impl TripleGenerator {
                 Err(err)
             }
         }
+    }
+
+    #[cfg(feature = "debug-page")]
+    fn render_debug(&self, total_pokes: usize) {
+        let markup = maud::html! {
+            p { (format!("{total_pokes} pokes")) }
+        };
+        self.debug_view.send(markup);
     }
 }
