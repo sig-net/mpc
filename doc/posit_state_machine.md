@@ -49,16 +49,14 @@ Running these machines needs little memory. Per in-flight request a node holds:
 - **`highest_seen_round`** — the largest round any peer has mentioned, so one
   bump can jump straight to it;
 - **the round's timeout clock**, and, for a proposer, its concurrency permit;
-- **a one-slot-per-sender buffer** of messages for a future round (§5);
-- optionally **`pause_proposing_until`**, a deadline until which it declines to
-  propose.
+- **a one-slot-per-sender buffer** of messages for a future round (§5).
 
 Three things reset this state.
 
 A **new round** starts when a recoverable failure sends the task back to the
 organizing phase while it keeps running. It resets the timeout clock and
-releases the permit; `r`, `highest_seen_round`, the proposing pause and the
-buffer all carry across.
+releases the permit; `r`, `highest_seen_round` and the buffer all carry
+across.
 
 A **respawn** is a governance change: the committee this node signs with
 changed in membership, threshold, epoch, or by leaving the running state.
@@ -105,8 +103,7 @@ round, with a different proposer.
 ## 3. Inside Posit
 
 Posit is two independent machines, one per role; a node runs exactly one for
-round `r`, chosen by `is_proposer`: the proposer elected for `r` (§5), unless it
-is throttling (§8.6).
+round `r`, chosen by `is_proposer`: the proposer elected for `r` (§5).
 Each starts at `Organizing` and ends at `Generating` (agreement) or back at
 `Organizing` (new round).
 
@@ -184,8 +181,8 @@ None of the four messages is a cluster-wide broadcast.
 A member outside the `PROPOSE` set is never told that round `r` is running. It
 sits in `Waiting for Propose` until its timeout expires and bumps to `r+1`,
 where it may be elected proposer and reserve a *second* presignature for a
-request that is already being signed. That is the waste the `pause_proposing_until`
-flag exists to limit after the fact.
+request that is already being signed. Nothing limits that waste after the fact;
+the pause flag that once did was removed in #1182.
 
 The tally is keyed on `SinglePositCounter::participants` and `process_action`
 drops senders outside that set, so a reply from a member the proposer did not
@@ -333,8 +330,7 @@ because the round timeout ran out.
 - **Rounds are monotone per request**, including across a respawn
   (`carried_round`). Peers read a round reset as time travel; `set_round` is the
   only write path.
-- **At most one proposer per round**: exactly one node is elected, though it
-  may decline (§8.6). Election reads only `r`, membership and entropy — never
+- **At most one proposer per round**: exactly one node is elected. Election reads only `r`, membership and entropy — never
   the local active set. Filtering by local state is what caused the permanent
   divergence in #907.
 - **`ACCEPT` is sent at most once per round**, on the edge out of
@@ -367,10 +363,5 @@ because the round timeout ran out.
    before any on-chain confirmation, and also fires when reconstruction failed
    and the backlog was never marked. The publish/confirm lifecycle lives in the
    spawner and indexer, not in this machine.
-6. **`pause_proposing_until` is a hidden mode.** For up to `generation_timeout`
-   a node declines proposership and takes the deliberator edge out of
-   `Waiting for participants`. Since election is by round, nobody else proposes
-   that round either, so the round is spent waiting for a `PROPOSE` that will
-   not come.
-7. **`Waiting for participants` is unbounded**, and whatever time it spends is
+6. **`Waiting for participants` is unbounded**, and whatever time it spends is
    subtracted from the round that follows.
