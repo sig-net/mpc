@@ -142,25 +142,7 @@ impl TronHttp {
                 &serde_json::json!({ "transaction": hex::encode(raw_tx) }),
             )
             .await?;
-
-        let code = response.code.as_deref().unwrap_or_default();
-
-        match (response.result, code) {
-            // Accepted cases: either a duplicate transaction or a successful broadcast.
-            (_, "DUP_TRANSACTION") | (true, _) => Ok(BroadcastOutcome::Accepted),
-            (false, "TooManyTransactions" | "CONNECTION_CLOSED") => {
-                Err(anyhow!("broadcast rejected: {code}"))
-            }
-            // Rejected cases
-            (false, _) => Ok(BroadcastOutcome::Rejected {
-                code: if code.is_empty() { "OTHER" } else { code }.to_string(),
-                message: response
-                    .message
-                    .as_deref()
-                    .map(decode_hex_ascii)
-                    .unwrap_or_default(),
-            }),
-        }
+        response.into_outcome()
     }
 
     /// Sends a JSON POST request to the Tron node and deserializes the response.
@@ -231,6 +213,28 @@ struct BroadcastResponse {
     code: Option<String>,
     #[serde(default)]
     message: Option<String>,
+}
+
+impl BroadcastResponse {
+    /// Codes are java-tron `Return.response_code` names. Congestion and
+    /// duplicates must not be terminal
+    fn into_outcome(self) -> anyhow::Result<BroadcastOutcome> {
+        let code = self.code.as_deref().unwrap_or_default();
+        match (self.result, code) {
+            (_, "DUP_TRANSACTION_ERROR") | (true, _) => Ok(BroadcastOutcome::Accepted),
+            (false, "SERVER_BUSY" | "NO_CONNECTION" | "NOT_ENOUGH_EFFECTIVE_CONNECTION") => {
+                Err(anyhow!("broadcast rejected: {code}"))
+            }
+            (false, _) => Ok(BroadcastOutcome::Rejected {
+                code: if code.is_empty() { "OTHER" } else { code }.to_string(),
+                message: self
+                    .message
+                    .as_deref()
+                    .map(decode_hex_ascii)
+                    .unwrap_or_default(),
+            }),
+        }
+    }
 }
 
 /// Response structure for the transaction info query.
@@ -372,6 +376,47 @@ mod tests {
         assert_eq!(block.block_id, block_hash);
     }
 
+    #[test]
+    fn broadcast_codes_classify() {
+        fn outcome(result: bool, code: Option<&str>) -> anyhow::Result<BroadcastOutcome> {
+            BroadcastResponse {
+                result,
+                code: code.map(str::to_string),
+                message: None,
+            }
+            .into_outcome()
+        }
+
+        // java-tron `Return.response_code` names.
+        assert_eq!(outcome(true, None).unwrap(), BroadcastOutcome::Accepted);
+        assert_eq!(
+            outcome(false, Some("DUP_TRANSACTION_ERROR")).unwrap(),
+            BroadcastOutcome::Accepted
+        );
+        for code in [
+            "SERVER_BUSY",
+            "NO_CONNECTION",
+            "NOT_ENOUGH_EFFECTIVE_CONNECTION",
+        ] {
+            let err = outcome(false, Some(code)).unwrap_err();
+            assert!(err.to_string().contains(code), "{code} must be retryable");
+        }
+        for code in [
+            Some("CONTRACT_VALIDATE_ERROR"),
+            Some("SIGERROR"),
+            Some("BANDWITH_ERROR"),
+            None,
+        ] {
+            assert!(
+                matches!(
+                    outcome(false, code).unwrap(),
+                    BroadcastOutcome::Rejected { .. }
+                ),
+                "{code:?} must be terminal"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn broadcast_accepted() {
         let (mut server, client) = test_client(fast_retry()).await;
@@ -394,7 +439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcast_dup_transaction_is_accepted_without_retry() {
+    async fn broadcast_duplicate_is_accepted_without_retry() {
         let (mut server, client) = test_client(fast_retry()).await;
         let mock = server
             .mock("POST", "/wallet/broadcasthex")
@@ -402,7 +447,7 @@ mod tests {
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{ "result": false, "code": "DUP_TRANSACTION", "message": "" }"#)
+            .with_body(r#"{ "result": false, "code": "DUP_TRANSACTION_ERROR", "message": "" }"#)
             .create_async()
             .await;
 
@@ -421,8 +466,8 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
-                r#"{ "result": false, "code": "TRANSACTION_EXPIRATION",
-                      "message": "65787069726564" }"#,
+                r#"{ "result": false, "code": "CONTRACT_VALIDATE_ERROR",
+                      "message": "Contract validate error : No contract!" }"#,
             )
             .create_async()
             .await;
@@ -431,8 +476,8 @@ mod tests {
         assert_eq!(
             outcome,
             BroadcastOutcome::Rejected {
-                code: "TRANSACTION_EXPIRATION".into(),
-                message: "expired".into()
+                code: "CONTRACT_VALIDATE_ERROR".into(),
+                message: "Contract validate error : No contract!".into()
             }
         );
         mock.assert_async().await;
@@ -446,12 +491,12 @@ mod tests {
             .match_body(Matcher::Json(serde_json::json!({ "transaction": "0a" })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{ "result": false, "code": "TooManyTransactions", "message": "" }"#)
+            .with_body(r#"{ "result": false, "code": "SERVER_BUSY", "message": "" }"#)
             .create_async()
             .await;
 
         let err = client.broadcast_transaction(&[0x0a]).await.unwrap_err();
-        assert!(err.to_string().contains("TooManyTransactions"));
+        assert!(err.to_string().contains("SERVER_BUSY"));
     }
 
     #[tokio::test]
