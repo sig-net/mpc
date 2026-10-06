@@ -477,7 +477,7 @@ const fixture: OracleFixture = {
   vectors,
 };
 
-const fixtureDirectory = new URL("../../chain-ethereum/tests/fixtures/", import.meta.url);
+const fixtureDirectory = new URL("../../midnight-respond-codec/tests/fixtures/", import.meta.url);
 const fixturePath = new URL("midnight_respond_vectors.json", fixtureDirectory);
 mkdirSync(fixtureDirectory, { recursive: true });
 writeFileSync(fixturePath, `${JSON.stringify(fixture, null, 2)}\n`);

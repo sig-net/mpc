@@ -5,6 +5,11 @@
 //! encoding derives from the output schema alone and the request's respond schema is
 //! ignored. Byte-level behavior is pinned by the TypeScript oracle corpus in
 //! `tests/fixtures/midnight_respond_vectors.json`.
+//!
+//! `TracedReturn` is deliberately neutral: an execution target converts its own trace
+//! result into it, and a void call's missing return data is empty output, so only trace
+//! availability is distinguished. Schema parsing keeps `alloy::json_abi::Param` because it
+//! enforces Solidity-identifier validation whose exact rules the oracle corpus does not pin.
 
 use std::collections::HashSet;
 
@@ -13,10 +18,15 @@ use alloy::primitives::Bytes;
 use anyhow::Context as _;
 use signet_midnight_serde::BorshSerialize;
 
-use super::TraceOutput;
-
 const ABI_WORD_BYTES: usize = 32;
 const EVM_ADDRESS_BYTES: usize = 20;
+
+/// The traced return data an attestation derives from
+#[derive(Debug)]
+pub enum TracedReturn {
+    NotTraced,
+    Returned(Bytes),
+}
 
 /// The ABI output types a Midnight response can carry. Each is one static ABI word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,10 +103,10 @@ struct CanonicalField<'a> {
 /// An empty schema with no return data (a plain transfer, or a call that returned nothing)
 /// attests an empty output. A non-empty schema with canonical return data encodes every
 /// field. Any other combination, a non-canonical schema, or an unsupported type is refused.
-pub(super) fn executed_output(
+pub fn executed_output(
     is_contract_call: bool,
     output_schema: &[u8],
-    trace_output: TraceOutput,
+    trace: TracedReturn,
 ) -> anyhow::Result<Vec<u8>> {
     let fields = parse_output_schema(output_schema)?;
     let expects_output = !fields.is_empty();
@@ -107,12 +117,11 @@ pub(super) fn executed_output(
         );
         return Ok(Vec::new());
     }
-    let return_data = match trace_output {
-        TraceOutput::NotTraced => {
+    let return_data = match trace {
+        TracedReturn::NotTraced => {
             anyhow::bail!("contract-call output extraction requires trace output")
         }
-        TraceOutput::Output(data) => data,
-        TraceOutput::NoReturnData => Bytes::new(),
+        TracedReturn::Returned(data) => data,
     };
     if return_data.is_empty() {
         anyhow::ensure!(
@@ -167,11 +176,7 @@ fn encode(fields: &[OutputField], return_data: &[u8]) -> anyhow::Result<Vec<u8>>
                     .serialize(&mut out)?;
             }
             // A Borsh `[u8; N]` is its N bytes.
-            OutputKind::FixedBytes(length) => {
-                for byte in &word[..length] {
-                    byte.serialize(&mut out)?;
-                }
-            }
+            OutputKind::FixedBytes(length) => out.extend_from_slice(&word[..length]),
         }
     }
     debug_assert_eq!(out.len(), width);
@@ -252,10 +257,9 @@ fn parse_output_schema(bytes: &[u8]) -> anyhow::Result<Vec<OutputField>> {
 #[cfg(test)]
 mod tests {
     use alloy::primitives::Bytes;
-    use mpc_primitives::SerDeserFormat;
     use serde::Deserialize;
 
-    use crate::respond_bidirectional::{build_serialized_output, TraceOutput};
+    use super::{executed_output, TracedReturn};
 
     #[derive(Deserialize)]
     struct OracleFixture {
@@ -287,46 +291,29 @@ mod tests {
     fn respond(
         is_contract_call: bool,
         output_schema: &[u8],
-        trace: TraceOutput,
+        trace: OracleTrace,
     ) -> anyhow::Result<Vec<u8>> {
-        // The respond schema is ignored: pass one that no format could parse.
-        build_serialized_output(
-            is_contract_call,
-            output_schema,
-            trace,
-            SerDeserFormat::Fab,
-            b"not a schema",
-        )
-    }
-
-    fn words(words: &[[u8; 32]]) -> Bytes {
-        Bytes::from(words.concat())
-    }
-
-    fn word(last: u8) -> [u8; 32] {
-        let mut word = [0; 32];
-        word[31] = last;
-        word
+        let trace = match trace {
+            OracleTrace::NotTraced => TracedReturn::NotTraced,
+            OracleTrace::NoReturnData => TracedReturn::Returned(Bytes::new()),
+            OracleTrace::Output { return_data_hex } => {
+                TracedReturn::Returned(hex::decode(return_data_hex).unwrap().into())
+            }
+        };
+        executed_output(is_contract_call, output_schema, trace)
     }
 
     #[test]
     fn replays_every_typescript_oracle_vector() {
         let fixture: OracleFixture = serde_json::from_str(include_str!(
-            "../../tests/fixtures/midnight_respond_vectors.json"
+            "../tests/fixtures/midnight_respond_vectors.json"
         ))
         .unwrap();
         assert!(!fixture.vectors.is_empty());
 
         for vector in fixture.vectors {
             let output_schema = hex::decode(&vector.output_schema_hex).unwrap();
-            let trace = match vector.trace {
-                OracleTrace::NotTraced => TraceOutput::NotTraced,
-                OracleTrace::NoReturnData => TraceOutput::NoReturnData,
-                OracleTrace::Output { return_data_hex } => {
-                    TraceOutput::Output(hex::decode(return_data_hex).unwrap().into())
-                }
-            };
-            let result = respond(vector.is_contract_call, &output_schema, trace);
+            let result = respond(vector.is_contract_call, &output_schema, vector.trace);
 
             if vector.expected_reject == Some(true) {
                 assert!(
@@ -342,22 +329,6 @@ mod tests {
             });
             let expected = hex::decode(vector.expected_output_hex.as_ref().unwrap()).unwrap();
             assert_eq!(actual, expected, "{}: output bytes differ", vector.name);
-        }
-    }
-
-    #[test]
-    fn ignores_the_respond_schema() {
-        let schema = br#"[{"name":"ok","type":"bool"}]"#;
-        for respond_schema in [&b""[..], b"[]", br#"{"struct":{"ok":"u8"}}"#] {
-            let output = build_serialized_output(
-                true,
-                schema,
-                TraceOutput::Output(words(&[word(1)])),
-                SerDeserFormat::Fab,
-                respond_schema,
-            )
-            .unwrap();
-            assert_eq!(output, vec![1]);
         }
     }
 }
