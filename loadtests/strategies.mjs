@@ -1,4 +1,4 @@
-// Arrival-rate strategies, shared by the k6 script and plan.js so that a run is
+// Arrival-rate strategies, shared by the k6 script and plan.mjs so that a run is
 // sized from the same definitions it is driven by. A plain ES module: k6 and
 // Node both import it.
 
@@ -6,8 +6,8 @@
 // transaction being buried (measured on dev: 29s to 73s, about 48s typically).
 // The pool is sized for the slow end so it does not run out when leases bunch
 // up; the busiest address for the fast end, which lets it serve the most jobs.
-export const SLOW_LEASE_SECONDS = 73;
-export const FAST_LEASE_SECONDS = 40;
+const SLOW_LEASE_SECONDS = 73;
+const FAST_LEASE_SECONDS = 40;
 
 const constant = (rate, timeUnit) => ({ kind: 'constant', rate, timeUnit });
 
@@ -16,7 +16,7 @@ export const strategies = {
   rps_1: constant(1, '1s'),
   rps_5: constant(5, '1s'),
   rps_10: constant(10, '1s'),
-  // The stages of ramp_1_10 in sig-net/mpc's loadtests/k6-load-test.js. A ramp
+  // The stages of ramp_1_10 in loadtests/k6-load-test.js. A ramp
   // runs its own stages, so a duration does not apply to it.
   ramp_1_10: {
     kind: 'ramp',

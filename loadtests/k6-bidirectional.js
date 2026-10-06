@@ -6,8 +6,8 @@ import { parseDuration, planFor, strategies } from './strategies.mjs';
 
 // Load test for the Solana -> Ethereum bidirectional round trip.
 //
-// A round trip lasts about twenty minutes, so holding a VU for each job would
-// need thousands at a few jobs a second. Two scenarios split the work instead:
+// A round trip lasts about twenty minutes, so a VU per job would need thousands
+// at a few jobs a second. Two scenarios avoid that:
 //
 //   submit   POSTs at the strategy's arrival rate, each tagged with this run's id.
 //            An iteration lasts milliseconds, so a few VUs cover the rate.

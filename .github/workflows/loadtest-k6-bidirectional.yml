@@ -9,7 +9,8 @@ name: k6 Bidirectional Load Test
 #    deployed one holds ten addresses and its own job caps.
 #
 # A rate per minute (rpm_*) drives the deployed pinger; a rate per second
-# (rps_*, ramp_*) starts one of its own.
+# (rps_*, ramp_*) starts one of its own. Before each run a job funds the
+# addresses it will use, sized to what the run will submit.
 #
 # Every job spends Sepolia gas and Solana fees. The mid tier runs about 1,200
 # jobs and the high tier about 2,430, roughly 0.03 and 0.06 ETH of gas, and the
@@ -64,6 +65,16 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # The isolated pinger's addresses. The prefix must differ from the deployed
+  # pinger's, whose addresses these would otherwise be. It is fixed, so the same
+  # funded set is reused from run to run: ETH sent to an address can only be
+  # moved by an MPC-signed transaction, so nothing here takes it back. The floor
+  # is low enough that an address needs little to be leasable; the default would
+  # tie up several times what these runs spend.
+  ISOLATED_PATH_PREFIX: burst
+  ISOLATED_MIN_BALANCE_WEI: '300000000000000'
 
 jobs:
   # A schedule carries no inputs, so every setting is resolved here, once, for
@@ -146,9 +157,82 @@ jobs:
           INPUT_DURATION: ${{ inputs.lt_duration }}
           INPUT_ENVIRONMENT: ${{ inputs.environment }}
 
+  # Funds the addresses the run will use. One job for both modes and both
+  # networks: they spend from one wallet on Sepolia, whose transfers must not
+  # overlap. A concurrency group keeps only one job waiting, so this stays short.
+  fund:
+    name: Fund the addresses
+    needs: select
+    concurrency:
+      group: fund-bidirectional-workers
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Holds the pinger's secrets. Restrict it to the default branch rather than
+    # requiring reviewers, which would hold every scheduled run for approval.
+    environment: Pinger Load Test
+    outputs:
+      jobs: ${{ steps.plan.outputs.jobs }}
+      paths: ${{ steps.plan.outputs.paths }}
+    env:
+      SIG_ETH_RPC_URL_SEPOLIA: ${{ secrets.SIG_ETH_RPC_URL_SEPOLIA }}
+      SIG_SOL_RPC_URL_DEV: ${{ secrets.SIG_SOL_RPC_URL_DEV }}
+      SIG_SOL_SK: ${{ secrets.SIG_SOL_SK }}
+      SIG_BIDIRECTIONAL_FUNDING_SK: ${{ secrets.SIG_BIDIRECTIONAL_FUNDING_SK }}
+      SIG_SOL_ROOT_PUBLIC_KEY: ${{ vars.SIG_SOL_ROOT_PUBLIC_KEY }}
+    steps:
+      # The strategies the run is sized from.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: sig-net/contract-pinger
+          path: pinger
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.14.0'
+
+      # corepack reads the pnpm version from the pinger's package.json.
+      - name: Install the pinger
+        working-directory: pinger
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      # From the same strategies the k6 script runs, so the funding and the
+      # pinger are sized for exactly what will be submitted.
+      - name: Size the run
+        id: plan
+        run: node loadtests/plan.mjs "${LT_STRATEGY}" "${LT_DURATION}" >> "${GITHUB_OUTPUT}"
+        env:
+          LT_STRATEGY: ${{ needs.select.outputs.strategy }}
+          LT_DURATION: ${{ needs.select.outputs.duration }}
+
+      # Sized to the busiest address, and a no-op for any address already
+      # holding it. An empty funding wallet fails here, naming the address to
+      # top up. The deployed pinger's prefix and floor are the pinger's own
+      # defaults, which an empty value selects.
+      - name: Fund the addresses the run will use
+        working-directory: pinger
+        run: |
+          set -euo pipefail
+          pnpm fund --env "$(jq -r 'join(",")' <<< "${ENVIRONMENTS}")" \
+            --paths "${PATHS}" --address-jobs "${ADDRESS_JOBS}"
+        env:
+          ENVIRONMENTS: ${{ needs.select.outputs.environments }}
+          PATHS: ${{ steps.plan.outputs.paths }}
+          ADDRESS_JOBS: ${{ steps.plan.outputs.address_jobs }}
+          SIG_BIDIRECTIONAL_PATH_PREFIX: ${{ needs.select.outputs.mode == 'isolated' && env.ISOLATED_PATH_PREFIX || '' }}
+          SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: ${{ needs.select.outputs.mode == 'isolated' && env.ISOLATED_MIN_BALANCE_WEI || '' }}
+          # A first fill of a few hundred addresses is past the default per-run
+          # cap, which is sized for a handful.
+          SIG_BIDIRECTIONAL_FUND_MAX_PER_RUN_ETH: ${{ needs.select.outputs.mode == 'isolated' && '1' || '' }}
+
   deployed:
     name: Bidirectional Load Test (${{ matrix.environment }})
-    needs: select
+    needs: [select, fund]
     if: needs.select.outputs.mode == 'deployed'
     strategy:
       matrix:
@@ -244,7 +328,7 @@ jobs:
   # neither the deployed pinger resized nor its address pool and job caps.
   isolated:
     name: Isolated Bidirectional Load Test (${{ needs.select.outputs.environment }})
-    needs: select
+    needs: [select, fund]
     if: needs.select.outputs.mode == 'isolated'
     # The funded addresses are shared state: two runs would lease the same ones
     # and collide on their nonces. Queued, since cancelling mid-run abandons
@@ -252,36 +336,23 @@ jobs:
     concurrency:
       group: k6-bidirectional-isolated-${{ needs.select.outputs.environment }}
       cancel-in-progress: false
-    # Self-hosted: a run holds its runner for the first fill of the addresses,
-    # the submission, and then up to 45 minutes for the last jobs to settle.
+    # Self-hosted: a run holds its runner for the submission and then up to 45
+    # minutes for the last jobs to settle.
     runs-on: arc-runner-set
     timeout-minutes: 240
-    # Holds the pinger's secrets. Restrict it to the default branch rather than
-    # requiring reviewers, which would hold every scheduled run for approval.
+    # The same environment as the fund job, for the pinger's own secrets.
     environment: Pinger Load Test
     env:
       PORT: '3001'
       # The pinger listens on the runner only.
       API_SECRET: loadtest
-      # Must differ from the deployed pinger's prefix, whose addresses these
-      # would otherwise be. Fixed, so the same funded set is reused from run to
-      # run: ETH sent to an address can only be moved by an MPC-signed
-      # transaction, so nothing here takes it back.
-      SIG_BIDIRECTIONAL_PATH_PREFIX: burst
-      # Low enough that an address needs little to be leasable. The default
-      # floor would tie up several times what these runs spend.
-      SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: '300000000000000'
-      # A first fill of a few hundred addresses is past the default per-run cap,
-      # which is sized for the scheduled sweep.
-      SIG_BIDIRECTIONAL_FUND_MAX_PER_RUN_ETH: '1'
       SIG_ETH_RPC_URL_SEPOLIA: ${{ secrets.SIG_ETH_RPC_URL_SEPOLIA }}
       SIG_SOL_RPC_URL_DEV: ${{ secrets.SIG_SOL_RPC_URL_DEV }}
       SIG_SOL_SK: ${{ secrets.SIG_SOL_SK }}
-      SIG_BIDIRECTIONAL_FUNDING_SK: ${{ secrets.SIG_BIDIRECTIONAL_FUNDING_SK }}
       SIG_SOL_ROOT_PUBLIC_KEY: ${{ vars.SIG_SOL_ROOT_PUBLIC_KEY }}
       LT_CHAIN_ENV: ${{ needs.select.outputs.environment }}
     steps:
-      # The k6 script, and the strategies the run is sized from.
+      # The k6 script.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -293,7 +364,6 @@ jobs:
         with:
           node-version: '22.14.0'
 
-      # corepack reads the pnpm version from the pinger's package.json.
       - name: Install and build the pinger
         working-directory: pinger
         run: |
@@ -301,25 +371,6 @@ jobs:
           corepack enable
           pnpm install --frozen-lockfile
           pnpm build
-
-      # From the same strategies the k6 script runs, so the pinger and its
-      # funding are sized for exactly what will be submitted.
-      - name: Size the run
-        id: plan
-        run: node loadtests/plan.mjs "${LT_STRATEGY}" "${LT_DURATION}" >> "${GITHUB_OUTPUT}"
-        env:
-          LT_STRATEGY: ${{ needs.select.outputs.strategy }}
-          LT_DURATION: ${{ needs.select.outputs.duration }}
-
-      # Sized to the busiest address, and a no-op for any address already
-      # holding it. A first fill sends hundreds of transfers, sixteen at a time.
-      # An empty funding wallet fails here, naming the address to top up.
-      - name: Fund the addresses the run will use
-        working-directory: pinger
-        run: pnpm fund --env "${LT_CHAIN_ENV}" --address-jobs "${ADDRESS_JOBS}"
-        env:
-          ADDRESS_JOBS: ${{ steps.plan.outputs.address_jobs }}
-          SIG_BIDIRECTIONAL_PATHS: ${{ steps.plan.outputs.paths }}
 
       - name: Start the pinger
         working-directory: pinger
@@ -336,12 +387,12 @@ jobs:
           cat ../pinger.log
           exit 1
         env:
-          SIG_BIDIRECTIONAL_PATHS: ${{ steps.plan.outputs.paths }}
-          SIG_BIDIRECTIONAL_MAX_JOBS: ${{ steps.plan.outputs.jobs }}
-          SIG_BIDIRECTIONAL_RETAINED_JOBS: ${{ steps.plan.outputs.jobs }}
+          SIG_BIDIRECTIONAL_PATH_PREFIX: ${{ env.ISOLATED_PATH_PREFIX }}
+          SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: ${{ env.ISOLATED_MIN_BALANCE_WEI }}
+          SIG_BIDIRECTIONAL_PATHS: ${{ needs.fund.outputs.paths }}
+          SIG_BIDIRECTIONAL_MAX_JOBS: ${{ needs.fund.outputs.jobs }}
+          SIG_BIDIRECTIONAL_RETAINED_JOBS: ${{ needs.fund.outputs.jobs }}
 
-      # near-dev-github holds secretAccessor on the three secrets below and
-      # nothing else. The runner pods have no GCP identity of their own.
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
@@ -358,9 +409,9 @@ jobs:
 
       - uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1
 
-      # The strategy tag keeps these runs out of the deployed pinger's series,
-      # as in loadtest-k6.yml. The script's setup() fails the run if the
-      # pinger's addresses are not funded.
+      # The strategy tag keeps these runs out of the deployed pinger's series.
+      # The script's setup() fails the run if the pinger's addresses are not
+      # funded.
       - name: Run k6
         run: |
           set -euo pipefail
@@ -389,7 +440,7 @@ jobs:
             echo "## k6 Bidirectional Load Test (isolated pinger)"
             echo
             echo "- Network: \`${{ needs.select.outputs.environment }}\`"
-            echo "- Rate: \`${{ needs.select.outputs.strategy }}\`, about ${{ steps.plan.outputs.jobs }} jobs across ${{ steps.plan.outputs.paths }} addresses"
+            echo "- Rate: \`${{ needs.select.outputs.strategy }}\`, about ${{ needs.fund.outputs.jobs }} jobs across ${{ needs.fund.outputs.paths }} addresses"
             echo
             if [ -f k6-bidirectional.log ]; then
               echo '```'
