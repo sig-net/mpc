@@ -27,7 +27,7 @@ pub struct Options {
         long,
         env("MPC_OPENTELEMETRY_LEVEL"),
         value_enum,
-        default_value = "off"
+        default_value_t = OpenTelemetryLevel::default()
     )]
     pub opentelemetry_level: OpenTelemetryLevel,
 
@@ -45,7 +45,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            opentelemetry_level: OpenTelemetryLevel::OFF,
+            opentelemetry_level: OpenTelemetryLevel::default(),
             otlp_endpoint: "http://localhost:4318".to_string(),
             disable_gcp_logs: false,
         }
