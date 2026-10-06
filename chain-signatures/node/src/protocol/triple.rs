@@ -156,7 +156,7 @@ impl TripleGenerator {
         mut self,
         inbox: &mut mpsc::Receiver<ArtifactMessage>,
         epoch: u64,
-    ) -> Result<([Triple; 2], Vec<super::message::PresignatureMessage>), ProtocolError> {
+    ) -> Result<(TriplePair, Vec<super::message::PresignatureMessage>), ProtocolError> {
         struct OngoingGuard {
             tx: watch::Sender<usize>,
         }
@@ -217,16 +217,18 @@ impl TripleGenerator {
                         let [first, second, ..] = &outputs[..] else {
                             return Err(ProtocolError::InsufficientTriples);
                         };
-                        let pair = [
-                            Triple {
+                        let pair = TriplePair {
+                            id: self.id,
+                            triple0: Triple {
                                 share: first.0.clone(),
                                 public: first.1.clone(),
                             },
-                            Triple {
+                            triple1: Triple {
                                 share: second.0.clone(),
                                 public: second.1.clone(),
                             },
-                        ];
+                            holders: Some(self.participants.clone()),
+                        };
                         return Ok(pair);
                     }
                 }

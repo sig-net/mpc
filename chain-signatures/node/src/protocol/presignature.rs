@@ -1,5 +1,5 @@
 use super::message::{ArtifactMessage, MessageChannel, PresignatureMessage};
-use super::triple::{Triple, TripleId};
+use super::triple::{TripleId, TriplePair};
 use crate::storage::presignature_storage::PresignatureSlot;
 use crate::types::PresignatureProtocol;
 use mpc_chain_near::AffinePointExt as _;
@@ -230,7 +230,7 @@ impl PresignatureGenerator {
     /// Drive Cait-Sith presignature generation using Beaver triples generated in RAM.
     pub async fn run(
         mut self,
-        triples: [Triple; 2],
+        triple_pair: TriplePair,
         early_messages: Vec<PresignatureMessage>,
         inbox: &mut mpsc::Receiver<ArtifactMessage>,
         epoch: u64,
@@ -267,8 +267,8 @@ impl PresignatureGenerator {
             &self.participants,
             self.me,
             PresignArguments {
-                triple0: (triples[0].share.clone(), triples[0].public.clone()),
-                triple1: (triples[1].share.clone(), triples[1].public.clone()),
+                triple0: (triple_pair.triple0.share, triple_pair.triple0.public),
+                triple1: (triple_pair.triple1.share, triple_pair.triple1.public),
                 keygen_out: self.keygen_out.clone(),
                 threshold: self.threshold,
             },
