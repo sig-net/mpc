@@ -12,10 +12,9 @@ name: k6 Bidirectional Load Test
 # (rps_*, ramp_*) starts one of its own. Before each run a job funds the
 # addresses it will use, sized to what the run will submit.
 #
-# Every job spends Sepolia gas and Solana fees. The mid tier runs about 1,200
-# jobs and the high tier about 2,430, roughly 0.03 and 0.06 ETH of gas, and the
-# first high run also fills about 730 addresses with roughly 0.8 ETH that stays
-# on them. These are estimates.
+# Every job spends Sepolia gas and Solana fees: roughly 0.03 ETH a mid run and
+# 0.06 a high run, plus about 0.8 ETH the first high run leaves on its
+# addresses. These are estimates.
 #
 # Off-the-hour minutes: GitHub delays or drops schedules most at the minutes
 # everyone else uses.
@@ -68,11 +67,9 @@ permissions:
 
 env:
   # The isolated pinger's addresses. The prefix must differ from the deployed
-  # pinger's, whose addresses these would otherwise be. It is fixed, so the same
-  # funded set is reused from run to run: ETH sent to an address can only be
-  # moved by an MPC-signed transaction, so nothing here takes it back. The floor
-  # is low enough that an address needs little to be leasable; the default would
-  # tie up several times what these runs spend.
+  # pinger's, and is fixed so the funded set is reused: ETH on these addresses
+  # cannot be moved back. The floor is below the default so an address needs
+  # little to be leasable.
   ISOLATED_PATH_PREFIX: burst
   ISOLATED_MIN_BALANCE_WEI: '300000000000000'
 
@@ -201,8 +198,7 @@ jobs:
           corepack enable
           pnpm install --frozen-lockfile
 
-      # From the same strategies the k6 script runs, so the funding and the
-      # pinger are sized for exactly what will be submitted.
+      # Sized from the same strategies the k6 script runs.
       - name: Size the run
         id: plan
         run: node loadtests/plan.mjs "${LT_STRATEGY}" "${LT_DURATION}" >> "${GITHUB_OUTPUT}"
@@ -210,10 +206,8 @@ jobs:
           LT_STRATEGY: ${{ needs.select.outputs.strategy }}
           LT_DURATION: ${{ needs.select.outputs.duration }}
 
-      # Sized to the busiest address, and a no-op for any address already
-      # holding it. An empty funding wallet fails here, naming the address to
-      # top up. The deployed pinger's prefix and floor are the pinger's own
-      # defaults, which an empty value selects.
+      # Tops each address up to what the busiest one could spend. An empty value
+      # selects the pinger's own prefix and floor, which the deployed pool uses.
       - name: Fund the addresses the run will use
         working-directory: pinger
         run: |

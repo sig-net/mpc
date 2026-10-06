@@ -1,6 +1,5 @@
-// Arrival-rate strategies, shared by the k6 script and plan.mjs so that a run is
-// sized from the same definitions it is driven by. A plain ES module: k6 and
-// Node both import it.
+// Arrival-rate strategies, shared by the k6 script and plan.mjs so a run is sized
+// from what drives it. A plain ES module, so both k6 and Node can import it.
 
 // How long a job holds its address, from the Solana request to the Ethereum
 // transaction being buried (measured on dev: 29s to 73s, about 48s typically).
@@ -16,8 +15,8 @@ export const strategies = {
   rps_1: constant(1, '1s'),
   rps_5: constant(5, '1s'),
   rps_10: constant(10, '1s'),
-  // The stages of ramp_1_10 in loadtests/k6-load-test.js. A ramp
-  // runs its own stages, so a duration does not apply to it.
+  // The stages of ramp_1_10 in loadtests/k6-load-test.js. A ramp runs its own
+  // stages, so a duration does not apply to it.
   ramp_1_10: {
     kind: 'ramp',
     startRate: 1,

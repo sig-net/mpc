@@ -41,8 +41,8 @@ const failures = new Counter('bidi_failures');
 // which capacity ceiling was hit.
 const rejectedCapacity = new Counter('bidi_rejected_capacity');
 
-// Events the shared Solana poller dropped because it fell behind. Non-zero
-// means respond timeouts in this run may be the driver's RPC, not the MPC.
+// Events the pinger's Solana poller dropped by falling behind. Non-zero means
+// respond timeouts in this run may come from the pinger's RPC, not the MPC.
 const pollerExpired = new Gauge('bidi_solana_expired_transactions');
 const pollerEvicted = new Gauge('bidi_solana_evicted_transactions');
 
@@ -176,9 +176,8 @@ export function setup() {
   const runId = `k6-${strategyName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   console.log(`run id ${runId}`);
 
-  // Read now so a restart at any point after this is visible: the pinger keeps
-  // jobs in memory, and a restarted one reports a run it has never heard of as
-  // simply empty.
+  // Read now so a later restart is visible: a restarted pinger reports any run
+  // as empty.
   const run = http.get(`${BASE_URL}/sign_bidirectional/runs/${runId}`, {
     headers: headers(apiKey),
   });
@@ -251,9 +250,8 @@ export function collect({ runId, startedAt }) {
         tags: { name: 'GET /sign_bidirectional/runs/{runId}' },
       }
     );
-    // Only parsing can throw. A bad page is skipped and the cursor holds, so the
-    // next poll fetches it again; recording happens after, so nothing is
-    // recorded twice.
+    // A bad page is skipped and the cursor holds, so the next poll fetches it
+    // again.
     let body;
     try {
       body = res.status === 200 ? res.json() : undefined;
@@ -300,9 +298,9 @@ export function collect({ runId, startedAt }) {
     );
   }
 
-  // Every job the pinger accepted must have been recorded, or counted as a
-  // driver timeout above. A shortfall means jobs were dropped before they
-  // could be collected, which no success rate would show.
+  // Every accepted job must be recorded or counted as a driver timeout. A
+  // shortfall means jobs were dropped before collection, which the success
+  // rate would not show.
   if (recorded < accepted) {
     exec.test.abort(
       `${accepted - recorded}/${accepted} jobs were never collected; raise SIG_BIDIRECTIONAL_RETAINED_JOBS to at least the run's job count`
