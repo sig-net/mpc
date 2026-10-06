@@ -7611,11 +7611,11 @@ dependencies = [
  "mockito",
  "mpc-chain-integration-core",
  "mpc-crypto",
+ "mpc-midnight-respond-codec",
  "mpc-primitives",
  "mpc-utils",
  "serde",
  "serde_json",
- "signet-midnight-serde",
  "tokio",
  "tokio-util",
  "tracing",
@@ -7759,6 +7759,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-chain-tron"
+version = "1.20.0"
+dependencies = [
+ "anyhow",
+ "mpc-chain-integration-core",
+ "url",
+]
+
+[[package]]
 name = "mpc-compact-hashing"
 version = "1.20.0"
 dependencies = [
@@ -7821,6 +7830,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-midnight-respond-codec"
+version = "1.20.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "hex",
+ "serde",
+ "serde_json",
+ "signet-midnight-serde",
+]
+
+[[package]]
 name = "mpc-node"
 version = "1.20.0"
 dependencies = [
@@ -7856,6 +7877,7 @@ dependencies = [
  "mpc-chain-midnight",
  "mpc-chain-near",
  "mpc-chain-solana",
+ "mpc-chain-tron",
  "mpc-compact-hashing",
  "mpc-contract",
  "mpc-crypto",

@@ -28,6 +28,6 @@ pub use config::{
 };
 pub use indexer::MidnightIndexer;
 pub use intent_gen::{IntentGen, IntentRequest, WireAttestation, WirePoint, WireSignature};
-pub use publisher::MidnightPublisher;
+pub use publisher::RecoveringMidnightPublisher;
 #[cfg(feature = "sandbox")]
 pub use rpc::probe_network_id;

@@ -109,7 +109,7 @@ pub struct Checkpoints {
 pub enum CheckpointError {
     #[error("pending checkpoint cap reached for {chain}")]
     PendingCap { chain: Chain, tx_count: usize },
-    #[error("failed to persist checkpoint for {chain}")]
+    #[error("failed to persist checkpoint for {chain}: {source:#}")]
     Storage {
         chain: Chain,
         #[source]
