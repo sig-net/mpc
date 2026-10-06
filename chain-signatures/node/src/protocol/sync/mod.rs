@@ -184,7 +184,7 @@ impl SyncTask {
         // Do NOT start until we have our own participant info
         tracing::info!("sync waiting for participant info");
         let start = Instant::now();
-        let (threshold, me) = self.contract.wait_info().await;
+        let (_, me) = self.contract.wait_info().await;
         tracing::info!(?me, elapsed = ?start.elapsed(), "starting sync loop...");
 
         self.presignatures.set_me(me);
@@ -234,6 +234,11 @@ impl SyncTask {
 
                     match handle.await {
                         Ok(responses) => {
+                            // Re-read every time: resharing can change the threshold.
+                            let Some((threshold, _)) = self.contract.info().await else {
+                                tracing::warn!("contract has no threshold yet, dropping sync responses");
+                                continue;
+                            };
                             // Process sync responses: update artifact participants based on not_found data
                             if let Err(err) = self.process_sync_responses(responses, threshold).await {
                                 tracing::warn!(?err, "failed to process sync responses");
