@@ -84,7 +84,7 @@ fn output_cases() -> anyhow::Result<Vec<OutputCase>> {
         vectors: Vec<OutputVector>,
     }
     let oracle: Oracle = serde_json::from_str(include_str!(
-        "../../../chain-signatures/chain-ethereum/tests/fixtures/midnight_respond_vectors.json"
+        "../../../chain-signatures/midnight-respond-codec/tests/fixtures/midnight_respond_vectors.json"
     ))?;
     for (name, contract, cache_outage) in [
         (
