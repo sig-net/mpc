@@ -3,7 +3,7 @@
 ## TL;DR
 
 A contract on the source chain asks for a transaction to be signed and
-executed on a destination chain, and gets at most one response. The
+executed on a destination chain, and is told the outcome at most once. The
 response is final when it comes: the transaction executed, it reverted, or
 it can never execute. Until then nothing arrives, and a transaction that
 never executes is never answered. The rest of the document is what the
@@ -13,8 +13,7 @@ Organization:
 
 * Section 1 names the entities and walks through the happy path.
 * Section 2 defines the terms.
-* Section 3 states what the application gets and what is assumed of the
-  chains.
+* Section 3 states what an application gets and what is assumed of the chains.
 * Section 4 describes the library, signet contract and MPC nodes.
 * Section 5 argues that Section 4 delivers Section 3.
 * Section 6 collects notes: limits of the design and what is still open.
@@ -61,16 +60,16 @@ Happy path:
   signature gives a different transaction ID. Replay
   protection (Section 3.3) lets at most one of them execute, and all of
   them belong to the same request.
-* *Request*: what the contract asks for, the tuple (tx, dest, key, schema):
+* *Request*: what the contract asks for, the tuple (tx, target, key, schema):
   the transaction, its destination chain, the key parameters to sign it with
   (a derivation path, key version and signing scheme), and the schema of its
   output. The MPC decodes the output with that schema and encodes the
   response from it, in the source chain's types. Written `req`, with fields
-  `req.tx`, `req.dest`, `req.key` and `req.schema` (Section 7 maps them to
-  the fields on the wire, `req.dest` is `executionDest`). A request is
+  `req.tx`, `req.target`, `req.key` and `req.schema` (Section 7 maps them to
+  the fields on the wire, `req.target` is `executionDest`). A request is
   *made* when the contract passes it to `sign_bidirectional` (Section 3.1).
   The same tuple can be made again, and then it is the same request.
-* *Request ID*: rid(contract, req.tx, req.dest, req.key), a collision-
+* *Request ID*: rid(contract, req.tx, req.target, req.key), a collision-
   resistant hash in a length-committing encoding, so within one source
   chain two requests have the same rid exactly when they agree on all four.
   One execution has one rid (Section 5).
@@ -259,38 +258,42 @@ has no effect.
 
 ### 4.1 Library (inside the application contract)
 
+The behaviour the application contract has to show. Marked `SDK` is what
+`@sig-net/midnight` supplies; the rest is code the integrator guide gives
+each contract to include, and C1 to C4 hold for a contract that does.
+
 ```
 state (per application contract):
-    attestation_key: KeyVersion -> PublicKey   // Section 3.1
-    last_seen:   ChainId -> Height       // 0 for every chain
+    attestation_key: KeyVersion -> PublicKey                // Section 3.1
+    last_seen:   ChainId -> Height                          // 0 when starting
     outstanding: RequestId -> Entry
-    Entry = { dest: ChainId, known: Height, key_version: KeyVersion }
-    // a rid is a hash and cannot yield dest or key_version
+    Entry = { target: ChainId, known: Height, key_version: KeyVersion }
+    // a rid is a hash and cannot yield target or key_version
 
 on sign_bidirectional(req) from the application logic:
-    rid = request_id(self, req)
+    rid = request_id(self, req)                            // SDK
     if rid in outstanding
-      or req.key.key_version not in attestation_key:      // C1
+      or req.key.key_version not in attestation_key:       // C1
         return Refused
-    outstanding[rid] = { req.dest, known: last_seen[req.dest],   // C2
+    outstanding[rid] = { req.target, known: last_seen[req.target],   // C2
                          req.key.key_version }
     signet.sign_bidirectional(rid, req)
     return rid
 
 on response(rid, att = (height, kind, data), sig):
-    if rid not in outstanding:                          // C3a
+    if rid not in outstanding:                             // C3a
         drop
     e = outstanding[rid]
-    if not verify(
-        sig,
+    if not verify(                                         // SDK, with
+        sig,                                               // attestationDigest
         attestationDigest(rid, att),
         attestation_key[e.key_version]
-    ):                                                  // C3b
+    ):                                                     // C3b
         drop
-    if height <= e.known:                               // C3c
+    if height <= e.known:                                  // C3c
         drop
-    last_seen[e.dest] = max(last_seen[e.dest], height)  // C3d
-    delete outstanding[rid]                             // C4
+    last_seen[e.target] = max(last_seen[e.target], height) // C3d
+    delete outstanding[rid]                                // C4
     self.on_response(rid, (kind, data))
 ```
 
@@ -313,7 +316,7 @@ Properties:
 
 * C1 A request is refused while an entry with the same rid is outstanding,
   and if the library has no attestation key for its key version.
-* C2 Every outstanding entry records last_seen[dest] at creation.
+* C2 Every outstanding entry records last_seen[target] at creation.
 * C3 A response is accepted only if it verifies, an entry for its rid is
   outstanding, and its height is strictly above that entry's recorded
   height. Acceptance raises last_seen to at least that height.
@@ -374,15 +377,15 @@ authentic(contract, rid, req): bool
     the request provably comes from `contract`, and rid recomputes from it
 
 processable(req): bool
-    req.dest parses to a chain this MPC can watch
+    req.target parses to a chain this MPC can watch
     key derivation is valid: parameters canonical, key derivable for the
       source chain, path not the attestation key's
-    req.tx is non-empty, parses as an unsigned transaction in dest's
-      format, commits to the network this MPC watches for dest (EVM:
+    req.tx is non-empty, parses as an unsigned transaction in target's
+      format, commits to the network this MPC watches for target (EVM:
       carries that network's chain id), and attaching any signature
       yields a well-formed signed transaction
     req.schema is well formed: it is empty, or it parses and names only
-      types the MPC can decode from dest and encode for the source chain
+      types the MPC can decode from target and encode for the source chain
 
 on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
@@ -390,12 +393,12 @@ on Signature { rid, signature } finalised on the source chain:
       under derived_key(e.contract, e.req.key):
         e.signatures.add(signature)
 
-on destination block at height h finalised on chain dest:
-    for (rid, e) in backlog for dest and no local[rid].outcome:
+on destination block at height h finalised on chain target:
+    for (rid, e) in backlog for target and no local[rid].outcome:
         ours = { txid(s, e.req.tx)
                  for s in e.signatures + local[rid].issued }
         if some id in ours has receipt r in a final block at height h':  // M3
-            for (rid', e') in backlog for dest, other than rid, with e's
+            for (rid', e') in backlog for target, other than rid, with e's
               account and e.req.tx's replay protection, and no
               local[rid'].outcome:
                 attest(rid', (h', Unviable, empty))             // M4
@@ -419,7 +422,7 @@ on Response { contract, rid, att, sig } finalised on the source chain:
     if e and sig verifies over attestationDigest(rid, att)
       under attestation_key(e.contract, e.req.key.key_version):
         if att.kind is Executed or Failed:        // e.req.tx was included
-            for (rid', e') in backlog for e.req.dest, other than rid,
+            for (rid', e') in backlog for e.req.target, other than rid,
               with e's account and e.req.tx's replay protection, and no
               local[rid'].outcome:
                 attest(rid', (att.height, Unviable, empty))     // M4
@@ -516,10 +519,11 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
   are this contract's acceptances, so the path runs along the destination
   chain to a block at height h'' >= h, from there to the transaction in which
   this contract accepted a response attesting h'', and along the source chain
-  to the making of req. That acceptance raised last_seen[dest] to at least h''
-  (C3d) before req recorded it (C2; C3d runs before the handler), so e.known
-  >= h and C3c drops the response. Contradiction. The diagram shows the case
-  where the accepted response answered an earlier making of the same request.
+  to the making of req. That acceptance raised last_seen[target] to at least
+  h'' (C3d) before req recorded it (C2; C3d runs before the handler), so
+  e.known >= h and C3c drops the response. Contradiction. The diagram shows
+  the case where the accepted response answered an earlier making of the same
+  request.
 
 ```mermaid
 flowchart LR
@@ -548,11 +552,11 @@ a path from B48 through A15; the first at A12 has none.
   execution. In full: suppose two responses reporting the same execution
   (height h) are accepted by entries e1 and e2. An accepted response is for a
   rid the MPC admitted (C3b), so its key parameters are canonical (M2) and its
-  dest names one chain (Section 3.3). Both then carry the same rid: the
+  target names one chain (Section 3.3). Both then carry the same rid: the
   execution fixes the transaction and the destination, and its sender fixes
   the contract and key (distinct keys, above). By C1 they were not outstanding
   together, so e2 was created after e1 was removed, after the first
-  acceptance. By C3d last_seen[dest] was already at least h then, so by C2
+  acceptance. By C3d last_seen[target] was already at least h then, so by C2
   e2.known >= h, and C3c drops the second response. Contradiction. The
   execution itself happening at most once is the replay-protection assumption,
   not something the library enforces.
@@ -686,7 +690,7 @@ The names of Section 2 map onto the fields below as follows.
 |---|---|
 | contract | `sender` |
 | req.tx | `txParamType` with `txParams` |
-| req.dest | `executionDest` |
+| req.target | `executionDest` |
 | req.key | `keyVersion`, `path`, `algo` |
 | req.schema | `outputDeserializationSchema` |
 | rid | `RequestId` |
