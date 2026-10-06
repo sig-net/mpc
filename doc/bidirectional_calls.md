@@ -3,7 +3,7 @@
 ## TL;DR
 
 A contract on the source chain asks for a transaction to be signed and
-executed on a destination chain, and is told the outcome at most once. The
+executed on a target chain, and is told the outcome at most once. The
 response is final when it comes: the transaction executed, it reverted, or
 it can never execute. Until then nothing arrives, and a transaction that
 never executes is never answered. The rest of the document is what the
@@ -23,7 +23,7 @@ Organization:
 
 * *Source chain*: where the application contract lives and where requests,
   signatures and responses are published.
-* *Destination chain*: where the signed transaction executes. One contract
+* *Target chain*: where the signed transaction executes. One contract
   may use several.
 * *Application contract*: the contract a developer writes on the source
   chain. "The contract" below means this one.
@@ -35,7 +35,7 @@ Organization:
   requests, signatures and responses are published. It holds no per-
   application state.
 * *MPC network*: the nodes that sign and attest.
-* *Broadcaster*: whoever submits the signed transaction to the destination
+* *Broadcaster*: whoever submits the signed transaction to the target
   chain. Untrusted; the design does not depend on who it is.
 
 Happy path:
@@ -43,17 +43,17 @@ Happy path:
 1. The application contract calls the library, which records the request
    and asks the signet contract to emit it.
 2. The MPC signs the transaction, publishes the signature on the source
-   chain, and starts looking for the transaction on the destination chain.
-3. Any entity can broadcast the signed transaction to the destination chain.
-4. When the transaction is in a final destination block, the MPC attests
+   chain, and starts looking for the transaction on the target chain.
+3. Any entity can broadcast the signed transaction to the target chain.
+4. When the transaction is in a final target-chain block, the MPC attests
    the outcome and publishes the attestation to the signet contract.
 5. Once delivered to the application contract, the library accepts or drops
    it, and on acceptance runs the contract's response handler.
 
 ## 2. Vocabulary
 
-* *Transaction*: the bytes of an unsigned destination-chain transaction.
-* *Transaction ID*: the identifier under which the destination chain records
+* *Transaction*: the bytes of an unsigned target chain transaction.
+* *Transaction ID*: the identifier under which the target chain records
   a submitted transaction, computable from the transaction and the signature
   in the encoding that chain accepts. One transaction can be signed more
   than once, for instance by two signing rounds for one request, and each
@@ -61,7 +61,7 @@ Happy path:
   protection (Section 3.3) lets at most one of them execute, and all of
   them belong to the same request.
 * *Request*: what the contract asks for, the tuple (tx, target, key, schema):
-  the transaction, its destination chain, the key parameters to sign it with
+  the transaction, its target chain, the key parameters to sign it with
   (a derivation path, key version and signing scheme), and the schema of its
   output. The MPC decodes the output with that schema and encodes the
   response from it, in the source chain's types. Written `req`, with fields
@@ -83,8 +83,8 @@ Happy path:
 
   | kind | what happened to req.tx | data |
   |---|---|---|
-  | Executed | included in a final destination block, succeeded, and its return data decodes against req.schema | the decoded return data |
-  | Failed | included in a final destination block and reverted | empty |
+  | Executed | included in a final target chain block, succeeded, and its return data decodes against req.schema | the decoded return data |
+  | Failed | included in a final target chain block and reverted | empty |
   | Unviable | can never be included, because a transaction whose unsigned bytes are not req.tx, from the same key, has already used up req.tx's replay protection (Section 3.3) | empty |
 
   Empty data is a zero-length field; the kind is the whole information.
@@ -95,7 +95,7 @@ Happy path:
   An expired transaction goes unanswered, as does one nobody broadcasts.
 
   A transaction that succeeded but whose return data does not decode
-  against req.schema, because the schema is wrong or the destination
+  against req.schema, because the schema is wrong or the target
   contract changed its return type, has no outcome. The MPC reports
   nothing, stops watching the request and logs why (Section 4.3). A node
   cannot tell a wrong schema from a changed contract, and the contract
@@ -109,7 +109,7 @@ Happy path:
   [Section 7.4.2.1](#7421-attestation-digest), where
   `att = (height, outcome.kind, outcome.data)`. The digest commits to its
   domain tag and the output length, so no signed statement can be read as
-  two different outcomes. `height` is the height, in the destination
+  two different outcomes. `height` is the height, in the target
   chain's own numbering (a slot on Solana),
   of the final block that holds the transaction the outcome describes:
   req.tx for Executed and Failed, the transaction that used up its replay
@@ -150,12 +150,12 @@ relation with these edges:
 
 * on one chain, an earlier block, transaction or step within a transaction
   happens-before a later one;
-* across chains, a destination block happens-before the source transaction
+* across chains, a target chain block happens-before the source transaction
   in which this contract accepts a response attesting that block.
 
 Nothing else is an edge. A request being made does not happen-before its
 execution, a dropped response adds no edge, and another contract's
-acceptance adds none for this contract. Destination state reaches this
+acceptance adds none for this contract. Target chain state reaches this
 contract only through the responses it accepts, and the causal-order
 guarantee in Section 3.2 is a promise about that channel.
 
@@ -166,7 +166,7 @@ guarantee in Section 3.2 is a promise about that channel.
 ```
 sign_bidirectional(
     transaction: SerializedTransaction,
-    destination: ChainId,
+    target: ChainId,
     key:         (DerivationPath, KeyVersion, SigningScheme),
     schema:      OutputSchema,
 ) -> RequestId | Refused
@@ -186,7 +186,7 @@ G1 to G3 are safety, G4 and G5 are liveness. G2 and G4 together give
 
 * G1 Causal order. The answer to a request is always about something newer
   than everything you had been told when you made it. Precisely: an
-  accepted response to req reports destination state that does not
+  accepted response to req reports target chain state that does not
   happen-before req was made.
 * G2 At most once. The result of each execution is reported to you at most
   once. Precisely: for each execution, at most one response reporting it
@@ -199,7 +199,7 @@ G1 to G3 are safety, G4 and G5 are liveness. G2 and G4 together give
 * G4 Delivery. If your transaction runs, you are told, as long as your
   schema fits its output and your handler does not fail. One rare
   fault on the MPC side can also leave a request unanswered, and anyone
-  can repair it. Precisely: if req.tx is included in a final destination
+  can repair it. Precisely: if req.tx is included in a final target
   block after req was made, a response to req is eventually accepted
   unless (i) the return data does not decode against req.schema, (ii) the
   response handler fails, or (iii) the transaction's ID depends on its
@@ -207,15 +207,15 @@ G1 to G3 are safety, G4 and G5 are liveness. G2 and G4 together give
 * G5 Unviable. If another of your requests takes this one's place and is
   answered, you are told that this one can never run. Precisely: suppose
   the transaction of another request has the same replay protection as
-  req.tx on the same destination chain, the same account and nonce on EVM
+  req.tx on the same target chain, the same account and nonce on EVM
   for instance. If it is included after req was made and that request is
   answered Executed or Failed, a response to req saying Unviable is
   eventually accepted, unless the response handler fails or that answer
   cannot be checked (Section 6).
 
 G4's exceptions (i) and (ii) are in the application's hands: a schema that
-does not match what the destination contract returns, and a handler that
-fails. Exception (iii) is not. It concerns destinations like EVM, where a
+does not match what the target contract returns, and a handler that
+fails. Exception (iii) is not. It concerns e.g., EVM target chains, where a
 transaction can only be looked up once its signature is known. The
 signature stays unknown if every correct node that signed loses it before
 publishing it, or if a faulty node keeps it to itself. The fix is simple:
@@ -240,7 +240,7 @@ before the contract upgraded to this library.
   different transaction using the same nonce or output blocks ours for
   good. A Solana transaction with a recent blockhash has no such
   protection; see Section 6.
-* Progress. All source and destination chains keep producing final blocks.
+* Progress. All source and target chains keep producing final blocks.
   An outage delays delivery and changes nothing else. A correct node
   processes final blocks faster than the chains produce them, so it
   reaches the head from wherever it starts.
@@ -298,8 +298,8 @@ on response(rid, att = (height, kind, data), sig):
 ```
 
 The check is here and not in the MPC because the nodes have no agreed
-mapping between source and destination heights, so no node can say what the
-destination looked like when a request was made; the contract can, from the
+mapping between source and target chain heights, so no node can say what the
+target looked like when a request was made; the contract can, from the
 responses it has accepted. On chains where `response` and the
 application's handler run in one transaction, a failing handler reverts
 the whole transaction, C3d and C4 included: the entry stays outstanding and
@@ -358,7 +358,7 @@ state:
 
     local: RequestId -> Local
     Local = { issued: Set<Signature>,         // participated in signing
-              outcome: Found(att) | Parked,   // read on destination chain
+              outcome: Found(att) | Parked,   // read on target chain
               attestation: (att, sig) }       // participated in attesting
     // outcome and attestation are empty at first
     // local may differ between nodes that processed the same height
@@ -393,7 +393,7 @@ on Signature { rid, signature } finalised on the source chain:
       under derived_key(e.contract, e.req.key):
         e.signatures.add(signature)
 
-on destination block at height h finalised on chain target:
+on target chain block at height h finalised on chain target:
     for (rid, e) in backlog for target and no local[rid].outcome:
         ours = { txid(s, e.req.tx)
                  for s in e.signatures + local[rid].issued }
@@ -478,12 +478,12 @@ Properties:
   decode, the MPC attests nothing, and the entry stays in the backlog,
   parked and unwatched.
 * M4 The MPC attests Unviable for a request only when another request's
-  transaction, from the same account, on the same destination chain and
+  transaction, from the same account, on the same target chain and
   with the same replay protection, was included in a final block: a node
   finds that execution itself, or reads a `Response` saying Executed or
   Failed. It attests at that block's height.
 * M5 An attestation binds rid, height, kind and data, with data's length
-  in the hash, and describes only destination state final at that height.
+  in the hash, and describes only target chain state final at that height.
 
 ## 5. Why the guarantees hold (sketch)
 
@@ -499,7 +499,7 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
 * Agreement. Correct nodes hold the same backlog at a source height, so
   they admit the same requests and hold the same published signatures for
   them, and they compute the same attestation for a rid, as a function of
-  final destination state and the request's schema only.
+  final target chain state and the request's schema only.
 * Distinct keys (ACCOUNT_DERIVATION.md). The derivation path contains the
   source chain's id and the requesting contract, so different (source
   chain, contract, key parameters) derive different keys, where the key
@@ -514,9 +514,9 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
 * G1, in short: an execution this contract has already accepted is at or below
   last_seen, so a request made later records it as known and C3c drops any
   response about it. In full: an accepted response to req describes a
-  destination block at height h (M5) with h > e.known (C3c). Suppose that
+  target chain block at height h (M5) with h > e.known (C3c). Suppose that
   block happens-before the making of req. The only edges into the source chain
-  are this contract's acceptances, so the path runs along the destination
+  are this contract's acceptances, so the path runs along the target
   chain to a block at height h'' >= h, from there to the transaction in which
   this contract accepted a response attesting h'', and along the source chain
   to the making of req. That acceptance raised last_seen[target] to at least
@@ -531,7 +531,7 @@ flowchart LR
     direction LR
     A12["A12<br/>req made"] --> A13["A13<br/>exec(req')"] --> A14["A14"] --> A15["A15<br/>resp(req, o)"] --> A16["A16<br/>req made again"]
   end
-  subgraph B["Chain B (destination)"]
+  subgraph B["Chain B (target)"]
     direction LR
     B46["B46"] --> B47["B47<br/>req' made"] --> B48["B48<br/>exec(req)"] --> B49["B49"] --> B50["B50<br/>resp(req', o')"]
   end
@@ -553,7 +553,7 @@ a path from B48 through A15; the first at A12 has none.
   (height h) are accepted by entries e1 and e2. An accepted response is for a
   rid the MPC admitted (C3b), so its key parameters are canonical (M2) and its
   target names one chain (Section 3.3). Both then carry the same rid: the
-  execution fixes the transaction and the destination, and its sender fixes
+  execution fixes the transaction and the target, and its sender fixes
   the contract and key (distinct keys, above). By C1 they were not outstanding
   together, so e2 was created after e1 was removed, after the first
   acceptance. By C3d last_seen[target] was already at least h then, so by C2
@@ -710,7 +710,7 @@ stay out.
 | `algo` | `enum MPCSignatureAlgorithm` | yes | signing scheme |
 | `txParamType` | `enum TxParamType` | yes | which transaction structure `txParams` holds |
 | `txParams` | per `txParamType` (7.3) | as its digest | the transaction |
-| `executionDest` | `bytes(32)` | yes | CAIP-2 id of the destination chain family, matched exactly; one fixed id per family, `eip155:1` for every Ethereum network. Which network the MPC executes on is set per deployment |
+| `executionDest` | `bytes(32)` | yes | CAIP-2 id of the target chain family, matched exactly; one fixed id per family, `eip155:1` for every Ethereum network. Which network the MPC executes on is set per deployment |
 | `signatureDest` | `enum MPCDestination` | no | reserved, request construction refuses any value except `unused` |
 | `params` | `bytes(64)` | no | reserved, request construction refuses any non-zero byte |
 | `outputDeserializationSchema` | `bytes` | no | how the MPC decodes the execution output |
@@ -762,7 +762,7 @@ order.
 | `maxPriorityFeePerGas` | `u128` | wei |
 | `maxFeePerGas` | `u128` | wei |
 | `gasLimit` | `u64` | |
-| `to` | `bytes(20)` | call target |
+| `to` | `bytes(20)` | recipient |
 | `value` | `u128` | wei |
 | `calldata` | optional `{ selector: bytes(4), noWords: u16, words: bytes(32)[w] }` | absent for a plain transfer; `words` are canonical ABI words, `noWords` of them used |
 | `accessListEntryCount` | `u8` | used entries |
@@ -853,7 +853,7 @@ The event carries:
 | field | type | meaning |
 |---|---|---|
 | `requestId` | `RequestId` | the request it settles |
-| `blockHeight` | `u64` | height of the final destination block, in that chain's numbering |
+| `blockHeight` | `u64` | height of the final target chain block, in that chain's numbering |
 | `outputKind` | `enum OutputKind { executed, failed, unviable }` | the outcome's kind |
 | `serializedOutputLength` | `u64` | byte width of the serialised output |
 | `digest` | `bytes(32)` | the [attestation digest](#7421-attestation-digest) |
@@ -878,8 +878,8 @@ digest = bytes32(H(E[
 ##### 7.4.2.2 Output Recovery
 
 The output itself travels off chain. Clients are responsible for recovering
-it from the destination chain so they can deliver the exact serialised
-output the MPC attested to the application contract. Each destination-chain
+it from the target chain so they can deliver the exact serialised
+output the MPC attested to the application contract. Each target chain
 integration must document how the MPC obtains the output so clients can
 follow the same procedure.
 
