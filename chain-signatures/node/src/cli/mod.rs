@@ -1,6 +1,6 @@
 mod args;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
@@ -29,7 +29,7 @@ pub use args::{
 };
 
 use clap::Parser;
-use deadpool_redis::Runtime;
+use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
@@ -697,6 +697,23 @@ struct StorageHandles {
     backlog: Backlog,
 }
 
+const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A Redis pool whose waits, connects and commands all fail after [`REDIS_TIMEOUT`].
+fn redis_pool(url: Url) -> anyhow::Result<deadpool_redis::Pool> {
+    Ok(deadpool_redis::Config::from_url(url)
+        .builder()?
+        .runtime(Runtime::Tokio1)
+        .wait_timeout(Some(REDIS_TIMEOUT))
+        .create_timeout(Some(REDIS_TIMEOUT))
+        .recycle_timeout(Some(REDIS_TIMEOUT))
+        .post_create(Hook::sync_fn(|conn, _| {
+            conn.set_response_timeout(REDIS_TIMEOUT);
+            Ok(())
+        }))
+        .build()?)
+}
+
 impl StorageHandles {
     async fn new(
         account_id: &AccountId,
@@ -705,9 +722,7 @@ impl StorageHandles {
         let gcp_service = GcpService::init(storage_options).await?;
         let key_storage =
             storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
-        let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
-        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-        let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
@@ -968,6 +983,24 @@ mod tests {
     use super::*;
 
     const ETH_CONTRACT_ADDRESS: &str = "f8bdC0612361a1E49a8E01423d4C0cFc5dF4791A";
+
+    /// A listener that never replies stands in for a stalled Redis.
+    #[tokio::test]
+    async fn redis_pool_fails_instead_of_hanging_on_a_stalled_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("redis://{}", listener.local_addr().unwrap())).unwrap();
+        let pool = redis_pool(url).unwrap();
+        let result = tokio::time::timeout(3 * REDIS_TIMEOUT, async {
+            let mut conn = pool.get().await?;
+            let value: Option<String> = redis::AsyncCommands::get(&mut *conn, "key").await?;
+            anyhow::Ok(value)
+        })
+        .await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "expected a timeout error, got {result:?}"
+        );
+    }
 
     #[test]
     fn test_digest_staking() {
