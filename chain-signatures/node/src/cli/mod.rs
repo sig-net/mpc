@@ -366,7 +366,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 web_port,
                 message_channel,
                 node_watcher,
-                presignature_storage,
                 sync_channel,
                 account_id,
                 backlog.clone(),
