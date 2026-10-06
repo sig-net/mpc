@@ -610,12 +610,12 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(
                 r#"{
-                    "freeNetUsed": 0,
+                    "freeNetUsed": 284,
                     "freeNetLimit": 600,
-                    "NetUsed": 0,
+                    "NetUsed": 150,
                     "NetLimit": 5000,
-                    "energyUsed": 131,
-                    "energyLimit": 100000
+                    "EnergyUsed": 131,
+                    "EnergyLimit": 100000
                 }"#,
             )
             .create_async()
@@ -623,7 +623,9 @@ mod tests {
 
         let address = TronAddress::from_evm(Address::ZERO);
         let resources = client.get_account_resource(&address).await.unwrap();
+        assert_eq!(resources.free_net_used, 284);
         assert_eq!(resources.free_net_limit, 600);
+        assert_eq!(resources.net_used, 150);
         assert_eq!(resources.net_limit, 5000);
         assert_eq!(resources.energy_used, 131);
         assert_eq!(resources.energy_limit, 100000);
