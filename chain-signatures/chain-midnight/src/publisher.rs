@@ -1,13 +1,16 @@
 //! Publishes finished MPC signatures to the Midnight central contract through opaque
 //! intents built and submitted by the companion process.
 
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind, Signature};
+use mpc_utils::task::AbortOnDrop;
 use mpc_utils::time::current_unix_timestamp;
 
 use crate::attestation::validate_attestation_response;
@@ -222,6 +225,78 @@ impl ChainPublisher for MidnightPublisher {
         );
         self.telemetry.record_publish_metrics(action);
         Ok(())
+    }
+}
+
+/// Keeps Midnight publishing recoverable when the node or the intent builder is
+/// unavailable at startup: a background task connects with backoff, and until it has,
+/// each publish fails retryably instead of the chain going unpublished until a restart.
+pub struct RecoveringMidnightPublisher {
+    ready: Arc<OnceLock<MidnightPublisher>>,
+    _connector: AbortOnDrop,
+}
+
+impl RecoveringMidnightPublisher {
+    /// Validates `config` now, so a configuration that can never publish still fails at
+    /// startup, then connects in the background.
+    pub fn start(
+        config: &MidnightConfig,
+        telemetry: Arc<dyn PublisherTelemetry>,
+    ) -> anyhow::Result<Self> {
+        config.validate()?;
+        let config = config.clone();
+        Ok(Self::spawn(move || {
+            let config = config.clone();
+            let telemetry = telemetry.clone();
+            async move { MidnightPublisher::connect(&config, telemetry).await }
+        }))
+    }
+
+    fn spawn<F, Fut>(mut connect: F) -> Self
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: Future<Output = anyhow::Result<MidnightPublisher>> + Send,
+    {
+        let ready = Arc::new(OnceLock::new());
+        let connected = ready.clone();
+        let connector = tokio::spawn(async move {
+            let mut delay = Duration::from_secs(1);
+            loop {
+                match connect().await {
+                    Ok(publisher) => {
+                        // Only this task fills the slot; publishes only read it.
+                        let _ = connected.set(publisher);
+                        tracing::info!("midnight publisher connected");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            ?error,
+                            retry_in = ?delay,
+                            "midnight publisher failed to connect; retrying in background"
+                        );
+                    }
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(60));
+            }
+        });
+        Self {
+            ready,
+            _connector: AbortOnDrop(connector),
+        }
+    }
+}
+
+#[async_trait]
+impl ChainPublisher for RecoveringMidnightPublisher {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        // The message carries no status-like digits, so the publish loop keeps retrying.
+        self.ready
+            .get()
+            .context("midnight publisher is still connecting")?
+            .publish_signature(action)
+            .await
     }
 }
 
@@ -1289,5 +1364,71 @@ mod tests {
                 ),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn publishes_fail_retryably_until_the_publisher_connects() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let client = StubClient::new();
+        let mut connected = Some(publisher(StubReads::new(), client.clone()));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let calls = attempts.clone();
+        tokio::time::pause();
+        let recovering = RecoveringMidnightPublisher::spawn(move || {
+            let result = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(anyhow::anyhow!("midnight node unreachable"))
+            } else {
+                Ok(connected.take().expect("connects only once"))
+            };
+            async move { result }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        let error = recovering
+            .publish_signature(&respond_action())
+            .await
+            .expect_err("nothing is connected yet");
+        assert!(
+            mpc_chain_integration_core::utils::retry::is_retryable(&error),
+            "a publish before the connection must stay retryable: {error:#}"
+        );
+        assert_eq!(client.submissions(), 0);
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        recovering
+            .publish_signature(&respond_action())
+            .await
+            .expect("the connected publisher posts");
+        assert_eq!(client.submissions(), 1);
+
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "connected means done");
+    }
+
+    #[tokio::test]
+    async fn start_rejects_a_configuration_that_can_never_publish() {
+        let config = MidnightConfig {
+            node_url: "ftp://127.0.0.1:1".to_string(),
+            central_address: MidnightAddress::from_hex(CENTRAL)
+                .expect("CENTRAL is a 32-byte hex address"),
+            publisher: PublisherConfig {
+                funding_seed: "ab".repeat(32),
+                proof_server_url: "http://127.0.0.1:1".to_string(),
+                indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
+                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                ..Default::default()
+            },
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+
+        let error = RecoveringMidnightPublisher::start(&config, Arc::new(NoopPublisherTelemetry))
+            .err()
+            .expect("an ftp node_url is refused before any connection attempt");
+        assert!(format!("{error:#}").contains("node_url"), "{error:#}");
     }
 }
