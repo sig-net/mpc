@@ -406,7 +406,10 @@ mod tests {
         assert_eq!(clamp(oldest_supported + 1), oldest_supported + 1);
         assert_eq!(clamp(anchor_height + 5), anchor_height + 5);
         // A window wider than the chain saturates at genesis instead of underflowing.
-        assert_eq!(EthereumClient::clamp_oldest_supported_with(0, 100, u64::MAX), 0);
+        assert_eq!(
+            EthereumClient::clamp_oldest_supported_with(0, 100, u64::MAX),
+            0
+        );
         assert_eq!(EthereumClient::clamp_oldest_supported_with(7, 0, 10), 7);
     }
 

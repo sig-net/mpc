@@ -125,7 +125,11 @@ async fn publishes_across_multiple_batches() {
         assert_eq!(responder, env.signer.address());
         by_tx.entry(tx_hash).or_default().push(*rid);
     }
-    assert_eq!(by_tx.len(), 2, "expected exactly two batches, got {by_tx:?}");
+    assert_eq!(
+        by_tx.len(),
+        2,
+        "expected exactly two batches, got {by_tx:?}"
+    );
     for (tx, rids) in &by_tx {
         assert_eq!(rids.len(), 3, "batch {tx:?} is not full: {rids:?}");
     }
