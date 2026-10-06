@@ -206,7 +206,7 @@ impl BatchPublisher {
             }
             let result = res
                 .as_ref()
-                .map_err(|err| anyhow::anyhow!("{err}"))
+                .map_err(|err| anyhow::anyhow!("{err:#}"))
                 .map(|_| ());
             let _ = queued.done.send(result);
         }
