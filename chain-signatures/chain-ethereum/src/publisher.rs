@@ -272,6 +272,8 @@ impl BatchPublisher {
             {
                 // TODO: fetching nonce from RPC is slow and expensive, consider better approach (fetch once, increment locally, etc.)
                 // Fetch nonce here in the retry loop, otherwise we may get the same nonce on retry
+                // TODO: proper tx lifecycle management — pin the batch nonce, track the
+                // broadcast tx hash, and unstick it with RBF fee bumps
                 let nonce = self
                     .contract
                     .provider()
