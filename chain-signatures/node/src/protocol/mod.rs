@@ -15,9 +15,6 @@ pub mod triple;
 #[cfg(feature = "test-feature")]
 pub mod test_setup;
 
-#[cfg(any(test, feature = "test-feature"))]
-pub mod test_cluster;
-
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use message::{Message, MessageChannel};
