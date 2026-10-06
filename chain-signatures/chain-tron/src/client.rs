@@ -59,9 +59,10 @@ impl TronHttp {
         )
     }
 
-    /// `POST /wallet/broadcasttransaction`. Congestion errors
-    /// (`TooManyTransactions`, `CONNECTION_CLOSED`) become `Err` so the gate
-    /// rebroadcasts identical bytes. Other rejections are terminal.
+    /// `POST /wallet/broadcasthex` with the raw (protobuf-serialized)
+    /// transaction. Congestion errors (`TooManyTransactions`,
+    /// `CONNECTION_CLOSED`) become `Err` so the gate rebroadcasts identical
+    /// bytes. Other rejections are terminal.
     pub async fn broadcast_transaction(&self, raw_tx: &[u8]) -> anyhow::Result<BroadcastOutcome> {
         retry_rpc_gated!(
             self.request_timeout,
@@ -137,8 +138,8 @@ impl TronHttp {
     async fn broadcast_once(&self, raw_tx: &[u8]) -> anyhow::Result<BroadcastOutcome> {
         let response: BroadcastResponse = self
             .post_json(
-                "wallet/broadcasttransaction",
-                &serde_json::json!({ "data": hex::encode(raw_tx), "visible": false }),
+                "wallet/broadcasthex",
+                &serde_json::json!({ "transaction": hex::encode(raw_tx) }),
             )
             .await?;
 
@@ -307,6 +308,7 @@ mod tests {
     use std::time::Duration;
 
     use alloy::primitives::{address, Address};
+    use mockito::Matcher;
 
     use super::*;
 
@@ -374,7 +376,10 @@ mod tests {
     async fn broadcast_accepted() {
         let (mut server, client) = test_client(fast_retry()).await;
         server
-            .mock("POST", "/wallet/broadcasttransaction")
+            .mock("POST", "/wallet/broadcasthex")
+            .match_body(Matcher::Json(
+                serde_json::json!({ "transaction": "0a020801" }),
+            ))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{ "result": true, "txid": "aa11…22" }"#)
@@ -392,7 +397,8 @@ mod tests {
     async fn broadcast_dup_transaction_is_accepted_without_retry() {
         let (mut server, client) = test_client(fast_retry()).await;
         let mock = server
-            .mock("POST", "/wallet/broadcasttransaction")
+            .mock("POST", "/wallet/broadcasthex")
+            .match_body(Matcher::Json(serde_json::json!({ "transaction": "0a" })))
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -409,7 +415,8 @@ mod tests {
     async fn broadcast_terminal_rejection_is_not_retried() {
         let (mut server, client) = test_client(fast_retry()).await;
         let mock = server
-            .mock("POST", "/wallet/broadcasttransaction")
+            .mock("POST", "/wallet/broadcasthex")
+            .match_body(Matcher::Json(serde_json::json!({ "transaction": "0a" })))
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -435,7 +442,8 @@ mod tests {
     async fn broadcast_congestion_is_an_error() {
         let (mut server, client) = test_client(once_retry()).await;
         server
-            .mock("POST", "/wallet/broadcasttransaction")
+            .mock("POST", "/wallet/broadcasthex")
+            .match_body(Matcher::Json(serde_json::json!({ "transaction": "0a" })))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{ "result": false, "code": "TooManyTransactions", "message": "" }"#)
