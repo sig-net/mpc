@@ -131,8 +131,9 @@ impl BatchPublisher {
     /// Run the background batching loop that collects publish actions and sends them in batches to the Ethereum contract.
     ///
     /// A batch is flushed once it reaches `max_batch_size`, or `batch_flush_interval` after its
-    /// first action was queued. Each flush is one attempt whose outcome is reported to the
-    /// awaiting callers; retries and duplicate suppression belong to the node-level publish loop.
+    /// first action was queued. Each flush attempts the batch with a bounded retry budget, then
+    /// reports the outcome to the awaiting callers; unbounded liveness retries and duplicate
+    /// suppression belong to the node-level publish loop.
     async fn run_batch_respond(self, mut actions_rx: mpsc::Receiver<QueuedAction>) {
         let mut actions_batch: Vec<QueuedAction> = Vec::with_capacity(self.config.max_batch_size);
         // Starts with a sleep of Duration::MAX, which will be reset when the first action is received.
@@ -187,14 +188,29 @@ impl BatchPublisher {
         std::mem::replace(actions, Vec::with_capacity(self.config.max_batch_size))
     }
 
-    /// Attempt one batch publish and report the outcome to every awaiting caller;
-    /// retries belong to the node-level publish loop.
+    /// Attempt the batch publish with a bounded retry budget, reporting the final
+    /// outcome to every awaiting caller. The budget keeps the batch grouped across
+    /// transient failures (one retried tx, not one tx per action); unbounded liveness
+    /// retries and duplicate suppression belong to the node-level publish loop.
     async fn execute_batch_publish(&self, mut actions: Vec<QueuedAction>) {
         tracing::info!(
             num_requests = actions.len(),
             "publishing batch of ethereum signatures",
         );
-        let res = self.batch_publish_signatures(&actions).await;
+        let max_attempts = self.config.batch_publish_retry.max_times;
+        let res = retry_rpc_gated!(
+            // Every step inside is individually timeout-bounded (estimate, send, receipt).
+            Duration::MAX,
+            self.config.batch_publish_retry,
+            self.shared_backoff,
+            |attempt, err, sleep| {
+                tracing::warn!(
+                    num_requests = actions.len(),
+                    "batch publish failed (attempt {attempt}/{max_attempts}): {err}, retrying in {sleep:?}"
+                );
+            },
+            { self.batch_publish_signatures(&actions).await }
+        );
 
         if let Err(err) = &res {
             tracing::error!(%err, "batch publish failed");
@@ -403,6 +419,7 @@ mod tests {
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{Chain, SignKind};
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn mock_publish_action(id: u8) -> PublishAction {
         make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new([id; 32]))
@@ -1033,6 +1050,13 @@ mod tests {
             max_times: 1,
             jitter: false,
         };
+        // Isolate waiter reporting: no publisher-side batch retries here.
+        batcher.config.batch_publish_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 0,
+            jitter: false,
+        };
 
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(batcher.run_batch_respond(rx));
@@ -1042,5 +1066,94 @@ mod tests {
 
         let err = result.await.unwrap().expect_err("batch publish must fail");
         assert!(err.to_string().contains("mock error"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_failed_batch_retries_as_one_unit() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+        let tx_hash = B256::repeat_byte(0x31);
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // First send fails transiently, the retry succeeds: the whole batch must
+        // be retried as ONE tx carrying all responses, not scattered per action.
+        let sends = Arc::new(AtomicUsize::new(0));
+        let counter = sends.clone();
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(200)
+            .with_body_from_request(move |_| {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "transient"}})
+                        .to_string()
+                        .into_bytes()
+                } else {
+                    json!({"jsonrpc": "2.0", "id": 1, "result": format!("{tx_hash:#x}")})
+                        .to_string()
+                        .into_bytes()
+                }
+            })
+            .expect(2)
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({"jsonrpc": "2.0", "id": 1, "result": mock_receipt_json(tx_hash, "0x1")})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut batcher = test_publisher(&server.url());
+        batcher.config.max_batch_size = 10;
+        batcher.config.batch_flush_interval = Duration::from_millis(50);
+        batcher.config.send_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 0,
+            jitter: false,
+        };
+        batcher.config.batch_publish_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 1,
+            jitter: false,
+        };
+
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(batcher.run_batch_respond(rx));
+
+        let mut results = Vec::with_capacity(3);
+        for i in 0u8..3 {
+            let (queued, result) = queue(mock_publish_action(i));
+            tx.send(queued).await.unwrap();
+            results.push(result);
+        }
+
+        for result in results {
+            result.await.unwrap().expect("batch succeeds on retry");
+        }
+        // 1 failed send + 1 successful send: all 3 responses shared one tx.
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
     }
 }
