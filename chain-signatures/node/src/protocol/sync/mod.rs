@@ -49,6 +49,7 @@ pub enum SyncPeerResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
+    // TODO: remove triples once we coordinate breaking serialization changes (triples are now ephemeral in-memory).
     pub triples: Vec<TripleId>,
     pub presignatures: Vec<PresignatureId>,
 }

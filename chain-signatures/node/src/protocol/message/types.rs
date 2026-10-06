@@ -24,6 +24,7 @@ pub type Round = usize;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum PositProtocolId {
+    // TODO: remove Triple once we coordinate breaking serialization changes (triples are generated ephemerally and never posited).
     Triple(TripleId),
     Presignature(FullPresignatureId),
     Signature(SignId, PresignatureId, Round),
