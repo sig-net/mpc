@@ -181,15 +181,19 @@ fn output_schema_is_empty(schema_json: &[u8]) -> anyhow::Result<bool> {
 fn encode_abi(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
     let values = schema
         .iter()
-        .map(|field| match data.fields.get(&field.name) {
-            Some(value) => Ok(value.clone()),
-            None => Err(anyhow::anyhow!(
-                "Missing required field '{}' in output",
-                field.name
-            )),
+        .map(|field| {
+            let value = data.fields.get(&field.name).ok_or_else(|| {
+                anyhow::anyhow!("Missing required field '{}' in output", field.name)
+            })?;
+            let ty: DynSolType = field.typ.parse()?;
+            if !ty.matches(value) {
+                anyhow::bail!("Value {value:?} doesn't match Solidity type {}", field.typ);
+            }
+            Ok(value.clone())
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    encode_abi_values(schema, &values)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    // One tuple, mirroring `abi_decode_params`, so dynamic-field offsets are shared.
+    Ok(DynSolValue::Tuple(values).abi_encode_params())
 }
 
 fn encode_borsh(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
@@ -203,27 +207,6 @@ fn encode_borsh(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(128);
     serialize_dynsol(&mut buf, val)?;
     Ok(buf)
-}
-
-fn encode_abi_values(schema: &[AbiField], values: &[DynSolValue]) -> anyhow::Result<Vec<u8>> {
-    if schema.len() != values.len() {
-        anyhow::bail!(
-            "Schema and values length mismatch: {} != {}",
-            schema.len(),
-            values.len()
-        );
-    }
-    for (f, v) in schema.iter().zip(values.iter()) {
-        let ty: DynSolType = f.typ.parse()?;
-        if !ty.matches(v) {
-            anyhow::bail!("Value {v:?} doesn't match Solidity type {}", f.typ);
-        }
-    }
-    let mut combined = Vec::new();
-    for v in values {
-        combined.extend(v.abi_encode());
-    }
-    Ok(combined)
 }
 
 fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> {
@@ -428,15 +411,22 @@ mod tests {
 
     #[test]
     fn build_serialized_output_decodes_contract_call() {
-        // A contract-call tx whose function returned `uint256` 12345; `trace`
-        // is that ABI-encoded return value from debug_traceTransaction.
-        let trace = abi_uint256(12_345);
+        // `trace` is the function's ABI-encoded return value from debug_traceTransaction.
+        let schema = br#"[{"name":"n","type":"uint256"},{"name":"s","type":"string"},{"name":"b","type":"bytes"}]"#;
+        let trace = Bytes::from(
+            DynSolValue::Tuple(vec![
+                DynSolValue::Uint(U256::from(12_345), 256),
+                DynSolValue::String("hi".to_string()),
+                DynSolValue::Bytes(vec![1, 2, 3]),
+            ])
+            .abi_encode_params(),
+        );
         let out = build_serialized_output(
             true,
-            UINT256_SCHEMA,
+            schema,
             TraceOutput::Output(trace.clone()),
             SerDeserFormat::Abi,
-            UINT256_SCHEMA,
+            schema,
         )
         .unwrap();
         assert_eq!(out, trace.to_vec());
