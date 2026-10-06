@@ -16,6 +16,10 @@ use std::sync::Arc;
 
 use crate::backlog::Publishing;
 
+/// Target chains with an execution watcher; requests targeting any other chain
+/// would never leave `Executing`.
+const SUPPORTED_TARGET_CHAINS: &[Chain] = &[Chain::Ethereum];
+
 /// Progress of an active Cait-Sith MPC signing round.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignProgress {
@@ -184,8 +188,13 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             !self.serialized_transaction.is_empty(),
             "empty serialized_transaction"
         );
-        self.target_chain()
+        let target = self
+            .target_chain()
             .map_err(|err| anyhow::anyhow!("bad target chain: {err:?}"))?;
+        anyhow::ensure!(
+            SUPPORTED_TARGET_CHAINS.contains(&target),
+            "unsupported target chain {target}"
+        );
         self.epsilon().context("cannot derive epsilon")?;
         validate_unsigned_transaction(&self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
@@ -581,6 +590,30 @@ mod tests {
         let boundary = (u64::MAX - 35) / 2;
         assert!(super::validate_unsigned_transaction(&legacy_tx(boundary)).is_err());
         assert!(super::validate_unsigned_transaction(&legacy_tx(boundary - 1)).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_target_chain() {
+        use super::{SignBidirectionalEvent, SignBidirectionalEventExt as _};
+        use crate::protocol::Chain;
+
+        let event = |target: Chain| SignBidirectionalEvent {
+            sender: Default::default(),
+            serialized_transaction: legacy_tx(1),
+            dest: String::new(),
+            caip2_id: target.caip2_chain_id().to_string(),
+            key_version: 0,
+            deposit: 0,
+            path: "m/0".to_string(),
+            algo: "ECDSA".to_string(),
+            params: "{}".to_string(),
+            chain: Chain::Solana,
+            chain_ctx: None,
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+        };
+        assert!(event(Chain::Ethereum).validate().is_ok());
+        assert!(event(Chain::Solana).validate().is_err());
     }
 
     #[test]
