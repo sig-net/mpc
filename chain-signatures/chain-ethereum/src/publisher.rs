@@ -326,21 +326,29 @@ impl BatchPublisher {
     /// Estimate the gas limit for a batch of responses.
     ///
     /// Uses the node's `eth_estimateGas` then applies the configured buffer to
-    /// absorb variance. On failure falls back to a conservative static
-    /// heuristic based on the batch size.
+    /// absorb variance. On failure or timeout falls back to a conservative
+    /// static heuristic based on the batch size.
     async fn estimate_batch_gas(
         &self,
         responses: &[ChainSignatures::Response],
         num_requests: u64,
     ) -> u64 {
         let call = self.contract.respond(responses.to_vec());
-        match call.estimate_gas().await {
-            Ok(est) => self.gas.clamp_estimate(est),
-            Err(e) => {
+        match tokio::time::timeout(self.config.send_timeout, call.estimate_gas()).await {
+            Ok(Ok(est)) => self.gas.clamp_estimate(est),
+            Ok(Err(e)) => {
                 tracing::warn!(
                     error = %e,
                     num_requests,
                     "dynamic gas estimation failed, falling back to static heuristic"
+                );
+                self.gas.fallback_gas(num_requests)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout = ?self.config.send_timeout,
+                    num_requests,
+                    "dynamic gas estimation timed out, falling back to static heuristic"
                 );
                 self.gas.fallback_gas(num_requests)
             }
