@@ -27,6 +27,7 @@ pub enum Chain {
     Hydration,
     Canton,
     Midnight,
+    Tron,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
@@ -47,10 +48,11 @@ impl Chain {
             Chain::Hydration => "Hydration",
             Chain::Canton => "Canton",
             Chain::Midnight => "Midnight",
+            Chain::Tron => "Tron",
         }
     }
 
-    pub const fn iter() -> [Chain; 7] {
+    pub const fn iter() -> [Chain; 8] {
         [
             Chain::NEAR,
             Chain::Ethereum,
@@ -59,6 +61,7 @@ impl Chain {
             Chain::Hydration,
             Chain::Canton,
             Chain::Midnight,
+            Chain::Tron,
         ]
     }
 
@@ -71,6 +74,7 @@ impl Chain {
             Chain::Hydration => "polkadot:2034",
             Chain::Canton => "canton:global",
             Chain::Midnight => "midnight:mainnet",
+            Chain::Tron => "tron:mainnet",
         }
     }
 
@@ -90,6 +94,8 @@ impl Chain {
             // open. Must stay byte-identical to the chain-id constant in
             // `@sig-net/midnight`, which integrators derive expected keys with.
             Chain::Midnight => "midnight:mainnet",
+            // No `tron` namespace is registered in ChainAgnostic/namespaces.
+            Chain::Tron => "tron:mainnet",
         }
     }
 
@@ -119,6 +125,7 @@ impl FromStr for Chain {
             "hydration" | "hyd" => Ok(Chain::Hydration),
             "canton" | "ctn" => Ok(Chain::Canton),
             "midnight" => Ok(Chain::Midnight),
+            "tron" | "trx" => Ok(Chain::Tron),
             other => Err(format!("unknown or unsupported chain {other}")),
         }
     }

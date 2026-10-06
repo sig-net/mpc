@@ -1,6 +1,6 @@
 mod args;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
@@ -29,7 +29,7 @@ pub use args::{
 };
 
 use clap::Parser;
-use deadpool_redis::Runtime;
+use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
@@ -37,9 +37,10 @@ use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
-use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
+use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher};
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
+use mpc_chain_tron::TronConfig;
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
@@ -309,6 +310,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 contract_watcher.clone(),
                 sync_report_tx.clone(),
+                network.clone(),
             );
 
             log_startup(
@@ -472,6 +474,7 @@ struct ChainConfigs {
     hydration: Option<HydrationConfig>,
     canton: Option<CantonConfig>,
     midnight: Option<MidnightConfig>,
+    tron: Option<TronConfig>,
 }
 
 impl ChainConfigs {
@@ -488,6 +491,7 @@ impl ChainConfigs {
             hydration: hydration.into_config(),
             canton: canton.into_config(),
             midnight: midnight.into_config()?,
+            tron: None, // Tron is a target-only chain with no indexer
         })
     }
 }
@@ -553,7 +557,7 @@ impl ChainStack {
         }
         if let Some(midnight) = &self.configs.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
-            match MidnightPublisher::connect(midnight, telemetry).await {
+            match RecoveringMidnightPublisher::start(midnight, telemetry) {
                 Ok(client) => {
                     publishers.insert(Chain::Midnight, Arc::new(client));
                 }
@@ -601,6 +605,7 @@ fn log_startup(
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
         midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
+        tron_endpoint = %chains.tron.as_ref().map(|c| c.endpoint.as_str()).unwrap_or("None"),
         "starting node",
     );
 }
@@ -692,6 +697,23 @@ struct StorageHandles {
     backlog: Backlog,
 }
 
+const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A Redis pool whose waits, connects and commands all fail after [`REDIS_TIMEOUT`].
+fn redis_pool(url: Url) -> anyhow::Result<deadpool_redis::Pool> {
+    Ok(deadpool_redis::Config::from_url(url)
+        .builder()?
+        .runtime(Runtime::Tokio1)
+        .wait_timeout(Some(REDIS_TIMEOUT))
+        .create_timeout(Some(REDIS_TIMEOUT))
+        .recycle_timeout(Some(REDIS_TIMEOUT))
+        .post_create(Hook::sync_fn(|conn, _| {
+            conn.set_response_timeout(REDIS_TIMEOUT);
+            Ok(())
+        }))
+        .build()?)
+}
+
 impl StorageHandles {
     async fn new(
         account_id: &AccountId,
@@ -700,9 +722,7 @@ impl StorageHandles {
         let gcp_service = GcpService::init(storage_options).await?;
         let key_storage =
             storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
-        let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
-        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-        let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
@@ -813,6 +833,7 @@ async fn spawn_indexers(
         hydration,
         canton,
         midnight,
+        tron,
     } = configs;
 
     tracing::info!(
@@ -821,6 +842,7 @@ async fn spawn_indexers(
         hydration = hydration.is_some(),
         canton = canton.is_some(),
         midnight = midnight.is_some(),
+        tron = tron.is_some(),
         "spawning chain indexers"
     );
 
@@ -961,6 +983,24 @@ mod tests {
     use super::*;
 
     const ETH_CONTRACT_ADDRESS: &str = "f8bdC0612361a1E49a8E01423d4C0cFc5dF4791A";
+
+    /// A listener that never replies stands in for a stalled Redis.
+    #[tokio::test]
+    async fn redis_pool_fails_instead_of_hanging_on_a_stalled_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("redis://{}", listener.local_addr().unwrap())).unwrap();
+        let pool = redis_pool(url).unwrap();
+        let result = tokio::time::timeout(3 * REDIS_TIMEOUT, async {
+            let mut conn = pool.get().await?;
+            let value: Option<String> = redis::AsyncCommands::get(&mut *conn, "key").await?;
+            anyhow::Ok(value)
+        })
+        .await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "expected a timeout error, got {result:?}"
+        );
+    }
 
     #[test]
     fn test_digest_staking() {
@@ -1275,24 +1315,9 @@ mod tests {
             "empty MidnightArgs must not produce a MidnightConfig"
         );
 
-        let account_id = AccountId::from_str("test.near").unwrap();
-        let signer = match InMemorySigner::from_secret_key(
-            account_id.clone(),
-            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
-        ) {
-            near_crypto::Signer::InMemory(signer) => signer,
-            _ => unreachable!(),
-        };
-        // Never dialed: publishers() only stores the client in the registry.
-        let near = near_fetch::Client::new("http://127.0.0.1:1");
-        let near = NearClient::new(
-            near,
-            &account_id,
-            signer,
-            NearRpcGates::new(SharedBackoff::new()),
-            Arc::new(NodeTelemetry::new(Chain::NEAR)),
-        );
-        let publishers = ChainStack::new(chains).publishers(near).await;
+        let publishers = ChainStack::new(chains)
+            .publishers(undialed_near_client())
+            .await;
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),
@@ -1304,5 +1329,58 @@ mod tests {
             "with no chain configured, only the NEAR publisher must exist"
         );
         assert!(publishers.contains_key(&Chain::NEAR));
+    }
+
+    /// A Midnight node that is unreachable at startup must not leave the node without a
+    /// Midnight publisher for its lifetime: the publisher registers and connects later.
+    #[tokio::test]
+    async fn midnight_publisher_registers_while_its_node_is_unreachable() {
+        let chains = ChainConfigs {
+            eth: None,
+            sol: None,
+            hydration: None,
+            canton: None,
+            midnight: Some(MidnightConfig {
+                // Nothing listens on port 1, so the startup dial is refused.
+                node_url: "http://127.0.0.1:1".to_string(),
+                central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
+                publisher: mpc_chain_midnight::PublisherConfig {
+                    funding_seed: "ab".repeat(32),
+                    proof_server_url: "http://127.0.0.1:1".to_string(),
+                    indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
+                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                    ..Default::default()
+                },
+                rpc: Default::default(),
+                indexer: Default::default(),
+            }),
+            tron: None,
+        };
+
+        let publishers = ChainStack::new(chains)
+            .publishers(undialed_near_client())
+            .await;
+
+        assert!(publishers.contains_key(&Chain::Midnight));
+    }
+
+    /// A NEAR client that is never dialed: publishers() only stores it in the registry.
+    fn undialed_near_client() -> NearClient {
+        let account_id = AccountId::from_str("test.near").unwrap();
+        let signer = match InMemorySigner::from_secret_key(
+            account_id.clone(),
+            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
+        ) {
+            near_crypto::Signer::InMemory(signer) => signer,
+            _ => unreachable!(),
+        };
+        let near = near_fetch::Client::new("http://127.0.0.1:1");
+        NearClient::new(
+            near,
+            &account_id,
+            signer,
+            NearRpcGates::new(SharedBackoff::new()),
+            Arc::new(NodeTelemetry::new(Chain::NEAR)),
+        )
     }
 }

@@ -17,12 +17,14 @@ pub trait ChainConfig {
     fn expected_finality_time_secs(&self) -> u64;
     fn expected_response_time_secs(&self) -> u64;
     fn respond_serialization_format(&self) -> SerDeserFormat;
+    /// Whether bidirectional requests can target this chain.
+    fn has_execution_watcher(&self) -> bool;
 }
 
 impl ChainConfig for Chain {
     fn checkpoint_interval(&self) -> Option<u64> {
         let (key, default) = match self {
-            Chain::NEAR | Chain::Bitcoin => return None,
+            Chain::NEAR | Chain::Bitcoin | Chain::Tron => return None,
             Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 1200),
             Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
@@ -59,6 +61,9 @@ impl ChainConfig for Chain {
             Chain::Hydration => 12,
             Chain::Canton => 15,
             Chain::Midnight => 15,
+            // Tron solidification: >=19 active SRs at/above a height, ~1 min
+            // on mainnet.
+            Chain::Tron => 60,
         }
     }
 
@@ -74,5 +79,9 @@ impl ChainConfig for Chain {
             // Solana and Hydration use Borsh for bidirectional responses.
             _ => SerDeserFormat::Borsh,
         }
+    }
+
+    fn has_execution_watcher(&self) -> bool {
+        matches!(self, Chain::Ethereum)
     }
 }
