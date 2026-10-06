@@ -6,6 +6,7 @@ use k256::elliptic_curve::scalar::IsHigh as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
+use mpc_primitives::ChainConfig as _;
 pub use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
 };
@@ -15,10 +16,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::backlog::Publishing;
-
-/// Target chains with an execution watcher; requests targeting any other chain
-/// would never leave `Executing`.
-const SUPPORTED_TARGET_CHAINS: &[Chain] = &[Chain::Ethereum];
 
 /// Progress of an active Cait-Sith MPC signing round.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,7 +189,7 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             .target_chain()
             .map_err(|err| anyhow::anyhow!("bad target chain: {err:?}"))?;
         anyhow::ensure!(
-            SUPPORTED_TARGET_CHAINS.contains(&target),
+            target.has_execution_watcher(),
             "unsupported target chain {target}"
         );
         self.epsilon().context("cannot derive epsilon")?;
