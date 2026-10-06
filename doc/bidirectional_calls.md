@@ -62,11 +62,12 @@ Happy path:
   protection (Section 3.3) lets at most one of them execute, and all of
   them belong to the same request.
 * *Request*: what the contract asks for, the tuple (tx, dest, key, schema):
-  the transaction, its destination chain, the key parameters to sign it
-  with (a derivation path, key version and signing scheme), and the schema
-  of its output. The MPC decodes the output with that schema and encodes
-  the response from it, in the source chain's types. Written `req`, with
-  fields `req.tx`, `req.dest`, `req.key` and `req.schema`. A request is
+  the transaction, its destination chain, the key parameters to sign it with
+  (a derivation path, key version and signing scheme), and the schema of its
+  output. The MPC decodes the output with that schema and encodes the
+  response from it, in the source chain's types. Written `req`, with fields
+  `req.tx`, `req.dest`, `req.key` and `req.schema` (Section 7 maps them to
+  the fields on the wire, `req.dest` is `executionDest`). A request is
   *made* when the contract passes it to `sign_bidirectional` (Section 3.1).
   The same tuple can be made again, and then it is the same request.
 * *Request ID*: rid(contract, req.tx, req.dest, req.key), a collision-
@@ -244,10 +245,12 @@ before the contract upgraded to this library.
   An outage delays delivery and changes nothing else. A correct node
   processes final blocks faster than the chains produce them, so it
   reaches the head from wherever it starts.
-* One id per chain. Two different chain ids the MPC accepts never name the
-  same chain. Otherwise the same transaction could be made once under each
-  id: two rids and two entries for one execution, with last_seen split
-  between the ids.
+* One network per chain id. A chain id names a chain family, e.g., `eip155:1`
+  for every Ethereum network, and an MPC deployment watches one network
+  per family. So within a deployment an id names one network, and no two
+  ids name the same one. Otherwise the same transaction could be made once
+  under each id: two rids and two entries for one execution, with
+  last_seen split between the ids.
 
 ## 4. Pseudocode and properties per entity
 
@@ -375,8 +378,9 @@ processable(req): bool
     key derivation is valid: parameters canonical, key derivable for the
       source chain, path not the attestation key's
     req.tx is non-empty, parses as an unsigned transaction in dest's
-      format, commits to dest (EVM: carries its chain id), and attaching
-      any signature yields a well-formed signed transaction
+      format, commits to the network this MPC watches for dest (EVM:
+      carries that network's chain id), and attaching any signature
+      yields a well-formed signed transaction
     req.schema is well formed: it is empty, or it parses and names only
       types the MPC can decode from dest and encode for the source chain
 
@@ -440,17 +444,17 @@ signature it does not hold is not found (see Section 6 for alternatives).
 When the transaction of one request is included, every other request
 waiting on the same account and replay protection can never execute, and
 the MPC attests Unviable for each, at that transaction's height. A node
-learns of it in one of two ways: it finds the execution itself, or it reads the
-`Response` that reports it. The second reaches every node that reads the
-source chain. A node that is behind notes the outcome and attests once
-caught up.
+learns of it in one of two ways: it finds the execution itself, or it
+reads the `Response` that reports it. The second reaches every node that
+reads the source chain. A node that is behind notes the outcome and
+attests once caught up.
 
 A repeated attestation has the same content (Section 5) and is dropped
 (C3a).
 
 A node has to be able to check a `Response` from the event alone, since a
-`Response` removes the request on every node. The event of Section 7 allows that
-only when the output is empty; Section 6 says what is missing.
+`Response` removes the request on every node. The event of Section 7
+allows that only when the output is empty; Section 6 says what is missing.
 
 Properties:
 
@@ -494,12 +498,15 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
   them, and they compute the same attestation for a rid, as a function of
   final destination state and the request's schema only.
 * Distinct keys (ACCOUNT_DERIVATION.md). The derivation path contains the
-  source chain and the requesting contract, so different (source chain,
-  contract, key parameters) derive different keys, where the key
+  source chain's id and the requesting contract, so different (source
+  chain, contract, key parameters) derive different keys, where the key
   parameters are a request's derivation path, key version and signing
-  scheme. So the sender of an executed transaction tells the MPC which
-  contract and key parameters asked for it. Assumed here: two signing
-  schemes never share a key.
+  scheme. The id names a chain family, so the same contract address on
+  two networks of one family derives the same key; a deployment watches
+  one network per family (Section 3.3), so within it the key still names
+  one contract. So the sender of an executed transaction tells the MPC
+  which contract and key parameters asked for it. Assumed here: two
+  signing schemes never share a key.
 
 * G1, in short: an execution this contract has already accepted is at or below
   last_seen, so a request made later records it as known and C3c drops any
@@ -699,7 +706,7 @@ stay out.
 | `algo` | `enum MPCSignatureAlgorithm` | yes | signing scheme |
 | `txParamType` | `enum TxParamType` | yes | which transaction structure `txParams` holds |
 | `txParams` | per `txParamType` (7.3) | as its digest | the transaction |
-| `executionDest` | `bytes(32)` | yes | CAIP-2 id of the destination chain |
+| `executionDest` | `bytes(32)` | yes | CAIP-2 id of the destination chain family, matched exactly; one fixed id per family, `eip155:1` for every Ethereum network. Which network the MPC executes on is set per deployment |
 | `signatureDest` | `enum MPCDestination` | no | reserved, request construction refuses any value except `unused` |
 | `params` | `bytes(64)` | no | reserved, request construction refuses any non-zero byte |
 | `outputDeserializationSchema` | `bytes` | no | how the MPC decodes the execution output |
