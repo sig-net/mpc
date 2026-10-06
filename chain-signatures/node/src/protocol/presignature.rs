@@ -4,7 +4,7 @@ use crate::storage::presignature_storage::PresignatureSlot;
 use crate::types::PresignatureProtocol;
 use mpc_chain_near::AffinePointExt as _;
 
-use cait_sith::protocol::{Action, InitializationError, Participant};
+use cait_sith::protocol::{Action, Participant};
 use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
 use chrono::Utc;
 use k256::{AffinePoint, Scalar, Secp256k1};
@@ -103,15 +103,7 @@ impl<'de> Deserialize<'de> for Presignature {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum PresignatureGenerationError {
-    #[error("timeout or aborted")]
-    TimeoutOrAborted,
-    #[error("protocol initialization failed: {0}")]
-    Init(#[from] InitializationError),
-    #[error("protocol error: {0}")]
-    Protocol(String),
-}
+pub use super::ProtocolError;
 
 /// Standalone generator driving Stage 2 (Cait-Sith presignature generation in RAM).
 pub struct PresignatureGenerator {
@@ -177,11 +169,11 @@ impl PresignatureGenerator {
     fn poke(
         &self,
         protocol: &mut PresignatureProtocol,
-    ) -> Result<Action<PresignOutput<Secp256k1>>, PresignatureGenerationError> {
+    ) -> Result<Action<PresignOutput<Secp256k1>>, ProtocolError> {
         let poke_start = Instant::now();
         let action = protocol
             .poke()
-            .map_err(|e| PresignatureGenerationError::Protocol(e.to_string()))?;
+            .map_err(|e| ProtocolError::Protocol(e.to_string()))?;
         crate::metrics::protocols::PRESIGNATURE_POKE_CPU_TIME
             .observe(poke_start.elapsed().as_millis() as f64);
         Ok(action)
@@ -190,11 +182,11 @@ impl PresignatureGenerator {
     async fn recv(
         &self,
         inbox: &mut mpsc::Receiver<ArtifactMessage>,
-    ) -> Result<ArtifactMessage, PresignatureGenerationError> {
+    ) -> Result<ArtifactMessage, ProtocolError> {
         let remaining = self.timeout.saturating_sub(self.created.elapsed());
         match tokio::time::timeout(remaining, inbox.recv()).await {
             Ok(Some(msg)) => Ok(msg),
-            Ok(None) | Err(_) => Err(PresignatureGenerationError::TimeoutOrAborted),
+            Ok(None) | Err(_) => Err(ProtocolError::TimeoutOrAborted),
         }
     }
 
@@ -244,7 +236,7 @@ impl PresignatureGenerator {
         early_messages: Vec<PresignatureMessage>,
         inbox: &mut mpsc::Receiver<ArtifactMessage>,
         epoch: u64,
-    ) -> Result<(), PresignatureGenerationError> {
+    ) -> Result<(), ProtocolError> {
         struct OngoingGuard {
             tx: watch::Sender<usize>,
         }

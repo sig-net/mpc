@@ -1,4 +1,5 @@
 use super::message::{ArtifactMessage, MessageChannel, TripleMessage};
+pub use super::ProtocolError;
 use crate::types::TripleProtocol;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
@@ -19,25 +20,13 @@ pub struct Triple {
     pub public: TriplePub<Secp256k1>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum TripleGenerationError {
-    #[error("timeout or aborted")]
-    TimeoutOrAborted,
-    #[error("protocol error: {0}")]
-    Protocol(String),
-    #[error("blocking task failed: {0}")]
-    Join(#[from] tokio::task::JoinError),
-    #[error("insufficient triples returned (expected 2)")]
-    InsufficientTriples,
-}
-
 /// Standalone generator driving Stage 1 (Beaver triple pair generation in RAM).
 pub struct TripleGenerator {
     pub id: TripleId,
     pub me: Participant,
     pub owner: Participant,
     pub participants: Vec<Participant>,
-    protocol: TripleProtocol,
+    protocol: Option<TripleProtocol>,
     timeout: Duration,
     created: Instant,
     msg: MessageChannel,
@@ -85,7 +74,7 @@ impl TripleGenerator {
             me,
             owner,
             participants,
-            protocol: Box::new(protocol),
+            protocol: Some(Box::new(protocol)),
             timeout,
             created: Instant::now(),
             msg: msg.clone(),
@@ -98,7 +87,7 @@ impl TripleGenerator {
         })
     }
 
-    async fn poke(&mut self) -> Result<Action<Vec<(TripleShare<Secp256k1>, TriplePub<Secp256k1>)>>, TripleGenerationError> {
+    async fn poke(&mut self) -> Result<Action<Vec<(TripleShare<Secp256k1>, TriplePub<Secp256k1>)>>, ProtocolError> {
         let poke_start = Instant::now();
         let mut protocol = self.protocol.take().expect("triple protocol missing");
 
@@ -109,17 +98,17 @@ impl TripleGenerator {
         crate::metrics::protocols::TRIPLE_POKE_CPU_TIME
             .observe(poke_start.elapsed().as_millis() as f64);
 
-        result.map_err(|e| TripleGenerationError::Protocol(e.to_string()))
+        result.map_err(|e| ProtocolError::Protocol(e.to_string()))
     }
 
     async fn recv(
         &self,
         inbox: &mut mpsc::Receiver<ArtifactMessage>,
-    ) -> Result<ArtifactMessage, TripleGenerationError> {
+    ) -> Result<ArtifactMessage, ProtocolError> {
         let remaining = self.timeout.saturating_sub(self.created.elapsed());
         match tokio::time::timeout(remaining, inbox.recv()).await {
             Ok(Some(msg)) => Ok(msg),
-            Ok(None) | Err(_) => Err(TripleGenerationError::TimeoutOrAborted),
+            Ok(None) | Err(_) => Err(ProtocolError::TimeoutOrAborted),
         }
     }
 
@@ -166,7 +155,7 @@ impl TripleGenerator {
         mut self,
         inbox: &mut mpsc::Receiver<ArtifactMessage>,
         epoch: u64,
-    ) -> Result<([Triple; 2], Vec<super::message::PresignatureMessage>), TripleGenerationError> {
+    ) -> Result<([Triple; 2], Vec<super::message::PresignatureMessage>), ProtocolError> {
         struct OngoingGuard {
             tx: watch::Sender<usize>,
         }
@@ -215,7 +204,7 @@ impl TripleGenerator {
                     }
                     Action::Return(outputs) => {
                         let [first, second, ..] = &outputs[..] else {
-                            return Err(TripleGenerationError::InsufficientTriples);
+                            return Err(ProtocolError::InsufficientTriples);
                         };
                         let pair = [
                             Triple {
