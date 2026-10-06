@@ -3,12 +3,9 @@
 // Node both import it.
 
 // How long a job holds its address, from the Solana request to the Ethereum
-// transaction being buried. Measured on dev: about 48s typically, 73s at the
-// slow end, 29s at the fast end.
-//
-// The pool is sized for slow leases, so it never runs out when they bunch up.
-// The busiest address is sized for fast ones, since those let it serve the most
-// jobs.
+// transaction being buried (measured on dev: 29s to 73s, about 48s typically).
+// The pool is sized for the slow end so it does not run out when leases bunch
+// up; the busiest address for the fast end, which lets it serve the most jobs.
 export const SLOW_LEASE_SECONDS = 73;
 export const FAST_LEASE_SECONDS = 40;
 
@@ -16,9 +13,8 @@ const constant = (rate, timeUnit) => ({ kind: 'constant', rate, timeUnit });
 
 export const strategies = {
   rpm_1: constant(1, '1m'),
-  rpm_6: constant(6, '1m'),
   rps_1: constant(1, '1s'),
-  rps_3: constant(3, '1s'),
+  rps_5: constant(5, '1s'),
   rps_10: constant(10, '1s'),
   // The stages of ramp_1_10 in sig-net/mpc's loadtests/k6-load-test.js. A ramp
   // runs its own stages, so a duration does not apply to it.

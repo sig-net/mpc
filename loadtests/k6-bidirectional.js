@@ -2,12 +2,7 @@ import http from 'k6/http';
 import { check, fail, sleep } from 'k6';
 import exec from 'k6/execution';
 import { Trend, Rate, Counter, Gauge } from 'k6/metrics';
-import {
-  SLOW_LEASE_SECONDS,
-  parseDuration,
-  planFor,
-  strategies,
-} from './strategies.mjs';
+import { parseDuration, planFor, strategies } from './strategies.mjs';
 
 // Load test for the Solana -> Ethereum bidirectional round trip.
 //
@@ -22,7 +17,7 @@ import {
 // Thresholds on the built-in HTTP metrics would pass while every round trip
 // failed, so only the round-trip success rate is asserted.
 
-// Local by default: a mistyped strategy must not point 10/s at a deployment.
+// For local runs; the workflows set it.
 const BASE_URL = __ENV.LT_PINGER_URL || 'http://localhost:3001';
 
 // The service's own phase timings, not wall-clock around our polling.
@@ -41,7 +36,6 @@ const workerBalanceMin = new Gauge('bidi_worker_balance_min_eth');
 const success = new Rate('bidi_success');
 // Tagged with the service's own failure reason.
 const failures = new Counter('bidi_failures');
-const submitted = new Counter('bidi_submitted');
 
 // A rejection is not a failed round trip — the job never started. Tagged with
 // which capacity ceiling was hit.
@@ -54,9 +48,6 @@ const pollerEvicted = new Gauge('bidi_solana_evicted_transactions');
 
 const pollSeconds = Number(__ENV.LT_POLL_SECONDS || 10);
 const jobTimeoutSeconds = Number(__ENV.LT_JOB_TIMEOUT_SECONDS || 2400);
-// Overrides how long a job is assumed to hold its address, which sizes the
-// funded pool setup() insists on.
-const leaseSeconds = Number(__ENV.LT_LEASE_SECONDS || SLOW_LEASE_SECONDS);
 
 const strategyName = __ENV.LT_STRATEGY;
 const known = Object.keys(strategies).join(', ');
@@ -111,9 +102,12 @@ export const options = {
       maxDuration: `${plan.totalSeconds + jobTimeoutSeconds + 300}s`,
     },
   },
-  // Only the success rate: a count threshold cannot tell four failures out of
-  // four from four out of four hundred.
   thresholds: {
+    // A rate that is not met is not the rate being tested. k6 drops an arrival
+    // when no VU is free, and nothing else would show it.
+    dropped_iterations: ['count==0'],
+    // The success rate, not a failure count: a count cannot tell four failures
+    // out of four from four out of four hundred.
     bidi_success: ['rate>0.95'],
   },
 };
@@ -169,21 +163,17 @@ export function setup() {
   if (short.length > 20) console.warn(`  ...and ${short.length - 20} more`);
 
   // Each job holds its address until its transaction is buried, so the pool
-  // has to cover rate x lease. The service skips short addresses rather than
+  // has to cover the peak rate. The service skips short addresses rather than
   // failing on them, so only funded ones count.
-  const needed = Math.ceil(plan.peakPerSecond * leaseSeconds);
   const funded = workers.length - short.length;
-  if (funded < needed) {
+  if (funded < plan.paths) {
     fail(
-      `${funded}/${workers.length} addresses funded, ~${needed} needed at ` +
-        `${plan.peakPerSecond}/s with ${leaseSeconds}s leases ` +
-        `(raise SIG_BIDIRECTIONAL_PATHS and fund them)`
+      `${funded}/${workers.length} addresses funded, ${plan.paths} needed at ` +
+        `${plan.peakPerSecond}/s (raise SIG_BIDIRECTIONAL_PATHS and fund them)`
     );
   }
 
-  const runId =
-    __ENV.LT_RUN_ID ||
-    `k6-${strategyName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const runId = `k6-${strategyName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   console.log(`run id ${runId}`);
 
   // Read now so a restart at any point after this is visible: the pinger keeps
@@ -221,9 +211,7 @@ export function submit({ runId }) {
     failures.add(1, { reason: `submit_${res.status}` });
     success.add(false);
     console.error(`submit failed: ${res.status} ${res.body}`);
-    return;
   }
-  submitted.add(1);
 }
 
 const record = job => {
@@ -253,7 +241,6 @@ export function collect({ runId, startedAt }) {
   let live = 0;
   let accepted = 0;
   let recorded = 0;
-  let gaveUp = false;
 
   for (;;) {
     sleep(pollSeconds);
@@ -297,7 +284,7 @@ export function collect({ runId, startedAt }) {
         failures.add(live, { reason: 'driver_timeout' });
         console.error(`${live} jobs still running after ${jobTimeoutSeconds}s`);
       }
-      gaveUp = true;
+      recorded += live;
       break;
     }
   }
@@ -316,10 +303,9 @@ export function collect({ runId, startedAt }) {
   // Every job the pinger accepted must have been recorded, or counted as a
   // driver timeout above. A shortfall means jobs were dropped before they
   // could be collected, which no success rate would show.
-  const unaccounted = accepted - recorded - (gaveUp ? live : 0);
-  if (unaccounted > 0) {
+  if (recorded < accepted) {
     exec.test.abort(
-      `${unaccounted}/${accepted} jobs were never collected; raise SIG_BIDIRECTIONAL_RETAINED_JOBS to at least the run's job count`
+      `${accepted - recorded}/${accepted} jobs were never collected; raise SIG_BIDIRECTIONAL_RETAINED_JOBS to at least the run's job count`
     );
   }
 }
