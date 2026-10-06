@@ -224,12 +224,11 @@ stateDiagram-v2
     class PositIn,DoneOut,OrgOut outside
 ```
 
-`Recording` has no exit to a new round. Reconstruction failure returns `None`
-from `build_publish_state`, which skips the backlog marking; the proposer's
-`rpc.publish` call still runs but validates the signature again internally and
-trashes the request on failure. Either way nothing is submitted, nothing is
-marked for republish, and the task still returns `Ok`: a reconstruction failure
-is silently recorded as success.
+`Recording` has no exit to a new round. `SignEntry::advance` reconstructs the
+signature and only then marks the backlog. If reconstruction fails, or the
+marking fails (`NotFound`, `InvalidPublishTransition`), the request is trashed
+with a log line, `rpc.publish` never runs, and the task still returns `Ok`: the
+failure is silently recorded as success.
 
 Only the proposer submits, though every node reconstructs the signature and
 marks the backlog.
