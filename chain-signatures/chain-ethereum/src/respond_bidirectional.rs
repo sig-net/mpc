@@ -1,8 +1,7 @@
-mod midnight;
-
 use alloy::dyn_abi::{DynSolType, DynSolValue};
 use alloy::primitives::Bytes;
 use borsh::BorshSerialize;
+use mpc_midnight_respond_codec::{executed_output, TracedReturn};
 use mpc_primitives::SerDeserFormat;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -116,6 +115,16 @@ pub enum TraceOutput {
     NoReturnData,
 }
 
+impl From<TraceOutput> for TracedReturn {
+    fn from(trace: TraceOutput) -> Self {
+        match trace {
+            TraceOutput::NotTraced => Self::NotTraced,
+            TraceOutput::NoReturnData => Self::Returned(Bytes::new()),
+            TraceOutput::Output(data) => Self::Returned(data),
+        }
+    }
+}
+
 /// Decode a transaction's output and re-serialize it for the respond chain.
 ///
 /// Contract calls require a `debug_traceTransaction` result. Void-returning
@@ -123,8 +132,9 @@ pub enum TraceOutput {
 /// plain-transfer behavior and synthesizes response defaults from
 /// `respond_serialization_schema` (for example, `bool true`).
 ///
-/// Midnight (FAB) derives its encoding from the output schema alone and ignores
-/// `respond_serialization_schema`; plain transfers and void calls attest an empty output.
+/// Midnight responses derive their encoding from the output schema alone and
+/// ignore `respond_serialization_schema`; plain transfers and void calls attest
+/// an empty output.
 pub fn build_serialized_output(
     is_contract_call: bool,
     output_deserialization_schema: &[u8],
@@ -132,13 +142,11 @@ pub fn build_serialized_output(
     respond_serialization_format: SerDeserFormat,
     respond_serialization_schema: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
-    // TODO: Extract FAB serialization when another execution target needs to respond to
-    // Midnight. See https://github.com/sig-net/mpc/issues/1196.
     if respond_serialization_format == SerDeserFormat::Fab {
-        return midnight::executed_output(
+        return executed_output(
             is_contract_call,
             output_deserialization_schema,
-            trace_output,
+            trace_output.into(),
         );
     }
     let transaction_output = match OUTPUT_DESERIALIZATION_FORMAT {
@@ -338,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_rejects_output_types_midnight_cannot_carry() {
+    fn build_serialized_output_midnight_rejects_output_types_it_cannot_carry() {
         let output_schema = br#"[{"name":"message","type":"string"}]"#;
         let trace = Bytes::from(
             DynSolValue::Tuple(vec![DynSolValue::String("hello".to_string())]).abi_encode_params(),
@@ -365,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_contract_bool() {
+    fn build_serialized_output_midnight_contract_bool() {
         let bool_schema = br#"[{"name":"ok","type":"bool"}]"#;
         let out = build_serialized_output(
             true,
@@ -380,7 +388,23 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_plain_transfer_attests_empty_output() {
+    fn build_serialized_output_midnight_ignores_the_respond_schema() {
+        let output_schema = br#"[{"name":"ok","type":"bool"}]"#;
+        for respond_schema in [&b""[..], b"[]", br#"{"struct":{"ok":"u8"}}"#] {
+            let out = build_serialized_output(
+                true,
+                output_schema,
+                TraceOutput::Output(abi_bool(true)),
+                SerDeserFormat::Fab,
+                respond_schema,
+            )
+            .unwrap();
+            assert_eq!(out, vec![1]);
+        }
+    }
+
+    #[test]
+    fn build_serialized_output_midnight_plain_transfer_attests_empty_output() {
         let out = build_serialized_output(
             false,
             b"[]",
@@ -403,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_void_call_attests_empty_output() {
+    fn build_serialized_output_midnight_void_call_attests_empty_output() {
         let out = build_serialized_output(
             true,
             b"[]",
