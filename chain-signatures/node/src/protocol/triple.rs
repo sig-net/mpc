@@ -20,6 +20,15 @@ pub struct Triple {
     pub public: TriplePub<Secp256k1>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TriplePair {
+    pub id: TripleId,
+    pub triple0: Triple,
+    pub triple1: Triple,
+    #[serde(skip, default)]
+    pub holders: Option<Vec<Participant>>,
+}
+
 /// Standalone generator driving Stage 1 (Beaver triple pair generation in RAM).
 pub struct TripleGenerator {
     pub id: TripleId,
@@ -34,15 +43,6 @@ pub struct TripleGenerator {
     #[cfg(feature = "debug-page")]
     #[allow(dead_code)]
     debug_view: crate::web::debug::DebugPageTaskHandle,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct TriplePair {
-    pub id: TripleId,
-    pub triple0: Triple,
-    pub triple1: Triple,
-    #[serde(skip, default)]
-    pub holders: Option<Vec<Participant>>,
 }
 
 impl TripleGenerator {
