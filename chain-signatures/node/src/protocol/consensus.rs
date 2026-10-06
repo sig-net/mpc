@@ -97,7 +97,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             let threshold = contract_state.threshold;
                             // Initialize identity for storage; this is an entry point into Running.
                             ctx.presignature_storage.set_me(me);
-                            let protocol_spawner_task = ProtocolSpawnerTask::run(
+                            let protocol_spawner = ProtocolSpawnerTask::run(
                                 me,
                                 threshold,
                                 epoch,
@@ -113,7 +113,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                                 threshold: contract_state.threshold,
                                 private_share,
                                 public_key,
-                                protocol_spawner_task,
+                                protocol_spawner,
                             })
                         }
                     }
@@ -390,7 +390,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
 
                     // Initialize identity for storage; this is an entry point into Running.
                     ctx.presignature_storage.set_me(me);
-                    let protocol_spawner_task = ProtocolSpawnerTask::run(
+                    let protocol_spawner = ProtocolSpawnerTask::run(
                         me,
                         self.threshold,
                         self.epoch,
@@ -405,7 +405,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         threshold: self.threshold,
                         private_share: self.private_share,
                         public_key: self.public_key,
-                        protocol_spawner_task,
+                        protocol_spawner,
                     })
                 }
             },
