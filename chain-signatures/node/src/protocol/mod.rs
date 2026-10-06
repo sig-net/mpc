@@ -23,7 +23,7 @@ pub use contract::ProtocolState;
 pub use message::{Message, MessageChannel};
 pub use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, RespondBidirectionalTx};
 pub use state::{Node, NodeState};
-pub use task::{ProtocolSpawner, ProtocolTask};
+pub use task::{ProtocolSpawner, ProtocolSpawnerTask, ProtocolTask};
 
 use crate::config::Config;
 use crate::mesh::MeshState;

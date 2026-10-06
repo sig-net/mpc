@@ -294,18 +294,15 @@ impl ProtocolSpawner {
             &node_account_id,
         );
 
-        let task = async move {
-            run_stacked_pipeline(
-                id,
-                epoch,
-                triple_gen,
-                presign_gen,
-                msg,
-            )
-            .await;
-        };
+        let task = ProtocolTask::new(
+            id,
+            epoch,
+            triple_gen,
+            presign_gen,
+            msg,
+        );
 
-        self.ongoing.spawn(id.id, task);
+        self.ongoing.spawn(id.id, task.run());
 
         Ok(())
     }
@@ -390,31 +387,51 @@ impl Drop for ProtocolSpawner {
 }
 
 /// Runs the stacked in-memory pipeline: Beaver triples in RAM -> Cait-Sith presign in RAM -> Store presignature.
-async fn run_stacked_pipeline(
-    id: FullPresignatureId,
-    epoch: u64,
-    triple_gen: TripleGenerator,
-    presign_gen: PresignatureGenerator,
-    msg: MessageChannel,
-) {
-    let mut inbox = msg.subscribe_artifact(id.id).await;
+pub struct ProtocolTask {
+    pub id: FullPresignatureId,
+    pub epoch: u64,
+    pub triple_gen: TripleGenerator,
+    pub presign_gen: PresignatureGenerator,
+    pub msg: MessageChannel,
+}
 
-    // Stage 1: Generate Beaver Triples in RAM
-    let (triple_pair, early_msgs) = match triple_gen.run(&mut inbox, epoch).await {
-        Ok(res) => res,
-        Err(err) => {
-            tracing::warn!(?id, ?err, "stage 1 triple generation failed");
-            cleanup_artifact(&msg, id.id).await;
-            return;
+impl ProtocolTask {
+    pub fn new(
+        id: FullPresignatureId,
+        epoch: u64,
+        triple_gen: TripleGenerator,
+        presign_gen: PresignatureGenerator,
+        msg: MessageChannel,
+    ) -> Self {
+        Self {
+            id,
+            epoch,
+            triple_gen,
+            presign_gen,
+            msg,
         }
-    };
-
-    // Stage 2: Cait-Sith Presignature Generation in RAM & insert into PresignatureStorage
-    if let Err(err) = presign_gen.run(triple_pair, early_msgs, &mut inbox, epoch).await {
-        tracing::warn!(?id, ?err, "stage 2 presignature generation failed");
     }
 
-    cleanup_artifact(&msg, id.id).await;
+    pub async fn run(self) {
+        let mut inbox = self.msg.subscribe_artifact(self.id.id).await;
+
+        // Stage 1: Generate Beaver Triples in RAM
+        let (triple_pair, early_msgs) = match self.triple_gen.run(&mut inbox, self.epoch).await {
+            Ok(res) => res,
+            Err(err) => {
+                tracing::warn!(id = ?self.id, ?err, "stage 1 triple generation failed");
+                cleanup_artifact(&self.msg, self.id.id).await;
+                return;
+            }
+        };
+
+        // Stage 2: Cait-Sith Presignature Generation in RAM & insert into PresignatureStorage
+        if let Err(err) = self.presign_gen.run(triple_pair, early_msgs, &mut inbox, self.epoch).await {
+            tracing::warn!(id = ?self.id, ?err, "stage 2 presignature generation failed");
+        }
+
+        cleanup_artifact(&self.msg, self.id.id).await;
+    }
 }
 
 async fn cleanup_artifact(msg: &MessageChannel, id: u64) {
@@ -422,14 +439,14 @@ async fn cleanup_artifact(msg: &MessageChannel, id: u64) {
     msg.filter_artifact(id).await;
 }
 
-/// Handle to the background protocol task running in the node.
-pub struct ProtocolTask {
+/// Handle to the background protocol spawner task running in the node.
+pub struct ProtocolSpawnerTask {
     ongoing_triples_rx: watch::Receiver<usize>,
     ongoing_presignatures_rx: watch::Receiver<usize>,
     handle: JoinHandle<()>,
 }
 
-impl ProtocolTask {
+impl ProtocolSpawnerTask {
     pub fn run(
         me: Participant,
         threshold: usize,
@@ -479,7 +496,7 @@ impl ProtocolTask {
     }
 }
 
-impl Drop for ProtocolTask {
+impl Drop for ProtocolSpawnerTask {
     fn drop(&mut self) {
         self.abort();
     }
