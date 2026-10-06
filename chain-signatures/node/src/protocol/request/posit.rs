@@ -66,25 +66,15 @@ impl PositPhase {
                         my_round = state.round(),
                         "Rejecting message from older round, as deliberator",
                     );
-                    ctx.msg
-                        .send(
-                            ctx.governance.me,
-                            *from,
-                            PositMessage {
-                                // The id echoes the rejected message so the
-                                // sender knows which attempt we are answering.
-                                id: PositProtocolId::Signature(
-                                    sign_id,
-                                    *presignature_id,
-                                    *peer_round,
-                                ),
-                                from: ctx.governance.me,
-                                action: PositAction::RejectWithReason(
-                                    PositRejectReason::StaleRound(state.round()),
-                                ),
-                            },
-                        )
-                        .await;
+                    // The id echoes the rejected message so the sender
+                    // knows which attempt we are answering.
+                    ctx.send_posit(
+                        *from,
+                        *presignature_id,
+                        *peer_round,
+                        PositAction::RejectWithReason(PositRejectReason::StaleRound(state.round())),
+                    )
+                    .await;
                     continue;
                 }
 
@@ -126,23 +116,13 @@ impl PositPhase {
                             presignature_id,
                             "deliberator does not have access to proposed presignature, rejecting"
                         );
-                        ctx.msg
-                            .send(
-                                ctx.governance.me,
-                                proposer,
-                                PositMessage {
-                                    id: PositProtocolId::Signature(
-                                        sign_id,
-                                        *presignature_id,
-                                        state.round(),
-                                    ),
-                                    from: ctx.governance.me,
-                                    action: PositAction::RejectWithReason(
-                                        PositRejectReason::MissingArtifact,
-                                    ),
-                                },
-                            )
-                            .await;
+                        ctx.send_posit(
+                            proposer,
+                            *presignature_id,
+                            state.round(),
+                            PositAction::RejectWithReason(PositRejectReason::MissingArtifact),
+                        )
+                        .await;
                         continue;
                     }
 
@@ -155,23 +135,13 @@ impl PositPhase {
                         "received Propose from non-proposer, rejecting"
                     );
 
-                    ctx.msg
-                        .send(
-                            ctx.governance.me,
-                            *from,
-                            PositMessage {
-                                id: PositProtocolId::Signature(
-                                    sign_id,
-                                    *presignature_id,
-                                    state.round(),
-                                ),
-                                from: ctx.governance.me,
-                                action: PositAction::RejectWithReason(
-                                    PositRejectReason::InvalidRequest,
-                                ),
-                            },
-                        )
-                        .await;
+                    ctx.send_posit(
+                        *from,
+                        *presignature_id,
+                        state.round(),
+                        PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
+                    )
+                    .await;
                 }
             }
         })
@@ -184,17 +154,13 @@ impl PositPhase {
         };
 
         // received propose, send Accept
-        ctx.msg
-            .send(
-                ctx.governance.me,
-                proposer,
-                PositMessage {
-                    id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
-                    from: ctx.governance.me,
-                    action: PositAction::Accept,
-                },
-            )
-            .await;
+        ctx.send_posit(
+            proposer,
+            presignature_id,
+            state.round(),
+            PositAction::Accept,
+        )
+        .await;
 
         Ok(presignature_id)
     }
@@ -241,7 +207,7 @@ impl PositPhase {
 
         // GUARANTEE: at least threshold participants from organizing phase.
         let posit_participants = active.iter().copied().collect::<Vec<_>>();
-        let mut counter = SinglePositCounter::new(ctx.governance.me, &posit_participants);
+        let mut counter = PositCounter::new(ctx.governance.me, &posit_participants, ());
 
         let mut remaining = state.budget.remaining();
         if is_deliberator {
@@ -279,25 +245,17 @@ impl PositPhase {
                         if matches!(task_msg.action, PositAction::RejectWithReason(_)) {
                             continue;
                         }
-                        ctx.msg
-                            .send(
-                                ctx.governance.me,
-                                task_msg.from,
-                                PositMessage {
-                                    // The id echoes the rejected message so the
-                                    // sender knows which attempt we are answering.
-                                    id: PositProtocolId::Signature(
-                                        sign_id,
-                                        task_msg.presignature_id,
-                                        peer_round,
-                                    ),
-                                    from: ctx.governance.me,
-                                    action: PositAction::RejectWithReason(
-                                        PositRejectReason::StaleRound(state.round()),
-                                    ),
-                                },
-                            )
-                            .await;
+                        // The id echoes the rejected message so the sender
+                        // knows which attempt we are answering.
+                        ctx.send_posit(
+                            task_msg.from,
+                            task_msg.presignature_id,
+                            peer_round,
+                            PositAction::RejectWithReason(PositRejectReason::StaleRound(
+                                state.round(),
+                            )),
+                        )
+                        .await;
                         continue;
                     }
 
@@ -332,7 +290,7 @@ impl PositPhase {
                             break participants;
                         }
                     } else {
-                        if !counter.process_action(from, &action) {
+                        if counter.process_action(from, &action).is_none() {
                             continue;
                         }
 
@@ -360,7 +318,7 @@ impl PositPhase {
                             }
                             return state.reorganize(&format!(
                                 "received enough rejects: {:?}",
-                                counter.rejects
+                                counter.rejects()
                             ));
                         }
 
@@ -395,7 +353,7 @@ impl PositPhase {
                         }
                         format!(
                             "proposer posit deadline reached ({} accepts, threshold {})",
-                            counter.accepts.len(),
+                            counter.accepts().len(),
                             ctx.governance.threshold
                         )
                     } else {
@@ -433,29 +391,21 @@ impl PositPhase {
     async fn start_with_current_accepts(
         ctx: &SignTask,
         state: &mut SignState,
-        counter: SinglePositCounter,
+        counter: PositCounter<()>,
         sign_id: SignId,
         presignature_id: PresignatureId,
     ) -> Vec<Participant> {
-        let participants = counter.accepts.into_iter().collect::<Vec<_>>();
+        let participants = counter.into_accepts();
         tracing::info!(?sign_id, round=?state.round(), me = ?ctx.governance.me, ?participants, "proposer broadcasting Start");
 
-        for &p in &participants {
-            if p == ctx.governance.me {
-                continue;
-            }
-            ctx.msg
-                .send(
-                    ctx.governance.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
-                        from: ctx.governance.me,
-                        action: PositAction::Start(participants.clone()),
-                    },
-                )
-                .await;
-        }
+        ctx.msg
+            .broadcast_posit(
+                ctx.governance.me,
+                &participants,
+                PositProtocolId::Signature(sign_id, presignature_id, state.round()),
+                PositAction::Start(participants.clone()),
+            )
+            .await;
         participants
     }
 }
