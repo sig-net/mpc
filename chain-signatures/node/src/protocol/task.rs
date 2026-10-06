@@ -394,7 +394,7 @@ async fn run_stacked_pipeline(
     id: FullPresignatureId,
     epoch: u64,
     triple_gen: TripleGenerator,
-    mut presign_gen: PresignatureGenerator,
+    presign_gen: PresignatureGenerator,
     msg: MessageChannel,
 ) {
     let mut inbox = msg.subscribe_artifact(id.id).await;
@@ -409,18 +409,11 @@ async fn run_stacked_pipeline(
         }
     };
 
-    // Stage 2: Cait-Sith Presignature Generation in RAM
-    let presignature = match presign_gen.run(triple_pair, early_msgs, &mut inbox, epoch).await {
-        Ok(res) => res,
-        Err(err) => {
-            tracing::warn!(?id, ?err, "stage 2 presignature generation failed");
-            cleanup_artifact(&msg, id.id).await;
-            return;
-        }
-    };
+    // Stage 2: Cait-Sith Presignature Generation in RAM & insert into PresignatureStorage
+    if let Err(err) = presign_gen.run(triple_pair, early_msgs, &mut inbox, epoch).await {
+        tracing::warn!(?id, ?err, "stage 2 presignature generation failed");
+    }
 
-    // Stage 3: Insert into PresignatureStorage
-    presign_gen.insert(presignature).await;
     cleanup_artifact(&msg, id.id).await;
 }
 

@@ -237,19 +237,14 @@ impl PresignatureGenerator {
             .await;
     }
 
-    /// Insert the completed presignature into storage.
-    pub async fn insert(&mut self, presignature: Presignature) -> bool {
-        self.slot.insert(presignature, self.owner).await
-    }
-
     /// Drive Cait-Sith presignature generation using Beaver triples generated in RAM.
     pub async fn run(
-        &mut self,
+        mut self,
         triples: [Triple; 2],
         early_messages: Vec<PresignatureMessage>,
         inbox: &mut mpsc::Receiver<ArtifactMessage>,
         epoch: u64,
-    ) -> Result<Presignature, PresignatureGenerationError> {
+    ) -> Result<(), PresignatureGenerationError> {
         struct OngoingGuard {
             tx: watch::Sender<usize>,
         }
@@ -344,7 +339,8 @@ impl PresignatureGenerator {
                 if self.owner == self.me {
                     crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS.inc();
                 }
-                Ok(presignature)
+                self.slot.insert(presignature, self.owner).await;
+                Ok(())
             }
             Err(err) => {
                 crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();

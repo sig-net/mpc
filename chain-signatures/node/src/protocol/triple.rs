@@ -37,7 +37,7 @@ pub struct TripleGenerator {
     pub me: Participant,
     pub owner: Participant,
     pub participants: Vec<Participant>,
-    protocol: Option<TripleProtocol>,
+    protocol: TripleProtocol,
     timeout: Duration,
     created: Instant,
     msg: MessageChannel,
@@ -85,7 +85,7 @@ impl TripleGenerator {
             me,
             owner,
             participants,
-            protocol: Some(Box::new(protocol)),
+            protocol: Box::new(protocol),
             timeout,
             created: Instant::now(),
             msg: msg.clone(),
@@ -98,72 +98,10 @@ impl TripleGenerator {
         })
     }
 
-    async fn poke(&mut self) -> Result<Action<Vec<(TripleShare<Secp256k1>, TriplePub<Secp256k1>)>>, TripleGenerationError> {
-        let poke_start = Instant::now();
-        let mut protocol = self.protocol.take().expect("triple protocol missing");
-
-        let (result, protocol) =
-            tokio::task::spawn_blocking(move || (protocol.poke(), protocol)).await?;
-        self.protocol = Some(protocol);
-
-        crate::metrics::protocols::TRIPLE_POKE_CPU_TIME
-            .observe(poke_start.elapsed().as_millis() as f64);
-
-        result.map_err(|e| TripleGenerationError::Protocol(e.to_string()))
-    }
-
-    async fn recv(
-        &self,
-        inbox: &mut mpsc::Receiver<ArtifactMessage>,
-    ) -> Result<ArtifactMessage, TripleGenerationError> {
-        let remaining = self.timeout.saturating_sub(self.created.elapsed());
-        match tokio::time::timeout(remaining, inbox.recv()).await {
-            Ok(Some(msg)) => Ok(msg),
-            Ok(None) | Err(_) => Err(TripleGenerationError::TimeoutOrAborted),
-        }
-    }
-
-    async fn send_many(&self, data: Vec<u8>, epoch: u64) {
-        for to in &self.participants {
-            if *to == self.me {
-                continue;
-            }
-            self.msg
-                .send(
-                    self.me,
-                    *to,
-                    TripleMessage {
-                        id: self.id,
-                        epoch,
-                        from: self.me,
-                        data: data.clone(),
-                        timestamp: Utc::now().timestamp() as u64,
-                    },
-                )
-                .await;
-        }
-    }
-
-    async fn send_private(&self, to: Participant, data: Vec<u8>, epoch: u64) {
-        self.msg
-            .send(
-                self.me,
-                to,
-                TripleMessage {
-                    id: self.id,
-                    epoch,
-                    from: self.me,
-                    data,
-                    timestamp: Utc::now().timestamp() as u64,
-                },
-            )
-            .await;
-    }
-
     /// Drive Beaver triple generation until a pair is produced.
     /// Any presignature messages received from faster peers are buffered and returned.
     pub async fn run(
-        mut self,
+        self,
         inbox: &mut mpsc::Receiver<ArtifactMessage>,
         epoch: u64,
     ) -> Result<([Triple; 2], Vec<super::message::PresignatureMessage>), TripleGenerationError> {
@@ -189,18 +127,42 @@ impl TripleGenerator {
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.inc();
         let _guard = OngoingGuard::new(self.ongoing_tx.clone());
 
+        let Self {
+            id,
+            me,
+            owner,
+            participants,
+            mut protocol,
+            timeout,
+            created,
+            msg,
+            ..
+        } = self;
+
         let mut early_presign_messages = Vec::new();
         let start_time = Instant::now();
 
         let res = async {
             loop {
-                let action = self.poke().await?;
+                let poke_start = Instant::now();
+                let (result, p) =
+                    tokio::task::spawn_blocking(move || (protocol.poke(), protocol)).await?;
+                protocol = p;
+
+                crate::metrics::protocols::TRIPLE_POKE_CPU_TIME
+                    .observe(poke_start.elapsed().as_millis() as f64);
+
+                let action = result.map_err(|e| TripleGenerationError::Protocol(e.to_string()))?;
                 match action {
                     Action::Wait => {
-                        let msg = self.recv(inbox).await?;
-                        match msg {
+                        let remaining = timeout.saturating_sub(created.elapsed());
+                        let item = match tokio::time::timeout(remaining, inbox.recv()).await {
+                            Ok(Some(msg)) => msg,
+                            Ok(None) | Err(_) => return Err(TripleGenerationError::TimeoutOrAborted),
+                        };
+                        match item {
                             ArtifactMessage::Triple(m) => {
-                                self.protocol.as_mut().expect("protocol missing").message(m.from, m.data);
+                                protocol.message(m.from, m.data);
                             }
                             ArtifactMessage::Presignature(m) => {
                                 early_presign_messages.push(m);
@@ -208,10 +170,37 @@ impl TripleGenerator {
                         }
                     }
                     Action::SendMany(data) => {
-                        self.send_many(data, epoch).await;
+                        for to in &participants {
+                            if *to == me {
+                                continue;
+                            }
+                            msg.send(
+                                me,
+                                *to,
+                                TripleMessage {
+                                    id,
+                                    epoch,
+                                    from: me,
+                                    data: data.clone(),
+                                    timestamp: Utc::now().timestamp() as u64,
+                                },
+                            )
+                            .await;
+                        }
                     }
                     Action::SendPrivate(to, data) => {
-                        self.send_private(to, data, epoch).await;
+                        msg.send(
+                            me,
+                            to,
+                            TripleMessage {
+                                id,
+                                epoch,
+                                from: me,
+                                data,
+                                timestamp: Utc::now().timestamp() as u64,
+                            },
+                        )
+                        .await;
                     }
                     Action::Return(outputs) => {
                         let [first, second, ..] = &outputs[..] else {
@@ -239,14 +228,14 @@ impl TripleGenerator {
                 crate::metrics::protocols::TRIPLE_LATENCY
                     .observe(start_time.elapsed().as_secs_f64());
                 crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS.inc();
-                if self.owner == self.me {
+                if owner == me {
                     crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_OWNED_SUCCESS.inc();
                 }
                 Ok((pair, early_presign_messages))
             }
             Err(err) => {
                 crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
-                if self.owner == self.me {
+                if owner == me {
                     crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
                 }
                 Err(err)
