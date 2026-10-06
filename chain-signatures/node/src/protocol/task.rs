@@ -410,23 +410,23 @@ impl ProtocolTask {
     pub async fn run(self) {
         let mut inbox = self.msg.subscribe_artifact(self.id.id).await;
 
-        // Stage 1: Generate Beaver Triples in RAM
+        // Part 1: Triple pair generation into RAM
         let (triple_pair, early_msgs) = match self.triple_gen.run(&mut inbox, self.epoch).await {
             Ok(res) => res,
             Err(err) => {
-                tracing::warn!(id = ?self.id, ?err, "stage 1 triple generation failed");
+                tracing::warn!(id = ?self.id, ?err, "triple pair generation failed");
                 cleanup_artifact(&self.msg, self.id.id).await;
                 return;
             }
         };
 
-        // Stage 2: Cait-Sith Presignature Generation in RAM & insert into PresignatureStorage
+        // Part 2: Presignature generation into PresignatureStorage
         if let Err(err) = self
             .presign_gen
             .run(triple_pair, early_msgs, &mut inbox, self.epoch)
             .await
         {
-            tracing::warn!(id = ?self.id, ?err, "stage 2 presignature generation failed");
+            tracing::warn!(id = ?self.id, ?err, "presignature generation failed");
         }
 
         cleanup_artifact(&self.msg, self.id.id).await;
