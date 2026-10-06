@@ -391,6 +391,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn catchup_start_inside_supported_window_is_kept() {
+        let max_catchup_blocks = 8191;
+        let anchor_height = 10_000;
+        let oldest_supported = anchor_height - 1 - max_catchup_blocks;
+        let clamp = |start| {
+            EthereumClient::clamp_oldest_supported_with(start, anchor_height, max_catchup_blocks)
+        };
+
+        // Exact boundary passes through unchanged.
+        assert_eq!(clamp(oldest_supported), oldest_supported);
+        // Anything newer, up to and past the anchor, passes through too.
+        assert_eq!(clamp(oldest_supported + 1), oldest_supported + 1);
+        assert_eq!(clamp(anchor_height + 5), anchor_height + 5);
+        // A window wider than the chain saturates at genesis instead of underflowing.
+        assert_eq!(EthereumClient::clamp_oldest_supported_with(0, 100, u64::MAX), 0);
+        assert_eq!(EthereumClient::clamp_oldest_supported_with(7, 0, 10), 7);
+    }
+
     #[tokio::test]
     async fn shared_backoff_gates_concurrent_calls_on_429() {
         let mut server = Server::new_async().await;
