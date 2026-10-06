@@ -25,8 +25,6 @@ pub struct TriplePair {
     pub id: TripleId,
     pub triple0: Triple,
     pub triple1: Triple,
-    #[serde(skip, default)]
-    pub holders: Option<Vec<Participant>>,
 }
 
 /// Standalone generator driving Stage 1 (Beaver triple pair generation in RAM).
@@ -227,7 +225,6 @@ impl TripleGenerator {
                                 share: second.0.clone(),
                                 public: second.1.clone(),
                             },
-                            holders: Some(self.participants.clone()),
                         };
                         return Ok(pair);
                     }
