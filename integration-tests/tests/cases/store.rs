@@ -10,7 +10,6 @@ use test_log::test;
 use super::helpers::{dummy_backlog_entry, dummy_presignature};
 use mpc_primitives::SignId;
 
-
 #[test(tokio::test)]
 async fn test_presignature_persistence() -> anyhow::Result<()> {
     let spawner = ClusterSpawner::default()

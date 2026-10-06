@@ -87,7 +87,9 @@ impl TripleGenerator {
         })
     }
 
-    async fn poke(&mut self) -> Result<Action<Vec<(TripleShare<Secp256k1>, TriplePub<Secp256k1>)>>, ProtocolError> {
+    async fn poke(
+        &mut self,
+    ) -> Result<Action<Vec<(TripleShare<Secp256k1>, TriplePub<Secp256k1>)>>, ProtocolError> {
         let poke_start = Instant::now();
         let mut protocol = self.protocol.take().expect("triple protocol missing");
 
@@ -189,7 +191,10 @@ impl TripleGenerator {
                         let msg = self.recv(inbox).await?;
                         match msg {
                             ArtifactMessage::Triple(m) => {
-                                self.protocol.as_mut().expect("protocol missing").message(m.from, m.data);
+                                self.protocol
+                                    .as_mut()
+                                    .expect("protocol missing")
+                                    .message(m.from, m.data);
                             }
                             ArtifactMessage::Presignature(m) => {
                                 early_presign_messages.push(m);

@@ -29,9 +29,7 @@ async fn test_sync_noop_when_fully_synced() {
     let node0_presigs = node0.owned_presignatures().await;
 
     // Responder side: node1 receives node0's sync update and reports what it's missing.
-    let response = node1
-        .sync(node0, Vec::new(), node0_presigs.clone())
-        .await;
+    let response = node1.sync(node0, Vec::new(), node0_presigs.clone()).await;
     assert!(
         response.presignatures.is_empty(),
         "node1 should have all of node0's presignatures"
@@ -290,9 +288,7 @@ async fn test_sync_remove_outdated_orphan() {
     let node0_presigs = node0.owned_presignatures().await;
     assert!(!node0_presigs.contains(&77), "node0 should not own id=77");
 
-    let response = node1
-        .sync(node0, Vec::new(), node0_presigs.clone())
-        .await;
+    let response = node1.sync(node0, Vec::new(), node0_presigs.clone()).await;
     assert!(
         response.presignatures.is_empty(),
         "node1 should not report any missing presignatures"
@@ -421,7 +417,13 @@ async fn test_sync_matrix() {
                     id..=id,
                 )
                 .await;
-                caller_taken = Some(caller.presignature_storage.take(id, caller.me).await.unwrap());
+                caller_taken = Some(
+                    caller
+                        .presignature_storage
+                        .take(id, caller.me)
+                        .await
+                        .unwrap(),
+                );
             }
             ArtifactState::None => {}
         }
@@ -454,7 +456,13 @@ async fn test_sync_matrix() {
                     id..=id,
                 )
                 .await;
-                responder_taken = Some(responder.presignature_storage.take(id, caller.me).await.unwrap());
+                responder_taken = Some(
+                    responder
+                        .presignature_storage
+                        .take(id, caller.me)
+                        .await
+                        .unwrap(),
+                );
             }
             ArtifactState::None => {}
         }
@@ -506,7 +514,10 @@ async fn test_sync_matrix() {
             .process_sync_response(responder.me, 2, &response)
             .await;
         assert_eq!(
-            caller.presignature_storage.contains_by_owner(id, caller.me).await,
+            caller
+                .presignature_storage
+                .contains_by_owner(id, caller.me)
+                .await,
             case.expected_caller.stored_after,
             "case {i}: caller={:?}, responder={:?} → expected caller stored_after={}",
             case.caller,
@@ -531,10 +542,7 @@ async fn shares_by_owner(
 ) -> Vec<(Participant, usize)> {
     let mut shares = Vec::new();
     for &owner in owners {
-        shares.push((
-            owner,
-            node.presignature_storage.len_by_owner(owner).await,
-        ));
+        shares.push((owner, node.presignature_storage.len_by_owner(owner).await));
     }
     shares
 }

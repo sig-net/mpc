@@ -331,11 +331,7 @@ impl SyncTask {
                             }
                         }
                         Err(err) => {
-                            tracing::warn!(
-                                ?peer,
-                                ?err,
-                                "sync batch failed, not notifying mesh"
-                            );
+                            tracing::warn!(?peer, ?err, "sync batch failed, not notifying mesh");
                         }
                     }
                 }

@@ -84,7 +84,6 @@ async fn test_basic_generate_keys() {
     }
 }
 
-
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_presignature() {
     const N: u32 = if WRITE_OUTPUT_TO_FILES {
@@ -647,7 +646,6 @@ async fn test_sign_contention_5_nodes() {
     );
 }
 
-
 async fn dump_presignatures(network: &MpcFixture) {
     let mut conn = network.redis_container.pool().get().await.unwrap();
     let mut data = BTreeMap::new();
@@ -838,7 +836,6 @@ async fn test_sign_no_presignature_waste() {
     }
 }
 
-
 /// Test that a node losing their presignatures locally doesn't prevent
 /// signatures from going through.
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -946,7 +943,6 @@ async fn test_sign_missing_presignature_after_posits() {
     assert_eq!(actions.len(), 1);
 }
 
-
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_presignature_message_count() {
     let network = MpcFixtureBuilder::default()
@@ -1023,7 +1019,14 @@ fn test_filter_artifacts_on_all_nodes() {
     let mut data = BTreeMap::new();
     data.insert(
         p0,
-        BTreeMap::from([(p0, vec![dummy_presignature(1), dummy_presignature(2), dummy_presignature(3)])]),
+        BTreeMap::from([(
+            p0,
+            vec![
+                dummy_presignature(1),
+                dummy_presignature(2),
+                dummy_presignature(3),
+            ],
+        )]),
     );
     data.insert(
         p1,
@@ -1053,11 +1056,25 @@ fn test_truncate_per_owner() {
     let mut data = BTreeMap::new();
     data.insert(
         p0,
-        BTreeMap::from([(p0, vec![dummy_presignature(1), dummy_presignature(2), dummy_presignature(3)])]),
+        BTreeMap::from([(
+            p0,
+            vec![
+                dummy_presignature(1),
+                dummy_presignature(2),
+                dummy_presignature(3),
+            ],
+        )]),
     );
     data.insert(
         p1,
-        BTreeMap::from([(p0, vec![dummy_presignature(1), dummy_presignature(2), dummy_presignature(3)])]),
+        BTreeMap::from([(
+            p0,
+            vec![
+                dummy_presignature(1),
+                dummy_presignature(2),
+                dummy_presignature(3),
+            ],
+        )]),
     );
     let result = truncate_per_owner(data, 2);
     assert_eq!(result[&p0][&p0].len(), 2);

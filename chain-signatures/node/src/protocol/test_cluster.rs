@@ -39,7 +39,8 @@ pub struct TestCluster {
 
 impl TestCluster {
     pub async fn new(threshold: usize, total: usize) -> anyhow::Result<Self> {
-        let participants: Vec<Participant> = (0..total).map(|i| Participant::from(i as u32)).collect();
+        let participants: Vec<Participant> =
+            (0..total).map(|i| Participant::from(i as u32)).collect();
         let mut sign_sks = HashMap::new();
         let mut cipher_sks = HashMap::new();
         let mut cipher_pks = HashMap::new();
@@ -81,10 +82,7 @@ impl TestCluster {
             let sign_sk = sign_sks[&p].clone();
             let (_config_tx, config_rx) = Config::channel(LocalConfig {
                 over: OverrideConfig::default(),
-                network: NetworkConfig {
-                    sign_sk,
-                    cipher_sk,
-                },
+                network: NetworkConfig { sign_sk, cipher_sk },
             });
             let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
                 &account_ids[&p],
@@ -111,10 +109,7 @@ impl TestCluster {
 
             let handle = tokio::spawn(async move {
                 while let Some(SendMessage {
-                    message,
-                    from,
-                    to,
-                    ..
+                    message, from, to, ..
                 }) = rx.recv().await
                 {
                     if let Some(to_cipher_pk) = peer_cipher_pks.get(&to) {
@@ -211,14 +206,7 @@ async fn drive_keygen(
             }
             Action::SendPrivate(to, data) => {
                 channel
-                    .send(
-                        me,
-                        to,
-                        GeneratingMessage {
-                            from: me,
-                            data,
-                        },
-                    )
+                    .send(me, to, GeneratingMessage { from: me, data })
                     .await;
             }
             Action::Return(out) => return Ok(out),

@@ -38,7 +38,6 @@ impl FullPresignatureId {
     }
 }
 
-
 /// A completed presignature.
 pub struct Presignature {
     pub id: PresignatureId,
@@ -327,7 +326,8 @@ impl PresignatureGenerator {
             Ok(presignature) => {
                 crate::metrics::protocols::PRESIGNATURE_LATENCY
                     .observe(start_time.elapsed().as_secs_f64());
-                crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS.inc();
+                crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS
+                    .inc();
                 if self.owner == self.me {
                     crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS.inc();
                 }

@@ -11,15 +11,9 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time;
 
-use super::message::{
-    MessageChannel, PositMessage, PositProtocolId,
-};
-use super::posit::{
-    PositAction, PositInternalAction, PositRejectReason, Positor, Posits,
-};
-use super::presignature::{
-    FullPresignatureId, PresignatureGenerator, PresignatureId,
-};
+use super::message::{MessageChannel, PositMessage, PositProtocolId};
+use super::posit::{PositAction, PositInternalAction, PositRejectReason, Positor, Posits};
+use super::presignature::{FullPresignatureId, PresignatureGenerator, PresignatureId};
 use super::triple::TripleGenerator;
 use super::MpcSignProtocol;
 use crate::config::Config;
@@ -118,8 +112,10 @@ impl ProtocolSpawner {
 
     /// Merged stockpile logic: monitors inventory against {min, max}_artifacts.
     async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
-        let min_artifacts = (cfg.presignature.min_presignatures as usize).max(cfg.triple.min_triples as usize);
-        let max_artifacts = (cfg.presignature.max_presignatures as usize).max(cfg.triple.max_triples as usize);
+        let min_artifacts =
+            (cfg.presignature.min_presignatures as usize).max(cfg.triple.min_triples as usize);
+        let max_artifacts =
+            (cfg.presignature.max_presignatures as usize).max(cfg.triple.max_triples as usize);
 
         let potential = self.len_potential().await;
         let mine = self.len_mine().await;
@@ -193,7 +189,9 @@ impl ProtocolSpawner {
                         PositMessage {
                             id: PositProtocolId::Presignature(id),
                             from: self.me,
-                            action: PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
+                            action: PositAction::RejectWithReason(
+                                PositRejectReason::AlreadyGenerating,
+                            ),
                         },
                     )
                     .await;
@@ -224,7 +222,10 @@ impl ProtocolSpawner {
                 tracing::warn!(?id, "artifact posit aborted due to too many rejections");
             }
             PositInternalAction::StartProtocol(participants, positor) => {
-                if let Err(err) = self.start_generation(id, positor, participants, timeout).await {
+                if let Err(err) = self
+                    .start_generation(id, positor, participants, timeout)
+                    .await
+                {
                     tracing::warn!(?id, ?err, "failed to start artifact generation");
                 }
             }
@@ -294,13 +295,7 @@ impl ProtocolSpawner {
             &node_account_id,
         );
 
-        let task = ProtocolTask::new(
-            id,
-            epoch,
-            triple_gen,
-            presign_gen,
-            msg,
-        );
+        let task = ProtocolTask::new(id, epoch, triple_gen, presign_gen, msg);
 
         self.ongoing.spawn(id.id, task.run());
 
@@ -426,7 +421,11 @@ impl ProtocolTask {
         };
 
         // Stage 2: Cait-Sith Presignature Generation in RAM & insert into PresignatureStorage
-        if let Err(err) = self.presign_gen.run(triple_pair, early_msgs, &mut inbox, self.epoch).await {
+        if let Err(err) = self
+            .presign_gen
+            .run(triple_pair, early_msgs, &mut inbox, self.epoch)
+            .await
+        {
             tracing::warn!(id = ?self.id, ?err, "stage 2 presignature generation failed");
         }
 
@@ -471,10 +470,7 @@ impl ProtocolSpawnerTask {
             ctx.my_account_id.to_string(),
         );
 
-        let handle = tokio::spawn(spawner.run(
-            ctx.mesh_state.clone(),
-            ctx.config.clone(),
-        ));
+        let handle = tokio::spawn(spawner.run(ctx.mesh_state.clone(), ctx.config.clone()));
 
         Self {
             ongoing_triples_rx,
