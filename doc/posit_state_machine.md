@@ -73,7 +73,7 @@ Two things are held per node rather than kept per request: (i) the mesh's active
 ```mermaid
 stateDiagram-v2
     state "<b>Waiting for participants</b><br/>1. round timeout starts ticking<br/>2. wait for t active peers<br/>3. determine role" as WaitingForParticipants
-    state "<b>Reserving</b><br/>1. take one of 4 permits<br/>2. reserve a presignature with at least t active holders<br/>3. send PROPOSE to those active holders" as Reserving
+    state "<b>Reserving</b><br/>1. take one of the chain's 4 permits<br/>2. reserve a presignature with at least t active holders<br/>3. send PROPOSE to those active holders" as Reserving
     state "Posit" as PositOut
 
     [*] --> WaitingForParticipants
@@ -195,7 +195,8 @@ No message carries the outcome of a round, so an excluded member cannot tell
 "round `r` succeeded without me" from "round `r` still running". It keeps
 rotating: it burns the round for every peer still waiting, and in the rounds
 where it is elected proposer it takes one of the `MAX_CONCURRENT_PROPOSERS` (4)
-permits, which is proposer-only, so a deliberator holds none, and reserves a
+permits of its chain's pool (#1177), which is proposer-only, so a deliberator
+holds none, and reserves a
 presignature that it returns to the pool on timeout. The permit is therefore
 held intermittently rather than for the whole wait, and the steady cost is the
 wasted rounds and the repeated reservations.
@@ -309,7 +310,9 @@ are known, and every state shares whatever is left of it.
 Round 0 gets 20s. Round 1 starts at a 2s floor and each later round grows 1.15x,
 up to a 600s ceiling. Short early rounds rotate quickly past dead proposers;
 long later rounds outlast the skew between nodes that indexed the request at
-different times.
+different times. A respawned task's first budget is `round_timeout(r)` or the
+round-0 budget, whichever is larger (#1320), so a respawn at a low round is not
+starved.
 
 | State | Time limit |
 |---|---|
