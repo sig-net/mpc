@@ -122,6 +122,49 @@ const MAX_DEAD_IDS: usize = 4096;
 type SignTaskKey = (SignId, RequestKind);
 type SignTaskExit = Result<(SignTaskKey, Result<(), SignError>), SignTaskKey>;
 
+/// Compact bitmask of request kinds considered dead for a given [`SignId`].
+/// Enables a completed or refused request to mark all kinds dead using a single
+/// entry in the [`SignatureSpawner::dead_ids`] LRU cache, while still allowing
+/// leg 1 retirement to mark only [`RequestKind::SignBidirectional`] dead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct DeadKinds(u8);
+
+impl DeadKinds {
+    const SIGN: u8 = 1 << 0;
+    const SIGN_BIDI: u8 = 1 << 1;
+    const RESPOND_BIDI: u8 = 1 << 2;
+    const ALL: u8 = Self::SIGN | Self::SIGN_BIDI | Self::RESPOND_BIDI;
+
+    fn all() -> Self {
+        Self(Self::ALL)
+    }
+
+    fn from_kind(kind: RequestKind) -> Self {
+        let bit = match kind {
+            RequestKind::Sign => Self::SIGN,
+            RequestKind::SignBidirectional => Self::SIGN_BIDI,
+            RequestKind::RespondBidirectional => Self::RESPOND_BIDI,
+        };
+        Self(bit)
+    }
+
+    fn insert(&mut self, kind: RequestKind) {
+        self.0 |= Self::from_kind(kind).0;
+    }
+
+    fn remove(&mut self, kind: RequestKind) {
+        self.0 &= !Self::from_kind(kind).0;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    fn contains(&self, kind: RequestKind) -> bool {
+        (self.0 & Self::from_kind(kind).0) != 0
+    }
+}
+
 /// A retained in-flight request. `is_proposer` is shared with the current
 /// task incarnation and read by the deadline watcher; `round` carries the
 /// posit round across respawns.
@@ -149,7 +192,7 @@ pub struct SignatureSpawner {
     /// In-flight requests: enables chain-scoped abort and respawning.
     requests: HashMap<SignId, SignEntry>,
     /// Recently completed/aborted sign IDs and leg kinds; prevents late peer posit messages from recreating orphan mailboxes.
-    dead_ids: LruCache<SignTaskKey, ()>,
+    dead_ids: LruCache<SignId, DeadKinds>,
     mesh_state: watch::Receiver<MeshState>,
     /// Caps concurrent sign-task progress per chain so requests don't flood the system's compute.
     limiters: EnumMap<Chain, SignLimiter>,
@@ -205,7 +248,7 @@ impl SignatureSpawner {
         let kind = entry.request().request_kind();
         // Ensure we don't retain the dead tag from a prior incarnation of this
         // sign ID (e.g. after regression recovery re-queues a completed request).
-        self.dead_ids.pop(&(sign_id, kind));
+        self.unmark_dead(sign_id, kind);
         let is_proposer = Arc::new(AtomicBool::new(false));
         let chain = entry.chain();
         let request = Arc::clone(entry.request());
@@ -316,7 +359,11 @@ impl SignatureSpawner {
     fn handle_posit(&mut self, sign_id: SignId, kind: RequestKind, msg: SignPositMessage) {
         // Drop late-arriving posits for already-completed/aborted sign IDs
         // to prevent re-creating orphan mailboxes.
-        if self.dead_ids.contains(&(sign_id, kind)) {
+        if self
+            .dead_ids
+            .get(&sign_id)
+            .is_some_and(|dead| dead.contains(kind))
+        {
             return;
         }
         self.posit_mailboxes
@@ -327,18 +374,7 @@ impl SignatureSpawner {
 
     /// A peer/chain reported this signature done: tear down and abort our task.
     fn handle_completion(&mut self, sign_id: SignId) {
-        let kind = self
-            .requests
-            .get(&sign_id)
-            .map(|q| q.entry.request().request_kind());
-        let aborted = if let Some(kind) = kind {
-            self.retire_task(sign_id, kind, "completion")
-        } else {
-            self.retire_task(sign_id, RequestKind::Sign, "completion");
-            self.retire_task(sign_id, RequestKind::SignBidirectional, "completion");
-            self.retire_task(sign_id, RequestKind::RespondBidirectional, "completion");
-            false
-        };
+        let aborted = self.retire_all(sign_id, "completion");
         if aborted {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
         } else {
@@ -383,6 +419,10 @@ impl SignatureSpawner {
                 return;
             }
         };
+        // Retires only this task's specific leg kind. If this was leg 1 (SignBidirectional),
+        // leg 2 (RespondBidirectional) is not retired here because leg 2 is expected
+        // to arrive on chain and may already have pre-buffered posits. If leg 2 never
+        // arrives, its mailboxes are retired upon on-chain completion or chain abort.
         self.retire_task(sign_id, kind, "task completion");
         match result {
             Ok(()) => {
@@ -398,7 +438,26 @@ impl SignatureSpawner {
     /// instead of recreating an orphan mailbox. Automatically LRU-evicts the
     /// stalest entry when the cache exceeds [`MAX_DEAD_IDS`].
     fn mark_dead(&mut self, sign_id: SignId, kind: RequestKind) {
-        self.dead_ids.put((sign_id, kind), ());
+        if let Some(dead) = self.dead_ids.get_mut(&sign_id) {
+            dead.insert(kind);
+        } else {
+            self.dead_ids.put(sign_id, DeadKinds::from_kind(kind));
+        }
+    }
+
+    /// Record a sign ID as dead for all leg kinds.
+    fn mark_dead_all(&mut self, sign_id: SignId) {
+        self.dead_ids.put(sign_id, DeadKinds::all());
+    }
+
+    /// Clear dead flag for a specific leg kind when a request incarnation is admitted.
+    fn unmark_dead(&mut self, sign_id: SignId, kind: RequestKind) {
+        if let Some(dead) = self.dead_ids.get_mut(&sign_id) {
+            dead.remove(kind);
+            if dead.is_empty() {
+                self.dead_ids.pop(&sign_id);
+            }
+        }
     }
 
     /// Common teardown when a sign request ends: abort its task if one is still
@@ -414,6 +473,26 @@ impl SignatureSpawner {
             }
         }
         self.posit_mailboxes.remove(&(sign_id, kind));
+        aborted
+    }
+
+    /// Complete teardown when a sign request completes, is refused, or aborts on chain regression:
+    /// abort tasks and drop mailboxes for all kinds, mark all kinds dead, forget the request,
+    /// and unwatch its delay monitoring. Returns whether any task was aborted.
+    fn retire_all(&mut self, sign_id: SignId, reason: &'static str) -> bool {
+        self.mark_dead_all(sign_id);
+        let mut aborted = false;
+        for kind in [
+            RequestKind::Sign,
+            RequestKind::SignBidirectional,
+            RequestKind::RespondBidirectional,
+        ] {
+            aborted |= self.tasks.abort((sign_id, kind));
+            self.posit_mailboxes.remove(&(sign_id, kind));
+        }
+        if self.requests.remove(&sign_id).is_some() {
+            self.delay_monitor.unwatch(sign_id, reason);
+        }
         aborted
     }
 
@@ -435,22 +514,14 @@ impl SignatureSpawner {
                     ?chain,
                     "aborting all in-flight signature tasks on chain regression"
                 );
-                let to_abort: Vec<(SignId, RequestKind)> = self
+                let to_abort: Vec<SignId> = self
                     .requests
                     .iter()
                     .filter(|(_, q)| q.entry.chain() == chain)
-                    .map(|(id, q)| (*id, q.entry.request().request_kind()))
+                    .map(|(id, _)| *id)
                     .collect();
-                for (sign_id, kind) in to_abort {
-                    self.retire_task(sign_id, kind, "chain aborted");
-                    // Peers ahead of us may already have buffered posits for the next leg.
-                    if kind == RequestKind::SignBidirectional {
-                        self.retire_task(
-                            sign_id,
-                            RequestKind::RespondBidirectional,
-                            "chain aborted",
-                        );
-                    }
+                for sign_id in to_abort {
+                    self.retire_all(sign_id, "chain aborted");
                 }
             }
             SignCommand::Request(entry) => {
@@ -484,21 +555,14 @@ impl SignatureSpawner {
 
                 // Every route into signing passes here, checkpoint recovery included (it skips
                 // admission). After the duplicate guard, so a refusal can't retire a tracked request.
-                let kind = entry.request().request_kind();
                 if claims_attestation_key(entry.request()) {
                     tracing::error!(
                         ?sign_id,
                         chain = %entry.chain(),
                         "refusing to sign on the reserved attestation path"
                     );
-                    // Drop posits peers sent ahead of the request, and any that arrive later.
-                    self.mark_dead(sign_id, kind);
-                    self.posit_mailboxes.remove(&(sign_id, kind));
-                    if kind == RequestKind::SignBidirectional {
-                        self.mark_dead(sign_id, RequestKind::RespondBidirectional);
-                        self.posit_mailboxes
-                            .remove(&(sign_id, RequestKind::RespondBidirectional));
-                    }
+                    // Drop posits peers sent ahead of the request, and any that arrive later across all kinds.
+                    self.retire_all(sign_id, "refused attestation path");
                     return;
                 }
 
@@ -574,7 +638,13 @@ impl SignatureSpawner {
 #[cfg(test)]
 impl SignatureSpawner {
     fn test_dead_ids_contains(&self, sign_id: &SignId, kind: RequestKind) -> bool {
-        self.dead_ids.contains(&(*sign_id, kind))
+        self.dead_ids
+            .peek(sign_id)
+            .is_some_and(|dead| dead.contains(kind))
+    }
+
+    fn test_dead_ids_len(&self) -> usize {
+        self.dead_ids.len()
     }
 
     fn test_posit_mailboxes_contains(&self, sign_id: &SignId, kind: RequestKind) -> bool {
@@ -1522,5 +1592,205 @@ mod tests {
         assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
         assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::SignBidirectional));
         assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert_eq!(spawner.test_dead_ids_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_completion_retires_buffered_next_leg_posits() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+
+        let mut spawner = SignatureSpawner::new(
+            account_id,
+            contract,
+            presignatures,
+            mesh_rx,
+            msg_channel,
+            RpcChannel { tx: rpc_tx },
+            sync_report_tx,
+        );
+        let backlog = crate::backlog::Backlog::new();
+        let cfg = ProtocolConfig::default();
+        let sign_id = SignId::new([89u8; 32]);
+
+        // 1. Admit first leg (SignBidirectional)
+        let leg1 = crate::backlog::mock::mock_bidi_request(sign_id, Chain::Solana);
+        let entry1 = backlog::SignEntry::generating(Arc::clone(&leg1), &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry1), &cfg);
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::SignBidirectional));
+
+        // 2. Deliver a second leg Propose while first leg is still running
+        spawner.handle_posit(
+            sign_id,
+            RequestKind::RespondBidirectional,
+            SignPositMessage {
+                presignature_id: 124,
+                round: 0,
+                from: Participant::from(1),
+                action: PositAction::Propose,
+            },
+        );
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
+
+        // 3. Completion arrives: must retire first leg AND buffered second leg posits, consuming exactly 1 LRU slot
+        spawner.handle_sign(&governance, SignCommand::Completion(sign_id), &cfg);
+        assert!(!spawner.test_tasks_contains(sign_id, RequestKind::SignBidirectional));
+        assert!(!spawner.test_requests_contains(&sign_id));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::SignBidirectional));
+        assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::Sign));
+        assert_eq!(spawner.test_dead_ids_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_untracked_completion_aborts_task_and_uses_single_lru_slot() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+
+        let mut spawner = SignatureSpawner::new(
+            account_id,
+            contract,
+            presignatures,
+            mesh_rx,
+            msg_channel,
+            RpcChannel { tx: rpc_tx },
+            sync_report_tx,
+        );
+        let sign_id = SignId::new([90u8; 32]);
+
+        // Spawn a task directly without entering requests (simulating untracked task)
+        spawner
+            .tasks
+            .spawn((sign_id, RequestKind::RespondBidirectional), async move {
+                std::future::pending::<Result<(), SignError>>().await
+            });
+        assert!(spawner.test_tasks_contains(sign_id, RequestKind::RespondBidirectional));
+        assert!(!spawner.test_requests_contains(&sign_id));
+
+        // Untracked completion arrives
+        let aborted = spawner.retire_all(sign_id, "completion");
+        assert!(aborted, "retire_all must report that a task was aborted");
+        assert!(!spawner.test_tasks_contains(sign_id, RequestKind::RespondBidirectional));
+        assert_eq!(spawner.test_dead_ids_len(), 1);
+        assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::Sign));
+        assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::SignBidirectional));
+        assert!(spawner.test_dead_ids_contains(&sign_id, RequestKind::RespondBidirectional));
+    }
+
+    #[tokio::test]
+    async fn test_refused_request_blocks_posits_across_all_kinds() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+
+        let mut spawner = SignatureSpawner::new(
+            account_id,
+            contract,
+            presignatures,
+            mesh_rx,
+            msg_channel,
+            RpcChannel { tx: rpc_tx },
+            sync_report_tx,
+        );
+        let backlog = crate::backlog::Backlog::new();
+        let cfg = ProtocolConfig::default();
+        let sign_id = SignId::new([91u8; 32]);
+
+        let propose = || SignPositMessage {
+            presignature_id: 0,
+            round: 0,
+            from: Participant::from(1),
+            action: PositAction::Propose,
+        };
+
+        // Pre-buffer posits for Sign and RespondBidirectional
+        spawner.handle_posit(sign_id, RequestKind::Sign, propose());
+        spawner.handle_posit(sign_id, RequestKind::RespondBidirectional, propose());
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
+        assert!(spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
+
+        // Refuse the request via attestation path
+        let mut req = crate::backlog::mock::mock_bidi_request(sign_id, Chain::Solana);
+        Arc::make_mut(&mut req).args.path = "solana response key".to_string();
+        let entry = backlog::SignEntry::generating(req, &backlog);
+        spawner.handle_sign(&governance, SignCommand::Request(entry), &cfg);
+
+        // All mailboxes must be cleared
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
+        assert_eq!(spawner.test_dead_ids_len(), 1);
+
+        // Late posits for any kind must be dropped and cannot reopen a mailbox
+        spawner.handle_posit(sign_id, RequestKind::Sign, propose());
+        spawner.handle_posit(sign_id, RequestKind::SignBidirectional, propose());
+        spawner.handle_posit(sign_id, RequestKind::RespondBidirectional, propose());
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::Sign));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::SignBidirectional));
+        assert!(!spawner.test_posit_mailboxes_contains(&sign_id, RequestKind::RespondBidirectional));
     }
 }
