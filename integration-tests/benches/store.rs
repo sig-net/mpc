@@ -15,7 +15,7 @@ use mpc_node::{
     protocol::{
         contract::{primitives::Participants, RunningContractState},
         presignature::Presignature,
-        sync::{SyncChannel, SyncTask},
+        sync::SyncTask,
         triple::Triple,
         ParticipantInfo, ProtocolState,
     },
@@ -65,7 +65,6 @@ struct SyncEnv {
     _redis: Redis,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
-    _sync_channel: SyncChannel,
 }
 
 fn env() -> (Runtime, SyncEnv) {
@@ -120,7 +119,7 @@ fn env() -> (Runtime, SyncEnv) {
             }),
         );
 
-        let (sync_channel, _sync) = SyncTask::new(
+        let _sync = SyncTask::new(
             &client,
             triples.clone(),
             presignatures.clone(),
@@ -140,7 +139,6 @@ fn env() -> (Runtime, SyncEnv) {
             _redis: redis,
             triples,
             presignatures,
-            _sync_channel: sync_channel,
         }
     });
 
