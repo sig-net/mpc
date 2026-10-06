@@ -156,7 +156,7 @@ impl BatchPublisher {
                     if received == 0 {
                         // All senders dropped: flush what's left and shut down.
                         if !actions_batch.is_empty() {
-                            self.execute_batch_publish(std::mem::take(&mut actions_batch))
+                            self.execute_batch_publish(self.take_batch(&mut actions_batch))
                                 .await;
                         }
                         return;
@@ -169,17 +169,22 @@ impl BatchPublisher {
                 }
                 // Flush the batch if the flush timer has elapsed and the batch is not empty.
                 _ = &mut flush_timer, if !actions_batch.is_empty() => {
-                    self.execute_batch_publish(std::mem::take(&mut actions_batch))
+                    self.execute_batch_publish(self.take_batch(&mut actions_batch))
                         .await;
                 }
             }
 
             // Flush the batch if it has reached the maximum batch size.
             if actions_batch.len() >= self.config.max_batch_size {
-                self.execute_batch_publish(std::mem::take(&mut actions_batch))
+                self.execute_batch_publish(self.take_batch(&mut actions_batch))
                     .await;
             }
         }
+    }
+
+    /// Take the batch for publishing, leaving a fresh right-sized buffer behind.
+    fn take_batch(&self, actions: &mut Vec<QueuedAction>) -> Vec<QueuedAction> {
+        std::mem::replace(actions, Vec::with_capacity(self.config.max_batch_size))
     }
 
     /// Attempt one batch publish and report the outcome to every awaiting caller;
