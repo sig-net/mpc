@@ -260,6 +260,11 @@ impl PresignatureGenerator {
         }
         let _guard = OngoingGuard::new(self.ongoing_tx.clone());
 
+        crate::metrics::storage::NUM_TRIPLES_TOTAL.dec();
+        if self.owner == self.me {
+            crate::metrics::storage::NUM_TRIPLES_MINE.dec();
+        }
+
         let start_time = Instant::now();
         let mut protocol: PresignatureProtocol = Box::new(cait_sith::presign(
             &self.participants,
