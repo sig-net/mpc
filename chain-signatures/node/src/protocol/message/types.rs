@@ -16,8 +16,7 @@ pub enum Protocols {
     Generating,
     Resharing,
     Ready,
-    Triple,
-    Presignature,
+    Artifact,
     Signature,
 }
 
@@ -25,6 +24,7 @@ pub type Round = usize;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum PositProtocolId {
+    // TODO: remove Triple once we coordinate breaking serialization changes (triples are generated ephemerally and never posited).
     Triple(TripleId),
     Presignature(FullPresignatureId),
     Signature(SignId, PresignatureId, Round),
@@ -142,6 +142,25 @@ impl From<PresignatureMessage> for Message {
     }
 }
 
+/// Node-internal message enum unifying triple and presignature messages for the stacked generator.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub enum ArtifactMessage {
+    Triple(TripleMessage),
+    Presignature(PresignatureMessage),
+}
+
+impl From<TripleMessage> for ArtifactMessage {
+    fn from(msg: TripleMessage) -> Self {
+        ArtifactMessage::Triple(msg)
+    }
+}
+
+impl From<PresignatureMessage> for ArtifactMessage {
+    fn from(msg: PresignatureMessage) -> Self {
+        ArtifactMessage::Presignature(msg)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct SignatureMessage {
     pub id: SignId,
@@ -256,11 +275,15 @@ impl ProtocolType for ReadyMessage {
 }
 
 impl ProtocolType for TripleMessage {
-    const PROTOCOL: Protocols = Protocols::Triple;
+    const PROTOCOL: Protocols = Protocols::Artifact;
 }
 
 impl ProtocolType for PresignatureMessage {
-    const PROTOCOL: Protocols = Protocols::Presignature;
+    const PROTOCOL: Protocols = Protocols::Artifact;
+}
+
+impl ProtocolType for ArtifactMessage {
+    const PROTOCOL: Protocols = Protocols::Artifact;
 }
 
 impl ProtocolType for SignatureMessage {
@@ -284,6 +307,15 @@ impl MessageFilterId for TripleMessage {
 impl MessageFilterId for PresignatureMessage {
     fn id(&self) -> u64 {
         self.id
+    }
+}
+
+impl MessageFilterId for ArtifactMessage {
+    fn id(&self) -> u64 {
+        match self {
+            ArtifactMessage::Triple(msg) => msg.id,
+            ArtifactMessage::Presignature(msg) => msg.id,
+        }
     }
 }
 

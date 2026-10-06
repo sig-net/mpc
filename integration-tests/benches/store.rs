@@ -1,10 +1,6 @@
 use std::time::Instant;
 
-use cait_sith::{
-    protocol::Participant,
-    triples::{TriplePub, TripleShare},
-    PresignOutput,
-};
+use cait_sith::{protocol::Participant, PresignOutput};
 use criterion::{criterion_group, criterion_main, Criterion};
 use elliptic_curve::CurveArithmetic;
 use integration_tests::{cluster::spawner::ClusterSpawner, containers::Redis};
@@ -16,11 +12,10 @@ use mpc_node::{
         contract::{primitives::Participants, RunningContractState},
         presignature::Presignature,
         sync::{SyncChannel, SyncTask},
-        triple::Triple,
         ParticipantInfo, ProtocolState,
     },
     rpc::ContractStateWatcher,
-    storage::{triple_storage::TriplePair, PresignatureStorage, TripleStorage},
+    storage::PresignatureStorage,
 };
 use near_account_id::AccountId;
 use tokio::{
@@ -63,7 +58,6 @@ struct SyncEnv {
     _mesh_state: watch::Receiver<MeshState>,
     _client: NodeClient,
     _redis: Redis,
-    triples: TripleStorage,
     presignatures: PresignatureStorage,
     _sync_channel: SyncChannel,
 }
@@ -78,8 +72,8 @@ fn env() -> (Runtime, SyncEnv) {
     let env = rt.block_on(async move {
         let spawner = ClusterSpawner::default()
             .with_config(|cfg| {
-                cfg.protocol.triple.min_triples = 3 * 1024;
-                cfg.protocol.triple.max_triples = 1000000;
+                cfg.protocol.presignature.min_presignatures = 3 * 1024;
+                cfg.protocol.presignature.max_presignatures = 1000000;
             })
             .network("bench-protocol-sync")
             .init_network()
@@ -87,14 +81,7 @@ fn env() -> (Runtime, SyncEnv) {
             .unwrap();
 
         let redis = spawner.spawn_redis().await;
-        let triples = redis.triple_storage(&node_id, me);
         let presignatures = redis.presignature_storage(&node_id, me);
-        {
-            let participants = into_contract_participants(&participants);
-            redis
-                .stockpile_triples(&spawner.cfg, &participants, 1)
-                .await;
-        }
         let client = NodeClient::new(&node_client::Options::default());
         let (sync_report_tx, sync_report_rx) = mpsc::channel(1024);
         let mesh = Mesh::new(
@@ -122,7 +109,6 @@ fn env() -> (Runtime, SyncEnv) {
 
         let (sync_channel, _sync) = SyncTask::new(
             &client,
-            triples.clone(),
             presignatures.clone(),
             mesh.watch(),
             contract_watcher,
@@ -138,7 +124,6 @@ fn env() -> (Runtime, SyncEnv) {
             _mesh_state: mesh.watch(),
             _client: client,
             _redis: redis,
-            triples,
             presignatures,
             _sync_channel: sync_channel,
         }
@@ -151,22 +136,6 @@ fn bench_load_keys(c: &mut Criterion) {
     let env_start = Instant::now();
     let (rt, env) = env();
     tracing::info!(elapsed = ?env_start.elapsed(), "init store env");
-
-    c.bench_function("add 1000 triples", |b| {
-        b.iter(|| {
-            rt.block_on(async {
-                for i in 0..1000 {
-                    let t = dummy_pair(i);
-                    env.triples
-                        .create_slot(t.id, env.me)
-                        .await
-                        .unwrap()
-                        .insert(t, env.me)
-                        .await;
-                }
-            });
-        })
-    });
 
     c.bench_function("add 1000 presignatures", |b| {
         b.iter(|| {
@@ -181,16 +150,6 @@ fn bench_load_keys(c: &mut Criterion) {
                         .await;
                 }
             });
-        })
-    });
-
-    c.bench_function("load 1024 mine triple keys", |b| {
-        b.iter(|| {
-            let task = || async {
-                let _ = env.triples.fetch_owned().await;
-            };
-
-            rt.block_on(task());
         })
     });
 
@@ -224,68 +183,5 @@ fn dummy_presignature(id: u64) -> Presignature {
         },
         participants: vec![Participant::from(1), Participant::from(2)],
         holders: Some(vec![Participant::from(1), Participant::from(2)]),
-    }
-}
-
-fn dummy_pair(id: u64) -> TriplePair {
-    TriplePair {
-        id,
-        triple0: dummy_triple(),
-        triple1: dummy_triple(),
-        holders: Some(vec![Participant::from(1), Participant::from(2)]),
-    }
-}
-
-// TODO: cleanup and move this to a common test utils module
-fn dummy_triple() -> Triple {
-    Triple {
-        share: TripleShare {
-            a: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            b: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            c: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-        },
-        public: TriplePub {
-            big_a: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            big_b: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            big_c: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            participants: vec![Participant::from(1), Participant::from(2)],
-            threshold: 5,
-        },
-    }
-}
-
-fn into_contract_participants(
-    participants: &Participants,
-) -> mpc_contract::primitives::Participants {
-    mpc_contract::primitives::Participants {
-        next_id: participants.len() as u32,
-        participants: participants
-            .participants
-            .values()
-            .map(|info| {
-                (
-                    info.account_id.clone(),
-                    mpc_contract::primitives::ParticipantInfo {
-                        account_id: info.account_id.clone(),
-                        url: info.url.clone(),
-                        cipher_pk: info.cipher_pk.to_bytes(),
-                        sign_pk: near_sdk::PublicKey::from_parts(
-                            match info.sign_pk.key_type() {
-                                near_crypto::KeyType::ED25519 => near_sdk::CurveType::ED25519,
-                                near_crypto::KeyType::SECP256K1 => near_sdk::CurveType::SECP256K1,
-                                _ => unimplemented!(),
-                            },
-                            info.sign_pk.key_data().to_vec(),
-                        )
-                        .unwrap(),
-                    },
-                )
-            })
-            .collect(),
-        account_to_participant_id: participants
-            .participants
-            .iter()
-            .map(|(participant, info)| (info.account_id.clone(), (*participant).into()))
-            .collect(),
     }
 }

@@ -7,8 +7,7 @@ use crate::metrics::messaging::{
 };
 use crate::protocol::message::types::Round;
 use crate::protocol::message::{
-    GeneratingMessage, PresignatureMessage, ReadyMessage, ResharingMessage, SignatureMessage,
-    TripleMessage,
+    ArtifactMessage, GeneratingMessage, ReadyMessage, ResharingMessage, SignatureMessage,
 };
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
@@ -29,21 +28,19 @@ pub enum SubscribeId {
     TriplePosit,
     PresignaturePosit,
     SignaturePosit,
-    Triple(TripleId),
-    Presignature(PresignatureId),
     Signature(SignId, PresignatureId),
+    Artifact(u64),
 }
 
 pub enum SubscribeResponse {
     Generating(mpsc::Receiver<GeneratingMessage>),
     Resharing(mpsc::Receiver<ResharingMessage>),
     Ready(mpsc::Receiver<ReadyMessage>),
-    Triple(mpsc::Receiver<TripleMessage>),
     TriplePosit(mpsc::Receiver<(TripleId, Participant, PositAction)>),
-    Presignature(mpsc::Receiver<PresignatureMessage>),
     PresignaturePosit(mpsc::Receiver<(FullPresignatureId, Participant, PositAction)>),
     Signature(mpsc::Receiver<SignatureMessage>),
     SignaturePosit(mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)>),
+    Artifact(mpsc::Receiver<ArtifactMessage>),
 }
 
 /// Ties a message type to the `SubscribeResponse` variant carrying its receiver.
@@ -68,12 +65,11 @@ impl_subscription_message! {
     GeneratingMessage => Generating,
     ResharingMessage => Resharing,
     ReadyMessage => Ready,
-    TripleMessage => Triple,
     (TripleId, Participant, PositAction) => TriplePosit,
-    PresignatureMessage => Presignature,
     (FullPresignatureId, Participant, PositAction) => PresignaturePosit,
     SignatureMessage => Signature,
     (SignId, PresignatureId, Round, Participant, PositAction) => SignaturePosit,
+    ArtifactMessage => Artifact,
 }
 
 pub enum SubscribeRequestAction {

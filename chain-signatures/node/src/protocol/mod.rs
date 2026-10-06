@@ -9,6 +9,7 @@ pub mod request;
 pub mod signature;
 pub mod state;
 pub mod sync;
+pub mod task;
 pub mod triple;
 
 #[cfg(feature = "test-feature")]
@@ -19,6 +20,7 @@ pub use contract::ProtocolState;
 pub use message::{Message, MessageChannel};
 pub use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, RespondBidirectionalTx};
 pub use state::{Node, NodeState};
+pub use task::{ProtocolSpawner, ProtocolSpawnerTask, ProtocolTask};
 
 use crate::config::Config;
 use crate::mesh::MeshState;
@@ -29,7 +31,6 @@ use crate::protocol::request::SignatureSpawnerTask;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
-use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
 use semver::Version;
@@ -38,10 +39,29 @@ use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
 use tokio::sync::{mpsc, watch};
 
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolError {
+    #[error("timeout or aborted")]
+    TimeoutOrAborted,
+    #[error("protocol initialization failed: {0}")]
+    Init(#[from] cait_sith::protocol::InitializationError),
+    #[error("protocol error: {0}")]
+    Protocol(String),
+    #[error("blocking task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
+    #[error("insufficient triples returned (expected 2)")]
+    InsufficientTriples,
+}
+
+impl From<cait_sith::protocol::ProtocolError> for ProtocolError {
+    fn from(err: cait_sith::protocol::ProtocolError) -> Self {
+        Self::Protocol(err.to_string())
+    }
+}
+
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
     pub(crate) secret_storage: SecretNodeStorageVariant,
-    pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
     pub(crate) sign_task: SignatureSpawnerTask,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,

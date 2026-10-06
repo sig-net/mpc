@@ -1,6 +1,5 @@
 use super::contract::{primitives::Participants, ResharingContractState};
-use super::triple::TripleSpawnerTask;
-use crate::protocol::presignature::PresignatureSpawnerTask;
+use super::task::ProtocolSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 
 use cait_sith::protocol::Participant;
@@ -74,8 +73,7 @@ pub struct RunningState {
     pub threshold: usize,
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
-    pub triple_task: TripleSpawnerTask,
-    pub presign_task: PresignatureSpawnerTask,
+    pub protocol_spawner: ProtocolSpawnerTask,
 }
 
 pub struct ResharingState {
@@ -260,8 +258,8 @@ impl Node {
                 let _ = self.watcher_tx.send(NodeStatus::Running {
                     me: state.me,
                     participants: state.participants.keys_vec(),
-                    ongoing_triple_gen: state.triple_task.len_ongoing(),
-                    ongoing_presignature_gen: state.presign_task.len_ongoing(),
+                    ongoing_triple_gen: state.protocol_spawner.ongoing_triples(),
+                    ongoing_presignature_gen: state.protocol_spawner.ongoing_presignatures(),
                 });
             }
             NodeState::Resharing(state) => {

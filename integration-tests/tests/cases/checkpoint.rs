@@ -25,7 +25,6 @@ async fn test_web_server_serves_checkpoint() {
         .await;
 
     network.wait_for_running().await;
-    network.assert_triples(4, Duration::from_secs(30)).await;
     network
         .assert_presignatures(4, Duration::from_secs(30))
         .await;
@@ -98,7 +97,6 @@ async fn test_consensus_alignment_peer_fetch() {
         .await;
 
     network.wait_for_running().await;
-    network.assert_triples(4, Duration::from_secs(30)).await;
     network
         .assert_presignatures(4, Duration::from_secs(30))
         .await;
@@ -209,7 +207,6 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
         .await;
 
     network.wait_for_running().await;
-    network.assert_triples(4, Duration::from_secs(30)).await;
     network
         .assert_presignatures(4, Duration::from_secs(30))
         .await;

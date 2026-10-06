@@ -375,10 +375,6 @@ impl ResharingState {
             return Err(());
         }
 
-        if !ctx.triple_storage.clear().await {
-            tracing::error!("failed to clear triples from storage on new epoch start");
-        }
-
         if !ctx.presignature_storage.clear().await {
             tracing::error!("failed to clear presignatures from storage on new epoch start");
         }

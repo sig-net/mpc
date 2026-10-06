@@ -19,7 +19,6 @@ use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, R
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
-use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::types::SignCommand;
 use crate::{logs, storage, web};
@@ -245,7 +244,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let StorageHandles {
                 key_storage,
-                triple_storage,
                 presignature_storage,
                 backlog,
             } = StorageHandles::new(&account_id, &storage_options).await?;
@@ -305,7 +303,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let (sync_channel, sync_task) = SyncTask::new(
                 &node_client,
-                triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
                 contract_watcher.clone(),
@@ -340,7 +337,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &node_client,
                 &contract_watcher,
                 key_storage,
-                triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
                 rpc_channel.clone(),
@@ -370,8 +366,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 web_port,
                 message_channel,
                 node_watcher,
-                triple_storage,
-                presignature_storage,
                 sync_channel,
                 account_id,
                 backlog.clone(),
@@ -692,7 +686,6 @@ impl RpcHandles {
 
 struct StorageHandles {
     key_storage: SecretNodeStorageVariant,
-    triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     backlog: Backlog,
 }
@@ -723,7 +716,6 @@ impl StorageHandles {
         let key_storage =
             storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
         let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
-        let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
             redis_pool.clone(),
@@ -731,7 +723,6 @@ impl StorageHandles {
         ));
         Ok(Self {
             key_storage,
-            triple_storage,
             presignature_storage,
             backlog,
         })
@@ -758,7 +749,6 @@ impl ProtocolHandles {
         node_client: &NodeClient,
         contract_watcher: &ContractStateWatcher,
         key_storage: SecretNodeStorageVariant,
-        triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
         rpc_channel: RpcChannel,
@@ -797,7 +787,6 @@ impl ProtocolHandles {
             ready: message_channel.subscribe_ready().await,
             sign_task,
             secret_storage: key_storage,
-            triple_storage,
             presignature_storage,
             config: config_rx,
             mesh_state,

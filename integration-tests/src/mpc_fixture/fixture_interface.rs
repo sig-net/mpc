@@ -17,7 +17,7 @@ use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{open_reply_for_test, SyncChannel, SyncError, SyncUpdate};
 use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
-use mpc_node::storage::{PresignatureStorage, TripleStorage};
+use mpc_node::storage::PresignatureStorage;
 use mpc_node::types::SignCommand;
 use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest};
 use near_sdk::AccountId;
@@ -49,7 +49,6 @@ pub struct MpcFixtureNode {
 
     /// Keeps the per-node checkpoint watch sender alive for the test's lifetime.
     pub checkpoint_tx: watch::Sender<Option<CheckpointDigest>>,
-    pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
     pub backlog: Backlog,
 
@@ -171,12 +170,6 @@ impl MpcFixture {
         p
     }
 
-    pub async fn wait_for_triples(&self, threshold_per_node: usize) {
-        for node in &self.nodes {
-            node.wait_for_triples(threshold_per_node).await;
-        }
-    }
-
     pub async fn wait_for_presignatures(&self, threshold_per_node: usize) {
         for node in &self.nodes {
             node.wait_for_presignatures(threshold_per_node).await;
@@ -227,14 +220,6 @@ impl MpcFixture {
 
             self.output.actions_changed.notified().await;
         }
-    }
-
-    pub async fn assert_triples(&self, threshold_per_node: usize, timeout: Duration) {
-        let result = tokio::time::timeout(timeout, self.wait_for_triples(threshold_per_node)).await;
-        if result.is_err() {
-            self.print_triples().await;
-        }
-        result.expect("should have enough triples")
     }
 
     pub async fn assert_presignatures(&self, threshold_per_node: usize, timeout: Duration) {
@@ -300,14 +285,6 @@ impl MpcFixture {
                     node.sign_tx.send(cmd.clone()).await.unwrap();
                 }
             }
-        }
-    }
-
-    pub async fn print_triples(&self) {
-        for node in &self.nodes {
-            let id = node.me;
-            let num = node.triple_storage.len_by_owner(id).await;
-            tracing::info!("Node {id:?} has {num} Ts");
         }
     }
 
@@ -378,16 +355,6 @@ impl MpcFixtureNode {
         }
     }
 
-    pub async fn wait_for_triples(&self, threshold_per_node: usize) {
-        loop {
-            let count = self.triple_storage.len_by_owner(self.me).await;
-            if count >= threshold_per_node {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        }
-    }
-
     pub async fn wait_for_presignatures(&self, threshold_per_node: usize) {
         loop {
             let count = self.presignature_storage.len_by_owner(self.me).await;
@@ -451,13 +418,6 @@ impl MpcFixtureNode {
         self.sync_channel.request_update(encrypted).await
     }
 
-    /// Get the list of triple IDs this node owns in storage (sorted).
-    pub async fn owned_triples(&self) -> Vec<u64> {
-        let mut ids = self.triple_storage.fetch_owned().await.unwrap();
-        ids.sort();
-        ids
-    }
-
     /// Get the list of presignature IDs this node owns in storage (sorted).
     pub async fn owned_presignatures(&self) -> Vec<u64> {
         let mut ids = self.presignature_storage.fetch_owned().await.unwrap();
@@ -466,9 +426,9 @@ impl MpcFixtureNode {
     }
 
     /// Owned + owned using + owned generating, sorted.
-    pub async fn owned_triples_with_reserved(&self) -> Vec<u64> {
+    pub async fn owned_presignatures_with_reserved(&self) -> Vec<u64> {
         let mut ids = self
-            .triple_storage
+            .presignature_storage
             .fetch_owned_with_reserved()
             .await
             .unwrap();
@@ -484,10 +444,6 @@ impl MpcFixtureNode {
         threshold: usize,
         response: &mpc_node::protocol::sync::SyncUpdate,
     ) {
-        self.triple_storage
-            .remove_holder_and_prune(peer, threshold, &response.triples)
-            .await
-            .expect("remove_holder_and_prune triples failed");
         self.presignature_storage
             .remove_holder_and_prune(peer, threshold, &response.presignatures)
             .await
@@ -507,8 +463,6 @@ impl MpcFixtureNode {
             web_port,
             self.msg_channel.clone(),
             self.state.clone(),
-            self.triple_storage.clone(),
-            self.presignature_storage.clone(),
             SyncChannel::new().1,
             account_id,
             self.backlog.clone(),

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::LazyLock;
 
 use prometheus::{exponential_buckets, linear_buckets, Counter, Histogram, IntGauge};

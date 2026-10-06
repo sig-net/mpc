@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
-use crate::NodeConfig;
 
 use anchor_client::anchor_lang::{solana_program::system_program, InstructionData, ToAccountMetas};
 use anyhow::{anyhow, Context};
@@ -16,16 +14,11 @@ use bollard::models::{Ipam, NetworkCreateRequest};
 use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
-use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::FullSignature;
-use elliptic_curve::rand_core::OsRng;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
 use mpc_chain_solana::SolConfig;
-use mpc_contract::primitives::Participants;
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::triple::Triple;
-use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::Chain;
 use near_account_id::AccountId;
 use reqwest::Client;
@@ -333,16 +326,6 @@ impl Redis {
             .unwrap()
     }
 
-    pub fn triple_storage(
-        &self,
-        id: &AccountId,
-        me: Participant,
-    ) -> mpc_node::storage::TripleStorage {
-        let storage = TriplePair::storage(&self.pool(), id);
-        storage.set_me(me);
-        storage
-    }
-
     pub fn presignature_storage(
         &self,
         id: &AccountId,
@@ -351,65 +334,6 @@ impl Redis {
         let storage = Presignature::storage(&self.pool(), id);
         storage.set_me(me);
         storage
-    }
-
-    pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
-        let pool = self.pool();
-        let storage = participants
-            .participants
-            .keys()
-            .map(|account_id| {
-                let me = Participant::from(
-                    *participants
-                        .account_to_participant_id
-                        .get(account_id)
-                        .unwrap(),
-                );
-                let storage = TriplePair::storage(&pool, account_id);
-                storage.set_me(me);
-                (me, storage)
-            })
-            .collect::<HashMap<_, _>>();
-
-        let participant_ids = participants
-            .account_to_participant_id
-            .values()
-            .map(|id| Participant::from(*id))
-            .collect::<Vec<_>>();
-        let (public, shares): (TriplePub<Secp256k1>, Vec<TripleShare<Secp256k1>>) =
-            cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
-
-        // - first/second loop add at least min_triples per node
-        // - third loop: for each pair, store the shares as pairs per node
-        let mut num_pairs = 0;
-        for owner in &participant_ids {
-            for _ in 0..(cfg.protocol.triple.min_triples * mul / 2) {
-                num_pairs += 1;
-                let pair_id = rand::random();
-                for ((me, triple0), triple1) in participant_ids
-                    .iter()
-                    .zip(shares_to_triples(&public, &shares))
-                    .zip(shares_to_triples(&public, &shares))
-                {
-                    let pair = TriplePair {
-                        id: pair_id,
-                        triple0,
-                        triple1,
-                        holders: Some(participant_ids.clone()),
-                    };
-                    storage
-                        .get(me)
-                        .unwrap()
-                        .create_slot(pair_id, *owner)
-                        .await
-                        .unwrap()
-                        .insert(pair, *owner)
-                        .await;
-                }
-            }
-        }
-
-        tracing::info!("stockpiled {num_pairs} triple pairs");
     }
 }
 
@@ -537,19 +461,6 @@ mod tests {
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
         );
     }
-}
-
-fn shares_to_triples(
-    public: &TriplePub<Secp256k1>,
-    shares: &[TripleShare<Secp256k1>],
-) -> Vec<Triple> {
-    shares
-        .iter()
-        .map(|share| Triple {
-            public: public.clone(),
-            share: share.clone(),
-        })
-        .collect()
 }
 
 pub struct Solana {

@@ -13,9 +13,9 @@ mod sub;
 mod types;
 
 pub use crate::protocol::message::types::{
-    GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
-    PresignatureMessage, Protocols, ReadyMessage, ResharingMessage, SignatureMessage,
-    TripleMessage,
+    ArtifactMessage, GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage,
+    PositProtocolId, PresignatureMessage, Protocols, ReadyMessage, ResharingMessage,
+    SignatureMessage, TripleMessage,
 };
 pub(crate) use crypto::cbor_to_bytes;
 pub use crypto::SignedMessage;
@@ -146,16 +146,8 @@ impl MessageChannel {
         }
     }
 
-    pub async fn filter_triple(&self, id: TripleId) {
-        if let Err(err) = self.filter.send((Protocols::Triple, id)).await {
-            tracing::warn!(?err, "failed to send filter message");
-        } else {
-            set_channel_capacity_tx("filter", &self.filter);
-        }
-    }
-
-    pub async fn filter_presignature(&self, id: PresignatureId) {
-        if let Err(err) = self.filter.send((Protocols::Presignature, id)).await {
+    pub async fn filter_artifact(&self, id: u64) {
+        if let Err(err) = self.filter.send((Protocols::Artifact, id)).await {
             tracing::warn!(?err, "failed to send filter message");
         } else {
             set_channel_capacity_tx("filter", &self.filter);
@@ -222,16 +214,6 @@ impl MessageChannel {
         }
     }
 
-    pub async fn subscribe_triple(&self, id: TripleId) -> mpsc::Receiver<TripleMessage> {
-        self.subscribe_or_closed(SubscribeId::Triple(id), "triple")
-            .await
-    }
-
-    pub async fn unsubscribe_triple(&self, id: TripleId) {
-        self.send_unsubscribe(SubscribeId::Triple(id), "triple")
-            .await;
-    }
-
     pub async fn subscribe_triple_posit(
         &self,
     ) -> mpsc::Receiver<(TripleId, Participant, PositAction)> {
@@ -244,16 +226,13 @@ impl MessageChannel {
             .await;
     }
 
-    pub async fn subscribe_presignature(
-        &self,
-        id: PresignatureId,
-    ) -> mpsc::Receiver<PresignatureMessage> {
-        self.subscribe_or_closed(SubscribeId::Presignature(id), "presignature")
+    pub async fn subscribe_artifact(&self, id: u64) -> mpsc::Receiver<ArtifactMessage> {
+        self.subscribe_or_closed(SubscribeId::Artifact(id), "artifact")
             .await
     }
 
-    pub async fn unsubscribe_presignature(&self, id: PresignatureId) {
-        self.send_unsubscribe(SubscribeId::Presignature(id), "presignature")
+    pub async fn unsubscribe_artifact(&self, id: u64) {
+        self.send_unsubscribe(SubscribeId::Artifact(id), "artifact")
             .await;
     }
 

@@ -12,7 +12,6 @@ use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus};
 use crate::protocol::sync::SyncChannel;
 use crate::protocol::{Chain, MessageChannel};
-use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;
 
@@ -36,11 +35,6 @@ use tracing::Instrument;
 
 struct AxumState {
     node: NodeStateWatcher,
-    /// Only used by the debug page.
-    #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
-    triple_storage: TripleStorage,
-    #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
-    presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     msg_channel: MessageChannel,
     /// Only used to label the debug page.
@@ -54,8 +48,6 @@ pub async fn run(
     port: u16,
     msg_channel: MessageChannel,
     node: NodeStateWatcher,
-    triple_storage: TripleStorage,
-    presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     my_account_id: AccountId,
     backlog: Backlog,
@@ -64,8 +56,6 @@ pub async fn run(
     let axum_state = AxumState {
         msg_channel,
         node,
-        triple_storage,
-        presignature_storage,
         sync_channel,
         my_account_id,
         backlog,
