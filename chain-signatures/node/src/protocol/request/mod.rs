@@ -711,8 +711,14 @@ mod tests {
     use deadpool_redis::Runtime;
     use tokio::sync::Notify;
 
-    #[tokio::test]
-    async fn test_abort_chain_dead_ids_lifecycle() {
+    struct TestSetup {
+        spawner: SignatureSpawner,
+        governance: GovernanceInfo,
+        backlog: crate::backlog::Backlog,
+        cfg: ProtocolConfig,
+    }
+
+    fn setup() -> TestSetup {
         let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
         let mut participants = Participants::default();
         participants.insert(&Participant::from(0), ParticipantInfo::new(0));
@@ -740,7 +746,7 @@ mod tests {
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
 
-        let mut spawner = SignatureSpawner::new(
+        let spawner = SignatureSpawner::new(
             account_id,
             contract,
             presignatures,
@@ -750,8 +756,24 @@ mod tests {
             sync_report_tx,
         );
         let backlog = crate::backlog::Backlog::new();
-
         let cfg = ProtocolConfig::default();
+
+        TestSetup {
+            spawner,
+            governance,
+            backlog,
+            cfg,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_abort_chain_dead_ids_lifecycle() {
+        let TestSetup {
+            mut spawner,
+            governance,
+            backlog,
+            cfg,
+        } = setup();
         let sign_id = SignId::new([42u8; 32]);
         let request = crate::backlog::mock::mock_sign_request(sign_id, Chain::Solana);
 
@@ -852,44 +874,12 @@ mod tests {
     /// must leave that id admissible.
     #[tokio::test]
     async fn test_leg_completed_admits_the_next_leg() {
-        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-
-        let governance = GovernanceInfo {
-            me: Participant::from(0),
-            threshold: 1,
-            epoch: 0,
-            public_key: k256::AffinePoint::default(),
-            participants: [Participant::from(0)].into_iter().collect(),
-            is_running: true,
-        };
-
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
-        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-
-        let mut spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
-        let backlog = crate::backlog::Backlog::new();
-        let cfg = ProtocolConfig::default();
+        let TestSetup {
+            mut spawner,
+            governance,
+            backlog,
+            cfg,
+        } = setup();
         let sign_id = SignId::new([7u8; 32]);
         let request = crate::backlog::mock::mock_sign_request(sign_id, Chain::Solana);
 
@@ -937,44 +927,12 @@ mod tests {
     /// the refusal has to hold here too, without catching the legitimate leg 2.
     #[tokio::test]
     async fn test_refuses_the_reserved_attestation_path() {
-        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-
-        let governance = GovernanceInfo {
-            me: Participant::from(0),
-            threshold: 1,
-            epoch: 0,
-            public_key: k256::AffinePoint::default(),
-            participants: [Participant::from(0)].into_iter().collect(),
-            is_running: true,
-        };
-
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
-        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-
-        let mut spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
-        let backlog = crate::backlog::Backlog::new();
-        let cfg = ProtocolConfig::default();
+        let TestSetup {
+            mut spawner,
+            governance,
+            backlog,
+            cfg,
+        } = setup();
 
         let reserved = |id: SignId| {
             let mut request = crate::backlog::mock::mock_sign_request(id, Chain::Solana);
@@ -1029,44 +987,12 @@ mod tests {
     /// a request of the same kind stays a duplicate.
     #[tokio::test]
     async fn test_next_leg_supersedes_tracked_request() {
-        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-
-        let governance = GovernanceInfo {
-            me: Participant::from(0),
-            threshold: 1,
-            epoch: 0,
-            public_key: k256::AffinePoint::default(),
-            participants: [Participant::from(0)].into_iter().collect(),
-            is_running: true,
-        };
-
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
-        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-
-        let mut spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
-        let backlog = crate::backlog::Backlog::new();
-        let cfg = ProtocolConfig::default();
+        let TestSetup {
+            mut spawner,
+            governance,
+            backlog,
+            cfg,
+        } = setup();
         let sign_id = SignId::new([9u8; 32]);
 
         // First leg in flight, with a task of its own.
@@ -1109,44 +1035,12 @@ mod tests {
     /// leg is a duplicate, not a reason to drop the leg that replaced it.
     #[tokio::test]
     async fn test_a_replayed_first_leg_does_not_supersede_the_second() {
-        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-
-        let governance = GovernanceInfo {
-            me: Participant::from(0),
-            threshold: 1,
-            epoch: 0,
-            public_key: k256::AffinePoint::default(),
-            participants: [Participant::from(0)].into_iter().collect(),
-            is_running: true,
-        };
-
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
-        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-
-        let mut spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
-        let backlog = crate::backlog::Backlog::new();
-        let cfg = ProtocolConfig::default();
+        let TestSetup {
+            mut spawner,
+            governance,
+            backlog,
+            cfg,
+        } = setup();
         let sign_id = SignId::new([9u8; 32]);
 
         // Second leg in flight, with a task of its own.
@@ -1186,44 +1080,12 @@ mod tests {
     /// back requests but not stop events.
     #[tokio::test]
     async fn test_leg_completion_for_an_untracked_id_is_a_no_op() {
-        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-
-        let governance = GovernanceInfo {
-            me: Participant::from(0),
-            threshold: 1,
-            epoch: 0,
-            public_key: k256::AffinePoint::default(),
-            participants: [Participant::from(0)].into_iter().collect(),
-            is_running: true,
-        };
-
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
-        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-
-        let mut spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
-        let backlog = crate::backlog::Backlog::new();
-        let cfg = ProtocolConfig::default();
+        let TestSetup {
+            mut spawner,
+            governance,
+            backlog,
+            cfg,
+        } = setup();
         let sign_id = SignId::new([13u8; 32]);
 
         // Nothing is tracked yet: the completion must not mark the id in any way.
@@ -1250,44 +1112,12 @@ mod tests {
     /// can land after the leg it would retire has been replaced.
     #[tokio::test]
     async fn test_late_leg_completion_spares_the_running_leg() {
-        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-
-        let governance = GovernanceInfo {
-            me: Participant::from(0),
-            threshold: 1,
-            epoch: 0,
-            public_key: k256::AffinePoint::default(),
-            participants: [Participant::from(0)].into_iter().collect(),
-            is_running: true,
-        };
-
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
-        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-
-        let mut spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
-        let backlog = crate::backlog::Backlog::new();
-        let cfg = ProtocolConfig::default();
+        let TestSetup {
+            mut spawner,
+            governance,
+            backlog,
+            cfg,
+        } = setup();
         let sign_id = SignId::new([11u8; 32]);
 
         // The second leg is already running.
@@ -1422,44 +1252,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_first_and_second_leg_posit_mailboxes_are_segregated() {
-        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-
-        let governance = GovernanceInfo {
-            me: Participant::from(0),
-            threshold: 1,
-            epoch: 0,
-            public_key: k256::AffinePoint::default(),
-            participants: [Participant::from(0)].into_iter().collect(),
-            is_running: true,
-        };
-
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
-        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-
-        let mut spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
-        let backlog = crate::backlog::Backlog::new();
-        let cfg = ProtocolConfig::default();
+        let TestSetup {
+            mut spawner,
+            governance,
+            backlog,
+            cfg,
+        } = setup();
         let sign_id = SignId::new([77u8; 32]);
 
         // 1. Admit first leg (SignBidirectional)
@@ -1524,44 +1322,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_abort_chain_retires_buffered_next_leg_posits() {
-        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-
-        let governance = GovernanceInfo {
-            me: Participant::from(0),
-            threshold: 1,
-            epoch: 0,
-            public_key: k256::AffinePoint::default(),
-            participants: [Participant::from(0)].into_iter().collect(),
-            is_running: true,
-        };
-
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
-        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-
-        let mut spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
-        let backlog = crate::backlog::Backlog::new();
-        let cfg = ProtocolConfig::default();
+        let TestSetup {
+            mut spawner,
+            governance,
+            backlog,
+            cfg,
+        } = setup();
         let sign_id = SignId::new([88u8; 32]);
 
         // 1. Admit first leg (SignBidirectional)
@@ -1597,44 +1363,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_completion_retires_buffered_next_leg_posits() {
-        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-
-        let governance = GovernanceInfo {
-            me: Participant::from(0),
-            threshold: 1,
-            epoch: 0,
-            public_key: k256::AffinePoint::default(),
-            participants: [Participant::from(0)].into_iter().collect(),
-            is_running: true,
-        };
-
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
-        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-
-        let mut spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
-        let backlog = crate::backlog::Backlog::new();
-        let cfg = ProtocolConfig::default();
+        let TestSetup {
+            mut spawner,
+            governance,
+            backlog,
+            cfg,
+        } = setup();
         let sign_id = SignId::new([89u8; 32]);
 
         // 1. Admit first leg (SignBidirectional)
@@ -1670,33 +1404,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_untracked_completion_aborts_task_and_uses_single_lru_slot() {
-        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
-        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-
-        let mut spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
+        let TestSetup { mut spawner, .. } = setup();
         let sign_id = SignId::new([90u8; 32]);
 
         // Spawn a task directly without entering requests (simulating untracked task)
@@ -1720,44 +1428,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_refused_request_blocks_posits_across_all_kinds() {
-        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-
-        let governance = GovernanceInfo {
-            me: Participant::from(0),
-            threshold: 1,
-            epoch: 0,
-            public_key: k256::AffinePoint::default(),
-            participants: [Participant::from(0)].into_iter().collect(),
-            is_running: true,
-        };
-
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
-        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-        let presignatures = Presignature::storage(&pool, &account_id);
-        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
-        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
-        let (contract, _tx) = ContractStateWatcher::with_running(
-            &account_id,
-            k256::AffinePoint::default(),
-            1,
-            participants.clone(),
-        );
-        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
-
-        let mut spawner = SignatureSpawner::new(
-            account_id,
-            contract,
-            presignatures,
-            mesh_rx,
-            msg_channel,
-            RpcChannel { tx: rpc_tx },
-            sync_report_tx,
-        );
-        let backlog = crate::backlog::Backlog::new();
-        let cfg = ProtocolConfig::default();
+        let TestSetup {
+            mut spawner,
+            governance,
+            backlog,
+            cfg,
+        } = setup();
         let sign_id = SignId::new([91u8; 32]);
 
         let propose = || SignPositMessage {
