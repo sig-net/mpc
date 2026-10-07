@@ -9,13 +9,13 @@ name: k6 Bidirectional Load Test
 #    deployed one holds ten addresses and its own job caps.
 #
 # A rate per minute (rpm_*) drives the deployed pinger; a rate per second
-# (rps_*, ramp_*) starts a runner pinger. Before each run a job funds the
-# addresses it will use: a runner pinger's sized to what the run will submit,
-# the deployed pinger's to its usual band.
+# (rps_*, ramp_*) starts a runner pinger. Before each run, the addresses it will
+# use are topped up from LT_SEPOLIA_FUNDING_SK to what the run could spend. The
+# deployed pinger's own hourly top-up normally keeps its addresses above that,
+# so this only fills in when that one falls behind.
 #
-# The runner pinger's secrets are repo secrets: LT_RUNNER_PINGER_SOL_SK (its
-# Solana requester key), LT_SEPOLIA_FUNDING_SK (the Sepolia wallet funding its
-# addresses), LT_SEPOLIA_RPC_URL and LT_SOLANA_DEVNET_RPC_URL.
+# The runner pinger signs with LT_RUNNER_PINGER_SOL_SK and reaches the chains
+# through LT_SEPOLIA_RPC_URL and LT_SOLANA_DEVNET_RPC_URL.
 #
 # Every job spends Sepolia gas and Solana fees: roughly 0.03 ETH a mid run and
 # 0.06 a high run, plus about 0.8 ETH the first high run leaves on its
@@ -92,7 +92,7 @@ env:
 
 jobs:
   # A schedule carries no inputs, so every setting is resolved here, once, for
-  # both jobs below.
+  # the jobs below.
   select:
     name: Select run
     runs-on: ubuntu-latest
@@ -172,8 +172,7 @@ jobs:
           INPUT_ENVIRONMENT: ${{ inputs.environment }}
 
   # Funds the addresses the run will use. Runs spend from one Sepolia wallet,
-  # whose transfers must not overlap. A concurrency group keeps only one job
-  # waiting, so this stays short.
+  # whose transfers must not overlap.
   fund:
     name: Fund the addresses
     needs: select
@@ -239,34 +238,38 @@ jobs:
               console.log(`::warning::Funding wallet ${address} holds ${eth} ETH, below ${process.env.FUNDING_LOW_BALANCE_ETH}: refill it with Sepolia ETH`);
           '
 
-      # A runner pinger's addresses are derived from its key and topped up to
-      # what the busiest one could spend. The deployed pinger's are derived from
-      # its public key and topped up to the pinger's defaults; funding first
-      # checks them against the addresses the pinger reports, and sends nothing
-      # if they differ. Empty values are unset to the pinger.
-      - name: Fund the addresses the run will use
+      # Both steps top each address up to what the busiest one could spend in
+      # the run.
+      - name: Fund the runner pinger's addresses
+        if: needs.select.outputs.mode == 'runner_pinger'
         working-directory: pinger
-        run: |
-          set -euo pipefail
-          args=(--env "$(jq -r 'join(",")' <<< "${ENVIRONMENTS}")")
-          if [ "${MODE}" = "runner_pinger" ]; then
-            args+=(--paths "${PATHS}" --address-jobs "${ADDRESS_JOBS}")
-          fi
-          pnpm fund "${args[@]}"
+        run: pnpm fund --env "${LT_CHAIN_ENV}" --paths "${PATHS}" --address-jobs "${ADDRESS_JOBS}"
         env:
-          MODE: ${{ needs.select.outputs.mode }}
-          ENVIRONMENTS: ${{ needs.select.outputs.environments }}
+          LT_CHAIN_ENV: ${{ needs.select.outputs.environment }}
           PATHS: ${{ steps.plan.outputs.paths }}
           ADDRESS_JOBS: ${{ steps.plan.outputs.address_jobs }}
-          SIG_SOL_SK: ${{ needs.select.outputs.mode == 'runner_pinger' && secrets.LT_RUNNER_PINGER_SOL_SK || '' }}
-          SIG_BIDIRECTIONAL_PATH_PREFIX: ${{ needs.select.outputs.mode == 'runner_pinger' && env.RUNNER_PINGER_PATH_PREFIX || '' }}
-          SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: ${{ needs.select.outputs.mode == 'runner_pinger' && env.RUNNER_PINGER_MIN_BALANCE_WEI || '' }}
+          SIG_SOL_SK: ${{ secrets.LT_RUNNER_PINGER_SOL_SK }}
+          SIG_BIDIRECTIONAL_PATH_PREFIX: ${{ env.RUNNER_PINGER_PATH_PREFIX }}
+          SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: ${{ env.RUNNER_PINGER_MIN_BALANCE_WEI }}
           # A first fill of a few hundred addresses is past the default per-run
           # cap, which is sized for a handful.
-          SIG_BIDIRECTIONAL_FUND_MAX_PER_RUN_ETH: ${{ needs.select.outputs.mode == 'runner_pinger' && '1' || '' }}
-          SIG_BIDIRECTIONAL_REQUESTER_PUBKEY: ${{ needs.select.outputs.mode == 'deployed' && env.DEPLOYED_PINGER_SOL_PUBKEY || '' }}
-          SIG_BIDIRECTIONAL_SERVICE_URL: ${{ needs.select.outputs.mode == 'deployed' && env.DEPLOYED_PINGER_URL || '' }}
-          API_SECRET: ${{ needs.select.outputs.mode == 'deployed' && secrets.LT_PINGER_API_KEY || '' }}
+          SIG_BIDIRECTIONAL_FUND_MAX_PER_RUN_ETH: '1'
+
+      # The pinger's own address count and floor, so its addresses are derived
+      # from its public key alone. They are checked against the ones the pinger
+      # reports, and nothing is sent if they differ.
+      - name: Fund the deployed pinger's addresses
+        if: needs.select.outputs.mode == 'deployed'
+        working-directory: pinger
+        run: |
+          pnpm fund --env "$(jq -r 'join(",")' <<< "${ENVIRONMENTS}")" \
+            --address-jobs "${ADDRESS_JOBS}"
+        env:
+          ENVIRONMENTS: ${{ needs.select.outputs.environments }}
+          ADDRESS_JOBS: ${{ steps.plan.outputs.address_jobs }}
+          SIG_BIDIRECTIONAL_REQUESTER_PUBKEY: ${{ env.DEPLOYED_PINGER_SOL_PUBKEY }}
+          SIG_BIDIRECTIONAL_SERVICE_URL: ${{ env.DEPLOYED_PINGER_URL }}
+          API_SECRET: ${{ secrets.LT_PINGER_API_KEY }}
 
   deployed:
     name: Bidirectional Load Test (${{ matrix.environment }})
@@ -459,7 +462,7 @@ jobs:
           K6_PROMETHEUS_RW_USERNAME: ${{ steps.grafana.outputs.username }}
           K6_PROMETHEUS_RW_PASSWORD: ${{ steps.grafana.outputs.password }}
           K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM: 'true'
-          LT_PINGER_URL: http://localhost:3001
+          LT_PINGER_URL: http://localhost:${{ env.PORT }}
           LT_PINGER_API_KEY: ${{ env.API_SECRET }}
           LT_STRATEGY: ${{ needs.select.outputs.strategy }}
           LT_DURATION: ${{ needs.select.outputs.duration }}
