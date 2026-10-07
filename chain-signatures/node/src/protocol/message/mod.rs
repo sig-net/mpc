@@ -21,7 +21,7 @@ pub(crate) use crypto::cbor_to_bytes;
 pub use crypto::SignedMessage;
 pub use inbox::MessageInbox;
 pub use outbox::{MessageOutbox, SendMessage};
-pub use sub::Subscriber;
+pub use sub::{PresignaturePosit, SignaturePosit, Subscriber, TriplePosit};
 
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
@@ -34,9 +34,7 @@ use crate::protocol::message::filter::MAX_FILTER_SIZE;
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeResponse, SubscriptionMessage,
 };
-use crate::protocol::message::types::Round;
-use crate::protocol::posit::PositAction;
-use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
+use crate::protocol::presignature::PresignatureId;
 use crate::protocol::triple::TripleId;
 use crate::protocol::Config;
 use crate::rpc::ContractStateWatcher;
@@ -232,9 +230,7 @@ impl MessageChannel {
             .await;
     }
 
-    pub async fn subscribe_triple_posit(
-        &self,
-    ) -> mpsc::Receiver<(TripleId, Participant, PositAction)> {
+    pub async fn subscribe_triple_posit(&self) -> mpsc::Receiver<TriplePosit> {
         self.subscribe_or_closed(SubscribeId::TriplePosit, "triple posit")
             .await
     }
@@ -257,9 +253,7 @@ impl MessageChannel {
             .await;
     }
 
-    pub async fn subscribe_presignature_posit(
-        &self,
-    ) -> mpsc::Receiver<(FullPresignatureId, Participant, PositAction)> {
+    pub async fn subscribe_presignature_posit(&self) -> mpsc::Receiver<PresignaturePosit> {
         self.subscribe_or_closed(SubscribeId::PresignaturePosit, "presignature posit")
             .await
     }
@@ -289,9 +283,7 @@ impl MessageChannel {
         .await;
     }
 
-    pub async fn subscribe_signature_posit(
-        &self,
-    ) -> mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)> {
+    pub async fn subscribe_signature_posit(&self) -> mpsc::Receiver<SignaturePosit> {
         self.subscribe_or_closed(SubscribeId::SignaturePosit, "signature posit")
             .await
     }
