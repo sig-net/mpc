@@ -34,10 +34,12 @@ enum CantonConnection {
 
 impl CantonConnection {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-    // Fast stall signal: a silent connection surfaces as an error so the
-    // supervisor restarts the run; its per-chain `live_block_timeout` watchdog
-    // is the slower backstop.
+    // Silence budget before probing transport liveness with an RFC 6455 ping
+    // (party-filtered streams go quiet legitimately). The supervisor's
+    // `live_block_timeout` watchdog is the slower backstop.
     const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
+    // Budget for the peer's mandatory Pong answer (RFC 6455 §5.5.2).
+    const PONG_TIMEOUT: Duration = Duration::from_secs(20);
     const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
     async fn connect(
@@ -90,16 +92,37 @@ impl CantonConnection {
         Ok(Self::Connected(ws_read, ws_write))
     }
 
-    /// Read the next message from the WebSocket. Returns `None` (transitioning to
-    /// `Disconnected`) on close, error, or a 60s message stall.
+    /// Read the next message. Returns `None` on close, error, or a stall that
+    /// survives an RFC 6455 liveness ping — quiet party-filtered streams are
+    /// legitimate, an unanswered ping is not.
     async fn next(&mut self) -> Option<Message> {
-        let Self::Connected(ws_read, _) = self else {
+        let Self::Connected(ws_read, ws_write) = self else {
             tracing::warn!("canton WebSocket not initialized");
             return None;
         };
-        let Ok(maybe_msg) = timeout(Self::MESSAGE_TIMEOUT, ws_read.next()).await else {
-            tracing::warn!("canton WebSocket stalled: no message for 60s");
-            return None;
+
+        let maybe_msg = match timeout(Self::MESSAGE_TIMEOUT, ws_read.next()).await {
+            Ok(maybe_msg) => maybe_msg,
+            Err(_) => {
+                if let Err(err) = timeout(
+                    Self::PONG_TIMEOUT,
+                    ws_write.send(Message::Ping(Vec::new().into())),
+                )
+                .await
+                {
+                    tracing::warn!(?err, "canton WebSocket liveness ping failed");
+                    return None;
+                }
+                // Any answer proves liveness and flows through the shared
+                // handling below; only silence fails the stream.
+                match timeout(Self::PONG_TIMEOUT, ws_read.next()).await {
+                    Ok(maybe_msg) => maybe_msg,
+                    Err(_) => {
+                        tracing::warn!("canton WebSocket stalled: silence despite ping");
+                        return None;
+                    }
+                }
+            }
         };
 
         let Some(msg) = maybe_msg else {
@@ -117,7 +140,7 @@ impl CantonConnection {
         if matches!(msg, Message::Close(_)) {
             tracing::info!("canton WebSocket received close frame");
             if let Err(err) = self.close().await {
-                tracing::debug!(%err, "failed to flush canton WebSocket close reply");
+                tracing::debug!(?err, "failed to flush canton WebSocket close reply");
             }
             return None;
         }
