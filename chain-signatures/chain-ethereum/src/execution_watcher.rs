@@ -172,11 +172,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         events.extend(sibling_events);
 
         // Candidates for a replacement that the nonce gate below observes late.
-        let midnight_pending: Vec<_> = unmined_watchers
-            .iter()
-            .filter(|(_, (_, tx))| tx.source_chain == Chain::Midnight)
-            .cloned()
-            .collect();
+        let late_candidates = unmined_watchers.clone();
 
         // Nonce gate: one-shot for new watchers, every block for retries,
         // every WATCHER_SLOW_SWEEP_INTERVAL blocks for edge-case consumption by a tx with no local watcher.
@@ -191,7 +187,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         events.extend(gated_events);
         failed.extend(gated_failed);
         events.extend(Self::resolve_late_replaced_siblings(
-            midnight_pending,
+            late_candidates,
             &late_consumed_slots,
         ));
 
@@ -538,17 +534,14 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         (events, consumed_slots, failed)
     }
 
-    /// A consumed nonce without this transaction's receipt is insufficient for a
-    /// Midnight attestation. Other source chains retain their failure response.
-    fn consumed_nonce_fallback(
+    /// A displaced non-Midnight request attests `Failed`: those applications
+    /// cancel by taking the nonce and refund on `Failed` until they can encode `Unviable`.
+    fn displaced_failure(
         tx_id: BidirectionalTxId,
         sign_id: SignId,
         tx: &BidirectionalTx,
         block_number: u64,
     ) -> Option<ChainEvent> {
-        if tx.source_chain == Chain::Midnight {
-            return None;
-        }
         Some(ChainEvent::ExecutionConfirmed {
             tx_id,
             sign_id,
@@ -559,7 +552,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     }
 
     /// Resolves pending watchers whose (sender, nonce) slot was consumed by a
-    /// different watched tx included in block `block_number`. A Midnight verdict
+    /// different watched tx included in block `block_number`. A verdict
     /// requires different unsigned bytes: another signature over the same
     /// transaction is not evidence that the requested execution became unviable.
     /// The supplied height belongs to the block containing the consuming tx,
@@ -586,8 +579,10 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                             result: ExecutionOutcome::Unviable,
                         },
                     )
+                } else if tx.serialized_transaction != consuming_tx.serialized_transaction {
+                    Self::displaced_failure(tx_id, sign_id, &tx, block_number)
                 } else {
-                    Self::consumed_nonce_fallback(tx_id, sign_id, &tx, block_number)
+                    None
                 };
                 if let Some(event) = event {
                     tracing::info!(
@@ -607,7 +602,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         (events, remaining)
     }
 
-    /// Resolves pending Midnight watchers displaced by a watched tx that the
+    /// Resolves pending watchers displaced by a watched tx that the
     /// nonce gate observed after its inclusion block: this node listed that tx's
     /// watcher late, restarted, or is retrying its output extraction. Each verdict
     /// uses the consuming tx's inclusion height, as the mined-block path does, so
@@ -705,19 +700,9 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                         }
                     }
                 }
-                Ok(BackfillOutcome::NotObserved) => {
-                    if let Some(event) =
-                        Self::consumed_nonce_fallback(tx_id, sign_id, &pending_tx, block_number)
-                    {
-                        tracing::info!(
-                            ?tx_id,
-                            ?sign_id,
-                            expected_nonce = pending_tx.nonce,
-                            "transaction replaced or dropped (nonce consumed by another tx)"
-                        );
-                        events.push(event);
-                    }
-                }
+                // An unknown taker may be this request's own tx under a
+                // signature this node does not hold: no outcome is known.
+                Ok(BackfillOutcome::NotObserved) => {}
                 Err(err) => {
                     tracing::warn!(
                         ?tx_id,
@@ -959,11 +944,7 @@ mod tests {
             .await
             .expect("should succeed");
 
-        assert_eq!(
-            events.len(),
-            2,
-            "Should emit 2 Failed events for consumed nonces"
-        );
+        assert!(events.is_empty(), "an unknown taker yields no outcome");
 
         nonce_mock.assert_async().await;
         receipt_mock_0.assert_async().await;
@@ -1508,7 +1489,7 @@ mod tests {
         failing_nonce_mock.remove_async().await;
 
         // Phase 2 (block 11, NOT a tick): retried via the nonce gate; nonce
-        // consumed, no receipt -> Failed at block 11
+        // consumed by the watched tx, which reverted in block 3
         let nonce_mock = server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
@@ -1522,6 +1503,8 @@ mod tests {
             .create_async()
             .await;
 
+        let mut reverted_receipt = success_receipt(tx_hash, from_address, 3);
+        reverted_receipt["status"] = json!("0x0");
         let receipt_mock = server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
@@ -1530,7 +1513,7 @@ mod tests {
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": null }).to_string())
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": reverted_receipt }).to_string())
             .expect(1)
             .create_async()
             .await;
@@ -1554,7 +1537,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(tx_id.0, tx_hash.0);
-                assert_eq!(*block_height, 11);
+                assert_eq!(*block_height, 3);
                 assert!(matches!(result, ExecutionOutcome::Failed));
             }
             other => panic!("expected ExecutionConfirmed, got {other:?}"),
@@ -1690,7 +1673,7 @@ mod tests {
                 Chain::Solana,
                 None,
                 Some("0x"),
-                Some(ExecutionOutcome::Failed),
+                None,
             ),
             (
                 "midnight trace unavailable",
@@ -1897,14 +1880,15 @@ mod tests {
     fn midnight_unviable_requires_different_unsigned_bytes_at_the_same_nonce() {
         let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
         let tx_hash = alloy::primitives::B256::repeat_byte(0xdd);
-        let mut tx = test_watcher_tx(tx_hash, from_address, 7);
-        Arc::make_mut(&mut tx).source_chain = Chain::Midnight;
-        for case in [
-            "same unsigned transaction",
-            "different sender",
-            "different nonce",
-            "no observation",
+        for (source_chain, case) in [
+            (Chain::Midnight, "same unsigned transaction"),
+            (Chain::Solana, "same unsigned transaction"),
+            (Chain::Midnight, "different sender"),
+            (Chain::Midnight, "different nonce"),
+            (Chain::Midnight, "no observation"),
         ] {
+            let mut tx = test_watcher_tx(tx_hash, from_address, 7);
+            Arc::make_mut(&mut tx).source_chain = source_chain;
             let mut consuming_tx = tx.clone();
             Arc::make_mut(&mut consuming_tx).id = BidirectionalTxId([0xee; 32]);
             if case != "same unsigned transaction" {
@@ -1933,8 +1917,8 @@ mod tests {
                 &consumed,
                 5,
             );
-            assert!(events.is_empty(), "{case}: must not infer Unviable");
-            assert_eq!(remaining.len(), 1, "{case}");
+            assert!(events.is_empty(), "{source_chain} {case}: no outcome");
+            assert_eq!(remaining.len(), 1, "{source_chain} {case}");
         }
     }
 
@@ -1987,10 +1971,9 @@ mod tests {
     }
 
     /// A replacement that the nonce gate observes only after its inclusion block
-    /// must resolve its displaced Midnight sibling at the replacement's inclusion
+    /// must resolve its displaced sibling at the replacement's inclusion
     /// height, as a node that watched it in time does, whatever the replacement's
-    /// own outcome and whichever watcher this node lists first. Legacy sources
-    /// keep resolving displaced watchers by nonce gate.
+    /// own outcome and whichever watcher this node lists first.
     #[tokio::test]
     async fn late_replacement_resolves_its_displaced_midnight_sibling() {
         /// When this node lists each watcher, relative to the replacement's
@@ -2171,15 +2154,17 @@ mod tests {
                     std::mem::discriminant(&ExecutionOutcome::Failed),
                 ));
             }
-            if source_chain == Chain::Midnight {
-                expected.push((
-                    displaced_hash,
-                    SignId::new(displaced_hash.0),
-                    source_chain,
-                    5,
-                    std::mem::discriminant(&ExecutionOutcome::Unviable),
-                ));
-            }
+            expected.push((
+                displaced_hash,
+                SignId::new(displaced_hash.0),
+                source_chain,
+                5,
+                std::mem::discriminant(&if source_chain == Chain::Midnight {
+                    ExecutionOutcome::Unviable
+                } else {
+                    ExecutionOutcome::Failed
+                }),
+            ));
             assert_eq!(outcomes, expected, "{name}");
             let extraction_attempts = match (replacement_succeeded, &listing) {
                 (false, _) => 0,
