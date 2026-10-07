@@ -219,22 +219,24 @@ fn parse_cpi_event(data: &str) -> Option<CpiEvent> {
         return None;
     };
     let (discriminator, event_data) = split_cpi_event(&ix_data)?;
-    if discriminator == SignatureRequestedEvent::DISCRIMINATOR {
-        decode(event_data).map(|ev| CpiEvent::Sign(SolanaSignEvent::SignatureRequested(ev)))
-    } else if discriminator == SignBidirectionalEvent::DISCRIMINATOR {
-        let ev: SignBidirectionalEvent = decode(event_data)?;
-        // An invalid target chain can't be handled downstream.
-        if let Err(e) = Chain::from_caip2_chain_id(&ev.caip2_id) {
-            tracing::warn!("invalid caip2 chain id in sign bidirectional event: {e:?}");
-            return None;
+    match discriminator {
+        SignatureRequestedEvent::DISCRIMINATOR => {
+            decode(event_data).map(|ev| CpiEvent::Sign(SolanaSignEvent::SignatureRequested(ev)))
         }
-        Some(CpiEvent::Sign(SolanaSignEvent::SignBidirectional(ev)))
-    } else if discriminator == RespondBidirectionalEvent::DISCRIMINATOR {
-        decode(event_data).map(CpiEvent::RespondBidirectional)
-    } else if discriminator == SignatureRespondedEvent::DISCRIMINATOR {
-        decode(event_data).map(CpiEvent::Responded)
-    } else {
-        None
+        SignBidirectionalEvent::DISCRIMINATOR => {
+            let ev: SignBidirectionalEvent = decode(event_data)?;
+            // An invalid target chain can't be handled downstream.
+            if let Err(e) = Chain::from_caip2_chain_id(&ev.caip2_id) {
+                tracing::warn!("invalid caip2 chain id in sign bidirectional event: {e:?}");
+                return None;
+            }
+            Some(CpiEvent::Sign(SolanaSignEvent::SignBidirectional(ev)))
+        }
+        RespondBidirectionalEvent::DISCRIMINATOR => {
+            decode(event_data).map(CpiEvent::RespondBidirectional)
+        }
+        SignatureRespondedEvent::DISCRIMINATOR => decode(event_data).map(CpiEvent::Responded),
+        _ => None,
     }
 }
 
@@ -410,6 +412,41 @@ mod tests {
             hex::encode(SolanaSignEvent::SignatureRequested(event).generate_request_id()),
             "7f7aee49c2a994cc17f85058f7e0b19a44603d619a7e738522f9aa329e457879"
         );
+    }
+
+    fn sign_bidirectional_ix_data(caip2_id: &str) -> String {
+        let event = SignBidirectionalEvent {
+            sender: Pubkey::new_from_array([0x11; 32]),
+            serialized_transaction: vec![1, 2, 3],
+            caip2_id: caip2_id.to_string(),
+            key_version: 0,
+            deposit: 0,
+            path: "path".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "dest".to_string(),
+            params: String::new(),
+            program_id: Pubkey::new_from_array([0x22; 32]),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+        };
+        let mut data = anchor_lang::event::EVENT_IX_TAG_LE.to_vec();
+        data.extend(anchor_lang::Event::data(&event));
+        solana_sdk::bs58::encode(data).into_string()
+    }
+
+    #[test]
+    fn emits_sign_bidirectional_cpi_event() {
+        let data = sign_bidirectional_ix_data("eip155:1");
+        assert!(matches!(
+            parse_cpi_event(&data),
+            Some(CpiEvent::Sign(SolanaSignEvent::SignBidirectional(ev))) if ev.caip2_id == "eip155:1"
+        ));
+    }
+
+    #[test]
+    fn skips_sign_bidirectional_event_with_invalid_caip2() {
+        let data = sign_bidirectional_ix_data("not-a-chain");
+        assert!(parse_cpi_event(&data).is_none());
     }
 
     #[test]
