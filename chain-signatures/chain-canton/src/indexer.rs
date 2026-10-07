@@ -34,8 +34,9 @@ enum CantonConnection {
 
 impl CantonConnection {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-    // TODO: this 60s message stall overlaps with the supervisor's per-chain
-    // `live_block_timeout` watchdog. Consolidate into one stall authority
+    // Fast stall signal: a silent connection surfaces as an error so the
+    // supervisor restarts the run; its per-chain `live_block_timeout` watchdog
+    // is the slower backstop.
     const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
     const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -155,59 +156,27 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
         })
     }
 
-    // TODO: ws_conn + last_seen_offset are threaded as explicit params because
-    // `run(&self)` is immutable. Consider better approache post migration
-    async fn connect_and_subscribe(
-        &self,
-        ws_conn: &mut CantonConnection,
-        begin_exclusive: u64,
-    ) -> anyhow::Result<()> {
+    // TODO: ws_conn is threaded as an explicit param because `run(&self)` is
+    // immutable. Consider a better approach post migration.
+    async fn subscribe(&self, begin_exclusive: u64) -> anyhow::Result<CantonConnection> {
         let jwt_token = self.client.bearer_token().await?;
         let ws_url = format!("{}/v2/updates", self.client.config.json_api_ws_url);
-        let party_id = &self.client.config.party_id;
-        *ws_conn = CantonConnection::connect(
+        CantonConnection::connect(
             &ws_url,
             &jwt_token,
-            party_id,
+            &self.client.config.party_id,
             &self.client.config.signer_template_id,
             begin_exclusive,
         )
-        .await?;
-        Ok(())
+        .await
     }
 
-    async fn reconnect(&self, ws_conn: &mut CantonConnection, resume_offset: u64) {
-        let mut backoff = Duration::from_secs(1);
+    /// Next ledger update, skipping non-text and unparsable messages. Returns
+    /// `None` when the connection closes, errors, or stalls; reconnecting is
+    /// the supervisor's job.
+    async fn next_update(&self, ws_conn: &mut CantonConnection) -> Option<ledger_api::Update> {
         loop {
-            match self.connect_and_subscribe(ws_conn, resume_offset).await {
-                Ok(()) => {
-                    tracing::info!(resume_offset, "canton WebSocket reconnected");
-                    return;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        ?err,
-                        resume_offset,
-                        backoff_secs = backoff.as_secs(),
-                        "canton WebSocket reconnect failed; retrying"
-                    );
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
-                }
-            }
-        }
-    }
-
-    async fn next_update(
-        &self,
-        ws_conn: &mut CantonConnection,
-        last_seen_offset: u64,
-    ) -> Option<ledger_api::Update> {
-        loop {
-            let Some(msg) = ws_conn.next().await else {
-                self.reconnect(ws_conn, last_seen_offset).await;
-                continue;
-            };
+            let msg = ws_conn.next().await?;
             let Message::Text(text) = msg else {
                 continue;
             };
@@ -282,7 +251,7 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
                 _ = cancel.cancelled() => return Ok(()),
                 r = tokio::time::timeout(
                     Duration::from_secs(2),
-                    self.next_update(ws_conn, *last_seen_offset),
+                    self.next_update(ws_conn),
                 ) => r,
             };
             match outcome {
@@ -294,7 +263,7 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
                     }
                 }
                 Ok(None) => {
-                    anyhow::bail!("canton WebSocket closed during catchup; reconnecting");
+                    anyhow::bail!("canton WebSocket closed during catchup");
                 }
                 Err(_) => {
                     // Timeout elapsed. Check if the global ledger end has progressed past target_offset.
@@ -336,8 +305,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
         let mut last_seen_offset = checkpoint;
 
         let anchor = self.client.fetch_ledger_end().await?;
-        let mut ws_conn = CantonConnection::Disconnected;
-        self.reconnect(&mut ws_conn, last_seen_offset).await;
+        let mut ws_conn = self.subscribe(last_seen_offset).await?;
 
         self.process_catchup_offset(
             &mut ws_conn,
@@ -356,12 +324,12 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
         loop {
             let update = tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
-                u = self.next_update(&mut ws_conn, last_seen_offset) => match u {
+                u = self.next_update(&mut ws_conn) => match u {
                     Some(u) => u,
-                    None => anyhow::bail!("canton WebSocket producer terminated"),
+                    None => anyhow::bail!("canton WebSocket closed or stalled"),
                 },
             };
-            last_seen_offset = self.process_update(&events_tx, &update).await?;
+            self.process_update(&events_tx, &update).await?;
         }
     }
 }
