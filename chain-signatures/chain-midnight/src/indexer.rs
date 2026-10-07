@@ -772,6 +772,7 @@ mod tests {
         oversized_states: HashSet<(String, String)>,
         undecodable_states: HashMap<(String, String), String>,
         transient_head_errors: Mutex<usize>,
+        block_errors: HashSet<u64>,
         live: tokio::sync::Mutex<Option<mpsc::Receiver<BlockRef>>>,
         park_at: Option<u64>,
         reached: Option<mpsc::Sender<String>>,
@@ -848,6 +849,9 @@ mod tests {
         async fn block_at(&self, number: u64) -> anyhow::Result<BlockRef> {
             if self.park_at == Some(number) {
                 self.park(format!("block_at:{number}")).await;
+            }
+            if self.block_errors.contains(&number) {
+                anyhow::bail!("fixture block lookup failed: connection reset by peer");
             }
             Ok(block_ref(number))
         }
@@ -1778,6 +1782,22 @@ mod tests {
             .expect("run task")
             .expect_err("anchor read errors fail the run for a supervised restart");
         assert!(err.to_string().contains("anchor"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_block_lookup_error_fails_the_run() {
+        let source = FixtureSource {
+            head: 10,
+            block_errors: HashSet::from([9]),
+            ..Default::default()
+        };
+        let harness = RunFixture::spawn(source, 8).await;
+        let err = harness
+            .handle
+            .await
+            .expect("run task")
+            .expect_err("block lookup errors fail the run for a supervised restart");
+        assert!(err.to_string().contains("block 9"), "{err:#}");
     }
 
     #[tokio::test]
