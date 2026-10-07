@@ -1,17 +1,21 @@
 //! Publishes finished MPC signatures to the Midnight central contract through opaque
 //! intents built and submitted by the companion process.
 
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind, Signature};
+use mpc_utils::task::AbortOnDrop;
 use mpc_utils::time::current_unix_timestamp;
 
+use crate::attestation::validate_attestation_response;
 use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
-use crate::intent_gen::{IntentGen, IntentRequest, WirePoint, WireSignature};
+use crate::intent_gen::{IntentGen, IntentRequest, WireAttestation, WirePoint, WireSignature};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 
@@ -69,6 +73,7 @@ struct RespondCall {
     circuit: RespondCircuit,
     request_id: [u8; 32],
     signature: WireSignature,
+    attestation: Option<WireAttestation>,
 }
 
 /// Posts MPC responses back to the Midnight central contract.
@@ -159,7 +164,14 @@ impl ChainPublisher for MidnightPublisher {
             // execution outcomes vary in length across requests. Cache the exact attested
             // bytes off-chain when possible; cache availability does not gate the response.
             if let Err(error) = store
-                .ensure_output(&call.request_id, &response.output)
+                .ensure_output(
+                    &call.request_id,
+                    response
+                        .attestation
+                        .as_ref()
+                        .context("Midnight attestation metadata is missing")?,
+                    &response.output,
+                )
                 .await
             {
                 tracing::warn!(
@@ -189,6 +201,7 @@ impl ChainPublisher for MidnightPublisher {
             contract_address: central_address,
             request_id: hex::encode(call.request_id),
             signature: call.signature.clone(),
+            attestation: call.attestation,
             contract_state: hex::encode(&chain.contract_state),
             ledger_parameters: hex::encode(&chain.ledger_parameters),
             ttl_seconds: ttl_seconds(&self.config, current_unix_timestamp()),
@@ -215,6 +228,78 @@ impl ChainPublisher for MidnightPublisher {
     }
 }
 
+/// Keeps Midnight publishing recoverable when the node or the intent builder is
+/// unavailable at startup: a background task connects with backoff, and until it has,
+/// each publish fails retryably instead of the chain going unpublished until a restart.
+pub struct RecoveringMidnightPublisher {
+    ready: Arc<OnceLock<MidnightPublisher>>,
+    _connector: AbortOnDrop,
+}
+
+impl RecoveringMidnightPublisher {
+    /// Validates `config` now, so a configuration that can never publish still fails at
+    /// startup, then connects in the background.
+    pub fn start(
+        config: &MidnightConfig,
+        telemetry: Arc<dyn PublisherTelemetry>,
+    ) -> anyhow::Result<Self> {
+        config.validate()?;
+        let config = config.clone();
+        Ok(Self::spawn(move || {
+            let config = config.clone();
+            let telemetry = telemetry.clone();
+            async move { MidnightPublisher::connect(&config, telemetry).await }
+        }))
+    }
+
+    fn spawn<F, Fut>(mut connect: F) -> Self
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: Future<Output = anyhow::Result<MidnightPublisher>> + Send,
+    {
+        let ready = Arc::new(OnceLock::new());
+        let connected = ready.clone();
+        let connector = tokio::spawn(async move {
+            let mut delay = Duration::from_secs(1);
+            loop {
+                match connect().await {
+                    Ok(publisher) => {
+                        // Only this task fills the slot; publishes only read it.
+                        let _ = connected.set(publisher);
+                        tracing::info!("midnight publisher connected");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            ?error,
+                            retry_in = ?delay,
+                            "midnight publisher failed to connect; retrying in background"
+                        );
+                    }
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(60));
+            }
+        });
+        Self {
+            ready,
+            _connector: AbortOnDrop(connector),
+        }
+    }
+}
+
+#[async_trait]
+impl ChainPublisher for RecoveringMidnightPublisher {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        // The message carries no status-like digits, so the publish loop keeps retrying.
+        self.ready
+            .get()
+            .context("midnight publisher is still connecting")?
+            .publish_signature(action)
+            .await
+    }
+}
+
 /// The action as one respond call, or a refusal: every gate is here, ahead of the
 /// first read, so a refused action costs nothing.
 fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
@@ -235,17 +320,28 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
             );
             Ok(RespondCall {
                 circuit: RespondCircuit::Respond,
+                attestation: None,
                 request_id,
                 signature,
             })
         }
-        // The on-chain event carries only the signature; output storage is handled
-        // by the publisher, when configured, before it builds this circuit call.
-        SignKind::RespondBidirectional(_) => Ok(RespondCall {
-            circuit: RespondCircuit::RespondBidirectional,
-            request_id,
-            signature,
-        }),
+        // The on-chain event carries the signature and attestation metadata; output
+        // storage is handled by the publisher, when configured, before it builds this
+        // circuit call.
+        SignKind::RespondBidirectional(_) => {
+            let attestation = validate_attestation_response(&action.request)?;
+            Ok(RespondCall {
+                circuit: RespondCircuit::RespondBidirectional,
+                attestation: Some(WireAttestation {
+                    block_height: attestation.block_height.to_string(),
+                    output_kind: attestation.outcome_kind as u8,
+                    serialized_output_length: attestation.serialized_output_length.to_string(),
+                    digest: hex::encode(attestation.digest),
+                }),
+                request_id,
+                signature,
+            })
+        }
         SignKind::Sign => anyhow::bail!(
             "midnight publisher serves SignBidirectional and RespondBidirectional only, not Sign"
         ),
@@ -295,7 +391,8 @@ mod tests {
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{
-        BidirectionalTxId, Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignId, SignKind,
+        AttestationMetadata, BidirectionalTxId, Chain, RespondBidirectionalTx,
+        SignBidirectionalEvent, SignId, SignKind,
     };
 
     /// An arbitrary well-formed central address.
@@ -519,20 +616,33 @@ mod tests {
         )
     }
 
+    #[derive(Debug, PartialEq)]
+    struct StoredOutput {
+        request_id: [u8; 32],
+        metadata: AttestationMetadata,
+        output: Vec<u8>,
+    }
+
     #[derive(Default)]
     struct StubOutputStore {
-        outputs: Mutex<Vec<([u8; 32], Vec<u8>)>>,
+        outputs: Mutex<Vec<StoredOutput>>,
         failure: bool,
     }
 
     #[async_trait]
     impl OutputStore for StubOutputStore {
-        async fn ensure_output(&self, request_id: &[u8; 32], output: &[u8]) -> anyhow::Result<()> {
+        async fn ensure_output(
+            &self,
+            request_id: &[u8; 32],
+            metadata: &AttestationMetadata,
+            output: &[u8],
+        ) -> anyhow::Result<()> {
             anyhow::ensure!(!self.failure, "output storage unavailable");
-            self.outputs
-                .lock()
-                .unwrap()
-                .push((*request_id, output.to_vec()));
+            self.outputs.lock().unwrap().push(StoredOutput {
+                request_id: *request_id,
+                metadata: *metadata,
+                output: output.to_vec(),
+            });
             Ok(())
         }
     }
@@ -563,17 +673,83 @@ mod tests {
         )
     }
 
+    const METADATA: AttestationMetadata = AttestationMetadata {
+        key_version: 1,
+        block_height: 42,
+        outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
+    };
+
     fn bidirectional_action(output: Vec<u8>) -> PublishAction {
-        make_publish_action(
+        let mut action = make_publish_action(
             Chain::Midnight,
             SignKind::RespondBidirectional(RespondBidirectionalTx {
                 tx_id: BidirectionalTxId([0x11; 32]),
                 output,
+                attestation: Some(METADATA),
                 origin_indexed_at: None,
                 chain_ctx: None,
             }),
             SignId::new(REQUEST_ID),
-        )
+        );
+        let request = Arc::make_mut(&mut action.request);
+        request.args.key_version = METADATA.key_version;
+        let SignKind::RespondBidirectional(response) = &request.kind else {
+            unreachable!()
+        };
+        let digest =
+            mpc_compact_hashing::compute_attestation_hash(&REQUEST_ID, &METADATA, &response.output)
+                .unwrap();
+        use mpc_primitives::ScalarExt as _;
+        request.args.payload = k256::Scalar::from_bytes(digest).unwrap();
+        action
+    }
+
+    #[tokio::test]
+    async fn invalid_attestation_metadata_is_rejected_before_cache_or_chain_io() {
+        for case in 0..10 {
+            // Case 8 changes only the outcome of an empty successful output,
+            // so the hash comparison, rather than the output constraint, rejects it.
+            let mut action = bidirectional_action(if case == 8 { vec![] } else { vec![1] });
+            let request = Arc::make_mut(&mut action.request);
+            let SignKind::RespondBidirectional(response) = &mut request.kind else {
+                unreachable!()
+            };
+            match case {
+                0 => response.attestation = None,
+                1 => response.attestation.as_mut().unwrap().key_version += 1,
+                2 => {
+                    response.attestation.as_mut().unwrap().outcome_kind =
+                        mpc_primitives::AttestationOutcomeKind::Failed
+                }
+                3 => {
+                    response.attestation.as_mut().unwrap().outcome_kind =
+                        mpc_primitives::AttestationOutcomeKind::Unviable
+                }
+                4 => response.attestation.as_mut().unwrap().block_height += 1,
+                5 => response.output[0] ^= 1,
+                6 => response.output.push(0),
+                7 => request.id.request_id[0] ^= 1,
+                8 => {
+                    response.attestation.as_mut().unwrap().outcome_kind =
+                        mpc_primitives::AttestationOutcomeKind::Failed
+                }
+                9 => request.args.payload += k256::Scalar::ONE,
+                _ => unreachable!(),
+            }
+            let reads = StubReads::new();
+            let client = StubClient::new();
+            let store = Arc::new(StubOutputStore::default());
+            let mut publisher = publisher(reads.clone(), client.clone());
+            publisher.output_store = Some(store.clone());
+            assert!(
+                publisher.publish_signature(&action).await.is_err(),
+                "case {case}"
+            );
+            assert!(store.outputs.lock().unwrap().is_empty());
+            assert!(reads.reads().is_empty());
+            assert!(client.built().is_empty());
+            assert_eq!(client.submissions(), 0);
+        }
     }
 
     #[derive(Clone, Default)]
@@ -843,7 +1019,11 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 store.outputs.lock().unwrap().pop(),
-                Some((REQUEST_ID, output))
+                Some(StoredOutput {
+                    request_id: REQUEST_ID,
+                    metadata: METADATA,
+                    output
+                })
             );
         }
     }
@@ -857,7 +1037,12 @@ mod tests {
         }
         #[async_trait]
         impl OutputStore for BlockingStore {
-            async fn ensure_output(&self, _: &[u8; 32], _: &[u8]) -> anyhow::Result<()> {
+            async fn ensure_output(
+                &self,
+                _: &[u8; 32],
+                _: &AttestationMetadata,
+                _: &[u8],
+            ) -> anyhow::Result<()> {
                 self.entered.notify_one();
                 self.release.notified().await;
                 Ok(())
@@ -1150,7 +1335,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_bidirectional_action_names_the_other_circuit_on_the_same_request() {
-        // Output storage does not change the signature-only circuit arguments.
+        // Output storage does not change the circuit arguments.
         let client = StubClient::new();
         let publisher = publisher(StubReads::new(), client.clone());
 
@@ -1163,5 +1348,87 @@ mod tests {
         assert_eq!(request.circuit, RESPOND_BIDIRECTIONAL);
         assert_eq!(request.contract_address, CENTRAL);
         assert_eq!(request.request_id, hex::encode(REQUEST_ID));
+        assert_eq!(
+            request.attestation,
+            Some(WireAttestation {
+                block_height: "42".to_string(),
+                output_kind: 0,
+                serialized_output_length: "32".to_string(),
+                digest: hex::encode(
+                    mpc_compact_hashing::compute_attestation_hash(
+                        &REQUEST_ID,
+                        &METADATA,
+                        &[0xab; 32]
+                    )
+                    .unwrap()
+                ),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn publishes_fail_retryably_until_the_publisher_connects() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let client = StubClient::new();
+        let mut connected = Some(publisher(StubReads::new(), client.clone()));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let calls = attempts.clone();
+        tokio::time::pause();
+        let recovering = RecoveringMidnightPublisher::spawn(move || {
+            let result = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(anyhow::anyhow!("midnight node unreachable"))
+            } else {
+                Ok(connected.take().expect("connects only once"))
+            };
+            async move { result }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        let error = recovering
+            .publish_signature(&respond_action())
+            .await
+            .expect_err("nothing is connected yet");
+        assert!(
+            mpc_chain_integration_core::utils::retry::is_retryable(&error),
+            "a publish before the connection must stay retryable: {error:#}"
+        );
+        assert_eq!(client.submissions(), 0);
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        recovering
+            .publish_signature(&respond_action())
+            .await
+            .expect("the connected publisher posts");
+        assert_eq!(client.submissions(), 1);
+
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "connected means done");
+    }
+
+    #[tokio::test]
+    async fn start_rejects_a_configuration_that_can_never_publish() {
+        let config = MidnightConfig {
+            node_url: "ftp://127.0.0.1:1".to_string(),
+            central_address: MidnightAddress::from_hex(CENTRAL)
+                .expect("CENTRAL is a 32-byte hex address"),
+            publisher: PublisherConfig {
+                funding_seed: "ab".repeat(32),
+                proof_server_url: "http://127.0.0.1:1".to_string(),
+                indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
+                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                ..Default::default()
+            },
+            rpc: Default::default(),
+            indexer: Default::default(),
+        };
+
+        let error = RecoveringMidnightPublisher::start(&config, Arc::new(NoopPublisherTelemetry))
+            .err()
+            .expect("an ftp node_url is refused before any connection attempt");
+        assert!(format!("{error:#}").contains("node_url"), "{error:#}");
     }
 }

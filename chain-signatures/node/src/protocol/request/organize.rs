@@ -121,7 +121,9 @@ impl OrganizingPhase {
                 }
                 Err(SignLimitError::Closed) => {
                     tracing::error!(?sign_id, "proposer semaphore closed");
-                    return SignPhase::Complete(Err(SignError::Aborted));
+                    return SignPhase::Complete(Err(SignError::Aborted(
+                        "proposer semaphore closed".to_string(),
+                    )));
                 }
             };
 
@@ -182,7 +184,12 @@ impl OrganizingPhase {
                         ctx.governance.me,
                         p,
                         PositMessage {
-                            id: PositProtocolId::Signature(sign_id, presignature_id, state.round()),
+                            id: PositProtocolId::signature(
+                                sign_id,
+                                ctx.kind,
+                                presignature_id,
+                                state.round(),
+                            ),
                             from: ctx.governance.me,
                             action: PositAction::Propose,
                         },

@@ -130,7 +130,6 @@ impl CantonClient {
             .bearer_auth(token))
     }
 
-    // TODO: this method is only used in integration tests, cosider hiding it behind a feature flag
     async fn auth_get(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
         let token = self.bearer_token().await?;
         Ok(self
@@ -467,6 +466,7 @@ mod tests {
         make_publish_action(
             Chain::Canton,
             SignKind::RespondBidirectional(RespondBidirectionalTx {
+                attestation: None,
                 tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
                 output: vec![1, 2, 3],
                 origin_indexed_at: None,
@@ -768,6 +768,7 @@ mod tests {
         .unwrap();
 
         let tx = RespondBidirectionalTx {
+            attestation: None,
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![1, 2, 3],
             origin_indexed_at: None,
@@ -795,6 +796,7 @@ mod tests {
         .with_retry_strategy(fast_retry_strategy());
 
         let tx = RespondBidirectionalTx {
+            attestation: None,
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
             origin_indexed_at: None,
@@ -834,6 +836,7 @@ mod tests {
         })
         .unwrap();
         let tx = RespondBidirectionalTx {
+            attestation: None,
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
             origin_indexed_at: None,
@@ -883,6 +886,7 @@ mod tests {
         })
         .unwrap();
         let tx = RespondBidirectionalTx {
+            attestation: None,
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
             origin_indexed_at: None,
@@ -922,6 +926,7 @@ mod tests {
         })
         .unwrap();
         let tx = RespondBidirectionalTx {
+            attestation: None,
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
             origin_indexed_at: None,

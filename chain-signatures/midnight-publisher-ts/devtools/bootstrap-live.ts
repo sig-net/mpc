@@ -20,7 +20,7 @@ const keys = deriveAccountKeys(seed, config.networkId);
 await withSyncedWalletFacade(keys, config, async (facade, state) => {
   const registered = await registerNightForDustGeneration(facade, keys, state);
   console.log(`dust: ${registered} NIGHT utxo(s) newly registered`);
-  const dust = await waitForSpendableDust(facade, 180_000);
+  const dust = await waitForSpendableDust(facade, 1n, 180_000);
   console.log(`dust: ${dust} spendable`);
 });
 

@@ -11,8 +11,7 @@ use crate::bench;
 use crate::client::{logs_filter, MaybeBlock};
 
 // This is more than likely limited by the RPC provider, but alchemy
-// supports archive nodes, so we effectively can go as far back as needed
-// for direct RPC client.
+// supports archive nodes, so we effectively can go as far back as needed.
 pub const MAX_CATCHUP_BLOCKS: u64 = u64::MAX;
 
 /// JSON-RPC read client over a plain alloy HTTP transport. Retry, timeout,

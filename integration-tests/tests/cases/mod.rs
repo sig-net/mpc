@@ -9,10 +9,9 @@ use mpc_crypto::{
     self, derive_epsilon_near, derive_key, reconstruct_signature, x_coordinate, ScalarExt,
 };
 use mpc_node::protocol::cryptography::set_resharing_running_timeout;
-use mpc_node::protocol::state::ResharingStatus;
+use mpc_node::protocol::state::{NodeStatus, ResharingStatus};
 use mpc_node::sign_bidirectional::public_key_to_address;
 use mpc_node::util::NearPublicKeyExt as _;
-use mpc_node::web::StateView;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use std::time::{Duration, Instant};
 use test_log::test;
@@ -306,10 +305,10 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
     nodes.wait().nodes_resharing().await?;
 
     {
-        let states = nodes.fetch_states().await?;
+        let states = nodes.fetch_statuses().await?;
         for (account_id, state) in nodes.account_ids().into_iter().zip(states.iter()) {
             match state {
-                StateView::Resharing { phase, .. } => {
+                NodeStatus::Resharing { phase, .. } => {
                     tracing::info!(%account_id, ?phase, "account resharing phase before kill");
                 }
                 other => {
@@ -347,10 +346,10 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
     .await?;
 
     {
-        let states = nodes.fetch_states().await?;
+        let states = nodes.fetch_statuses().await?;
         for (account_id, state) in nodes.account_ids().into_iter().zip(states.iter()) {
             match state {
-                StateView::Resharing { phase, .. } => {
+                NodeStatus::Resharing { phase, .. } => {
                     tracing::info!(%account_id, ?phase, "account resharing phase after restart");
                 }
                 other => {
@@ -433,16 +432,16 @@ async fn wait_for_resharing_phase(
             .iter()
             .position(|current| *current == account_id)
         {
-            match nodes.fetch_state(idx).await? {
-                StateView::Resharing { phase, .. } if expected.contains(&phase) => return Ok(()),
-                StateView::Running { .. } if allow_completion => {
+            match nodes.fetch_status(idx).await? {
+                NodeStatus::Resharing { phase, .. } if expected.contains(&phase) => return Ok(()),
+                NodeStatus::Running { .. } if allow_completion => {
                     tracing::info!(
                         %account_id,
                         "node already returned to running state; treating as successful resharing phase"
                     );
                     return Ok(());
                 }
-                StateView::Resharing { phase, .. } => {
+                NodeStatus::Resharing { phase, .. } => {
                     tracing::info!(
                         %account_id,
                         ?phase,

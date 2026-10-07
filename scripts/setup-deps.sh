@@ -87,7 +87,7 @@ check_extended() {
     if have anchor && anchor --version 2>/dev/null | grep -q "$ANCHOR_VERSION"; then ok "anchor $(anchor --version)"; else miss "anchor ${ANCHOR_VERSION}"; hint "cargo install --git https://github.com/coral-xyz/anchor avm --locked && avm install ${ANCHOR_VERSION}"; fi
     if java -version 2>&1 | grep -q "21"; then ok "java 21"; else miss "java 21 (temurin)"; fi
     if have dpm; then ok "dpm $(dpm --version 2>/dev/null | head -n 1)"; else miss "dpm (Canton SDK ${CANTON_SDK})"; hint "curl -fsSL https://get.digitalasset.com/install/install.sh | sh && dpm install ${CANTON_SDK}"; fi
-    if have compact; then ok "compact"; else miss "compact launcher 0.5.1 + compactc ${COMPACT_RC}"; hint "see .github/workflows/midnight.yml (Linux pins)"; fi
+    if have compact; then ok "compact"; else miss "compact launcher 0.5.1 + compactc ${COMPACT_RC}"; hint "see .github/workflows/test-chain-midnight.yml (Linux pins)"; fi
 }
 
 apt_install() {

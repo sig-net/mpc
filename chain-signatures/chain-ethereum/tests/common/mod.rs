@@ -67,14 +67,11 @@ impl EthTestEnv {
 
         let eth_config = EthConfig {
             account_sk: signer.clone(),
-            consensus_rpc_http_url: endpoint.clone(),
             execution_rpc_http_url: endpoint.parse()?,
             contract_address,
             network: "anvil".to_string(),
-            helios_data_path: String::new(),
             refresh_finalized_interval: 1000,
             optimistic_requests: false,
-            light_client: false,
             rpc: Default::default(),
             gas: Default::default(),
             publisher: PublisherConfig {
