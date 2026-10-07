@@ -70,6 +70,13 @@ on:
 permissions:
   contents: read
 
+# One run per schedule entry (or per dispatched strategy and network) at a time,
+# queued before any job starts, so a tick landing mid-run funds nothing. A newer
+# tick replaces the one waiting.
+concurrency:
+  group: k6-bidirectional-${{ github.event.schedule || format('{0}-{1}', inputs.lt_strategy, inputs.environment) }}
+  cancel-in-progress: false
+
 env:
   # The runner pinger's addresses. The prefix is fixed so the funded set is
   # reused: ETH on these addresses cannot be moved back. The floor is below the
