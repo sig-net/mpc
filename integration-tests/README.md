@@ -48,7 +48,7 @@ In case of authorization issues make sure you have logged into docker using your
 
 ### Running tests
 
-Each `just` test recipe automatically runs setup (WASM contract + node binary compilation) before executing tests. Pass an optional `filter` to run matching tests only, and `helios=1` to build with Helios. Run `just` with no arguments to list all available recipes.
+Each `just` test recipe automatically runs setup (WASM contract + node binary compilation) before executing tests. Pass an optional `filter` to run matching tests only. Run `just` with no arguments to list all available recipes.
 
 | Command | Full recipe | Description |
 |---|---|---|
@@ -63,8 +63,7 @@ Each `just` test recipe automatically runs setup (WASM contract + node binary co
 ```bash
 just t                               # run all tests
 just t my_module                     # run matching tests only
-just t my_module helios=1            # run matching tests with Helios
-just to test_basic_action helios=1.  # run specific test with Helios
+just to test_basic_action.           # run specific test
 ```
 
 The available profiles and their concurrency settings are defined in [`.config/nextest.toml`](../.config/nextest.toml).
@@ -78,7 +77,7 @@ In addition to the prerequisites above, it requires:
 - Docker
 - [Node.js](https://nodejs.org/) 22.13 or newer
 - [cargo-near](https://github.com/near/cargo-near)
-- Compact launcher 0.5.1 with `compactc` 0.33.0-rc.2 available as `compact`; see the [Midnight CI workflow](../.github/workflows/midnight.yml) for the pinned Linux installation
+- Compact launcher 0.5.1 with `compactc` 0.33.0-rc.2 available as `compact`; see the [Midnight CI workflow](../.github/workflows/test-chain-midnight.yml) for the pinned Linux installation
 
 From the repository root, prepare the TypeScript publisher and test caller,
 then build the MPC contract and host node and run the ignored test:

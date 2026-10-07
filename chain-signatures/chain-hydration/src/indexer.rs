@@ -62,11 +62,6 @@ impl HydrationSignatureRequestedEvent {
 
     fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
-        if self.deposit == 0 {
-            tracing::warn!("deposit is 0, skipping sign request");
-            return None;
-        }
-
         if self.key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!("unsupported key version: {}", self.key_version);
             return None;
@@ -183,11 +178,6 @@ impl HydrationSignBidirectionalRequestedEvent {
 
     pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
-        if self.deposit == 0 {
-            tracing::warn!("deposit is 0, skipping sign request");
-            return None;
-        }
-
         if self.key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!("unsupported key version: {}", self.key_version);
             return None;
@@ -530,6 +520,7 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
             events_tx
                 .send(ChainEvent::RespondBidirectional(
                     RespondBidirectionalEvent {
+                        attestation: None,
                         request_id,
                         signature,
                         chain: Chain::Hydration,

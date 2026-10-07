@@ -198,7 +198,6 @@ impl FinalizedHeadTracker {
         }
     }
 
-    // TODO: Currently if this dies silently we have to wait 35 min for the stream supervisor to restart it. Implement faster failure detection and restart.
     /// Background task maintaining the cached head.
     ///
     /// Polls `eth_getBlockByNumber(Finalized)` (production) or `(Latest)`

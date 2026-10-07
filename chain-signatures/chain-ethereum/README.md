@@ -6,13 +6,10 @@ emits MPC signing request/response events, and surfaces them through the
 [`mpc-chain-integration-core`](../chain-integration-core) `ChainIndexer`
 trait.
 
-Two clients are supported:
+A single client is supported:
 
-- **Direct RPC** (default): `indexer_eth_direct_rpc::RpcEthereumClient` — talks
-  to a standard JSON-RPC endpoint (`eth_*`, `debug_*`).
-- **Helios light-client** (`helios` feature): `indexer_eth_helios::HeliosEthereumClient`
-  — syncs a light client locally. Note that the benchmarking
-  helpers intentionally only instrument the direct-RPC backend.
+- **Direct RPC**: `rpc::RpcEthereumClient` — talks to a standard JSON-RPC
+  endpoint (`eth_*`, `debug_*`).
 
 In the full node, this crate is driven by [`mpc-node`](../node) via the
 `ChainIndexer` trait (`EthereumIndexer::run`). Catchup and the live tail are
@@ -30,11 +27,8 @@ plumbed through from the node's config, not constructed by hand.
 | `execution_rpc_http_url`  | `RPC_URL`           | yes       | execution-layer JSON-RPC endpoint (Alchemy, Infura, OnFinality, …) |
 | `contract_address`        | `CONTRACT_ADDRESS`  | yes       | MPC contract address, with or without the `0x` prefix |
 | `network`                 | `NETWORK`           | no        | default `sepolia` |
-| `consensus_rpc_http_url`  | —                   | helios     | CL RPC for the light-client backend |
-| `helios_data_dir`         | —                   | helios     | where Helios stores its synced state |
 | `refresh_finalized_interval` | —                | no        | milliseconds between finalized-head watcher polls (production) |
 | `optimistic_requests`     | `OPTIMISTIC`        | no        | default off (production waits for finality via the finalized-head watcher); set `1` for the demo/soft-tip path |
-| `light_client`            | —                   | no        | set `true` to select the Helios backend (`helios` feature required) |
 
 ### Catchup fetch tuning
 
@@ -150,5 +144,4 @@ cargo run --example bench_watchers --features bench
 
 | feature   | what it enables |
 |-----------|-----------------|
-| `bench`   | the `bench` module + RPC/timing counters in the direct-RPC indexer; required by `examples/bench_catchup.rs` and `examples/bench_watchers.rs` |
-| `helios`  | the `indexer_eth_helios` light-client |
+| `bench`   | the `bench` module + RPC/timing counters in the RPC client; required by `examples/bench_catchup.rs` and `examples/bench_watchers.rs` |

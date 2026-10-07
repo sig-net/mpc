@@ -1,8 +1,7 @@
 use crate::backlog::Checkpoint;
 use crate::protocol::message::cbor_to_bytes;
-use crate::protocol::sync::SyncUpdate;
 use crate::protocol::Chain;
-use crate::web::{CheckpointResponse, StateView, StatusResponse};
+use crate::web::{CheckpointResponse, StatusResponse};
 
 use mpc_keys::hpke::Ciphered;
 use reqwest::IntoUrl;
@@ -175,20 +174,6 @@ impl NodeClient {
         self.post_msg(&url, msg).await
     }
 
-    pub async fn state(&self, base: impl IntoUrl) -> Result<StateView, RequestError> {
-        let mut url = base.into_url()?;
-        url.set_path("state");
-
-        let resp = self
-            .http
-            .get(url)
-            .timeout(Duration::from_millis(self.options.state_timeout))
-            .send()
-            .await?;
-
-        Ok(resp.json::<StateView>().await?)
-    }
-
     pub async fn status(&self, base: impl IntoUrl) -> Result<StatusResponse, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("status");
@@ -206,8 +191,8 @@ impl NodeClient {
     pub async fn sync(
         &self,
         base: impl IntoUrl,
-        update: &SyncUpdate,
-    ) -> Result<SyncUpdate, RequestError> {
+        update: &Ciphered,
+    ) -> Result<Ciphered, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("sync");
         self.post_cbor_response(

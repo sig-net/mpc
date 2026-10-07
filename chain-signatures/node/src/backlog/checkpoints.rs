@@ -109,7 +109,7 @@ pub struct Checkpoints {
 pub enum CheckpointError {
     #[error("pending checkpoint cap reached for {chain}")]
     PendingCap { chain: Chain, tx_count: usize },
-    #[error("failed to persist checkpoint for {chain}")]
+    #[error("failed to persist checkpoint for {chain}: {source:#}")]
     Storage {
         chain: Chain,
         #[source]
@@ -234,6 +234,14 @@ impl Checkpoints {
     pub async fn latest(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
         self.storage
             .latest(chain)
+            .await
+            .map_err(|source| CheckpointError::Storage { chain, source })
+    }
+
+    /// Returns whether a pending or confirmed checkpoint is stored for `chain`.
+    pub(crate) async fn has_checkpoint(&self, chain: Chain) -> Result<bool, CheckpointError> {
+        self.storage
+            .has_checkpoint(chain)
             .await
             .map_err(|source| CheckpointError::Storage { chain, source })
     }

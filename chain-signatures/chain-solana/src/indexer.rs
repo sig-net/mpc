@@ -14,14 +14,13 @@ use mpc_chain_integration_core::{
 use mpc_primitives::{Chain, ChainEvent};
 use mpc_utils::task::retry_until_ok;
 use solana_sdk::{pubkey::Pubkey, signature::Signature};
-use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{EncodedTransactionWithStatusMeta, UiConfirmedBlock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
 use crate::config::SolIndexerConfig;
-use crate::events::{emit_events, extract_tx_signature};
+use crate::events::emit_events;
 use crate::{SolConfig, SolanaClient};
 
 /// Per-run state for the indexer poll loop.
@@ -488,8 +487,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         let started_at = Instant::now();
 
         if let Some(transactions) = &block.transactions {
+            let program_id = self.program_id.to_string();
             for tx in transactions {
-                process_transaction(events_tx, &self.program_id, tx).await?;
+                process_transaction(events_tx, &program_id, tx).await?;
             }
         }
 
@@ -515,7 +515,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 /// produce durable state on chain, so their events must not be indexed.
 async fn process_transaction(
     events_tx: &mpsc::Sender<ChainEvent>,
-    program_id: &Pubkey,
+    program_id: &str,
     tx: &EncodedTransactionWithStatusMeta,
 ) -> anyhow::Result<()> {
     let Some(meta) = tx.meta.as_ref() else {
@@ -524,12 +524,7 @@ async fn process_transaction(
     if meta.err.is_some() {
         return Ok(());
     }
-    let OptionSerializer::Some(logs) = meta.log_messages.as_ref() else {
-        return Ok(());
-    };
-
-    let signature = extract_tx_signature(&tx.transaction)?;
-    emit_events(events_tx, program_id, signature, tx, logs).await
+    emit_events(events_tx, program_id, tx).await
 }
 
 #[async_trait]
@@ -652,7 +647,6 @@ mod tests {
     fn event_transaction(
         program_id: Pubkey,
         signature: Signature,
-        instruction: &str,
         event_data: String,
     ) -> serde_json::Value {
         serde_json::json!({
@@ -671,11 +665,6 @@ mod tests {
                         "stackHeight": 2
                     }]
                 }],
-                "logMessages": [
-                    format!("Program {program_id} invoke [1]"),
-                    format!("Program log: Instruction: {instruction}"),
-                    format!("Program {program_id} success")
-                ],
                 "preTokenBalances": [],
                 "postTokenBalances": [],
                 "rewards": null,
@@ -697,6 +686,32 @@ mod tests {
             },
             "version": "legacy"
         })
+    }
+
+    /// A `SignatureRespondedEvent` with a valid curve point (the secp256k1 generator).
+    fn responded_event(request_id: [u8; 32]) -> SignatureRespondedEvent {
+        SignatureRespondedEvent {
+            request_id,
+            responder: Pubkey::new_unique(),
+            signature: signet_program::Signature {
+                big_r: signet_program::AffinePoint {
+                    x: hex::decode(
+                        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                    )
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                    y: hex::decode(
+                        "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
+                    )
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                },
+                s: [1; 32],
+                recovery_id: 0,
+            },
+        }
     }
 
     fn event_block_response(
@@ -1069,28 +1084,7 @@ mod tests {
             fee_payer: None,
         };
         let request_id = SolanaSignEvent::SignatureRequested(request.clone()).generate_request_id();
-        let response = SignatureRespondedEvent {
-            request_id,
-            responder: Pubkey::new_unique(),
-            signature: signet_program::Signature {
-                big_r: signet_program::AffinePoint {
-                    x: hex::decode(
-                        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-                    )
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-                    y: hex::decode(
-                        "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
-                    )
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-                },
-                s: [1; 32],
-                recovery_id: 0,
-            },
-        };
+        let response = responded_event(request_id);
 
         let entries: Vec<_> = [8, 7, 5].into_iter().map(signature_entry).collect();
         let _signatures = server
@@ -1112,7 +1106,6 @@ mod tests {
                 event_transaction(
                     indexer.program_id,
                     Signature::new_unique(),
-                    "Sign",
                     cpi_event_instruction(&request),
                 ),
             ),
@@ -1122,7 +1115,6 @@ mod tests {
                 event_transaction(
                     indexer.program_id,
                     Signature::new_unique(),
-                    "Respond",
                     cpi_event_instruction(&response),
                 ),
             ),
@@ -1179,7 +1171,6 @@ mod tests {
         let mut transaction = event_transaction(
             indexer.program_id,
             Signature::new_unique(),
-            "Sign",
             cpi_event_instruction(&request),
         );
         let error = serde_json::json!({ "InstructionError": [0, { "Custom": 1 }] });
@@ -1194,6 +1185,48 @@ mod tests {
 
         assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
         assert!(events_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn emits_every_cpi_event_in_a_transaction() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let request = SignatureRequestedEvent {
+            sender: Pubkey::new_unique(),
+            payload: [1; 32],
+            key_version: 0,
+            deposit: 1,
+            chain_id: "solana".to_string(),
+            path: "test".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "test".to_string(),
+            params: String::new(),
+            fee_payer: None,
+        };
+        let request_id = SolanaSignEvent::SignatureRequested(request.clone()).generate_request_id();
+        let mut transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            cpi_event_instruction(&request),
+        );
+        let instructions = &mut transaction["meta"]["innerInstructions"][0]["instructions"];
+        let mut respond_ix = instructions[0].clone();
+        respond_ix["data"] = cpi_event_instruction(&responded_event(request_id)).into();
+        instructions.as_array_mut().unwrap().push(respond_ix);
+
+        let response = event_block_response(0, 7, transaction);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest { request, .. }) if request.id == SignId::new(request_id)
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Respond(event)) if event.request_id == request_id
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
     }
 
     #[tokio::test]
@@ -1242,7 +1275,6 @@ mod tests {
             event_transaction(
                 indexer.program_id,
                 Signature::new_unique(),
-                "Sign",
                 cpi_event_instruction(&req_a),
             ),
         );
@@ -1253,7 +1285,6 @@ mod tests {
             .push(event_transaction(
                 indexer.program_id,
                 Signature::new_unique(),
-                "Sign",
                 cpi_event_instruction(&req_b),
             ));
 

@@ -12,7 +12,7 @@ use midnight_onchain_state::state::ContractState;
 use midnight_storage::DefaultDB;
 use midnight_transient_crypto::commitment::PedersenRandomness;
 use mpc_chain_midnight::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
-use mpc_chain_midnight::{IntentGen, IntentRequest, WirePoint, WireSignature};
+use mpc_chain_midnight::{IntentGen, IntentRequest, WireAttestation, WirePoint, WireSignature};
 
 /// Any well-formed 32-byte hex address serves.
 const SINGLETON: &str = "5555555555555555555555555555555555555555555555555555555555555555";
@@ -57,6 +57,7 @@ fn initial_ledger_parameters() -> String {
 fn respond_request() -> IntentRequest {
     IntentRequest {
         circuit: "respond",
+        attestation: None,
         contract_address: SINGLETON.to_string(),
         request_id: REQUEST_ID.to_string(),
         signature: signature(),
@@ -136,13 +137,34 @@ async fn the_rust_client_and_the_ts_builder_agree_on_a_bidirectional_intent() {
         .await
         .expect("spawn the builder");
 
-    let bytes = builder
-        .build(&IntentRequest {
-            circuit: "respondBidirectional",
-            ..respond_request()
-        })
-        .await
-        .expect("the builder answers");
+    let fixtures: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/api-parity-vectors.json")).unwrap();
+    let event = &fixtures["responseEvent"];
+    let mut request = respond_request();
+    request.circuit = "respondBidirectional";
+    request.request_id = event["requestId"].as_str().unwrap().to_string();
+    request.signature = WireSignature {
+        big_r: WirePoint {
+            x: format!("{:0>64}", event["signature"]["bigR"]["x"].as_str().unwrap()),
+            y: format!("{:0>64}", event["signature"]["bigR"]["y"].as_str().unwrap()),
+        },
+        s: format!("{:0>64}", event["signature"]["s"].as_str().unwrap()),
+        recovery_id: event["signature"]["recoveryId"].as_u64().unwrap() as u8,
+    };
+    request.attestation = Some(WireAttestation {
+        block_height: event["blockHeight"].as_str().unwrap().to_string(),
+        output_kind: event["outputKind"].as_u64().unwrap() as u8,
+        serialized_output_length: event["serializedOutputLength"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+        digest: event["digest"].as_str().unwrap().to_string(),
+    });
+    let bytes = builder.build(&request).await.expect("the builder answers");
+    let expected: [u8; MISC_PAYLOAD_LEN] = hex::decode(event["payload"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
 
     let call = sole_call(&bytes);
     assert_eq!(call.entry_point.0.as_slice(), b"respondBidirectional");
@@ -150,7 +172,7 @@ async fn the_rust_client_and_the_ts_builder_agree_on_a_bidirectional_intent() {
         emissions_of_call(&call).expect("the singleton emission decodes"),
         vec![Emission {
             kind: EmissionKind::RespondBidirectional,
-            payload: expected_response_payload(),
+            payload: expected,
         }]
     );
 }

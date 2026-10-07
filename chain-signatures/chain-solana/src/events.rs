@@ -19,22 +19,12 @@ use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
     SignatureRespondedEvent,
 };
-use solana_sdk::{pubkey::Pubkey, signature::Signature};
+use solana_sdk::signature::Signature;
 use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{
     EncodedTransaction, EncodedTransactionWithStatusMeta, UiInstruction, UiParsedInstruction,
 };
 use tokio::sync::mpsc;
-
-const CPI_EVENT_HINTS: &[&str] = &[
-    "Program log: Instruction: Sign",
-    "Program log: Instruction: SignBidirectional",
-];
-
-const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
-    "Program log: Instruction: Respond",
-    "Program log: Instruction: RespondBidirectional",
-];
 
 pub enum SolanaSignEvent {
     SignatureRequested(SignatureRequestedEvent),
@@ -43,15 +33,10 @@ pub enum SolanaSignEvent {
 
 impl SolanaSignEvent {
     fn is_valid(&self, sign_id: SignId) -> bool {
-        let (deposit, key_version) = match self {
-            SolanaSignEvent::SignatureRequested(ev) => (ev.deposit, ev.key_version),
-            SolanaSignEvent::SignBidirectional(ev) => (ev.deposit, ev.key_version),
+        let key_version = match self {
+            SolanaSignEvent::SignatureRequested(ev) => ev.key_version,
+            SolanaSignEvent::SignBidirectional(ev) => ev.key_version,
         };
-
-        if deposit == 0 {
-            tracing::warn!(?sign_id, "deposit is 0, skipping sign request");
-            return false;
-        }
 
         if key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!(?sign_id, "unsupported key version: {}", key_version);
@@ -197,317 +182,132 @@ fn split_cpi_event(ix_data: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((&ix_data[8..16], &ix_data[16..]))
 }
 
-fn parse_cpi_events(
-    tx: &EncodedTransactionWithStatusMeta,
-    target_program_id: &Pubkey,
-) -> anyhow::Result<Vec<SolanaSignEvent>> {
-    let Some(meta) = &tx.meta else {
-        return Ok(Vec::new());
+enum CpiEvent {
+    Sign(SolanaSignEvent),
+    RespondBidirectional(RespondBidirectionalEvent),
+    Responded(SignatureRespondedEvent),
+}
+
+/// Decodes the program's `emit_cpi!` events from the tx's inner instructions, in order.
+fn parse_cpi_events(tx: &EncodedTransactionWithStatusMeta, program_id: &str) -> Vec<CpiEvent> {
+    let Some(OptionSerializer::Some(inner_ixs)) = tx.meta.as_ref().map(|m| &m.inner_instructions)
+    else {
+        return Vec::new();
     };
-
-    let target_program_str = target_program_id.to_string();
-    let mut out = Vec::<SolanaSignEvent>::new();
-
-    // Small helper closure to try decoding both event types from raw data
-    let try_parse_events = |data: &str| -> anyhow::Result<Vec<SolanaSignEvent>> {
-        let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
-            tracing::warn!("Failed to decode instruction data for target program");
-            return Ok(Vec::new());
-        };
-
-        // Split into the 8-byte event discriminator and trailing event bytes,
-        // skipping anything that isn't a well-formed Anchor event instruction.
-        let Some((event_discriminator, event_data)) = split_cpi_event(&ix_data) else {
-            return Ok(Vec::new());
-        };
-
-        let mut acc = Vec::new();
-
-        // handle both event types
-        if event_discriminator == SignatureRequestedEvent::DISCRIMINATOR {
-            match SignatureRequestedEvent::deserialize(&mut &event_data[..]) {
-                Ok(ev) => acc.push(SolanaSignEvent::SignatureRequested(ev)),
-                Err(e) => tracing::warn!("Failed to deserialize SignatureRequestedEvent: {e}"),
+    inner_ixs
+        .iter()
+        .flat_map(|set| &set.instructions)
+        .filter_map(|ix| match ix {
+            UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(ui))
+                if ui.program_id == program_id =>
+            {
+                parse_cpi_event(&ui.data)
             }
-        } else if event_discriminator == SignBidirectionalEvent::DISCRIMINATOR {
-            match <SignBidirectionalEvent as AnchorDeserialize>::deserialize(&mut &event_data[..]) {
-                Ok(ev) => {
-                    // caip2_id represents the mainnet CAIP-2 chain ID of the target chain
-                    // we won't process the event if the caip2_id is invalid, since it won't be able to be handled correctly downstream anyway
-                    if let Err(e) = Chain::from_caip2_chain_id(&ev.caip2_id) {
-                        tracing::warn!("invalid caip2 chain id in sign bidirectional event: {e:?}")
-                    } else {
-                        acc.push(SolanaSignEvent::SignBidirectional(ev))
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to deserialize SignBidirectionalEvent: {e}")
-                }
-            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn parse_cpi_event(data: &str) -> Option<CpiEvent> {
+    let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
+        tracing::warn!("Failed to decode instruction data for target program");
+        return None;
+    };
+    let (discriminator, event_data) = split_cpi_event(&ix_data)?;
+    match discriminator {
+        SignatureRequestedEvent::DISCRIMINATOR => {
+            decode(event_data).map(|ev| CpiEvent::Sign(SolanaSignEvent::SignatureRequested(ev)))
         }
-
-        Ok(acc)
-    };
-
-    // Look into inner instructions for CPI calls
-    let inner_ixs = match &meta.inner_instructions {
-        OptionSerializer::Some(ixs) => ixs,
-        _ => return Ok(Vec::new()),
-    };
-
-    for (set_idx, inner_ix_set) in inner_ixs.iter().enumerate() {
-        for (ix_idx, instruction) in inner_ix_set.instructions.iter().enumerate() {
-            if let UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(ui)) = instruction {
-                if ui.program_id == target_program_str {
-                    match try_parse_events(&ui.data) {
-                        Ok(mut v) => {
-                            if !v.is_empty() {
-                                tracing::debug!(
-                                    "parsed {} event(s) from {}.{}",
-                                    v.len(),
-                                    set_idx,
-                                    ix_idx
-                                );
-                            }
-                            out.append(&mut v);
-                        }
-                        Err(e) => tracing::warn!(
-                            "Error processing inner instruction {}.{}: {}",
-                            set_idx,
-                            ix_idx,
-                            e
-                        ),
-                    }
-                }
+        SignBidirectionalEvent::DISCRIMINATOR => {
+            let ev: SignBidirectionalEvent = decode(event_data)?;
+            // An invalid target chain can't be handled downstream.
+            if let Err(e) = Chain::from_caip2_chain_id(&ev.caip2_id) {
+                tracing::warn!("invalid caip2 chain id in sign bidirectional event: {e:?}");
+                return None;
             }
+            Some(CpiEvent::Sign(SolanaSignEvent::SignBidirectional(ev)))
         }
+        RespondBidirectionalEvent::DISCRIMINATOR => {
+            decode(event_data).map(CpiEvent::RespondBidirectional)
+        }
+        SignatureRespondedEvent::DISCRIMINATOR => decode(event_data).map(CpiEvent::Responded),
+        _ => None,
     }
-
-    Ok(out)
 }
 
-fn looks_like_cpi_sign_event(logs: &[String]) -> bool {
-    logs.iter()
-        .any(|l| CPI_EVENT_HINTS.iter().any(|h| l.contains(h)))
-}
-
-fn looks_like_respond_event(logs: &[String]) -> bool {
-    logs.iter()
-        .any(|l| CPI_RESPOND_EVENT_HINTS.iter().any(|h| l.contains(h)))
-}
-
-fn parse_cpi_respond_events(
-    tx: &EncodedTransactionWithStatusMeta,
-    target_program_id: &Pubkey,
-) -> anyhow::Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
-    use solana_transaction_status::{UiInstruction, UiParsedInstruction};
-
-    let Some(meta) = &tx.meta else {
-        return Ok((Vec::new(), Vec::new()));
-    };
-
-    let target_program_str = target_program_id.to_string();
-    let mut respond_bidirectional_events = Vec::<RespondBidirectionalEvent>::new();
-    let mut signature_responded_events = Vec::<SignatureRespondedEvent>::new();
-
-    // Helper closure to try decoding RespondBidirectionalEvent and SignatureRespondedEvent from raw data
-    let try_parse_respond_event = |data: &str| -> anyhow::Result<(
-        Vec<RespondBidirectionalEvent>,
-        Vec<SignatureRespondedEvent>,
-    )> {
-        let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
-            tracing::warn!("Failed to decode instruction data for target program");
-            return Ok((Vec::new(), Vec::new()));
-        };
-
-        // Split into the 8-byte event discriminator and trailing event bytes,
-        // skipping anything that isn't a well-formed Anchor event instruction.
-        let Some((event_discriminator, event_data)) = split_cpi_event(&ix_data) else {
-            return Ok((Vec::new(), Vec::new()));
-        };
-
-        let mut respond_bdx = Vec::new();
-        let mut sig_resp = Vec::new();
-
-        // Handle RespondBidirectionalEvent
-        if event_discriminator == RespondBidirectionalEvent::DISCRIMINATOR {
-            match RespondBidirectionalEvent::deserialize(&mut &event_data[..]) {
-                Ok(ev) => respond_bdx.push(ev),
-                Err(e) => {
-                    tracing::warn!("Failed to deserialize RespondBidirectionalEvent: {e}")
-                }
-            }
-        }
-
-        // Handle SignatureRespondedEvent
-        if event_discriminator == SignatureRespondedEvent::DISCRIMINATOR {
-            match SignatureRespondedEvent::deserialize(&mut &event_data[..]) {
-                Ok(ev) => sig_resp.push(ev),
-                Err(e) => {
-                    tracing::warn!("Failed to deserialize SignatureRespondedEvent: {e}")
-                }
-            }
-        }
-
-        Ok((respond_bdx, sig_resp))
-    };
-
-    // Look into inner instructions for CPI calls
-    let inner_ixs = match &meta.inner_instructions {
-        OptionSerializer::Some(ixs) => ixs,
-        _ => return Ok((Vec::new(), Vec::new())),
-    };
-
-    for (set_idx, inner_ix_set) in inner_ixs.iter().enumerate() {
-        for (ix_idx, instruction) in inner_ix_set.instructions.iter().enumerate() {
-            if let UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(ui)) = instruction {
-                if ui.program_id == target_program_str {
-                    match try_parse_respond_event(&ui.data) {
-                        Ok((mut r_bdx, mut s_resp)) => {
-                            if !r_bdx.is_empty() {
-                                tracing::debug!(
-                                    "parsed {} RespondBidirectionalEvent(s) from {}.{}",
-                                    r_bdx.len(),
-                                    set_idx,
-                                    ix_idx
-                                );
-                            }
-                            if !s_resp.is_empty() {
-                                tracing::debug!(
-                                    "parsed {} SignatureRespondedEvent(s) from {}.{}",
-                                    s_resp.len(),
-                                    set_idx,
-                                    ix_idx
-                                );
-                            }
-                            respond_bidirectional_events.append(&mut r_bdx);
-                            signature_responded_events.append(&mut s_resp);
-                        }
-                        Err(e) => tracing::warn!(
-                            "Error processing inner instruction {}.{}: {}",
-                            set_idx,
-                            ix_idx,
-                            e
-                        ),
-                    }
-                }
-            }
-        }
-    }
-
-    Ok((respond_bidirectional_events, signature_responded_events))
-}
-
-enum SolanaEvents {
-    Sign(Vec<SolanaSignEvent>),
-    Respond {
-        bidirectional: Vec<RespondBidirectionalEvent>,
-        responded: Vec<SignatureRespondedEvent>,
-    },
-    None,
-}
-
-impl SolanaEvents {
-    fn parse(
-        tx: &EncodedTransactionWithStatusMeta,
-        target_program_id: &Pubkey,
-        logs: &[String],
-    ) -> anyhow::Result<Self> {
-        if looks_like_cpi_sign_event(logs) {
-            Ok(SolanaEvents::Sign(parse_cpi_events(tx, target_program_id)?))
-        } else if looks_like_respond_event(logs) {
-            let (bidirectional, responded) = parse_cpi_respond_events(tx, target_program_id)?;
-            Ok(SolanaEvents::Respond {
-                bidirectional,
-                responded,
-            })
-        } else {
-            Ok(SolanaEvents::None)
-        }
-    }
+fn decode<T: AnchorDeserialize>(mut data: &[u8]) -> Option<T> {
+    T::deserialize(&mut data)
+        .inspect_err(|e| {
+            tracing::warn!("Failed to deserialize {}: {e}", std::any::type_name::<T>())
+        })
+        .ok()
 }
 
 pub async fn emit_events(
     events_tx: &mpsc::Sender<ChainEvent>,
-    program_id: &Pubkey,
-    signature: Signature,
+    program_id: &str,
     tx: &EncodedTransactionWithStatusMeta,
-    logs: &[String],
 ) -> anyhow::Result<()> {
-    match SolanaEvents::parse(tx, program_id, logs)? {
-        SolanaEvents::Sign(events) => {
-            let sig_bytes = signature.as_ref().to_vec();
-            for ev in events {
-                if let Some(request) = ev.build_sign_request(&sig_bytes) {
-                    // `signature` is the Solana transaction signature, i.e. the tx hash
-                    // shown in explorers and used as the getTransaction lookup key. Log it
-                    // next to the sign_id so a given tx can be matched to its request.
-                    tracing::info!(
-                        tx_hash = %signature,
-                        sign_id = ?request.id,
-                        bidirectional = matches!(request.kind, SignKind::SignBidirectional(_)),
-                        "solana sign request parsed",
-                    );
-                    events_tx
-                        .send(ChainEvent::SignRequest {
-                            request: Arc::new(request),
-                            block_timestamp: None,
-                        })
-                        .await?;
+    let events = parse_cpi_events(tx, program_id);
+    if events.is_empty() {
+        return Ok(());
+    }
+    let signature = extract_tx_signature(&tx.transaction)?;
+    for event in events {
+        let event = match event {
+            CpiEvent::Sign(ev) => {
+                let Some(request) = ev.build_sign_request(signature.as_ref()) else {
+                    continue;
+                };
+                // `signature` is the Solana transaction signature, i.e. the tx hash
+                // shown in explorers and used as the getTransaction lookup key. Log it
+                // next to the sign_id so a given tx can be matched to its request.
+                tracing::info!(
+                    tx_hash = %signature,
+                    sign_id = ?request.id,
+                    bidirectional = matches!(request.kind, SignKind::SignBidirectional(_)),
+                    "solana sign request parsed",
+                );
+                ChainEvent::SignRequest {
+                    request: Arc::new(request),
+                    block_timestamp: None,
                 }
             }
-        }
-        SolanaEvents::Respond {
-            bidirectional,
-            responded,
-        } => {
-            for ev in bidirectional {
-                let signature = match to_mpc_signature(&ev.signature) {
-                    Ok(sig) => sig,
-                    Err(err) => {
-                        tracing::warn!(
-                            ?err,
-                            ?ev.request_id,
-                            "ignoring malformed signature in RespondBidirectional event"
-                        );
-                        continue;
-                    }
+            CpiEvent::RespondBidirectional(ev) => {
+                let Ok(signature) = to_mpc_signature(&ev.signature).inspect_err(|err| {
+                    tracing::warn!(
+                        ?err,
+                        ?ev.request_id,
+                        "ignoring malformed signature in RespondBidirectional event"
+                    )
+                }) else {
+                    continue;
                 };
-                let _ = events_tx
-                    .send(ChainEvent::RespondBidirectional(
-                        mpc_primitives::RespondBidirectionalEvent {
-                            request_id: ev.request_id,
-                            signature,
-                            chain: Chain::Solana,
-                        },
-                    ))
-                    .await;
+                ChainEvent::RespondBidirectional(mpc_primitives::RespondBidirectionalEvent {
+                    attestation: None,
+                    request_id: ev.request_id,
+                    signature,
+                    chain: Chain::Solana,
+                })
             }
-
-            for ev in responded {
-                let signature = match to_mpc_signature(&ev.signature) {
-                    Ok(sig) => sig,
-                    Err(err) => {
-                        tracing::warn!(
-                            ?err,
-                            ?ev.request_id,
-                            "ignoring malformed signature in SignatureResponded event"
-                        );
-                        continue;
-                    }
+            CpiEvent::Responded(ev) => {
+                let Ok(signature) = to_mpc_signature(&ev.signature).inspect_err(|err| {
+                    tracing::warn!(
+                        ?err,
+                        ?ev.request_id,
+                        "ignoring malformed signature in SignatureResponded event"
+                    )
+                }) else {
+                    continue;
                 };
-                let _ = events_tx
-                    .send(ChainEvent::Respond(
-                        mpc_primitives::SignatureRespondedEvent {
-                            request_id: ev.request_id,
-                            signature,
-                            chain: Chain::Solana,
-                        },
-                    ))
-                    .await;
+                ChainEvent::Respond(mpc_primitives::SignatureRespondedEvent {
+                    request_id: ev.request_id,
+                    signature,
+                    chain: Chain::Solana,
+                })
             }
-        }
-        SolanaEvents::None => {}
+        };
+        events_tx.send(event).await?;
     }
     Ok(())
 }
@@ -558,6 +358,7 @@ pub fn to_mpc_signature(
 mod tests {
     use super::*;
     use signet_program::SignatureRequestedEvent;
+    use solana_sdk::pubkey::Pubkey;
 
     #[test]
     fn split_cpi_event_handles_short_and_valid_data() {
@@ -606,6 +407,41 @@ mod tests {
             hex::encode(SolanaSignEvent::SignatureRequested(event).generate_request_id()),
             "7f7aee49c2a994cc17f85058f7e0b19a44603d619a7e738522f9aa329e457879"
         );
+    }
+
+    fn sign_bidirectional_ix_data(caip2_id: &str) -> String {
+        let event = SignBidirectionalEvent {
+            sender: Pubkey::new_from_array([0x11; 32]),
+            serialized_transaction: vec![1, 2, 3],
+            caip2_id: caip2_id.to_string(),
+            key_version: 0,
+            deposit: 0,
+            path: "path".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "dest".to_string(),
+            params: String::new(),
+            program_id: Pubkey::new_from_array([0x22; 32]),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+        };
+        let mut data = anchor_lang::event::EVENT_IX_TAG_LE.to_vec();
+        data.extend(anchor_lang::Event::data(&event));
+        solana_sdk::bs58::encode(data).into_string()
+    }
+
+    #[test]
+    fn emits_sign_bidirectional_cpi_event() {
+        let data = sign_bidirectional_ix_data("eip155:1");
+        assert!(matches!(
+            parse_cpi_event(&data),
+            Some(CpiEvent::Sign(SolanaSignEvent::SignBidirectional(ev))) if ev.caip2_id == "eip155:1"
+        ));
+    }
+
+    #[test]
+    fn skips_sign_bidirectional_event_with_invalid_caip2() {
+        let data = sign_bidirectional_ix_data("not-a-chain");
+        assert!(parse_cpi_event(&data).is_none());
     }
 
     #[test]

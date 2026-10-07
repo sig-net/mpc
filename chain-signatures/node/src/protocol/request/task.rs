@@ -47,7 +47,7 @@ impl SignPhase {
             SignPhase::Organizing(phase) => phase.advance(ctx, state).await,
             SignPhase::Posit(phase) => phase.advance(ctx, state, mailbox).await,
             SignPhase::Generating(phase) => phase.advance(ctx, state, mailbox).await,
-            SignPhase::Complete(result) => SignPhase::Complete(*result),
+            SignPhase::Complete(result) => SignPhase::Complete(result.clone()),
         }
     }
 }
@@ -108,7 +108,9 @@ impl GeneratingPhase {
 
         match result {
             Ok(()) => SignPhase::Complete(Ok(())),
-            Err(err) => state.reorganize(&format!("signature generation failed: {err:?}")),
+            Err(SignError::Aborted(cause)) => {
+                state.reorganize(&format!("signature generation failed: {cause}"))
+            }
         }
     }
 
@@ -166,7 +168,7 @@ impl GeneratingPhase {
                 me,
                 from,
                 PositMessage {
-                    id: PositProtocolId::Signature(ctx.sign_id, presignature_id, round),
+                    id: PositProtocolId::signature(ctx.sign_id, ctx.kind, presignature_id, round),
                     from: me,
                     action: PositAction::RejectWithReason(reason),
                 },
@@ -179,6 +181,7 @@ impl GeneratingPhase {
 pub struct SignTask {
     pub governance: GovernanceInfo,
     pub sign_id: SignId,
+    pub kind: RequestKind,
     pub presignatures: PresignatureStorage,
     pub msg: MessageChannel,
     pub rpc: RpcChannel,
