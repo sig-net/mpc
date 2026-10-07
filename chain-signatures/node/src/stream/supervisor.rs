@@ -14,13 +14,6 @@ use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-/// Per-chain watchdog timeout: restart a `run()` that produced no
-/// `ChainEvent::Block` within [`ChainConfig::stall_timeout_secs`] (derived
-/// from each chain's block cadence, env-overridable).
-pub(crate) fn live_block_timeout(chain: Chain) -> Duration {
-    Duration::from_secs(chain.stall_timeout_secs())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RegressionOutcome {
     /// Consensus digest mismatches local backlog — transition to Recovery.
@@ -158,7 +151,13 @@ pub async fn run_supervised<I: ChainIndexer, T: ChainTelemetry>(
     ctx: StreamContext,
     telemetry: T,
 ) {
-    run_supervised_with_watchdog(indexer, ctx, telemetry, live_block_timeout(I::CHAIN)).await
+    run_supervised_with_watchdog(
+        indexer,
+        ctx,
+        telemetry,
+        Duration::from_secs(I::CHAIN.stall_timeout_secs()),
+    )
+    .await
 }
 
 async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
@@ -308,7 +307,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         }
 
         if matches!(exit, Exit::Restart) {
-            tracing::debug!(
+            tracing::info!(
                 %chain,
                 ?restart_delay,
                 "backing off before restarting chain indexer"
@@ -1003,7 +1002,13 @@ mod tests {
         // instant-Ok exits cannot be observed while the cap is full, so the
         // supervisor must keep restarting instead of shutting down. The first
         // restart waits out the 1s backoff base.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while attempts.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("watchdog should have restarted run() after the 1s backoff");
         assert!(
             !task.is_finished(),
             "supervisor must not shut down while the checkpoint cap is full"

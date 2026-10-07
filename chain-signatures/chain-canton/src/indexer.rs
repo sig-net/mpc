@@ -36,7 +36,7 @@ impl CantonConnection {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
     // Silence budget before probing transport liveness with an RFC 6455 ping
     // (party-filtered streams go quiet legitimately). The supervisor's
-    // `live_block_timeout` watchdog is the slower backstop.
+    // `stall_timeout_secs` watchdog is the slower backstop.
     const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
     // Budget for the peer's mandatory Pong answer (RFC 6455 §5.5.2).
     const PONG_TIMEOUT: Duration = Duration::from_secs(20);
