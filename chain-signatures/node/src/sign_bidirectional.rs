@@ -321,19 +321,20 @@ pub fn sign_and_hash_transaction(
     if is_eip1559(unsigned_rlp) {
         sign_and_hash_eip1559_from_unsigned(unsigned_rlp, &r, &s, y_parity)
     } else {
-        // Extract chain_id from the unsigned RLP (it's the 7th field in legacy transactions)
-        // In legacy Ethereum transactions with EIP-155, there are 9 fields:
-        // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
-        // The chain_id is the 7th field (index 6, 0-based).
-        // We check for at least 9 fields to ensure chain_id is present.
-        let rlp = Rlp::new(unsigned_rlp);
-        let chain_id = if rlp.item_count().unwrap_or(0) >= 9 {
-            rlp.val_at::<u64>(6).ok()
-        } else {
-            None
-        };
+        let chain_id = transaction_chain_id(unsigned_rlp);
         sign_and_hash_legacy_from_unsigned(unsigned_rlp, chain_id, &r, &s, y_parity)
     }
+}
+
+/// The EIP-155 chain id of an unsigned EIP-1559 or legacy transaction.
+pub(crate) fn transaction_chain_id(unsigned_rlp: &[u8]) -> Option<u64> {
+    if let Some(body) = unsigned_rlp.strip_prefix(&[0x02]) {
+        return Rlp::new(body).val_at(0).ok();
+    }
+    // Legacy with EIP-155 has 9 fields:
+    // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
+    let rlp = Rlp::new(unsigned_rlp);
+    (rlp.item_count().ok()? >= 9).then(|| rlp.val_at(6).ok())?
 }
 
 fn is_eip1559(unsigned_rlp: &[u8]) -> bool {
@@ -553,6 +554,20 @@ mod tests {
         rlp.append_u64(0);
         rlp.append_u64(0);
         rlp.into_vec()
+    }
+
+    #[test]
+    fn transaction_chain_id_reads_legacy_and_eip1559() {
+        assert_eq!(
+            super::transaction_chain_id(&legacy_tx(31_337)),
+            Some(31_337)
+        );
+        let eip1559 = TxEip1559 {
+            chain_id: 11_155_111,
+            ..Default::default()
+        };
+        let unsigned = eip1559.encoded_for_signing();
+        assert_eq!(super::transaction_chain_id(&unsigned), Some(11_155_111));
     }
 
     /// The negated signature verifies too, so it has to name the transaction a

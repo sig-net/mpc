@@ -577,6 +577,47 @@ async fn process_sign_request_rejects_an_unprocessable_output_schema() {
     assert!(backlog.get(Chain::Solana, &admitted).await.is_some());
 }
 
+/// `eip155:1` names every Ethereum network, so the transaction's own chain id
+/// decides where it executes: signed for another network, it never executes here.
+#[tokio::test]
+async fn process_sign_request_rejects_another_networks_chain_id() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let mut ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+    let request = |seed: u8, chain_id: u64| {
+        Arc::new(IndexedSignRequest::sign_bidirectional(
+            SignId::new([seed; 32]),
+            test_sign_args(seed),
+            Chain::Solana,
+            current_unix_timestamp(),
+            bidirectional_event(legacy_contract_call(chain_id)),
+        ))
+    };
+
+    ctx.ethereum_chain_id = None;
+    process_sign_request(request(17, 11_155_111), &ctx)
+        .await
+        .expect("without Ethereum configured the check is skipped");
+
+    ctx.ethereum_chain_id = Some(1);
+    let err = process_sign_request(request(18, 11_155_111), &ctx)
+        .await
+        .expect_err("another network's chain id should be rejected at ingestion");
+    assert!(format!("{err:#}").contains("this node executes on 1"));
+    assert!(backlog
+        .get(Chain::Solana, &SignId::new([18; 32]))
+        .await
+        .is_none());
+
+    process_sign_request(request(19, 1), &ctx)
+        .await
+        .expect("the configured network's chain id should be admitted");
+    assert!(backlog
+        .get(Chain::Solana, &SignId::new([19; 32]))
+        .await
+        .is_some());
+}
+
 /// A non-empty but undecodable transaction is the same poison pill as an empty one,
 /// with a worse blast radius: admitted, it signs, publishes leg 1, then fails
 /// deterministically in respond processing before the cancel, leaving the entry in

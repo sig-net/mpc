@@ -185,7 +185,7 @@ pub struct EthConfig {
     pub execution_rpc_http_url: Url,
     /// The contract address to watch
     pub contract_address: Address,
-    /// must be one of sepolia, mainnet
+    /// must be one of sepolia, mainnet, anvil
     pub network: String,
     /// refresh finalized block interval in milliseconds
     pub refresh_finalized_interval: u64,
@@ -203,6 +203,16 @@ impl EthConfig {
     /// Ethereum address derived from the configured account secret key.
     pub fn signer_address(&self) -> String {
         self.account_sk.address().to_string()
+    }
+
+    /// The EIP-155 chain id of `network`.
+    pub fn chain_id(&self) -> Option<u64> {
+        match self.network.as_str() {
+            "mainnet" => Some(1),
+            "sepolia" => Some(11_155_111),
+            "anvil" => Some(31_337),
+            _ => None,
+        }
     }
 }
 

@@ -8,7 +8,9 @@ use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
     claims_attestation_key, is_failed_execution_response, CompletedTx,
 };
-use crate::sign_bidirectional::{BidirectionalProgress, SignBidirectionalEventExt, SignStatus};
+use crate::sign_bidirectional::{
+    transaction_chain_id, BidirectionalProgress, SignBidirectionalEventExt, SignStatus,
+};
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
 use mpc_chain_integration_core::ChainTelemetry;
@@ -46,9 +48,22 @@ pub(crate) async fn process_sign_request(
         // admitted here but failing there can never advance: its entry sticks in
         // pending-publish forever, and every node publishes a leg-1 response
         // whose second leg will never come.
-        SignKind::SignBidirectional(event) => event.validate().with_context(|| {
-            format!("rejecting bidirectional sign request {:?}", sign_request.id)
-        })?,
+        SignKind::SignBidirectional(event) => {
+            event.validate().with_context(|| {
+                format!("rejecting bidirectional sign request {:?}", sign_request.id)
+            })?;
+            // Here rather than in `validate`, so quarantine stays a function of the event.
+            let ethereum_target = matches!(event.target_chain(), Ok(Chain::Ethereum));
+            if let Some(expected) = ctx.ethereum_chain_id.filter(|_| ethereum_target) {
+                let chain_id = transaction_chain_id(&event.serialized_transaction);
+                anyhow::ensure!(
+                    chain_id == Some(expected),
+                    "rejecting bidirectional sign request {:?}: chain id {chain_id:?}, \
+                     but this node executes on {expected}",
+                    sign_request.id
+                );
+            }
+        }
         SignKind::Sign => {}
     }
 

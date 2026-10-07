@@ -848,6 +848,16 @@ async fn spawn_indexers(
         "spawning chain indexers"
     );
 
+    // Every source chain's stream admits bidirectional requests targeting Ethereum.
+    // Admission must match across nodes, so they all need the same Ethereum network.
+    let ethereum_chain_id = eth.as_ref().and_then(EthConfig::chain_id);
+    if ethereum_chain_id.is_none() {
+        tracing::warn!(
+            "ethereum not configured: Ethereum-targeted requests are admitted without the \
+             chain id check that nodes with ethereum configured apply"
+        );
+    }
+
     if let Some(eth_config) = eth {
         let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
         match EthereumIndexer::new(
@@ -870,7 +880,8 @@ async fn spawn_indexers(
                         mesh_state.clone(),
                         node_client.clone(),
                         checkpoints_rx[Chain::Ethereum].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     eth_telemetry,
                 ));
             }
@@ -895,7 +906,8 @@ async fn spawn_indexers(
                         mesh_state.clone(),
                         node_client.clone(),
                         checkpoints_rx[Chain::Solana].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     sol_telemetry,
                 ));
             }
@@ -920,7 +932,8 @@ async fn spawn_indexers(
                 mesh_state.clone(),
                 node_client.clone(),
                 checkpoints_rx[Chain::Hydration].clone(),
-            ),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
             hydration_telemetry,
         ));
     }
@@ -940,7 +953,8 @@ async fn spawn_indexers(
                         mesh_state.clone(),
                         node_client.clone(),
                         checkpoints_rx[Chain::Canton].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     canton_telemetry,
                 ));
             }
@@ -967,7 +981,8 @@ async fn spawn_indexers(
                         mesh_state,
                         node_client,
                         checkpoints_rx[Chain::Midnight].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     midnight_telemetry,
                 ));
             }
