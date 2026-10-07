@@ -24,7 +24,7 @@ use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
 use mpc_utils::{
-    task::{retry_until_some, CancellationTokenExt as _},
+    task::CancellationTokenExt as _,
     time::current_unix_timestamp,
 };
 use tokio::sync::mpsc;
@@ -439,13 +439,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         number: u64,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Indexed> {
-        let Some(block) =
-            retry_until_some(cancel, RETRY_DELAY, "midnight block lookup", || async {
-                source.block_at(number).await.map(Some)
-            })
-            .await
-        else {
-            return Ok(Indexed::Cancelled);
+        let block = tokio::select! {
+            _ = cancel.cancelled() => return Ok(Indexed::Cancelled),
+            result = source.block_at(number) => result
+                .with_context(|| format!("failed to resolve midnight block {number}"))?,
         };
         self.index_block(source, events_tx, &block, cancel).await
     }
@@ -505,13 +502,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .get_processed_block(Chain::Midnight)
             .await
             .unwrap_or(0);
-        let Some(anchor) =
-            retry_until_some(&cancel, RETRY_DELAY, "midnight anchor sampling", || async {
-                source.finalized_head().await.map(Some)
-            })
-            .await
-        else {
-            return Ok(());
+        let anchor = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = source.finalized_head() => result
+                .context("failed to sample the midnight anchor")?,
         };
 
         let mut last_processed = checkpoint;
@@ -548,7 +542,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .await
             .context("failed to send midnight catchup completed event")?;
 
-        let mut last_progress = tokio::time::Instant::now();
         loop {
             if cancel
                 .cancelled_within(self.config.indexer.poll_interval)
@@ -564,12 +557,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             };
 
             if block.number <= last_processed {
-                if last_progress.elapsed() >= self.config.indexer.stall_timeout {
-                    anyhow::bail!(
-                        "midnight finalized head made no progress for {:?}",
-                        self.config.indexer.stall_timeout
-                    );
-                }
                 continue;
             }
             for number in last_processed.saturating_add(1)..block.number {
@@ -585,10 +572,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 .index_block(source, &events_tx, &block, &cancel)
                 .await?
             {
-                Indexed::Done => {
-                    last_processed = block.number;
-                    last_progress = tokio::time::Instant::now();
-                }
+                Indexed::Done => last_processed = block.number,
                 Indexed::Cancelled => return Ok(()),
             }
         }
@@ -1064,39 +1048,6 @@ mod tests {
         }
         assert!(harness.events_rx.try_recv().is_err());
         harness.cancel_and_join().await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn nonadvancing_heads_share_one_stall_budget() {
-        let mut config = test_config();
-        config.indexer.poll_interval = Duration::from_secs(1);
-        config.indexer.stall_timeout = Duration::from_secs(2);
-        let source = FixtureSource {
-            head: 8,
-            sampled_heads: Mutex::new(VecDeque::from([
-                HeadSample::Block(block_ref(8)),
-                HeadSample::Block(block_ref(7)),
-            ])),
-            ..Default::default()
-        };
-        let mut harness =
-            RunFixture::spawn_with_config(source, MockStateManager::new(), config).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        assert!(harness.events_rx.try_recv().is_err());
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        let err = harness
-            .handle
-            .await
-            .expect("run task")
-            .expect_err("regressed and equal samples share the stall budget");
-        assert!(err.to_string().contains("no progress"), "{err:#}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1817,16 +1768,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_retries_a_transient_anchor_read() {
-        let (mut source, live_tx) = with_live(8);
-        source.transient_head_errors = Mutex::new(2);
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        harness.cancel_and_join().await;
-        drop(live_tx);
+    async fn a_transient_anchor_error_fails_the_run() {
+        let source = FixtureSource {
+            head: 8,
+            transient_head_errors: Mutex::new(1),
+            ..Default::default()
+        };
+        let harness = RunFixture::spawn(source, 8).await;
+        let err = harness
+            .handle
+            .await
+            .expect("run task")
+            .expect_err("anchor read errors fail the run for a supervised restart");
+        assert!(err.to_string().contains("anchor"), "{err:#}");
     }
 
     #[tokio::test]

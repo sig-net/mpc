@@ -289,9 +289,7 @@ pub fn ss58_address_from_account32(sender: [u8; 32]) -> String {
     acc.to_ss58check_with_version(Ss58AddressFormatRegistry::PolkadotAccount.into())
 }
 
-const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
-const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const PALLET_SIGNET: &str = "Signet";
 const EVENT_SIGNATURE_REQUESTED: &str = "SignatureRequested";
 const EVENT_SIGNATURE_RESPONDED: &str = "SignatureResponded";
@@ -308,56 +306,29 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
         Self { config, telemetry }
     }
 
-    /// Establish the Hydration OnlineClient + legacy RPC methods. Returns
-    /// `None` (after logging) on failure so the caller can back off and retry.
+    /// Establish the Hydration OnlineClient + legacy RPC methods.
     async fn connect_rpc(
         &self,
         ws_url: &str,
-    ) -> Option<(
+    ) -> Result<(
         OnlineClient<SubstrateConfig>,
         LegacyRpcMethods<SubstrateConfig>,
     )> {
-        let api = match tokio::time::timeout(
+        let api = tokio::time::timeout(
             CONNECTION_TIMEOUT,
             OnlineClient::<SubstrateConfig>::from_url(ws_url),
         )
         .await
-        {
-            Ok(Ok(api)) => api,
-            Ok(Err(e)) => {
-                tracing::error!(
-                    "failed to connect to hydration rpc: {e}; retrying in {RECONNECT_DELAY:?}"
-                );
-                return None;
-            }
-            Err(_) => {
-                tracing::error!(
-                    "timed out connecting to hydration rpc after {CONNECTION_TIMEOUT:?}; retrying"
-                );
-                return None;
-            }
-        };
+        .map_err(|_| anyhow!("timed out connecting to hydration rpc"))?
+        .context("failed to connect to hydration rpc")?;
 
-        let rpc_client = match tokio::time::timeout(CONNECTION_TIMEOUT, RpcClient::from_url(ws_url))
+        let rpc_client = tokio::time::timeout(CONNECTION_TIMEOUT, RpcClient::from_url(ws_url))
             .await
-        {
-            Ok(Ok(client)) => client,
-            Ok(Err(e)) => {
-                tracing::error!(
-                        "failed to connect to hydration rpc client: {e}; retrying in {RECONNECT_DELAY:?}"
-                    );
-                return None;
-            }
-            Err(_) => {
-                tracing::error!(
-                        "timed out connecting to hydration rpc client after {CONNECTION_TIMEOUT:?}; retrying"
-                    );
-                return None;
-            }
-        };
+            .map_err(|_| anyhow!("timed out connecting to hydration rpc client"))?
+            .context("failed to connect to hydration rpc client")?;
         let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
 
-        Some((api, legacy_rpc))
+        Ok((api, legacy_rpc))
     }
 
     /// Verify a finalized block's `System::Events` against its Merkle proof and
@@ -543,101 +514,45 @@ impl<T: ChainTelemetry> ChainIndexer for HydrationIndexer<T> {
         cancel: CancellationToken,
     ) -> Result<()> {
         // Hydration is live-only: it streams finalized blocks and performs no
-        // catchup/backfill (any gap during a disconnect is a known TODO)
+        // catchup/backfill (TODO: backfill blocks missed across a restart).
         events_tx
             .send(ChainEvent::CatchupCompleted)
             .await
             .context("failed to send hydration catchup completed event")?;
 
         let ws_url: &str = self.config.rpc_ws_url.as_str();
-        let mut runtime_updater_handle: Option<tokio::task::JoinHandle<()>> = None;
+        tracing::info!("connecting to hydration rpc at {ws_url}");
+        let (hydration_api, legacy_rpc) = self.connect_rpc(ws_url).await?;
 
-        loop {
-            if cancel.is_cancelled() {
-                return Ok(());
-            }
-            if let Some(handle) = runtime_updater_handle.take() {
-                handle.abort();
-            }
+        // `subscribe_finalized` returns a private subxt stream alias, so it is
+        // built inline (inferred) rather than inside `connect_rpc`.
+        let mut blocks = tokio::time::timeout(
+            CONNECTION_TIMEOUT,
+            hydration_api.blocks().subscribe_finalized(),
+        )
+        .await
+        .map_err(|_| anyhow!("timed out subscribing to finalized blocks"))?
+        .context("failed to subscribe to finalized blocks")?;
 
-            tracing::info!("connecting to hydration rpc at {ws_url}");
-
-            let (hydration_api, legacy_rpc) = match self.connect_rpc(ws_url).await {
-                Some(conn) => conn,
-                None => {
-                    tokio::time::sleep(RECONNECT_DELAY).await;
-                    continue;
-                }
+        // Reconnects and stall detection are the supervisor's job: any failure
+        // below fails `run()` and the supervised loop restarts it. Break (not
+        // `return`) so the runtime updater is aborted on every exit path.
+        let runtime_updater = spawn_runtime_updater(hydration_api.clone());
+        let outcome = loop {
+            let block = tokio::select! {
+                _ = cancel.cancelled() => break Ok(()),
+                maybe = blocks.next() => match maybe {
+                    Some(Ok(block)) => block,
+                    Some(Err(e)) => break Err(anyhow!("failed to get hydration block: {e}")),
+                    None => break Err(anyhow!("hydration block stream ended")),
+                },
             };
-
-            // `subscribe_finalized` returns a private subxt stream alias, so it is
-            // built inline (inferred) rather than inside `connect_rpc`.
-            let mut blocks = match tokio::time::timeout(
-                CONNECTION_TIMEOUT,
-                hydration_api.blocks().subscribe_finalized(),
-            )
-            .await
-            {
-                Ok(Ok(blocks)) => blocks,
-                Ok(Err(e)) => {
-                    tracing::error!(
-                        "failed to subscribe to finalized blocks: {e}; retrying in {RECONNECT_DELAY:?}"
-                    );
-                    tokio::time::sleep(RECONNECT_DELAY).await;
-                    continue;
-                }
-                Err(_) => {
-                    tracing::error!(
-                        "timed out subscribing to finalized blocks after {CONNECTION_TIMEOUT:?}; retrying"
-                    );
-                    tokio::time::sleep(RECONNECT_DELAY).await;
-                    continue;
-                }
-            };
-
-            runtime_updater_handle = Some(spawn_runtime_updater(hydration_api.clone()));
-
-            let mut last_block_time = std::time::Instant::now();
-            let mut watchdog = tokio::time::interval(Duration::from_secs(5));
-
-            loop {
-                let block_res = tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    maybe = blocks.next() => {
-                        match maybe {
-                            Some(block_res) => block_res,
-                            None => {
-                                tracing::warn!("hydration block stream ended; reconnecting");
-                                break;
-                            }
-                        }
-                    }
-                    _ = watchdog.tick() => {
-                        if last_block_time.elapsed() > STALL_TIMEOUT {
-                            tracing::warn!(
-                                "hydration block subscription stalled: no block for {STALL_TIMEOUT:?}; reconnecting"
-                            );
-                            break;
-                        }
-                        continue;
-                    }
-                };
-                let block = match block_res {
-                    Ok(block) => block,
-                    Err(e) => {
-                        tracing::warn!("failed to get block: {e}; reconnecting");
-                        break;
-                    }
-                };
-                last_block_time = std::time::Instant::now();
-
-                self.process_block(&legacy_rpc, &events_tx, &block).await?;
+            if let Err(err) = self.process_block(&legacy_rpc, &events_tx, &block).await {
+                break Err(err);
             }
-
-            // TODO: backfill blocks missed during the disconnect window before resuming live streaming.
-            tracing::info!("reconnecting to hydration rpc in {RECONNECT_DELAY:?}");
-            tokio::time::sleep(RECONNECT_DELAY).await;
-        }
+        };
+        runtime_updater.abort();
+        outcome
     }
 }
 
