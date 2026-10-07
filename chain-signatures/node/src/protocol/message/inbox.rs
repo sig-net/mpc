@@ -7,9 +7,7 @@ use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::message::sub::{
     self, SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse, Subscriber,
 };
-use crate::protocol::message::types::Round;
-use crate::protocol::posit::PositAction;
-use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
+use crate::protocol::presignature::PresignatureId;
 use crate::protocol::triple::TripleId;
 use crate::protocol::Config;
 use crate::rpc::ContractStateWatcher;
@@ -68,15 +66,15 @@ pub struct MessageInbox {
     /// demand and removed on unsubscribe.
     triple: HashMap<TripleId, Subscriber<TripleMessage>>,
     /// Posit conversations for all triples; demuxed per-id by the TripleSpawner.
-    triple_posit: Subscriber<(TripleId, Participant, PositAction)>,
+    triple_posit: Subscriber<sub::TriplePosit>,
     /// Protocol messages per running presignature generation.
     presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
     /// Posit conversations for all presignatures; demuxed by the PresignatureSpawner.
-    presignature_posit: Subscriber<(FullPresignatureId, Participant, PositAction)>,
+    presignature_posit: Subscriber<sub::PresignaturePosit>,
     /// Protocol messages per running signature generation.
     signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
     /// Posit conversations for all sign requests; demuxed per sign_id by the SignatureSpawner.
-    signature_posit: Subscriber<(SignId, PresignatureId, Round, Participant, PositAction)>,
+    signature_posit: Subscriber<sub::SignaturePosit>,
 }
 
 impl MessageInbox {
@@ -132,9 +130,10 @@ impl MessageInbox {
                             .try_send_lossy((id, message.from, message.action));
                     self.presignature_posit.report_capacity_global();
                 }
-                PositProtocolId::Signature(sign_id, presignature_id, round) => {
+                PositProtocolId::Signature(sign_id, presignature_id, round, kind) => {
                     let _ = self.signature_posit.try_send_lossy((
                         sign_id,
+                        kind,
                         presignature_id,
                         round,
                         message.from,
@@ -793,7 +792,12 @@ mod tests {
         let mut messages = Vec::with_capacity(sub::MAX_MESSAGE_SUB_CHANNEL_SIZE + 2);
         for round in 0..=sub::MAX_MESSAGE_SUB_CHANNEL_SIZE {
             messages.push(Message::Posit(PositMessage {
-                id: PositProtocolId::Signature(sign_id, 77, round),
+                id: PositProtocolId::signature(
+                    sign_id,
+                    mpc_primitives::RequestKind::Sign,
+                    77,
+                    round,
+                ),
                 from,
                 action: PositAction::Accept,
             }));
@@ -817,5 +821,6 @@ mod tests {
             .await
             .expect("signature posit subscription unexpectedly closed");
         assert_eq!(first_signature_posit.0, sign_id);
+        assert_eq!(first_signature_posit.1, mpc_primitives::RequestKind::Sign);
     }
 }
