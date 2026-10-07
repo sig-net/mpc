@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anchor_client::anchor_lang::{AnchorDeserialize, Discriminator};
+use backon::{ConstantBuilder, Retryable};
 use cait_sith::FullSignature;
 use futures::StreamExt;
 use k256::Secp256k1;
@@ -545,7 +546,7 @@ async fn wait_for_signature_responded_event(
                     continue;
                 }
 
-                match parse_signature_responded_events(&rpc_client, &tx_signature, &program_id).await {
+                match parse_signature_responded_events(&rpc_client, &tx_signature, &program_id, deadline.deadline()).await {
                     Ok(events) => {
                         for event in events {
                             tracing::info!(
@@ -585,19 +586,23 @@ async fn parse_signature_responded_events(
     rpc_client: &RpcClient,
     signature: &solana_sdk::signature::Signature,
     program_id: &Pubkey,
+    deadline: tokio::time::Instant,
 ) -> anyhow::Result<Vec<SignatureRespondedEvent>> {
     use solana_transaction_status::{UiInstruction, UiParsedInstruction};
 
-    let tx = rpc_client
-        .get_transaction_with_config(
-            signature,
-            RpcTransactionConfig {
-                encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
-                commitment: Some(CommitmentConfig::confirmed()),
-                max_supported_transaction_version: Some(0),
-            },
-        )
-        .await?;
+    let config = RpcTransactionConfig {
+        encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
+        commitment: Some(CommitmentConfig::confirmed()),
+        max_supported_transaction_version: Some(0),
+    };
+    // A `confirmed` logs notification can arrive before `getTransaction` serves
+    // the transaction at that commitment, which then returns null. The logs
+    // stream does not repeat the notification, so the fetch is retried here.
+    let strategy = ConstantBuilder::default()
+        .with_delay(Duration::from_millis(500))
+        .with_max_times(9); // Nine retries after the initial attempt.
+    let fetch = || rpc_client.get_transaction_with_config(signature, config);
+    let tx = tokio::time::timeout_at(deadline, fetch.retry(&strategy)).await??;
 
     let Some(meta) = tx.transaction.meta else {
         return Ok(Vec::new());
