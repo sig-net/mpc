@@ -5,12 +5,17 @@ name: k6 Bidirectional Load Test
 #    series to alert on and the deployed service is known to work;
 #  - mid: 1 job a second for 20 minutes, twice a day, to check steady load;
 #  - high: a ramp from 1 to 10 jobs a second, twice a day, to find where it
-#    breaks. Both run against a pinger of their own on the runner, since the
+#    breaks. Both start a pinger on the runner (the runner pinger), since the
 #    deployed one holds ten addresses and its own job caps.
 #
-# A rate per minute (rpm_*) drives the deployed pinger; a rate per second
-# (rps_*, ramp_*) starts one of its own. Before each run a job funds the
-# addresses it will use, sized to what the run will submit.
+# A rate per minute (rpm_*) drives the deployed pinger, which funds its own
+# addresses; a rate per second (rps_*, ramp_*) starts a runner pinger. Before a
+# runner-pinger run a job funds the addresses it will use, sized to what the
+# run will submit.
+#
+# The runner pinger's secrets are repo secrets: LT_RUNNER_PINGER_SOL_SK (its
+# Solana requester key), LT_SEPOLIA_FUNDING_SK (the Sepolia wallet funding its
+# addresses), LT_SEPOLIA_RPC_URL and LT_SOLANA_DEVNET_RPC_URL.
 #
 # Every job spends Sepolia gas and Solana fees: roughly 0.03 ETH a mid run and
 # 0.06 a high run, plus about 0.8 ETH the first high run leaves on its
@@ -66,12 +71,13 @@ permissions:
   contents: read
 
 env:
-  # The isolated pinger's addresses. The prefix must differ from the deployed
-  # pinger's, and is fixed so the funded set is reused: ETH on these addresses
-  # cannot be moved back. The floor is below the default so an address needs
-  # little to be leasable.
-  ISOLATED_PATH_PREFIX: burst
-  ISOLATED_MIN_BALANCE_WEI: '300000000000000'
+  # The runner pinger's addresses. The prefix is fixed so the funded set is
+  # reused: ETH on these addresses cannot be moved back. The floor is below the
+  # default so an address needs little to be leasable.
+  RUNNER_PINGER_PATH_PREFIX: burst
+  RUNNER_PINGER_MIN_BALANCE_WEI: '300000000000000'
+  # Below this, the funding wallet needs a refill soon.
+  FUNDING_LOW_BALANCE_ETH: '0.3'
 
 jobs:
   # A schedule carries no inputs, so every setting is resolved here, once, for
@@ -116,7 +122,7 @@ jobs:
 
           case "${strategy}" in
             rpm_*) mode=deployed ;;
-            rps_* | ramp_*) mode=isolated ;;
+            rps_* | ramp_*) mode=runner_pinger ;;
             *)
               echo "::error::Unhandled strategy '${strategy}': add it to the mode selection"
               exit 1
@@ -125,7 +131,7 @@ jobs:
 
           case "${environment}" in
             both)
-              if [ "${mode}" = "isolated" ]; then
+              if [ "${mode}" = "runner_pinger" ]; then
                 echo "::error::A run with its own pinger uses one network: pick dev or testnet"
                 exit 1
               fi
@@ -154,29 +160,27 @@ jobs:
           INPUT_DURATION: ${{ inputs.lt_duration }}
           INPUT_ENVIRONMENT: ${{ inputs.environment }}
 
-  # Funds the addresses the run will use. One job for both modes and both
-  # networks: they spend from one wallet on Sepolia, whose transfers must not
-  # overlap. A concurrency group keeps only one job waiting, so this stays short.
+  # Funds the runner pinger's addresses. Runs spend from one Sepolia wallet,
+  # whose transfers must not overlap. A concurrency group keeps only one job
+  # waiting, so this stays short.
   fund:
     name: Fund the addresses
     needs: select
+    if: needs.select.outputs.mode == 'runner_pinger'
     concurrency:
-      group: fund-bidirectional-workers
+      group: fund-runner-pinger-workers
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # Holds the pinger's secrets. Restrict it to the default branch rather than
-    # requiring reviewers, which would hold every scheduled run for approval.
-    environment: Pinger Load Test
     outputs:
       jobs: ${{ steps.plan.outputs.jobs }}
       paths: ${{ steps.plan.outputs.paths }}
     env:
-      SIG_ETH_RPC_URL_SEPOLIA: ${{ secrets.SIG_ETH_RPC_URL_SEPOLIA }}
-      SIG_SOL_RPC_URL_DEV: ${{ secrets.SIG_SOL_RPC_URL_DEV }}
-      SIG_SOL_SK: ${{ secrets.SIG_SOL_SK }}
-      SIG_BIDIRECTIONAL_FUNDING_SK: ${{ secrets.SIG_BIDIRECTIONAL_FUNDING_SK }}
-      SIG_SOL_ROOT_PUBLIC_KEY: ${{ vars.SIG_SOL_ROOT_PUBLIC_KEY }}
+      SIG_ETH_RPC_URL_SEPOLIA: ${{ secrets.LT_SEPOLIA_RPC_URL }}
+      SIG_SOL_RPC_URL_DEV: ${{ secrets.LT_SOLANA_DEVNET_RPC_URL }}
+      # The addresses to fund are derived from this key's public half.
+      SIG_SOL_SK: ${{ secrets.LT_RUNNER_PINGER_SOL_SK }}
+      SIG_BIDIRECTIONAL_FUNDING_SK: ${{ secrets.LT_SEPOLIA_FUNDING_SK }}
     steps:
       # The strategies the run is sized from.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -206,8 +210,28 @@ jobs:
           LT_STRATEGY: ${{ needs.select.outputs.strategy }}
           LT_DURATION: ${{ needs.select.outputs.duration }}
 
-      # Tops each address up to what the busiest one could spend. An empty value
-      # selects the pinger's own prefix and floor, which the deployed pool uses.
+      # A warning, not a failure: the run can still go ahead, and the funding
+      # step below fails on its own once the wallet hits its reserve.
+      - name: Check the funding wallet
+        working-directory: pinger
+        run: |
+          node --input-type=module -e '
+            import { createPublicClient, formatEther, http } from "viem";
+            import { privateKeyToAccount } from "viem/accounts";
+            const key = process.env.SIG_BIDIRECTIONAL_FUNDING_SK;
+            if (!key) {
+              console.log("::error::Missing required secret: LT_SEPOLIA_FUNDING_SK");
+              process.exit(1);
+            }
+            const { address } = privateKeyToAccount(key.startsWith("0x") ? key : `0x${key}`);
+            const client = createPublicClient({ transport: http(process.env.SIG_ETH_RPC_URL_SEPOLIA) });
+            const eth = formatEther(await client.getBalance({ address }));
+            console.log(`Funding wallet ${address} holds ${eth} ETH`);
+            if (Number(eth) < Number(process.env.FUNDING_LOW_BALANCE_ETH))
+              console.log(`::warning::Funding wallet ${address} holds ${eth} ETH, below ${process.env.FUNDING_LOW_BALANCE_ETH}: refill it with Sepolia ETH`);
+          '
+
+      # Tops each address up to what the busiest one could spend.
       - name: Fund the addresses the run will use
         working-directory: pinger
         run: |
@@ -218,15 +242,15 @@ jobs:
           ENVIRONMENTS: ${{ needs.select.outputs.environments }}
           PATHS: ${{ steps.plan.outputs.paths }}
           ADDRESS_JOBS: ${{ steps.plan.outputs.address_jobs }}
-          SIG_BIDIRECTIONAL_PATH_PREFIX: ${{ needs.select.outputs.mode == 'isolated' && env.ISOLATED_PATH_PREFIX || '' }}
-          SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: ${{ needs.select.outputs.mode == 'isolated' && env.ISOLATED_MIN_BALANCE_WEI || '' }}
+          SIG_BIDIRECTIONAL_PATH_PREFIX: ${{ env.RUNNER_PINGER_PATH_PREFIX }}
+          SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: ${{ env.RUNNER_PINGER_MIN_BALANCE_WEI }}
           # A first fill of a few hundred addresses is past the default per-run
           # cap, which is sized for a handful.
-          SIG_BIDIRECTIONAL_FUND_MAX_PER_RUN_ETH: ${{ needs.select.outputs.mode == 'isolated' && '1' || '' }}
+          SIG_BIDIRECTIONAL_FUND_MAX_PER_RUN_ETH: '1'
 
   deployed:
     name: Bidirectional Load Test (${{ matrix.environment }})
-    needs: [select, fund]
+    needs: select
     if: needs.select.outputs.mode == 'deployed'
     strategy:
       matrix:
@@ -320,30 +344,27 @@ jobs:
 
   # Runs a contract pinger of its own on the runner, so a high rate needs
   # neither the deployed pinger resized nor its address pool and job caps.
-  isolated:
-    name: Isolated Bidirectional Load Test (${{ needs.select.outputs.environment }})
+  runner-pinger:
+    name: Runner-Pinger Bidirectional Load Test (${{ needs.select.outputs.environment }})
     needs: [select, fund]
-    if: needs.select.outputs.mode == 'isolated'
+    if: needs.select.outputs.mode == 'runner_pinger'
     # The funded addresses are shared state: two runs would lease the same ones
     # and collide on their nonces. Queued, since cancelling mid-run abandons
     # jobs that have already paid for their transactions.
     concurrency:
-      group: k6-bidirectional-isolated-${{ needs.select.outputs.environment }}
+      group: k6-bidirectional-runner-pinger-${{ needs.select.outputs.environment }}
       cancel-in-progress: false
     # Self-hosted: a run holds its runner for the submission and then up to 45
     # minutes for the last jobs to settle.
     runs-on: arc-runner-set
     timeout-minutes: 240
-    # The same environment as the fund job, for the pinger's own secrets.
-    environment: Pinger Load Test
     env:
       PORT: '3001'
       # The pinger listens on the runner only.
       API_SECRET: loadtest
-      SIG_ETH_RPC_URL_SEPOLIA: ${{ secrets.SIG_ETH_RPC_URL_SEPOLIA }}
-      SIG_SOL_RPC_URL_DEV: ${{ secrets.SIG_SOL_RPC_URL_DEV }}
-      SIG_SOL_SK: ${{ secrets.SIG_SOL_SK }}
-      SIG_SOL_ROOT_PUBLIC_KEY: ${{ vars.SIG_SOL_ROOT_PUBLIC_KEY }}
+      SIG_ETH_RPC_URL_SEPOLIA: ${{ secrets.LT_SEPOLIA_RPC_URL }}
+      SIG_SOL_RPC_URL_DEV: ${{ secrets.LT_SOLANA_DEVNET_RPC_URL }}
+      SIG_SOL_SK: ${{ secrets.LT_RUNNER_PINGER_SOL_SK }}
       LT_CHAIN_ENV: ${{ needs.select.outputs.environment }}
     steps:
       # The k6 script.
@@ -381,8 +402,8 @@ jobs:
           cat ../pinger.log
           exit 1
         env:
-          SIG_BIDIRECTIONAL_PATH_PREFIX: ${{ env.ISOLATED_PATH_PREFIX }}
-          SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: ${{ env.ISOLATED_MIN_BALANCE_WEI }}
+          SIG_BIDIRECTIONAL_PATH_PREFIX: ${{ env.RUNNER_PINGER_PATH_PREFIX }}
+          SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: ${{ env.RUNNER_PINGER_MIN_BALANCE_WEI }}
           SIG_BIDIRECTIONAL_PATHS: ${{ needs.fund.outputs.paths }}
           SIG_BIDIRECTIONAL_MAX_JOBS: ${{ needs.fund.outputs.jobs }}
           SIG_BIDIRECTIONAL_RETAINED_JOBS: ${{ needs.fund.outputs.jobs }}
@@ -431,7 +452,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## k6 Bidirectional Load Test (isolated pinger)"
+            echo "## k6 Bidirectional Load Test (runner pinger)"
             echo
             echo "- Network: \`${{ needs.select.outputs.environment }}\`"
             echo "- Rate: \`${{ needs.select.outputs.strategy }}\`, about ${{ needs.fund.outputs.jobs }} jobs across ${{ needs.fund.outputs.paths }} addresses"

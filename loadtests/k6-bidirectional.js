@@ -4,7 +4,8 @@ import exec from 'k6/execution';
 import { Trend, Rate, Counter, Gauge } from 'k6/metrics';
 import { parseDuration, planFor, strategies } from './strategies.mjs';
 
-// Load test for the Solana -> Ethereum bidirectional round trip.
+// Load test for the bidirectional round trip from a source chain (Solana by
+// default, LT_SOURCE_CHAIN) to Ethereum.
 //
 // A round trip lasts about twenty minutes, so a VU per job would need thousands
 // at a few jobs a second. Two scenarios avoid that:
@@ -115,13 +116,14 @@ export const options = {
 const config = () => {
   const env = __ENV.LT_CHAIN_ENV;
   const mode = __ENV.LT_MODE || 'eth_self_transfer';
+  const sourceChain = __ENV.LT_SOURCE_CHAIN || 'solana';
   const apiKey = __ENV.LT_PINGER_API_KEY;
   if (!env || !apiKey) {
     throw new Error(
       `Missing required environment: LT_CHAIN_ENV=${env}, LT_PINGER_API_KEY=${apiKey ? 'set' : 'unset'}`
     );
   }
-  return { env, mode, apiKey };
+  return { env, mode, sourceChain, apiKey };
 };
 
 const headers = apiKey => ({
@@ -134,10 +136,11 @@ const headers = apiKey => ({
  * id every job is tagged with so the collector sees only this run's jobs.
  */
 export function setup() {
-  const { env, apiKey } = config();
-  const res = http.get(`${BASE_URL}/sign_bidirectional/workers?env=${env}`, {
-    headers: headers(apiKey),
-  });
+  const { env, sourceChain, apiKey } = config();
+  const res = http.get(
+    `${BASE_URL}/sign_bidirectional/workers?env=${env}&sourceChain=${sourceChain}`,
+    { headers: headers(apiKey) }
+  );
   if (res.status !== 200) {
     fail(`Could not read worker funding: ${res.status} ${res.body}`);
   }
@@ -188,10 +191,10 @@ export function setup() {
 }
 
 export function submit({ runId }) {
-  const { env, mode, apiKey } = config();
+  const { env, mode, sourceChain, apiKey } = config();
   const res = http.post(
     `${BASE_URL}/sign_bidirectional`,
-    JSON.stringify({ env, mode, runId }),
+    JSON.stringify({ env, mode, sourceChain, runId }),
     { headers: headers(apiKey) }
   );
 
