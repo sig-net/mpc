@@ -1,10 +1,11 @@
 ## Sig.Network MPC
 
-Sig.Network MPC is a service that facilitates the ability to sign arbitrary payloads by calling into a smart contract and getting back a signature. This signature can be used for various purposes such as deriving new public keys associated with foreign chains (Ethereum, Bitcoin, Cosmos, etc.).
+Sig.Network MPC is a threshold-signature network that lets a smart contract on one blockchain act on any other (Ethereum, Bitcoin, Solana, Midnight, etc.). The root key is split across the nodes, so no single party can sign. A contract calls the Sig.Network contract on its own chain and gets the result back there.
+
+- **Sign**: a signature over an arbitrary payload, for accounts the contract controls on current or other chains.
+- **Bidirectional call**: a transaction signed and executed on a destination chain, with its outcome attested back to the contract.
 
 ### More information:
-- [Docs](https://docs.sig.network/)
-- [Roadmap](https://sig.network/#network-roadmap)
-- [Architecture](doc/ARCHITECTURE.md)
-- [Scaling and Security](doc/SCALING_AND_SECURITY.md)
+- [MPC docs](doc/)
+- [Integration docs](https://docs.sig.network/)
 - [Contributing](./integration-tests/README.md)

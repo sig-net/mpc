@@ -49,16 +49,14 @@ Running these machines needs little memory. Per in-flight request a node holds:
 - **`highest_seen_round`** — the largest round any peer has mentioned, so one
   bump can jump straight to it;
 - **the round's timeout clock**, and, for a proposer, its concurrency permit;
-- **a one-slot-per-sender buffer** of messages for a future round (§5);
-- optionally **`pause_proposing_until`**, a deadline until which it declines to
-  propose.
+- **a one-slot-per-sender buffer** of messages for a future round (§5).
 
 Three things reset this state.
 
 A **new round** starts when a recoverable failure sends the task back to the
 organizing phase while it keeps running. It resets the timeout clock and
-releases the permit; `r`, `highest_seen_round`, the proposing pause and the
-buffer all carry across.
+releases the permit; `r`, `highest_seen_round` and the buffer all carry
+across.
 
 A **respawn** is a governance change: the committee this node signs with
 changed in membership, threshold, epoch, or by leaving the running state.
@@ -75,7 +73,7 @@ Two things are held per node rather than kept per request: (i) the mesh's active
 ```mermaid
 stateDiagram-v2
     state "<b>Waiting for participants</b><br/>1. round timeout starts ticking<br/>2. wait for t active peers<br/>3. determine role" as WaitingForParticipants
-    state "<b>Reserving</b><br/>1. take one of 4 permits<br/>2. reserve a presignature with at least t active holders<br/>3. send PROPOSE to those active holders" as Reserving
+    state "<b>Reserving</b><br/>1. take one of the chain's 4 permits<br/>2. reserve a presignature with at least t active holders<br/>3. send PROPOSE to those active holders" as Reserving
     state "Posit" as PositOut
 
     [*] --> WaitingForParticipants
@@ -105,8 +103,7 @@ round, with a different proposer.
 ## 3. Inside Posit
 
 Posit is two independent machines, one per role; a node runs exactly one for
-round `r`, chosen by `is_proposer`: the proposer elected for `r` (§5), unless it
-is throttling (§8.6).
+round `r`, chosen by `is_proposer`: the proposer elected for `r` (§5).
 Each starts at `Organizing` and ends at `Generating` (agreement) or back at
 `Organizing` (new round).
 
@@ -184,8 +181,8 @@ None of the four messages is a cluster-wide broadcast.
 A member outside the `PROPOSE` set is never told that round `r` is running. It
 sits in `Waiting for Propose` until its timeout expires and bumps to `r+1`,
 where it may be elected proposer and reserve a *second* presignature for a
-request that is already being signed. That is the waste the `pause_proposing_until`
-flag exists to limit after the fact.
+request that is already being signed. Nothing limits that waste after the fact;
+the pause flag that once did was removed in #1182.
 
 The tally is keyed on `SinglePositCounter::participants` and `process_action`
 drops senders outside that set, so a reply from a member the proposer did not
@@ -198,7 +195,8 @@ No message carries the outcome of a round, so an excluded member cannot tell
 "round `r` succeeded without me" from "round `r` still running". It keeps
 rotating: it burns the round for every peer still waiting, and in the rounds
 where it is elected proposer it takes one of the `MAX_CONCURRENT_PROPOSERS` (4)
-permits, which is proposer-only, so a deliberator holds none, and reserves a
+permits of its chain's pool (#1177), which is proposer-only, so a deliberator
+holds none, and reserves a
 presignature that it returns to the pool on timeout. The permit is therefore
 held intermittently rather than for the whole wait, and the steady cost is the
 wasted rounds and the repeated reservations.
@@ -227,12 +225,11 @@ stateDiagram-v2
     class PositIn,DoneOut,OrgOut outside
 ```
 
-`Recording` has no exit to a new round. Reconstruction failure returns `None`
-from `build_publish_state`, which skips the backlog marking; the proposer's
-`rpc.publish` call still runs but validates the signature again internally and
-trashes the request on failure. Either way nothing is submitted, nothing is
-marked for republish, and the task still returns `Ok`: a reconstruction failure
-is silently recorded as success.
+`Recording` has no exit to a new round. `SignEntry::advance` reconstructs the
+signature and only then marks the backlog. If reconstruction fails, or the
+marking fails (`NotFound`, `InvalidPublishTransition`), the request is trashed
+with a log line, `rpc.publish` never runs, and the task still returns `Ok`: the
+failure is silently recorded as success.
 
 Only the proposer submits, though every node reconstructs the signature and
 marks the backlog.
@@ -313,7 +310,9 @@ are known, and every state shares whatever is left of it.
 Round 0 gets 20s. Round 1 starts at a 2s floor and each later round grows 1.15x,
 up to a 600s ceiling. Short early rounds rotate quickly past dead proposers;
 long later rounds outlast the skew between nodes that indexed the request at
-different times.
+different times. A respawned task's first budget is `round_timeout(r)` or the
+round-0 budget, whichever is larger (#1320), so a respawn at a low round is not
+starved.
 
 | State | Time limit |
 |---|---|
@@ -333,8 +332,7 @@ because the round timeout ran out.
 - **Rounds are monotone per request**, including across a respawn
   (`carried_round`). Peers read a round reset as time travel; `set_round` is the
   only write path.
-- **At most one proposer per round**: exactly one node is elected, though it
-  may decline (§8.6). Election reads only `r`, membership and entropy — never
+- **At most one proposer per round**: exactly one node is elected. Election reads only `r`, membership and entropy — never
   the local active set. Filtering by local state is what caused the permanent
   divergence in #907.
 - **`ACCEPT` is sent at most once per round**, on the edge out of
@@ -367,10 +365,5 @@ because the round timeout ran out.
    before any on-chain confirmation, and also fires when reconstruction failed
    and the backlog was never marked. The publish/confirm lifecycle lives in the
    spawner and indexer, not in this machine.
-6. **`pause_proposing_until` is a hidden mode.** For up to `generation_timeout`
-   a node declines proposership and takes the deliberator edge out of
-   `Waiting for participants`. Since election is by round, nobody else proposes
-   that round either, so the round is spent waiting for a `PROPOSE` that will
-   not come.
-7. **`Waiting for participants` is unbounded**, and whatever time it spends is
+6. **`Waiting for participants` is unbounded**, and whatever time it spends is
    subtracted from the round that follows.
