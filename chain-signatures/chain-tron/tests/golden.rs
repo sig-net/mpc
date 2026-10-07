@@ -41,8 +41,12 @@ fn reference_block_fixture() -> NowBlock {
         block_id: alloy::primitives::B256::from_slice(
             &hex::decode(block["blockID"].as_str().unwrap()).unwrap(),
         ),
-        number: block["block_header"]["raw_data"]["number"].as_u64().unwrap(),
-        timestamp: block["block_header"]["raw_data"]["timestamp"].as_u64().unwrap(),
+        number: block["block_header"]["raw_data"]["number"]
+            .as_u64()
+            .unwrap(),
+        timestamp: block["block_header"]["raw_data"]["timestamp"]
+            .as_u64()
+            .unwrap(),
     }
 }
 
@@ -87,7 +91,9 @@ fn built_transaction_matches_recorded_bytes() {
 
     let intent = TronIntent {
         owner: TronAddress::from_evm(parse_hex(param["owner_address"].as_str().unwrap()).unwrap()),
-        contract: TronAddress::from_evm(parse_hex(param["contract_address"].as_str().unwrap()).unwrap()),
+        contract: TronAddress::from_evm(
+            parse_hex(param["contract_address"].as_str().unwrap()).unwrap(),
+        ),
         call_data: hex::decode(param["data"].as_str().unwrap()).unwrap(),
     };
     let built = intent.raw_transaction(
@@ -183,9 +189,11 @@ fn signature_recovers_to_owner_address() {
     let s: &[u8; 32] = sig[32..64].try_into().unwrap();
     let v = sig[64];
 
-    let signature =
-        k256::ecdsa::Signature::from_scalars(k256::FieldBytes::from(*r), k256::FieldBytes::from(*s))
-            .unwrap();
+    let signature = k256::ecdsa::Signature::from_scalars(
+        k256::FieldBytes::from(*r),
+        k256::FieldBytes::from(*s),
+    )
+    .unwrap();
     let recovered = k256::ecdsa::VerifyingKey::recover_from_prehash(
         &digest,
         &signature,
