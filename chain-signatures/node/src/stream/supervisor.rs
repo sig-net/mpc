@@ -14,19 +14,11 @@ use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-/// Per-chain watchdog timeout. Chains whose processing synchronously waits for
-/// finality (Ethereum, ~12 min on mainnet) need a timeout that exceeds their
-/// finality cadence to avoid false restarts. We derive it from the chain's
-/// `expected_finality_time_secs` with a buffer, flooring at 300s for fast chains.
+/// Per-chain watchdog timeout: restart a `run()` that produced no
+/// `ChainEvent::Block` within [`ChainConfig::stall_timeout_secs`] (derived
+/// from each chain's block cadence, env-overridable).
 pub(crate) fn live_block_timeout(chain: Chain) -> Duration {
-    const FLOOR_SECS: u64 = 300;
-    const BUFFER_SECS: u64 = 300;
-    Duration::from_secs(
-        chain
-            .expected_finality_time_secs()
-            .saturating_add(BUFFER_SECS)
-            .max(FLOOR_SECS),
-    )
+    Duration::from_secs(chain.stall_timeout_secs())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,8 +139,11 @@ async fn resubmit_pending_checkpoint_votes(
     Ok(())
 }
 
-/// Delay before respawning a `run()` that returned an error.
+/// Base delay before a restart; doubles up to `MAX_RESTART_DELAY` while
+/// restarts recur without an intervening block event.
 const ERROR_RESTART_DELAY: Duration = Duration::from_secs(1);
+/// Upper bound of the exponential restart backoff.
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
 /// Maximum delay between consecutive backlog recovery retry attempts during storage outages.
 const MAX_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// How long a cancelled `run()` gets to drain before it is aborted.
@@ -157,6 +152,7 @@ const RUN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 /// Supervised indexer loop: node-side recovery, then spawn the chain's `run()`
 /// loop and dispatch its events. Regression or a watchdog stall cancels `run()`
 /// and restarts it, re-running light recovery (`load_local: false`) first.
+/// Restarts back off exponentially, resetting once a run delivers a block event.
 pub async fn run_supervised<I: ChainIndexer, T: ChainTelemetry>(
     indexer: I,
     ctx: StreamContext,
@@ -188,6 +184,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     // votes have been resubmitted.
     let mut resubmit_votes = true;
     let mut recovery_retry_delay = ERROR_RESTART_DELAY;
+    let mut restart_delay = ERROR_RESTART_DELAY;
     loop {
         // Cleared before recovery, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
@@ -245,7 +242,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                         run_finished = true;
                         // `run()` exited on its own: Ok shuts the chain down; an anyhow
                         // error or JoinError::Panic is a crash — either can hot-loop,
-                        // so back off before restarting.
+                        // so the restart backoff applies.
                         let result = match (&mut run_handle).await {
                             Ok(r) => r,
                             Err(e) => Err(anyhow::Error::from(e)),
@@ -258,13 +255,13 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                                     %chain,
                                     "chain run() failed; restarting"
                                 );
-                                tokio::time::sleep(ERROR_RESTART_DELAY).await;
                                 Exit::Restart
                             }
                         };
                     };
                     if matches!(event, ChainEvent::Block(_)) {
                         last_block_event = Instant::now();
+                        restart_delay = ERROR_RESTART_DELAY;
                     }
                     if let Err(err) =
                         handle_chain_event(event, &mut ctx, &telemetry, root_pk, chain).await
@@ -308,6 +305,16 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 tracing::warn!(%chain, "run() did not drain after cancellation; aborting");
                 run_handle.abort();
             }
+        }
+
+        if matches!(exit, Exit::Restart) {
+            tracing::debug!(
+                %chain,
+                ?restart_delay,
+                "backing off before restarting chain indexer"
+            );
+            tokio::time::sleep(restart_delay).await;
+            restart_delay = (restart_delay * 2).min(MAX_RESTART_DELAY);
         }
 
         if matches!(exit, Exit::Shutdown) {
@@ -993,8 +1000,9 @@ mod tests {
 
         // The first (stalled) run is restarted by the watchdog; afterwards the
         // instant-Ok exits cannot be observed while the cap is full, so the
-        // supervisor must keep restarting instead of shutting down.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // supervisor must keep restarting instead of shutting down. The first
+        // restart waits out the 1s backoff base.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
         assert!(
             !task.is_finished(),
             "supervisor must not shut down while the checkpoint cap is full"

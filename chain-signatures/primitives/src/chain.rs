@@ -14,6 +14,11 @@ pub enum SerDeserFormat {
 pub trait ChainConfig {
     fn checkpoint_interval(&self) -> Option<u64>;
     fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)>;
+    /// Watchdog budget (seconds) without a `ChainEvent::Block` before the
+    /// stream supervisor restarts the chain's indexer. Must stay well above
+    /// the chain's block cadence; a false fire costs only one cheap
+    /// supervised restart. Env-overridable for indexed chains.
+    fn stall_timeout_secs(&self) -> u64;
     fn expected_finality_time_secs(&self) -> u64;
     fn expected_response_time_secs(&self) -> u64;
     fn respond_serialization_format(&self) -> SerDeserFormat;
@@ -47,6 +52,33 @@ impl ChainConfig for Chain {
             ("CHECKPOINT_INTERVAL_CANTON", "5"),
             ("CHECKPOINT_INTERVAL_MIDNIGHT", "5"),
         ]
+    }
+
+    fn stall_timeout_secs(&self) -> u64 {
+        const FLOOR_SECS: u64 = 300;
+        const BUFFER_SECS: u64 = 300;
+        // Finality-derived default, kept conservative for chains whose
+        // streams can legitimately go quiet (e.g. Canton's party-filtered
+        // updates — its 60s transport signal already catches silent
+        // connections).
+        let derived = self
+            .expected_finality_time_secs()
+            .saturating_add(BUFFER_SECS)
+            .max(FLOOR_SECS);
+        let (key, default) = match self {
+            // ~10 missed blocks at Midnight's ~6s cadence.
+            Chain::Midnight => ("STALL_TIMEOUT_MIDNIGHT", 60),
+            // ~10x Hydration's 12s finality cadence.
+            Chain::Hydration => ("STALL_TIMEOUT_HYDRATION", 120),
+            Chain::Canton => ("STALL_TIMEOUT_CANTON", derived),
+            Chain::Ethereum => ("STALL_TIMEOUT_ETHEREUM", derived),
+            Chain::Solana => ("STALL_TIMEOUT_SOLANA", derived),
+            Chain::NEAR | Chain::Bitcoin | Chain::Tron => return derived,
+        };
+
+        std::env::var(key)
+            .map(|param| param.parse::<u64>().unwrap_or(default))
+            .unwrap_or(default)
     }
 
     fn expected_finality_time_secs(&self) -> u64 {
