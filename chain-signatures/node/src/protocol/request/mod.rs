@@ -361,7 +361,7 @@ impl SignatureSpawner {
         // to prevent re-creating orphan mailboxes.
         if self
             .dead_ids
-            .get(&sign_id)
+            .peek(&sign_id)
             .is_some_and(|dead| dead.contains(kind))
         {
             return;
