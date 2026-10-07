@@ -11576,9 +11576,9 @@ dependencies = [
 
 [[package]]
 name = "signet-midnight-serde"
-version = "0.24.0-rc.10"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c09668957e8842b7b0a45d64dee1f280e3ba04ffebd1aa0ec1a3b04a827abea6"
+checksum = "9c7d0bdb4d2a9159f0b3b3394d67ce1ff84eb04f2ee17cd4d25a67d5ceb45f6f"
 dependencies = [
  "borsh",
 ]

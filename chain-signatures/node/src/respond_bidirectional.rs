@@ -104,8 +104,7 @@ impl CompletedTx {
                 Bytes::from(output).into()
             }
             SerDeserFormat::Fab => {
-                output.push(1);
-                Bytes::from(output).into()
+                anyhow::bail!("Midnight failures attest an empty output without the error prefix")
             }
             SerDeserFormat::Abi => {
                 // Encode boolean as ABI: true = 0x0000000000000000000000000000000000000000000000000000000000000001
@@ -400,7 +399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn midnight_failure_payload_differs_from_zero_padded_success() {
+    async fn midnight_failure_payload_differs_from_zero_byte_success() {
         let completed = CompletedTx::new(
             sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]),
             None,
