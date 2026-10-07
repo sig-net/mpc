@@ -118,3 +118,21 @@ impl ChainConfig for Chain {
         matches!(self, Chain::Ethereum)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the cadence-derived defaults
+    #[test]
+    fn stall_timeouts_track_block_cadence() {
+        assert_eq!(Chain::Midnight.stall_timeout_secs(), 120);
+        assert_eq!(Chain::Hydration.stall_timeout_secs(), 120);
+        assert_eq!(Chain::Canton.stall_timeout_secs(), 315);
+        assert_eq!(Chain::Solana.stall_timeout_secs(), 315);
+        assert_eq!(Chain::Ethereum.stall_timeout_secs(), 30 * 60 + 300);
+        // Finality-derived default for the non-indexed chains.
+        assert_eq!(Chain::NEAR.stall_timeout_secs(), 3 + 300);
+        assert_eq!(Chain::Tron.stall_timeout_secs(), 60 + 300);
+    }
+}
