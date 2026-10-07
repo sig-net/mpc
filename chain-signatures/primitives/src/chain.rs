@@ -66,8 +66,9 @@ impl ChainConfig for Chain {
             .saturating_add(BUFFER_SECS)
             .max(FLOOR_SECS);
         let (key, default) = match self {
-            // ~10 missed blocks at Midnight's ~6s cadence.
-            Chain::Midnight => ("STALL_TIMEOUT_MIDNIGHT", 60),
+            // ~20 missed blocks at Midnight's ~6s cadence, with headroom for a
+            // slow catchup block (large contract-state reads).
+            Chain::Midnight => ("STALL_TIMEOUT_MIDNIGHT", 120),
             // ~10x Hydration's 12s finality cadence.
             Chain::Hydration => ("STALL_TIMEOUT_HYDRATION", 120),
             Chain::Canton => ("STALL_TIMEOUT_CANTON", derived),

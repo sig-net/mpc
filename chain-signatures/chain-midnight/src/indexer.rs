@@ -23,10 +23,7 @@ use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
-use mpc_utils::{
-    task::CancellationTokenExt as _,
-    time::current_unix_timestamp,
-};
+use mpc_utils::{task::CancellationTokenExt as _, time::current_unix_timestamp};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
