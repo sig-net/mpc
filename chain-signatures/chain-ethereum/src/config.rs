@@ -117,7 +117,7 @@ pub struct PublisherConfig {
     pub receipt_timeout: Duration,
     /// Retry strategy for polling the transaction receipt
     pub receipt_retry: RetryConfig,
-    /// Retry strategy for the whole batch publish (retries indefinitely)
+    /// Retry strategy for a batch publish as one unit
     pub batch_publish_retry: RetryConfig,
 }
 
@@ -142,9 +142,9 @@ impl Default for PublisherConfig {
                 jitter: true,
             },
             batch_publish_retry: RetryConfig {
-                min_delay: Duration::from_secs(1),
-                max_delay: Duration::from_secs(10),
-                max_times: usize::MAX,
+                min_delay: Duration::from_millis(500),
+                max_delay: Duration::from_secs(5),
+                max_times: 2,
                 jitter: true,
             },
         }
