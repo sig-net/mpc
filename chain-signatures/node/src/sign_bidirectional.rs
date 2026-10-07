@@ -128,9 +128,10 @@ pub trait SignBidirectionalEventExt {
     fn target_chain(&self) -> Result<Chain, ChainFromError>;
 
     /// The deterministic derivations respond processing runs for every bidirectional
-    /// request. Shared between admission (reject before the backlog) and the respond
-    /// path's failure handling (quarantine): both must agree on what "can never
-    /// advance" means.
+    /// request, and the schema checks output extraction applies whatever the target
+    /// chain returns. Shared between admission (reject before the backlog) and the
+    /// respond path's failure handling (quarantine): both must agree on what "can
+    /// never advance" means.
     fn validate(&self) -> anyhow::Result<()>;
 
     /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
@@ -193,9 +194,16 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             "unsupported target chain {target}"
         );
         self.epsilon().context("cannot derive epsilon")?;
-        validate_unsigned_transaction(&self.serialized_transaction)
+        let calldata = validate_unsigned_transaction(&self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
-        Ok(())
+        // Ethereum is the only target with an execution watcher, checked above.
+        mpc_chain_ethereum::validate_schemas(
+            calldata,
+            &self.output_deserialization_schema,
+            self.chain.respond_serialization_format(),
+            &self.respond_serialization_schema,
+        )
+        .context("unprocessable output schemas")
     }
 
     fn to_bidirectional_tx(
@@ -276,19 +284,26 @@ impl BidirectionalTxExt for BidirectionalTx {
 }
 
 /// Check that `unsigned_rlp` would survive [`sign_and_hash_transaction`], without a
-/// real signature. Admission calls this so a transaction that cannot be signed at
-/// respond time is rejected before it enters the backlog; running the actual
-/// function is what keeps admission structurally equal to respond processing. The
-/// placeholder's recovery id is 1, the strict case: the legacy `v` computation adds
-/// `y_parity`, so validating with 0 would admit the one chain id whose `v` only
-/// overflows when the real signature draws parity 1.
-fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<()> {
+/// real signature, and return its calldata. Admission calls this so a transaction
+/// that cannot be signed at respond time is rejected before it enters the backlog;
+/// running the actual function is what keeps admission structurally equal to
+/// respond processing. The placeholder's recovery id is 1, the strict case: the
+/// legacy `v` computation adds `y_parity`, so validating with 0 would admit the one
+/// chain id whose `v` only overflows when the real signature draws parity 1.
+fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
     let placeholder = Signature::new(
         k256::ProjectivePoint::GENERATOR.to_affine(),
         k256::Scalar::ONE,
         1,
     );
-    sign_and_hash_transaction(unsigned_rlp, placeholder).map(|_| ())
+    sign_and_hash_transaction(unsigned_rlp, placeholder)?;
+    let (fields, data_index) = if is_eip1559(unsigned_rlp) {
+        (Rlp::new(&unsigned_rlp[1..]), 7)
+    } else {
+        (Rlp::new(unsigned_rlp), 5)
+    };
+    // A list here would make Ethereum reject the transaction.
+    Ok(fields.at(data_index)?.data()?)
 }
 
 pub fn sign_and_hash_transaction(
@@ -607,7 +622,7 @@ mod tests {
             chain: Chain::Solana,
             chain_ctx: None,
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
         };
         assert!(event(Chain::Ethereum).validate().is_ok());
         assert!(event(Chain::Solana).validate().is_err());

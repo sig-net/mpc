@@ -524,8 +524,57 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
         chain: Chain::Solana,
         chain_ctx: None,
         output_deserialization_schema: vec![],
-        respond_serialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
     }
+}
+
+/// An unsigned legacy contract call on `chain_id`.
+fn legacy_contract_call(chain_id: u64) -> Vec<u8> {
+    let mut rlp = rlp::RlpStream::new_list(9);
+    rlp.append(&0u64); // nonce
+    rlp.append(&0u64); // gasPrice
+    rlp.append(&0u64); // gasLimit
+    rlp.append(&vec![0x11u8; 20]); // to
+    rlp.append(&0u64); // value
+    rlp.append(&vec![0xa9u8, 0x05, 0x9c, 0xbb]); // data
+    rlp.append(&chain_id);
+    rlp.append(&0u64);
+    rlp.append(&0u64);
+    rlp.out().to_vec()
+}
+
+/// Admitted, a request whose output schema extraction refuses is signed and
+/// executed, and only then fails as `ExtractionFailed`.
+#[tokio::test]
+async fn process_sign_request_rejects_an_unprocessable_output_schema() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+    let request = |seed: u8, output_schema: &[u8]| {
+        Arc::new(IndexedSignRequest::sign_bidirectional(
+            SignId::new([seed; 32]),
+            test_sign_args(seed),
+            Chain::Solana,
+            current_unix_timestamp(),
+            SignBidirectionalEvent {
+                output_deserialization_schema: output_schema.to_vec(),
+                ..bidirectional_event(legacy_contract_call(1))
+            },
+        ))
+    };
+
+    let refused = SignId::new([15u8; 32]);
+    let err = process_sign_request(request(15, b"{"), &ctx)
+        .await
+        .expect_err("a malformed output schema should be rejected at ingestion");
+    assert!(format!("{err:#}").contains("unprocessable output schemas"));
+    assert!(backlog.get(Chain::Solana, &refused).await.is_none());
+
+    let admitted = SignId::new([16u8; 32]);
+    process_sign_request(request(16, b"[]"), &ctx)
+        .await
+        .expect("an empty output schema should be admitted");
+    assert!(backlog.get(Chain::Solana, &admitted).await.is_some());
 }
 
 /// A non-empty but undecodable transaction is the same poison pill as an empty one,

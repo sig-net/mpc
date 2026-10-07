@@ -1,11 +1,13 @@
 use alloy::dyn_abi::{DynSolType, DynSolValue};
 use alloy::primitives::Bytes;
 use borsh::BorshSerialize;
-use mpc_midnight_respond_codec::{executed_output, TracedReturn};
+use mpc_midnight_respond_codec::{executed_output, validate_output_schema, TracedReturn};
 use mpc_primitives::SerDeserFormat;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::Write;
+
+use crate::event_parsing::is_contract_call;
 
 // Use Abi as this is what we are using for ethereum
 const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
@@ -178,6 +180,39 @@ pub fn build_serialized_output(
     transaction_output
         .output
         .serialize(respond_serialization_format, respond_serialization_schema)
+}
+
+/// Refuse, before signing, what [`build_serialized_output`] refuses on the schemas
+/// alone, by running it on all-zero return data, which decodes for every output type.
+/// Refusals that depend on the real return data stay with extraction.
+pub fn validate_schemas(
+    calldata: &[u8],
+    output_deserialization_schema: &[u8],
+    respond_serialization_format: SerDeserFormat,
+    respond_serialization_schema: &[u8],
+) -> anyhow::Result<()> {
+    let is_contract_call = is_contract_call(&Bytes::copy_from_slice(calldata));
+    if respond_serialization_format == SerDeserFormat::Fab {
+        return validate_output_schema(is_contract_call, output_deserialization_schema);
+    }
+    let trace = if is_contract_call && !output_schema_is_empty(output_deserialization_schema)? {
+        let schema = parse_output_schema_fields(output_deserialization_schema)?;
+        let words = parse_schema_type(&schema)?.minimum_words();
+        let bytes = words
+            .checked_mul(32)
+            .ok_or_else(|| anyhow::anyhow!("output schema needs {words} words"))?;
+        TraceOutput::Output(vec![0; bytes].into())
+    } else {
+        TraceOutput::NoReturnData
+    };
+    build_serialized_output(
+        is_contract_call,
+        output_deserialization_schema,
+        trace,
+        respond_serialization_format,
+        respond_serialization_schema,
+    )
+    .map(drop)
 }
 
 fn output_schema_is_empty(schema_json: &[u8]) -> anyhow::Result<bool> {
@@ -389,6 +424,57 @@ mod tests {
 
     fn abi_bool(value: bool) -> Bytes {
         abi_uint256(u64::from(value))
+    }
+
+    /// Admission refuses exactly the schemas extraction refuses on real return data.
+    #[test]
+    fn validate_schemas_agrees_with_extraction() {
+        use SerDeserFormat::{Abi, Borsh, Fab};
+        let call = [0xa9, 0x05, 0x9c, 0xbb];
+        let bool_schema: &[u8] = br#"[{"name":"ok","type":"bool"}]"#;
+        let string_schema: &[u8] = br#"[{"name":"s","type":"string"}]"#;
+        let uint64_schema: &[u8] = br#"[{"name":"n","type":"uint64"}]"#;
+        let function_schema: &[u8] = br#"[{"name":"f","type":"function"}]"#;
+        let string_output = Bytes::from(
+            DynSolValue::Tuple(vec![DynSolValue::String("hi".into())]).abi_encode_params(),
+        );
+        let traced = |data: Bytes| TraceOutput::Output(data);
+        // Calldata, output schema, format, respond schema, trace, accepted.
+        type Case<'a> = (
+            &'a [u8],
+            &'a [u8],
+            SerDeserFormat,
+            &'a [u8],
+            TraceOutput,
+            bool,
+        );
+        #[rustfmt::skip]
+        let cases: [Case; 15] = [
+            (&call, bool_schema, Abi, bool_schema, traced(abi_bool(true)), true),
+            (&call, string_schema, Abi, string_schema, traced(string_output), true),
+            (&call, b"{", Abi, bool_schema, traced(abi_bool(true)), false),
+            (&call, bool_schema, Abi, string_schema, traced(abi_bool(true)), false),
+            (&[], b"{", Abi, bool_schema, TraceOutput::NotTraced, true),
+            (&[], b"", Abi, UINT256_SCHEMA, TraceOutput::NotTraced, false),
+            (&call, uint64_schema, Borsh, uint64_schema, traced(abi_uint256(7)), true),
+            (&call, b"[]", Borsh, bool_schema, TraceOutput::NoReturnData, true),
+            (&call, function_schema, Borsh, function_schema, traced(abi_uint256(0)), false),
+            (&[], b"", Borsh, b"", TraceOutput::NotTraced, false),
+            (&call, bool_schema, Borsh, b"{", traced(abi_bool(true)), false),
+            (&call, bool_schema, Fab, b"", traced(abi_bool(true)), true),
+            (&[], b"", Fab, b"", TraceOutput::NotTraced, true),
+            (&call, string_schema, Fab, b"", traced(abi_bool(true)), false),
+            (&[], bool_schema, Fab, b"", TraceOutput::NotTraced, false),
+        ];
+        for (calldata, output, format, respond, trace, accepted) in cases {
+            let case = format!("{format:?} {calldata:?} {output:?} {respond:?}");
+            let is_contract_call = is_contract_call(&Bytes::copy_from_slice(calldata));
+            let extracted =
+                build_serialized_output(is_contract_call, output, trace, format, respond);
+            assert_eq!(extracted.is_ok(), accepted, "{case}: {extracted:?}");
+            let admitted = validate_schemas(calldata, output, format, respond);
+            assert_eq!(admitted.is_ok(), accepted, "{case}: {admitted:?}");
+        }
     }
 
     #[test]
