@@ -1,5 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use cait_sith::protocol::Participant;
@@ -49,6 +51,17 @@ pub enum NodeStatus {
 struct NodeConnection {
     info_tx: watch::Sender<ParticipantInfo>,
     task: JoinHandle<()>,
+    /// Cleared on drop; `abort` alone can let an in-flight poll write after removal.
+    alive: Arc<AtomicBool>,
+}
+
+/// Apply `update` unless the connection was dropped.
+fn write_status(
+    state_tx: &watch::Sender<MeshState>,
+    alive: &AtomicBool,
+    update: impl FnOnce(&mut MeshState) -> bool,
+) -> bool {
+    state_tx.send_if_modified(|state| alive.load(Ordering::Acquire) && update(state))
 }
 
 impl NodeConnection {
@@ -60,14 +73,20 @@ impl NodeConnection {
         state_tx: watch::Sender<MeshState>,
     ) -> Self {
         let (info_tx, info_rx) = watch::channel(info.clone());
+        let alive = Arc::new(AtomicBool::new(true));
         let task = tokio::spawn(Self::run(
             client.clone(),
             state_tx,
+            Arc::clone(&alive),
             info_rx,
             participant,
             ping_interval,
         ));
-        Self { info_tx, task }
+        Self {
+            info_tx,
+            task,
+            alive,
+        }
     }
 
     fn update(&mut self, info: &ParticipantInfo) {
@@ -80,6 +99,7 @@ impl NodeConnection {
     async fn run(
         client: NodeClient,
         state_tx: watch::Sender<MeshState>,
+        alive: Arc<AtomicBool>,
         mut info_rx: watch::Receiver<ParticipantInfo>,
         participant: Participant,
         ping_interval: Duration,
@@ -96,7 +116,7 @@ impl NodeConnection {
                 Ok(()) = info_rx.changed() => {
                     info = info_rx.borrow_and_update().clone();
                     node = (participant, info.url.clone());
-                    state_tx.send_if_modified(|state| match state.status(participant) {
+                    write_status(&state_tx, &alive, |state| match state.status(participant) {
                         Some(listed) => state.update(participant, listed, info.clone()),
                         None => false,
                     });
@@ -107,7 +127,7 @@ impl NodeConnection {
                         Err(err) => {
                             tracing::warn!(?node, ?err, "checking /status failed");
                             status = NodeStatus::Offline;
-                            state_tx.send_if_modified(|state| state.remove(participant));
+                            write_status(&state_tx, &alive, |state| state.remove(participant));
                             continue;
                         }
                     };
@@ -120,7 +140,7 @@ impl NodeConnection {
                             "protocol version mismatch"
                         );
                         status = NodeStatus::Offline;
-                        state_tx.send_if_modified(|state| state.remove(participant));
+                        write_status(&state_tx, &alive, |state| state.remove(participant));
                         continue;
                     }
 
@@ -152,7 +172,7 @@ impl NodeConnection {
                     }
                     if old_status != new_status {
                         tracing::info!(?node, ?old_status, ?new_status, "updated with new status");
-                        state_tx.send_if_modified(|state| {
+                        write_status(&state_tx, &alive, |state| {
                             state.update(participant, new_status, info.clone())
                         });
                     }
@@ -170,6 +190,7 @@ impl NodeConnection {
 impl Drop for NodeConnection {
     fn drop(&mut self) {
         tracing::info!(info = ?*self.info_tx.borrow(), "connection dropped");
+        self.alive.store(false, Ordering::Release);
         self.task.abort();
     }
 }
@@ -324,5 +345,37 @@ impl Pool {
             tracing::info!(?participant, ?from, ?to, "reporting node status");
             state.update(participant, to, info)
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A write after the connection was dropped must be ignored.
+    #[test]
+    fn dropped_connection_cannot_write_the_peer_back() {
+        let participant = Participant::from(3u32);
+        let info = ParticipantInfo::new(3);
+        let (state_tx, mut state_rx) = watch::channel(MeshState::default());
+        let alive = AtomicBool::new(true);
+
+        assert!(write_status(&state_tx, &alive, |state| {
+            state.update(participant, NodeStatus::Active, info.clone())
+        }));
+        assert_eq!(
+            state_rx.borrow().status(participant),
+            Some(NodeStatus::Active)
+        );
+
+        alive.store(false, Ordering::Release);
+        assert!(state_tx.send_if_modified(|state| state.remove(participant)));
+        assert_eq!(state_rx.borrow_and_update().status(participant), None);
+
+        assert!(!write_status(&state_tx, &alive, |state| {
+            state.update(participant, NodeStatus::Active, info.clone())
+        }));
+        assert_eq!(state_rx.borrow().status(participant), None);
+        assert!(!state_rx.has_changed().unwrap());
     }
 }
