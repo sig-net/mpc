@@ -338,6 +338,7 @@ mod tests {
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_primitives::{Chain, CheckpointDigest};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use tokio::sync::{mpsc, watch, Notify};
 
     /// Creates a test `StreamContext` along with channels for checkpoint and mesh state updates.
@@ -1011,6 +1012,122 @@ mod tests {
             attempts.load(Ordering::SeqCst) >= 2,
             "watchdog should have restarted run()"
         );
+        task.abort();
+    }
+
+    /// Advances virtual time (auto-advance fills the gaps between the 50ms
+    /// ticks) until enough `run()` starts are recorded, failing after `budget`
+    /// of virtual time.
+    async fn wait_for_runs(started: &Mutex<Vec<Instant>>, target: usize, budget: Duration) {
+        let deadline = Instant::now() + budget;
+        while started.lock().expect("run timestamps").len() < target {
+            assert!(
+                Instant::now() < deadline,
+                "only {} runs started within {budget:?}",
+                started.lock().expect("run timestamps").len()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failing_runs_back_off_exponentially() {
+        struct FailIndexer {
+            started: Arc<Mutex<Vec<Instant>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ChainIndexer for FailIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn run(
+                &self,
+                _events_tx: mpsc::Sender<ChainEvent>,
+                _cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                self.started
+                    .lock()
+                    .expect("run timestamps")
+                    .push(Instant::now());
+                anyhow::bail!("boom")
+            }
+        }
+
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let indexer = FailIndexer {
+            started: started.clone(),
+        };
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
+
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(3600),
+        ));
+
+        // Restarts space out 1s → 2s → 4s between consecutive runs.
+        wait_for_runs(&started, 4, Duration::from_secs(30)).await;
+        let started = started.lock().expect("run timestamps").clone();
+        for (i, gap) in started.windows(2).map(|w| w[1] - w[0]).enumerate() {
+            let expected = Duration::from_secs(1 << i);
+            assert!(
+                gap >= expected && gap < expected + Duration::from_millis(100),
+                "restart gap {i} was {gap:?}, expected ~{expected:?}"
+            );
+        }
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn block_events_reset_the_restart_backoff() {
+        struct BlockThenFailIndexer {
+            started: Arc<Mutex<Vec<Instant>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ChainIndexer for BlockThenFailIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn run(
+                &self,
+                events_tx: mpsc::Sender<ChainEvent>,
+                _cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                self.started
+                    .lock()
+                    .expect("run timestamps")
+                    .push(Instant::now());
+                events_tx.send(ChainEvent::Block(1)).await.unwrap();
+                anyhow::bail!("boom")
+            }
+        }
+
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let indexer = BlockThenFailIndexer {
+            started: started.clone(),
+        };
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
+
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(3600),
+        ));
+
+        // Every run delivers a block before failing, so each restart waits out
+        // only the 1s base.
+        wait_for_runs(&started, 3, Duration::from_secs(30)).await;
+        let started = started.lock().expect("run timestamps").clone();
+        for (i, gap) in started.windows(2).map(|w| w[1] - w[0]).enumerate() {
+            assert!(
+                gap >= Duration::from_secs(1) && gap < Duration::from_secs(2),
+                "reset run {i} backed off {gap:?}; block events must reset to the 1s base"
+            );
+        }
         task.abort();
     }
 }
