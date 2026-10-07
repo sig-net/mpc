@@ -1690,7 +1690,7 @@ async fn non_midnight_decode_failure_retires_request_without_response() {
             .await
             .unwrap();
 
-            assert!(ctx.backlog.get(source_chain, &tx.sign_id()).await.is_none());
+            assert!(ctx.backlog.get(source_chain, &tx.sign_id()).await.is_some());
             assert!(ctx
                 .backlog
                 .get_execution_watchers(Chain::Ethereum)
@@ -1705,7 +1705,7 @@ async fn non_midnight_decode_failure_retires_request_without_response() {
             let checkpoint = ctx.backlog.checkpoint(source_chain).await.unwrap();
             let restored = Backlog::new();
             restored.recover_by_checkpoint(&checkpoint).await;
-            assert!(restored.get(source_chain, &tx.sign_id()).await.is_none());
+            assert!(restored.get(source_chain, &tx.sign_id()).await.is_some());
             assert!(restored
                 .get_execution_watchers(Chain::Ethereum)
                 .await

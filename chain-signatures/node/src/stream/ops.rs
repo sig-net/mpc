@@ -465,11 +465,12 @@ pub async fn process_execution_confirmed(
                     %String::from_utf8_lossy(&entry.execution_tx().output_deserialization_schema),
                 respond_serialization_schema =
                     %String::from_utf8_lossy(&entry.execution_tx().respond_serialization_schema),
-                "bidirectional output extraction failed terminally; resolving the request \
+                "bidirectional output extraction failed terminally; parking the request \
                  without a response, even though the destination transaction executed."
             );
-            entry.complete().await;
-            // Stop the signing task even during catchup: the removed request
+            // Removal here would split source checkpoints (#1363).
+            entry.park().await?;
+            // Stop the signing task even during catchup: the parked request
             // cannot produce another completion event.
             ctx.sign_tx
                 .send(SignCommand::Completion(sign_id))
