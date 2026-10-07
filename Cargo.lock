@@ -7611,11 +7611,11 @@ dependencies = [
  "mockito",
  "mpc-chain-integration-core",
  "mpc-crypto",
+ "mpc-midnight-respond-codec",
  "mpc-primitives",
  "mpc-utils",
  "serde",
  "serde_json",
- "signet-midnight-serde",
  "tokio",
  "tokio-util",
  "tracing",
@@ -7762,8 +7762,19 @@ dependencies = [
 name = "mpc-chain-tron"
 version = "1.20.0"
 dependencies = [
+ "alloy",
  "anyhow",
+ "bs58 0.5.1",
+ "hex",
+ "mockito",
  "mpc-chain-integration-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
  "url",
 ]
 
@@ -7827,6 +7838,18 @@ dependencies = [
  "hpke",
  "rand 0.8.5",
  "serde",
+]
+
+[[package]]
+name = "mpc-midnight-respond-codec"
+version = "1.20.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "hex",
+ "serde",
+ "serde_json",
+ "signet-midnight-serde",
 ]
 
 [[package]]
@@ -11553,9 +11576,9 @@ dependencies = [
 
 [[package]]
 name = "signet-midnight-serde"
-version = "0.24.0-rc.10"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c09668957e8842b7b0a45d64dee1f280e3ba04ffebd1aa0ec1a3b04a827abea6"
+checksum = "9c7d0bdb4d2a9159f0b3b3394d67ce1ff84eb04f2ee17cd4d25a67d5ceb45f6f"
 dependencies = [
  "borsh",
 ]
@@ -15077,10 +15100,12 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
- "native-tls",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
- "tokio-native-tls",
+ "tokio-rustls",
  "tungstenite 0.29.0",
+ "webpki-roots 0.26.9",
 ]
 
 [[package]]
@@ -15546,8 +15571,9 @@ dependencies = [
  "http 1.3.1",
  "httparse",
  "log",
- "native-tls",
  "rand 0.9.5",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.19",
 ]

@@ -43,15 +43,10 @@ pub enum SolanaSignEvent {
 
 impl SolanaSignEvent {
     fn is_valid(&self, sign_id: SignId) -> bool {
-        let (deposit, key_version) = match self {
-            SolanaSignEvent::SignatureRequested(ev) => (ev.deposit, ev.key_version),
-            SolanaSignEvent::SignBidirectional(ev) => (ev.deposit, ev.key_version),
+        let key_version = match self {
+            SolanaSignEvent::SignatureRequested(ev) => ev.key_version,
+            SolanaSignEvent::SignBidirectional(ev) => ev.key_version,
         };
-
-        if deposit == 0 {
-            tracing::warn!(?sign_id, "deposit is 0, skipping sign request");
-            return false;
-        }
 
         if key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!(?sign_id, "unsupported key version: {}", key_version);

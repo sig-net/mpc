@@ -9,7 +9,7 @@ pub mod debug;
 use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
-use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
+use crate::protocol::state::{NodeStateWatcher, NodeStatus};
 use crate::protocol::sync::SyncChannel;
 use crate::protocol::{Chain, MessageChannel};
 use crate::storage::{PresignatureStorage, TripleStorage};
@@ -25,7 +25,6 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
-use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
 use near_account_id::AccountId;
 use prometheus::{Encoder, TextEncoder};
@@ -37,7 +36,10 @@ use tracing::Instrument;
 
 struct AxumState {
     node: NodeStateWatcher,
+    /// Only used by the debug page.
+    #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     triple_storage: TripleStorage,
+    #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     msg_channel: MessageChannel,
@@ -84,7 +86,6 @@ pub async fn run(
             }),
         )
         .route("/msg", post(msg))
-        .route("/state", get(state))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
         .route("/checkpoint", get(checkpoint))
@@ -148,86 +149,6 @@ async fn msg(
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["msg"])
         .observe(start.elapsed().as_millis() as f64);
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum StateView {
-    Running {
-        participants: Vec<Participant>,
-        triple_count: usize,
-        triple_mine_count: usize,
-        triple_potential_count: usize,
-        presignature_count: usize,
-        presignature_mine_count: usize,
-        presignature_potential_count: usize,
-    },
-    Resharing {
-        old_participants: Vec<Participant>,
-        new_participants: Vec<Participant>,
-        phase: ResharingStatus,
-    },
-    Joining {
-        participants: Vec<Participant>,
-    },
-    NotRunning,
-}
-
-#[tracing::instrument(level = "debug", skip_all)]
-async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
-    let start = Instant::now();
-    tracing::debug!("fetching state");
-
-    let result = match web.node.status() {
-        NodeStatus::Running {
-            me,
-            participants,
-            ongoing_triple_gen,
-            ongoing_presignature_gen,
-        } => {
-            let triple_count = web.triple_storage.len_generated().await;
-            let triple_mine_count = web.triple_storage.len_by_owner(me).await;
-            let triple_potential_count = triple_count + ongoing_triple_gen;
-            let presignature_count = web.presignature_storage.len_generated().await;
-            let presignature_mine_count = web.presignature_storage.len_by_owner(me).await;
-            let presignature_potential_count = presignature_count + ongoing_presignature_gen;
-
-            Ok(Json(StateView::Running {
-                participants: participants.clone(),
-                triple_count,
-                triple_mine_count,
-                triple_potential_count,
-                presignature_count,
-                presignature_mine_count,
-                presignature_potential_count,
-            }))
-        }
-        NodeStatus::Resharing {
-            old_participants,
-            new_participants,
-            phase,
-        } => Ok(Json(StateView::Resharing {
-            old_participants: old_participants.clone(),
-            new_participants: new_participants.clone(),
-            phase,
-        })),
-        NodeStatus::Joining { participants } => Ok(Json(StateView::Joining {
-            participants: participants.clone(),
-        })),
-        NodeStatus::Generating { .. }
-        | NodeStatus::WaitingForConsensus { .. }
-        | NodeStatus::Started
-        | NodeStatus::Starting => {
-            tracing::debug!("not running, state unavailable");
-            Ok(Json(StateView::NotRunning))
-        }
-    };
-    WEB_ENDPOINT_LATENCY
-        .with_label_values(&["state"])
-        .observe(start.elapsed().as_millis() as f64);
-    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

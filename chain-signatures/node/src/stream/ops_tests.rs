@@ -868,7 +868,7 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
 #[tokio::test]
 async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     let backlog = Backlog::new();
-    let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Solana);
+    let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Ethereum);
     let sign_id = tx.sign_id();
     let args = test_sign_args(14);
 
@@ -959,7 +959,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         .expect("pending execution entries should store the execution transaction")
         .id;
 
-    let watchers = ctx.backlog.get_execution_watchers(Chain::Solana).await;
+    let watchers = ctx.backlog.get_execution_watchers(Chain::Ethereum).await;
     assert_eq!(watchers.len(), 1);
     assert!(watchers.contains_key(&execution_tx_id));
 }

@@ -12,6 +12,7 @@ use opentelemetry_sdk::Resource;
 use tracing::{Event, Subscriber};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_stackdriver::layer as stackdriver_layer;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::{Format, FormatEvent, Full};
 use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::fmt::{format, FmtContext, FormatFields};
@@ -26,7 +27,7 @@ pub struct Options {
         long,
         env("MPC_OPENTELEMETRY_LEVEL"),
         value_enum,
-        default_value = "off"
+        default_value_t = OpenTelemetryLevel::default()
     )]
     pub opentelemetry_level: OpenTelemetryLevel,
 
@@ -44,7 +45,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            opentelemetry_level: OpenTelemetryLevel::DEBUG,
+            opentelemetry_level: OpenTelemetryLevel::default(),
             otlp_endpoint: "http://localhost:4318".to_string(),
             disable_gcp_logs: false,
         }
@@ -94,18 +95,30 @@ impl Display for OpenTelemetryLevel {
     }
 }
 
+impl OpenTelemetryLevel {
+    fn level_filter(self) -> LevelFilter {
+        match self {
+            OpenTelemetryLevel::OFF => LevelFilter::OFF,
+            OpenTelemetryLevel::INFO => LevelFilter::INFO,
+            OpenTelemetryLevel::DEBUG => LevelFilter::DEBUG,
+            OpenTelemetryLevel::TRACE => LevelFilter::TRACE,
+        }
+    }
+}
+
+#[derive(Default)]
 pub struct OtlpGuard {
-    tracer_otlp_provider: SdkTracerProvider,
-    log_otlp_provider: SdkLoggerProvider,
+    tracer_otlp_provider: Option<SdkTracerProvider>,
+    log_otlp_provider: Option<SdkLoggerProvider>,
 }
 
 impl Drop for OtlpGuard {
     fn drop(&mut self) {
-        if let Err(err) = self.tracer_otlp_provider.shutdown() {
-            eprintln!("{err:?}");
+        if let Some(p) = &self.tracer_otlp_provider {
+            p.shutdown().unwrap_or_else(|err| eprintln!("{err:?}"));
         }
-        if let Err(err) = self.log_otlp_provider.shutdown() {
-            eprintln!("{err:?}");
+        if let Some(p) = &self.log_otlp_provider {
+            p.shutdown().unwrap_or_else(|err| eprintln!("{err:?}"));
         }
     }
 }
@@ -209,38 +222,51 @@ async fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkT
 }
 
 pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
-    let log_otlp_provider = init_otlp_logs(env, node_id, options.otlp_endpoint.as_str()).await;
-    let log_otlp_layer = OpenTelemetryTracingBridge::new(&log_otlp_provider);
+    let (otlp_guard, log_otlp_layer, otlp_tracer) = match options.opentelemetry_level {
+        OpenTelemetryLevel::OFF => (OtlpGuard::default(), None, None),
+        _ => {
+            let log_provider = init_otlp_logs(env, node_id, &options.otlp_endpoint).await;
+            let log_layer = OpenTelemetryTracingBridge::new(&log_provider);
+            let trace_provider = init_otlp_traces(env, node_id, &options.otlp_endpoint).await;
+            let tracer = trace_provider.tracer("mpc");
+            (
+                OtlpGuard {
+                    tracer_otlp_provider: Some(trace_provider),
+                    log_otlp_provider: Some(log_provider),
+                },
+                Some(log_layer),
+                Some(tracer),
+            )
+        }
+    };
+    let otlp_filter = options.opentelemetry_level.level_filter();
 
-    let log_fmt_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(std::io::stderr().is_terminal())
-        .with_line_number(true)
-        .with_thread_names(true)
-        .event_format(NodeIdFormatter::new(node_id))
-        .with_filter(EnvFilter::from_default_env());
-
-    let tracer_otlp_provider = init_otlp_traces(env, node_id, options.otlp_endpoint.as_str()).await;
-    let tracer_otlp = tracer_otlp_provider.tracer("mpc");
-
-    if !options.disable_gcp_logs && is_running_on_gcp().await {
-        let log_stackdriver_layer = stackdriver_layer()
+    let on_gcp = !options.disable_gcp_logs && is_running_on_gcp().await;
+    let log_fmt_layer = (!on_gcp).then(|| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(std::io::stderr().is_terminal())
+            .with_line_number(true)
+            .with_thread_names(true)
+            .event_format(NodeIdFormatter::new(node_id))
+            .with_filter(EnvFilter::from_default_env())
+    });
+    let log_gcp_layer = on_gcp.then(|| {
+        stackdriver_layer()
             .with_writer(std::io::stderr)
-            .with_filter(EnvFilter::from_default_env());
+            .with_filter(EnvFilter::from_default_env())
+    });
 
-        tracing_subscriber::registry()
-            .with(log_otlp_layer)
-            .with(OpenTelemetryLayer::new(tracer_otlp))
-            .with(log_stackdriver_layer)
-            .init();
-        tracing::info!("Set global logging subscriber: fmt, otlp, stackdriver");
-    } else {
-        tracing_subscriber::registry()
-            .with(log_fmt_layer)
-            .with(log_otlp_layer)
-            .with(OpenTelemetryLayer::new(tracer_otlp))
-            .init();
-        tracing::info!("Set global logging subscriber: fmt, otlp");
-    }
+    tracing_subscriber::registry()
+        .with(log_fmt_layer)
+        .with(log_gcp_layer)
+        .with(log_otlp_layer.with_filter(otlp_filter))
+        .with(
+            otlp_tracer
+                .map(OpenTelemetryLayer::new)
+                .with_filter(otlp_filter),
+        )
+        .init();
+    tracing::info!(gcp_logs = on_gcp, "Set global logging subscriber");
 
     tracing::info!(
         "Logging parameters: env={}, node_id={}, options={:?}",
@@ -249,8 +275,5 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
         options
     );
 
-    OtlpGuard {
-        tracer_otlp_provider,
-        log_otlp_provider,
-    }
+    otlp_guard
 }

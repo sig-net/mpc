@@ -17,6 +17,8 @@ pub trait ChainConfig {
     fn expected_finality_time_secs(&self) -> u64;
     fn expected_response_time_secs(&self) -> u64;
     fn respond_serialization_format(&self) -> SerDeserFormat;
+    /// Whether bidirectional requests can target this chain.
+    fn has_execution_watcher(&self) -> bool;
 }
 
 impl ChainConfig for Chain {
@@ -77,5 +79,9 @@ impl ChainConfig for Chain {
             // Solana and Hydration use Borsh for bidirectional responses.
             _ => SerDeserFormat::Borsh,
         }
+    }
+
+    fn has_execution_watcher(&self) -> bool {
+        matches!(self, Chain::Ethereum)
     }
 }

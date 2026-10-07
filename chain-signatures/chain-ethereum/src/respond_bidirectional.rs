@@ -1,8 +1,7 @@
-mod midnight;
-
 use alloy::dyn_abi::{DynSolType, DynSolValue};
-use alloy::primitives::{Bytes, I256, U256};
+use alloy::primitives::Bytes;
 use borsh::BorshSerialize;
+use mpc_midnight_respond_codec::{executed_output, TracedReturn};
 use mpc_primitives::SerDeserFormat;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -116,6 +115,16 @@ pub enum TraceOutput {
     NoReturnData,
 }
 
+impl From<TraceOutput> for TracedReturn {
+    fn from(trace: TraceOutput) -> Self {
+        match trace {
+            TraceOutput::NotTraced => Self::NotTraced,
+            TraceOutput::NoReturnData => Self::Returned(Bytes::new()),
+            TraceOutput::Output(data) => Self::Returned(data),
+        }
+    }
+}
+
 /// Decode a transaction's output and re-serialize it for the respond chain.
 ///
 /// Contract calls require a `debug_traceTransaction` result. Void-returning
@@ -123,8 +132,9 @@ pub enum TraceOutput {
 /// plain-transfer behavior and synthesizes response defaults from
 /// `respond_serialization_schema` (for example, `bool true`).
 ///
-/// Midnight (FAB) derives its encoding from the output schema alone and ignores
-/// `respond_serialization_schema`; plain transfers and void calls attest an empty output.
+/// Midnight responses derive their encoding from the output schema alone and
+/// ignore `respond_serialization_schema`; plain transfers and void calls attest
+/// an empty output.
 pub fn build_serialized_output(
     is_contract_call: bool,
     output_deserialization_schema: &[u8],
@@ -132,13 +142,11 @@ pub fn build_serialized_output(
     respond_serialization_format: SerDeserFormat,
     respond_serialization_schema: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
-    // TODO: Extract FAB serialization when another execution target needs to respond to
-    // Midnight. See https://github.com/sig-net/mpc/issues/1196.
     if respond_serialization_format == SerDeserFormat::Fab {
-        return midnight::executed_output(
+        return executed_output(
             is_contract_call,
             output_deserialization_schema,
-            trace_output,
+            trace_output.into(),
         );
     }
     let transaction_output = match OUTPUT_DESERIALIZATION_FORMAT {
@@ -181,15 +189,19 @@ fn output_schema_is_empty(schema_json: &[u8]) -> anyhow::Result<bool> {
 fn encode_abi(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
     let values = schema
         .iter()
-        .map(|field| match data.fields.get(&field.name) {
-            Some(value) => Ok(value.clone()),
-            None => Err(anyhow::anyhow!(
-                "Missing required field '{}' in output",
-                field.name
-            )),
+        .map(|field| {
+            let value = data.fields.get(&field.name).ok_or_else(|| {
+                anyhow::anyhow!("Missing required field '{}' in output", field.name)
+            })?;
+            let ty: DynSolType = field.typ.parse()?;
+            if !ty.matches(value) {
+                anyhow::bail!("Value {value:?} doesn't match Solidity type {}", field.typ);
+            }
+            Ok(value.clone())
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    encode_abi_values(schema, &values)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    // One tuple, mirroring `abi_decode_params`, so dynamic-field offsets are shared.
+    Ok(DynSolValue::Tuple(values).abi_encode_params())
 }
 
 fn encode_borsh(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
@@ -205,27 +217,6 @@ fn encode_borsh(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn encode_abi_values(schema: &[AbiField], values: &[DynSolValue]) -> anyhow::Result<Vec<u8>> {
-    if schema.len() != values.len() {
-        anyhow::bail!(
-            "Schema and values length mismatch: {} != {}",
-            schema.len(),
-            values.len()
-        );
-    }
-    for (f, v) in schema.iter().zip(values.iter()) {
-        let ty: DynSolType = f.typ.parse()?;
-        if !ty.matches(v) {
-            anyhow::bail!("Value {v:?} doesn't match Solidity type {}", f.typ);
-        }
-    }
-    let mut combined = Vec::new();
-    for v in values {
-        combined.extend(v.abi_encode());
-    }
-    Ok(combined)
-}
-
 fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> {
     use DynSolValue::*;
     match v {
@@ -233,9 +224,10 @@ fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> 
             b.serialize(w)?;
         }
         Address(a) => a.serialize(w)?,
-        Uint(u, size) => write_u256(w, *u, *size)?,
-        Int(i, size) => write_i256(w, *i, *size)?,
-        FixedBytes(b, _) => w.write_all(b.as_slice())?,
+        // Integer sizes are in bits; Borsh writes the native little-endian width.
+        Uint(u, bits) => w.write_all(&u.to_le_bytes::<32>()[..bits / 8])?,
+        Int(i, bits) => w.write_all(&i.to_le_bytes::<32>()[..bits / 8])?,
+        FixedBytes(b, size) => w.write_all(&b[..*size])?,
         Bytes(b) => b.serialize(w)?,
         String(s) => s.serialize(w)?,
         Array(xs) => {
@@ -257,18 +249,6 @@ fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> 
         other => anyhow::bail!("unsupported DynSolValue variant: {other:?}"),
     }
     Ok(())
-}
-
-fn write_u256<W: Write>(w: &mut W, x: U256, size: usize) -> anyhow::Result<()> {
-    let le = x.to_le_bytes::<{ U256::BYTES }>();
-    w.write_all(&le[..size.min(U256::BYTES)])
-        .map_err(Into::into)
-}
-
-fn write_i256<W: Write>(w: &mut W, x: I256, size: usize) -> anyhow::Result<()> {
-    let le = x.to_le_bytes::<{ I256::BYTES }>();
-    w.write_all(&le[..size.min(I256::BYTES)])
-        .map_err(Into::into)
 }
 
 fn parse_output_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
@@ -333,6 +313,7 @@ fn default_output_for_non_contract_call(schema: &[AbiField]) -> anyhow::Result<O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::{I256, U256};
 
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
 
@@ -348,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_rejects_output_types_midnight_cannot_carry() {
+    fn build_serialized_output_midnight_rejects_output_types_it_cannot_carry() {
         let output_schema = br#"[{"name":"message","type":"string"}]"#;
         let trace = Bytes::from(
             DynSolValue::Tuple(vec![DynSolValue::String("hello".to_string())]).abi_encode_params(),
@@ -375,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_contract_bool() {
+    fn build_serialized_output_midnight_contract_bool() {
         let bool_schema = br#"[{"name":"ok","type":"bool"}]"#;
         let out = build_serialized_output(
             true,
@@ -390,7 +371,23 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_plain_transfer_attests_empty_output() {
+    fn build_serialized_output_midnight_ignores_the_respond_schema() {
+        let output_schema = br#"[{"name":"ok","type":"bool"}]"#;
+        for respond_schema in [&b""[..], b"[]", br#"{"struct":{"ok":"u8"}}"#] {
+            let out = build_serialized_output(
+                true,
+                output_schema,
+                TraceOutput::Output(abi_bool(true)),
+                SerDeserFormat::Fab,
+                respond_schema,
+            )
+            .unwrap();
+            assert_eq!(out, vec![1]);
+        }
+    }
+
+    #[test]
+    fn build_serialized_output_midnight_plain_transfer_attests_empty_output() {
         let out = build_serialized_output(
             false,
             b"[]",
@@ -413,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn build_serialized_output_fab_void_call_attests_empty_output() {
+    fn build_serialized_output_midnight_void_call_attests_empty_output() {
         let out = build_serialized_output(
             true,
             b"[]",
@@ -428,15 +425,22 @@ mod tests {
 
     #[test]
     fn build_serialized_output_decodes_contract_call() {
-        // A contract-call tx whose function returned `uint256` 12345; `trace`
-        // is that ABI-encoded return value from debug_traceTransaction.
-        let trace = abi_uint256(12_345);
+        // `trace` is the function's ABI-encoded return value from debug_traceTransaction.
+        let schema = br#"[{"name":"n","type":"uint256"},{"name":"s","type":"string"},{"name":"b","type":"bytes"}]"#;
+        let trace = Bytes::from(
+            DynSolValue::Tuple(vec![
+                DynSolValue::Uint(U256::from(12_345), 256),
+                DynSolValue::String("hi".to_string()),
+                DynSolValue::Bytes(vec![1, 2, 3]),
+            ])
+            .abi_encode_params(),
+        );
         let out = build_serialized_output(
             true,
-            UINT256_SCHEMA,
+            schema,
             TraceOutput::Output(trace.clone()),
             SerDeserFormat::Abi,
-            UINT256_SCHEMA,
+            schema,
         )
         .unwrap();
         assert_eq!(out, trace.to_vec());
@@ -521,6 +525,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, vec![1u8]);
+    }
+
+    #[test]
+    fn build_serialized_output_borsh_uses_native_widths() {
+        let bytes4 = alloy::primitives::B256::right_padding_from(&[0xde, 0xad, 0xbe, 0xef]);
+        let cases = [
+            (
+                "uint8",
+                DynSolValue::Uint(U256::from(7), 8),
+                borsh::to_vec(&7u8),
+            ),
+            (
+                "uint64",
+                DynSolValue::Uint(U256::from(7), 64),
+                borsh::to_vec(&7u64),
+            ),
+            (
+                "int32",
+                DynSolValue::Int(I256::MINUS_ONE, 32),
+                borsh::to_vec(&-1i32),
+            ),
+            (
+                "bytes4",
+                DynSolValue::FixedBytes(bytes4, 4),
+                borsh::to_vec(&[0xdeu8, 0xad, 0xbe, 0xef]),
+            ),
+            (
+                "uint64[]",
+                DynSolValue::Array(vec![DynSolValue::Uint(U256::from(7), 64)]),
+                borsh::to_vec(&vec![7u64]),
+            ),
+        ];
+        for (ty, value, expected) in cases {
+            let schema = format!(r#"[{{"name":"v","type":"{ty}"}}]"#);
+            let trace = Bytes::from(DynSolValue::Tuple(vec![value]).abi_encode_params());
+            let out = build_serialized_output(
+                true,
+                schema.as_bytes(),
+                TraceOutput::Output(trace),
+                SerDeserFormat::Borsh,
+                schema.as_bytes(),
+            )
+            .unwrap();
+            assert_eq!(out, expected.unwrap(), "{ty}");
+        }
     }
 
     #[test]

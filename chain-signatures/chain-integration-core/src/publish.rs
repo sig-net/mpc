@@ -10,8 +10,9 @@ use mpc_primitives::{IndexedSignRequest, Signature};
 /// Trait for publishing signatures to different blockchains (single attempt, caller handles retries).
 #[async_trait::async_trait]
 pub trait ChainPublisher: Send + Sync + 'static {
-    /// Accepts a publish action. The publisher encapsulates how this is executed
-    /// (e.g., immediate spawn, or pushing to an internal batching queue).
+    /// Publishes a signature, resolving only once the response is on chain or
+    /// the attempt fails. The caller's retry loop owns liveness retries and
+    /// duplicate suppression.
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()>;
 }
 

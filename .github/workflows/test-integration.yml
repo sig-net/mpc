@@ -10,6 +10,7 @@ permissions:
   contents: read
   packages: read
   issues: write
+  pull-requests: write
 
 jobs:
   # Fixture tests: in-process MPC protocol tests, no Docker or external infra needed.
@@ -238,11 +239,6 @@ jobs:
         with:
           toolchain: 1.93.0
           components: clippy
-
-      - name: Install system OpenSSL
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-      - name: Set OpenSSL to system
-        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       # Cache policy: doc/ci-caching.md
       - name: Detect dependency changes vs develop
