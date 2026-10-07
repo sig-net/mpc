@@ -87,6 +87,9 @@ jobs:
       - name: Midnight output storage tests
         run: cargo test -p mpc-chain-midnight --lib --features sandbox output_storage::tests
 
+      - name: Check build left no uncommitted changes
+        run: git diff --text --exit-code
+
   audit:
     name: Dependency Audit
     runs-on: ubuntu-latest
