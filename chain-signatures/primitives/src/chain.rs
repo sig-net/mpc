@@ -14,11 +14,12 @@ pub enum SerDeserFormat {
 pub trait ChainConfig {
     fn checkpoint_interval(&self) -> Option<u64>;
     fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)>;
-    /// Watchdog budget (seconds) without a `ChainEvent::Block` before the
-    /// stream supervisor restarts the chain's indexer. Must stay well above
-    /// the chain's block cadence; a false fire costs only one cheap
-    /// supervised restart. Env-overridable for indexed chains.
+    /// `ChainEvent::Block` silence budget before the supervisor restarts
+    /// the indexer. Env-overridable for indexed chains.
     fn stall_timeout_secs(&self) -> u64;
+    /// Budget for the chain-local feed detector (Canton: WS silence;
+    /// Solana: frozen anchor). Env-overridable
+    fn feed_stall_timeout_secs(&self) -> u64;
     fn expected_finality_time_secs(&self) -> u64;
     fn expected_response_time_secs(&self) -> u64;
     fn respond_serialization_format(&self) -> SerDeserFormat;
@@ -57,24 +58,36 @@ impl ChainConfig for Chain {
     fn stall_timeout_secs(&self) -> u64 {
         const FLOOR_SECS: u64 = 300;
         const BUFFER_SECS: u64 = 300;
-        // Finality-derived default, kept conservative for chains whose
-        // streams can legitimately go quiet (e.g. Canton's party-filtered
-        // updates — its 60s transport signal already catches silent
-        // connections).
+        // Conservative default: finality cadence + buffer, floored. Streams
+        // that can legitimately go quiet (Canton) keep this; their feed
+        // detector is the fast path.
         let derived = self
             .expected_finality_time_secs()
             .saturating_add(BUFFER_SECS)
             .max(FLOOR_SECS);
         let (key, default) = match self {
-            // ~20 missed blocks at Midnight's ~6s cadence, with headroom for a
-            // slow catchup block (large contract-state reads).
+            // ~20 missed blocks at ~6s cadence; headroom for slow catchup
+            // blocks (large contract-state reads).
             Chain::Midnight => ("STALL_TIMEOUT_MIDNIGHT", 120),
-            // ~10x Hydration's 12s finality cadence.
+            // ~10x the 12s finality cadence.
             Chain::Hydration => ("STALL_TIMEOUT_HYDRATION", 120),
             Chain::Canton => ("STALL_TIMEOUT_CANTON", derived),
             Chain::Ethereum => ("STALL_TIMEOUT_ETHEREUM", derived),
             Chain::Solana => ("STALL_TIMEOUT_SOLANA", derived),
             Chain::NEAR | Chain::Bitcoin | Chain::Tron => return derived,
+        };
+
+        std::env::var(key)
+            .map(|param| param.parse::<u64>().unwrap_or(default))
+            .unwrap_or(default)
+    }
+
+    fn feed_stall_timeout_secs(&self) -> u64 {
+        const DEFAULT_SECS: u64 = 60;
+        let (key, default) = match self {
+            Chain::Canton => ("FEED_STALL_TIMEOUT_CANTON", DEFAULT_SECS),
+            Chain::Solana => ("FEED_STALL_TIMEOUT_SOLANA", DEFAULT_SECS),
+            _ => return DEFAULT_SECS,
         };
 
         std::env::var(key)
@@ -134,5 +147,11 @@ mod tests {
         // Finality-derived default for the non-indexed chains.
         assert_eq!(Chain::NEAR.stall_timeout_secs(), 3 + 300);
         assert_eq!(Chain::Tron.stall_timeout_secs(), 60 + 300);
+    }
+
+    #[test]
+    fn feed_stall_timeouts_pin_the_fast_signal_budgets() {
+        assert_eq!(Chain::Canton.feed_stall_timeout_secs(), 60);
+        assert_eq!(Chain::Solana.feed_stall_timeout_secs(), 60);
     }
 }

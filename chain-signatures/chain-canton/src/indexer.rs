@@ -12,7 +12,7 @@ use futures_util::{SinkExt, StreamExt};
 use mpc_chain_integration_core::{
     ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
-use mpc_primitives::{Chain, ChainEvent};
+use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -34,10 +34,6 @@ enum CantonConnection {
 
 impl CantonConnection {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-    // Silence budget before probing transport liveness with an RFC 6455 ping
-    // (party-filtered streams go quiet legitimately). The supervisor's
-    // `stall_timeout_secs` watchdog is the slower backstop.
-    const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
     // Budget for the peer's mandatory Pong answer (RFC 6455 §5.5.2).
     const PONG_TIMEOUT: Duration = Duration::from_secs(20);
     const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -101,7 +97,9 @@ impl CantonConnection {
             return None;
         };
 
-        let maybe_msg = match timeout(Self::MESSAGE_TIMEOUT, ws_read.next()).await {
+        // Silence budget before probing liveness with an RFC 6455 ping
+        let message_timeout = Duration::from_secs(Chain::Canton.feed_stall_timeout_secs());
+        let maybe_msg = match timeout(message_timeout, ws_read.next()).await {
             Ok(maybe_msg) => maybe_msg,
             Err(_) => {
                 if let Err(err) = timeout(

@@ -11,7 +11,7 @@ use futures_util::Stream;
 use mpc_chain_integration_core::{
     ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
-use mpc_primitives::{Chain, ChainEvent};
+use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use mpc_utils::task::retry_until_ok;
 use solana_sdk::{pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::option_serializer::OptionSerializer;
@@ -111,6 +111,8 @@ pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
     program_id: Pubkey,
     client: SolanaClient,
     config: SolIndexerConfig,
+    /// Frozen-anchor budget from `feed_stall_timeout_secs`; tests override.
+    slot_stall_timeout: Duration,
     state_manager: S,
     telemetry: T,
 }
@@ -149,6 +151,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             program_id,
             client,
             config: config.indexer,
+            slot_stall_timeout: Duration::from_secs(Chain::Solana.feed_stall_timeout_secs()),
             state_manager,
             telemetry,
         })
@@ -552,7 +555,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
                 return Ok(());
             };
             let anchor = res?;
-            state = state.observe_anchor(anchor, self.config.slot_stall_timeout)?;
+            state = state.observe_anchor(anchor, self.slot_stall_timeout)?;
 
             let tick_started_at = Instant::now();
             self.drain_range(&events_tx, anchor, state.next_start, &cancel)
@@ -621,6 +624,7 @@ mod tests {
             program_id,
             client,
             config: SolIndexerConfig::default(),
+            slot_stall_timeout: Duration::from_secs(30),
             state_manager,
             telemetry: NoopChainTelemetry,
         }
@@ -731,15 +735,17 @@ mod tests {
 
     impl RunFixture {
         /// Spawn `run()` with a getSlot mock serving `slots` in order (the
-        /// last repeats forever), an optional persisted watermark, and an
-        /// optional `SolIndexerConfig` (defaults: fast poll, slow stall timeout).
+        /// last repeats forever), an optional persisted watermark, an optional
+        /// `SolIndexerConfig` (default: fast poll), and the anchor-stall
+        /// budget for the spawned run.
         async fn spawn(
             slots: &[u64],
             processed: Option<u64>,
             config: impl Into<Option<SolIndexerConfig>>,
+            slot_stall_timeout: Duration,
         ) -> Self {
             let server = mockito::Server::new_async().await;
-            Self::spawn_with_server(server, slots, processed, config).await
+            Self::spawn_with_server(server, slots, processed, config, slot_stall_timeout).await
         }
 
         /// Variant taking a pre-built mockito server
@@ -748,6 +754,7 @@ mod tests {
             slots: &[u64],
             processed: Option<u64>,
             config: impl Into<Option<SolIndexerConfig>>,
+            slot_stall_timeout: Duration,
         ) -> Self {
             // Serve the slots in order, repeating the last one forever
             let bodies = Arc::new(std::sync::Mutex::new(
@@ -785,8 +792,8 @@ mod tests {
             let mut indexer = test_indexer(&server.url(), state_manager);
             indexer.config = config.into().unwrap_or(SolIndexerConfig {
                 poll_interval: Duration::from_millis(5),
-                slot_stall_timeout: Duration::from_secs(30),
             });
+            indexer.slot_stall_timeout = slot_stall_timeout;
 
             let (events_tx, events_rx) = mpsc::channel(64);
             let cancel = CancellationToken::new();
@@ -1498,7 +1505,7 @@ mod tests {
     async fn run_emits_single_catchup_completed_when_anchor_frozen() {
         // Frozen anchor: the range [10, 10) covers no new slots, so the only
         // event is exactly one CatchupCompleted — no Block markers.
-        let mut f = RunFixture::spawn(&[10], Some(9), None).await;
+        let mut f = RunFixture::spawn(&[10], Some(9), None, Duration::from_secs(30)).await;
 
         assert!(matches!(
             f.next_event().await,
@@ -1517,15 +1524,7 @@ mod tests {
         // A frozen RPC node: getSlot keeps returning the same slot forever.
         // Dense markers cover only drained slots, so a frozen anchor stops
         // Block flow; the indexer-side stall watchdog trips first.
-        let f = RunFixture::spawn(
-            &[10],
-            Some(9),
-            SolIndexerConfig {
-                poll_interval: Duration::from_millis(5),
-                slot_stall_timeout: Duration::from_millis(100),
-            },
-        )
-        .await;
+        let f = RunFixture::spawn(&[10], Some(9), None, Duration::from_millis(100)).await;
 
         let err = f
             .await_result()
@@ -1568,7 +1567,14 @@ mod tests {
 
         // getSlot script: seed 10, tick 1 at 10 (empty range), tick 2 at 12
         // (drains [10, 12)), tick 3 at 12 again (empty, proves no re-drain).
-        let mut f = RunFixture::spawn_with_server(server, &[10, 10, 12], Some(9), None).await;
+        let mut f = RunFixture::spawn_with_server(
+            server,
+            &[10, 10, 12],
+            Some(9),
+            None,
+            Duration::from_secs(30),
+        )
+        .await;
 
         // Tick 1: empty range — caught up at once, no markers.
         assert!(matches!(
@@ -1670,7 +1676,14 @@ mod tests {
                 .create_async()
                 .await;
 
-            let mut f = RunFixture::spawn_with_server(server, slots, Some(9), None).await;
+            let mut f = RunFixture::spawn_with_server(
+                server,
+                slots,
+                Some(9),
+                None,
+                Duration::from_secs(30),
+            )
+            .await;
             let mut heights = Vec::new();
             while heights.len() < 3 {
                 if let Some(ChainEvent::Block(height)) = f.next_event().await {
@@ -1734,6 +1747,7 @@ mod tests {
             program_id: Pubkey::from_str(&sol_addr).unwrap(),
             client,
             config: SolIndexerConfig::default(),
+            slot_stall_timeout: Duration::from_secs(30),
             state_manager,
             telemetry: NoopChainTelemetry,
         };
