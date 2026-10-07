@@ -514,7 +514,7 @@ impl<T: ChainTelemetry> ChainIndexer for HydrationIndexer<T> {
         cancel: CancellationToken,
     ) -> Result<()> {
         // Hydration is live-only: it streams finalized blocks and performs no
-        // catchup/backfill (TODO: backfill blocks missed across a restart).
+        // catchup/backfill (any gap during a disconnect is a known TODO)
         events_tx
             .send(ChainEvent::CatchupCompleted)
             .await

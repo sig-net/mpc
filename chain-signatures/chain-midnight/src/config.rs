@@ -40,16 +40,12 @@ impl Default for RpcConfig {
 pub struct IndexerConfig {
     /// Delay between finalized-head samples after each completed live iteration.
     pub poll_interval: Duration,
-    /// Silence budget before `run()` returns for a restart: ~10 missed blocks at
-    /// Midnight's ~6s cadence.
-    pub stall_timeout: Duration,
 }
 
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(2),
-            stall_timeout: Duration::from_secs(60),
         }
     }
 }
