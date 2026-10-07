@@ -18,9 +18,7 @@ const thresholds = {
   dropped_iterations: ['count<10'],
 };
 
-// Requests in flight at 10 rps when each takes the whole budget. k6 starts
-// further VUs too slowly to follow a climbing rate, so they are allocated
-// up front.
+// Allocated up front: k6 adds VUs too slowly to follow a climbing rate.
 const VUS_AT_10_RPS = 10 * (P95_BUDGET_MS / 1000);
 
 const strategies = {
