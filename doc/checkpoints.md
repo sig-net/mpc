@@ -148,7 +148,7 @@ Described for one node, one source chain; `backlog` is the node's backlog.
     If not, it re-indexes from it.
   * The settled checkpoint is another one: the node stops indexing, fetches it from a peer, makes it the base and re-indexes from it.
 * A node is *at the cap* when its processed height is `MAX_PENDING` boundaries above its base.
-  There it processes no block and waits for a settlement.
+  There it processes no block and waits for a settlement, caught up or not.
   This bounds how far the network signs from state nobody has agreed to.
   If no settlement comes although 2f+1 votes are in at the first boundary above its base, it re-indexes from its base, on a backoff that grows each time and resets on a rebase.
 * It acts only while it is caught up, is not at the cap, and is not missing a settled checkpoint it has read (`want` below).
@@ -381,22 +381,25 @@ As of develop at 55c9f796.
 ### Contract
 
 * Settles at the signing threshold t. Here: f+1.
+  Note: any threshold from f+1 up keeps S2, so t works too. f+1 needs the fewest nodes up and agreeing (Section 2).
 
 ### Checkpoint and digest
 
 * The digest hashes the chain, the height, the rids, and one phase tag per entry. Here: each entry whole, with request, contract and signatures.
 * The body carries the entry's status, including the signature and publish bookkeeping. Here: entries only, nothing node-local.
+  Note: a body may carry more than the digest covers; a receiver can recompute the digest over the entry info and ignore the rest.
 * One stored checkpoint per height; a conflicting one is an error. Here: a list per height, newest last.
+  Note: the list only matters when a re-index builds a different checkpoint. Without the re-index at the cap, one per height is enough, as today.
 
 ### Checkpointing on the node
 
 * Creates and votes only while caught up. Here: at every boundary passed, also while catching up.
-* Votes are not retried; all pending ones are re-cast at startup. Here: retried until recorded.
+  Note: today a node that catches up never votes for the heights it replayed. A height where fewer than the threshold were caught up stays unsettled for good, and the caught-up nodes stop at the cap. Voting while catching up closes that.
 * The cap counts stored checkpoints, reloaded on restart. Here: a distance from the base.
-* A node at the cap resumes only when the watchdog fires (a per-chain timer that restarts the indexer after no block event for a while, about five minutes). Here: it wakes on a settlement.
+  Note: with creation and voting during catching up, the counting argument can be made to work too.
+* Votes are not retried; all pending ones are re-cast at startup. Here: retried until recorded.
 * No stuck path: the node never reads the vote tally. Here: re-index at the cap on 2f+1 votes.
 * A failed write of a new checkpoint to storage is logged and indexing continues, so the node may vote for a checkpoint it does not hold. Here: the write is retried before the node goes on.
-* A reset digest from the contract is rebuilt locally. Here: no reset.
 
 ### Backlog entries and records
 
