@@ -549,7 +549,7 @@ impl ChainStack {
         }
         if let Some(canton) = &self.configs.canton {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
-            match CantonClient::new(canton, telemetry).await {
+            match CantonClient::new(canton, telemetry, self.gate(Chain::Canton)).await {
                 Ok(client) => {
                     publishers.insert(Chain::Canton, Arc::new(client));
                 }
@@ -927,7 +927,14 @@ async fn spawn_indexers(
 
     if let Some(canton_config) = canton {
         let canton_telemetry = NodeTelemetry::new(Chain::Canton);
-        match CantonIndexer::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
+        match CantonIndexer::new(
+            canton_config,
+            backlog.clone(),
+            canton_telemetry.clone(),
+            gates[Chain::Canton].clone(),
+        )
+        .await
+        {
             Ok(canton_indexer) => {
                 tracing::info!("canton indexer created successfully");
                 tokio::spawn(run_supervised(
