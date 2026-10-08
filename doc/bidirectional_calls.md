@@ -210,8 +210,7 @@ G1 to G3 are safety, G4 and G5 are liveness. G2 and G4 together give
   req.tx on the same target chain, the same account and nonce on EVM
   for instance. If it is included after req was made and that request is
   answered Executed or Failed, a response to req saying Unviable is
-  eventually accepted, unless the response handler fails or that answer
-  cannot be checked (Section 6).
+  eventually accepted, unless the response handler fails.
 
 G4's exceptions (i) and (ii) are in the application's hands: a schema that
 does not match what the target contract returns, and a handler that
@@ -460,7 +459,7 @@ A repeated attestation has the same content (Section 5) and is dropped
 
 A node has to be able to check a `Response` from the event alone, since a
 `Response` removes the request on every node. The event of Section 7
-allows that only when the output is empty; Section 6 says what is missing.
+carries a hash of the output for that.
 
 Properties:
 
@@ -593,7 +592,7 @@ a path from B48 through A15; the first at A12 has none.
      execution passes C3 and is accepted.
 
 * G5: the other request's `Response` is final on the source chain, so
-  every correct node reads it, and can check it by G5's premise. Req is
+  every correct node reads it, and can check it from the event alone. Req is
   still in each node's backlog unless it was answered before. Each node
   attests Unviable for req at the height in that response (M4), and they
   agree. The other transaction was included after req was made, so that
@@ -622,10 +621,6 @@ a path from B48 through A15; the first at A12 has none.
   transaction that used it. At least t nodes would need providers that
   serve account state at old blocks. On Solana, listing
   the account's transactions does the same.
-* A `Response` cannot always be checked. The signature in a `Response`
-  covers the output, but the event carries only the output's length. A
-  node that does not have the output cannot check the response. Signing a
-  hash of the output and putting that hash in the event would fix this.
 * Agreement has no enforcement point. A change to `authentic`,
   `processable` or the attestation function must apply only to requests
   made at or after a source height the upgrade names; applied to requests
@@ -682,6 +677,7 @@ The single append-only enum has at most 256 variants and assigns these indices:
 | `evmType2TxWord` | 3 |
 | `evmType2TxAccessEntry` | 4 |
 | `evmType2TxStorageKey` | 5 |
+| `attestedOutput` | 6 |
 
 `E` must preserve the leading tag: inputs with different tags must have
 different encodings, including when their remaining tuple shapes differ.
@@ -849,7 +845,7 @@ The MPC publishes these responses to a `SignBidirectionalEventV1` request.
 
 `RespondBidirectionalEventV1` attests the requested transaction's outcome:
 `executed`, `failed` or `unviable`. The first two
-attest execution of the transaction signed in `SignatureRespondedEventV1`.
+attest execution of the request's transaction, under any of its signatures.
 An `unviable` outcome attests that a different transaction used up the
 requested transaction's replay protection.
 
@@ -861,22 +857,29 @@ The event carries:
 | `blockHeight` | `u64` | height of the final target chain block, in that chain's numbering |
 | `outputKind` | `enum OutputKind { executed, failed, unviable }` | the outcome's kind |
 | `serializedOutputLength` | `u64` | byte width of the serialised output |
+| `outputHash` | `bytes(32)` | hash of the serialised output |
 | `digest` | `bytes(32)` | the [attestation digest](#7421-attestation-digest) |
 | `signature` | `Signature` | over `digest`, by the attestation key of `requestId`'s contract at the request's key version |
 
 ##### 7.4.2.1 Attestation Digest
 
-The attestation digest, over the serialised output the request's schema
-produced (empty for `failed` and `unviable`):
+The attestation digest covers a hash of the serialised output the
+request's schema produced (empty for `failed` and `unviable`), so anyone
+can check an event without the output:
 
 ```
+outputHash = bytes32(H(E[
+    HashDomain.attestedOutput: u8,
+    serializedOutput: bytes(serializedOutputLength)
+]))
+
 digest = bytes32(H(E[
     HashDomain.attestationDigest: u8,
     requestId: bytes(32),
     blockHeight: u64,
     outputKind: enum,
     serializedOutputLength: u64,
-    serializedOutput: bytes(serializedOutputLength)
+    outputHash: bytes(32)
 ]))
 ```
 
