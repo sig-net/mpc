@@ -30,6 +30,14 @@ plumbed through from the node's config, not constructed by hand.
 | `refresh_finalized_interval` | —                | no        | milliseconds between finalized-head watcher polls (production) |
 | `optimistic_requests`     | `OPTIMISTIC`        | no        | default off (production waits for finality via the finalized-head watcher); set `1` for the demo/soft-tip path |
 
+### Stall budget
+
+`STALL_TIMEOUT_ETHEREUM` (chain-config env var, default `2100s` — 30-minute
+finality plus a 5-minute buffer) is the supervisor watchdog budget: restart
+the indexer when no `ChainEvent::Block` is dispatched within it. Sibling
+chains expose the same knob; see `ChainConfig` in
+`mpc-primitives/src/chain.rs`.
+
 ### Catchup fetch tuning
 
 `rpc.catchup` (`CatchupFetchConfig`) shapes historical block fetching:
