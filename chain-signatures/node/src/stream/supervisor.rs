@@ -133,7 +133,7 @@ async fn resubmit_pending_checkpoint_votes(
 }
 
 /// Base delay before a restart; doubles up to `MAX_RESTART_DELAY` while
-/// restarts recur without an intervening block event.
+/// restarts recur without a new highest block (replays don't count).
 const ERROR_RESTART_DELAY: Duration = Duration::from_secs(1);
 /// Upper bound of the exponential restart backoff.
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
@@ -145,7 +145,9 @@ const RUN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 /// Supervised indexer loop: node-side recovery, then spawn the chain's `run()`
 /// loop and dispatch its events. Regression or a watchdog stall cancels `run()`
 /// and restarts it, re-running light recovery (`load_local: false`) first.
-/// Restarts back off exponentially, resetting once a run delivers a block event.
+/// Restarts back off exponentially, resetting only when a run dispatches a
+/// new highest block — replayed catchup blocks keep the watchdog fed but do
+/// not reset the backoff.
 pub async fn run_supervised<I: ChainIndexer, T: ChainTelemetry>(
     indexer: I,
     ctx: StreamContext,
@@ -184,6 +186,11 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     let mut resubmit_votes = true;
     let mut recovery_retry_delay = ERROR_RESTART_DELAY;
     let mut restart_delay = ERROR_RESTART_DELAY;
+    // Highest block dispatched this supervisor instance. The persisted
+    // watermark only advances once caught up, so a persistent per-height
+    // failure replays the same catchup blocks every restart; only a new
+    // high-water mark is real progress.
+    let mut highest_block: u64 = 0;
     loop {
         // Cleared before recovery, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
@@ -258,9 +265,13 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                             }
                         };
                     };
-                    if matches!(event, ChainEvent::Block(_)) {
+                    if let ChainEvent::Block(number) = event {
+                        // Update the highest observed block and reset the restart delay if this block is newer than any seen before.
+                        if number > highest_block {
+                            highest_block = number;
+                            restart_delay = ERROR_RESTART_DELAY;
+                        }
                         last_block_event = Instant::now();
-                        restart_delay = ERROR_RESTART_DELAY;
                     }
                     if let Err(err) =
                         handle_chain_event(event, &mut ctx, &telemetry, root_pk, chain).await
@@ -1100,11 +1111,12 @@ mod tests {
                 events_tx: mpsc::Sender<ChainEvent>,
                 _cancel: CancellationToken,
             ) -> anyhow::Result<()> {
-                self.started
-                    .lock()
-                    .expect("run timestamps")
-                    .push(Instant::now());
-                events_tx.send(ChainEvent::Block(1)).await.unwrap();
+                let height = {
+                    let mut started = self.started.lock().expect("run timestamps");
+                    started.push(Instant::now());
+                    started.len() as u64
+                };
+                events_tx.send(ChainEvent::Block(height)).await.unwrap();
                 anyhow::bail!("boom")
             }
         }
@@ -1123,14 +1135,68 @@ mod tests {
             Duration::from_secs(3600),
         ));
 
-        // Every run delivers a block before failing, so each restart waits out
-        // only the 1s base.
+        // Every run advances past the previous highest block before failing,
+        // so each restart waits out only the 1s base.
         wait_for_runs(&started, 3, Duration::from_secs(30)).await;
         let started = started.lock().expect("run timestamps").clone();
         for (i, gap) in started.windows(2).map(|w| w[1] - w[0]).enumerate() {
             assert!(
                 gap >= Duration::from_secs(1) && gap < Duration::from_secs(2),
-                "reset run {i} backed off {gap:?}; block events must reset to the 1s base"
+                "progressed run {i} backed off {gap:?}; new highest blocks must reset to the 1s base"
+            );
+        }
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replayed_blocks_do_not_reset_the_restart_backoff() {
+        // A persistent failure at one height (e.g. a Midnight BlockHold)
+        // replays the same catchup blocks on every restart; the replays must
+        // not reset the backoff, or the loop hammers at the 1s base forever.
+        struct ReplayThenFailIndexer {
+            started: Arc<Mutex<Vec<Instant>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ChainIndexer for ReplayThenFailIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn run(
+                &self,
+                events_tx: mpsc::Sender<ChainEvent>,
+                _cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                self.started
+                    .lock()
+                    .expect("run timestamps")
+                    .push(Instant::now());
+                events_tx.send(ChainEvent::Block(1)).await.unwrap();
+                anyhow::bail!("boom")
+            }
+        }
+
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let indexer = ReplayThenFailIndexer {
+            started: started.clone(),
+        };
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
+
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(3600),
+        ));
+
+        // Same height every run: backoff doubles 1s → 2s.
+        wait_for_runs(&started, 3, Duration::from_secs(30)).await;
+        let started = started.lock().expect("run timestamps").clone();
+        for (i, gap) in started.windows(2).map(|w| w[1] - w[0]).enumerate() {
+            let expected = Duration::from_secs(1 << i);
+            assert!(
+                gap >= expected && gap < expected + Duration::from_millis(100),
+                "replay-only run {i} backed off {gap:?}, expected ~{expected:?}"
             );
         }
         task.abort();
