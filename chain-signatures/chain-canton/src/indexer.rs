@@ -102,14 +102,21 @@ impl CantonConnection {
         let maybe_msg = match timeout(message_timeout, ws_read.next()).await {
             Ok(maybe_msg) => maybe_msg,
             Err(_) => {
-                if let Err(err) = timeout(
+                match timeout(
                     Self::PONG_TIMEOUT,
                     ws_write.send(Message::Ping(Vec::new().into())),
                 )
                 .await
                 {
-                    tracing::warn!(?err, "canton WebSocket liveness ping failed");
-                    return None;
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        tracing::warn!(%err, "canton WebSocket liveness ping send failed");
+                        return None;
+                    }
+                    Err(_) => {
+                        tracing::warn!("canton WebSocket liveness ping send timed out");
+                        return None;
+                    }
                 }
                 // Any answer proves liveness and flows through the shared
                 // handling below; only silence fails the stream.
