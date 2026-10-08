@@ -25,7 +25,18 @@ variables:
 | `rpc_http_url`   | `MPC_SOL_RPC_HTTP_URL`   | yes       | JSON-RPC endpoint (Helius, Alchemy, …) |
 | `program_address`| `MPC_SOL_PROGRAM_ADDRESS`| yes       | signet program id (base58) |
 | `indexer.poll_interval` | `MPC_SOL_POLL_INTERVAL_MS` | no | default `1000`; finalized slots advance ~every 400ms |
-| `indexer.slot_stall_timeout` | — | no | default 60s; anchor-stall watchdog |
+
+### Stall budgets
+
+Chain-config env vars (see `ChainConfig` in `mpc-primitives/src/chain.rs`),
+consumed by the node's stream supervisor — not `SolConfig` fields:
+
+| env var | default | trips on |
+|---|---|---|
+| `FEED_STALL_TIMEOUT_SOLANA` | 60s | observed anchor slot frozen (lagging/frozen RPC replica) — fails `run()` immediately |
+| `STALL_TIMEOUT_SOLANA` | 315s | no `ChainEvent::Block` dispatched — supervisor watchdog restart |
+
+Restarts back off exponentially (1s → 30s). 
 
 ## Benchmarking catchup
 
