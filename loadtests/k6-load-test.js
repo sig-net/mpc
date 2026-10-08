@@ -18,6 +18,9 @@ const thresholds = {
   dropped_iterations: ['count<10'],
 };
 
+// Allocated up front: k6 adds VUs too slowly to follow a climbing rate.
+const VUS_AT_10_RPS = 10 * (P95_BUDGET_MS / 1000);
+
 const strategies = {
   "rps_0_1": {
     scenarios: {
@@ -61,8 +64,8 @@ const strategies = {
         executor: 'constant-arrival-rate',
         rate: 10,
         timeUnit: '1s',
-        preAllocatedVUs: 40,
-        maxVUs: 200,
+        preAllocatedVUs: VUS_AT_10_RPS,
+        maxVUs: 2 * VUS_AT_10_RPS,
       },
     },
     thresholds,
@@ -76,7 +79,7 @@ const strategies = {
         executor: 'ramping-arrival-rate',
         startRate: 1,
         timeUnit: '1s',
-        preAllocatedVUs: 40,
+        preAllocatedVUs: VUS_AT_10_RPS,
         maxVUs: 300,
         stages: [
           { target: 1, duration: '3m' },
