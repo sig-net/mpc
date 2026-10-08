@@ -28,6 +28,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const RETRY_DELAY: Duration = Duration::from_millis(500);
+/// Per-block processing retry budget before the run fails with the cause.
+const RETRY_BUDGET: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub(crate) struct BlockHold {
@@ -390,13 +392,16 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     }
 
     /// [`process_block`](Self::process_block) under the per-block retry policy.
-    /// Permanent scanner failures escape immediately; transport failures retry here.
+    /// Permanent failures (BlockHold) escape immediately; transient failures
+    /// retry for [`RETRY_BUDGET`], then fail the run with the last error so
+    /// the supervised restart carries the cause.
     async fn process_block_retrying<C: ChainSource>(
         &self,
         source: &C,
         block: &BlockRef,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Option<Vec<ChainEvent>>> {
+        let deadline = tokio::time::Instant::now() + RETRY_BUDGET;
         loop {
             let result = tokio::select! {
                 _ = cancel.cancelled() => return Ok(None),
@@ -413,6 +418,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                             "midnight block processing held"
                         );
                         return Err(err);
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(err.context(format!(
+                            "midnight block {} still failing after {RETRY_BUDGET:?}",
+                            block.number
+                        )));
                     }
                     tracing::warn!(
                         reason = "retrying",
@@ -1820,6 +1831,33 @@ mod tests {
         assert_request(harness.next_event().await, rid);
         assert_block(harness.next_event().await, 9);
         harness.cancel_and_join().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_persistent_block_error_fails_the_run_after_the_retry_budget() {
+        let (_record, rid) = named_record_and_rid(7);
+        let (mut source, live_tx) = with_live(8);
+        source.set_emissions(
+            9,
+            one_call(EmissionKind::SignBidirectional, notification(rid)),
+        );
+        source.set_state_error(CALLER, 9, "connection reset by peer");
+
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        live_tx.send(block_ref(9)).await.expect("send live block");
+        let err = harness
+            .handle
+            .await
+            .expect("run task")
+            .expect_err("persistent block errors exhaust the retry budget");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("still failing after"), "{rendered}");
+        assert!(rendered.contains("connection reset by peer"), "{rendered}");
+        drop(live_tx);
     }
 
     #[tokio::test]
