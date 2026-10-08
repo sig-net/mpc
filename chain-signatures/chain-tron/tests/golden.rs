@@ -4,7 +4,6 @@
 //! `gettransactionbyid` (USDT transfers, block #86891375).
 
 use mpc_chain_tron::pb::{Message, RawTransaction, Transaction, TriggerSmartContract};
-use mpc_chain_tron::Message as _;
 use mpc_chain_tron::{parse_hex, NowBlock, TronAddress, TronIntent};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -158,6 +157,7 @@ fn parse_accepts_and_rejects() {
 
     // A second contract is rejected.
     bare.contract.push(bare.contract[0].clone());
+    use mpc_chain_tron::Message as _;
     assert!(RawTransaction::parse(&bare.encode_to_vec()).is_err());
 }
 

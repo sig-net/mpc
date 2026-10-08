@@ -7,8 +7,8 @@
 
 use crate::address::TronAddress;
 use crate::pb::{
-    transaction::contract::ContractType, transaction::Contract as TronContract, Message,
-    RawTransaction, Transaction, TriggerSmartContract,
+    Contract as TronContract, ContractType, Message, RawTransaction, Transaction,
+    TriggerSmartContract,
 };
 use crate::types::NowBlock;
 use prost_types::Any;
@@ -48,8 +48,6 @@ impl TronIntent {
                 type_url: TRIGGER_SMART_CONTRACT_TYPE_URL.to_string(),
                 value: trigger.encode_to_vec(),
             }),
-            provider: Vec::new(),
-            contract_name: Vec::new(),
             permission_id: 0,
         };
         let (ref_block_bytes, ref_block_hash) = reference.reference_fields();
@@ -58,9 +56,6 @@ impl TronIntent {
             ref_block_num: 0,
             ref_block_hash,
             expiration: now_ms + EXPIRATION_MS,
-            auths: Vec::new(),
-            data: Vec::new(),
-            scripts: Vec::new(),
             timestamp: now_ms,
             fee_limit: FEE_LIMIT_SUN,
             contract: vec![contract],
@@ -106,7 +101,6 @@ impl RawTransaction {
         let signed = Transaction {
             raw_data: Some(self),
             signature: vec![signature],
-            ..Default::default()
         };
         Ok((signed.encode_to_vec(), txid))
     }

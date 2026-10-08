@@ -25,7 +25,3 @@ prost-types = "0.14.4"
 [dev-dependencies]
 k256.workspace = true
 mockito.workspace = true
-
-[build-dependencies]
-prost-build = "0.14.4"
-protox = "0.9.1"
