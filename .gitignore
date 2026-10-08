@@ -9,6 +9,7 @@
 !.github/ISSUE_TEMPLATE/
 !.github/workflows/
 !.github/CODEOWNERS
+!.github/pull_request_template.md
 
 tmp
 *.log
