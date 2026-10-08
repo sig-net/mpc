@@ -11,7 +11,7 @@ use crate::{
     signing::der_encode_signature,
     CantonChainCtx,
 };
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff};
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind};
 use std::{sync::Arc, time::Duration};
@@ -44,6 +44,7 @@ pub struct CantonClient {
     auth_provider: CantonAuthProvider,
     telemetry: Arc<dyn PublisherTelemetry>,
     retry_strategy: RetryConfig,
+    shared_backoff: SharedBackoff,
 }
 
 impl std::fmt::Debug for CantonClient {
@@ -59,6 +60,7 @@ impl CantonClient {
     pub async fn new(
         config: &CantonConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
+        shared_backoff: SharedBackoff,
     ) -> anyhow::Result<Self> {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -80,6 +82,7 @@ impl CantonClient {
             default_canton_rpc_retry_strategy(),
             http_client,
             auth_provider,
+            shared_backoff,
         ))
     }
 
@@ -99,6 +102,7 @@ impl CantonClient {
         retry_strategy: RetryConfig,
         http_client: reqwest::Client,
         auth_provider: CantonAuthProvider,
+        shared_backoff: SharedBackoff,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -106,6 +110,7 @@ impl CantonClient {
             auth_provider,
             telemetry,
             retry_strategy,
+            shared_backoff,
         }
     }
 
@@ -139,9 +144,10 @@ impl CantonClient {
     }
 
     pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
-        retry_rpc!(
+        retry_rpc_gated!(
             CANTON_RPC_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
             "fetch_ledger_end",
             {
                 let resp = self.auth_get("/v2/state/ledger-end").await?.send().await?;
@@ -187,9 +193,10 @@ impl CantonClient {
             },
         };
 
-        retry_rpc!(
+        retry_rpc_gated!(
             CANTON_RPC_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
             "fetch_active_contracts",
             {
                 let resp = self
@@ -224,9 +231,10 @@ impl CantonClient {
         context: &str,
     ) -> anyhow::Result<SubmissionOutcome> {
         let max_attempts = self.retry_strategy.max_times;
-        retry_rpc!(
+        retry_rpc_gated!(
             CANTON_RPC_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
             |attempt, err, sleep| {
                 tracing::warn!(
                     context,
@@ -403,6 +411,7 @@ mod tests {
     use super::*;
     use crate::config::{CantonAuthConfig, CantonConfig};
     use mockito::{Matcher, Server, ServerGuard};
+    use mpc_chain_integration_core::utils::retry::retry_rpc;
     use mpc_chain_integration_core::{utils::test::make_publish_action, NoopPublisherTelemetry};
     use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignId, SignKind};
     use serde_json::json;
@@ -533,10 +542,14 @@ mod tests {
                 .create_async()
                 .await;
             let telemetry = Arc::new(PublishCounter::default());
-            let client = CantonClient::new(&mock_canton_config(&server.url()), telemetry.clone())
-                .await
-                .unwrap()
-                .with_retry_strategy(fast_retry_strategy());
+            let client = CantonClient::new(
+                &mock_canton_config(&server.url()),
+                telemetry.clone(),
+                SharedBackoff::new(),
+            )
+            .await
+            .unwrap()
+            .with_retry_strategy(fast_retry_strategy());
 
             let result = client.publish_signature(&action).await;
 
@@ -597,10 +610,14 @@ mod tests {
             .create_async()
             .await;
         let telemetry = Arc::new(PublishCounter::default());
-        let client = CantonClient::new(&mock_canton_config(&server.url()), telemetry.clone())
-            .await
-            .unwrap()
-            .with_retry_strategy(fast_retry_strategy());
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            telemetry.clone(),
+            SharedBackoff::new(),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
         let action = final_response_action();
 
         let result = retry_rpc!(Duration::MAX, fast_retry_strategy(), "publish", {
@@ -641,6 +658,7 @@ mod tests {
             let client = CantonClient::new(
                 &mock_canton_config(&server.url()),
                 Arc::new(NoopPublisherTelemetry),
+                SharedBackoff::new(),
             )
             .await
             .unwrap()
@@ -673,6 +691,7 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
@@ -708,10 +727,14 @@ mod tests {
             .await;
 
         let telemetry = Arc::new(PublishCounter::default());
-        let client = CantonClient::new(&mock_canton_config(&server.url()), telemetry.clone())
-            .await
-            .unwrap()
-            .with_retry_strategy(fast_retry_strategy());
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            telemetry.clone(),
+            SharedBackoff::new(),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
         let chain_ctx = borsh::to_vec(&CantonChainCtx {
             sign_event_contract_id: "cid".to_string(),
         })
@@ -758,6 +781,7 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
@@ -790,6 +814,7 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
@@ -827,6 +852,7 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
@@ -877,6 +903,7 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
@@ -917,6 +944,7 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()

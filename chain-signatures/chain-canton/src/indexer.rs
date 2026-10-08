@@ -9,6 +9,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use mpc_chain_integration_core::utils::retry::SharedBackoff;
 use mpc_chain_integration_core::{
     ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
@@ -146,8 +147,14 @@ pub struct CantonIndexer<S: StateManager, T: ChainTelemetry> {
 }
 
 impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
-    pub async fn new(config: CantonConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
-        let client = CantonClient::new(&config, Arc::new(NoopPublisherTelemetry)).await?; // Indexer does not publish
+    pub async fn new(
+        config: CantonConfig,
+        state_manager: S,
+        telemetry: T,
+        shared_backoff: SharedBackoff,
+    ) -> anyhow::Result<Self> {
+        let client =
+            CantonClient::new(&config, Arc::new(NoopPublisherTelemetry), shared_backoff).await?; // Indexer does not publish
         Ok(Self {
             client,
             state_manager,
