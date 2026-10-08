@@ -4,6 +4,7 @@
 //! `gettransactionbyid` (USDT transfers, block #86891375).
 
 use mpc_chain_tron::pb::{Message, RawTransaction, Transaction, TriggerSmartContract};
+use mpc_chain_tron::Message as _;
 use mpc_chain_tron::{parse_hex, NowBlock, TronAddress, TronIntent};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -23,16 +24,7 @@ fn tx_fixture() -> Value {
 }
 
 fn raw_from_fixture(tx: &Value) -> RawTransaction {
-    let bytes = hex::decode(tx["raw_data_hex"].as_str().unwrap()).unwrap();
-    RawTransaction::decode(bytes.as_slice()).unwrap()
-}
-
-fn unsigned_bytes(raw: &RawTransaction) -> Vec<u8> {
-    Transaction {
-        raw_data: Some(raw.clone()),
-        ..Default::default()
-    }
-    .encode_to_vec()
+    RawTransaction::parse(&hex::decode(tx["raw_data_hex"].as_str().unwrap()).unwrap()).unwrap()
 }
 
 fn reference_block_fixture() -> NowBlock {
@@ -109,15 +101,14 @@ fn built_transaction_matches_recorded_bytes() {
 #[test]
 fn signing_reproduces_recorded_signature_and_txid() {
     let tx = tx_fixture();
-    let raw = raw_from_fixture(&tx);
-    let unsigned = unsigned_bytes(&raw);
+    let unsigned = hex::decode(tx["raw_data_hex"].as_str().unwrap()).unwrap();
 
     let sig = hex::decode(tx["signature"][0].as_str().unwrap()).unwrap();
     let r: &[u8; 32] = sig[0..32].try_into().unwrap();
     let s: &[u8; 32] = sig[32..64].try_into().unwrap();
     let v = sig[64];
 
-    let (signed, txid) = Transaction::parse_unsigned(&unsigned)
+    let (signed, txid) = RawTransaction::parse(&unsigned)
         .unwrap()
         .sign_and_hash(r, s, v)
         .unwrap();
@@ -152,30 +143,22 @@ fn unpacked_parameter_matches_contract_call() {
 }
 
 #[test]
-fn parse_unsigned_accepts_and_rejects() {
+fn parse_accepts_and_rejects() {
     let tx = tx_fixture();
-    let raw = raw_from_fixture(&tx);
-
-    let unsigned = unsigned_bytes(&raw);
-    Transaction::parse_unsigned(&unsigned).unwrap();
-
-    // Signed transactions are rejected.
-    let sig = hex::decode(tx["signature"][0].as_str().unwrap()).unwrap();
-    let signed = Transaction {
-        raw_data: Some(raw.clone()),
-        signature: vec![sig],
-        ..Default::default()
-    }
-    .encode_to_vec();
-    assert!(Transaction::parse_unsigned(&signed).is_err());
+    RawTransaction::parse(&hex::decode(tx["raw_data_hex"].as_str().unwrap()).unwrap()).unwrap();
 
     // Garbage is rejected.
-    assert!(Transaction::parse_unsigned(&[0xff, 0xff]).is_err());
+    assert!(RawTransaction::parse(&[0xff, 0xff]).is_err());
 
     // Missing ref block is rejected.
-    let mut bare = raw.clone();
+    let mut bare = raw_from_fixture(&tx);
     bare.ref_block_bytes = Vec::new();
-    assert!(Transaction::parse_unsigned(&unsigned_bytes(&bare)).is_err());
+
+    assert!(RawTransaction::parse(&bare.encode_to_vec()).is_err());
+
+    // A second contract is rejected.
+    bare.contract.push(bare.contract[0].clone());
+    assert!(RawTransaction::parse(&bare.encode_to_vec()).is_err());
 }
 
 #[test]

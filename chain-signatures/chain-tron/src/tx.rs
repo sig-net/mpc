@@ -75,22 +75,21 @@ impl RawTransaction {
     }
 }
 
-impl Transaction {
-    /// Parses and validates a transaction we are willing to sign.
-    pub fn parse_unsigned(bytes: &[u8]) -> anyhow::Result<Self> {
-        let tx = Transaction::decode(bytes)?;
-        anyhow::ensure!(tx.signature.is_empty(), "transaction already signed");
-        anyhow::ensure!(tx.raw_data.is_some(), "transaction missing raw_data");
-        let raw = tx.raw_data.as_ref().unwrap();
+impl RawTransaction {
+    /// Parses and validates the bytes the multichain API carries for Tron
+    /// targets: the bare `raw` message, unsigned by construction. The MPC's
+    /// payload is `sha256` of exactly these bytes — the same hash as txID.
+    pub fn parse(bytes: &[u8]) -> anyhow::Result<Self> {
+        let raw = RawTransaction::decode(bytes)?;
         anyhow::ensure!(raw.contract.len() == 1, "expected exactly one contract");
         anyhow::ensure!(!raw.ref_block_bytes.is_empty(), "missing ref_block_bytes");
         anyhow::ensure!(!raw.ref_block_hash.is_empty(), "missing ref_block_hash");
         anyhow::ensure!(raw.expiration > 0, "missing expiration");
-        Ok(tx)
+        Ok(raw)
     }
 
-    /// Appends the 65-byte `[r ‖ s ‖ v]` signature, returning the signed
-    /// bytes and txID.
+    /// Wraps in a `Transaction` with the 65-byte `[r ‖ s ‖ v]` signature,
+    /// returning the signed bytes and txID.
     pub fn sign_and_hash(
         self,
         r: &[u8; 32],
@@ -98,14 +97,17 @@ impl Transaction {
         v: u8,
     ) -> anyhow::Result<(Vec<u8>, [u8; 32])> {
         anyhow::ensure!(v <= 1, "recovery id must be 0 or 1");
-        let mut tx = self;
-        let txid = tx.raw_data.as_ref().unwrap().txid();
+        let txid = self.txid();
 
         let mut signature = Vec::with_capacity(65);
         signature.extend_from_slice(r);
         signature.extend_from_slice(s);
         signature.push(v);
-        tx.signature = vec![signature];
-        Ok((tx.encode_to_vec(), txid))
+        let signed = Transaction {
+            raw_data: Some(self),
+            signature: vec![signature],
+            ..Default::default()
+        };
+        Ok((signed.encode_to_vec(), txid))
     }
 }
