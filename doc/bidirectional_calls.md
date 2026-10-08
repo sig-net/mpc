@@ -326,14 +326,17 @@ Properties:
 
 It holds no per-application state, verifies nothing, and anyone may call
 it. It records the caller of `sign_bidirectional` as `contract` in the
-event it emits, which is all that `authentic` in Section 4.3 rests on. It
-emits three events:
+event it emits, which is what `authentic` in Section 4.3 rests on. Where a
+chain's signet contract cannot see its caller, the event carries the caller
+the calling contract names, and `authentic` rests instead on the MPC
+checking, from the transaction itself, that the named contract made the
+call. It emits three events:
 
 * `SignRequest { contract, rid, req }`, when a contract asks for a
   signature.
 * `Signature { rid, signature }`, when a signature is published, for the
   broadcaster and for nodes that were not in the signing round.
-* `Response { contract, rid, att, sig }`, when an attestation is published.
+* `Response { rid, att, sig }`, when an attestation is published.
   Where the chain allows it, the contract's `response` handler is called in
   the same transaction, with a bounded gas allowance, since it runs on the
   MPC's gas, and without letting its failure suppress the event. The
@@ -417,7 +420,7 @@ attest(rid, att):
     local[rid].attestation = (att, sig)    // stored before publishing
     publish_response(e.contract, rid, att, sig)
 
-on Response { contract, rid, att, sig } finalised on the source chain:
+on Response { rid, att, sig } finalised on the source chain:
     e = backlog[rid] if rid in backlog
     if e and sig verifies over attestationDigest(rid, att)
       under attestation_key(e.contract, e.req.key.key_version):
@@ -641,8 +644,10 @@ a path from B48 through A15; the first at A12 has none.
   signature nobody broadcasts, or whose output does not decode (M3),
   never produces one. A cancel transaction that uses up the replay
   protection, itself requested through `sign_bidirectional`, ends both
-  entries (G5), so an application has a way out, but nothing bounds the
-  entries nobody clears.
+  entries (G5), so an application has a way out, unless the request's
+  replay protection was used up before the request was made: then it can
+  never execute, and no later transaction takes its place. Nothing bounds
+  the entries nobody clears.
 
 
 ## 7. Canonical Protocol Structures
