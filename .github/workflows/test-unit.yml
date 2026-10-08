@@ -10,6 +10,11 @@ on:
 
 env:
   RUSTFLAGS: -D warnings
+# Cancel superseded runs of the same PR. Merge-queue and develop runs keep going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint-and-test:
     runs-on: warp-ubuntu-latest-x64-4x
