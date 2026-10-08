@@ -970,4 +970,101 @@ mod tests {
         assert!(err.to_string().contains("400"));
         submit_mock.assert_async().await;
     }
+
+    #[tokio::test]
+    async fn test_rpc_gate_cooldown_engages_on_throttled_response() {
+        for status in [429, 402] {
+            let mut server = setup_mock_server_with_auth().await;
+            server
+                .mock("GET", "/v2/state/ledger-end")
+                .with_status(status)
+                .expect(1)
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/v2/state/ledger-end")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(json!({"offset": 42}).to_string())
+                .expect(1)
+                .create_async()
+                .await;
+
+            // base cooldown well above backon's 1-10ms delays, so the gate wait is observable
+            let gate = SharedBackoff::with_cooldowns(
+                Duration::from_millis(300),
+                Duration::from_millis(600),
+            );
+            let client = CantonClient::new(
+                &mock_canton_config(&server.url()),
+                Arc::new(NoopPublisherTelemetry),
+                gate,
+            )
+            .await
+            .unwrap()
+            .with_retry_strategy(fast_retry_strategy());
+
+            let start = std::time::Instant::now();
+            assert_eq!(client.fetch_ledger_end().await.unwrap(), 42);
+            // the gated second attempt waits out the window; the ungated macro
+            // would finish in backon-delay time (~ms)
+            assert!(
+                start.elapsed() >= Duration::from_millis(250),
+                "gated retry must wait out the {status} cooldown, took {:?}",
+                start.elapsed()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rpc_gate_spans_clients_sharing_one_backoff() {
+        let mut server = setup_mock_server_with_auth().await;
+        server
+            .mock("GET", "/v2/state/ledger-end")
+            .with_status(429)
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/v2/state/ledger-end")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({"offset": 7}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // One-shot strategy: the throttled client fails after a single attempt,
+        // so it never waits out the window it opened.
+        let one_shot = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_times: 0,
+            jitter: false,
+        };
+
+        // one gate for both clients — production wiring shares
+        // stack.gate(Chain::Canton) between publisher and indexer clients
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(400), Duration::from_millis(800));
+        let config = mock_canton_config(&server.url());
+        let throttled = CantonClient::new(&config, Arc::new(NoopPublisherTelemetry), gate.clone())
+            .await
+            .unwrap()
+            .with_retry_strategy(one_shot);
+        let healthy = CantonClient::new(&config, Arc::new(NoopPublisherTelemetry), gate)
+            .await
+            .unwrap()
+            .with_retry_strategy(fast_retry_strategy());
+
+        assert!(throttled.fetch_ledger_end().await.is_err());
+
+        let start = std::time::Instant::now();
+        assert_eq!(healthy.fetch_ledger_end().await.unwrap(), 7);
+        assert!(
+            start.elapsed() >= Duration::from_millis(300),
+            "healthy client must wait out the cooldown opened by the throttled one, took {:?}",
+            start.elapsed()
+        );
+    }
 }
