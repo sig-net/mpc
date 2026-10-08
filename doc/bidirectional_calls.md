@@ -645,6 +645,26 @@ a path from B48 through A15; the first at A12 has none.
   entries nobody clears.
 
 
+### 6.1 Tron targets
+
+Request format. `serialized_transaction` carries the protobuf bytes of
+the transaction's `raw` message exactly as the requester built it. The
+ref-block fields (`ref_block_bytes`, `ref_block_hash`) anchor replay to
+a recent Tron block the requester fetched; `timestamp`, `expiration`
+and `fee_limit` are requester-set. Nodes neither fill nor refresh them.
+
+Digest and identity. The signed digest is sha256 of those bytes, and one
+value serves as the MPC payload, the transaction ID and the replay key:
+the signature sits outside the digest's preimage, so a differently
+signed copy of the same bytes names the same transaction ID and the
+chain rejects it as a duplicate. A node therefore needs no signature to
+find an execution (the note above).
+
+Outcomes. No `Unviable` outcome arises: there is no nonce-like sequence
+to use up, and same-key bytes that differ are a different request. A
+transaction whose `expiration` passes unexecuted goes unanswered by
+Section 2's expiry rule, and nodes stop watching it at expiry.
+
 ## 7. Canonical Protocol Structures
 
 The structures the library, the signet contract and the MPC agree on. They
