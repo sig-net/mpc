@@ -680,6 +680,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
         let mut events = Vec::new();
         let mut consumed_slots = HashMap::new();
+        let mut unknown_takers = Vec::new();
         for (tx_id, sign_id, pending_tx, result) in self
             .fetch_watcher_receipts(consumed_txs, block_number)
             .await
@@ -702,7 +703,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                 }
                 // An unknown taker may be this request's own tx under a
                 // signature this node does not hold: no outcome is known.
-                Ok(BackfillOutcome::NotObserved) => {}
+                Ok(BackfillOutcome::NotObserved) => unknown_takers.push(sign_id),
                 Err(err) => {
                     tracing::warn!(
                         ?tx_id,
@@ -713,6 +714,15 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                     failed.insert(tx_id);
                 }
             }
+        }
+
+        if !unknown_takers.is_empty() {
+            tracing::info!(
+                block_number,
+                count = unknown_takers.len(),
+                sample = ?&unknown_takers[..unknown_takers.len().min(5)],
+                "nonce used by a transaction this node does not know; watchers stay pending"
+            );
         }
 
         (events, failed, consumed_slots)
