@@ -681,8 +681,9 @@ impl RpcHandles {
             near_gates,
         );
         let publishers = stack.publishers(near_client.clone()).await;
+        let gates = EnumMap::from_fn(|chain| stack.gate(chain));
         let (rpc_channel, rpc_executor) =
-            RpcExecutor::new(near_governance_client.clone(), publishers).await;
+            RpcExecutor::new(near_governance_client.clone(), publishers, gates).await;
         Self {
             near_client,
             near_governance_client,

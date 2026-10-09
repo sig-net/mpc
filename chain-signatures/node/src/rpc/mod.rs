@@ -19,7 +19,7 @@ use cait_sith::protocol::Participant;
 use dashmap::{mapref::entry::Entry, DashMap, DashSet};
 use k256::AffinePoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, retry_rpc_gated, RetryConfig, SharedBackoff},
+    utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
@@ -459,6 +459,8 @@ pub struct RpcExecutor {
     near: NearGovernanceClient,
     /// The publishers for each chain.
     publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
+    /// Per-chain 429/402 cooldown gates, shared with each chain's indexer.
+    gates: EnumMap<Chain, SharedBackoff>,
     /// The receiver for incoming RPC actions.
     action_rx: mpsc::Receiver<RpcAction>,
 }
@@ -467,6 +469,7 @@ impl RpcExecutor {
     pub async fn new(
         near: NearGovernanceClient,
         publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
+        gates: EnumMap<Chain, SharedBackoff>,
     ) -> (RpcChannel, Self) {
         let (tx, action_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         (
@@ -474,6 +477,7 @@ impl RpcExecutor {
             Self {
                 near,
                 publishers,
+                gates,
                 action_rx,
             },
         )
@@ -502,6 +506,7 @@ impl RpcExecutor {
 
         Self::dispatch_loop(
             &self.publishers,
+            &self.gates,
             Some(backlog),
             Some(self.near.clone()),
             &consensus,
@@ -513,6 +518,7 @@ impl RpcExecutor {
     /// Dispatches incoming RPC actions to the appropriate chain publishers.
     async fn dispatch_loop(
         publishers: &HashMap<Chain, Arc<dyn ChainPublisher>>,
+        gates: &EnumMap<Chain, SharedBackoff>,
         backlog: Option<Backlog>,
         near: Option<NearGovernanceClient>,
         consensus: &EnumMap<Chain, CheckpointWatcher>,
@@ -551,10 +557,11 @@ impl RpcExecutor {
 
                     let publisher = publisher.clone();
                     let backlog = backlog.clone();
+                    let gate = gates[chain].clone();
                     let in_flight = in_flight.clone();
                     tokio::spawn(async move {
                         let _guard = InFlightGuard { in_flight, id: key };
-                        execute_publish(publisher, backlog, action).await;
+                        execute_publish(publisher, backlog, action, gate).await;
                     });
                 }
                 RpcAction::VoteCheckpoint {
@@ -680,12 +687,14 @@ impl Drop for InFlightGuard {
 }
 
 /// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
+/// Each attempt first waits out the chain's shared 429/402 cooldown gate.
 /// With a `backlog`, each attempt first checks that this node still waits for the
 /// response: once any node's response is observed, a retry would only land a duplicate.
 pub async fn execute_publish(
     publisher: Arc<dyn ChainPublisher>,
     backlog: Option<Backlog>,
     action: PublishAction,
+    gate: SharedBackoff,
 ) {
     let chain = action.request.chain;
     let sign_id = action.request.id;
@@ -704,9 +713,10 @@ pub async fn execute_publish(
         jitter: true,
     };
 
-    let publish_res = retry_rpc!(
+    let publish_res = retry_rpc_gated!(
         Duration::MAX, // Prevent from timing out
         retry_config,
+        gate,
         // Log the error and retry attempt
         |attempt, err, sleep| {
             tracing::warn!(
@@ -1148,7 +1158,7 @@ mod tests {
         // Returns once the channel drains. A wrongly admitted vote would already
         // be spawned; the short wait gives it time to reach the server. It bounds
         // a negative check, so a slow run can only pass, never fail spuriously.
-        RpcExecutor::dispatch_loop(&HashMap::new(), None, Some(near), &consensus, &mut rx).await;
+        RpcExecutor::dispatch_loop(&HashMap::new(), &EnumMap::from_fn(|_| SharedBackoff::new()), None, Some(near), &consensus, &mut rx).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         mock.assert_async().await;
     }
@@ -1308,7 +1318,7 @@ mod tests {
         });
 
         let action = publish_action_for(&mock_sign_request(sign_id, Chain::Midnight));
-        execute_publish(publisher, Some(backlog), action).await;
+        execute_publish(publisher, Some(backlog), action, SharedBackoff::new()).await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
@@ -1401,7 +1411,7 @@ mod tests {
         // Closing the channel will cause dispatch_loop to return
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, None, &no_consensus(), &mut rx).await;
 
         // Give spawned tasks a chance to complete
         tokio::task::yield_now().await;
@@ -1435,7 +1445,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, None, &no_consensus(), &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 0);
@@ -1475,7 +1485,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, None, &no_consensus(), &mut rx).await;
 
         // Yield enough times to let both spawned tasks complete.
         // Each task calls publish_signature once and returns immediately.
@@ -1535,7 +1545,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, None, &no_consensus(), &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);
@@ -1558,7 +1568,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let publishers = HashMap::new();
         let dispatch = tokio::spawn(async move {
-            RpcExecutor::dispatch_loop(&publishers, None, Some(near), &no_consensus(), &mut rx)
+            RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, Some(near), &no_consensus(), &mut rx)
                 .await;
         });
 
@@ -1610,7 +1620,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, None, &no_consensus(), &mut rx).await;
 
         // Let the single in-flight publish finish.
         tokio::task::yield_now().await;
