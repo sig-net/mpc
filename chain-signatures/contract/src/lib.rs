@@ -1263,19 +1263,6 @@ mod tests {
     use near_sdk::testing_env;
 
     #[derive(BorshSerialize)]
-    struct OldMpcContract {
-        protocol_state: ProtocolContractState,
-        pending_requests: IterableMap<SignId, PendingRequest>,
-        proposed_updates: ProposedUpdates,
-        config: Config,
-    }
-
-    #[derive(BorshSerialize)]
-    enum VersionedOldMpcContract {
-        V0(OldMpcContract),
-    }
-
-    #[derive(BorshSerialize)]
     struct IterableMapValueAndIndexForTest<V> {
         value: V,
         key_index: u32,
@@ -1316,16 +1303,17 @@ mod tests {
             .build();
         testing_env!(context);
 
-        // 1. Serialize and write the OLD contract state to storage
-        let old_contract = OldMpcContract {
-            protocol_state: ProtocolContractState::NotInitialized,
+        // 1. Serialize and write the previous contract state to storage
+        let previous_contract = migration::PreviousDevnet {
+            protocol_state: migration::PreviousProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
         };
-        let versioned_old = VersionedOldMpcContract::V0(old_contract);
-        let old_bytes = borsh::to_vec(&versioned_old).unwrap();
-        env::storage_write(b"STATE", &old_bytes);
+        let prev_bytes = borsh::to_vec(&previous_contract).unwrap();
+        env::storage_write(b"STATE", &prev_bytes);
 
         // 2. Call migrate for the first time
         let migrated_res = MpcContract::migrate();
