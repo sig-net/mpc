@@ -203,7 +203,7 @@ on block b finalised, the next one above the processed height:
 Polling the governance contract
 ```
 on settlement poll period expiry:
-  h, d = contract.latest_checkpoint(chain), or the genesis checkpoint's
+  h, d = contract.latest_checkpoint(chain), or the genesis checkpoint
   if h < base.height or (want is set and h < want.height):
     return                           // older than what we already read
   if (h, d) == (base.height, base.digest):   // nothing new has settled
