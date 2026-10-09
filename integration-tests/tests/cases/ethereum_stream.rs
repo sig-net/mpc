@@ -909,9 +909,8 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
         tokio::time::sleep(Duration::from_millis(600)).await;
     }
 
-    // Both watchers resolve at the replacement's mined block: the replaced
-    // respond tx as failed, since another watched request with different
-    // unsigned bytes took its nonce, and the replacement with its real outcome.
+    // Both resolve at the replacement's block: the replaced tx as failed, since a watched tx
+    // with other unsigned bytes took its nonce, and the replacement with its real outcome.
     let mut confirmations = Vec::new();
     stream
         .wait_for(

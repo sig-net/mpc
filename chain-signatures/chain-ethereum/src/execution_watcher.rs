@@ -534,30 +534,8 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         (events, consumed_slots, failed)
     }
 
-    /// A displaced non-Midnight request attests `Failed`: those applications
-    /// cancel by taking the nonce and refund on `Failed` until they can encode `Unviable`.
-    fn displaced_failure(
-        tx_id: BidirectionalTxId,
-        sign_id: SignId,
-        tx: &BidirectionalTx,
-        block_number: u64,
-    ) -> Option<ChainEvent> {
-        Some(ChainEvent::ExecutionConfirmed {
-            tx_id,
-            sign_id,
-            source_chain: tx.source_chain,
-            block_height: block_number,
-            result: ExecutionOutcome::Failed,
-        })
-    }
-
-    /// Resolves pending watchers whose (sender, nonce) slot was consumed by a
-    /// different watched tx included in block `block_number`. A verdict
-    /// requires different unsigned bytes: another signature over the same
-    /// transaction is not evidence that the requested execution became unviable.
-    /// The supplied height belongs to the block containing the consuming tx,
-    /// never a later nonce sweep that cannot recover the replacement height.
-    /// Returns the events and the remaining unmined watchers.
+    /// Resolves watchers whose nonce a watched tx with other unsigned bytes took in block
+    /// `block_number`, at that height. Returns the events and the unresolved watchers.
     fn resolve_replaced_siblings(
         unmined: Vec<WatcherEntry>,
         consumed_slots: &HashMap<(Address, u64), Arc<BidirectionalTx>>,
@@ -566,47 +544,43 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         let mut events = Vec::new();
         let mut remaining = Vec::new();
         for (tx_id, (sign_id, tx)) in unmined {
-            if let Some(consuming_tx) =
-                consumed_slots.get(&(Address::from(tx.from_address), tx.nonce))
-            {
-                let event = if tx.source_chain == Chain::Midnight {
-                    (tx.serialized_transaction != consuming_tx.serialized_transaction).then_some(
-                        ChainEvent::ExecutionConfirmed {
-                            tx_id,
-                            sign_id,
-                            source_chain: tx.source_chain,
-                            block_height: block_number,
-                            result: ExecutionOutcome::Unviable,
-                        },
-                    )
-                } else if tx.serialized_transaction != consuming_tx.serialized_transaction {
-                    Self::displaced_failure(tx_id, sign_id, &tx, block_number)
-                } else {
-                    None
-                };
-                if let Some(event) = event {
-                    tracing::info!(
-                        ?tx_id,
-                        ?sign_id,
-                        nonce = tx.nonce,
-                        replacement_block = block_number,
-                        "transaction replaced by a watched sibling tx"
-                    );
-                    events.push(event);
-                    continue;
-                }
+            // The same bytes may be this request's own tx under a signature this node lacks.
+            let displaced = consumed_slots
+                .get(&(Address::from(tx.from_address), tx.nonce))
+                .is_some_and(|consuming| {
+                    consuming.serialized_transaction != tx.serialized_transaction
+                });
+            if !displaced {
+                remaining.push((tx_id, (sign_id, tx)));
+                continue;
             }
-            remaining.push((tx_id, (sign_id, tx)));
+            tracing::info!(
+                ?tx_id,
+                ?sign_id,
+                nonce = tx.nonce,
+                replacement_block = block_number,
+                "transaction replaced by a watched sibling tx"
+            );
+            // Other source chains cannot encode Unviable yet; their applications refund on Failed.
+            let result = if tx.source_chain == Chain::Midnight {
+                ExecutionOutcome::Unviable
+            } else {
+                ExecutionOutcome::Failed
+            };
+            events.push(ChainEvent::ExecutionConfirmed {
+                tx_id,
+                sign_id,
+                source_chain: tx.source_chain,
+                block_height: block_number,
+                result,
+            });
         }
 
         (events, remaining)
     }
 
-    /// Resolves pending watchers displaced by a watched tx that the
-    /// nonce gate observed after its inclusion block: this node listed that tx's
-    /// watcher late, restarted, or is retrying its output extraction. Each verdict
-    /// uses the consuming tx's inclusion height, as the mined-block path does, so
-    /// nodes that list watchers at different times reach the same attestation.
+    /// Like `resolve_replaced_siblings` for a tx the nonce gate saw after its inclusion block,
+    /// at that block's height, so nodes that list watchers at different times agree.
     fn resolve_late_replaced_siblings(
         pending: Vec<WatcherEntry>,
         consumed_slots: &HashMap<(Address, u64), (Arc<BidirectionalTx>, u64)>,
@@ -1980,10 +1954,8 @@ mod tests {
         }
     }
 
-    /// A replacement that the nonce gate observes only after its inclusion block
-    /// must resolve its displaced sibling at the replacement's inclusion
-    /// height, as a node that watched it in time does, whatever the replacement's
-    /// own outcome and whichever watcher this node lists first.
+    /// A replacement the nonce gate sees late resolves its displaced sibling at its own
+    /// inclusion height, whatever its outcome and whichever watcher this node lists first.
     #[tokio::test]
     async fn late_replacement_resolves_its_displaced_midnight_sibling() {
         /// When this node lists each watcher, relative to the replacement's
