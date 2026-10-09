@@ -517,6 +517,16 @@ impl ChainStack {
         self.gates[chain].clone()
     }
 
+    /// Wraps an internally-ungated publisher in [`GatedPublisher`] bound to
+    /// this stack's gate for `chain` (Midnight and Hydration are externally gated)
+    fn gated_publisher<P: ChainPublisher>(
+        &self,
+        chain: Chain,
+        publisher: P,
+    ) -> Arc<dyn ChainPublisher> {
+        Arc::new(GatedPublisher::new(publisher, self.gate(chain)))
+    }
+
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
     /// each other chain is added only when configured. A client that fails to build is
     /// logged and skipped rather than aborting startup.
@@ -546,11 +556,9 @@ impl ChainStack {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
             match rpc::HydrationClient::new(hydration, telemetry).await {
                 Ok(client) => {
-                    // Hydration's client has no internal gating: the adapter is
-                    // the single owner of this chain's shared cooldown
                     publishers.insert(
                         Chain::Hydration,
-                        Arc::new(GatedPublisher::new(client, self.gate(Chain::Hydration))),
+                        self.gated_publisher(Chain::Hydration, client),
                     );
                 }
                 Err(e) => tracing::error!(%e, "failed to create hydration client"),
@@ -569,11 +577,9 @@ impl ChainStack {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
             match RecoveringMidnightPublisher::start(midnight, telemetry) {
                 Ok(client) => {
-                    // Midnight's publisher has no internal gating: the adapter is
-                    // the single owner of this chain's shared cooldown
                     publishers.insert(
                         Chain::Midnight,
-                        Arc::new(GatedPublisher::new(client, self.gate(Chain::Midnight))),
+                        self.gated_publisher(Chain::Midnight, client),
                     );
                 }
                 Err(e) => tracing::error!(%e, "failed to create midnight publisher"),
