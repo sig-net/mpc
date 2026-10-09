@@ -36,7 +36,7 @@ use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
-use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
+use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher, GatedPublisher};
 use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher};
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
@@ -535,14 +535,23 @@ impl ChainStack {
         }
         if let Some(sol) = &self.configs.sol {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Solana));
-            let client = Arc::new(SolanaClient::from_config(sol, telemetry));
+            let client = Arc::new(SolanaClient::from_config(
+                sol,
+                telemetry,
+                self.gate(Chain::Solana),
+            ));
             publishers.insert(Chain::Solana, client);
         }
         if let Some(hydration) = &self.configs.hydration {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
             match rpc::HydrationClient::new(hydration, telemetry).await {
                 Ok(client) => {
-                    publishers.insert(Chain::Hydration, Arc::new(client));
+                    // Hydration's client has no internal gating: the adapter is
+                    // the single owner of this chain's shared cooldown
+                    publishers.insert(
+                        Chain::Hydration,
+                        Arc::new(GatedPublisher::new(client, self.gate(Chain::Hydration))),
+                    );
                 }
                 Err(e) => tracing::error!(%e, "failed to create hydration client"),
             }
@@ -560,7 +569,12 @@ impl ChainStack {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
             match RecoveringMidnightPublisher::start(midnight, telemetry) {
                 Ok(client) => {
-                    publishers.insert(Chain::Midnight, Arc::new(client));
+                    // Midnight's publisher has no internal gating: the adapter is
+                    // the single owner of this chain's shared cooldown
+                    publishers.insert(
+                        Chain::Midnight,
+                        Arc::new(GatedPublisher::new(client, self.gate(Chain::Midnight))),
+                    );
                 }
                 Err(e) => tracing::error!(%e, "failed to create midnight publisher"),
             }
@@ -681,9 +695,8 @@ impl RpcHandles {
             near_gates,
         );
         let publishers = stack.publishers(near_client.clone()).await;
-        let gates = stack.gates.clone();
         let (rpc_channel, rpc_executor) =
-            RpcExecutor::new(near_governance_client.clone(), publishers, gates).await;
+            RpcExecutor::new(near_governance_client.clone(), publishers).await;
         Self {
             near_client,
             near_governance_client,
@@ -883,7 +896,12 @@ async fn spawn_indexers(
 
     if let Some(sol_config) = sol {
         let sol_telemetry = NodeTelemetry::new(Chain::Solana);
-        match SolanaIndexer::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
+        match SolanaIndexer::new(
+            sol_config,
+            backlog.clone(),
+            sol_telemetry.clone(),
+            gates[Chain::Solana].clone(),
+        ) {
             Ok(sol_indexer) => {
                 tracing::info!("solana indexer created successfully");
                 tokio::spawn(run_supervised(

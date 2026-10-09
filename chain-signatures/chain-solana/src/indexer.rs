@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use futures_util::stream::{self, StreamExt};
 use futures_util::Stream;
 use mpc_chain_integration_core::{
-    ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
+    utils::retry::SharedBackoff, ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use mpc_utils::task::retry_until_ok;
@@ -132,7 +132,12 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         }
     }
 
-    pub fn new(config: SolConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
+    pub fn new(
+        config: SolConfig,
+        state_manager: S,
+        telemetry: T,
+        shared_backoff: SharedBackoff,
+    ) -> anyhow::Result<Self> {
         let program_id = Pubkey::from_str(&config.program_address).with_context(|| {
             format!(
                 "failed to parse solana program address: {}",
@@ -144,6 +149,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             config.rpc_http_url.clone(),
             program_id,
             Arc::new(NoopPublisherTelemetry), // Indexer does not publish
+            shared_backoff,
         );
 
         Ok(Self {
@@ -594,7 +600,9 @@ mod tests {
     use super::*;
     use crate::events::SolanaSignEvent;
     use anchor_lang::{AnchorSerialize, Discriminator};
-    use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
+    use mpc_chain_integration_core::{
+        utils::retry::SharedBackoff, MockStateManager, NoopChainTelemetry,
+    };
     use mpc_primitives::SignId;
     use signet_program::{SignatureRequestedEvent, SignatureRespondedEvent};
     use solana_commitment_config::CommitmentLevel;
@@ -613,6 +621,7 @@ mod tests {
             url.to_string(),
             program_id,
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .with_fast_retry();
         SolanaIndexer {
@@ -1772,6 +1781,7 @@ mod tests {
             http_url.clone(),
             Pubkey::from_str(&sol_addr).unwrap(),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         );
 
         let indexer = SolanaIndexer {

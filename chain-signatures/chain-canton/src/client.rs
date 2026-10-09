@@ -411,6 +411,7 @@ mod tests {
     use super::*;
     use crate::config::{CantonAuthConfig, CantonConfig};
     use mockito::{Matcher, Server, ServerGuard};
+    use mpc_chain_integration_core::utils::retry::retry_rpc;
     use mpc_chain_integration_core::{utils::test::make_publish_action, NoopPublisherTelemetry};
     use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignId, SignKind};
     use serde_json::json;
@@ -609,18 +610,17 @@ mod tests {
             .create_async()
             .await;
         let telemetry = Arc::new(PublishCounter::default());
-        let gate = SharedBackoff::new();
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             telemetry.clone(),
-            gate.clone(),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
         .with_retry_strategy(fast_retry_strategy());
         let action = final_response_action();
 
-        let result = retry_rpc_gated!(Duration::MAX, fast_retry_strategy(), gate, "publish", {
+        let result = retry_rpc!(Duration::MAX, fast_retry_strategy(), "publish", {
             client.publish_signature(&action).await
         });
         drop(release);
@@ -883,7 +883,7 @@ mod tests {
     #[tokio::test]
     async fn test_publish_canton_retries_on_500_then_succeeds() {
         let mut server = setup_mock_server_with_auth().await;
-        // First submit attempt → 500, second → success. The retry_rpc_gated! wrapper
+        // First submit attempt → 500, second → success. The retry_rpc! wrapper
         // should transparently retry the failing call and recover.
         let _fail = server
             .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
