@@ -400,14 +400,14 @@ on target chain block at height h finalised on chain target:
         ours = { txid(s, e.req.tx)
                  for s in e.signatures + local[rid].issued }
         if some id in ours has receipt r in a final block at height h':  // M3
-            for (rid', e') in backlog for target, other than rid, with e's
-              account and e.req.tx's replay protection, and no
-              local[rid'].outcome:
-                attest(rid', (h', Unviable, empty))             // M4
             if decode(r, e.req.schema) gives (kind, data):
                 attest(rid, (h', kind, data))
             else:
                 local[rid].outcome = Parked, log why        // M3
+        else if a transaction in a final block at height h' is from e's
+          account with e.req.tx's replay protection and its unsigned
+          bytes are not e.req.tx:                                       // M4
+            attest(rid, (h', Unviable, empty))
 
 attest(rid, att):
     e = backlog[rid]
@@ -446,11 +446,14 @@ starts looking late still finds it. A node holds the signatures published
 for the request and those it took part in producing. An execution under a
 signature it does not hold is not found (see Section 6 for alternatives).
 
-When the transaction of one request is included, every other request
-waiting on the same account and replay protection can never execute, and
-the MPC attests Unviable for each, at that transaction's height. A node
-learns of it in one of two ways: it finds the execution itself, or it
-reads the `Response` that reports it. The second reaches every node that
+When any transaction from an account is included, a request's or one
+signed through a plain sign request, every request waiting on that account
+and replay protection with other unsigned bytes can never execute, and the
+MPC attests Unviable for each, at that transaction's height. A plain sign
+request names only a payload hash, so the MPC finds such a transaction on
+the target chain, by account and replay protection. A node learns of it in
+one of two ways: it finds the transaction itself, or it reads the
+`Response` that reports it. The second reaches every node that
 reads the source chain. A node that is behind notes the outcome and
 attests once caught up.
 
@@ -479,11 +482,11 @@ Properties:
   that account. If the transaction succeeded but its return data does not
   decode, the MPC attests nothing, and the entry stays in the backlog,
   parked and unwatched.
-* M4 The MPC attests Unviable for a request only when another request's
-  transaction, from the same account, on the same target chain and
-  with the same replay protection, was included in a final block: a node
-  finds that execution itself, or reads a `Response` saying Executed or
-  Failed. It attests at that block's height.
+* M4 The MPC attests Unviable for a request only when a transaction from
+  the same account, on the same target chain, with the same replay
+  protection and other unsigned bytes, was included in a final block: a
+  node finds it itself, or reads a `Response` saying Executed or Failed. It
+  attests at that block's height.
 * M5 An attestation binds rid, height, kind and data, with data's length
   in the hash, and describes only target chain state final at that height.
 
@@ -568,10 +571,11 @@ a path from B48 through A15; the first at A12 has none.
   committing hash), and the MPC reports only the receipt of a transaction
   with req.tx's bytes from req.tx's account (M3). So the reported receipt
   is req.tx's own, and final (M5, finality assumption). For Unviable, M4
-  attests only when another transaction from req.tx's account with the
-  same replay protection was included in a final block. The node saw it
-  itself, or a response reported it, and that response is true by M3.
-  Such a transaction blocks req.tx for good (Section 3.3).
+  attests only when a transaction from req.tx's account with the same
+  replay protection and other unsigned bytes was included in a final
+  block. The node saw it itself, or a response reported it, and that
+  response is true by M3. Such a transaction blocks req.tx for good
+  (Section 3.3).
 
 * G4, in three steps.
   1. The execution is above e.known: e.known is a height some accepted
