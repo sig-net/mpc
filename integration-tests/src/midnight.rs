@@ -106,7 +106,7 @@ impl MidnightContext {
             mpc_primitives::LATEST_MPC_KEY_VERSION,
             &hex::encode(caller_bytes),
             mpc_node::respond_bidirectional::MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH,
-        );
+        )?;
         let response_public_key = mpc_crypto::derive_key(root_public_key, epsilon);
         let response_public_key = format!(
             "0x{}",

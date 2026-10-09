@@ -131,7 +131,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
         LATEST_MPC_KEY_VERSION,
         &expected_event.sender,
         &canton.requester_party,
-    );
+    )?;
     let expected_sender_addr = derive_user_address(root_pk, sign_epsilon);
 
     anvil
@@ -212,7 +212,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
         LATEST_MPC_KEY_VERSION,
         &expected_event.sender,
         CANTON_RESPOND_BIDIRECTIONAL_PATH,
-    );
+    )?;
     let respond_derived_pk = mpc_crypto::derive_key(root_pk, respond_epsilon);
 
     let respond_ecdsa = k256::ecdsa::Signature::from_scalars(

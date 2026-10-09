@@ -12,8 +12,7 @@ use mpc_chain_integration_core::{
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
-    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
-    MAX_SECP256K1_SCALAR,
+    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
@@ -62,10 +61,6 @@ impl HydrationSignatureRequestedEvent {
 
     fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
-        if self.key_version > LATEST_MPC_KEY_VERSION {
-            tracing::warn!("unsupported key version: {}", self.key_version);
-            return None;
-        }
 
         let payload = Scalar::from_bytes(self.payload).or_else(|| {
             tracing::warn!(
@@ -84,7 +79,14 @@ impl HydrationSignatureRequestedEvent {
             self.key_version,
             &self.sender_string(),
             &self.path,
-        );
+        )
+        .inspect_err(|_| {
+            tracing::info!(
+                key_version = self.key_version,
+                "unsupported key version; dropping sign request"
+            )
+        })
+        .ok()?;
 
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "hydration signature requested");
@@ -178,10 +180,6 @@ impl HydrationSignBidirectionalRequestedEvent {
 
     pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
-        if self.key_version > LATEST_MPC_KEY_VERSION {
-            tracing::warn!("unsupported key version: {}", self.key_version);
-            return None;
-        }
 
         let request_id = self.generate_request_id();
 
@@ -191,7 +189,14 @@ impl HydrationSignBidirectionalRequestedEvent {
             self.key_version,
             &self.sender_string(),
             &self.path,
-        );
+        )
+        .inspect_err(|_| {
+            tracing::info!(
+                key_version = self.key_version,
+                "unsupported key version; dropping sign request"
+            )
+        })
+        .ok()?;
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "hydration signature requested");

@@ -126,7 +126,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         let outcome = nodes.sign().path(hd_path).await?;
 
         let derivation_epsilon =
-            derive_epsilon_near(LATEST_MPC_KEY_VERSION, outcome.account.id(), hd_path);
+            derive_epsilon_near(LATEST_MPC_KEY_VERSION, outcome.account.id(), hd_path)?;
         let user_pk = derive_key(mpc_pk, derivation_epsilon);
         let multichain_sig = reconstruct_signature(
             &user_pk,

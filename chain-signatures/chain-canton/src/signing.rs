@@ -11,7 +11,6 @@ use mpc_chain_integration_core::utils::hashing::hash_payload;
 use mpc_crypto::x_coordinate;
 use mpc_primitives::{
     Chain, IndexedSignRequest, ScalarExt, SignArgs, SignBidirectionalEvent, SignId, Signature,
-    LATEST_MPC_KEY_VERSION,
 };
 
 use crate::daml::{
@@ -101,18 +100,13 @@ impl CantonSignBidirectionalRequestedEvent {
     ) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("found canton event: {:?}", self);
 
-        if self.key_version > LATEST_MPC_KEY_VERSION {
-            tracing::warn!("unsupported key version: {}", self.key_version);
-            anyhow::bail!("unsupported key version");
-        }
-
         let request_id = self.request_id;
 
         let epsilon = mpc_crypto::kdf::derive_epsilon_canton(
             self.key_version,
             &self.sender_string(),
             &self.path,
-        );
+        )?;
 
         let unsigned_tx_hash = hash_payload(&self.serialized_transaction);
 

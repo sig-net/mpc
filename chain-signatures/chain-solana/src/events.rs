@@ -10,8 +10,7 @@ use mpc_chain_integration_core::utils::hashing::{compute_request_id, hash_payloa
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, SignKind, LATEST_MPC_KEY_VERSION,
-    MAX_SECP256K1_SCALAR,
+    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, SignKind, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
 use sha3::Digest as _;
@@ -32,20 +31,6 @@ pub enum SolanaSignEvent {
 }
 
 impl SolanaSignEvent {
-    fn is_valid(&self, sign_id: SignId) -> bool {
-        let key_version = match self {
-            SolanaSignEvent::SignatureRequested(ev) => ev.key_version,
-            SolanaSignEvent::SignBidirectional(ev) => ev.key_version,
-        };
-
-        if key_version > LATEST_MPC_KEY_VERSION {
-            tracing::warn!(?sign_id, "unsupported key version: {}", key_version);
-            return false;
-        }
-
-        true
-    }
-
     pub fn generate_request_id(&self) -> [u8; 32] {
         match self {
             SolanaSignEvent::SignatureRequested(ev) => compute_request_id(
@@ -78,9 +63,6 @@ impl SolanaSignEvent {
 
     pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         let sign_id = SignId::new(self.generate_request_id());
-        if !self.is_valid(sign_id) {
-            return None;
-        }
 
         match self {
             SolanaSignEvent::SignatureRequested(ev) => {
@@ -98,7 +80,15 @@ impl SolanaSignEvent {
                     return None;
                 }
 
-                let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path);
+                let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path)
+                    .inspect_err(|_| {
+                        tracing::info!(
+                            ?sign_id,
+                            key_version = ev.key_version,
+                            "unsupported key version; dropping sign request"
+                        )
+                    })
+                    .ok()?;
                 Some(IndexedSignRequest::sign(
                     sign_id,
                     SignArgs {
@@ -113,7 +103,15 @@ impl SolanaSignEvent {
                 ))
             }
             SolanaSignEvent::SignBidirectional(ev) => {
-                let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path);
+                let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path)
+                    .inspect_err(|_| {
+                        tracing::info!(
+                            ?sign_id,
+                            key_version = ev.key_version,
+                            "unsupported key version; dropping sign request"
+                        )
+                    })
+                    .ok()?;
                 let unsigned_tx_hash = hash_payload(&ev.serialized_transaction);
                 let payload = Scalar::from_bytes(unsigned_tx_hash)?;
 
