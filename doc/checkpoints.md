@@ -8,10 +8,9 @@ Checkpoints keep these maps in sync across nodes and they let a joining or rejoi
 ### Approach
 Checkpoints are due at fixed heights, the same grid for every node.
 A node reaching a checkpoint height votes in the governance contract for a digest of its backlog at that height.
-The contract settles that height once f+1 nodes have voted for the same digest, enough that at least one correct node holds the checkpoint behind it.
+The contract settles that height once t nodes, the signing threshold, have voted for the same digest.
 Every node polls for what settled and rebases onto it, from its own store if it created that checkpoint and from a peer if not, so everything it indexes from then on descends from it.
-A node that has run as far ahead of its base as it may, and sees 2f+1 votes settle nothing, re-indexes from its base. 
-This is a repair mechanism for non-determinism bugs that leave nodes with different backlogs.
+A node that has run as far ahead of its base as it may stops and waits for a settlement.
 
 ## 1. Background
 
@@ -22,7 +21,7 @@ Protocol upgrades, committee and threshold changes are out of scope of this doc.
 A correct node is told the truth by its RPC provider, and keeps up: it indexes faster than the chain produces blocks, so it reaches the head from wherever it starts.
 A node whose provider misleads it is faulty, one of the f.
 The governance chain is assumed live and readable throughout.
-A correct node's durable storage survives a crash; a node that lost it rejoins as a new node (S4).
+A correct node's durable storage survives a crash; a node that lost it, but not its key share, rejoins as a new node (S4).
 
 Requests, signatures, executions, attestations and the source and destination chains are those of bidirectional_calls.md.
 
@@ -93,18 +92,16 @@ vote_checkpoint(CheckpointDigest)      // carries chain, height and digest;
 latest_checkpoint(chain) -> CheckpointDigest?
   // none until something has settled
 
-checkpoint_votes(chain) -> [(CheckpointDigest, count)]
-  // how many votes each digest has; the digest carries the height
 ```
 
 The contract is the only writer of settled checkpoint digests.
-It settles a height when one digest has votes from f+1 nodes, settles it at most once, and its settled height never decreases.
+It settles a height when one digest has votes from t nodes, settles it at most once, and its settled height never decreases.
 A vote arriving at or below the settled height is rejected, and votes it holds at or below a newly settled height are dropped in the settlement step.
 A node's vote counts once per digest, and a node may hold votes for several digests at one height.
 
-f+1 is the smallest threshold that puts a correct voter behind every settled digest, so it needs the fewest nodes up and agreeing.
-Settling at the signing threshold t would need t nodes agreeing, which at t = n - f is every correct node.
-Settling at 2f+1 would guarantee f+1 correct holders instead of one, but needs 2f+1 nodes agreeing.
+Any threshold from f+1 up puts a correct voter behind every settled digest.
+t is the signing threshold: a node that rebases onto a settled checkpoint adopts its requests, so fewer nodes than can sign must not be able to settle one.
+At t = n - f this is every correct node (Section 6).
 
 ### Peer
 
@@ -122,7 +119,7 @@ get_checkpoint(chain, height, digest) -> Checkpoint
 
 **S2 Validity.** Every settled `(chain, height, digest)` was created by at least one correct node, descending from a settled checkpoint below it.
 
-**S3 Containment.** (i) A node neither acts on a source chain's backlog nor votes while it is missing the newest settled checkpoint it has read from the contract.
+**S3 Containment.** (i) A node neither acts on a source chain's backlog nor casts a new vote while it is missing the newest settled checkpoint it has read from the contract.
 (ii) A node acts and votes only within a bounded distance of its base.
 At that bound it stops acting and creates no new checkpoint, until it rebases onto a newer checkpoint.
 
@@ -131,7 +128,7 @@ The exception is attesting Unviable (Section 6).
 
 ### Liveness, during a long-enough synchronous interval
 
-**L1 Settlement.** Checkpoints keep settling, as long as f+1 correct nodes reach the next checkpoint height, agree there, and can store what they vote for.
+**L1 Settlement.** Checkpoints keep settling, as long as t correct nodes reach the next checkpoint height, agree there, and can store what they vote for.
 
 **L2 Convergence.** A node whose backlog disagrees with a settled checkpoint finds out at the next settlement it sees, and ends up holding a settled checkpoint and indexing on from it, given a reachable node holding one.
 
@@ -140,9 +137,9 @@ The exception is attesting Unviable (Section 6).
 Described for one node, one source chain; `backlog` is the node's backlog.
 
 * The node indexes finalised blocks in order.
-  At every boundary it creates a checkpoint, adds it to `pending` under its height, newest last, and votes for it.
+  At every boundary it creates a checkpoint, stores it in `pending` under its height, and votes for it.
 * It polls the contract for the settled checkpoint, and one of three things follows.
-  * Nothing new has settled: the node does nothing, unless it is at the cap.
+  * Nothing new has settled: the node does nothing.
   * The settled checkpoint is the one the node stored at that height: it becomes the base.
     If the node has processed up to that height or past it, it carries on.
     If not, it re-indexes from it.
@@ -150,7 +147,6 @@ Described for one node, one source chain; `backlog` is the node's backlog.
 * A node is *at the cap* when its processed height is `MAX_PENDING` boundaries above its base.
   There it processes no block and waits for a settlement, caught up or not.
   This bounds how far the network signs from state nobody has agreed to.
-  If no settlement comes although 2f+1 votes are in at the first boundary above its base, it re-indexes from its base, on a backoff that grows each time and resets on a rebase.
 * It acts only while it is caught up, is not at the cap, and is not missing a settled checkpoint it has read (`want` below).
   This holds for everything acting covers, between blocks too.
 
@@ -164,8 +160,8 @@ Checkpoint = (Height, Digest, snapshot of backlog)
 
 persistent:
     base      Checkpoint               // the settled checkpoint we index from
-    pending   {Height -> [Checkpoint]} // the checkpoints we created above base,
-                                       // per boundary, newest last
+    pending   {Height -> Checkpoint}   // the checkpoints we created above base,
+                                       // one per boundary
     local     RequestId -> Local       // node-local, as in
                                        // bidirectional_calls.md
 
@@ -186,15 +182,15 @@ on start:
 Indexing
 ```
 on block b finalised, the next one above the processed height:
-  if want is set or at the cap:           // wait for checkpoint or settlement
-    return                                
+  if want is set or at the cap:           // wait for checkpoint or settlement;
+    return                                // b comes again
   backlog.update(b)                       // add/change/remove entries
   processed_height = height(b)
   if processed_height is a boundary:
     d = digest(processed_height, backlog)
     c = (processed_height, d, backlog)
-    pending[c.height].append(c) ; persist // store so we hold what we vote for;
-                                          // an equal one moves to the end
+    pending[c.height] = c ; persist       // store so we hold what we vote for;
+                                          // a different one there is a bug
     vote(c)
   if b is the finalised head:             // caught up
     delete local[rid] where rid not in backlog
@@ -204,15 +200,12 @@ Polling the governance contract
 ```
 on settlement poll period expiry:
   h, d = contract.latest_checkpoint(chain), or the genesis checkpoint
-  if h < base.height or (want is set and h < want.height):
+  if h <= base.height:               // nothing new; another digest at
+    return                           // base.height is a bug to alert on
+  if want is set and h < want.height:
     return                           // older than what we already read
-  if (h, d) == (base.height, base.digest):   // nothing new has settled
-    if want is unset and at the cap and backoff met:
-      increase backoff
-      if >2f checkpoint_votes at first boundary above base:
-        re_index()                   // backlogs differ: build ours again
-  else if pending holds a p with digest d at h:   // we created it, so we hold it
-    rebase(p)
+  if pending[h] has digest d:        // we created it, so we hold it
+    rebase(pending[h])
   else:
     want = (h, d)                    // S3(i): indexing stops until we hold
                                      // it (Asking peers, below)
@@ -237,7 +230,7 @@ A node that is behind does not, since it may hold a record for a request above i
 
 ```
 rebase(c):                                        // c settled, above base
-  aligned = newest in pending[c.height] has c's digest   // backlog descends from c
+  aligned = pending[c.height] has c's digest      // backlog descends from c
             and processed_height >= c.height
   base = c ; persist                              // store base, then prune
   pending.drop_up_to(c.height) ; persist
@@ -251,20 +244,15 @@ re_index():                                       // start over from base
 ### Asking peers
 
 While `want` is set the node keeps asking peers for `get_checkpoint(chain, want)`.
-Asking for a height below the settled one comes back without a checkpoint, since every holder dropped it on rebasing onto a later one.
+Asking for a height below the settled one comes back without a checkpoint, since holders drop it on rebasing onto a later one.
 The next poll overwrites `want` with whatever is settled then, so the poll period bounds how long the node asks for the wrong checkpoint.
 
 ### When backlogs differ
 
-For a correct node as described in the model, re-indexing in the poll handler changes nothing: the node builds the same checkpoints again.
-It is there because the implementation may make nodes that index the same blocks end up with different backlogs, and this can happen to more than f nodes at once.
 The arguments of Section 5 assume that correct nodes build the same backlog from the same blocks.
-Where a bug breaks that, only S3 is still guaranteed: it rests on when a node stops, not on what it builds.
-
-Re-indexing gives a second attempt, without an operator, once nodes have run to the cap and 2f+1 votes at the first boundary above the base have settled nothing.
-It helps where building the backlog again can come out differently, and not where a node repeats the same result.
-A node keeps every checkpoint it voted for until its height settles, so a settled digest always has its voters as holders.
-However, without counting how many distinct nodes have voted for a height, faulty nodes can trigger the re-index at will (Section 6).
+A bug can make nodes build different backlogs from the same blocks, on more than f nodes at once, which the model does not cover.
+In this case only S3 is still guaranteed: the nodes run to the cap and stop there.
+Section 6 describes an alternative design where nodes re-index at the cap if no checkpoint settled despite more than 2f votes.
 
 ## 5. Why the properties hold
 
@@ -272,9 +260,9 @@ However, without counting how many distinct nodes have voted for a height, fault
 Two things change the backlog.
 One is applying the events of the next finalised block, a deterministic step that reads the block and the backlog and nothing else.
 The other is rebasing onto a settled checkpoint, whose backlog some correct node built the first way.
-A rebase does not always replace the backlog: when the newest checkpoint the node stored at that height is the settled one and the node has processed up to it, the node keeps its own.
-That rests on one fact: a node adds the checkpoint it built, newest last, whenever it passes a height.
-So the newest stored checkpoint at or below the processed height was built from the current backlog, and if it is the settled one, resetting to it would change nothing.
+A rebase does not always replace the backlog: when the checkpoint the node stored at that height is the settled one and the node has processed up to it, the node keeps its own.
+That rests on one fact: a node stores the checkpoint it built whenever it passes a height, in place of an older one there.
+So the stored checkpoint at or below the processed height was built from the current backlog, and if it is the settled one, resetting to it would change nothing.
 
 The argument is an induction over heights.
 Nodes that hold the same backlog at one height and apply the same block hold the same backlog at the next, and nothing node-local enters along the way.
@@ -286,8 +274,8 @@ Effects sit outside that argument.
 Acting ahead of agreement can publish a signature or send a transaction twice, and bidirectional_calls.md makes both harmless (C3a, replay protection).
 
 ### *S2, a settled digest is created by a correct node, chained from genesis.*
-A settled digest has votes from f+1 nodes.
-At most f of them are faulty, so one is correct, and a correct node votes only for a checkpoint it built itself, from its base and the blocks after it.
+A settled digest has votes from t nodes.
+At most f < t of them are faulty, so one is correct, and a correct node votes only for a checkpoint it built itself, from its base and the blocks after it.
 The digest covers the entries, so a checkpoint that matches it holds that backlog, and a peer serving it can substitute nothing.
 The base of that node is a settled checkpoint or genesis, so by induction over settled heights the chain goes back to genesis.
 A vote a correct node cast before it rebased or re-indexed stays valid: it is for a checkpoint built the same way from an earlier base.
@@ -313,7 +301,7 @@ They are not lost to the network where another correct node was in the round, wh
 ### *L1, checkpoints keep settling.*
 Correct nodes agree (S1), so what is left is how many are up:
 
-* f+1 votes out of the n - f correct nodes leaves n - 2f - 1 of them free to be down.
+* t votes out of the n - f correct nodes leaves n - f - t of them free to be down, none at t = n - f.
 * Votes persist until the height settles, so nodes need not be up together.
 * A node catching up votes at every boundary it passes rather than waiting for the head.
 * A vote is retried until the contract has it, and after a restart the node casts it again when it passes that boundary.
@@ -321,18 +309,19 @@ Correct nodes agree (S1), so what is left is how many are up:
 ### *L2, a node that disagrees with a settled checkpoint ends up holding one.*
 Rebasing replaces the backlog wholesale rather than reconciling entry by entry, so a node behind and a node that diverged both take the settled checkpoint and index on from it.
 
-Retention keeps that checkpoint available: a node stores a checkpoint before it votes for it and drops it only on rebasing at or past its height; one it builds again at that height is added beside it, not in its place.
-So the f+1 behind a settled digest hold it the moment it settles, one of them correct.
+Retention keeps that checkpoint available: a node stores a checkpoint before it votes for it and drops it only on rebasing at or past its height; one it builds again at that height is the same (S1).
+So the t voters of a settled digest hold it the moment it settles, at least t - f of them correct.
 A holder drops it only on rebasing onto a later settled checkpoint, which a fetcher's next poll then asks for instead.
-One guaranteed holder is thin, and it is what the threshold costs; where no node can produce a checkpoint at all there is no recovery here (Section 6).
+Where no node can produce a checkpoint at all there is no recovery here (Section 6).
 
 ## 6. Limits and failure modes
 
 ### Inside the model
 
-* Settlement stalls when fewer than f+1 nodes reach a boundary and vote.
+* Settlement stalls when fewer than t nodes reach a boundary and vote.
+  At t = n - f one correct node down while the others index `MAX_PENDING` boundaries past the base is enough.
   The nodes that are up run to the cap and wait for a settlement.
-* Signing stalls while more than n - t nodes are faulty or catching up, since a node catching up does not act.
+* Signing stalls while more than n - t nodes are faulty or not acting: catching up, at the cap, or missing a settled checkpoint.
 * A restart re-indexes from the base, up to `MAX_PENDING` intervals without acting, unless a newer settled checkpoint is fetched.
 * A fetch slower than the time between two settlements never completes.
   Holders drop a checkpoint when they rebase onto the next one.
@@ -352,14 +341,16 @@ One guaranteed holder is thin, and it is what the threshold costs; where no node
 
 ### Outside the model: nodes build different backlogs
 
-* No digest reaches f+1.
-  Nodes run to the cap before any re-indexes, about two hours on Ethereum and four on Solana at today's settings.
-  Nodes that build the same backlog again land on the same split and go round again on a growing backoff.
+* No digest reaches t.
+  Nodes run to the cap, about two hours on Ethereum and four on Solana at today's settings, and stop.
+  There is no in-band way out.
+  Nodes restarted with the fix build the same checkpoints from the base again, and the next settlement realigns them.
 * A node that wrongly takes a request for finished deletes its record, with the signatures it issued.
 * Every copy of a settled checkpoint may be lost.
   Nothing here recovers from that; retention (Section 5, L2) makes it unlikely.
-* Two checkpoints at one height are the sign of such a bug.
-  Nothing here stops it, but it is worth alerting on.
+* A node that rebuilds a checkpoint at a height and gets a different one is the sign of such a bug.
+  It stores and votes for the new one; nothing here stops it, but it is worth alerting on.
+  An earlier vote of the node for the old one can still settle it, with no node holding it any more.
 
 ### Options
 
@@ -369,40 +360,15 @@ Each closes one of the limits above, at a price.
   This needs the creation order across heights, for instance a counter stored with each checkpoint.
   On start the node sets its backlog and processed height to the checkpoint with the highest counter and casts its vote for it again, since a vote in flight at the crash is lost.
   A restart then replays at most one interval instead of up to `MAX_PENDING`.
-* Count voters in the contract rather than votes: one vote per node and height, or a view of distinct voters.
-  Faulty nodes can then not inflate the tally.
-  The re-index could run as soon as a split shows, and only then.
+* Settle at f+1 instead of t, the smallest threshold with a correct voter behind every settled digest.
+  Settlement then needs the fewest nodes up and agreeing: n - 2f - 1 correct nodes may be down.
+* One vote per node and height in the contract, the newest replacing an older one.
+  A vote in flight at a restart can then not settle a digest its node no longer holds, and faulty nodes cannot inflate a tally.
   The price is a contract change.
-
-## 7. Differences to today's code
-
-As of develop at 55c9f796.
-
-### Contract
-
-* Settles at the signing threshold t. Here: f+1.
-  Note: any threshold from f+1 up keeps S2, so t works too. f+1 needs the fewest nodes up and agreeing (Section 2).
-
-### Checkpoint and digest
-
-* The digest hashes the chain, the height, the rids, and one phase tag per entry. Here: each entry whole, with request, contract and signatures.
-* The body carries the entry's status, including the signature and publish bookkeeping. Here: entries only, nothing node-local.
-  Note: a body may carry more than the digest covers; a receiver can recompute the digest over the entry info and ignore the rest.
-* One stored checkpoint per height; a conflicting one is an error. Here: a list per height, newest last.
-  Note: the list only matters when a re-index builds a different checkpoint. Without the re-index at the cap, one per height is enough, as today.
-
-### Checkpointing on the node
-
-* Creates and votes only while caught up. Here: at every boundary passed, also while catching up.
-  Note: today a node that catches up never votes for the heights it replayed. A height where fewer than the threshold were caught up stays unsettled for good, and the caught-up nodes stop at the cap. Voting while catching up closes that.
-* The cap counts stored checkpoints, reloaded on restart. Here: a distance from the base.
-  Note: with creation and voting during catching up, the counting argument can be made to work too.
-* Votes are not retried; all pending ones are re-cast at startup. Here: retried until recorded.
-* No stuck path: the node never reads the vote tally. Here: re-index at the cap on 2f+1 votes.
-* A failed write of a new checkpoint to storage is logged and indexing continues, so the node may vote for a checkpoint it does not hold. Here: the write is retried before the node goes on.
-
-### Backlog entries and records
-
-* The map is `requests` in `PendingRequests`. Here: `backlog`.
-* An entry holds one signature, in its status. Here: the set of published signatures.
-* No node-local records; what a node produced lives in the entry's status and is replaced by a regression. Here: `local`, persisted, outside checkpoints.
+* Re-index at the cap: a node at the cap that sees, in a view of the vote counts, more than 2f votes at the first boundary above its base settling nothing re-indexes from its base, on a backoff that grows each time and resets on a rebase.
+  For a correct node in the model this changes nothing, it builds the same checkpoints again.
+  It gives a second attempt, without an operator, where building the backlog again can come out differently, and not where a node repeats the same result.
+  It needs a list of checkpoints per height, so that a node keeps what it voted for beside what it rebuilt, and one vote per node and height in the contract, since otherwise faulty nodes can trigger it at will.
+* Settle through communication with peers instead of the contract: a node asks all peers for the digests they hold and takes a height as settled once it has heard 2f+1 matching answers, its own counted.
+  This drops the vote loop, and any answer that differs from the node's own digest is a faulty node or a bug and can be alerted on.
+  The price: a node that restarts behind the others needs 2f+1 peers up at once that hold a common height above its base, not the chain and one peer, and there is no shared record of what settled when.
