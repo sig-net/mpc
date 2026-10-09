@@ -1462,8 +1462,8 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_parks_publish_on_its_own_chains_cooldown_gate() {
-        let canton_call = Arc::new(std::sync::Mutex::new(None));
-        let midnight_call = Arc::new(std::sync::Mutex::new(None));
+        let canton_call = Arc::new(Mutex::new(None));
+        let midnight_call = Arc::new(Mutex::new(None));
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(
             Chain::Canton,
