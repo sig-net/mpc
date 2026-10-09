@@ -197,13 +197,10 @@ G1 to G3 are safety, G4 and G5 are liveness. G2 and G4 together give
   your transaction. Precisely: an accepted response to req carries the
   true, final outcome of req.tx, never of another transaction.
 * G4 Delivery. If your transaction runs, you are told, as long as your
-  schema fits its output and your handler does not fail. One rare
-  fault on the MPC side can also leave a request unanswered, and anyone
-  can repair it. Precisely: if req.tx is included in a final target
-  block after req was made, a response to req is eventually accepted
-  unless (i) the return data does not decode against req.schema, (ii) the
-  response handler fails, or (iii) the transaction's ID depends on its
-  signature and that signature is never published.
+  schema fits its output and your handler does not fail. Precisely: if
+  req.tx is included in a final target block after req was made, a
+  response to req is eventually accepted unless (i) the return data does
+  not decode against req.schema, or (ii) the response handler fails.
 * G5 Unviable. If another of your requests takes this one's place and is
   answered, you are told that this one can never run. Precisely: suppose
   the transaction of another request has the same replay protection as
@@ -212,14 +209,8 @@ G1 to G3 are safety, G4 and G5 are liveness. G2 and G4 together give
   answered Executed or Failed, a response to req saying Unviable is
   eventually accepted, unless the response handler fails.
 
-G4's exceptions (i) and (ii) are in the application's hands: a schema that
-does not match what the target contract returns, and a handler that
-fails. Exception (iii) is not. It concerns e.g., EVM target chains, where a
-transaction can only be looked up once its signature is known. The
-signature stays unknown if every correct node that signed loses it before
-publishing it, or if a faulty node keeps it to itself. The fix is simple:
-the executed transaction carries its signature, and anyone can publish it
-(Section 6).
+G4's exceptions are in the application's hands: a schema that does not
+match what the target contract returns, and a handler that fails.
 
 Beyond G5, nothing is promised for a transaction that never executes, for
 a request the MPC does not admit, or for a request made again after its
@@ -397,17 +388,16 @@ on Signature { rid, signature } finalised on the source chain:
 
 on target chain block at height h finalised on chain target:
     for (rid, e) in backlog for target and no local[rid].outcome:
-        ours = { txid(s, e.req.tx)
-                 for s in e.signatures + local[rid].issued }
-        if some id in ours has receipt r in a final block at height h':  // M3
-            if decode(r, e.req.schema) gives (kind, data):
-                attest(rid, (h', kind, data))
-            else:
-                local[rid].outcome = Parked, log why        // M3
-        else if a transaction in a final block at height h' is from e's
-          account with e.req.tx's replay protection and its unsigned
-          bytes are not e.req.tx:                                       // M4
-            attest(rid, (h', Unviable, empty))
+        if a transaction t in a final block at height h' is from e's
+          account with e.req.tx's replay protection:
+            if t's unsigned bytes are e.req.tx:                         // M3
+                r = receipt of t
+                if decode(r, e.req.schema) gives (kind, data):
+                    attest(rid, (h', kind, data))
+                else:
+                    local[rid].outcome = Parked, log why            // M3
+            else:                                                       // M4
+                attest(rid, (h', Unviable, empty))
 
 attest(rid, att):
     e = backlog[rid]
@@ -440,11 +430,12 @@ Once caught up, it acts on each entry only for what is missing: it does
 not sign an entry that has a published signature or one it holds, and does
 not attest an entry it holds an attestation for.
 
-The MPC looks for a request's execution by transaction ID, under every
-signature it holds for the request, in any final block, so a node that
-starts looking late still finds it. A node holds the signatures published
-for the request and those it took part in producing. An execution under a
-signature it does not hold is not found (see Section 6 for alternatives).
+The MPC watches a request's account and replay protection from the
+moment it admits the request. The transaction that uses them is the
+request's execution if its unsigned bytes are req.tx, whichever signature
+it carries, published or not, and takes the request's place otherwise. A
+node that admits the request only after that transaction's block does not
+see it, and settles the request from the `Response` instead (below).
 
 When any transaction from an account is included, a request's or one
 signed through a plain sign request, every request waiting on that account
@@ -581,12 +572,13 @@ a path from B48 through A15; the first at A12 has none.
   1. The execution is above e.known: e.known is a height some accepted
      response attested before req was made (C2, C3d), hence final by then
      (M5), and the execution came after.
-  2. It is attested: no exception applies, so the signature is published
-     and the return data decodes. Every correct node then holds the
-     signature (agreement, above) and finds the execution by its
-     transaction ID (Section 4.3), whenever it started looking, and
-     correct nodes compute the same attestation and publish it (threshold
-     and agreement, above).
+  2. It is attested: no exception applies, so the return data decodes.
+     Correct nodes that admitted req before the execution's block find it
+     by req.tx's account, replay protection and bytes (Section 4.3),
+     whichever signature it carries, and compute the same attestation and
+     publish it (threshold and agreement, above). A node that admitted req
+     later removes it on that `Response`, which it checks from the event
+     alone.
   3. It is accepted: by C4 the entry is still outstanding unless a
      response for the rid of req was accepted first, and any such response
      reports this execution too, since at most one signature executes and
@@ -609,22 +601,11 @@ a path from B48 through A15; the first at A12 has none.
   Section 3.3. It can be made to work if the MPC remembers completed rids
   for as long as a differently signed copy could still execute, about a
   minute.
-* Lost signatures. An execution under a signature that is not published
-  is not found, and its request goes unanswered. That takes every correct
-  node of a signing round losing the signature before it publishes it, or
-  a faulty node of the round withholding its share and keeping the
-  signature to itself. The remedy needs nothing new: the executed
-  transaction carries its signature, and anyone may publish it, after
-  which every node finds the execution.
-* Finding an execution without its signature. Where the transaction ID is
-  computed from the unsigned bytes alone (Tron, Zcash from version 5), a
-  node needs no signature and G4's exception (iii) does not arise. On EVM
-  and Solana it does. EVM offers a way around it that this design does
-  not use: a binary search on the account's nonce over block heights
-  finds the block where req.tx's nonce was used up, and with it the
-  transaction that used it. At least t nodes would need providers that
-  serve account state at old blocks. On Solana, listing
-  the account's transactions does the same.
+* Matching by account and replay protection needs every final target
+  block's transactions with their senders, read with the same trust in
+  the provider as receipts. A transaction ID alone would not do: on EVM
+  and Solana it depends on the signature, and a signature that is never
+  published would hide the execution.
 * Agreement has no enforcement point. A change to `authentic`,
   `processable` or the attestation function must apply only to requests
   made at or after a source height the upgrade names; applied to requests
