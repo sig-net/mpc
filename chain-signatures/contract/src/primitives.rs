@@ -460,10 +460,6 @@ impl ReshareVotes {
     pub fn is_empty(&self) -> bool {
         self.votes.is_empty()
     }
-
-    pub fn clear(&mut self) {
-        self.votes.clear();
-    }
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]

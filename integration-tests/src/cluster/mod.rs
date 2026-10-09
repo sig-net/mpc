@@ -14,7 +14,7 @@ use crate::actions::sign::SignAction;
 use crate::actions::wait::WaitAction;
 use crate::containers;
 use crate::local::NodeEnvConfig;
-use crate::utils::{self, vote_join, vote_leave, vote_reshare};
+use crate::utils::{self, vote_join, vote_reshare};
 use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
@@ -248,15 +248,8 @@ impl Cluster {
         let kick = kick
             .unwrap_or_else(|| participant_accounts.last().unwrap().id())
             .clone();
-        let voting_accounts = participant_accounts
-            .iter()
-            .filter(|account| account.id() != &kick)
-            .take(state.threshold)
-            .cloned()
-            .collect::<Vec<_>>();
 
-        tracing::info!(?voting_accounts, %kick, at_epoch = state.epoch, "kicking participant");
-        vote_leave(&voting_accounts, self.contract().id(), &kick).await?;
+        self.kick_participants(std::slice::from_ref(&kick)).await?;
 
         let new_state = self
             .wait()
