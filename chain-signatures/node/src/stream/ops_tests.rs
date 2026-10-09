@@ -1578,10 +1578,11 @@ async fn midnight_decode_failure_preserves_source_checkpoint_across_target_progr
             after.digest(),
             "unequal target progress must not change the same source checkpoint"
         );
-        assert!(
-            sign_rx.try_recv().is_err(),
-            "decode failure must not sign or complete the request"
+        assert_matches!(
+            sign_rx.try_recv().expect("parked request must stop its signing task"),
+            SignCommand::Completion(id) if id == tx.sign_id()
         );
+        assert!(sign_rx.try_recv().is_err(), "no response should be signed");
         assert_matches!(
             ctx.backlog
                 .get(source_chain, &tx.sign_id())
@@ -1668,7 +1669,7 @@ async fn midnight_decode_failure_preserves_source_checkpoint_across_target_progr
 }
 
 #[tokio::test]
-async fn non_midnight_decode_failure_retires_request_without_response() {
+async fn non_midnight_decode_failure_parks_request_without_response() {
     for source_chain in [Chain::Solana, Chain::Canton, Chain::Hydration] {
         for caught_up in [false, true] {
             let backlog = Backlog::new();
@@ -1690,14 +1691,14 @@ async fn non_midnight_decode_failure_retires_request_without_response() {
             .await
             .unwrap();
 
-            assert!(ctx.backlog.get(source_chain, &tx.sign_id()).await.is_none());
+            assert!(ctx.backlog.get(source_chain, &tx.sign_id()).await.is_some());
             assert!(ctx
                 .backlog
                 .get_execution_watchers(Chain::Ethereum)
                 .await
                 .is_empty());
             assert_matches!(
-                sign_rx.try_recv().expect("retired request must stop its signing task"),
+                sign_rx.try_recv().expect("parked request must stop its signing task"),
                 SignCommand::Completion(id) if id == tx.sign_id()
             );
             assert!(sign_rx.try_recv().is_err(), "no response should be signed");
@@ -1705,7 +1706,7 @@ async fn non_midnight_decode_failure_retires_request_without_response() {
             let checkpoint = ctx.backlog.checkpoint(source_chain).await.unwrap();
             let restored = Backlog::new();
             restored.recover_by_checkpoint(&checkpoint).await;
-            assert!(restored.get(source_chain, &tx.sign_id()).await.is_none());
+            assert!(restored.get(source_chain, &tx.sign_id()).await.is_some());
             assert!(restored
                 .get_execution_watchers(Chain::Ethereum)
                 .await
@@ -1914,5 +1915,79 @@ async fn midnight_unobserved_entries_keep_responses_they_cannot_bind() {
             "{case}"
         );
         assert!(sign_rx.try_recv().is_err(), "{case}");
+    }
+}
+
+/// On other source chains a Failed response's digest follows from the request alone, so a node
+/// that missed the outcome settles it with the nodes that attested it; any other response it keeps.
+#[tokio::test]
+async fn failed_response_settles_entries_that_missed_the_outcome() {
+    let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
+    for (source_chain, outcome, parked, settles) in [
+        (Chain::Solana, ExecutionOutcome::Failed, false, true),
+        (Chain::Hydration, ExecutionOutcome::Failed, false, true),
+        (Chain::Canton, ExecutionOutcome::Failed, true, true),
+        (
+            Chain::Solana,
+            ExecutionOutcome::Success { output: vec![] },
+            false,
+            false,
+        ),
+    ] {
+        let case = format!("{source_chain} {outcome:?}, parked: {parked}");
+        let tx = test_bidirectional_tx(105, source_chain, Chain::Ethereum);
+
+        let attested = Backlog::new();
+        attested.insert_mock_executing(&tx).await;
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let ctx = make_test_stream_context_with_generator_pk(attested, sign_tx, true);
+        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
+            .await
+            .unwrap();
+        let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
+            panic!("{case}: the observed outcome must be signed");
+        };
+        let event = RespondBidirectionalEvent {
+            attestation: None,
+            request_id: tx.request_id,
+            signature: mpc_crypto::generate_signature(&root_sk, &entry.request().args),
+            chain: source_chain,
+        };
+
+        let lagging = Backlog::new();
+        lagging.insert_mock_executing(&tx).await;
+        if parked {
+            lagging
+                .unwatch_execution(Chain::Ethereum, &tx.id)
+                .await
+                .unwrap()
+                .park()
+                .await
+                .unwrap();
+        }
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let ctx = make_test_stream_context_with_generator_pk(lagging, sign_tx, true);
+        process_respond_bidirectional_event(event, &ctx, root_sk.public_key().into())
+            .await
+            .unwrap_or_else(|error| panic!("{case}: {error:#}"));
+
+        assert_eq!(
+            ctx.backlog.get(source_chain, &tx.sign_id()).await.is_none(),
+            settles,
+            "{case}"
+        );
+        assert_eq!(
+            ctx.backlog
+                .get_execution_watchers(Chain::Ethereum)
+                .await
+                .is_empty(),
+            settles || parked,
+            "{case}"
+        );
+        assert_eq!(
+            matches!(sign_rx.try_recv(), Ok(SignCommand::Completion(id)) if id == tx.sign_id()),
+            settles,
+            "{case}"
+        );
     }
 }

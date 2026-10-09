@@ -514,15 +514,6 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
 
     let backlog = Backlog::persisted(storage.clone());
 
-    let execution_sign_id = SignId::new([0x33; 32]);
-    let execution_tx = test_eth_bidirectional_tx(
-        mpc_primitives::BidirectionalTxId(B256::from([0x44; 32]).0),
-        execution_sign_id,
-        ctx.wallet,
-        checkpoint_nonce,
-    );
-    backlog.insert_mock_executing(&execution_tx).await;
-
     let responder_contract = ChainSignatures::new(ctx.contract_address, responder_signer.clone());
 
     let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
@@ -537,7 +528,16 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         resolved_sig,
     )
     .await?;
-    submit_eth_transfer(&ctx).await?;
+    // Watch the transfer that takes `checkpoint_nonce`: a nonce taken by a
+    // transaction the watcher does not know yields no outcome.
+    let execution_sign_id = SignId::new([0x33; 32]);
+    let execution_tx = test_eth_bidirectional_tx(
+        mpc_primitives::BidirectionalTxId(submit_eth_transfer(&ctx).await?.0),
+        execution_sign_id,
+        ctx.wallet,
+        checkpoint_nonce,
+    );
+    backlog.insert_mock_executing(&execution_tx).await;
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
 
@@ -683,47 +683,6 @@ async fn test_ethereum_stream_emits_blocks() -> Result<()> {
     }
 
     assert!(saw_block, "expected block event");
-    Ok(())
-}
-
-#[test_log::test(tokio::test)]
-async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
-    let ctx = EthereumTestEnvironment::new().await?;
-    let backlog = ctx.backlog();
-
-    // Register an execution watcher with an intentionally stale nonce to trigger the staleness path.
-    let tx = test_eth_bidirectional_tx(
-        mpc_primitives::BidirectionalTxId(B256::from([9u8; 32]).0),
-        SignId::new([7u8; 32]),
-        ctx.wallet,
-        0,
-    );
-    let sign_id = tx.sign_id();
-    backlog.insert_mock_executing(&tx).await;
-
-    let mut stream = stream_ethereum(&ctx, backlog.clone()).await?;
-
-    // Send 10 transactions from the watched address to bump the nonce
-    // AND guarantee the local chain crosses a `block_number % 10 == 0` boundary
-    // to trigger the throttled staleness check.
-    for i in 0..10 {
-        let mut req_id = [0u8; 32];
-        req_id[0] = i as u8;
-        submit_sign_request(&ctx, req_id, "execution-path").await?;
-    }
-
-    let mut saw_execution = false;
-    for _ in 0..20 {
-        match stream.next_event_within(Duration::from_secs(10)).await? {
-            ChainEvent::ExecutionConfirmed { sign_id: ev_id, .. } if ev_id == sign_id => {
-                saw_execution = true;
-                break;
-            }
-            _ => continue,
-        }
-    }
-
-    assert!(saw_execution, "did not observe ExecutionConfirmed event");
     Ok(())
 }
 
@@ -902,7 +861,8 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
     // Register the execution watcher
     let sign_id = SignId::new([0x71; 32]);
     let watched_tx_id = mpc_primitives::BidirectionalTxId(tx_a_hash.0);
-    let tx = test_eth_bidirectional_tx(watched_tx_id, sign_id, responder_address, nonce);
+    let mut tx = test_eth_bidirectional_tx(watched_tx_id, sign_id, responder_address, nonce);
+    tx.serialized_transaction = vec![0x71];
 
     backlog.insert_mock_executing(&tx).await;
 
@@ -930,12 +890,13 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
     let replacement_sign_id = SignId::new([0x72; 32]);
     let replacement_tx_id = mpc_primitives::BidirectionalTxId(receipt_b.transaction_hash.0);
 
-    let replacement_tx = test_eth_bidirectional_tx(
+    let mut replacement_tx = test_eth_bidirectional_tx(
         replacement_tx_id,
         replacement_sign_id,
         responder_address,
         nonce,
     );
+    replacement_tx.serialized_transaction = vec![0x72];
     backlog.insert_mock_executing(&replacement_tx).await;
 
     let mut stream = stream_ethereum(&ctx, backlog).await?;
@@ -948,9 +909,8 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
         tokio::time::sleep(Duration::from_millis(600)).await;
     }
 
-    // The nonce-gated sweep must resolve both watchers:
-    // the replaced respond tx as failed (nonce consumed, receipt absent) instead of hanging,
-    // the replacement at its actual mined block with its real outcome.
+    // Both resolve at the replacement's block: the replaced tx as failed, since a watched tx
+    // with other unsigned bytes took its nonce, and the replacement with its real outcome.
     let mut confirmations = Vec::new();
     stream
         .wait_for(
@@ -995,7 +955,10 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
                 matches!(result, mpc_primitives::ExecutionOutcome::Failed),
                 "a replaced respond tx must resolve as failed"
             );
-            assert!(block_height >= replaced_at);
+            assert_eq!(
+                block_height, replaced_at,
+                "the replaced tx resolves at the replacement's mined block"
+            );
         } else if tx_id == replacement_tx_id {
             assert_eq!(event_sign_id, replacement_sign_id);
             assert!(
