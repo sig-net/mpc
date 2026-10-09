@@ -876,7 +876,7 @@ mod tests {
     use mpc_primitives::{SignId, SignKind};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     #[tokio::test]
@@ -1158,7 +1158,15 @@ mod tests {
         // Returns once the channel drains. A wrongly admitted vote would already
         // be spawned; the short wait gives it time to reach the server. It bounds
         // a negative check, so a slow run can only pass, never fail spuriously.
-        RpcExecutor::dispatch_loop(&HashMap::new(), &EnumMap::from_fn(|_| SharedBackoff::new()), None, Some(near), &consensus, &mut rx).await;
+        RpcExecutor::dispatch_loop(
+            &HashMap::new(),
+            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            None,
+            Some(near),
+            &consensus,
+            &mut rx,
+        )
+        .await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         mock.assert_async().await;
     }
@@ -1236,6 +1244,31 @@ mod tests {
         async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    /// A publisher that records when its first call happened.
+    struct TimestampingPublisher {
+        first_call: Arc<Mutex<Option<Instant>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for TimestampingPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            let mut slot = self.first_call.lock().unwrap();
+            if slot.is_none() {
+                *slot = Some(Instant::now());
+            }
+            Ok(())
+        }
+    }
+
+    async fn wait_for_first_call(slot: &Arc<Mutex<Option<Instant>>>) -> Instant {
+        loop {
+            if let Some(at) = *slot.lock().unwrap() {
+                return at;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -1411,12 +1444,95 @@ mod tests {
         // Closing the channel will cause dispatch_loop to return
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(
+            &publishers,
+            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            None,
+            None,
+            &no_consensus(),
+            &mut rx,
+        )
+        .await;
 
         // Give spawned tasks a chance to complete
         tokio::task::yield_now().await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_parks_publish_on_its_own_chains_cooldown_gate() {
+        let canton_call = Arc::new(std::sync::Mutex::new(None));
+        let midnight_call = Arc::new(std::sync::Mutex::new(None));
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(
+            Chain::Canton,
+            Arc::new(TimestampingPublisher {
+                first_call: canton_call.clone(),
+            }),
+        );
+        publishers.insert(
+            Chain::Midnight,
+            Arc::new(TimestampingPublisher {
+                first_call: midnight_call.clone(),
+            }),
+        );
+
+        // Canton's gate is already cooling down when the action arrives.
+        let gates: EnumMap<Chain, SharedBackoff> = EnumMap::from_fn(|chain| {
+            if chain == Chain::Canton {
+                let gate = SharedBackoff::with_cooldowns(
+                    Duration::from_millis(400),
+                    Duration::from_millis(800),
+                );
+                gate.extend_cooldown();
+                gate
+            } else {
+                SharedBackoff::new()
+            }
+        });
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let sent_at = Instant::now();
+        // canton is sent first; midnight overtaking it below proves the gates are per-chain
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::Canton,
+            SignKind::Sign,
+            SignId::new([0u8; 32]),
+        )))
+        .await
+        .unwrap();
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::Midnight,
+            SignKind::Sign,
+            SignId::new([1u8; 32]),
+        )))
+        .await
+        .unwrap();
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, &gates, None, None, &no_consensus(), &mut rx).await;
+
+        let midnight_at =
+            tokio::time::timeout(Duration::from_secs(5), wait_for_first_call(&midnight_call))
+                .await
+                .expect("midnight publish fires");
+        let canton_at =
+            tokio::time::timeout(Duration::from_secs(5), wait_for_first_call(&canton_call))
+                .await
+                .expect("canton publish fires");
+
+        // the canton attempt waited out its chain's window
+        assert!(
+            canton_at.duration_since(sent_at) >= Duration::from_millis(300),
+            "canton attempt must wait out its chain's cooldown, took {:?}",
+            canton_at.duration_since(sent_at)
+        );
+        // midnight gate is idle, so its attempt should not be delayed by canton's cooldown
+        assert!(
+            midnight_at < canton_at,
+            "midnight attempt must not wait out canton's cooldown"
+        );
     }
 
     #[tokio::test]
@@ -1445,7 +1561,15 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(
+            &publishers,
+            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            None,
+            None,
+            &no_consensus(),
+            &mut rx,
+        )
+        .await;
         tokio::task::yield_now().await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 0);
@@ -1485,7 +1609,15 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(
+            &publishers,
+            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            None,
+            None,
+            &no_consensus(),
+            &mut rx,
+        )
+        .await;
 
         // Yield enough times to let both spawned tasks complete.
         // Each task calls publish_signature once and returns immediately.
@@ -1545,7 +1677,15 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(
+            &publishers,
+            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            None,
+            None,
+            &no_consensus(),
+            &mut rx,
+        )
+        .await;
         tokio::task::yield_now().await;
 
         assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);
@@ -1568,8 +1708,15 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let publishers = HashMap::new();
         let dispatch = tokio::spawn(async move {
-            RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, Some(near), &no_consensus(), &mut rx)
-                .await;
+            RpcExecutor::dispatch_loop(
+                &publishers,
+                &EnumMap::from_fn(|_| SharedBackoff::new()),
+                None,
+                Some(near),
+                &no_consensus(),
+                &mut rx,
+            )
+            .await;
         });
 
         tx.send(RpcAction::VoteCheckpoint {
@@ -1620,7 +1767,15 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, &EnumMap::from_fn(|_| SharedBackoff::new()), None, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(
+            &publishers,
+            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            None,
+            None,
+            &no_consensus(),
+            &mut rx,
+        )
+        .await;
 
         // Let the single in-flight publish finish.
         tokio::task::yield_now().await;
