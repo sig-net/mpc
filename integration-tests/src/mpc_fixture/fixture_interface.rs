@@ -7,12 +7,12 @@ use crate::mpc_fixture::mock_chain::MockChain;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
-use mpc_keys::hpke::{self, Ciphered};
+use mpc_keys::hpke::Ciphered;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::contract::primitives::ParticipantInfo;
-use mpc_node::protocol::message::{MessageError, SignedMessage};
+use mpc_node::protocol::message::{now_millis, MessageDomain, MessageError, SignedMessage};
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{open_reply_for_test, SyncChannel, SyncError, SyncUpdate};
@@ -22,7 +22,7 @@ use mpc_node::types::SignCommand;
 use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -415,40 +415,60 @@ impl MpcFixtureNode {
             presignatures,
         };
         let network = from.config.borrow().local.network.clone();
-        let reply = self
+        let (reply, sent_at) = self
             .try_sync(from.me, &network.sign_sk, &update)
             .await
             .expect("sync_channel request_update failed");
-        self.open_reply(&reply, &network.cipher_sk)
+        self.open_reply(&reply, sent_at, from)
             .expect("failed to open sync reply")
     }
 
-    /// Open a sync reply from this node, as the caller holding `cipher_sk`.
+    /// Open this node's reply to `caller`'s request signed at `request_sent_at`.
     pub fn open_reply(
         &self,
         reply: &Ciphered,
-        cipher_sk: &hpke::SecretKey,
+        request_sent_at: u64,
+        caller: &MpcFixtureNode,
     ) -> Result<SyncUpdate, MessageError> {
+        let cipher_sk = caller.config.borrow().local.network.cipher_sk.clone();
         // Only the signing key is checked.
         let info = ParticipantInfo {
             sign_pk: self.config.borrow().local.network.sign_sk.public_key(),
             ..ParticipantInfo::new(self.me.into())
         };
-        open_reply_for_test(reply, cipher_sk, self.me, &info)
+        open_reply_for_test(
+            reply,
+            request_sent_at,
+            &cipher_sk,
+            &caller.account_id,
+            self.me,
+            &info,
+        )
     }
 
     /// Deliver `update` to this node as a sync request that claims to come
     /// from `claimed` and is signed with `sign_sk`, so tests can forge either.
+    /// Returns the reply and the request's signing time.
     pub async fn try_sync(
         &self,
         claimed: Participant,
         sign_sk: &near_crypto::SecretKey,
         update: &SyncUpdate,
-    ) -> Result<Ciphered, SyncError> {
+    ) -> Result<(Ciphered, u64), SyncError> {
         let cipher_pk = self.config.borrow().local.network.cipher_sk.public_key();
-        let encrypted = SignedMessage::encrypt(update, claimed, sign_sk, &cipher_pk)
-            .expect("failed to encrypt sync update");
-        self.sync_channel.request_update(encrypted).await
+        let sent_at = next_sync_sent_at();
+        let encrypted = SignedMessage::encrypt_at(
+            MessageDomain::SyncRequest,
+            update,
+            claimed,
+            &self.account_id,
+            sent_at,
+            sign_sk,
+            &cipher_pk,
+        )
+        .expect("failed to encrypt sync update");
+        let reply = self.sync_channel.request_update(encrypted).await?;
+        Ok((reply, sent_at))
     }
 
     /// Get the list of triple IDs this node owns in storage (sorted).
@@ -552,4 +572,17 @@ impl Default for SharedOutput {
             publishes: Default::default(),
         }
     }
+}
+
+/// Strictly increasing, as a node only accepts a newer request from a sender
+/// and tests can send two within a millisecond.
+fn next_sync_sent_at() -> u64 {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = now_millis();
+    let prev = LAST
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+            Some(now.max(prev + 1))
+        })
+        .unwrap();
+    now.max(prev + 1)
 }

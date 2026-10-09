@@ -1,7 +1,7 @@
 use cait_sith::protocol::Participant;
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::{MpcFixtureBuilder, MpcFixtureNode};
-use mpc_node::protocol::message::SignedMessage;
+use mpc_node::protocol::message::{now_millis, MessageDomain, SignedMessage};
 use mpc_node::protocol::sync::SyncUpdate;
 use test_log::test;
 
@@ -750,18 +750,24 @@ async fn test_sync_reply_rejects_forged_responder() {
     };
 
     // Control: node1's genuine reply opens as node1's.
-    let reply = node1
+    let (reply, sent_at) = node1
         .try_sync(node0.me, &node0_network.sign_sk, &update)
         .await
         .expect("node0's update should be accepted");
     node1
-        .open_reply(&reply, &node0_network.cipher_sk)
+        .open_reply(&reply, sent_at, node0)
         .expect("genuine reply should open");
+
+    // The same reply offered as the answer to a later request.
+    assert!(
+        node1.open_reply(&reply, sent_at + 1, node0).is_err(),
+        "reply should answer only its own request"
+    );
 
     // A reply from a node other than the one asked: node0 asked node2 but
     // got node1's reply.
     assert!(
-        node2.open_reply(&reply, &node0_network.cipher_sk).is_err(),
+        node2.open_reply(&reply, sent_at, node0).is_err(),
         "reply signed by node1 should not pass as node2's"
     );
 
@@ -772,15 +778,87 @@ async fn test_sync_reply_rejects_forged_responder() {
         triples: node0_triples,
         presignatures: node0_presigs,
     };
-    let forged = SignedMessage::encrypt(
+    let forged = SignedMessage::encrypt_at(
+        MessageDomain::SyncReply,
         &forged,
         node1.me,
+        &node0.account_id,
+        sent_at,
         &outsider_sk,
         &node0_network.cipher_sk.public_key(),
     )
     .expect("encrypt forged reply");
     assert!(
-        node1.open_reply(&forged, &node0_network.cipher_sk).is_err(),
+        node1.open_reply(&forged, sent_at, node0).is_err(),
         "forged reply should be rejected"
+    );
+}
+
+/// A reply fed back to the node that asked, as a request, is rejected.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_rejects_reply_as_request() {
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let owners = fixture.sorted_participants();
+    let before = shares_by_owner(node0, &owners).await;
+
+    let node0_network = node0.config.borrow().local.network.clone();
+    let update = SyncUpdate {
+        triples: node0.owned_triples().await,
+        presignatures: node0.owned_presignatures().await,
+    };
+    let (reply, _) = node1
+        .try_sync(node0.me, &node0_network.sign_sk, &update)
+        .await
+        .expect("node0's update should be accepted");
+
+    assert!(
+        node0.sync_channel.request_update(reply).await.is_err(),
+        "node1's reply should not pass as a request from node1"
+    );
+    assert_eq!(shares_by_owner(node0, &owners).await, before);
+}
+
+/// The same sync request delivered twice is accepted once.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_rejects_replayed_request() {
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let node0_sk = node0.config.borrow().local.network.sign_sk.clone();
+    let node1_pk = node1.config.borrow().local.network.cipher_sk.public_key();
+    let update = SyncUpdate {
+        triples: node0.owned_triples().await,
+        presignatures: node0.owned_presignatures().await,
+    };
+    let request = SignedMessage::encrypt_at(
+        MessageDomain::SyncRequest,
+        &update,
+        node0.me,
+        &node1.account_id,
+        now_millis(),
+        &node0_sk,
+        &node1_pk,
+    )
+    .expect("encrypt sync request");
+    let replay = serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+
+    node1
+        .sync_channel
+        .request_update(request)
+        .await
+        .expect("first delivery should be accepted");
+    assert!(
+        node1.sync_channel.request_update(replay).await.is_err(),
+        "the same request delivered again should be rejected"
     );
 }
