@@ -69,8 +69,11 @@ impl SharedBackoff {
         cooldown
     }
 
-    /// Resets the penalty level after a successful call.
+    /// Resets the penalty level once the cooldown window has fully elapsed
     pub fn report_success(&self) {
+        if self.remaining() > Duration::ZERO {
+            return;
+        }
         self.inner.penalty_level.store(0, Ordering::Relaxed);
     }
 
@@ -434,6 +437,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn report_success_keeps_escalation_while_window_active() {
+        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(1), Duration::from_secs(60));
+        let base = gate.extend_cooldown();
+
+        gate.report_success();
+
+        // a success landing inside the active window must not de-escalate
+        assert_eq!(
+            gate.extend_cooldown(),
+            base * 2,
+            "success during an active window must keep the penalty level"
+        );
+    }
+
+    #[test]
+    fn report_success_resets_escalation_after_window_elapses() {
+        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(1), Duration::from_secs(60));
+        let base = gate.extend_cooldown();
+        gate.extend_cooldown();
+
+        // simulate the window having elapsed
+        gate.inner.limited_until_ms.store(0, Ordering::Relaxed);
+        gate.report_success();
+
+        assert_eq!(
+            gate.extend_cooldown(),
+            base,
+            "success after the window elapsed must reset escalation"
+        );
+    }
+
+    #[test]
     fn client_errors_are_not_retryable() {
         for code in ["400", "401", "403", "404", "405"] {
             let e = anyhow::anyhow!(
@@ -458,19 +493,11 @@ mod tests {
         let sb = SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
         sb.extend_cooldown();
         let long = sb.extend_cooldown();
-        sb.report_success();
+        // simulate the level having been reset
+        sb.inner.penalty_level.store(0, Ordering::Relaxed);
         let short = sb.extend_cooldown();
         assert!(short < long);
         assert!(sb.remaining() > short);
-    }
-
-    #[test]
-    fn shared_backoff_success_resets_penalty() {
-        let sb = SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
-        sb.extend_cooldown();
-        sb.extend_cooldown();
-        sb.report_success();
-        assert_eq!(sb.extend_cooldown(), Duration::from_millis(100));
     }
 
     #[test]
