@@ -687,10 +687,9 @@ impl Drop for InFlightGuard {
 }
 
 /// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
-/// Each attempt waits out the chain's shared 429/402 cooldown gate, then - with a
-/// `backlog` - checks that this node still waits for the response (once any
-/// node's response is observed, a retry would only land a duplicate) before
-/// publishing.
+/// Each attempt waits out the chain's shared 429/402 cooldown gate, then (with a
+/// `backlog`) checks that this node still waits for the response before
+/// publishing: once any node's response is observed, a retry would only land a duplicate.
 pub async fn execute_publish(
     publisher: Arc<dyn ChainPublisher>,
     backlog: Option<Backlog>,
@@ -917,6 +916,11 @@ mod tests {
     /// Consensus feeds whose senders are gone: nothing is ever settled.
     fn no_consensus() -> EnumMap<Chain, CheckpointWatcher> {
         EnumMap::from_fn(|_| watch::channel(None).1)
+    }
+
+    /// Per-chain gates with no active cooldown: dispatch proceeds immediately.
+    fn idle_gates() -> EnumMap<Chain, SharedBackoff> {
+        EnumMap::from_fn(|_| SharedBackoff::new())
     }
 
     fn checkpoint_digest(chain: Chain, height: u64, digest: u8) -> CheckpointDigest {
@@ -1161,7 +1165,7 @@ mod tests {
         // a negative check, so a slow run can only pass, never fail spuriously.
         RpcExecutor::dispatch_loop(
             &HashMap::new(),
-            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            &idle_gates(),
             None,
             Some(near),
             &consensus,
@@ -1466,7 +1470,7 @@ mod tests {
 
         RpcExecutor::dispatch_loop(
             &publishers,
-            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            &idle_gates(),
             None,
             None,
             &no_consensus(),
@@ -1640,7 +1644,7 @@ mod tests {
 
         RpcExecutor::dispatch_loop(
             &publishers,
-            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            &idle_gates(),
             None,
             None,
             &no_consensus(),
@@ -1688,7 +1692,7 @@ mod tests {
 
         RpcExecutor::dispatch_loop(
             &publishers,
-            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            &idle_gates(),
             None,
             None,
             &no_consensus(),
@@ -1756,7 +1760,7 @@ mod tests {
 
         RpcExecutor::dispatch_loop(
             &publishers,
-            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            &idle_gates(),
             None,
             None,
             &no_consensus(),
@@ -1787,7 +1791,7 @@ mod tests {
         let dispatch = tokio::spawn(async move {
             RpcExecutor::dispatch_loop(
                 &publishers,
-                &EnumMap::from_fn(|_| SharedBackoff::new()),
+                &idle_gates(),
                 None,
                 Some(near),
                 &no_consensus(),
@@ -1846,7 +1850,7 @@ mod tests {
 
         RpcExecutor::dispatch_loop(
             &publishers,
-            &EnumMap::from_fn(|_| SharedBackoff::new()),
+            &idle_gates(),
             None,
             None,
             &no_consensus(),
