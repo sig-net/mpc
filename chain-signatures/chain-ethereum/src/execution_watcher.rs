@@ -182,14 +182,27 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             .filter(|(tx_id, _)| sweep_all || new_watchers.contains(tx_id) || retry.contains(tx_id))
             .collect();
 
-        let (gated_events, gated_failed, late_consumed_slots) =
+        let (gated_events, gated_failed, late_consumed_slots, mut unknown_takers) =
             self.resolve_gated_watchers(gated, block_number).await;
         events.extend(gated_events);
         failed.extend(gated_failed);
-        events.extend(Self::resolve_late_replaced_siblings(
-            late_candidates,
-            &late_consumed_slots,
-        ));
+        let late_events =
+            Self::resolve_late_replaced_siblings(late_candidates, &late_consumed_slots);
+        unknown_takers.retain(|id| {
+            !late_events.iter().any(
+                |event| matches!(event, ChainEvent::ExecutionConfirmed { sign_id, .. } if sign_id == id),
+            )
+        });
+        events.extend(late_events);
+
+        if !unknown_takers.is_empty() {
+            tracing::info!(
+                block_number,
+                count = unknown_takers.len(),
+                sample = ?&unknown_takers[..unknown_takers.len().min(5)],
+                "nonce used by a transaction this node does not know; watchers stay pending"
+            );
+        }
 
         // Failed watchers are retried on the next block.
         self.lock_watcher_gate().retry = failed;
@@ -544,7 +557,8 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         let mut events = Vec::new();
         let mut remaining = Vec::new();
         for (tx_id, (sign_id, tx)) in unmined {
-            // The same bytes may be this request's own tx under a signature this node lacks.
+            // A watched taker is another request, but with equal bytes it also executed this one
+            // (M3); answering that needs matching by bytes, not tx id, so no verdict yet.
             let displaced = consumed_slots
                 .get(&(Address::from(tx.from_address), tx.nonce))
                 .is_some_and(|consuming| {
@@ -603,15 +617,14 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         events
     }
 
-    /// Nonce-gates unmined watchers: fetches deduped sender nonces, then
-    /// resolves watchers whose nonce was consumed. Returns emitted events,
-    /// watchers whose RPC attempt failed, and the (sender, nonce) slots consumed
-    /// by observed watchers with their inclusion heights.
+    /// Nonce-gates watchers. Returns events, watchers to retry, slots taken by observed watchers
+    /// with their inclusion heights, and watchers whose nonce an unobserved tx took.
     async fn resolve_gated_watchers(
         &self,
         gated: Vec<WatcherEntry>,
         block_number: u64,
     ) -> (
+        Vec<SignId>,
         Vec<ChainEvent>,
         HashSet<BidirectionalTxId>,
         HashMap<(Address, u64), (Arc<BidirectionalTx>, u64)>,
@@ -690,16 +703,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             }
         }
 
-        if !unknown_takers.is_empty() {
-            tracing::info!(
-                block_number,
-                count = unknown_takers.len(),
-                sample = ?&unknown_takers[..unknown_takers.len().min(5)],
-                "nonce used by a transaction this node does not know; watchers stay pending"
-            );
-        }
-
-        (events, failed, consumed_slots)
+        (events, failed, consumed_slots, unknown_takers)
     }
 }
 
