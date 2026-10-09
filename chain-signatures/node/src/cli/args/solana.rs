@@ -49,7 +49,6 @@ impl SolArgs {
             program_address: self.sol_program_address?,
             indexer: SolIndexerConfig {
                 poll_interval: Duration::from_millis(self.sol_poll_interval_ms),
-                ..SolIndexerConfig::default()
             },
         })
     }

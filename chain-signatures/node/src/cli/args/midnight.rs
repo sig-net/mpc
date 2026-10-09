@@ -317,7 +317,6 @@ mod tests {
 
         let mut cfg = configured();
         cfg.indexer.poll_interval = Duration::from_millis(77);
-        cfg.indexer.stall_timeout = Duration::from_secs(7);
         cfg.publisher.submit_timeout = Duration::from_secs(7);
         assert_ne!(
             cfg.indexer,
