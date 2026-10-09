@@ -9,7 +9,7 @@ use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::store::IterableMap;
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
 use signet_primitives::{borsh_scalar, SignId, Signature};
-use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
+use std::collections::{btree_map, BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub mod hpke {
     pub type PublicKey = [u8; 32];
@@ -407,6 +407,62 @@ impl ThresholdVotes {
 
     pub fn is_empty(&self) -> bool {
         self.votes.is_empty()
+    }
+}
+
+#[derive(
+    BorshDeserialize,
+    BorshSerialize,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+)]
+pub struct ReshareProposal {
+    pub joins: BTreeSet<AccountId>,
+    pub kicks: BTreeSet<AccountId>,
+}
+
+#[derive(
+    BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default,
+)]
+pub struct ReshareVotes {
+    /// Maps each participant AccountId to the proposed reshare batch they voted for.
+    pub votes: BTreeMap<AccountId, ReshareProposal>,
+}
+
+impl ReshareVotes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record `voter`'s support for `proposal`, replacing any vote they had
+    /// previously cast, and return the resulting number of voters backing `proposal`.
+    pub fn vote(&mut self, proposal: ReshareProposal, voter: AccountId) -> usize {
+        self.votes.insert(voter, proposal.clone());
+        self.tally(&proposal)
+    }
+
+    /// Remove `voter`'s vote for any proposed batch.
+    pub fn remove(&mut self, voter: &AccountId) {
+        self.votes.remove(voter);
+    }
+
+    /// Count the number of voters currently backing `proposal`.
+    pub fn tally(&self, proposal: &ReshareProposal) -> usize {
+        self.votes.values().filter(|p| *p == proposal).count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.votes.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.votes.clear();
     }
 }
 

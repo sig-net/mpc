@@ -4,7 +4,9 @@ use borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, PublicKey};
 
-use crate::primitives::{Candidates, CandidatesView, Participants, PkVotes, ThresholdVotes, Votes};
+use crate::primitives::{
+    Candidates, CandidatesView, Participants, PkVotes, ReshareVotes, ThresholdVotes, Votes,
+};
 
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct InitializingContractState {
@@ -27,6 +29,7 @@ pub struct RunningContractState {
     /// current `threshold`, the contract transitions into `Resharing` with the
     /// same participants but the new threshold.
     pub threshold_votes: ThresholdVotes,
+    pub reshare_votes: ReshareVotes,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
@@ -75,6 +78,8 @@ pub struct RunningContractStateView {
     pub public_key: PublicKey,
     pub leave_votes: Votes,
     pub threshold_votes: ThresholdVotes,
+    #[serde(default)]
+    pub reshare_votes: ReshareVotes,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
@@ -103,6 +108,7 @@ impl From<&RunningContractState> for RunningContractStateView {
             public_key: state.public_key.clone(),
             leave_votes: state.leave_votes.clone(),
             threshold_votes: state.threshold_votes.clone(),
+            reshare_votes: state.reshare_votes.clone(),
         }
     }
 }

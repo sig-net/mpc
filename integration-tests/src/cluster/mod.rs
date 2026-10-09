@@ -14,7 +14,7 @@ use crate::actions::sign::SignAction;
 use crate::actions::wait::WaitAction;
 use crate::containers;
 use crate::local::NodeEnvConfig;
-use crate::utils::{self, vote_join, vote_leave};
+use crate::utils::{self, vote_join, vote_leave, vote_reshare};
 use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
@@ -283,6 +283,28 @@ impl Cluster {
         // Wait for the node to be offline then check all running nodes for running:
         self.wait().nodes_running().await?;
         Ok(config)
+    }
+
+    /// Kicks multiple nodes out of the network in a single batch resharing vote.
+    pub async fn kick_participants(&self, kicks: &[AccountId]) -> anyhow::Result<()> {
+        let state = self.expect_running().await?;
+        let participant_accounts = self.participant_accounts().await?;
+        let kick_set: std::collections::HashSet<_> = kicks.iter().collect();
+        let voting_accounts: Vec<&Account> = participant_accounts
+            .into_iter()
+            .filter(|account| !kick_set.contains(account.id()))
+            .take(state.threshold)
+            .collect();
+
+        let kick_refs: Vec<&AccountId> = kicks.iter().collect();
+        tracing::info!(
+            ?voting_accounts,
+            ?kicks,
+            at_epoch = state.epoch,
+            "batch kicking participants"
+        );
+        vote_reshare(&voting_accounts, self.contract().id(), &[], &kick_refs).await?;
+        Ok(())
     }
 
     pub async fn propose_update(&self, args: ProposeUpdateArgs) -> mpc_contract::update::UpdateId {

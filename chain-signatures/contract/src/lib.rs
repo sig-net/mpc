@@ -26,15 +26,14 @@ use near_sdk::{
 };
 use primitives::{
     CandidateEntry, CandidateInfo, Candidates, CheckpointReset, CheckpointVotes,
-    InternalSignRequest, Participants, PendingRequest, PkVotes, Read, SignPoll, SignRequest,
-    StorageKey, View, Votes, YieldIndex,
+    InternalSignRequest, Participants, PendingRequest, PkVotes, Read, ReshareProposal,
+    ReshareVotes, SignPoll, SignRequest, StorageKey, ThresholdVotes, View, Votes, YieldIndex,
 };
 use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::config::Config;
 use crate::errors::Error;
-use crate::primitives::ThresholdVotes;
 use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 use crate::utils::compute_threshold;
 
@@ -352,11 +351,16 @@ impl MpcContract {
     }
 
     #[handle_result]
-    pub fn vote_join(&mut self, candidate: AccountId) -> Result<bool, Error> {
+    pub fn vote_reshare(
+        &mut self,
+        joins: Vec<AccountId>,
+        kicks: Vec<AccountId>,
+    ) -> Result<bool, Error> {
         log!(
-            "vote_join: signer={}, candidate={}",
+            "vote_reshare: signer={}, joins={:?}, kicks={:?}",
             env::signer_account_id(),
-            candidate
+            joins,
+            kicks
         );
         let voter = self.voter()?;
         let protocol_state = self.mutable_state();
@@ -367,23 +371,76 @@ impl MpcContract {
                 threshold,
                 public_key,
                 candidates,
-                join_votes,
+                reshare_votes,
                 ..
             }) => {
-                let candidate_info = candidates
-                    .get(&candidate)
-                    .ok_or(VoteError::JoinNotCandidate)?;
-                let voted = join_votes.entry(candidate.clone());
-                voted.insert(voter);
-                if voted.len() >= *threshold {
+                // If both joins and kicks are empty, retract the voter's active proposal
+                if joins.is_empty() && kicks.is_empty() {
+                    reshare_votes.remove(&voter);
+                    return Ok(false);
+                }
+
+                let joins_set: BTreeSet<AccountId> = joins.into_iter().collect();
+                let kicks_set: BTreeSet<AccountId> = kicks.into_iter().collect();
+
+                // 1. Disjointness check
+                if !joins_set.is_disjoint(&kicks_set) {
+                    return Err(VoteError::BatchOverlapping.into());
+                }
+
+                // 2. Validate kicks
+                for kick in &kicks_set {
+                    if !participants.contains_key(kick) {
+                        return Err(VoteError::KickNotParticipant.into());
+                    }
+                }
+
+                // 3. Validate joins
+                for join in &joins_set {
+                    if participants.contains_key(join) {
+                        return Err(JoinError::JoinAlreadyParticipant.into());
+                    }
+                    if !candidates.contains_key(join) {
+                        return Err(VoteError::JoinNotCandidate.into());
+                    }
+                }
+
+                // 4. Validate resulting cohort size meets minimum viable MPC threshold
+                let new_count = participants
+                    .len()
+                    .checked_sub(kicks_set.len())
+                    .and_then(|c| c.checked_add(joins_set.len()))
+                    .ok_or(VoteError::ParticipantsBelowThreshold)?;
+
+                const MIN_PARTICIPANTS: usize = 2;
+                if new_count < MIN_PARTICIPANTS {
+                    return Err(VoteError::ParticipantsBelowThreshold.into());
+                }
+
+                let proposal = ReshareProposal {
+                    joins: joins_set,
+                    kicks: kicks_set,
+                };
+
+                let tally = reshare_votes.vote(proposal.clone(), voter);
+                if tally >= *threshold {
                     let mut new_participants = participants.clone();
-                    new_participants.insert(candidate, candidate_info.clone().into());
+                    for kick in &proposal.kicks {
+                        new_participants.remove(kick);
+                    }
+                    for join in &proposal.joins {
+                        let candidate_info =
+                            candidates.get(join).ok_or(VoteError::JoinNotCandidate)?;
+                        new_participants.insert(join.clone(), candidate_info.clone().into());
+                    }
+
                     candidates.clear();
+                    let new_threshold = compute_threshold(new_participants.len());
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
                         threshold: *threshold,
-                        new_threshold: compute_threshold(new_participants.len()),
+                        new_threshold,
                         new_participants,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
@@ -399,53 +456,23 @@ impl MpcContract {
     }
 
     #[handle_result]
+    pub fn vote_join(&mut self, candidate: AccountId) -> Result<bool, Error> {
+        log!(
+            "vote_join: signer={}, candidate={}",
+            env::signer_account_id(),
+            candidate
+        );
+        self.vote_reshare(vec![candidate], vec![])
+    }
+
+    #[handle_result]
     pub fn vote_leave(&mut self, kick: AccountId) -> Result<bool, Error> {
         log!(
             "vote_leave: signer={}, kick={}",
             env::signer_account_id(),
             kick
         );
-        let voter = self.voter()?;
-        let protocol_state = self.mutable_state();
-        match protocol_state {
-            ProtocolContractState::Running(RunningContractState {
-                epoch,
-                participants,
-                threshold,
-                public_key,
-                candidates,
-                leave_votes,
-                ..
-            }) => {
-                if !participants.contains_key(&kick) {
-                    return Err(VoteError::KickNotParticipant.into());
-                }
-                if participants.len() <= *threshold {
-                    return Err(VoteError::ParticipantsBelowThreshold.into());
-                }
-                let voted = leave_votes.entry(kick.clone());
-                voted.insert(voter);
-                if voted.len() >= *threshold {
-                    let mut new_participants = participants.clone();
-                    new_participants.remove(&kick);
-                    candidates.clear();
-                    *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
-                        old_epoch: *epoch,
-                        old_participants: participants.clone(),
-                        threshold: *threshold,
-                        new_threshold: compute_threshold(new_participants.len()),
-                        new_participants,
-                        public_key: public_key.clone(),
-                        finished_votes: HashSet::new(),
-                        cancel_votes: HashSet::new(),
-                    });
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            _ => Err(InvalidState::UnexpectedProtocolState.message(protocol_state.name())),
-        }
+        self.vote_reshare(vec![], vec![kick])
     }
 
     /// Vote to change the running threshold without otherwise modifying the
@@ -537,6 +564,7 @@ impl MpcContract {
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
+                        reshare_votes: ReshareVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -584,6 +612,7 @@ impl MpcContract {
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
+                        reshare_votes: ReshareVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -626,6 +655,7 @@ impl MpcContract {
                         join_votes: Votes::new(),
                         leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
+                        reshare_votes: ReshareVotes::new(),
                     });
                     Ok(true)
                 } else {
@@ -789,6 +819,7 @@ impl MpcContract {
                 join_votes: Votes::new(),
                 leave_votes: Votes::new(),
                 threshold_votes: ThresholdVotes::new(),
+                reshare_votes: ReshareVotes::new(),
             }),
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
@@ -841,12 +872,17 @@ impl MpcContract {
         match self.state_ref() {
             ProtocolContractState::Running(state) => {
                 state.candidates.get(&account_id).cloned().map(|info| {
-                    let join_votes = state
+                    let mut join_votes = state
                         .join_votes
                         .votes
                         .get(&account_id)
                         .cloned()
                         .unwrap_or_default();
+                    for (voter, proposal) in &state.reshare_votes.votes {
+                        if proposal.joins.contains(&account_id) {
+                            join_votes.insert(voter.clone());
+                        }
+                    }
                     CandidateEntry { info, join_votes }
                 })
             }
@@ -1415,6 +1451,7 @@ mod tests {
                 join_votes: Votes::new(),
                 leave_votes: Votes::new(),
                 threshold_votes: ThresholdVotes::new(),
+                reshare_votes: ReshareVotes::new(),
             }),
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),

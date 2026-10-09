@@ -1,8 +1,8 @@
 use crate::config::Config;
 use crate::errors::{Error, InvalidState};
 use crate::primitives::{
-    CandidateInfo, Candidates, CheckpointVotes, Participants, PendingRequest, PkVotes, StorageKey,
-    ThresholdVotes, Votes,
+    CandidateInfo, Candidates, CheckpointVotes, Participants, PendingRequest, PkVotes,
+    ReshareVotes, StorageKey, ThresholdVotes, Votes,
 };
 use crate::state::{
     InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
@@ -79,6 +79,7 @@ fn upgrade_protocol_state(old: OldProtocolContractState) -> ProtocolContractStat
                 join_votes: state.join_votes,
                 leave_votes: state.leave_votes,
                 threshold_votes: ThresholdVotes::new(),
+                reshare_votes: ReshareVotes::new(),
             })
         }
         OldProtocolContractState::Resharing(state) => ProtocolContractState::Resharing(state),
@@ -121,6 +122,7 @@ fn upgrade_devnet_protocol_state(old: DevnetProtocolContractState) -> ProtocolCo
                 join_votes: state.join_votes,
                 leave_votes: state.leave_votes,
                 threshold_votes: state.threshold_votes,
+                reshare_votes: ReshareVotes::new(),
             })
         }
         DevnetProtocolContractState::Resharing(state) => ProtocolContractState::Resharing(state),
@@ -205,6 +207,70 @@ impl PreviousMainnet {
 }
 
 #[derive(BorshDeserialize)]
+pub struct PreviousRunningContractState {
+    pub epoch: u64,
+    pub participants: Participants,
+    pub threshold: usize,
+    pub public_key: PublicKey,
+    pub candidates: Candidates,
+    pub join_votes: Votes,
+    pub leave_votes: Votes,
+    pub threshold_votes: ThresholdVotes,
+}
+
+#[derive(BorshDeserialize)]
+pub enum PreviousProtocolContractState {
+    NotInitialized,
+    Initializing(InitializingContractState),
+    Running(PreviousRunningContractState),
+    Resharing(ResharingContractState),
+}
+
+impl PreviousProtocolContractState {
+    fn upgrade(self) -> ProtocolContractState {
+        match self {
+            Self::NotInitialized => ProtocolContractState::NotInitialized,
+            Self::Initializing(s) => ProtocolContractState::Initializing(s),
+            Self::Running(s) => ProtocolContractState::Running(RunningContractState {
+                epoch: s.epoch,
+                participants: s.participants,
+                threshold: s.threshold,
+                public_key: s.public_key,
+                candidates: s.candidates,
+                join_votes: s.join_votes,
+                leave_votes: s.leave_votes,
+                threshold_votes: s.threshold_votes,
+                reshare_votes: ReshareVotes::new(),
+            }),
+            Self::Resharing(s) => ProtocolContractState::Resharing(s),
+        }
+    }
+}
+
+#[derive(BorshDeserialize)]
+pub struct PreviousMpcContract {
+    pub protocol_state: PreviousProtocolContractState,
+    pub pending_requests: IterableMap<SignId, PendingRequest>,
+    pub proposed_updates: ProposedUpdates,
+    pub config: Config,
+    pub latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
+    pub checkpoint_votes: CheckpointVotes,
+}
+
+impl PreviousMpcContract {
+    fn upgrade(self) -> MpcContract {
+        MpcContract {
+            protocol_state: self.protocol_state.upgrade(),
+            pending_requests: self.pending_requests,
+            proposed_updates: self.proposed_updates,
+            config: self.config,
+            latest_checkpoints: self.latest_checkpoints,
+            checkpoint_votes: self.checkpoint_votes,
+        }
+    }
+}
+
+#[derive(BorshDeserialize)]
 enum VersionedPreviousDevnet {
     V0(PreviousDevnet),
 }
@@ -222,15 +288,30 @@ enum VersionedPreviousState {
     V0(MpcContract),
 }
 
+#[derive(BorshDeserialize)]
+enum VersionedPreviousMpcContract {
+    V0(PreviousMpcContract),
+}
+
 pub(crate) fn migrate(state_bytes: &[u8]) -> Result<MpcContract, Error> {
     if let Ok(current) = MpcContract::try_from_slice(state_bytes) {
         return Ok(current);
+    }
+
+    if let Ok(previous) = PreviousMpcContract::try_from_slice(state_bytes) {
+        return Ok(previous.upgrade());
     }
 
     if let Ok(VersionedPreviousState::V0(previous)) =
         VersionedPreviousState::try_from_slice(state_bytes)
     {
         return Ok(previous);
+    }
+
+    if let Ok(VersionedPreviousMpcContract::V0(previous)) =
+        VersionedPreviousMpcContract::try_from_slice(state_bytes)
+    {
+        return Ok(previous.upgrade());
     }
 
     if let Ok(VersionedPreviousDevnet::V0(previous)) =
