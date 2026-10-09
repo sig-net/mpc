@@ -90,6 +90,7 @@ secrecy = "0.10.3"
 
 [dev-dependencies]
 mockito.workspace = true
+solana-sdk.workspace = true
 tempfile = "3.27.0"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 tokio = { workspace = true, features = ["test-util"] }

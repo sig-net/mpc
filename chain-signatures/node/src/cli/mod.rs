@@ -1006,7 +1006,11 @@ async fn spawn_indexers(
 
 #[cfg(test)]
 mod tests {
+    use mpc_chain_integration_core::utils::test::make_publish_action;
+    use mpc_chain_integration_core::NoopPublisherTelemetry;
+    use mpc_primitives::{SignId, SignKind};
     use std::str::FromStr;
+    use std::time::Duration;
 
     use super::*;
 
@@ -1410,5 +1414,73 @@ mod tests {
             NearRpcGates::new(SharedBackoff::new()),
             Arc::new(NodeTelemetry::new(Chain::NEAR)),
         )
+    }
+
+    fn sol_config_with_bogus_rpc() -> SolConfig {
+        SolConfig {
+            account_sk: solana_sdk::signer::keypair::Keypair::new().to_base58_string(),
+            rpc_http_url: "http://127.0.0.1:1".into(),
+            program_address: mpc_chain_solana::Pubkey::new_unique().to_string(),
+            indexer: Default::default(),
+        }
+    }
+
+    fn near_client_stub() -> NearClient {
+        use near_crypto::{InMemorySigner, KeyType, SecretKey};
+        let account: AccountId = "test.near".parse().unwrap();
+        let signer = match InMemorySigner::from_secret_key(
+            account.clone(),
+            SecretKey::from_seed(KeyType::ED25519, "wiring-test"),
+        ) {
+            near_crypto::Signer::InMemory(s) => s,
+            _ => unreachable!(),
+        };
+        NearClient::new(
+            near_fetch::Client::new("http://127.0.0.1:1"),
+            &account,
+            signer,
+            NearRpcGates::new(SharedBackoff::new()),
+            Arc::new(NoopPublisherTelemetry),
+        )
+    }
+
+    #[tokio::test]
+    async fn solana_publisher_shares_the_stacks_cooldown_gate() {
+        let stack = ChainStack::new(ChainConfigs {
+            eth: None,
+            sol: Some(sol_config_with_bogus_rpc()),
+            hydration: None,
+            canton: None,
+            midnight: None,
+            tron: None,
+        });
+
+        let publishers = stack.publishers(near_client_stub()).await;
+        let publisher = publishers
+            .get(&Chain::Solana)
+            .expect("solana publisher must be wired when configured");
+
+        // engage the stack's own gate and check the publisher parks on it
+        stack.gate(Chain::Solana).extend_cooldown();
+
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            publisher.publish_signature(&make_publish_action(
+                Chain::Solana,
+                SignKind::Sign,
+                SignId::new([0u8; 32]),
+            )),
+        )
+        .await
+        .expect("publish must not hang on an engaged gate");
+
+        // the bogus endpoint rejects the send itself; only the park matters
+        assert!(outcome.is_err());
+        assert!(
+            start.elapsed() >= Duration::from_millis(700),
+            "publish must wait out the stack gate's engaged window (base cooldown), took {:?}",
+            start.elapsed()
+        );
     }
 }
