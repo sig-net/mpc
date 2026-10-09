@@ -205,7 +205,7 @@ pub async fn create_response(
     let (digest, scalar_hash, payload_hash) = process_message(msg).await;
     let pk = sk.public_key();
 
-    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, predecessor_id, path);
+    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, predecessor_id, path).unwrap();
     let derived_sk = derive_secret_key(sk, epsilon);
     let derived_pk = derive_key(pk.into(), epsilon);
     let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);

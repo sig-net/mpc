@@ -22,7 +22,7 @@ async fn test_solana_signature_basic() -> anyhow::Result<()> {
     let root_pk_near = cluster.root_public_key().await.unwrap();
     let root_pk = near_public_key_to_affine_point(root_pk_near);
 
-    let epsilon = derive_epsilon_sol(key_version, &outcome.signer_account, path);
+    let epsilon = derive_epsilon_sol(key_version, &outcome.signer_account, path)?;
     let derived_user_pk = derive_key(root_pk, epsilon);
     let payload_hash = *alloy::primitives::keccak256(payload);
     let payload_hash = <k256::Scalar as Reduce<

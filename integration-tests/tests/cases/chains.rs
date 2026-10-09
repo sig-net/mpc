@@ -57,7 +57,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
 
     let root_pk_near = nodes.root_public_key().await?;
     let root_pk = near_public_key_to_affine_point(root_pk_near);
-    let epsilon = derive_epsilon_sol(key_version, &signer_account, path);
+    let epsilon = derive_epsilon_sol(key_version, &signer_account, path)?;
     let user_pk = derive_key(root_pk, epsilon);
     let user_pk_bytes = user_pk.to_encoded_point(false);
     let user_address = public_key_to_address(user_pk_bytes.as_bytes());
