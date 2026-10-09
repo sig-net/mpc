@@ -27,7 +27,7 @@ use near_sdk::{
 use primitives::{
     CandidateEntry, CandidateInfo, Candidates, CheckpointReset, CheckpointVotes,
     InternalSignRequest, Participants, PendingRequest, PkVotes, Read, ReshareProposal,
-    ReshareVotes, SignPoll, SignRequest, StorageKey, ThresholdVotes, View, Votes, YieldIndex,
+    ReshareVotes, SignPoll, SignRequest, StorageKey, ThresholdVotes, View, YieldIndex,
 };
 use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -330,7 +330,7 @@ impl MpcContract {
         match protocol_state {
             ProtocolContractState::Running(RunningContractState {
                 candidates,
-                join_votes,
+                reshare_votes,
                 ..
             }) => {
                 let signer_account_id = env::signer_account_id();
@@ -338,8 +338,10 @@ impl MpcContract {
                     return Err(JoinError::RevokeNotCandidate.into());
                 }
 
-                // cleanup the existing votes
-                join_votes.remove(&signer_account_id);
+                // cleanup proposals that include this candidate in joins
+                reshare_votes
+                    .votes
+                    .retain(|_, proposal| !proposal.joins.contains(&signer_account_id));
 
                 // remove from candidates
                 candidates.remove(&signer_account_id);
@@ -561,8 +563,6 @@ impl MpcContract {
                         threshold: *threshold,
                         public_key,
                         candidates: Candidates::new(),
-                        join_votes: Votes::new(),
-                        leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
                         reshare_votes: ReshareVotes::new(),
                     });
@@ -609,8 +609,6 @@ impl MpcContract {
                         threshold: *new_threshold,
                         public_key: public_key.clone(),
                         candidates: Candidates::new(),
-                        join_votes: Votes::new(),
-                        leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
                         reshare_votes: ReshareVotes::new(),
                     });
@@ -652,8 +650,6 @@ impl MpcContract {
                         threshold: *threshold,
                         public_key: public_key.clone(),
                         candidates: Candidates::new(),
-                        join_votes: Votes::new(),
-                        leave_votes: Votes::new(),
                         threshold_votes: ThresholdVotes::new(),
                         reshare_votes: ReshareVotes::new(),
                     });
@@ -816,8 +812,6 @@ impl MpcContract {
                 threshold,
                 public_key,
                 candidates: Candidates::new(),
-                join_votes: Votes::new(),
-                leave_votes: Votes::new(),
                 threshold_votes: ThresholdVotes::new(),
                 reshare_votes: ReshareVotes::new(),
             }),
@@ -872,12 +866,7 @@ impl MpcContract {
         match self.state_ref() {
             ProtocolContractState::Running(state) => {
                 state.candidates.get(&account_id).cloned().map(|info| {
-                    let mut join_votes = state
-                        .join_votes
-                        .votes
-                        .get(&account_id)
-                        .cloned()
-                        .unwrap_or_default();
+                    let mut join_votes = HashSet::new();
                     for (voter, proposal) in &state.reshare_votes.votes {
                         if proposal.joins.contains(&account_id) {
                             join_votes.insert(voter.clone());
@@ -1448,8 +1437,6 @@ mod tests {
                 threshold,
                 public_key,
                 candidates: Candidates::new(),
-                join_votes: Votes::new(),
-                leave_votes: Votes::new(),
                 threshold_votes: ThresholdVotes::new(),
                 reshare_votes: ReshareVotes::new(),
             }),

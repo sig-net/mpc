@@ -45,6 +45,7 @@ fn migrate_initializing(state: LegacyInitializingContractState) -> InitializingC
 }
 
 #[derive(BorshDeserialize)]
+#[allow(dead_code)]
 pub struct OldRunningContractState {
     pub epoch: u64,
     pub participants: Participants,
@@ -76,8 +77,6 @@ fn upgrade_protocol_state(old: OldProtocolContractState) -> ProtocolContractStat
                 threshold: state.threshold,
                 public_key: state.public_key,
                 candidates: migrate_candidates(state.candidates),
-                join_votes: state.join_votes,
-                leave_votes: state.leave_votes,
                 threshold_votes: ThresholdVotes::new(),
                 reshare_votes: ReshareVotes::new(),
             })
@@ -87,6 +86,7 @@ fn upgrade_protocol_state(old: OldProtocolContractState) -> ProtocolContractStat
 }
 
 #[derive(BorshDeserialize)]
+#[allow(dead_code)]
 struct DevnetRunningContractState {
     pub epoch: u64,
     pub participants: Participants,
@@ -119,8 +119,6 @@ fn upgrade_devnet_protocol_state(old: DevnetProtocolContractState) -> ProtocolCo
                 threshold: state.threshold,
                 public_key: state.public_key,
                 candidates: migrate_candidates(state.candidates),
-                join_votes: state.join_votes,
-                leave_votes: state.leave_votes,
                 threshold_votes: state.threshold_votes,
                 reshare_votes: ReshareVotes::new(),
             })
@@ -207,6 +205,7 @@ impl PreviousMainnet {
 }
 
 #[derive(BorshDeserialize)]
+#[allow(dead_code)]
 pub struct PreviousRunningContractState {
     pub epoch: u64,
     pub participants: Participants,
@@ -237,8 +236,6 @@ impl PreviousProtocolContractState {
                 threshold: s.threshold,
                 public_key: s.public_key,
                 candidates: s.candidates,
-                join_votes: s.join_votes,
-                leave_votes: s.leave_votes,
                 threshold_votes: s.threshold_votes,
                 reshare_votes: ReshareVotes::new(),
             }),
@@ -379,11 +376,10 @@ mod tests {
     }
 
     #[test]
-    fn migrating_devnet_running_state_preserves_candidates_and_join_votes() {
+    fn migrating_devnet_running_state_preserves_candidates() {
         testing_env!(VMContextBuilder::new().build());
 
         let candidate_id: AccountId = "candidate.near".parse().unwrap();
-        let voter_id: AccountId = "voter.near".parse().unwrap();
         let candidate = CandidateInfo {
             account_id: candidate_id.clone(),
             url: "https://candidate.example".to_owned(),
@@ -394,10 +390,6 @@ mod tests {
         let candidates = LegacyCandidates {
             candidates: [(candidate_id.clone(), candidate.clone())].into(),
         };
-        let mut join_votes = Votes::new();
-        join_votes
-            .entry(candidate_id.clone())
-            .insert(voter_id.clone());
 
         let migrated = upgrade_devnet_protocol_state(DevnetProtocolContractState::Running(
             DevnetRunningContractState {
@@ -406,7 +398,7 @@ mod tests {
                 threshold: 2,
                 public_key: candidate.sign_pk.clone(),
                 candidates,
-                join_votes,
+                join_votes: Votes::new(),
                 leave_votes: Votes::new(),
                 threshold_votes: ThresholdVotes::new(),
             },
@@ -416,10 +408,5 @@ mod tests {
             panic!("expected running state");
         };
         assert_eq!(running.candidates.get(&candidate_id), Some(&candidate));
-        assert!(running
-            .join_votes
-            .votes
-            .get(&candidate_id)
-            .is_some_and(|votes| votes.contains(&voter_id)));
     }
 }
