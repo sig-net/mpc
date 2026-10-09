@@ -1272,6 +1272,25 @@ mod tests {
         }
     }
 
+    /// Fails its first call with a throttle error, then succeeds; records call times.
+    struct ThrottledFirstPublisher {
+        calls: Arc<Mutex<Vec<Instant>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for ThrottledFirstPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            let mut calls = self.calls.lock().unwrap();
+            let first = calls.is_empty();
+            calls.push(Instant::now());
+            drop(calls);
+            if first {
+                anyhow::bail!("HTTP 429 Too Many Requests");
+            }
+            Ok(())
+        }
+    }
+
     /// A publisher that always fails to publish a signature.
     struct FailingPublisher;
 
@@ -1533,6 +1552,63 @@ mod tests {
             midnight_at < canton_at,
             "midnight attempt must not wait out canton's cooldown"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_publish_extends_the_chain_gate_on_throttled_errors() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let publisher = Arc::new(ThrottledFirstPublisher {
+            calls: calls.clone(),
+        });
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(300), Duration::from_millis(600));
+
+        // Throttled publish: the first attempt will receive a 429 and trigger the backoff window
+        let throttled = tokio::spawn(execute_publish(
+            publisher.clone(),
+            None,
+            publish_action_for(&mock_sign_request(SignId::new([2u8; 32]), Chain::Midnight)),
+            gate.clone(),
+        ));
+
+        let first_at = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(at) = calls.lock().unwrap().first().copied() {
+                    return at;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("first (throttled) call fires");
+
+        // Concurrent same-chain publish: its first attempt must wait for the backoff window opened by the 429 response
+        let concurrent = tokio::spawn(execute_publish(
+            publisher,
+            None,
+            publish_action_for(&mock_sign_request(SignId::new([3u8; 32]), Chain::Midnight)),
+            gate,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if calls.lock().unwrap().len() >= 2 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("concurrent publish fires");
+
+        let second_at = calls.lock().unwrap()[1];
+        assert!(
+            second_at.duration_since(first_at) >= Duration::from_millis(250),
+            "concurrent same-chain publish must wait out the window the 429 opened, took {:?}",
+            second_at.duration_since(first_at)
+        );
+
+        throttled.abort();
+        concurrent.abort();
     }
 
     #[tokio::test]
