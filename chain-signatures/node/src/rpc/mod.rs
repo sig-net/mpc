@@ -687,9 +687,10 @@ impl Drop for InFlightGuard {
 }
 
 /// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
-/// Each attempt first waits out the chain's shared 429/402 cooldown gate.
-/// With a `backlog`, each attempt first checks that this node still waits for the
-/// response: once any node's response is observed, a retry would only land a duplicate.
+/// Each attempt waits out the chain's shared 429/402 cooldown gate, then - with a
+/// `backlog` - checks that this node still waits for the response (once any
+/// node's response is observed, a retry would only land a duplicate) before
+/// publishing.
 pub async fn execute_publish(
     publisher: Arc<dyn ChainPublisher>,
     backlog: Option<Backlog>,
