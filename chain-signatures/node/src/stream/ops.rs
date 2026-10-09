@@ -446,37 +446,24 @@ pub async fn process_execution_confirmed(
     // outcome is what distinguishes a healthy round trip from a reverted one.
     let awaiting_execution = entry.awaiting_execution();
     if matches!(result, ExecutionOutcome::ExtractionFailed) {
-        if source_chain == Chain::Midnight {
-            // Destination streams advance independently of Midnight checkpoints.
-            // Keep membership until a source-observable transition can settle it.
-            entry.park().await?;
-            tracing::error!(
-                ?sign_id,
-                ?tx_id,
-                ?source_chain,
-                "output extraction failed terminally; parking request without an attestation"
-            );
-        } else {
-            tracing::error!(
-                ?sign_id,
-                ?tx_id,
-                ?source_chain,
-                output_deserialization_schema =
-                    %String::from_utf8_lossy(&entry.execution_tx().output_deserialization_schema),
-                respond_serialization_schema =
-                    %String::from_utf8_lossy(&entry.execution_tx().respond_serialization_schema),
-                "bidirectional output extraction failed terminally; parking the request \
-                 without a response, even though the destination transaction executed."
-            );
-            // Removal here would split source checkpoints (#1363).
-            entry.park().await?;
-            // Stop the signing task even during catchup: the parked request
-            // cannot produce another completion event.
-            ctx.sign_tx
-                .send(SignCommand::Completion(sign_id))
-                .await
-                .context("failed to send completion into queue")?;
-        }
+        tracing::error!(
+            ?sign_id,
+            ?tx_id,
+            ?source_chain,
+            output_deserialization_schema =
+                %String::from_utf8_lossy(&entry.execution_tx().output_deserialization_schema),
+            respond_serialization_schema =
+                %String::from_utf8_lossy(&entry.execution_tx().respond_serialization_schema),
+            "bidirectional output extraction failed terminally; parking the request \
+             without a response, even though the destination transaction executed."
+        );
+        // Removing it here, on a target-chain event, would split source checkpoints (#1363).
+        entry.park().await?;
+        // Sent even during catchup: nothing requeues a parked request.
+        ctx.sign_tx
+            .send(SignCommand::Completion(sign_id))
+            .await
+            .context("failed to send completion into queue")?;
         return Ok(());
     }
     let execution_failed = matches!(

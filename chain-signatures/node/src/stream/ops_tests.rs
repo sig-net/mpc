@@ -1578,10 +1578,11 @@ async fn midnight_decode_failure_preserves_source_checkpoint_across_target_progr
             after.digest(),
             "unequal target progress must not change the same source checkpoint"
         );
-        assert!(
-            sign_rx.try_recv().is_err(),
-            "decode failure must not sign or complete the request"
+        assert_matches!(
+            sign_rx.try_recv().expect("parked request must stop its signing task"),
+            SignCommand::Completion(id) if id == tx.sign_id()
         );
+        assert!(sign_rx.try_recv().is_err(), "no response should be signed");
         assert_matches!(
             ctx.backlog
                 .get(source_chain, &tx.sign_id())
@@ -1668,7 +1669,7 @@ async fn midnight_decode_failure_preserves_source_checkpoint_across_target_progr
 }
 
 #[tokio::test]
-async fn non_midnight_decode_failure_retires_request_without_response() {
+async fn non_midnight_decode_failure_parks_request_without_response() {
     for source_chain in [Chain::Solana, Chain::Canton, Chain::Hydration] {
         for caught_up in [false, true] {
             let backlog = Backlog::new();
@@ -1697,7 +1698,7 @@ async fn non_midnight_decode_failure_retires_request_without_response() {
                 .await
                 .is_empty());
             assert_matches!(
-                sign_rx.try_recv().expect("retired request must stop its signing task"),
+                sign_rx.try_recv().expect("parked request must stop its signing task"),
                 SignCommand::Completion(id) if id == tx.sign_id()
             );
             assert!(sign_rx.try_recv().is_err(), "no response should be signed");
