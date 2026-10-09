@@ -127,6 +127,12 @@ impl PreviousMainnet {
 }
 
 pub(crate) fn migrate(state_bytes: &[u8]) -> Result<MpcContract, Error> {
+    if let Ok(current) = MpcContract::try_from_slice(state_bytes) {
+        if borsh::to_vec(&current).is_ok_and(|bytes| bytes == state_bytes) {
+            return Ok(current);
+        }
+    }
+
     if let Ok(previous) = PreviousDevnet::try_from_slice(state_bytes) {
         return Ok(previous.upgrade());
     }
@@ -137,10 +143,6 @@ pub(crate) fn migrate(state_bytes: &[u8]) -> Result<MpcContract, Error> {
 
     if let Ok(previous) = PreviousMainnet::try_from_slice(state_bytes) {
         return Ok(previous.upgrade());
-    }
-
-    if let Ok(current) = MpcContract::try_from_slice(state_bytes) {
-        return Ok(current);
     }
 
     Err(InvalidState::ContractStateIsMissing.message("Failed to deserialize contract state"))
@@ -235,5 +237,56 @@ mod tests {
             migrated.protocol_state,
             ProtocolContractState::NotInitialized
         ));
+    }
+
+    #[test]
+    fn migrate_is_idempotent_on_current_running_state() {
+        testing_env!(VMContextBuilder::new().build());
+
+        let candidate_id: AccountId = "candidate.near".parse().unwrap();
+        let candidate = CandidateInfo {
+            account_id: candidate_id.clone(),
+            url: "https://candidate.example".to_owned(),
+            cipher_pk: [7; 32],
+            sign_pk: PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae")
+                .unwrap(),
+        };
+        let mut candidates = Candidates::new();
+        candidates.insert(candidate_id.clone(), candidate.clone());
+
+        let mut reshare_votes = ReshareVotes::new();
+        reshare_votes.vote(
+            crate::primitives::ReshareProposal {
+                joins: [candidate_id.clone()].into(),
+                kicks: std::collections::BTreeSet::new(),
+            },
+            candidate_id.clone(),
+        );
+
+        let current = MpcContract {
+            protocol_state: ProtocolContractState::Running(RunningContractState {
+                epoch: 5,
+                participants: Participants::new(),
+                threshold: 2,
+                public_key: candidate.sign_pk.clone(),
+                candidates,
+                threshold_votes: ThresholdVotes::new(),
+                reshare_votes: reshare_votes.clone(),
+            }),
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        };
+
+        let bytes = borsh::to_vec(&current).unwrap();
+        let migrated = migrate(&bytes).expect("migration should succeed");
+        let ProtocolContractState::Running(running) = migrated.protocol_state else {
+            panic!("expected running state");
+        };
+        assert_eq!(running.epoch, 5);
+        assert_eq!(running.threshold, 2);
+        assert_eq!(running.reshare_votes, reshare_votes);
     }
 }
