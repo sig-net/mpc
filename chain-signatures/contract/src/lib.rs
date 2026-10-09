@@ -866,12 +866,13 @@ impl MpcContract {
         match self.state_ref() {
             ProtocolContractState::Running(state) => {
                 state.candidates.get(&account_id).cloned().map(|info| {
-                    let mut join_votes = HashSet::new();
-                    for (voter, proposal) in &state.reshare_votes.votes {
-                        if proposal.joins.contains(&account_id) {
-                            join_votes.insert(voter.clone());
-                        }
-                    }
+                    let join_votes = state
+                        .reshare_votes
+                        .votes
+                        .iter()
+                        .filter(|(_, proposal)| proposal.joins.contains(&account_id))
+                        .map(|(voter, _)| voter.clone())
+                        .collect();
                     CandidateEntry { info, join_votes }
                 })
             }
