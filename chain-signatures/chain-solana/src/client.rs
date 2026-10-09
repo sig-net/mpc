@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff},
+    utils::retry::{retry_rpc_gated, run_gated, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::SignKind;
@@ -463,9 +463,8 @@ impl SolanaClient {
     }
 }
 
-#[async_trait::async_trait]
-impl ChainPublisher for SolanaClient {
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+impl SolanaClient {
+    async fn send_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let timestamp = action.timestamp;
         let mpc_sig = &action.signature;
         let program = self.client.program(self.program_id)?;
@@ -557,6 +556,21 @@ impl ChainPublisher for SolanaClient {
         self.telemetry.record_publish_metrics(action);
 
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ChainPublisher for SolanaClient {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        // single attempt under the shared gate — the caller's retry loop owns
+        // retries; a throttle response opens the window for the indexer and
+        // sibling publishers sharing this gate
+        run_gated(
+            &self.shared_backoff,
+            "solana publish",
+            self.send_signature(action),
+        )
+        .await
     }
 }
 

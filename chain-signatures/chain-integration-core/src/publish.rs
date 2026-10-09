@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::utils::retry::SharedBackoff;
+use crate::utils::retry::{run_gated, SharedBackoff};
 
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
@@ -37,23 +37,7 @@ impl<P: ChainPublisher> GatedPublisher<P> {
 #[async_trait::async_trait]
 impl<P: ChainPublisher> ChainPublisher for GatedPublisher<P> {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        self.gate.wait().await;
-        match self.inner.publish_signature(action).await {
-            Ok(()) => {
-                self.gate.report_success();
-                Ok(())
-            }
-            Err(err) => {
-                if let Some(cooldown) = self.gate.engage_if_throttled(&err) {
-                    tracing::warn!(
-                        %err,
-                        ?cooldown,
-                        "provider throttled (429/402), engaging chain cooldown"
-                    );
-                }
-                Err(err)
-            }
-        }
+        run_gated(&self.gate, "publish", self.inner.publish_signature(action)).await
     }
 }
 

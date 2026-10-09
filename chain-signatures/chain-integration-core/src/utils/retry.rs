@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -106,6 +107,37 @@ impl SharedBackoff {
         let millis = (self.inner.base_cooldown.as_millis() as u64)
             .saturating_mul(1u64 << level.min(MAX_PENALTY_LEVEL));
         Duration::from_millis(millis).min(self.inner.max_cooldown)
+    }
+}
+
+/// Runs a single call under `gate`: waits out any engaged cooldown, resets the
+/// penalty level on success, and extends the window when the error looks like
+/// provider throttling (429/402). Single attempt — the caller owns retries.
+pub async fn run_gated<T, F>(
+    gate: &SharedBackoff,
+    operation: &'static str,
+    call: F,
+) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    gate.wait().await;
+    match call.await {
+        Ok(value) => {
+            gate.report_success();
+            Ok(value)
+        }
+        Err(err) => {
+            if let Some(cooldown) = gate.engage_if_throttled(&err) {
+                tracing::warn!(
+                    operation,
+                    error = %err,
+                    ?cooldown,
+                    "provider throttled (429/402), engaging shared cooldown"
+                );
+            }
+            Err(err)
+        }
     }
 }
 
