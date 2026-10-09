@@ -19,7 +19,7 @@ use cait_sith::protocol::Participant;
 use dashmap::{mapref::entry::Entry, DashMap, DashSet};
 use k256::AffinePoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff},
+    utils::retry::{retry_rpc, retry_rpc_gated, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
@@ -459,8 +459,6 @@ pub struct RpcExecutor {
     near: NearGovernanceClient,
     /// The publishers for each chain.
     publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
-    /// Per-chain 429/402 cooldown gates, shared with each chain's indexer.
-    gates: EnumMap<Chain, SharedBackoff>,
     /// The receiver for incoming RPC actions.
     action_rx: mpsc::Receiver<RpcAction>,
 }
@@ -469,7 +467,6 @@ impl RpcExecutor {
     pub async fn new(
         near: NearGovernanceClient,
         publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
-        gates: EnumMap<Chain, SharedBackoff>,
     ) -> (RpcChannel, Self) {
         let (tx, action_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         (
@@ -477,7 +474,6 @@ impl RpcExecutor {
             Self {
                 near,
                 publishers,
-                gates,
                 action_rx,
             },
         )
@@ -506,7 +502,6 @@ impl RpcExecutor {
 
         Self::dispatch_loop(
             &self.publishers,
-            &self.gates,
             Some(backlog),
             Some(self.near.clone()),
             &consensus,
@@ -518,7 +513,6 @@ impl RpcExecutor {
     /// Dispatches incoming RPC actions to the appropriate chain publishers.
     async fn dispatch_loop(
         publishers: &HashMap<Chain, Arc<dyn ChainPublisher>>,
-        gates: &EnumMap<Chain, SharedBackoff>,
         backlog: Option<Backlog>,
         near: Option<NearGovernanceClient>,
         consensus: &EnumMap<Chain, CheckpointWatcher>,
@@ -557,11 +551,10 @@ impl RpcExecutor {
 
                     let publisher = publisher.clone();
                     let backlog = backlog.clone();
-                    let gate = gates[chain].clone();
                     let in_flight = in_flight.clone();
                     tokio::spawn(async move {
                         let _guard = InFlightGuard { in_flight, id: key };
-                        execute_publish(publisher, backlog, action, gate).await;
+                        execute_publish(publisher, backlog, action).await;
                     });
                 }
                 RpcAction::VoteCheckpoint {
@@ -687,14 +680,12 @@ impl Drop for InFlightGuard {
 }
 
 /// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
-/// Each attempt waits out the chain's shared 429/402 cooldown gate, then (with a
-/// `backlog`) checks that this node still waits for the response before
-/// publishing: once any node's response is observed, a retry would only land a duplicate.
+/// With a `backlog`, each attempt first checks that this node still waits for the
+/// response: once any node's response is observed, a retry would only land a duplicate.
 pub async fn execute_publish(
     publisher: Arc<dyn ChainPublisher>,
     backlog: Option<Backlog>,
     action: PublishAction,
-    gate: SharedBackoff,
 ) {
     let chain = action.request.chain;
     let sign_id = action.request.id;
@@ -713,10 +704,9 @@ pub async fn execute_publish(
         jitter: true,
     };
 
-    let publish_res = retry_rpc_gated!(
+    let publish_res = retry_rpc!(
         Duration::MAX, // Prevent from timing out
         retry_config,
-        gate,
         // Log the error and retry attempt
         |attempt, err, sleep| {
             tracing::warn!(
@@ -876,7 +866,7 @@ mod tests {
     use mpc_primitives::{SignId, SignKind};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     };
 
     #[tokio::test]
@@ -916,11 +906,6 @@ mod tests {
     /// Consensus feeds whose senders are gone: nothing is ever settled.
     fn no_consensus() -> EnumMap<Chain, CheckpointWatcher> {
         EnumMap::from_fn(|_| watch::channel(None).1)
-    }
-
-    /// Per-chain gates with no active cooldown: dispatch proceeds immediately.
-    fn idle_gates() -> EnumMap<Chain, SharedBackoff> {
-        EnumMap::from_fn(|_| SharedBackoff::new())
     }
 
     fn checkpoint_digest(chain: Chain, height: u64, digest: u8) -> CheckpointDigest {
@@ -1163,15 +1148,7 @@ mod tests {
         // Returns once the channel drains. A wrongly admitted vote would already
         // be spawned; the short wait gives it time to reach the server. It bounds
         // a negative check, so a slow run can only pass, never fail spuriously.
-        RpcExecutor::dispatch_loop(
-            &HashMap::new(),
-            &idle_gates(),
-            None,
-            Some(near),
-            &consensus,
-            &mut rx,
-        )
-        .await;
+        RpcExecutor::dispatch_loop(&HashMap::new(), None, Some(near), &consensus, &mut rx).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         mock.assert_async().await;
     }
@@ -1248,50 +1225,6 @@ mod tests {
     impl ChainPublisher for CountingPublisher {
         async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    /// A publisher that records when its first call happened.
-    struct TimestampingPublisher {
-        first_call: Arc<Mutex<Option<Instant>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl ChainPublisher for TimestampingPublisher {
-        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
-            let mut slot = self.first_call.lock().unwrap();
-            if slot.is_none() {
-                *slot = Some(Instant::now());
-            }
-            Ok(())
-        }
-    }
-
-    async fn wait_for_first_call(slot: &Arc<Mutex<Option<Instant>>>) -> Instant {
-        loop {
-            if let Some(at) = *slot.lock().unwrap() {
-                return at;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    /// Fails its first call with a throttle error, then succeeds; records call times.
-    struct ThrottledFirstPublisher {
-        calls: Arc<Mutex<Vec<Instant>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl ChainPublisher for ThrottledFirstPublisher {
-        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
-            let mut calls = self.calls.lock().unwrap();
-            let first = calls.is_empty();
-            calls.push(Instant::now());
-            drop(calls);
-            if first {
-                anyhow::bail!("HTTP 429 Too Many Requests");
-            }
             Ok(())
         }
     }
@@ -1375,7 +1308,7 @@ mod tests {
         });
 
         let action = publish_action_for(&mock_sign_request(sign_id, Chain::Midnight));
-        execute_publish(publisher, Some(backlog), action, SharedBackoff::new()).await;
+        execute_publish(publisher, Some(backlog), action).await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
@@ -1468,152 +1401,12 @@ mod tests {
         // Closing the channel will cause dispatch_loop to return
         drop(tx);
 
-        RpcExecutor::dispatch_loop(
-            &publishers,
-            &idle_gates(),
-            None,
-            None,
-            &no_consensus(),
-            &mut rx,
-        )
-        .await;
+        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
 
         // Give spawned tasks a chance to complete
         tokio::task::yield_now().await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn dispatch_parks_publish_on_its_own_chains_cooldown_gate() {
-        let canton_call = Arc::new(Mutex::new(None));
-        let midnight_call = Arc::new(Mutex::new(None));
-        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
-        publishers.insert(
-            Chain::Canton,
-            Arc::new(TimestampingPublisher {
-                first_call: canton_call.clone(),
-            }),
-        );
-        publishers.insert(
-            Chain::Midnight,
-            Arc::new(TimestampingPublisher {
-                first_call: midnight_call.clone(),
-            }),
-        );
-
-        // Canton's gate is already cooling down when the action arrives.
-        let gates: EnumMap<Chain, SharedBackoff> = EnumMap::from_fn(|chain| {
-            if chain == Chain::Canton {
-                let gate = SharedBackoff::with_cooldowns(
-                    Duration::from_millis(400),
-                    Duration::from_millis(800),
-                );
-                gate.extend_cooldown();
-                gate
-            } else {
-                SharedBackoff::new()
-            }
-        });
-
-        let (tx, mut rx) = mpsc::channel(16);
-        let sent_at = Instant::now();
-        // canton is sent first; midnight overtaking it below proves the gates are per-chain
-        tx.send(RpcAction::Publish(make_publish_action(
-            Chain::Canton,
-            SignKind::Sign,
-            SignId::new([0u8; 32]),
-        )))
-        .await
-        .unwrap();
-        tx.send(RpcAction::Publish(make_publish_action(
-            Chain::Midnight,
-            SignKind::Sign,
-            SignId::new([1u8; 32]),
-        )))
-        .await
-        .unwrap();
-        drop(tx);
-
-        RpcExecutor::dispatch_loop(&publishers, &gates, None, None, &no_consensus(), &mut rx).await;
-
-        let midnight_at =
-            tokio::time::timeout(Duration::from_secs(5), wait_for_first_call(&midnight_call))
-                .await
-                .expect("midnight publish fires");
-        let canton_at =
-            tokio::time::timeout(Duration::from_secs(5), wait_for_first_call(&canton_call))
-                .await
-                .expect("canton publish fires");
-
-        // the canton attempt waited out its chain's window
-        assert!(
-            canton_at.duration_since(sent_at) >= Duration::from_millis(300),
-            "canton attempt must wait out its chain's cooldown, took {:?}",
-            canton_at.duration_since(sent_at)
-        );
-        // midnight gate is idle, so its attempt should not be delayed by canton's cooldown
-        assert!(
-            midnight_at < canton_at,
-            "midnight attempt must not wait out canton's cooldown"
-        );
-    }
-
-    #[tokio::test]
-    async fn execute_publish_extends_the_chain_gate_on_throttled_errors() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let publisher = Arc::new(ThrottledFirstPublisher {
-            calls: calls.clone(),
-        });
-        let gate =
-            SharedBackoff::with_cooldowns(Duration::from_millis(300), Duration::from_millis(600));
-
-        // Throttled publish: the first attempt will receive a 429 and trigger the backoff window
-        let throttled = tokio::spawn(execute_publish(
-            publisher.clone(),
-            None,
-            publish_action_for(&mock_sign_request(SignId::new([2u8; 32]), Chain::Midnight)),
-            gate.clone(),
-        ));
-
-        let first_at = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(at) = calls.lock().unwrap().first().copied() {
-                    return at;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("first (throttled) call fires");
-
-        // Concurrent same-chain publish: its first attempt must wait for the backoff window opened by the 429 response
-        let concurrent = tokio::spawn(execute_publish(
-            publisher,
-            None,
-            publish_action_for(&mock_sign_request(SignId::new([3u8; 32]), Chain::Midnight)),
-            gate,
-        ));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if calls.lock().unwrap().len() >= 2 {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("concurrent publish fires");
-
-        let second_at = calls.lock().unwrap()[1];
-        assert!(
-            second_at.duration_since(first_at) >= Duration::from_millis(250),
-            "concurrent same-chain publish must wait out the window the 429 opened, took {:?}",
-            second_at.duration_since(first_at)
-        );
-
-        throttled.abort();
-        concurrent.abort();
     }
 
     #[tokio::test]
@@ -1642,15 +1435,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(
-            &publishers,
-            &idle_gates(),
-            None,
-            None,
-            &no_consensus(),
-            &mut rx,
-        )
-        .await;
+        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 0);
@@ -1690,15 +1475,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(
-            &publishers,
-            &idle_gates(),
-            None,
-            None,
-            &no_consensus(),
-            &mut rx,
-        )
-        .await;
+        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
 
         // Yield enough times to let both spawned tasks complete.
         // Each task calls publish_signature once and returns immediately.
@@ -1758,15 +1535,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(
-            &publishers,
-            &idle_gates(),
-            None,
-            None,
-            &no_consensus(),
-            &mut rx,
-        )
-        .await;
+        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);
@@ -1789,15 +1558,8 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let publishers = HashMap::new();
         let dispatch = tokio::spawn(async move {
-            RpcExecutor::dispatch_loop(
-                &publishers,
-                &idle_gates(),
-                None,
-                Some(near),
-                &no_consensus(),
-                &mut rx,
-            )
-            .await;
+            RpcExecutor::dispatch_loop(&publishers, None, Some(near), &no_consensus(), &mut rx)
+                .await;
         });
 
         tx.send(RpcAction::VoteCheckpoint {
@@ -1848,15 +1610,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(
-            &publishers,
-            &idle_gates(),
-            None,
-            None,
-            &no_consensus(),
-            &mut rx,
-        )
-        .await;
+        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
 
         // Let the single in-flight publish finish.
         tokio::task::yield_now().await;
