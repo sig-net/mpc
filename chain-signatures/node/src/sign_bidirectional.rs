@@ -128,9 +128,10 @@ pub trait SignBidirectionalEventExt {
     fn target_chain(&self) -> Result<Chain, ChainFromError>;
 
     /// The deterministic derivations respond processing runs for every bidirectional
-    /// request. Shared between admission (reject before the backlog) and the respond
-    /// path's failure handling (quarantine): both must agree on what "can never
-    /// advance" means.
+    /// request, and the schema checks output extraction applies whatever the target
+    /// chain returns. Shared between admission (reject before the backlog) and the
+    /// respond path's failure handling (quarantine): both must agree on what "can
+    /// never advance" means.
     fn validate(&self) -> anyhow::Result<()>;
 
     /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
@@ -193,9 +194,16 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             "unsupported target chain {target}"
         );
         self.epsilon().context("cannot derive epsilon")?;
-        validate_unsigned_transaction(&self.serialized_transaction)
+        let calldata = validate_unsigned_transaction(&self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
-        Ok(())
+        // Ethereum is the only target with an execution watcher, checked above.
+        mpc_chain_ethereum::validate_schemas(
+            calldata,
+            &self.output_deserialization_schema,
+            self.chain.respond_serialization_format(),
+            &self.respond_serialization_schema,
+        )
+        .context("unprocessable output schemas")
     }
 
     fn to_bidirectional_tx(
@@ -276,19 +284,26 @@ impl BidirectionalTxExt for BidirectionalTx {
 }
 
 /// Check that `unsigned_rlp` would survive [`sign_and_hash_transaction`], without a
-/// real signature. Admission calls this so a transaction that cannot be signed at
-/// respond time is rejected before it enters the backlog; running the actual
-/// function is what keeps admission structurally equal to respond processing. The
-/// placeholder's recovery id is 1, the strict case: the legacy `v` computation adds
-/// `y_parity`, so validating with 0 would admit the one chain id whose `v` only
-/// overflows when the real signature draws parity 1.
-fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<()> {
+/// real signature, and return its calldata. Admission calls this so a transaction
+/// that cannot be signed at respond time is rejected before it enters the backlog;
+/// running the actual function is what keeps admission structurally equal to
+/// respond processing. The placeholder's recovery id is 1, the strict case: the
+/// legacy `v` computation adds `y_parity`, so validating with 0 would admit the one
+/// chain id whose `v` only overflows when the real signature draws parity 1.
+fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
     let placeholder = Signature::new(
         k256::ProjectivePoint::GENERATOR.to_affine(),
         k256::Scalar::ONE,
         1,
     );
-    sign_and_hash_transaction(unsigned_rlp, placeholder).map(|_| ())
+    sign_and_hash_transaction(unsigned_rlp, placeholder)?;
+    let (fields, data_index) = if is_eip1559(unsigned_rlp) {
+        (Rlp::new(&unsigned_rlp[1..]), 7)
+    } else {
+        (Rlp::new(unsigned_rlp), 5)
+    };
+    // A list here would make Ethereum reject the transaction.
+    Ok(fields.at(data_index)?.data()?)
 }
 
 pub fn sign_and_hash_transaction(
@@ -306,19 +321,20 @@ pub fn sign_and_hash_transaction(
     if is_eip1559(unsigned_rlp) {
         sign_and_hash_eip1559_from_unsigned(unsigned_rlp, &r, &s, y_parity)
     } else {
-        // Extract chain_id from the unsigned RLP (it's the 7th field in legacy transactions)
-        // In legacy Ethereum transactions with EIP-155, there are 9 fields:
-        // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
-        // The chain_id is the 7th field (index 6, 0-based).
-        // We check for at least 9 fields to ensure chain_id is present.
-        let rlp = Rlp::new(unsigned_rlp);
-        let chain_id = if rlp.item_count().unwrap_or(0) >= 9 {
-            rlp.val_at::<u64>(6).ok()
-        } else {
-            None
-        };
+        let chain_id = transaction_chain_id(unsigned_rlp);
         sign_and_hash_legacy_from_unsigned(unsigned_rlp, chain_id, &r, &s, y_parity)
     }
+}
+
+/// The EIP-155 chain id of an unsigned EIP-1559 or legacy transaction.
+pub(crate) fn transaction_chain_id(unsigned_rlp: &[u8]) -> Option<u64> {
+    if let Some(body) = unsigned_rlp.strip_prefix(&[0x02]) {
+        return Rlp::new(body).val_at(0).ok();
+    }
+    // Legacy with EIP-155 has 9 fields:
+    // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
+    let rlp = Rlp::new(unsigned_rlp);
+    (rlp.item_count().ok()? >= 9).then(|| rlp.val_at(6).ok())?
 }
 
 fn is_eip1559(unsigned_rlp: &[u8]) -> bool {
@@ -540,6 +556,20 @@ mod tests {
         rlp.into_vec()
     }
 
+    #[test]
+    fn transaction_chain_id_reads_legacy_and_eip1559() {
+        assert_eq!(
+            super::transaction_chain_id(&legacy_tx(31_337)),
+            Some(31_337)
+        );
+        let eip1559 = TxEip1559 {
+            chain_id: 11_155_111,
+            ..Default::default()
+        };
+        let unsigned = eip1559.encoded_for_signing();
+        assert_eq!(super::transaction_chain_id(&unsigned), Some(11_155_111));
+    }
+
     /// The negated signature verifies too, so it has to name the transaction a
     /// chain will actually include.
     #[test]
@@ -607,7 +637,7 @@ mod tests {
             chain: Chain::Solana,
             chain_ctx: None,
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
         };
         assert!(event(Chain::Ethereum).validate().is_ok());
         assert!(event(Chain::Solana).validate().is_err());

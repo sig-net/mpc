@@ -1,11 +1,13 @@
 use alloy::dyn_abi::{DynSolType, DynSolValue};
 use alloy::primitives::Bytes;
 use borsh::BorshSerialize;
-use mpc_midnight_respond_codec::{executed_output, TracedReturn};
+use mpc_midnight_respond_codec::{executed_output, validate_output_schema, TracedReturn};
 use mpc_primitives::SerDeserFormat;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::Write;
+
+use crate::event_parsing::is_contract_call;
 
 // Use Abi as this is what we are using for ethereum
 const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
@@ -76,15 +78,13 @@ impl TransactionOutput {
     }
 
     pub fn from_call_result(schema_json: &[u8], call_result: &Bytes) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            call_result.len() <= MAX_RETURN_DATA_BYTES,
+            "return data of {} bytes exceeds {MAX_RETURN_DATA_BYTES}",
+            call_result.len()
+        );
         let schema = parse_output_schema_fields(schema_json)?;
-
-        let types: Vec<DynSolType> = schema
-            .iter()
-            .map(|f| f.typ.parse())
-            .collect::<Result<_, _>>()
-            .map_err(|e| anyhow::anyhow!("Failed to parse eth transaction types: {e:?}"))?;
-
-        let tuple_type = DynSolType::Tuple(types);
+        let tuple_type = parse_schema_type(&schema)?;
 
         // Return values form an ABI parameter sequence, without an outer tuple offset.
         let DynSolValue::Tuple(values) = tuple_type
@@ -182,26 +182,67 @@ pub fn build_serialized_output(
         .serialize(respond_serialization_format, respond_serialization_schema)
 }
 
+/// Refuse, before signing, what [`build_serialized_output`] refuses on the schemas
+/// alone, by running it on all-zero return data, which decodes for every output type.
+/// Refusals that depend on the real return data stay with extraction.
+pub fn validate_schemas(
+    calldata: &[u8],
+    output_deserialization_schema: &[u8],
+    respond_serialization_format: SerDeserFormat,
+    respond_serialization_schema: &[u8],
+) -> anyhow::Result<()> {
+    let is_contract_call = is_contract_call(&Bytes::copy_from_slice(calldata));
+    if respond_serialization_format == SerDeserFormat::Fab {
+        return validate_output_schema(is_contract_call, output_deserialization_schema);
+    }
+    let trace = if is_contract_call && !output_schema_is_empty(output_deserialization_schema)? {
+        let schema = parse_output_schema_fields(output_deserialization_schema)?;
+        let words = parse_schema_type(&schema)?.minimum_words();
+        let bytes = words
+            .checked_mul(32)
+            .ok_or_else(|| anyhow::anyhow!("output schema needs {words} words"))?;
+        TraceOutput::Output(vec![0; bytes].into())
+    } else {
+        TraceOutput::NoReturnData
+    };
+    build_serialized_output(
+        is_contract_call,
+        output_deserialization_schema,
+        trace,
+        respond_serialization_format,
+        respond_serialization_schema,
+    )
+    .map(drop)
+}
+
 fn output_schema_is_empty(schema_json: &[u8]) -> anyhow::Result<bool> {
     Ok(schema_json.is_empty() || parse_output_schema_fields(schema_json)?.is_empty())
 }
 
 fn encode_abi(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
+    let tuple_type = parse_schema_type(schema)?;
     let values = schema
         .iter()
         .map(|field| {
-            let value = data.fields.get(&field.name).ok_or_else(|| {
-                anyhow::anyhow!("Missing required field '{}' in output", field.name)
-            })?;
-            let ty: DynSolType = field.typ.parse()?;
-            if !ty.matches(value) {
-                anyhow::bail!("Value {value:?} doesn't match Solidity type {}", field.typ);
-            }
-            Ok(value.clone())
+            data.fields
+                .get(&field.name)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Missing required field '{}' in output", field.name))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     // One tuple, mirroring `abi_decode_params`, so dynamic-field offsets are shared.
-    Ok(DynSolValue::Tuple(values).abi_encode_params())
+    let values = DynSolValue::Tuple(values);
+    anyhow::ensure!(
+        tuple_type.matches(&values),
+        "output values don't match Solidity types {tuple_type}"
+    );
+    let encoded = values.abi_encode_params();
+    anyhow::ensure!(
+        encoded.len() <= MAX_RETURN_DATA_BYTES,
+        "output of {} bytes exceeds {MAX_RETURN_DATA_BYTES}",
+        encoded.len()
+    );
+    Ok(encoded)
 }
 
 fn encode_borsh(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
@@ -249,6 +290,63 @@ fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> 
         other => anyhow::bail!("unsupported DynSolValue variant: {other:?}"),
     }
     Ok(())
+}
+
+/// The longest return data decoded, and the longest ABI output encoded from it.
+const MAX_RETURN_DATA_BYTES: usize = 256 * 1024;
+
+/// Bounds a field type before it is parsed, and with it the parser's nesting.
+const MAX_TYPE_BYTES: usize = 32;
+
+const MAX_FIELDS: usize = 32;
+
+const MAX_FIXED_ARRAY_LEN: usize = 256;
+
+/// Parse a schema's field types into the tuple every decode and encode uses, accepting
+/// at most [`MAX_FIELDS`] fields, each an [`allowed`] type of at most [`MAX_TYPE_BYTES`].
+///
+/// Decoding pre-allocates at most [`MAX_FIELDS`] times [`MAX_FIXED_ARRAY_LEN`] values, and
+/// each dynamic field reads at most the return data, so decoding is linear in the return
+/// data. The largest schema, 32 fields of `uint256[256]`, fills [`MAX_RETURN_DATA_BYTES`].
+fn parse_schema_type(schema: &[AbiField]) -> anyhow::Result<DynSolType> {
+    anyhow::ensure!(
+        schema.len() <= MAX_FIELDS,
+        "schema has more than {MAX_FIELDS} fields"
+    );
+    let types = schema
+        .iter()
+        .map(|field| {
+            anyhow::ensure!(
+                field.typ.len() <= MAX_TYPE_BYTES,
+                "field '{}' has a type longer than {MAX_TYPE_BYTES} bytes",
+                field.name
+            );
+            let ty = field
+                .typ
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Failed to parse eth transaction types: {e:?}"))?;
+            anyhow::ensure!(
+                allowed(&ty),
+                "field '{}' has unsupported type {ty}",
+                field.name
+            );
+            Ok(ty)
+        })
+        .collect::<anyhow::Result<_>>()?;
+    Ok(DynSolType::Tuple(types))
+}
+
+/// A scalar, `bytes`, `string`, or an array of scalars at most [`MAX_FIXED_ARRAY_LEN`]
+/// long when fixed.
+fn allowed(ty: &DynSolType) -> bool {
+    use DynSolType::*;
+    let scalar = |ty: &DynSolType| matches!(ty, Bool | Address | Int(_) | Uint(_) | FixedBytes(_));
+    match ty {
+        Bytes | String => true,
+        Array(element) => scalar(element),
+        FixedArray(element, len) => scalar(element) && *len <= MAX_FIXED_ARRAY_LEN,
+        _ => scalar(ty),
+    }
 }
 
 fn parse_output_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
@@ -326,6 +424,144 @@ mod tests {
 
     fn abi_bool(value: bool) -> Bytes {
         abi_uint256(u64::from(value))
+    }
+
+    /// Admission refuses exactly the schemas extraction refuses on real return data.
+    #[test]
+    fn validate_schemas_agrees_with_extraction() {
+        use SerDeserFormat::{Abi, Borsh, Fab};
+        let call = [0xa9, 0x05, 0x9c, 0xbb];
+        let bool_schema: &[u8] = br#"[{"name":"ok","type":"bool"}]"#;
+        let string_schema: &[u8] = br#"[{"name":"s","type":"string"}]"#;
+        let uint64_schema: &[u8] = br#"[{"name":"n","type":"uint64"}]"#;
+        let function_schema: &[u8] = br#"[{"name":"f","type":"function"}]"#;
+        let string_output = Bytes::from(
+            DynSolValue::Tuple(vec![DynSolValue::String("hi".into())]).abi_encode_params(),
+        );
+        let traced = |data: Bytes| TraceOutput::Output(data);
+        // Calldata, output schema, format, respond schema, trace, accepted.
+        type Case<'a> = (
+            &'a [u8],
+            &'a [u8],
+            SerDeserFormat,
+            &'a [u8],
+            TraceOutput,
+            bool,
+        );
+        #[rustfmt::skip]
+        let cases: [Case; 15] = [
+            (&call, bool_schema, Abi, bool_schema, traced(abi_bool(true)), true),
+            (&call, string_schema, Abi, string_schema, traced(string_output), true),
+            (&call, b"{", Abi, bool_schema, traced(abi_bool(true)), false),
+            (&call, bool_schema, Abi, string_schema, traced(abi_bool(true)), false),
+            (&[], b"{", Abi, bool_schema, TraceOutput::NotTraced, true),
+            (&[], b"", Abi, UINT256_SCHEMA, TraceOutput::NotTraced, false),
+            (&call, uint64_schema, Borsh, uint64_schema, traced(abi_uint256(7)), true),
+            (&call, b"[]", Borsh, bool_schema, TraceOutput::NoReturnData, true),
+            (&call, function_schema, Borsh, function_schema, traced(abi_uint256(0)), false),
+            (&[], b"", Borsh, b"", TraceOutput::NotTraced, false),
+            (&call, bool_schema, Borsh, b"{", traced(abi_bool(true)), false),
+            (&call, bool_schema, Fab, b"", traced(abi_bool(true)), true),
+            (&[], b"", Fab, b"", TraceOutput::NotTraced, true),
+            (&call, string_schema, Fab, b"", traced(abi_bool(true)), false),
+            (&[], bool_schema, Fab, b"", TraceOutput::NotTraced, false),
+        ];
+        for (calldata, output, format, respond, trace, accepted) in cases {
+            let case = format!("{format:?} {calldata:?} {output:?} {respond:?}");
+            let is_contract_call = is_contract_call(&Bytes::copy_from_slice(calldata));
+            let extracted =
+                build_serialized_output(is_contract_call, output, trace, format, respond);
+            assert_eq!(extracted.is_ok(), accepted, "{case}: {extracted:?}");
+            let admitted = validate_schemas(calldata, output, format, respond);
+            assert_eq!(admitted.is_ok(), accepted, "{case}: {admitted:?}");
+        }
+    }
+
+    #[test]
+    fn parse_schema_type_accepts_only_allowed_types() {
+        let parse = |types: &[&str]| {
+            let schema: Vec<_> = types
+                .iter()
+                .map(|typ| AbiField {
+                    name: "a".into(),
+                    typ: typ.to_string(),
+                })
+                .collect();
+            parse_schema_type(&schema)
+        };
+        let max_fields = vec!["uint256[256]"; MAX_FIELDS];
+        let over_max_fields = vec!["bool"; MAX_FIELDS + 1];
+        // `uint8[0..01]`, padded with zeros to the given length.
+        let padded = |len: usize| format!("uint8[{}1]", "0".repeat(len - 8));
+        let (max_bytes, over_max_bytes) = (padded(MAX_TYPE_BYTES), padded(MAX_TYPE_BYTES + 1));
+        let cases: [(&[&str], bool); 24] = [
+            (&["uint256"], true),
+            (&["bool"], true),
+            (&["address"], true),
+            (&["bytes32"], true),
+            (&["bytes"], true),
+            (&["string"], true),
+            (&["uint8[256]"], true),
+            (&["uint256[]"], true),
+            (&max_fields, true),
+            (&[&max_bytes], true),
+            (&["uint8[257]"], false),
+            (&["uint256[][]"], false),
+            (&["uint256[2][]"], false),
+            (&["bytes[]"], false),
+            (&["string[]"], false),
+            (&["(uint256,bool)"], false),
+            (&["(bool)[]"], false),
+            (&["function"], false),
+            (&["bytes[2]"], false),
+            (&["string[2]"], false),
+            (&["uint8[2][2]"], false),
+            (&["(bool)[2]"], false),
+            (&[&over_max_bytes], false),
+            (&over_max_fields, false),
+        ];
+        for (types, accepted) in cases {
+            assert_eq!(parse(types).is_ok(), accepted, "{types:?}");
+        }
+    }
+
+    #[test]
+    fn from_call_result_refuses_oversized_return_data() {
+        let decode = |len: usize| {
+            TransactionOutput::from_call_result(UINT256_SCHEMA, &Bytes::from(vec![0; len]))
+        };
+        assert!(decode(MAX_RETURN_DATA_BYTES).is_ok());
+        let err = decode(MAX_RETURN_DATA_BYTES + 1).expect_err("return data over the cap");
+        assert!(format!("{err}").contains("return data of"), "{err}");
+
+        let largest = AbiField {
+            name: "a".into(),
+            typ: "uint256[256]".into(),
+        };
+        let largest_schema = serde_json::to_vec(&vec![largest; MAX_FIELDS]).unwrap();
+        let zeros = Bytes::from(vec![0; MAX_RETURN_DATA_BYTES]);
+        assert!(TransactionOutput::from_call_result(&largest_schema, &zeros).is_ok());
+    }
+
+    /// A respond schema naming one output field several times re-encodes it each time.
+    #[test]
+    fn encode_abi_refuses_output_over_the_cap() {
+        let output_schema: &[u8] = br#"[{"name":"b","type":"bytes"}]"#;
+        let blob = DynSolValue::Bytes(vec![1; 100 * 1024]);
+        let return_data = Bytes::from(DynSolValue::Tuple(vec![blob]).abi_encode_params());
+        let extract = |respond_schema: &[u8]| {
+            build_serialized_output(
+                true,
+                output_schema,
+                TraceOutput::Output(return_data.clone()),
+                SerDeserFormat::Abi,
+                respond_schema,
+            )
+        };
+        assert!(extract(output_schema).is_ok());
+        let tripled = br#"[{"name":"b","type":"bytes"},{"name":"b","type":"bytes"},{"name":"b","type":"bytes"}]"#;
+        let err = extract(tripled).expect_err("output over the cap");
+        assert!(format!("{err}").contains("output of"), "{err}");
     }
 
     #[test]
