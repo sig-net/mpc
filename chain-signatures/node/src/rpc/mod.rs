@@ -327,12 +327,21 @@ impl ContractStateWatcher {
             if let Some(governance) = self.governance() {
                 return governance;
             }
-            let _ = self.contract_state.changed().await;
+            self.changed().await;
+        }
+    }
+
+    /// Wait for the next contract state. If the update task holding the sender
+    /// is gone, no state will ever come: wait forever instead of returning at
+    /// once, which would turn every caller's loop into a busy loop.
+    async fn changed(&mut self) {
+        if self.contract_state.changed().await.is_err() {
+            std::future::pending::<()>().await;
         }
     }
 
     pub async fn next_state(&mut self) -> Option<ProtocolState> {
-        let _ = self.contract_state.changed().await;
+        self.changed().await;
         self.contract_state.borrow_and_update().clone()
     }
 
@@ -392,7 +401,7 @@ impl ContractStateWatcher {
             if let Some(pk) = self.public_key().await {
                 return pk;
             }
-            let _ = self.contract_state.changed().await;
+            self.changed().await;
         }
     }
 
@@ -415,7 +424,7 @@ impl ContractStateWatcher {
             if let Some((threshold, participant)) = self.info().await {
                 return (threshold, participant);
             }
-            let _ = self.contract_state.changed().await;
+            self.changed().await;
         }
     }
 
@@ -491,12 +500,23 @@ impl RpcExecutor {
 
         // Spin up update task for updating contract state, config and checkpoints
         let near = self.near.clone();
-        tokio::spawn(async move {
+        let updates = tokio::spawn(async move {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
                 update_contract_data(&near, &contract, &config, &checkpoints).await;
+            }
+        });
+        // Every contract watcher depends on that task, and it only ends by
+        // panicking: exit so the node restarts instead of running on a frozen
+        // contract view.
+        tokio::spawn(async move {
+            if let Err(err) = updates.await {
+                if err.is_panic() {
+                    tracing::error!(?err, "contract update task panicked, exiting");
+                    std::process::exit(1);
+                }
             }
         });
 
@@ -1214,6 +1234,21 @@ mod tests {
         // Channel closed.
         drop(tx);
         assert!(watcher.next_governance(next).await.is_none());
+    }
+
+    /// Once the update task is gone, waiting for a state must block, not
+    /// return at once and spin the caller's loop.
+    #[tokio::test]
+    async fn test_waits_block_after_updates_stop() {
+        let (mut watcher, tx) = ContractStateWatcher::new(&"node.testnet".parse().unwrap());
+        drop(tx);
+        let timeout = std::time::Duration::from_millis(100);
+        assert!(tokio::time::timeout(timeout, watcher.next_state())
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(timeout, watcher.wait_info())
+            .await
+            .is_err());
     }
 
     /// A publisher that counts the number of times it has been called.
