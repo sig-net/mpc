@@ -14,8 +14,8 @@ use crate::types::SignCommand;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    AttestationOutcomeKind, Chain, ExecutionOutcome, IndexedSignRequest, RequestKind,
-    RespondBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
+    AttestationOutcomeKind, BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest,
+    RequestKind, RespondBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
 };
 use mpc_utils::time::unix_elapsed_checked;
 
@@ -279,9 +279,8 @@ pub(crate) async fn process_respond_bidirectional_event(
         Err(entry) if source_chain == Chain::Midnight => {
             return settle_unobserved_midnight_response(entry, &event, ctx, root_pk).await;
         }
-        Err(_) => {
-            tracing::warn!(?sign_id, "bidirectional tx not found on completion");
-            return Ok(());
+        Err(entry) => {
+            return settle_unobserved_failed_response(entry, &event, ctx, root_pk).await;
         }
     };
 
@@ -341,14 +340,8 @@ async fn settle_unobserved_midnight_response(
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
     let sign_id = entry.sign_id();
-    let tx = match entry.status() {
-        SignStatus::Bidirectional(
-            BidirectionalProgress::Executing(tx) | BidirectionalProgress::Parked(tx),
-        ) => Arc::clone(tx),
-        _ => {
-            tracing::warn!(?sign_id, "bidirectional tx not found on completion");
-            return Ok(());
-        }
+    let Some(tx) = unobserved_tx(&entry) else {
+        return Ok(());
     };
     let published = event
         .attestation
@@ -383,6 +376,60 @@ async fn settle_unobserved_midnight_response(
     )
     .with_context(|| format!("respond event carried invalid signature for sign id {sign_id:?}"))?;
 
+    settle_unobserved(entry, &tx, ctx).await
+}
+
+/// Settle a request on another source chain whose outcome this node has not observed, if the
+/// response is Failed: its digest covers only the request id and a fixed output.
+async fn settle_unobserved_failed_response(
+    entry: SignEntry,
+    event: &RespondBidirectionalEvent,
+    ctx: &StreamContext,
+    root_pk: mpc_primitives::PublicKey,
+) -> anyhow::Result<()> {
+    let sign_id = entry.sign_id();
+    let Some(tx) = unobserved_tx(&entry) else {
+        return Ok(());
+    };
+    // The height is not part of these digests.
+    let request = CompletedTx::new(Arc::clone(&tx), None, None, 0)
+        .create_failed_sign_request()
+        .await?;
+    let verified = mpc_crypto::verify_signature(
+        root_pk,
+        request.args.epsilon,
+        request.args.payload,
+        &event.signature,
+    );
+    if verified.is_err() {
+        tracing::warn!(
+            ?sign_id,
+            "response is not a Failed one this node can check; keeping the request"
+        );
+        return Ok(());
+    }
+
+    settle_unobserved(entry, &tx, ctx).await
+}
+
+fn unobserved_tx(entry: &SignEntry) -> Option<Arc<BidirectionalTx>> {
+    match entry.status() {
+        SignStatus::Bidirectional(
+            BidirectionalProgress::Executing(tx) | BidirectionalProgress::Parked(tx),
+        ) => Some(Arc::clone(tx)),
+        _ => {
+            tracing::warn!(sign_id = ?entry.sign_id(), "bidirectional tx not found on completion");
+            None
+        }
+    }
+}
+
+async fn settle_unobserved(
+    entry: SignEntry,
+    tx: &BidirectionalTx,
+    ctx: &StreamContext,
+) -> anyhow::Result<()> {
+    let sign_id = entry.sign_id();
     // An unviable transaction is never mined, so no execution event would retire its watch.
     ctx.backlog.unwatch_execution(tx.target_chain, &tx.id).await;
     entry.complete().await;
