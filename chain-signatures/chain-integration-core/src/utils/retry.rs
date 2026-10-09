@@ -73,6 +73,13 @@ impl SharedBackoff {
         self.inner.penalty_level.store(0, Ordering::Relaxed);
     }
 
+    /// Extends the cooldown if `err` looks like provider throttling (429/402).
+    /// Returns the applied cooldown, or `None` when the error is not a
+    /// throttle
+    pub fn engage_if_throttled(&self, err: &anyhow::Error) -> Option<Duration> {
+        is_provider_throttled(err).then(|| self.extend_cooldown())
+    }
+
     /// Sleeps until the global cooldown window has elapsed, plus random jitter
     /// so callers parked on the same window don't all fire at once.
     pub async fn wait(&self) {
@@ -111,7 +118,7 @@ fn now_ms() -> u64 {
 
 /// Returns true if the error looks like the provider throttling us: HTTP 429
 /// (rate limited) or 402 (payment required, e.g. exhausted credits).
-pub fn is_provider_throttled(e: &anyhow::Error) -> bool {
+fn is_provider_throttled(e: &anyhow::Error) -> bool {
     let s = e.to_string();
     contains_status_code(&s, "429") || contains_status_code(&s, "402")
 }
@@ -326,8 +333,7 @@ macro_rules! retry_rpc_gated {
                     Ok(res)
                 }
                 Ok(Err(e)) => {
-                    if $crate::utils::retry::is_provider_throttled(&e) {
-                        let cooldown = shared.extend_cooldown();
+                    if let Some(cooldown) = shared.engage_if_throttled(&e) {
                         tracing::warn!(
                             operation = $op_name,
                             error = %e,
@@ -370,8 +376,7 @@ macro_rules! retry_rpc_gated {
                     Ok(res)
                 }
                 Ok(Err(e)) => {
-                    if $crate::utils::retry::is_provider_throttled(&e) {
-                        let cooldown = shared.extend_cooldown();
+                    if let Some(cooldown) = shared.engage_if_throttled(&e) {
                         tracing::warn!(error = %e, ?cooldown, "provider throttled (429/402), engaging global cooldown");
                     }
                     Err(e)
