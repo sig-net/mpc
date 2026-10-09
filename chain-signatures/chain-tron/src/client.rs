@@ -9,6 +9,7 @@ use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig, Sha
 
 use crate::address::{parse_hex, TronAddress};
 use crate::config::TronConfig;
+use crate::encoding::decode_bytes;
 use crate::types::{AccountResources, BroadcastOutcome, NowBlock, TronLog, TronReceipt};
 
 /// Tron HTTP client for interacting with the Tron blockchain.
@@ -125,7 +126,7 @@ impl TronHttp {
                 self.post_json(
                     "wallet/getaccountresource",
                     &serde_json::json!({
-                        "value": hex::encode(address.as_bytes()),
+                        "value": address.to_hex(),
                         "visible": false
                     }),
                 )
@@ -177,7 +178,7 @@ impl TronHttp {
 
 /// Tron error/reason strings (`message`, `resMessage`) are hex-encoded ASCII.
 fn decode_hex_ascii(s: &str) -> String {
-    hex::decode(s)
+    decode_bytes(s)
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_else(|| s.to_string())
@@ -294,9 +295,11 @@ where
                 .map(|t| t.parse::<B256>().with_context(|| format!("log topic {t}")))
                 .collect::<anyhow::Result<Vec<_>>>()
                 .map_err(serde::de::Error::custom)?;
-            let data = hex::decode(raw.data.strip_prefix("0x").unwrap_or(&raw.data))
+
+            let data = decode_bytes(&raw.data)
                 .context("decoding log data")
                 .map_err(serde::de::Error::custom)?;
+
             Log::new(
                 parse_hex(&raw.address).map_err(serde::de::Error::custom)?,
                 topics,

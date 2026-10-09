@@ -4,6 +4,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::encoding::decode_bytes;
 use alloy::primitives::Address;
 use anyhow::{anyhow, Context};
 use sha2::{Digest, Sha256};
@@ -25,6 +26,11 @@ impl TronAddress {
 
     pub fn to_evm(self) -> Address {
         Address::from_slice(&self.0[1..])
+    }
+
+    /// 21-byte `0x41`-prefixed hex form used in request bodies (`visible: false`).
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.as_bytes())
     }
 
     pub fn as_bytes(&self) -> &[u8; 21] {
@@ -95,8 +101,7 @@ pub enum ParseTronAddressError {
 /// Parses a hex address as emitted in Tron JSON: either the plain 20-byte
 /// EVM form or the 21-byte `0x41`-prefixed wallet form.
 pub fn parse_hex(s: &str) -> anyhow::Result<Address> {
-    let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
-        .with_context(|| format!("decoding hex address {s}"))?;
+    let bytes = decode_bytes(s).with_context(|| format!("decoding hex address {s}"))?;
     match bytes.len() {
         20 => Ok(Address::from_slice(&bytes)),
         21 if bytes[0] == TRON_ADDRESS_PREFIX => Ok(Address::from_slice(&bytes[1..])),
