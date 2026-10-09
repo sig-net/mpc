@@ -505,12 +505,9 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         HashSet<BidirectionalTxId>,
     ) {
         let mut events = Vec::new();
-        // Midnight must agree on replacement height despite receipt RPC failures.
-        // Its validated signed hash in this finalized block proves consumption.
-        // Other source chains retain their receipt-based replacement policy.
+        // A watched hash in this final block proves its nonce is taken, receipt or not.
         let mut consumed_slots: HashMap<_, _> = mined
             .iter()
-            .filter(|(_, (_, tx))| tx.source_chain == Chain::Midnight)
             .map(|(_, (_, tx))| ((Address::from(tx.from_address), tx.nonce), Arc::clone(tx)))
             .collect();
         let mut failed = HashSet::new();
@@ -624,10 +621,10 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         gated: Vec<WatcherEntry>,
         block_number: u64,
     ) -> (
-        Vec<SignId>,
         Vec<ChainEvent>,
         HashSet<BidirectionalTxId>,
         HashMap<(Address, u64), (Arc<BidirectionalTx>, u64)>,
+        Vec<SignId>,
     ) {
         let unique_senders: HashSet<_> = gated
             .iter()
@@ -1911,8 +1908,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn midnight_replacement_does_not_depend_on_receipt_rpc_availability() {
-        for status in [200, 500] {
+    async fn replacement_does_not_depend_on_receipt_rpc_availability() {
+        for (source_chain, status) in [
+            (Chain::Midnight, 200),
+            (Chain::Midnight, 500),
+            (Chain::Solana, 200),
+            (Chain::Solana, 500),
+        ] {
             let mut server = Server::new_async().await;
             let from = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
             let consuming_hash = alloy::primitives::B256::repeat_byte(0xaa);
@@ -1938,7 +1940,7 @@ mod tests {
             for hash in [consuming_hash, displaced_hash] {
                 let mut tx = test_watcher_tx(hash, from, 7);
                 let tx_fields = Arc::make_mut(&mut tx);
-                tx_fields.source_chain = Chain::Midnight;
+                tx_fields.source_chain = source_chain;
                 tx_fields.serialized_transaction = hash.to_vec();
                 harness
                     .state_manager
@@ -1949,10 +1951,16 @@ mod tests {
             block.header.number = 5;
             block.transactions = BlockTransactions::Hashes(vec![consuming_hash]);
             let events = harness.watcher().collect(&block).await.unwrap();
-            assert_eq!(events.len(), 1, "receipt HTTP {status}");
+            assert_eq!(events.len(), 1, "{source_chain} receipt HTTP {status}");
+            let expected = if source_chain == Chain::Midnight {
+                ExecutionOutcome::Unviable
+            } else {
+                ExecutionOutcome::Failed
+            };
             assert!(matches!(&events[0], ChainEvent::ExecutionConfirmed {
-                tx_id, block_height: 5, result: ExecutionOutcome::Unviable, ..
-            } if tx_id.0 == displaced_hash.0));
+                tx_id, block_height: 5, result, ..
+            } if tx_id.0 == displaced_hash.0
+                && std::mem::discriminant(result) == std::mem::discriminant(&expected)));
             receipt.assert_async().await;
             nonce.assert_async().await;
         }
