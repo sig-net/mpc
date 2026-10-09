@@ -1672,6 +1672,7 @@ mod tests {
                     first_call: canton_call.clone(),
                 },
                 canton_gate,
+                "canton publish",
             )),
         );
         publishers.insert(
@@ -1681,6 +1682,7 @@ mod tests {
                     first_call: midnight_call.clone(),
                 },
                 SharedBackoff::new(),
+                "midnight publish",
             )),
         );
 
@@ -1744,6 +1746,7 @@ mod tests {
                 calls: calls.clone(),
             },
             gate,
+            "midnight publish",
         ));
 
         // first publish hits the 429: the gated publisher engages the window

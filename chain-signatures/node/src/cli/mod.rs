@@ -518,13 +518,15 @@ impl ChainStack {
     }
 
     /// Wraps an internally-ungated publisher in [`GatedPublisher`] bound to
-    /// this stack's gate for `chain` (Midnight and Hydration are externally gated)
+    /// this stack's gate for `chain` (Midnight and Hydration are externally
+    /// gated). `operation` labels the adapter's throttle warn per chain.
     fn gated_publisher<P: ChainPublisher>(
         &self,
         chain: Chain,
+        operation: &'static str,
         publisher: P,
     ) -> Arc<dyn ChainPublisher> {
-        Arc::new(GatedPublisher::new(publisher, self.gate(chain)))
+        Arc::new(GatedPublisher::new(publisher, self.gate(chain), operation))
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
@@ -558,7 +560,7 @@ impl ChainStack {
                 Ok(client) => {
                     publishers.insert(
                         Chain::Hydration,
-                        self.gated_publisher(Chain::Hydration, client),
+                        self.gated_publisher(Chain::Hydration, "hydration publish", client),
                     );
                 }
                 Err(e) => tracing::error!(%e, "failed to create hydration client"),
@@ -579,7 +581,7 @@ impl ChainStack {
                 Ok(client) => {
                     publishers.insert(
                         Chain::Midnight,
-                        self.gated_publisher(Chain::Midnight, client),
+                        self.gated_publisher(Chain::Midnight, "midnight publish", client),
                     );
                 }
                 Err(e) => tracing::error!(%e, "failed to create midnight publisher"),

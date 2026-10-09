@@ -21,23 +21,35 @@ pub trait ChainPublisher: Send + Sync + 'static {
 /// [`ChainPublisher`] adapter that owns a chain's shared cooldown gate for
 /// publishers without internal gating: each attempt waits out the gate, a
 /// throttled error (429/402) extends the window for everyone sharing it, and a
-/// successful publish resets the penalty. Single-attempt like the inner
-/// publisher — the caller's retry loop still owns retries.
+/// successful publish resets the penalty. `operation` labels the throttle
+/// warn (e.g. "hydration publish") so shared-gate events stay attributable
+/// per chain. Single-attempt like the inner publisher — the caller's retry
+/// loop still owns retries.
 pub struct GatedPublisher<P> {
     inner: P,
     gate: SharedBackoff,
+    operation: &'static str,
 }
 
 impl<P: ChainPublisher> GatedPublisher<P> {
-    pub fn new(inner: P, gate: SharedBackoff) -> Self {
-        Self { inner, gate }
+    pub fn new(inner: P, gate: SharedBackoff, operation: &'static str) -> Self {
+        Self {
+            inner,
+            gate,
+            operation,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl<P: ChainPublisher> ChainPublisher for GatedPublisher<P> {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        run_gated(&self.gate, "publish", self.inner.publish_signature(action)).await
+        run_gated(
+            &self.gate,
+            self.operation,
+            self.inner.publish_signature(action),
+        )
+        .await
     }
 }
 
@@ -128,7 +140,7 @@ mod tests {
     async fn gated_publisher_waits_out_an_engaged_gate() {
         let gate = gate_with(300);
         gate.extend_cooldown();
-        let gated = GatedPublisher::new(OkPublisher, gate);
+        let gated = GatedPublisher::new(OkPublisher, gate, "publish");
 
         let start = std::time::Instant::now();
         gated.publish_signature(&action()).await.unwrap();
@@ -144,7 +156,7 @@ mod tests {
     #[tokio::test]
     async fn gated_publisher_extends_the_gate_on_throttled_errors() {
         let gate = gate_with(300);
-        let gated = GatedPublisher::new(ThrottledPublisher, gate.clone());
+        let gated = GatedPublisher::new(ThrottledPublisher, gate.clone(), "publish");
 
         assert!(gated.publish_signature(&action()).await.is_err());
 
@@ -162,7 +174,7 @@ mod tests {
     #[tokio::test]
     async fn gated_publisher_does_not_engage_the_gate_on_other_errors() {
         let gate = gate_with(300);
-        let gated = GatedPublisher::new(ServerErrorPublisher, gate.clone());
+        let gated = GatedPublisher::new(ServerErrorPublisher, gate.clone(), "publish");
 
         assert!(gated.publish_signature(&action()).await.is_err());
 
@@ -180,7 +192,7 @@ mod tests {
         let escalated = gate.extend_cooldown();
         assert!(escalated > base, "second engage must escalate");
 
-        let gated = GatedPublisher::new(OkPublisher, gate.clone());
+        let gated = GatedPublisher::new(OkPublisher, gate.clone(), "publish");
         gated.publish_signature(&action()).await.unwrap();
 
         // a successful publish drops the penalty back to the base cooldown
