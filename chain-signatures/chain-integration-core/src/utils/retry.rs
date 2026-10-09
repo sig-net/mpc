@@ -360,26 +360,12 @@ macro_rules! retry_rpc_gated {
         let shared = &$shared;
         let mut attempt_counter: u32 = 0;
         let op = || async {
-            shared.wait().await;
-            let fut = async { $($code)* };
-            match tokio::time::timeout($timeout, fut).await {
-                Ok(Ok(res)) => {
-                    shared.report_success();
-                    Ok(res)
-                }
-                Ok(Err(e)) => {
-                    if let Some(cooldown) = shared.engage_if_throttled(&e) {
-                        tracing::warn!(
-                            operation = $op_name,
-                            error = %e,
-                            ?cooldown,
-                            "provider throttled (429/402), engaging global cooldown"
-                        );
-                    }
-                    Err(e)
-                }
-                Err(_) => Err(anyhow::anyhow!("Operation timed out after {:?}", $timeout)),
-            }
+            $crate::utils::retry::run_gated(shared, $op_name, async {
+                tokio::time::timeout($timeout, async { $($code)* })
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Operation timed out after {:?}", $timeout))?
+            })
+            .await
         };
         use $crate::backon::Retryable as _;
         op.retry(&$strategy.build())
@@ -402,22 +388,14 @@ macro_rules! retry_rpc_gated {
     ($timeout:expr, $strategy:expr, $shared:expr, |$attempt:ident, $err:ident, $sleep:ident| $notify:block, { $($code:tt)* }) => {{
         let shared = &$shared;
         let mut attempt_counter: u32 = 0;
+        // TODO: "rpc" is temporary, replace it with the operation literal as a required parameter
         let op = || async {
-            shared.wait().await;
-            let fut = async { $($code)* };
-            match tokio::time::timeout($timeout, fut).await {
-                Ok(Ok(res)) => {
-                    shared.report_success();
-                    Ok(res)
-                }
-                Ok(Err(e)) => {
-                    if let Some(cooldown) = shared.engage_if_throttled(&e) {
-                        tracing::warn!(error = %e, ?cooldown, "provider throttled (429/402), engaging global cooldown");
-                    }
-                    Err(e)
-                }
-                Err(_) => Err(anyhow::anyhow!("Operation timed out after {:?}", $timeout)),
-            }
+            $crate::utils::retry::run_gated(shared, "rpc", async {
+                tokio::time::timeout($timeout, async { $($code)* })
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Operation timed out after {:?}", $timeout))?
+            })
+            .await
         };
         use $crate::backon::Retryable as _;
         op.retry(&$strategy.build())
