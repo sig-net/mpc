@@ -81,7 +81,13 @@ impl SolanaSignEvent {
                 }
 
                 let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path)
-                    .inspect_err(|e| tracing::warn!(?sign_id, %e))
+                    .inspect_err(|_| {
+                        tracing::info!(
+                            ?sign_id,
+                            key_version = ev.key_version,
+                            "unsupported key version; dropping sign request"
+                        )
+                    })
                     .ok()?;
                 Some(IndexedSignRequest::sign(
                     sign_id,
@@ -98,7 +104,13 @@ impl SolanaSignEvent {
             }
             SolanaSignEvent::SignBidirectional(ev) => {
                 let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path)
-                    .inspect_err(|e| tracing::warn!(?sign_id, %e))
+                    .inspect_err(|_| {
+                        tracing::info!(
+                            ?sign_id,
+                            key_version = ev.key_version,
+                            "unsupported key version; dropping sign request"
+                        )
+                    })
                     .ok()?;
                 let unsigned_tx_hash = hash_payload(&ev.serialized_transaction);
                 let payload = Scalar::from_bytes(unsigned_tx_hash)?;

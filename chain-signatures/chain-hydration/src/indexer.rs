@@ -80,7 +80,12 @@ impl HydrationSignatureRequestedEvent {
             &self.sender_string(),
             &self.path,
         )
-        .inspect_err(|e| tracing::warn!(%e))
+        .inspect_err(|_| {
+            tracing::info!(
+                key_version = self.key_version,
+                "unsupported key version; dropping sign request"
+            )
+        })
         .ok()?;
 
         let sign_id = SignId::new(self.generate_request_id());
@@ -185,7 +190,12 @@ impl HydrationSignBidirectionalRequestedEvent {
             &self.sender_string(),
             &self.path,
         )
-        .inspect_err(|e| tracing::warn!(%e))
+        .inspect_err(|_| {
+            tracing::info!(
+                key_version = self.key_version,
+                "unsupported key version; dropping sign request"
+            )
+        })
         .ok()?;
 
         let sign_id = SignId::new(request_id);

@@ -118,7 +118,12 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
         format!("0x{}", event.requester.encode_hex()).as_str(),
         &event.path,
     )
-    .inspect_err(|e| tracing::warn!(%e))
+    .inspect_err(|_| {
+        tracing::info!(
+            key_version = event.key_version,
+            "unsupported key version; dropping sign request"
+        )
+    })
     .ok()?;
 
     // Use transaction hash as entropy
