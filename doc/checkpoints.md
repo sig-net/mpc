@@ -224,7 +224,8 @@ What the node already produced is in its node-local records, so it repeats nothi
 
 That document deletes a node-local record when the node processes the `Response` for its request.
 A node that rebases forward skips those Responses, so a caught-up node also deletes the records of requests that are not in its backlog.
-A node that is behind does not, since it may hold a record for a request above its processed height, and it must not take a stale reading of the head for caught up, since deletion cannot be undone.
+A node that is behind does not, since it may hold a record for a request above its processed height.
+If the node takes a stale head for the real head, it deletes the record of a request it has not reached yet, and later signs or sends for that request a second time, which bidirectional_calls.md makes harmless (C3a, replay protection).
 
 ### Rebase and re-index
 
@@ -322,7 +323,7 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
   At t = n - f one correct node down while the others index `MAX_PENDING` boundaries past the base is enough.
   The nodes that are up run to the cap and wait for a settlement.
 * Signing stalls while more than n - t nodes are faulty or not acting: catching up, at the cap, or missing a settled checkpoint.
-* A restart re-indexes from the base, up to `MAX_PENDING` intervals without acting, unless a newer settled checkpoint is fetched.
+* A restart re-indexes from the base without acting until the first poll, which finds the newest settled checkpoint in `pending` and jumps to it; the blocks above that are replayed.
 * A fetch slower than the time between two settlements never completes.
   Holders drop a checkpoint when they rebase onto the next one.
 * Nothing bounds the size of a checkpoint.
@@ -359,7 +360,7 @@ Each closes one of the limits above, at a price.
 * Resume after a restart from the checkpoint created last, instead of re-indexing from the base.
   This needs the creation order across heights, for instance a counter stored with each checkpoint.
   On start the node sets its backlog and processed height to the checkpoint with the highest counter and casts its vote for it again, since a vote in flight at the crash is lost.
-  A restart then replays at most one interval instead of up to `MAX_PENDING`.
+  A restart then replays at most one interval instead of everything above the newest settled checkpoint.
 * Settle at f+1 instead of t, the smallest threshold with a correct voter behind every settled digest.
   Settlement then needs the fewest nodes up and agreeing: n - 2f - 1 correct nodes may be down.
 * One vote per node and height in the contract, the newest replacing an older one.
