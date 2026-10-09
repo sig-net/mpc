@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff},
+    utils::retry::{retry_rpc_gated, run_gated, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::SignKind;
@@ -103,7 +103,11 @@ pub struct SolanaClient {
 
 impl SolanaClient {
     // TODO: reduce duplication between from_config and for_indexer
-    pub fn from_config(sol: &SolConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
+    pub fn from_config(
+        sol: &SolConfig,
+        telemetry: Arc<dyn PublisherTelemetry>,
+        shared_backoff: SharedBackoff,
+    ) -> Self {
         let keypair = Keypair::from_base58_string(&sol.account_sk);
         let payer = Arc::new(keypair);
         // Empty ws slot: nothing subscribes (the indexer polls finalized blocks).
@@ -120,7 +124,7 @@ impl SolanaClient {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
             catchup_retry: catchup_retry_strategy(),
-            shared_backoff: SharedBackoff::new(),
+            shared_backoff,
             rpc_client,
             rpc_http_url: sol.rpc_http_url.clone(),
             http_client: reqwest::Client::new(),
@@ -134,6 +138,7 @@ impl SolanaClient {
         rpc_http_url: String,
         program_address: Pubkey,
         telemetry: Arc<dyn PublisherTelemetry>,
+        shared_backoff: SharedBackoff,
     ) -> Self {
         let keypair = Keypair::new(); // Dummy keypair for indexer mode
         let payer = Arc::new(keypair);
@@ -149,7 +154,7 @@ impl SolanaClient {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
             catchup_retry: catchup_retry_strategy(),
-            shared_backoff: SharedBackoff::new(),
+            shared_backoff,
             rpc_client,
             rpc_http_url,
             http_client: reqwest::Client::new(),
@@ -458,9 +463,8 @@ impl SolanaClient {
     }
 }
 
-#[async_trait::async_trait]
-impl ChainPublisher for SolanaClient {
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+impl SolanaClient {
+    async fn send_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let timestamp = action.timestamp;
         let mpc_sig = &action.signature;
         let program = self.client.program(self.program_id)?;
@@ -555,6 +559,21 @@ impl ChainPublisher for SolanaClient {
     }
 }
 
+#[async_trait::async_trait]
+impl ChainPublisher for SolanaClient {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        // single attempt under the shared gate — the caller's retry loop owns
+        // retries; a throttle response opens the window for the indexer and
+        // sibling publishers sharing this gate
+        run_gated(
+            &self.shared_backoff,
+            "solana publish",
+            self.send_signature(action),
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,6 +588,7 @@ mod tests {
             url.to_string(),
             Pubkey::new_unique(),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .with_fast_retry()
     }
