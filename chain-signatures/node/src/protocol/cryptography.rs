@@ -184,6 +184,13 @@ impl CryptographicProtocol for ResharingState {
                     return NodeState::Resharing(self);
                 }
 
+                // A peer that saw the resharing after us dropped our earlier
+                // Ready. It knows us now, so send ours once more before we stop.
+                state.broadcast_interval = Instant::now() - RESHARING_READY_BROADCAST_INTERVAL;
+                self.ready_nonce = state
+                    .broadcast_ready(self.me, ctx, &self.contract, self.ready_nonce)
+                    .await;
+
                 let protocol =
                     match ReshareProtocol::new(self.local_private_share, self.me, &self.contract) {
                         Ok(protocol) => protocol,
