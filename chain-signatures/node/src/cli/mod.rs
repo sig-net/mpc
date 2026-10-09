@@ -1426,7 +1426,7 @@ mod tests {
 
     fn sol_config_with_bogus_rpc() -> SolConfig {
         SolConfig {
-            account_sk: solana_sdk::signer::keypair::Keypair::new().to_base58_string(),
+            account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
             rpc_http_url: "http://127.0.0.1:1".into(),
             program_address: mpc_chain_solana::Pubkey::new_unique().to_string(),
             indexer: Default::default(),
