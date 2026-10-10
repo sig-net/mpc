@@ -92,8 +92,8 @@ struct EvmType2Capacities {
 
 /// Recover the sizing parameters the caller's contract was compiled with
 /// (`#maxCalldataWords`, `#maxAccessListEntries`, `#maxStorageKeysPerEntry`) from the
-/// declared widths alone. The tail anchors from the end: calldata words, storage keys
-/// and `execution_dest` are all `Bytes<32>`, so no forward scan can find the boundaries.
+/// declared widths alone. The tail anchors from the end: calldata words and storage
+/// keys are both `Bytes<32>`, so no forward scan can find the boundaries.
 fn evm_type2_capacities(widths: &[u32]) -> anyhow::Result<EvmType2Capacities> {
     anyhow::ensure!(
         widths.len() >= EVM_TYPE2_FIXED_ATOMS,
@@ -314,7 +314,7 @@ pub(crate) fn decode_bidirectional_response_payload(
     let request_id = emitted[..32].try_into().expect("fixed request id width");
     let response = (|| {
         anyhow::ensure!(
-            emitted[178..].iter().all(|byte| *byte == 0),
+            emitted[210..].iter().all(|byte| *byte == 0),
             "respondBidirectional padding must be zero"
         );
         let attestation = mpc_primitives::PublishedAttestation {
@@ -327,7 +327,8 @@ pub(crate) fn decode_bidirectional_response_payload(
                     .try_into()
                     .expect("fixed output length width"),
             ),
-            digest: emitted[49..81].try_into().expect("fixed digest width"),
+            output_hash: emitted[49..81].try_into().expect("fixed output hash width"),
+            digest: emitted[81..113].try_into().expect("fixed digest width"),
         };
         anyhow::ensure!(
             attestation.outcome_kind == mpc_primitives::AttestationOutcomeKind::Executed
@@ -335,10 +336,10 @@ pub(crate) fn decode_bidirectional_response_payload(
             "failed and unviable responses require zero output length"
         );
         let signature = decode_response_signature(
-            emitted[81..113].try_into().expect("fixed x width"),
-            emitted[113..145].try_into().expect("fixed y width"),
-            emitted[145..177].try_into().expect("fixed scalar width"),
-            emitted[177],
+            emitted[113..145].try_into().expect("fixed x width"),
+            emitted[145..177].try_into().expect("fixed y width"),
+            emitted[177..209].try_into().expect("fixed scalar width"),
+            emitted[209],
         )?;
         Ok((attestation, signature))
     })();
@@ -502,7 +503,7 @@ fn decode_sign_bidirectional(
         // Width-checked only: `ensure_evm_type2_param_type` already pinned the value.
         tx_param_type: uint::<u8>(cursor, 1, "tx_param_type")?,
         tx_params: decode_tx_params(cursor, capacities)?,
-        execution_dest: bytes_n::<32>(cursor, "execution_dest")?,
+        execution_dest: bytes_n::<64>(cursor, "execution_dest")?,
         signature_dest: bounded_enum(cursor, "signature_dest")?,
         params: bytes_n::<64>(cursor, "params")?,
         output_deserialization_schema: bytes_dyn(cursor, "output_deserialization_schema")?,
@@ -840,6 +841,10 @@ mod tests {
             event["serializedOutputLength"].as_str().unwrap()
         );
         assert_eq!(
+            attestation.output_hash,
+            hex_32(event["outputHash"].as_str().unwrap())
+        );
+        assert_eq!(
             attestation.digest,
             hex_32(event["digest"].as_str().unwrap())
         );
@@ -856,7 +861,7 @@ mod tests {
         // The emitter's metadata is only decoded here. A changed digest remains a
         // claim for the node's stored-digest verification, not a decoder failure.
         let mut changed_digest = payload;
-        changed_digest[49] ^= 1;
+        changed_digest[81] ^= 1;
         assert_ne!(
             decode_bidirectional_response_payload(&changed_digest)
                 .response
@@ -879,6 +884,7 @@ mod tests {
                 block_height: u64::MAX,
                 outcome_kind: AttestationOutcomeKind::Executed,
                 serialized_output_length: 0,
+                output_hash: [0x40; 32],
                 digest: [0x41; 32],
             },
             (*point.x().unwrap()).into(),
@@ -895,10 +901,10 @@ mod tests {
         }
         for (name, start, end, byte) in [
             ("output kind", 40, 41, 3),
-            ("point", 81, 145, 0xff),
-            ("scalar", 145, 177, 0xff),
-            ("recovery id", 177, 178, 2),
-            ("first padding byte", 178, 179, 1),
+            ("point", 113, 177, 0xff),
+            ("scalar", 177, 209, 0xff),
+            ("recovery id", 209, 210, 2),
+            ("first padding byte", 210, 211, 1),
             ("last padding byte", 255, 256, 1),
         ] {
             let mut invalid = payload;

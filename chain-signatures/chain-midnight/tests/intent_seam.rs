@@ -158,6 +158,7 @@ async fn the_rust_client_and_the_ts_builder_agree_on_a_bidirectional_intent() {
             .as_str()
             .unwrap()
             .to_string(),
+        output_hash: event["outputHash"].as_str().unwrap().to_string(),
         digest: event["digest"].as_str().unwrap().to_string(),
     });
     let bytes = builder.build(&request).await.expect("the builder answers");

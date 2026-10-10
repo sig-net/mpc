@@ -32,6 +32,7 @@ pub fn validate_attestation_response(
         block_height: metadata.block_height,
         outcome_kind: metadata.outcome_kind,
         serialized_output_length: response.output.len() as u64,
+        output_hash: mpc_compact_hashing::compute_attested_output_hash(&response.output),
         digest,
     })
 }
