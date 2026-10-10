@@ -37,7 +37,9 @@ use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
-use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher};
+use mpc_chain_midnight::{
+    MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher, ResponseAwaiter,
+};
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_chain_tron::TronConfig;
@@ -301,6 +303,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &mpc_contract_id,
                 signer,
                 &stack,
+                backlog.clone(),
             )
             .await;
 
@@ -520,7 +523,12 @@ impl ChainStack {
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
     /// each other chain is added only when configured. A client that fails to build is
     /// logged and skipped rather than aborting startup.
-    async fn publishers(&self, near: NearClient) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
+    /// `backlog` lets publishers that queue (Midnight) re-check a response before spending on it.
+    async fn publishers(
+        &self,
+        near: NearClient,
+        backlog: Option<Backlog>,
+    ) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
@@ -558,7 +566,10 @@ impl ChainStack {
         }
         if let Some(midnight) = &self.configs.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
-            match RecoveringMidnightPublisher::start(midnight, telemetry) {
+            let awaiter = backlog.map(|backlog| {
+                Arc::new(rpc::BacklogAwaiter::new(backlog)) as Arc<dyn ResponseAwaiter>
+            });
+            match RecoveringMidnightPublisher::start(midnight, telemetry, awaiter) {
                 Ok(client) => {
                     publishers.insert(Chain::Midnight, Arc::new(client));
                 }
@@ -658,6 +669,7 @@ impl RpcHandles {
         mpc_contract_id: &AccountId,
         signer: InMemorySigner,
         stack: &ChainStack,
+        backlog: Backlog,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         let near_rpc = near_fetch::Client::new(near_rpc_url);
@@ -680,7 +692,7 @@ impl RpcHandles {
             signer,
             near_gates,
         );
-        let publishers = stack.publishers(near_client.clone()).await;
+        let publishers = stack.publishers(near_client.clone(), Some(backlog)).await;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
         Self {
@@ -1325,7 +1337,7 @@ mod tests {
         );
 
         let publishers = ChainStack::new(chains)
-            .publishers(undialed_near_client())
+            .publishers(undialed_near_client(), None)
             .await;
 
         assert!(
@@ -1367,7 +1379,7 @@ mod tests {
         };
 
         let publishers = ChainStack::new(chains)
-            .publishers(undialed_near_client())
+            .publishers(undialed_near_client(), None)
             .await;
 
         assert!(publishers.contains_key(&Chain::Midnight));

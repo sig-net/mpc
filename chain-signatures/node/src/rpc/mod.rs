@@ -86,6 +86,23 @@ impl PublishKind {
     }
 }
 
+/// The backlog as a Midnight publisher's [`ResponseAwaiter`], so a publish queued behind
+/// others re-checks its entry once its turn comes.
+pub struct BacklogAwaiter(Backlog);
+
+impl BacklogAwaiter {
+    pub fn new(backlog: Backlog) -> Self {
+        Self(backlog)
+    }
+}
+
+#[async_trait::async_trait]
+impl mpc_chain_midnight::ResponseAwaiter for BacklogAwaiter {
+    async fn still_awaited(&self, action: &PublishAction) -> bool {
+        publish_still_awaited(&self.0, action).await
+    }
+}
+
 /// Whether this node's backlog still waits for the response `action` carries.
 /// An entry that left the backlog was answered on chain or pruned by consensus.
 /// Either way there is nothing left to publish.
