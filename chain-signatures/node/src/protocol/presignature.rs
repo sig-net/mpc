@@ -296,7 +296,6 @@ impl Drop for PresignatureGenerator {
         let msg = self.msg.clone();
         tokio::spawn(async move {
             msg.unsubscribe_presignature(id).await;
-            msg.filter_presignature(id).await;
         });
     }
 }

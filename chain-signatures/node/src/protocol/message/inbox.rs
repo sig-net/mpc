@@ -3,7 +3,6 @@
 use super::crypto::{cbor_name, SignedMessage};
 use crate::metrics::messaging::{set_channel_capacity_tx, set_inbox_count};
 use crate::protocol::contract::primitives::ParticipantMap;
-use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::message::sub::{
     self, SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse, Subscriber,
 };
@@ -13,8 +12,8 @@ use crate::protocol::Config;
 use crate::rpc::ContractStateWatcher;
 
 use crate::protocol::message::types::{
-    GeneratingMessage, Message, MessageError, PositProtocolId, PresignatureMessage, Protocols,
-    ReadyMessage, ResharingMessage, SignatureMessage, TripleMessage,
+    GeneratingMessage, Message, MessageError, PositProtocolId, PresignatureMessage, ReadyMessage,
+    ResharingMessage, SignatureMessage, TripleMessage,
 };
 
 use cait_sith::protocol::Participant;
@@ -24,7 +23,24 @@ use near_crypto::Signature;
 use tokio::sync::{mpsc, watch};
 
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
+
+/// Size of the dedup caches. This is roughly determined by the max number of
+/// protocols that can be within our system. It's not an upper bound but merely
+/// to serve as a good enough amount to maintain the IDs of protocols long
+/// enough on the case that they make it back into the system somehow after
+/// being erased.
+const MAX_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(64 * 1024).unwrap();
+
+/// A protocol instance whose subscriber has gone away, keyed the same way as
+/// its subscription.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum FinishedId {
+    Triple(TripleId),
+    Presignature(PresignatureId),
+    Signature(SignId, PresignatureId),
+}
 
 /// Metric labels for the per-generation subscriber maps
 const TRIPLE_TASK_LABEL: &str = "triple_task";
@@ -43,10 +59,10 @@ pub struct MessageInbox {
     /// it back in the system somehow. Uses the signature to make this check.
     idempotent: lru::LruCache<Signature, ()>,
 
-    /// Kill-list of finished protocol instances (fed by generator `Drop`s, on
-    /// completion or abort). Late messages for these ids are dropped so they
-    /// can't recreate orphan subscriber entries in the maps below.
-    filter: MessageFilter,
+    /// Kill-list of finished protocol instances, fed by their unsubscribe.
+    /// Late messages for these ids are dropped so they can't recreate orphan
+    /// subscriber entries in the maps below.
+    finished: lru::LruCache<FinishedId, ()>,
 
     /// Sender half of the incoming channel; kept to report capacity metrics.
     inbox_tx: mpsc::Sender<Ciphered>,
@@ -81,15 +97,13 @@ impl MessageInbox {
     pub fn new(
         inbox_tx: mpsc::Sender<Ciphered>,
         inbox_rx: mpsc::Receiver<Ciphered>,
-        filter_tx: mpsc::Sender<(Protocols, u64)>,
-        filter_rx: mpsc::Receiver<(Protocols, u64)>,
         subscribe_tx: mpsc::Sender<SubscribeRequest>,
         subscribe_rx: mpsc::Receiver<SubscribeRequest>,
     ) -> Self {
         Self {
             pending_decrypt: VecDeque::new(),
-            idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
-            filter: MessageFilter::new(filter_tx, filter_rx),
+            idempotent: lru::LruCache::new(MAX_CACHE_SIZE),
+            finished: lru::LruCache::new(MAX_CACHE_SIZE),
             inbox_tx,
             inbox_rx,
             subscribe_tx,
@@ -263,13 +277,17 @@ impl MessageInbox {
         messages
     }
 
-    /// Filter out all messages that have been filtered
+    /// Drop messages for protocol instances that already unsubscribed.
     pub fn filter(&mut self, mut messages: Vec<Message>) -> Vec<Message> {
-        messages.retain(|msg| match msg {
-            Message::Triple(msg) => !self.filter.contains(msg),
-            Message::Presignature(msg) => !self.filter.contains(msg),
-            Message::Signature(msg) => !self.filter.contains(msg),
-            _ => true,
+        messages.retain(|msg| {
+            let id = match msg {
+                Message::Triple(msg) => FinishedId::Triple(msg.id),
+                Message::Presignature(msg) => FinishedId::Presignature(msg.id),
+                Message::Signature(msg) => FinishedId::Signature(msg.id, msg.presignature_id),
+                _ => return true,
+            };
+            // `get` also promotes the id to most recently used.
+            self.finished.get(&id).is_none()
         });
         messages
     }
@@ -311,6 +329,7 @@ impl MessageInbox {
                     let _ = resp.send(SubscribeResponse::Triple(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
+                    self.finished.put(FinishedId::Triple(id), ());
                     if let Some(sub) = self.triple.remove(&id) {
                         sub.clear_capacity_global();
                     } else {
@@ -329,6 +348,7 @@ impl MessageInbox {
                     let _ = resp.send(SubscribeResponse::Presignature(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
+                    self.finished.put(FinishedId::Presignature(id), ());
                     if let Some(sub) = self.presignature.remove(&id) {
                         sub.clear_capacity_global();
                     } else {
@@ -350,6 +370,8 @@ impl MessageInbox {
                     let _ = resp.send(SubscribeResponse::Signature(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
+                    self.finished
+                        .put(FinishedId::Signature(sign_id, presignature_id), ());
                     if let Some(sub) = self.signature.remove(&(sign_id, presignature_id)) {
                         sub.clear_capacity_global();
                     } else {
@@ -405,7 +427,6 @@ impl MessageInbox {
     pub async fn run(mut self, config: watch::Receiver<Config>, contract: ContractStateWatcher) {
         loop {
             tokio::select! {
-                _ = self.filter.update() => {}
                 Some(sub) = self.subscribe_rx.recv() => {
                     set_channel_capacity_tx("subscribe", &self.subscribe_tx);
                     self.process_subscribe(sub);
@@ -423,8 +444,12 @@ impl MessageInbox {
                     let batches = self.decrypt(&cipher_sk, &participants);
                     let messages = Self::verify_senders(batches, me);
 
-                    // update filter before fanning out messages.
-                    self.filter.try_update();
+                    // Apply queued (un)subscribes before fanning out, so a
+                    // message for an instance that just finished is dropped
+                    // instead of recreating its subscriber entry.
+                    while let Ok(sub) = self.subscribe_rx.try_recv() {
+                        self.process_subscribe(sub);
+                    }
 
                     let messages = self.filter(messages);
                     let messages_len = messages.len();
@@ -565,21 +590,21 @@ mod tests {
         setup.inbox.abort();
     }
 
-    /// Check that inbox filters work correctly, and that the filtered message
-    /// does not make it through.
+    /// Messages for an instance that unsubscribed are dropped, and the other
+    /// subscribers still get theirs.
     #[tokio::test]
     async fn test_inbox_filters_messages() {
         let setup = inbox_setup();
-        let filter_id = 2;
+        let finished_id = 2;
         let batch = triple_batch(setup.epoch, setup.from);
         let encrypted =
             SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
 
         let mut recv1 = setup.channel.subscribe_triple(1).await;
-        let mut recv2 = setup.channel.subscribe_triple(filter_id).await;
+        let mut recv2 = setup.channel.subscribe_triple(finished_id).await;
         let mut recv3 = setup.channel.subscribe_triple(3).await;
 
-        setup.channel.filter_triple(filter_id).await;
+        setup.channel.unsubscribe_triple(finished_id).await;
         setup.channel.send_inbox(encrypted).await;
 
         let (m1, m3) = match tokio::join!(recv1.recv(), recv3.recv()) {
@@ -590,11 +615,45 @@ mod tests {
         assert_eq!(m1.id, 1);
         assert_eq!(m3.id, 3);
 
-        // Expect to timeout here since the message gets filtered out.
-        let result = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
-        assert!(result.is_err());
+        // The unsubscribed receiver is closed and never sees the message.
+        assert!(recv2.recv().await.is_none());
 
         setup.inbox.abort();
+    }
+
+    /// An unsubscribe puts the id on the finished list, so a late message for
+    /// it is dropped instead of recreating a buffered subscriber entry.
+    #[tokio::test]
+    async fn test_unsubscribe_drops_late_messages_without_recreating_subscriber() {
+        use tokio::sync::mpsc;
+
+        let (inbox_tx, inbox_rx) = mpsc::channel(1);
+        let (subscribe_tx, subscribe_rx) = mpsc::channel(1);
+        let mut inbox = MessageInbox::new(inbox_tx, inbox_rx, subscribe_tx, subscribe_rx);
+        let from = Participant::from(1);
+
+        let (req, resp) = sub::SubscribeRequest::subscribe(sub::SubscribeId::Triple(2));
+        inbox.process_subscribe(req);
+        let _rx = resp.await.unwrap();
+        inbox.process_subscribe(sub::SubscribeRequest::unsubscribe(
+            sub::SubscribeId::Triple(2),
+        ));
+        assert!(!inbox.triple.contains_key(&2));
+
+        let kept = inbox.filter(triple_batch(0, from));
+        let kept_ids = kept
+            .iter()
+            .map(|msg| match msg {
+                Message::Triple(msg) => msg.id,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(kept_ids, vec![1, 3]);
+
+        inbox.publish(kept);
+        assert!(inbox.triple.contains_key(&1));
+        assert!(!inbox.triple.contains_key(&2));
+        assert!(inbox.triple.contains_key(&3));
     }
 
     /// Check idempotency. The same set of messages encrypted and signed again
@@ -757,16 +816,8 @@ mod tests {
         use tokio::sync::mpsc;
 
         let (inbox_tx, inbox_rx) = mpsc::channel(1);
-        let (filter_tx, filter_rx) = mpsc::channel(1);
         let (subscribe_tx, subscribe_rx) = mpsc::channel(1);
-        let mut inbox = MessageInbox::new(
-            inbox_tx,
-            inbox_rx,
-            filter_tx,
-            filter_rx,
-            subscribe_tx,
-            subscribe_rx,
-        );
+        let mut inbox = MessageInbox::new(inbox_tx, inbox_rx, subscribe_tx, subscribe_rx);
 
         // Override to a small capacity so we can easily fill it
         inbox.signature_posit = sub::Subscriber::unsubscribed_with_capacity("signature_posit", 1);
