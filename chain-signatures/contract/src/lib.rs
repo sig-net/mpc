@@ -382,23 +382,23 @@ impl MpcContract {
                     return Ok(false);
                 }
 
-                let joins_set: BTreeSet<AccountId> = joins.into_iter().collect();
-                let kicks_set: BTreeSet<AccountId> = kicks.into_iter().collect();
+                let joins: BTreeSet<AccountId> = joins.into_iter().collect();
+                let kicks: BTreeSet<AccountId> = kicks.into_iter().collect();
 
                 // 1. Disjointness check
-                if !joins_set.is_disjoint(&kicks_set) {
+                if !joins.is_disjoint(&kicks) {
                     return Err(VoteError::BatchOverlapping.into());
                 }
 
                 // 2. Validate kicks
-                for kick in &kicks_set {
+                for kick in &kicks {
                     if !participants.contains_key(kick) {
                         return Err(VoteError::KickNotParticipant.into());
                     }
                 }
 
                 // 3. Validate joins
-                for join in &joins_set {
+                for join in &joins {
                     if participants.contains_key(join) {
                         return Err(JoinError::JoinAlreadyParticipant.into());
                     }
@@ -410,8 +410,8 @@ impl MpcContract {
                 // 4. Validate resulting cohort size meets minimum viable MPC threshold
                 let new_count = participants
                     .len()
-                    .checked_sub(kicks_set.len())
-                    .and_then(|c| c.checked_add(joins_set.len()))
+                    .checked_sub(kicks.len())
+                    .and_then(|c| c.checked_add(joins.len()))
                     .ok_or(VoteError::ParticipantsBelowThreshold)?;
 
                 const MIN_PARTICIPANTS: usize = 2;
@@ -419,10 +419,7 @@ impl MpcContract {
                     return Err(VoteError::ParticipantsBelowThreshold.into());
                 }
 
-                let proposal = ReshareProposal {
-                    joins: joins_set,
-                    kicks: kicks_set,
-                };
+                let proposal = ReshareProposal { joins, kicks };
 
                 let tally = reshare_votes.vote(proposal.clone(), voter);
                 if tally >= *threshold {
@@ -437,12 +434,11 @@ impl MpcContract {
                     }
 
                     candidates.clear();
-                    let new_threshold = compute_threshold(new_participants.len());
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
                         threshold: *threshold,
-                        new_threshold,
+                        new_threshold: compute_threshold(new_participants.len()),
                         new_participants,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
