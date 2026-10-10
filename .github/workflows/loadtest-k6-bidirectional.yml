@@ -1,26 +1,54 @@
 name: k6 Bidirectional Load Test
 
-# Drives the Solana -> Ethereum bidirectional round trip via
-# loadtests/k6-bidirectional.js.
+# Three tiers of bidirectional load, driven by loadtests/k6-bidirectional.js:
+#  - low: 1 job a minute against the deployed pinger, so Grafana has a latency
+#    series to alert on and the deployed service is known to work;
+#  - mid: 1 job a second for 20 minutes, twice a day, to check steady load;
+#  - high: a ramp from 1 to 10 jobs a second, twice a day, to find where it
+#    breaks. Both start a pinger on the runner (the runner pinger), since the
+#    deployed one holds ten addresses and its own job caps.
 #
-# Every job spends gas from addresses only a funding sweep refills, so the
-# cadence is a standing cost. A tick landing mid-run creates no run, so the
-# short interval only shortens the wait after one ends.
+# A rate per minute (rpm_*) drives the deployed pinger; a rate per second
+# (rps_*, ramp_*) starts a runner pinger. Before each run, the addresses it will
+# use are topped up from LT_SEPOLIA_FUNDING_SK to what the run could spend. The
+# deployed pinger's own hourly top-up normally keeps its addresses above that,
+# so this only fills in when that one falls behind.
+#
+# The runner pinger signs with LT_RUNNER_PINGER_SOL_SK and reaches the chains
+# through LT_SEPOLIA_RPC_URL and LT_SOLANA_DEVNET_RPC_URL.
+#
+# Every job spends Sepolia gas and Solana fees: roughly 0.03 ETH a mid run and
+# 0.06 a high run, plus about 0.8 ETH the first high run leaves on its
+# addresses. These are estimates.
+#
+# Off-the-hour minutes: GitHub delays or drops schedules most at the minutes
+# everyone else uses.
 on:
   schedule:
+    # Low: 1 job a minute for 2h. A tick landing mid-run creates no run, so the
+    # short interval only shortens the wait after one ends.
     - cron: '*/20 * * * *'
+    # Mid: 1 job a second for 20 minutes. This and the high tier are clear of
+    # the unidirectional tiers in loadtest-k6.yml (02:59, 09:42, 14:59, 21:42),
+    # which load the same network.
+    - cron: '47 11,23 * * *'
+    # High: the 12-minute ramp.
+    - cron: '23 6,18 * * *'
   workflow_dispatch:
     inputs:
       lt_strategy:
-        description: Arrival rate per minute (the service caps at 10)
+        description: rpm_1 drives the deployed pinger; rps_* and ramp_1_10 start a pinger of their own
         type: choice
         options:
           - rpm_1
-          - rpm_6
+          - rps_1
+          - rps_5
+          - rps_10
+          - ramp_1_10
         default: rpm_1
         required: true
       lt_duration:
-        description: How long to submit for, not how long the run takes (cron uses 2h)
+        description: How long to submit for, not how long the run takes (cron uses 2h; ramp_1_10 ignores it)
         type: choice
         options:
           - 5m
@@ -30,7 +58,7 @@ on:
         default: 20m
         required: true
       environment:
-        description: MPC network
+        description: MPC network (a run with its own pinger needs one)
         type: choice
         options:
           - both
@@ -42,20 +70,215 @@ on:
 permissions:
   contents: read
 
+# One run per schedule entry (or per dispatched strategy and network) at a time,
+# queued before any job starts, so a tick landing mid-run funds nothing. A newer
+# tick replaces the one waiting.
+concurrency:
+  group: k6-bidirectional-${{ github.event.schedule || format('{0}-{1}', inputs.lt_strategy, inputs.environment) }}
+  cancel-in-progress: false
+
+env:
+  # The runner pinger's addresses. The prefix is fixed so the funded set is
+  # reused: ETH on these addresses cannot be moved back. The floor is below the
+  # default so an address needs little to be leasable.
+  RUNNER_PINGER_PATH_PREFIX: burst
+  RUNNER_PINGER_MIN_BALANCE_WEI: '300000000000000'
+  # Below this, the funding wallet needs a refill soon.
+  FUNDING_LOW_BALANCE_ETH: '0.3'
+  DEPLOYED_PINGER_URL: https://contract-ping.sig.network
+  # The deployed pinger's Solana requester key, from which its addresses are
+  # derived. Public; funding checks it against the pinger before sending.
+  DEPLOYED_PINGER_SOL_PUBKEY: 8oYvqBeCAhQYhA7Fw2fxG2ZvYgmhUtEdtXhteT7xdbti
+
 jobs:
-  load-test:
+  # A schedule carries no inputs, so every setting is resolved here, once, for
+  # the jobs below.
+  select:
+    name: Select run
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+      strategy: ${{ steps.select.outputs.strategy }}
+      duration: ${{ steps.select.outputs.duration }}
+      environment: ${{ steps.select.outputs.environment }}
+      environments: ${{ steps.select.outputs.environments }}
+    steps:
+      - name: Resolve the run
+        id: select
+        run: |
+          set -euo pipefail
+          if [ "${EVENT}" = "schedule" ]; then
+            case "${SCHEDULE}" in
+              '23 6,18 * * *')
+                strategy=ramp_1_10
+                duration=5m
+                environment=dev
+                ;;
+              '47 11,23 * * *')
+                strategy=rps_1
+                duration=20m
+                environment=dev
+                ;;
+              *)
+                strategy=rpm_1
+                duration=2h
+                environment=both
+                ;;
+            esac
+          else
+            strategy="${INPUT_STRATEGY}"
+            duration="${INPUT_DURATION}"
+            environment="${INPUT_ENVIRONMENT}"
+          fi
+
+          case "${strategy}" in
+            rpm_*) mode=deployed ;;
+            rps_* | ramp_*) mode=runner_pinger ;;
+            *)
+              echo "::error::Unhandled strategy '${strategy}': add it to the mode selection"
+              exit 1
+              ;;
+          esac
+
+          case "${environment}" in
+            both)
+              if [ "${mode}" = "runner_pinger" ]; then
+                echo "::error::A run with its own pinger uses one network: pick dev or testnet"
+                exit 1
+              fi
+              environments='["dev","testnet"]'
+              ;;
+            dev | testnet)
+              environments="[\"${environment}\"]"
+              ;;
+            *)
+              echo "::error::Unhandled environment '${environment}': add it to the selection"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "mode=${mode}"
+            echo "strategy=${strategy}"
+            echo "duration=${duration}"
+            echo "environment=${environment}"
+            echo "environments=${environments}"
+          } >> "${GITHUB_OUTPUT}"
+        env:
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_STRATEGY: ${{ inputs.lt_strategy }}
+          INPUT_DURATION: ${{ inputs.lt_duration }}
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
+
+  # Funds the addresses the run will use. Runs spend from one Sepolia wallet,
+  # whose transfers must not overlap.
+  fund:
+    name: Fund the addresses
+    needs: select
+    concurrency:
+      group: fund-bidirectional-workers
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      jobs: ${{ steps.plan.outputs.jobs }}
+      paths: ${{ steps.plan.outputs.paths }}
+    env:
+      SIG_ETH_RPC_URL_SEPOLIA: ${{ secrets.LT_SEPOLIA_RPC_URL }}
+      SIG_SOL_RPC_URL_DEV: ${{ secrets.LT_SOLANA_DEVNET_RPC_URL }}
+      SIG_BIDIRECTIONAL_FUNDING_SK: ${{ secrets.LT_SEPOLIA_FUNDING_SK }}
+    steps:
+      # The strategies the run is sized from.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: sig-net/contract-pinger
+          path: pinger
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.14.0'
+
+      # corepack reads the pnpm version from the pinger's package.json.
+      - name: Install the pinger
+        working-directory: pinger
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      # Sized from the same strategies the k6 script runs.
+      - name: Size the run
+        id: plan
+        run: node loadtests/plan.mjs "${LT_STRATEGY}" "${LT_DURATION}" >> "${GITHUB_OUTPUT}"
+        env:
+          LT_STRATEGY: ${{ needs.select.outputs.strategy }}
+          LT_DURATION: ${{ needs.select.outputs.duration }}
+
+      # A warning, not a failure: the run can still go ahead, and the funding
+      # step below fails on its own once the wallet hits its reserve.
+      - name: Check the funding wallet
+        working-directory: pinger
+        run: |
+          node --input-type=module -e '
+            import { createPublicClient, formatEther, http } from "viem";
+            import { privateKeyToAccount } from "viem/accounts";
+            const key = process.env.SIG_BIDIRECTIONAL_FUNDING_SK;
+            if (!key) {
+              console.log("::error::Missing required secret: LT_SEPOLIA_FUNDING_SK");
+              process.exit(1);
+            }
+            const { address } = privateKeyToAccount(key.startsWith("0x") ? key : `0x${key}`);
+            const client = createPublicClient({ transport: http(process.env.SIG_ETH_RPC_URL_SEPOLIA) });
+            const eth = formatEther(await client.getBalance({ address }));
+            console.log(`Funding wallet ${address} holds ${eth} ETH`);
+            if (Number(eth) < Number(process.env.FUNDING_LOW_BALANCE_ETH))
+              console.log(`::warning::Funding wallet ${address} holds ${eth} ETH, below ${process.env.FUNDING_LOW_BALANCE_ETH}: refill it with Sepolia ETH`);
+          '
+
+      # Both steps top each address up to what the busiest one could spend in
+      # the run.
+      - name: Fund the runner pinger's addresses
+        if: needs.select.outputs.mode == 'runner_pinger'
+        working-directory: pinger
+        run: pnpm fund --env "${LT_CHAIN_ENV}" --paths "${PATHS}" --address-jobs "${ADDRESS_JOBS}"
+        env:
+          LT_CHAIN_ENV: ${{ needs.select.outputs.environment }}
+          PATHS: ${{ steps.plan.outputs.paths }}
+          ADDRESS_JOBS: ${{ steps.plan.outputs.address_jobs }}
+          SIG_SOL_SK: ${{ secrets.LT_RUNNER_PINGER_SOL_SK }}
+          SIG_BIDIRECTIONAL_PATH_PREFIX: ${{ env.RUNNER_PINGER_PATH_PREFIX }}
+          SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: ${{ env.RUNNER_PINGER_MIN_BALANCE_WEI }}
+          # A first fill of a few hundred addresses is past the default per-run
+          # cap, which is sized for a handful.
+          SIG_BIDIRECTIONAL_FUND_MAX_PER_RUN_ETH: '1'
+
+      # The pinger's own address count and floor, so its addresses are derived
+      # from its public key alone. They are checked against the ones the pinger
+      # reports, and nothing is sent if they differ.
+      - name: Fund the deployed pinger's addresses
+        if: needs.select.outputs.mode == 'deployed'
+        working-directory: pinger
+        run: |
+          pnpm fund --env "$(jq -r 'join(",")' <<< "${ENVIRONMENTS}")" \
+            --address-jobs "${ADDRESS_JOBS}"
+        env:
+          ENVIRONMENTS: ${{ needs.select.outputs.environments }}
+          ADDRESS_JOBS: ${{ steps.plan.outputs.address_jobs }}
+          SIG_BIDIRECTIONAL_REQUESTER_PUBKEY: ${{ env.DEPLOYED_PINGER_SOL_PUBKEY }}
+          SIG_BIDIRECTIONAL_SERVICE_URL: ${{ env.DEPLOYED_PINGER_URL }}
+          API_SECRET: ${{ secrets.LT_PINGER_API_KEY }}
+
+  deployed:
     name: Bidirectional Load Test (${{ matrix.environment }})
+    needs: [select, fund]
+    if: needs.select.outputs.mode == 'deployed'
     strategy:
-      # Add an option above without adding it here and the run fails rather
-      # than silently driving both. A schedule carries no inputs, hence ''.
       matrix:
-        environment: ${{ (inputs.environment == 'dev' && fromJSON('["dev"]'))
-          || (inputs.environment == 'testnet' && fromJSON('["testnet"]'))
-          || ((inputs.environment == 'both' || inputs.environment == '')
-              && fromJSON('["dev","testnet"]'))
-          || fromJSON('["unmatched"]') }}
-      # The networks hold separate address pools and rate limits, so they
-      # need no max-parallel.
+        environment: ${{ fromJSON(needs.select.outputs.environments) }}
+      # The networks hold separate address pools, so they need no max-parallel.
       fail-fast: false
     # Per network: overlapping runs would double the arrival rate one claims
     # to apply. Queued, since cancelling abandons jobs already paid for.
@@ -64,8 +287,8 @@ jobs:
       cancel-in-progress: false
     # Self-hosted: every run holds a runner for over an hour.
     runs-on: arc-runner-set
-    # Submission runs for lt_duration, then the scenario's 45m gracefulStop
-    # lets in-flight jobs finish.
+    # Submission runs for lt_duration, then the collector waits up to 45m for
+    # in-flight jobs to settle.
     timeout-minutes: 200
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -77,17 +300,8 @@ jobs:
             echo "::error::Missing required secret: LT_PINGER_API_KEY"
             exit 1
           fi
-          # What the matrix yields for an unrecognised input.
-          case "${LT_CHAIN_ENV}" in
-            dev | testnet) ;;
-            *)
-              echo "::error::Unhandled environment '${LT_CHAIN_ENV}': add it to the matrix"
-              exit 1
-              ;;
-          esac
         env:
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
-          LT_CHAIN_ENV: ${{ matrix.environment }}
 
       # near-dev-github holds secretAccessor on the three secrets below and
       # nothing else. The runner pods have no GCP identity of their own.
@@ -128,10 +342,11 @@ jobs:
           # No run_id tag: runs are separated in time, so the range is the run,
           # and the label would fragment every panel wider than one. env is
           # needed: without it both networks write the same series.
+          LT_PINGER_URL: ${{ env.DEPLOYED_PINGER_URL }}
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
           LT_CHAIN_ENV: ${{ matrix.environment }}
-          LT_STRATEGY: ${{ inputs.lt_strategy || 'rpm_1' }}
-          LT_DURATION: ${{ inputs.lt_duration || '2h' }}
+          LT_STRATEGY: ${{ needs.select.outputs.strategy }}
+          LT_DURATION: ${{ needs.select.outputs.duration }}
 
       - name: Write job summary
         if: always()
@@ -140,7 +355,130 @@ jobs:
             echo "## k6 Bidirectional Load Test"
             echo
             echo "- Network: \`${{ matrix.environment }}\`"
-            echo "- Rate: \`${{ inputs.lt_strategy || 'rpm_1' }}\` submitting for \`${{ inputs.lt_duration || '2h' }}\`"
+            echo "- Rate: \`${{ needs.select.outputs.strategy }}\` submitting for \`${{ needs.select.outputs.duration }}\`"
+            echo
+            if [ -f k6-bidirectional.log ]; then
+              echo '```'
+              # Thresholds and the bidi_* metrics live in the trailing summary.
+              sed -n '/█ THRESHOLDS/,$p' k6-bidirectional.log | head -60
+              echo '```'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # Runs a contract pinger of its own on the runner, so a high rate needs
+  # neither the deployed pinger resized nor its address pool and job caps.
+  runner-pinger:
+    name: Runner-Pinger Bidirectional Load Test (${{ needs.select.outputs.environment }})
+    needs: [select, fund]
+    if: needs.select.outputs.mode == 'runner_pinger'
+    # The funded addresses are shared state: two runs would lease the same ones
+    # and collide on their nonces. Queued, since cancelling mid-run abandons
+    # jobs that have already paid for their transactions.
+    concurrency:
+      group: k6-bidirectional-runner-pinger-${{ needs.select.outputs.environment }}
+      cancel-in-progress: false
+    # Self-hosted: a run holds its runner for the submission and then up to 45
+    # minutes for the last jobs to settle.
+    runs-on: arc-runner-set
+    timeout-minutes: 240
+    env:
+      PORT: '3001'
+      # The pinger listens on the runner only.
+      API_SECRET: loadtest
+      SIG_ETH_RPC_URL_SEPOLIA: ${{ secrets.LT_SEPOLIA_RPC_URL }}
+      SIG_SOL_RPC_URL_DEV: ${{ secrets.LT_SOLANA_DEVNET_RPC_URL }}
+      SIG_SOL_SK: ${{ secrets.LT_RUNNER_PINGER_SOL_SK }}
+      LT_CHAIN_ENV: ${{ needs.select.outputs.environment }}
+    steps:
+      # The k6 script.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: sig-net/contract-pinger
+          path: pinger
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.14.0'
+
+      - name: Install and build the pinger
+        working-directory: pinger
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Start the pinger
+        working-directory: pinger
+        run: |
+          set -euo pipefail
+          node dist/index.js > ../pinger.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -sf "http://localhost:${PORT}/" > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Pinger did not start"
+          cat ../pinger.log
+          exit 1
+        env:
+          SIG_BIDIRECTIONAL_PATH_PREFIX: ${{ env.RUNNER_PINGER_PATH_PREFIX }}
+          SIG_BIDIRECTIONAL_MIN_BALANCE_WEI: ${{ env.RUNNER_PINGER_MIN_BALANCE_WEI }}
+          SIG_BIDIRECTIONAL_PATHS: ${{ needs.fund.outputs.paths }}
+          SIG_BIDIRECTIONAL_MAX_JOBS: ${{ needs.fund.outputs.jobs }}
+          SIG_BIDIRECTIONAL_RETAINED_JOBS: ${{ needs.fund.outputs.jobs }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          credentials_json: '${{ secrets.SIG_CREDENTIALS_DEV }}'
+
+      - name: Read Grafana credentials
+        id: grafana
+        uses: google-github-actions/get-secretmanager-secrets@2b5f97c5a4b9c105e64646762ad4fc3f5128e6f5 # v2
+        with:
+          secrets: |-
+            push_url:near-cs-dev/prom-push-url
+            username:near-cs-dev/grafana-username
+            password:near-cs-dev/grafana_cloud_pswd
+
+      - uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1
+
+      # The strategy tag keeps these runs out of the deployed pinger's series.
+      # The script's setup() fails the run if the pinger's addresses are not
+      # funded.
+      - name: Run k6
+        run: |
+          set -euo pipefail
+          k6 run -o experimental-prometheus-rw \
+            --tag env="${LT_CHAIN_ENV}" \
+            --tag strategy="${LT_STRATEGY}" \
+            loadtests/k6-bidirectional.js 2>&1 | tee k6-bidirectional.log
+        env:
+          K6_PROMETHEUS_RW_SERVER_URL: ${{ steps.grafana.outputs.push_url }}
+          K6_PROMETHEUS_RW_USERNAME: ${{ steps.grafana.outputs.username }}
+          K6_PROMETHEUS_RW_PASSWORD: ${{ steps.grafana.outputs.password }}
+          K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM: 'true'
+          LT_PINGER_URL: http://localhost:${{ env.PORT }}
+          LT_PINGER_API_KEY: ${{ env.API_SECRET }}
+          LT_STRATEGY: ${{ needs.select.outputs.strategy }}
+          LT_DURATION: ${{ needs.select.outputs.duration }}
+
+      - name: Show the pinger log
+        if: always()
+        run: tail -40 pinger.log || true
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## k6 Bidirectional Load Test (runner pinger)"
+            echo
+            echo "- Network: \`${{ needs.select.outputs.environment }}\`"
+            echo "- Rate: \`${{ needs.select.outputs.strategy }}\`, about ${{ needs.fund.outputs.jobs }} jobs across ${{ needs.fund.outputs.paths }} addresses"
             echo
             if [ -f k6-bidirectional.log ]; then
               echo '```'
