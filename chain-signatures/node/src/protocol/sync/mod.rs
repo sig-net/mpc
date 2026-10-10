@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
@@ -12,9 +13,10 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, StorageError, TripleStorage};
+use near_account_id::AccountId;
 
 use super::contract::primitives::{ParticipantInfo, ParticipantMap, Participants};
-use super::message::{MessageError, SignedMessage};
+use super::message::{now_millis, signed_after_start, MessageDomain, MessageError, SignedMessage};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 
@@ -66,6 +68,34 @@ impl SyncUpdate {
     }
 }
 
+/// Accepts a sync request only if signed after we started and later than the
+/// last one from that sender, as a node runs one sync at a time.
+#[derive(Clone)]
+pub struct SyncFreshness {
+    started_at: u64,
+    newest: Arc<Mutex<HashMap<Participant, u64>>>,
+}
+
+impl SyncFreshness {
+    fn since(started_at: u64) -> Self {
+        Self {
+            started_at,
+            newest: Arc::default(),
+        }
+    }
+
+    fn admit(&self, from: Participant, sent_at: u64) -> Result<(), MessageError> {
+        signed_after_start(self.started_at, sent_at)?;
+        let mut newest = self.newest.lock().unwrap();
+        let newest = newest.entry(from).or_default();
+        if sent_at <= *newest {
+            return Err(MessageError::Idempotent);
+        }
+        *newest = sent_at;
+        Ok(())
+    }
+}
+
 pub struct SyncRequest {
     /// A `SyncUpdate` signed by its sender and encrypted to us.
     pub update: Ciphered,
@@ -74,24 +104,35 @@ pub struct SyncRequest {
 }
 
 impl SyncRequest {
+    #[allow(clippy::too_many_arguments)]
     async fn process(
         self,
         triples: TripleStorage,
         presignatures: PresignatureStorage,
         me: Participant,
+        my_account: AccountId,
         network: NetworkConfig,
         participants: ParticipantMap,
+        freshness: SyncFreshness,
     ) {
         let start = Instant::now();
 
         // The signer is the owner whose shares we drop.
-        let (from, update) = match SignedMessage::decrypt_with::<SyncUpdate, _>(
+        let opened = SignedMessage::decrypt::<SyncUpdate>(
+            MessageDomain::SyncRequest,
             &self.update,
             &network.cipher_sk,
             &participants,
-            |_| Ok(()),
-        ) {
-            Ok(verified) => verified,
+            &my_account,
+            BROADCAST_TIMEOUT,
+        )
+        .and_then(|opened| {
+            freshness
+                .admit(opened.from, opened.sent_at)
+                .map(|()| opened)
+        });
+        let (from, update, request_sent_at) = match opened {
+            Ok(opened) => (opened.from, opened.msg, opened.sent_at),
             Err(err) => {
                 tracing::warn!(?err, "rejected sync update");
                 return;
@@ -133,14 +174,22 @@ impl SyncRequest {
         let Some(info) = participants.get(&from) else {
             return;
         };
-        let response =
-            match SignedMessage::encrypt(&response, me, &network.sign_sk, &info.cipher_pk) {
-                Ok(response) => response,
-                Err(err) => {
-                    tracing::warn!(?err, "failed to encrypt sync response");
-                    return;
-                }
-            };
+        // Signed with the request's time, so it answers only that request.
+        let response = match SignedMessage::encrypt_at(
+            MessageDomain::SyncReply,
+            &response,
+            me,
+            &info.account_id,
+            request_sent_at,
+            &network.sign_sk,
+            &info.cipher_pk,
+        ) {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(?err, "failed to encrypt sync response");
+                return;
+            }
+        };
 
         let _ = self.response_tx.send(Ok(response));
     }
@@ -159,6 +208,7 @@ pub struct SyncTask {
     requests: SyncRequestReceiver,
     sync_report_tx: SyncReportSender,
     network: NetworkConfig,
+    freshness: SyncFreshness,
 }
 
 impl SyncTask {
@@ -181,6 +231,7 @@ impl SyncTask {
             requests,
             sync_report_tx,
             network,
+            freshness: SyncFreshness::since(now_millis()),
         };
         (channel, task)
     }
@@ -229,6 +280,7 @@ impl SyncTask {
                         update,
                         receivers.into_iter(),
                         me,
+                        self.contract.account_id().clone(),
                         self.network.clone(),
                     ));
                     broadcast = Some((start, task));
@@ -268,8 +320,10 @@ impl SyncTask {
                         self.triples.clone(),
                         self.presignatures.clone(),
                         me,
+                        self.contract.account_id().clone(),
                         self.network.clone(),
                         participants,
+                        self.freshness.clone(),
                     ));
                 }
             }
@@ -417,6 +471,7 @@ async fn broadcast_sync(
     update: SyncUpdate,
     receivers: impl Iterator<Item = (Participant, ParticipantInfo)>,
     me: Participant,
+    my_account: AccountId,
     network: NetworkConfig,
 ) -> Vec<(Participant, SyncPeerResponse)> {
     let mut tasks = JoinSet::new();
@@ -426,9 +481,10 @@ async fn broadcast_sync(
         let client = client.clone();
         let update = update.clone();
         let network = network.clone();
+        let my_account = my_account.clone();
         tasks.spawn(async move {
             let sync_result = if p != me {
-                match sync_peer(&client, &update, me, &network, p, &info).await {
+                match sync_peer(&client, &update, me, &my_account, &network, p, &info).await {
                     Ok(response) => SyncPeerResponse::Success(response),
                     Err(err) => SyncPeerResponse::Failed(err),
                 }
@@ -477,51 +533,73 @@ async fn sync_peer(
     client: &NodeClient,
     update: &SyncUpdate,
     me: Participant,
+    my_account: &AccountId,
     network: &NetworkConfig,
     peer: Participant,
     info: &ParticipantInfo,
 ) -> Result<SyncUpdate, String> {
-    let encrypted = SignedMessage::encrypt(update, me, &network.sign_sk, &info.cipher_pk)
-        .map_err(|err| err.to_string())?;
+    let sent_at = now_millis();
+    let encrypted = SignedMessage::encrypt_at(
+        MessageDomain::SyncRequest,
+        update,
+        me,
+        &info.account_id,
+        sent_at,
+        &network.sign_sk,
+        &info.cipher_pk,
+    )
+    .map_err(|err| err.to_string())?;
     let reply = client
         .sync(&info.url, &encrypted)
         .await
         .map_err(|err| err.to_string())?;
-    open_reply(&reply, &network.cipher_sk, peer, info).map_err(|err| err.to_string())
+    open_reply(&reply, sent_at, &network.cipher_sk, my_account, peer, info)
+        .map_err(|err| err.to_string())
 }
 
-/// Decrypt a sync reply and check it was signed by `peer`, the node we asked.
-/// `info` must be `peer`'s entry from the contract.
+/// Open `peer`'s reply to our request signed at `request_sent_at`. `info` must
+/// be `peer`'s entry from the contract.
 fn open_reply(
     reply: &Ciphered,
+    request_sent_at: u64,
     cipher_sk: &hpke::SecretKey,
+    my_account: &AccountId,
     peer: Participant,
     info: &ParticipantInfo,
 ) -> Result<SyncUpdate, MessageError> {
     let mut only_peer = Participants::default();
     only_peer.insert(&peer, info.clone());
-    let (from, reply) = SignedMessage::decrypt_with::<SyncUpdate, _>(
+    let opened = SignedMessage::decrypt::<SyncUpdate>(
+        MessageDomain::SyncReply,
         reply,
         cipher_sk,
         &ParticipantMap::One(only_peer),
-        |_| Ok(()),
+        my_account,
+        BROADCAST_TIMEOUT,
     )?;
-    if from != peer {
+    if opened.from != peer {
         return Err(MessageError::Verification(
             "sync reply was not signed by the peer we asked",
         ));
     }
-    Ok(reply)
+    if opened.sent_at != request_sent_at {
+        return Err(MessageError::Verification(
+            "sync reply does not answer our request",
+        ));
+    }
+    Ok(opened.msg)
 }
 
 #[cfg(any(test, feature = "test-feature"))]
 pub fn open_reply_for_test(
     reply: &Ciphered,
+    request_sent_at: u64,
     cipher_sk: &hpke::SecretKey,
+    my_account: &AccountId,
     peer: Participant,
     info: &ParticipantInfo,
 ) -> Result<SyncUpdate, MessageError> {
-    open_reply(reply, cipher_sk, peer, info)
+    open_reply(reply, request_sent_at, cipher_sk, my_account, peer, info)
 }
 
 #[derive(Clone)]

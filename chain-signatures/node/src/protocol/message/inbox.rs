@@ -1,15 +1,17 @@
 //! The receiving actor: decrypts, dedups, and routes incoming messages.
 
-use super::crypto::{cbor_name, SignedMessage};
+use super::crypto::{
+    cbor_name, in_window, now_millis, signed_after_start, MessageDomain, SignedMessage,
+};
 use crate::metrics::messaging::{set_channel_capacity_tx, set_inbox_count};
 use crate::protocol::contract::primitives::ParticipantMap;
-use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
+use crate::protocol::message::filter::MessageFilter;
 use crate::protocol::message::sub::{
     self, SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse, Subscriber,
 };
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::triple::TripleId;
-use crate::protocol::Config;
+use crate::protocol::{Config, ProtocolState};
 use crate::rpc::ContractStateWatcher;
 
 use crate::protocol::message::types::{
@@ -20,22 +22,92 @@ use crate::protocol::message::types::{
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_primitives::SignId;
+use near_account_id::AccountId;
 use near_crypto::Signature;
 use tokio::sync::{mpsc, watch};
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// Metric labels for the per-generation subscriber maps
 const TRIPLE_TASK_LABEL: &str = "triple_task";
 const PRESIGNATURE_TASK_LABEL: &str = "presign_task";
 const SIGNATURE_TASK_LABEL: &str = "sign_task";
 
+/// Beyond it a sender only loses its own oldest entries.
+const MAX_SEEN_PER_SENDER: usize = 100_000;
+
+/// Signatures of accepted batches per sender, kept until they leave the window.
+struct ReplayCache {
+    started_at: u64,
+    /// Longest window seen, so raising `message_timeout` revives nothing.
+    max_age: Duration,
+    senders: HashMap<Participant, SenderSeen>,
+}
+
+struct SenderSeen {
+    signatures: lru::LruCache<Signature, u64>,
+    /// When we last reported forgetting a signature still inside the window.
+    reported: Option<Instant>,
+}
+
+impl ReplayCache {
+    fn new() -> Self {
+        Self {
+            started_at: now_millis(),
+            max_age: Duration::ZERO,
+            senders: HashMap::new(),
+        }
+    }
+
+    /// Accept a batch `from` signed at `sent_at`, unless it was seen before.
+    fn admit(
+        &mut self,
+        from: Participant,
+        sig: &Signature,
+        sent_at: u64,
+        max_age: Duration,
+    ) -> Result<(), MessageError> {
+        signed_after_start(self.started_at, sent_at)?;
+        self.max_age = self.max_age.max(max_age);
+        let max_age = self.max_age;
+        let seen = self.senders.entry(from).or_insert_with(|| SenderSeen {
+            signatures: lru::LruCache::unbounded(),
+            reported: None,
+        });
+        if seen.signatures.contains(sig) {
+            return Err(MessageError::Idempotent);
+        }
+        seen.signatures.put(sig.clone(), sent_at);
+        while let Some((_, &oldest)) = seen.signatures.peek_lru() {
+            let fresh = in_window(oldest, max_age);
+            let full = seen.signatures.len() > MAX_SEEN_PER_SENDER;
+            if fresh && !full {
+                break;
+            }
+            seen.signatures.pop_lru();
+            if fresh && seen.reported.is_none_or(|at| at.elapsed() > max_age) {
+                seen.reported = Some(Instant::now());
+                tracing::error!(
+                    ?from,
+                    "inbox: sender over its replay cache cap, forgetting signatures inside the time window"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.senders.values().map(|s| s.signatures.len()).sum()
+    }
+}
+
 /// Receiving half of the message system: accepts encrypted messages from peers,
 /// decrypts and dedups them, and routes each to its subscriber channel.
 pub struct MessageInbox {
-    /// This idempotent checker is used to check that the same batch of messages does not make
-    /// it back in the system somehow. Uses the signature to make this check.
-    idempotent: lru::LruCache<Signature, ()>,
+    /// Drops a batch that arrives again (outbox retry or replay).
+    replay: ReplayCache,
 
     /// Kill-list of finished protocol instances (fed by generator `Drop`s, on
     /// completion or abort). Late messages for these ids are dropped so they
@@ -81,7 +153,7 @@ impl MessageInbox {
         subscribe_rx: mpsc::Receiver<SubscribeRequest>,
     ) -> Self {
         Self {
-            idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
+            replay: ReplayCache::new(),
             filter: MessageFilter::new(filter_tx, filter_rx),
             inbox_tx,
             inbox_rx,
@@ -190,14 +262,17 @@ impl MessageInbox {
         encrypted: &Ciphered,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
+        me: &AccountId,
+        max_age: Duration,
     ) -> Option<(Participant, Vec<Message>)> {
-        let decrypted = SignedMessage::decrypt_with(encrypted, cipher_sk, participants, |sig| {
-            if self.idempotent.put(sig.clone(), ()).is_some() {
-                Err(MessageError::Idempotent)
-            } else {
-                Ok(())
-            }
-        });
+        let domain = MessageDomain::Message;
+        let decrypted =
+            SignedMessage::decrypt(domain, encrypted, cipher_sk, participants, me, max_age)
+                .and_then(|opened| {
+                    let (from, sig, sent_at) = (opened.from, &opened.sig, opened.sent_at);
+                    self.replay.admit(from, sig, sent_at, max_age)?;
+                    Ok((from, opened.msg))
+                });
 
         match decrypted {
             Ok(batch) => return Some(batch),
@@ -206,8 +281,7 @@ impl MessageInbox {
             Err(MessageError::UnknownParticipant(from)) => {
                 tracing::debug!(?from, "inbox: dropped batch from unknown participant");
             }
-            // A batch we have already ingested, resent because the peer's
-            // outbox retried a send that had in fact landed.
+            // Seen before: an outbox retry of a send that landed, or a replay.
             Err(MessageError::Idempotent) => {
                 tracing::debug!("inbox: dropped duplicate message batch");
             }
@@ -405,11 +479,19 @@ impl MessageInbox {
                 Some(encrypted) = self.inbox_rx.recv(), if has_state => {
                     set_channel_capacity_tx("incoming", &self.inbox_tx);
                     let config = config.borrow().clone();
+                    let max_age = Duration::from_millis(config.protocol.message_timeout);
                     let participants = contract.participant_map().await;
                     let me = contract.me().await;
+                    let account = contract.account_id();
                     let cipher_sk = config.local.network.cipher_sk;
+                    // Peers resend keygen messages, signed before we started,
+                    // until we are up; a restart during keygen breaks it anyway.
+                    if matches!(*contract.borrow_state(), Some(ProtocolState::Initializing(_))) {
+                        self.replay.started_at = 0;
+                    }
 
-                    let batch = self.decrypt(&encrypted, &cipher_sk, &participants);
+                    let batch =
+                        self.decrypt(&encrypted, &cipher_sk, &participants, account, max_age);
                     let messages = Self::verify_senders(batch, me);
 
                     // update filter before fanning out messages.
@@ -440,8 +522,12 @@ mod tests {
     use mpc_keys::hpke;
     use std::time::Duration;
 
+    const MAX_AGE: Duration = Duration::from_secs(300);
+
     struct InboxTestSetup {
         epoch: u64,
+        /// The account running the inbox.
+        me: AccountId,
         from: Participant,
         sign_sk: near_crypto::SecretKey,
         cipher_pk: hpke::PublicKey,
@@ -458,7 +544,7 @@ mod tests {
         let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
-        let node_id = "node0".parse().unwrap();
+        let node_id: AccountId = "node0".parse().unwrap();
         let participants = {
             let mut map = Participants::default();
             for i in 0..2 {
@@ -493,6 +579,7 @@ mod tests {
 
         InboxTestSetup {
             epoch,
+            me: node_id,
             from,
             sign_sk,
             cipher_pk,
@@ -534,8 +621,14 @@ mod tests {
     async fn test_inbox_receives_messages() {
         let setup = inbox_setup();
         let batch = triple_batch(setup.epoch, setup.from);
-        let encrypted =
-            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+        let encrypted = SignedMessage::encrypt(
+            &batch,
+            setup.from,
+            &setup.me,
+            &setup.sign_sk,
+            &setup.cipher_pk,
+        )
+        .unwrap();
         setup.channel.send_inbox(encrypted).await;
 
         let mut recv1 = setup.channel.subscribe_triple(1).await;
@@ -561,8 +654,14 @@ mod tests {
         let setup = inbox_setup();
         let filter_id = 2;
         let batch = triple_batch(setup.epoch, setup.from);
-        let encrypted =
-            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+        let encrypted = SignedMessage::encrypt(
+            &batch,
+            setup.from,
+            &setup.me,
+            &setup.sign_sk,
+            &setup.cipher_pk,
+        )
+        .unwrap();
 
         let mut recv1 = setup.channel.subscribe_triple(1).await;
         let mut recv2 = setup.channel.subscribe_triple(filter_id).await;
@@ -586,16 +685,21 @@ mod tests {
         setup.inbox.abort();
     }
 
-    /// Check idempotency. The same set of messages encrypted and signed again
-    /// should produce the same signature. Thus sending the same encrypted
-    /// message should be idempotent and no new messages should be received by
-    /// the subscribers.
+    /// The same ciphertext delivered twice reaches subscribers once.
     #[tokio::test]
     async fn test_inbox_idempotency() {
         let setup = inbox_setup();
         let batch = triple_batch(setup.epoch, setup.from);
-        let encrypted =
-            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+        let encrypted = SignedMessage::encrypt(
+            &batch,
+            setup.from,
+            &setup.me,
+            &setup.sign_sk,
+            &setup.cipher_pk,
+        )
+        .unwrap();
+        let resent: hpke::Ciphered =
+            serde_json::from_slice(&serde_json::to_vec(&encrypted).unwrap()).unwrap();
         setup.channel.send_inbox(encrypted).await;
 
         let mut recv1 = setup.channel.subscribe_triple(1).await;
@@ -611,11 +715,8 @@ mod tests {
         setup.channel.unsubscribe_triple(2).await;
         setup.channel.unsubscribe_triple(3).await;
 
-        // Encrypting the same batch again produces the same signature, so the
-        // inbox should drop it as a duplicate.
-        let encrypted =
-            SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
-        setup.channel.send_inbox(encrypted).await;
+        // The same ciphertext again, as an outbox retry would send it.
+        setup.channel.send_inbox(resent).await;
         let mut recv1 = tokio::time::timeout(
             Duration::from_millis(300),
             setup.channel.subscribe_triple(1),
@@ -670,12 +771,14 @@ mod tests {
             );
         }
         let participants = ParticipantMap::One(participants);
+        let account: AccountId = "node0".parse().unwrap();
         let (mut inbox, _outbox, _channel) = MessageChannel::new();
 
         // Envelope signed by `peer`, inner messages claiming `me`: forged.
         let spoofed = triple_batch(0, me);
-        let encrypted = SignedMessage::encrypt(&spoofed, peer, &peer_sign_sk, &cipher_pk).unwrap();
-        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants);
+        let encrypted =
+            SignedMessage::encrypt(&spoofed, peer, &account, &peer_sign_sk, &cipher_pk).unwrap();
+        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants, &account, MAX_AGE);
         assert!(MessageInbox::verify_senders(batches, Some(me)).is_empty());
 
         // Mixed batch: only the forged message is dropped.
@@ -696,8 +799,9 @@ mod tests {
             }),
             Message::Unknown(HashMap::new()),
         ];
-        let encrypted = SignedMessage::encrypt(&mixed, peer, &peer_sign_sk, &cipher_pk).unwrap();
-        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants);
+        let encrypted =
+            SignedMessage::encrypt(&mixed, peer, &account, &peer_sign_sk, &cipher_pk).unwrap();
+        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants, &account, MAX_AGE);
         let survivors = MessageInbox::verify_senders(batches, Some(me));
         assert_eq!(survivors.len(), 2);
         assert!(matches!(&survivors[0], Message::Triple(msg) if msg.id == 5));
@@ -705,8 +809,9 @@ mod tests {
 
         // Self-signed batch: dropped whole.
         let self_sent = triple_batch(1, me);
-        let encrypted = SignedMessage::encrypt(&self_sent, me, &my_sign_sk, &cipher_pk).unwrap();
-        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants);
+        let encrypted =
+            SignedMessage::encrypt(&self_sent, me, &account, &my_sign_sk, &cipher_pk).unwrap();
+        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants, &account, MAX_AGE);
         assert!(MessageInbox::verify_senders(batches, Some(me)).is_empty());
 
         // Wrong signing key: rejected at signature verification already, and it
@@ -716,31 +821,51 @@ mod tests {
         // and evict the entries that make real duplicates detectable.
         let forged_envelope = triple_batch(3, peer);
         let encrypted =
-            SignedMessage::encrypt(&forged_envelope, peer, &my_sign_sk, &cipher_pk).unwrap();
-        let cached = inbox.idempotent.len();
+            SignedMessage::encrypt(&forged_envelope, peer, &account, &my_sign_sk, &cipher_pk)
+                .unwrap();
+        let cached = inbox.replay.len();
         assert!(inbox
-            .decrypt(&encrypted, &cipher_sk, &participants)
+            .decrypt(&encrypted, &cipher_sk, &participants, &account, MAX_AGE)
             .is_none());
         assert_eq!(
-            inbox.idempotent.len(),
+            inbox.replay.len(),
             cached,
             "unverified signature entered the dedup cache",
         );
 
         // Control: consistent sender passes through.
         let valid = triple_batch(2, peer);
-        let encrypted = SignedMessage::encrypt(&valid, peer, &peer_sign_sk, &cipher_pk).unwrap();
-        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants);
+        let encrypted =
+            SignedMessage::encrypt(&valid, peer, &account, &peer_sign_sk, &cipher_pk).unwrap();
+        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants, &account, MAX_AGE);
         assert_eq!(MessageInbox::verify_senders(batches, Some(me)).len(), 3);
 
         // Unknown sender: dropped at once, leaving nothing behind.
         let unknown = triple_batch(4, peer);
-        let encrypted = SignedMessage::encrypt(&unknown, peer, &peer_sign_sk, &cipher_pk).unwrap();
-        let cached = inbox.idempotent.len();
+        let encrypted =
+            SignedMessage::encrypt(&unknown, peer, &account, &peer_sign_sk, &cipher_pk).unwrap();
+        let cached = inbox.replay.len();
+        let nobody = ParticipantMap::Zero;
         assert!(inbox
-            .decrypt(&encrypted, &cipher_sk, &ParticipantMap::Zero)
+            .decrypt(&encrypted, &cipher_sk, &nobody, &account, MAX_AGE)
             .is_none());
-        assert_eq!(inbox.idempotent.len(), cached);
+        assert_eq!(inbox.replay.len(), cached);
+
+        // Signed before this inbox started: dropped.
+        let before_start = triple_batch(6, peer);
+        let encrypted = SignedMessage::encrypt_at(
+            MessageDomain::Message,
+            &before_start,
+            peer,
+            &account,
+            inbox.replay.started_at - 1,
+            &peer_sign_sk,
+            &cipher_pk,
+        )
+        .unwrap();
+        assert!(inbox
+            .decrypt(&encrypted, &cipher_sk, &participants, &account, MAX_AGE)
+            .is_none());
     }
 
     /// Messages that arrive before the first contract state are not lost: they
@@ -771,12 +896,14 @@ mod tests {
                 cipher_sk,
             },
         });
-        let (contract_watcher, contract_tx) = ContractStateWatcher::new(&"node0".parse().unwrap());
+        let account: AccountId = "node0".parse().unwrap();
+        let (contract_watcher, contract_tx) = ContractStateWatcher::new(&account);
         let (inbox, _outbox, channel) = MessageChannel::new();
         let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
 
         let batch = triple_batch(0, peer);
-        let encrypted = SignedMessage::encrypt(&batch, peer, &sign_sk, &cipher_pk).unwrap();
+        let encrypted =
+            SignedMessage::encrypt(&batch, peer, &account, &sign_sk, &cipher_pk).unwrap();
         channel.send_inbox(encrypted).await;
         // Subscriptions are served while messages wait.
         let mut recv = channel.subscribe_triple(1).await;
@@ -873,5 +1000,27 @@ mod tests {
             .expect("signature posit subscription unexpectedly closed");
         assert_eq!(first_signature_posit.0, sign_id);
         assert_eq!(first_signature_posit.1, mpc_primitives::RequestKind::Sign);
+    }
+
+    /// A signature is remembered while inside the window and forgotten after.
+    #[test]
+    fn test_replay_cache_forgets_only_expired_signatures() {
+        let mut cache = ReplayCache::new();
+        cache.started_at = 0;
+        let sign_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "replay");
+        let (from, max_age) = (Participant::from(1), Duration::from_secs(60));
+
+        let expired = sign_sk.sign(b"expired");
+        let long_ago = now_millis() - 2 * max_age.as_millis() as u64;
+        assert!(cache.admit(from, &expired, long_ago, max_age).is_ok());
+        assert_eq!(cache.len(), 0);
+
+        let fresh = sign_sk.sign(b"fresh");
+        assert!(cache.admit(from, &fresh, now_millis(), max_age).is_ok());
+        assert!(matches!(
+            cache.admit(from, &fresh, now_millis(), max_age),
+            Err(MessageError::Idempotent)
+        ));
+        assert_eq!(cache.len(), 1);
     }
 }

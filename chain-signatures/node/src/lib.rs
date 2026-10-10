@@ -1,6 +1,6 @@
 /// Version of the protocol (triples, presignatures, signatures) messages
 /// that the node can currently work with.
-pub const PROTOCOL_VERSION: u64 = 1;
+pub const PROTOCOL_VERSION: u64 = 2;
 /// Version of the checkpoint data that the node can work with.
 pub const CHECKPOINT_VERSION: u64 = 0;
 /// Redis namespace version for persisted checkpoints.

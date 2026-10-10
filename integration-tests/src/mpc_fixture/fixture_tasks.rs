@@ -59,9 +59,9 @@ pub(super) fn test_mock_network(
                         .get(to)
                         .or_else(|| initial_participants.get(to))
                         .unwrap_or_else(|| panic!("no participant info for recipient {to:?}"));
-                    match SignedMessage::encrypt(
-                        &[msg],
+                    match SignedMessage::encrypt(&[msg],
                         *from,
+                        &receiver_info.account_id,
                         &config.local.network.sign_sk,
                         &receiver_info.cipher_pk,
                     ) {
