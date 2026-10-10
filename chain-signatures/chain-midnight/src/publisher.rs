@@ -336,6 +336,7 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
                     block_height: attestation.block_height.to_string(),
                     output_kind: attestation.outcome_kind as u8,
                     serialized_output_length: attestation.serialized_output_length.to_string(),
+                    output_hash: hex::encode(attestation.output_hash),
                     digest: hex::encode(attestation.digest),
                 }),
                 request_id,
@@ -1354,6 +1355,9 @@ mod tests {
                 block_height: "42".to_string(),
                 output_kind: 0,
                 serialized_output_length: "32".to_string(),
+                output_hash: hex::encode(mpc_compact_hashing::compute_attested_output_hash(
+                    &[0xab; 32]
+                )),
                 digest: hex::encode(
                     mpc_compact_hashing::compute_attestation_hash(
                         &REQUEST_ID,

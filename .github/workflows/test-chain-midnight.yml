@@ -12,6 +12,11 @@ on:
 env:
   RUSTFLAGS: -D warnings
 
+# Cancel superseded runs of the same PR. Merge-queue and develop runs keep going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   midnight-real-stack:
     # The first name is the required check; each test starts its own stack and cluster.

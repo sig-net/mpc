@@ -12,7 +12,7 @@ struct BoolResponse {
 // notification below names that exact path.
 export ledger mpcResponseKey: Secp256k1Point;
 sealed ledger signetSigner: SignetSigner;
-export ledger requests: Map<RequestId, SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 64, 64>>;
+export ledger requests: Map<RequestId, SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 64, 0>>;
 sealed ledger deployer: Bytes<32>;
 export ledger initialised: Counter;
 // Test-only transcript ballast; see addBallast.
@@ -47,9 +47,10 @@ export circuit initialise(responseKey: Secp256k1Point): [] {
 circuit fileIsEvenRequest(
   call: IsEvenCall,
   keyVersion: Uint<8>,
-  outputSchema: Bytes<64>,
-  responseSchema: Bytes<64>
-): RequestId {
+  to: Bytes<20>,
+  argWord: Bytes<32>,
+  outputSchema: Bytes<64>
+): [] {
   const calldata = EvmCalldata<1> {
     selector: Bytes [0x2a, 0x2e, 0x13, 0x20],
     noWords: 1 as Uint<16>,
@@ -67,20 +68,20 @@ circuit fileIsEvenRequest(
     accessListEntryCount: 0,
     accessList: []
   };
-  const request = SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 64, 64> {
+  const request = SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 64, 0> {
     keyVersion: keyVersion,
     sender: kernel.self(),
     path: pad(32, "caller-path"),
     algo: MPCSignatureAlgorithm.ecdsa,
     txParamType: TxParamType.evmType2,
     txParams: txParams,
-    executionDest: pad(32, "eip155:1"),
+    executionDest: ethereumCaip2Id(),
     signatureDest: MPCDestination.unused,
     params: pad(64, ""),
     outputDeserializationSchema: outputSchema,
-    respondSerializationSchema: responseSchema
+    respondSerializationSchema: default<Bytes<0>>
   };
-  const requestId = disclose(calculateEvmType2RequestIdV1<1, 0, 0, 64, 64>(request));
+  const requestId = disclose(calculateEvmType2RequestIdV1<1, 0, 0, 64>(request));
 
   assert(!requests.member(requestId), "Request already exists");
   requests.insert(requestId, disclose(request));

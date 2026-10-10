@@ -84,6 +84,7 @@ const BuildSchema = wireObject({
     blockHeight: uint64,
     outputKind: z.literal([0, 1, 2]),
     serializedOutputLength: uint64,
+    outputHash: hex32,
     digest: hex32,
   }).optional(),
   contractState: ledgerHex,

@@ -488,6 +488,8 @@ impl Backlog {
             let cleared = pending.len();
             let restored_len = restored.len();
             *pending = restored;
+            // Otherwise the gauge shows nothing until the chain's next request.
+            self.observe_backlog_size(chain, restored_len);
 
             // Update total pending count based on the difference between cleared and restored requests
             if restored_len > cleared {

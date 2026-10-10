@@ -223,6 +223,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &account_id,
                 env!("CARGO_PKG_VERSION"),
                 option_env!("GIT_COMMIT_HASH"),
+                option_env!("BUILD_TIMESTAMP"),
             );
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
@@ -548,7 +549,7 @@ impl ChainStack {
         }
         if let Some(canton) = &self.configs.canton {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
-            match CantonClient::new(canton, telemetry).await {
+            match CantonClient::new(canton, telemetry, self.gate(Chain::Canton)).await {
                 Ok(client) => {
                     publishers.insert(Chain::Canton, Arc::new(client));
                 }
@@ -594,6 +595,7 @@ fn log_startup(
         cipher_pk_hex = %cipher_pk_hex,
         version = %crate::metrics::version(),
         git_commit_hash = %crate::metrics::git_commit_hash(),
+        build_timestamp = %crate::metrics::build_timestamp(),
         sign_pk = %network.sign_sk.public_key(),
         near_rpc_url = %near_client.rpc_addr(),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
@@ -925,7 +927,14 @@ async fn spawn_indexers(
 
     if let Some(canton_config) = canton {
         let canton_telemetry = NodeTelemetry::new(Chain::Canton);
-        match CantonIndexer::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
+        match CantonIndexer::new(
+            canton_config,
+            backlog.clone(),
+            canton_telemetry.clone(),
+            gates[Chain::Canton].clone(),
+        )
+        .await
+        {
             Ok(canton_indexer) => {
                 tracing::info!("canton indexer created successfully");
                 tokio::spawn(run_supervised(

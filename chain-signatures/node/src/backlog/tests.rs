@@ -822,6 +822,26 @@ async fn test_recovery_restores_state_and_watchers() {
 }
 
 #[tokio::test]
+async fn test_recovery_reports_restored_backlog_size() {
+    // A chain no other test uses: the gauge is shared by every test.
+    let chain = Chain::Bitcoin;
+    let mut pending = PendingRequests::new();
+    for id in 1..=3 {
+        let request = mock_sign_request(SignId::from_u8(id), chain);
+        pending.insert(request.id, BacklogEntry::new(request));
+    }
+    pending.set_processed_block(100);
+    let checkpoint = Checkpoints::snapshot(&pending, chain);
+
+    Backlog::new().recover_by_checkpoint(&checkpoint).await;
+
+    let size = crate::metrics::requests::BACKLOG_SIZE
+        .with_label_values(&[chain.as_str()])
+        .get();
+    assert_eq!(size, 3);
+}
+
+#[tokio::test]
 async fn test_recovery_requeues_completed_bidirectional_requests() {
     let backlog = Backlog::new();
     let tx = mock_tx(42);

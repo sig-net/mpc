@@ -62,14 +62,21 @@ async fn publishes_batched_responses() {
     cfg.publisher.batch_flush_interval = Duration::from_millis(1000);
     let client = EthClient::new(&cfg, Arc::new(NoopPublisherTelemetry), SharedBackoff::new());
 
-    // Publish all 3 responses.
+    // Concurrent publishes: awaits overlap, so all 3 land in one batch.
+    let mut publishes = tokio::task::JoinSet::new();
     for rid in &request_ids {
+        let client = client.clone();
         let action =
             make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new((*rid).into()));
-        client
-            .publish_signature(&action)
-            .await
-            .expect("publish_signature");
+        publishes.spawn(async move {
+            client
+                .publish_signature(&action)
+                .await
+                .expect("publish_signature")
+        });
+    }
+    while let Some(res) = publishes.join_next().await {
+        res.expect("publish task panicked");
     }
 
     // All 3 must land in a single batched `respond` transaction.
@@ -107,13 +114,20 @@ async fn publishes_across_multiple_batches() {
     cfg.publisher.batch_flush_interval = Duration::from_millis(2000);
     let client = EthClient::new(&cfg, Arc::new(NoopPublisherTelemetry), SharedBackoff::new());
 
+    let mut publishes = tokio::task::JoinSet::new();
     for rid in &request_ids {
+        let client = client.clone();
         let action =
             make_publish_action(Chain::Ethereum, SignKind::Sign, SignId::new((*rid).into()));
-        client
-            .publish_signature(&action)
-            .await
-            .expect("publish_signature");
+        publishes.spawn(async move {
+            client
+                .publish_signature(&action)
+                .await
+                .expect("publish_signature")
+        });
+    }
+    while let Some(res) = publishes.join_next().await {
+        res.expect("publish task panicked");
     }
 
     // All 6 must be responded, grouped into exactly 2 batched transactions of 3

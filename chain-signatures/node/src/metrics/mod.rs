@@ -18,8 +18,14 @@ pub mod telemetry;
 static NODE_ACCOUNT_ID: OnceLock<String> = OnceLock::new();
 static VERSION: OnceLock<String> = OnceLock::new();
 static GIT_COMMIT_HASH: OnceLock<String> = OnceLock::new();
+static BUILD_TIMESTAMP: OnceLock<String> = OnceLock::new();
 
-pub fn init_metrics(account_id: &AccountId, version: &str, git_commit_hash: Option<&str>) {
+pub fn init_metrics(
+    account_id: &AccountId,
+    version: &str,
+    git_commit_hash: Option<&str>,
+    build_timestamp: Option<&str>,
+) {
     if let Err(existing) = NODE_ACCOUNT_ID.set(account_id.to_string()) {
         // If set twice with a different value it is a programmer error; keep simple and panic.
         if existing.as_str() != account_id.as_str() {
@@ -35,6 +41,13 @@ pub fn init_metrics(account_id: &AccountId, version: &str, git_commit_hash: Opti
         if let Err(existing) = GIT_COMMIT_HASH.set(git_commit_hash.to_string()) {
             if existing.as_str() != git_commit_hash {
                 panic!("git commit hash already set to a different value");
+            }
+        }
+    }
+    if let Some(build_timestamp) = build_timestamp {
+        if let Err(existing) = BUILD_TIMESTAMP.set(build_timestamp.to_string()) {
+            if existing.as_str() != build_timestamp {
+                panic!("build timestamp already set to a different value");
             }
         }
     }
@@ -56,6 +69,13 @@ pub fn version() -> &'static str {
 
 pub fn git_commit_hash() -> &'static str {
     GIT_COMMIT_HASH
+        .get()
+        .map(String::as_str)
+        .unwrap_or("unknown")
+}
+
+pub fn build_timestamp() -> &'static str {
+    BUILD_TIMESTAMP
         .get()
         .map(String::as_str)
         .unwrap_or("unknown")
@@ -84,7 +104,8 @@ pub fn try_create_counter_vec_with_node_and_version(
     opts = opts
         .const_label("node_account_id".to_string(), node_account_id().to_string())
         .const_label("version".to_string(), version().to_string())
-        .const_label("git_commit_hash".to_string(), git_commit_hash().to_string());
+        .const_label("git_commit_hash".to_string(), git_commit_hash().to_string())
+        .const_label("build_timestamp".to_string(), build_timestamp().to_string());
     let counter = prometheus::CounterVec::new(opts, labels)?;
     prometheus::register(Box::new(counter.clone()))?;
     Ok(counter)
@@ -134,7 +155,8 @@ pub fn try_create_histogram_vec_with_node_and_version(
     opts = opts
         .const_label("node_account_id".to_string(), node_account_id().to_string())
         .const_label("version".to_string(), version().to_string())
-        .const_label("git_commit_hash".to_string(), git_commit_hash().to_string());
+        .const_label("git_commit_hash".to_string(), git_commit_hash().to_string())
+        .const_label("build_timestamp".to_string(), build_timestamp().to_string());
     let histogram = HistogramVec::new(opts, labels)?;
     prometheus::register(Box::new(histogram.clone()))?;
     Ok(histogram)

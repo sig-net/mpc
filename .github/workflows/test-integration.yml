@@ -12,6 +12,11 @@ permissions:
   issues: write
   pull-requests: write
 
+# Cancel superseded runs of the same PR. Merge-queue and develop runs keep going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Fixture tests: in-process MPC protocol tests, no Docker or external infra needed.
   # Runs the `fixture` nextest profile (see .config/nextest.toml).
@@ -239,11 +244,6 @@ jobs:
         with:
           toolchain: 1.93.0
           components: clippy
-
-      - name: Install system OpenSSL
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-      - name: Set OpenSSL to system
-        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       # Cache policy: doc/ci-caching.md
       - name: Detect dependency changes vs develop

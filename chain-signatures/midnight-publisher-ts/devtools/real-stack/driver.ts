@@ -606,9 +606,8 @@ async function dispatch(request: Request): Promise<unknown> {
     1n,
     bytes(request.target, 20),
     bytes(request.argument, 32),
-    requestOutputSchema(request),
-    // The reserved respond schema stays empty.
-    new Uint8Array(64),
+    // The output schema must be canonical JSON NUL-padded to the field width.
+    nulPadded(JSON.stringify([{ name: "success", type: request.outputType }]), 64),
   );
   return { requestId: bytesToHex(submitted.private.result), placement: active.lastPlacement };
 }

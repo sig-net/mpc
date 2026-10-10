@@ -117,7 +117,7 @@ pub struct PublisherConfig {
     pub receipt_timeout: Duration,
     /// Retry strategy for polling the transaction receipt
     pub receipt_retry: RetryConfig,
-    /// Retry strategy for the whole batch publish (retries indefinitely)
+    /// Retry strategy for a batch publish as one unit
     pub batch_publish_retry: RetryConfig,
 }
 
@@ -142,9 +142,9 @@ impl Default for PublisherConfig {
                 jitter: true,
             },
             batch_publish_retry: RetryConfig {
-                min_delay: Duration::from_secs(1),
-                max_delay: Duration::from_secs(10),
-                max_times: usize::MAX,
+                min_delay: Duration::from_millis(500),
+                max_delay: Duration::from_secs(5),
+                max_times: 2,
                 jitter: true,
             },
         }
@@ -154,9 +154,6 @@ impl Default for PublisherConfig {
 /// Tuning for the indexing pipeline (catchup, live stream, finality waits).
 #[derive(Clone, Debug)]
 pub struct IndexerConfig {
-    /// Consecutive `get_block(Finalized)` failures after which the finalized-head
-    /// watcher escalates its retry warning (it never gives up)
-    pub max_finalized_failures: u32,
     /// Re-warn interval (seconds) while the finalized head is stalled
     pub stall_rewarn_secs: u64,
     /// Max concurrent JSON-RPC calls when resolving watcher receipts/nonces.
@@ -169,7 +166,6 @@ pub struct IndexerConfig {
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
-            max_finalized_failures: 20,
             stall_rewarn_secs: 300,
             max_concurrent_watcher_rpcs: 8,
             watcher_slow_sweep_interval: 10,

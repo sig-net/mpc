@@ -330,6 +330,7 @@ macro_rules! retry_rpc_gated {
                         let cooldown = shared.extend_cooldown();
                         tracing::warn!(
                             operation = $op_name,
+                            error = %e,
                             ?cooldown,
                             "provider throttled (429/402), engaging global cooldown"
                         );
@@ -371,7 +372,7 @@ macro_rules! retry_rpc_gated {
                 Ok(Err(e)) => {
                     if $crate::utils::retry::is_provider_throttled(&e) {
                         let cooldown = shared.extend_cooldown();
-                        tracing::warn!(?cooldown, "provider throttled (429/402), engaging global cooldown");
+                        tracing::warn!(error = %e, ?cooldown, "provider throttled (429/402), engaging global cooldown");
                     }
                     Err(e)
                 }
