@@ -5,8 +5,9 @@
 A contract on the source chain asks for a transaction to be signed and
 executed on a target chain, and is told the outcome at most once. The
 response is final when it comes: the transaction executed, it reverted, or
-it can never execute. Until then nothing arrives, and a transaction that
-never executes is never answered. The rest of the document is what the
+it can never execute. Until then nothing arrives. A transaction that never
+executes is answered only when another request's transaction takes its
+place; otherwise it is never answered. The rest of the document is what the
 MPC, the signet contract and the library have to do for that to hold.
 
 Organization:
@@ -67,8 +68,9 @@ Happy path:
   response from it, in the source chain's types. Written `req`, with fields
   `req.tx`, `req.target`, `req.key` and `req.schema` (Section 7 maps them to
   the fields on the wire, `req.target` is `executionDest`). A request is
-  *made* when the contract passes it to `sign_bidirectional` (Section 3.1).
-  The same tuple can be made again, and then it is the same request.
+  *made* when the contract passes it to `sign_bidirectional` (Section 3.1)
+  and the library accepts it; a refused attempt makes nothing. The same
+  tuple can be made again, and then it is the same request.
 * *Request ID*: rid(contract, req.tx, req.target, req.key), a collision-
   resistant hash in a length-committing encoding, so within one source
   chain two requests have the same rid exactly when they agree on all four.
@@ -126,8 +128,9 @@ How a request ends, as seen by the application contract:
   3.1). A response the library does not accept is dropped without a trace:
   there is no rejected ending, and the contract is not told.
 * *Unanswered*: no response is ever accepted, because none is ever
-  published (the transaction neither executes nor becomes Unviable, its
-  output does not decode,
+  published (the transaction neither executes nor is displaced after the
+  request was made, its output does not decode, the transaction that
+  executes or displaces it carries a signature that is never published,
   or the MPC did not admit the request) or because every published one is
   dropped.
 
@@ -197,28 +200,32 @@ G1 to G3 are safety, G4 and G5 are liveness. G2 and G4 together give
   your transaction. Precisely: an accepted response to req carries the
   true, final outcome of req.tx, never of another transaction.
 * G4 Delivery. If your transaction runs, you are told, as long as your
-  schema fits its output and your handler does not fail. One rare
-  fault on the MPC side can also leave a request unanswered, and anyone
-  can repair it. Precisely: if req.tx is included in a final target
-  block after req was made, a response to req is eventually accepted
+  schema fits its output and your handler does not fail. One fault on
+  the MPC side can also leave a request unanswered, and anyone can repair
+  it. Precisely: if the MPC admitted req and req.tx is included in a
+  final target block after req was made, a response to req is eventually
+  accepted
   unless (i) the return data does not decode against req.schema, (ii) the
   response handler fails, or (iii) the transaction's ID depends on its
   signature and that signature is never published.
 * G5 Unviable. If another of your requests takes this one's place and is
   answered, you are told that this one can never run. Precisely: suppose
-  the transaction of another request has the same replay protection as
+  the MPC admitted req, and the transaction of another request has the
+  same replay protection as
   req.tx on the same target chain, the same account and nonce on EVM
   for instance. If it is included after req was made and that request is
   answered Executed or Failed, a response to req saying Unviable is
-  eventually accepted, unless the response handler fails or that answer
-  cannot be checked (Section 6).
+  eventually accepted, unless the response handler fails.
 
 G4's exceptions (i) and (ii) are in the application's hands: a schema that
 does not match what the target contract returns, and a handler that
 fails. Exception (iii) is not. It concerns e.g., EVM target chains, where a
 transaction can only be looked up once its signature is known. The
-signature stays unknown if every correct node that signed loses it before
-publishing it, or if a faulty node keeps it to itself. The fix is simple:
+signature stays unknown if every correct node of the signing round loses
+it before publishing it, or if a faulty node of the round withholds its
+share, so that only it learns the signature, and keeps it to itself. A
+faulty node can do that in any round of exactly t nodes it takes part
+in. The fix is simple:
 the executed transaction carries its signature, and anyone can publish it
 (Section 6).
 
@@ -233,17 +240,22 @@ before the contract upgraded to this library.
 * Finality. A block the MPC treats as final stays in the chain. The MPC
   reads requests and attests outcomes only from such blocks.
 * Replay protection. Executing a transaction uses up its replay protection:
-  the account nonce on EVM, the spent output on a UTXO chain,
-  the durable nonce on Solana. Each can be used up only once, and a
-  transaction whose replay protection is used up can never execute. So the
-  same bytes, however often they are signed, execute at most once, and a
-  different transaction using the same nonce or output blocks ours for
-  good. A Solana transaction with a recent blockhash has no such
-  protection; see Section 6.
+  the account nonce on EVM, the durable nonce on Solana. Each can be used
+  up only once, and a transaction whose replay protection is used up can
+  never execute. So the same bytes, however often they are signed, execute
+  at most once, and a different transaction using the same nonce blocks
+  ours for good. A Solana transaction with a recent blockhash has no such
+  protection; see Section 6. UTXO target chains are out of scope: their
+  replay protection is a set of outputs, and M4 would need a rule for
+  requests whose sets only overlap.
 * Progress. All source and target chains keep producing final blocks.
   An outage delays delivery and changes nothing else. A correct node
   processes final blocks faster than the chains produce them, so it
   reaches the head from wherever it starts.
+* History. A node can look up any final target chain transaction and its
+  receipt by transaction ID, however old. Some clients keep a bounded
+  transaction index by default, so the providers the nodes use must serve
+  the full history.
 * One network per chain id. A chain id names a chain family, e.g., `eip155:1`
   for every Ethereum network, and an MPC deployment watches one network
   per family. So within a deployment an id names one network, and no two
@@ -326,14 +338,17 @@ Properties:
 
 It holds no per-application state, verifies nothing, and anyone may call
 it. It records the caller of `sign_bidirectional` as `contract` in the
-event it emits, which is all that `authentic` in Section 4.3 rests on. It
-emits three events:
+event it emits, which is what `authentic` in Section 4.3 rests on. Where a
+chain's signet contract cannot see its caller, the event carries the caller
+the calling contract names, and `authentic` rests instead on the MPC
+checking, from the transaction itself, that the named contract made the
+call. It emits three events:
 
 * `SignRequest { contract, rid, req }`, when a contract asks for a
   signature.
 * `Signature { rid, signature }`, when a signature is published, for the
   broadcaster and for nodes that were not in the signing round.
-* `Response { contract, rid, att, sig }`, when an attestation is published.
+* `Response { rid, att, sig }`, when an attestation is published.
   Where the chain allows it, the contract's `response` handler is called in
   the same transaction, with a bounded gas allowance, since it runs on the
   MPC's gas, and without letting its failure suppress the event. The
@@ -379,11 +394,16 @@ authentic(contract, rid, req): bool
 processable(req): bool
     req.target parses to a chain this MPC can watch
     key derivation is valid: parameters canonical, key derivable for the
-      source chain, path not the attestation key's
+      source chain, key version with a root key of its own (Section 5)
+    req.key's path is not the attestation key's (M1)
+    if another signing API on the source chain maps the same contract,
+      path and key version to the same key as sign_bidirectional:
+        req.key's path lies in the bidirectional namespace (M1)
     req.tx is non-empty, parses as an unsigned transaction in target's
       format, commits to the network this MPC watches for target (EVM:
-      carries that network's chain id), and attaching any signature
-      yields a well-formed signed transaction
+      carries that network's chain id), has replay protection (Section
+      3.3), and attaching any signature yields a well-formed signed
+      transaction
     req.schema is well formed: it is empty, or it parses and names only
       types the MPC can decode from target and encode for the source chain
 
@@ -397,10 +417,11 @@ on target chain block at height h finalised on chain target:
     for (rid, e) in backlog for target and no local[rid].outcome:
         ours = { txid(s, e.req.tx)
                  for s in e.signatures + local[rid].issued }
+               + { txid(e.req.tx) } if target's IDs ignore the signature
         if some id in ours has receipt r in a final block at height h':  // M3
             for (rid', e') in backlog for target, other than rid, with e's
-              account and e.req.tx's replay protection, and no
-              local[rid'].outcome:
+              account and e.req.tx's replay protection, unsigned bytes
+              other than e.req.tx, and no local[rid'].outcome:
                 attest(rid', (h', Unviable, empty))             // M4
             if decode(r, e.req.schema) gives (kind, data):
                 attest(rid, (h', kind, data))
@@ -417,14 +438,14 @@ attest(rid, att):
     local[rid].attestation = (att, sig)    // stored before publishing
     publish_response(e.contract, rid, att, sig)
 
-on Response { contract, rid, att, sig } finalised on the source chain:
+on Response { rid, att, sig } finalised on the source chain:
     e = backlog[rid] if rid in backlog
     if e and sig verifies over attestationDigest(rid, att)
       under attestation_key(e.contract, e.req.key.key_version):
         if att.kind is Executed or Failed:        // e.req.tx was included
             for (rid', e') in backlog for e.req.target, other than rid,
-              with e's account and e.req.tx's replay protection, and no
-              local[rid'].outcome:
+              with e's account and e.req.tx's replay protection, unsigned
+              bytes other than e.req.tx, and no local[rid'].outcome:
                 attest(rid', (att.height, Unviable, empty))     // M4
         delete backlog[rid], local[rid]
 ```
@@ -457,7 +478,7 @@ A repeated attestation has the same content (Section 5) and is dropped
 
 A node has to be able to check a `Response` from the event alone, since a
 `Response` removes the request on every node. The event of Section 7
-allows that only when the output is empty; Section 6 says what is missing.
+carries a hash of the output for that.
 
 Properties:
 
@@ -467,6 +488,12 @@ Properties:
   under a reserved path that no request on any signing API may name
   (`processable` covers this one); otherwise a contract could have its own
   attestation key sign an arbitrary hash and forge a response to itself.
+  Likewise, where another signing API on the source chain maps the same
+  contract, path and key version to the same key, a bidirectional request's
+  path lies in a namespace reserved for bidirectional requests that no
+  request on that API may name; otherwise
+  such a request could have a transaction signed that uses up a
+  bidirectional request's replay protection unnoticed (Section 6).
 * M2 The MPC drops a request that is not authentic, that it cannot
   process, or whose rid is already in the backlog, and keeps nothing for
   it. A rid already in the backlog is the same transaction, already being
@@ -478,10 +505,10 @@ Properties:
   decode, the MPC attests nothing, and the entry stays in the backlog,
   parked and unwatched.
 * M4 The MPC attests Unviable for a request only when another request's
-  transaction, from the same account, on the same target chain and
-  with the same replay protection, was included in a final block: a node
-  finds that execution itself, or reads a `Response` saying Executed or
-  Failed. It attests at that block's height.
+  transaction, from the same account, on the same target chain, with the
+  same replay protection and other unsigned bytes, was included in a final
+  block: a node finds that execution itself, or reads a `Response` saying
+  Executed or Failed. It attests at that block's height.
 * M5 An attestation binds rid, height, kind and data, with data's length
   in the hash, and describes only target chain state final at that height.
 
@@ -499,7 +526,10 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
 * Agreement. Correct nodes hold the same backlog at a source height, so
   they admit the same requests and hold the same published signatures for
   them, and they compute the same attestation for a rid, as a function of
-  final target chain state and the request's schema only.
+  final target chain state and the request's schema only. This needs a
+  node to start processing a source chain at or before the oldest
+  outstanding request, or from a backlog the correct nodes agreed on at
+  its start height; otherwise it never admits the older requests.
 * Distinct keys (ACCOUNT_DERIVATION.md). The derivation path contains the
   source chain's id and the requesting contract, so different (source
   chain, contract, key parameters) derive different keys, where the key
@@ -509,7 +539,9 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
   one network per family (Section 3.3), so within it the key still names
   one contract. So the sender of an executed transaction tells the MPC
   which contract and key parameters asked for it. Assumed here: two
-  signing schemes never share a key.
+  signing schemes never share a key, and two key versions never share a
+  root key; `processable` refuses a key version without a root key of its
+  own.
 
 * G1, in short: an execution this contract has already accepted is at or below
   last_seen, so a request made later records it as known and C3c drops any
@@ -590,7 +622,7 @@ a path from B48 through A15; the first at A12 has none.
      execution passes C3 and is accepted.
 
 * G5: the other request's `Response` is final on the source chain, so
-  every correct node reads it, and can check it by G5's premise. Req is
+  every correct node reads it, and can check it from the event alone. Req is
   still in each node's backlog unless it was answered before. Each node
   attests Unviable for req at the height in that response (M4), and they
   agree. The other transaction was included after req was made, so that
@@ -611,7 +643,7 @@ a path from B48 through A15; the first at A12 has none.
   transaction carries its signature, and anyone may publish it, after
   which every node finds the execution.
 * Finding an execution without its signature. Where the transaction ID is
-  computed from the unsigned bytes alone (Tron, Zcash from version 5), a
+  computed from the unsigned bytes alone (Tron, for instance), a
   node needs no signature and G4's exception (iii) does not arise. On EVM
   and Solana it does. EVM offers a way around it that this design does
   not use: a binary search on the account's nonce over block heights
@@ -619,10 +651,14 @@ a path from B48 through A15; the first at A12 has none.
   transaction that used it. At least t nodes would need providers that
   serve account state at old blocks. On Solana, listing
   the account's transactions does the same.
-* A `Response` cannot always be checked. The signature in a `Response`
-  covers the output, but the event carries only the output's length. A
-  node that does not have the output cannot check the response. Signing a
-  hash of the output and putting that hash in the event would fix this.
+* Other signing APIs. A request on another signing API, a plain sign
+  request for instance, names only a payload hash, so the MPC could not
+  find a transaction it signed. With the same key as a bidirectional
+  request, it could use up that request's replay protection and leave it
+  unanswered. The reserved path namespace (M1) keeps the keys apart. It
+  has to be one that no path accepted before the rule took effect lies in:
+  a transaction signed then stays valid until its replay protection is
+  used.
 * Agreement has no enforcement point. A change to `authentic`,
   `processable` or the attestation function must apply only to requests
   made at or after a source height the upgrade names; applied to requests
@@ -635,14 +671,18 @@ a path from B48 through A15; the first at A12 has none.
 * A key version can be retired only once no entry that recorded it is
   outstanding, and an unanswered request is outstanding forever. Until
   then a compromised key can forge responses to the requests made under
-  it, and to no others (C3b).
+  it (C3b). A forged response with a large height also raises
+  `last_seen` for its target, so the library then drops genuine responses
+  on that target for requests of every key version (C3c, C3d).
 * The MPC's backlog and the library's `outstanding` can grow without
   bound. An entry lives until a verified Response, and a request whose
   signature nobody broadcasts, or whose output does not decode (M3),
   never produces one. A cancel transaction that uses up the replay
   protection, itself requested through `sign_bidirectional`, ends both
-  entries (G5), so an application has a way out, but nothing bounds the
-  entries nobody clears.
+  entries (G5), so an application has a way out, unless the request's
+  replay protection was used up before the request was made: then it can
+  never execute, and no later transaction takes its place. Nothing bounds
+  the entries nobody clears.
 
 
 ## 7. Canonical Protocol Structures
@@ -677,6 +717,7 @@ The single append-only enum has at most 256 variants and assigns these indices:
 | `evmType2TxWord` | 3 |
 | `evmType2TxAccessEntry` | 4 |
 | `evmType2TxStorageKey` | 5 |
+| `attestedOutput` | 6 |
 
 `E` must preserve the leading tag: inputs with different tags must have
 different encodings, including when their remaining tuple shapes differ.
@@ -710,7 +751,7 @@ stay out.
 | `algo` | `enum MPCSignatureAlgorithm` | yes | signing scheme |
 | `txParamType` | `enum TxParamType` | yes | which transaction structure `txParams` holds |
 | `txParams` | per `txParamType` (7.3) | as its digest | the transaction |
-| `executionDest` | `bytes(32)` | yes | CAIP-2 id of the target chain family, matched exactly; one fixed id per family, `eip155:1` for every Ethereum network. Which network the MPC executes on is set per deployment |
+| `executionDest` | `bytes(32)` | yes | CAIP-2 id of the target chain family in ASCII, zero padded, matched exactly; one fixed id per family, `eip155:1` for every Ethereum network. Which network the MPC executes on is set per deployment. An id contains no zero byte, so the padding is unambiguous; ids longer than 32 bytes, such as Solana's or Bitcoin's, cannot be named in this version |
 | `signatureDest` | `enum MPCDestination` | no | reserved, request construction refuses any value except `unused` |
 | `params` | `bytes(64)` | no | reserved, request construction refuses any non-zero byte |
 | `outputDeserializationSchema` | `bytes` | no | how the MPC decodes the execution output |
@@ -844,7 +885,7 @@ The MPC publishes these responses to a `SignBidirectionalEventV1` request.
 
 `RespondBidirectionalEventV1` attests the requested transaction's outcome:
 `executed`, `failed` or `unviable`. The first two
-attest execution of the transaction signed in `SignatureRespondedEventV1`.
+attest execution of the request's transaction, under any of its signatures.
 An `unviable` outcome attests that a different transaction used up the
 requested transaction's replay protection.
 
@@ -856,22 +897,32 @@ The event carries:
 | `blockHeight` | `u64` | height of the final target chain block, in that chain's numbering |
 | `outputKind` | `enum OutputKind { executed, failed, unviable }` | the outcome's kind |
 | `serializedOutputLength` | `u64` | byte width of the serialised output |
+| `outputHash` | `bytes(32)` | hash of the serialised output |
 | `digest` | `bytes(32)` | the [attestation digest](#7421-attestation-digest) |
 | `signature` | `Signature` | over `digest`, by the attestation key of `requestId`'s contract at the request's key version |
 
+A verifier recomputes `digest` from the other fields and checks `signature`
+against that; it does not trust the carried `digest`.
+
 ##### 7.4.2.1 Attestation Digest
 
-The attestation digest, over the serialised output the request's schema
-produced (empty for `failed` and `unviable`):
+The attestation digest covers a hash of the serialised output the
+request's schema produced (empty for `failed` and `unviable`), so anyone
+can check an event without the output:
 
 ```
+outputHash = bytes32(H(E[
+    HashDomain.attestedOutput: u8,
+    serializedOutput: bytes(serializedOutputLength)
+]))
+
 digest = bytes32(H(E[
     HashDomain.attestationDigest: u8,
     requestId: bytes(32),
     blockHeight: u64,
     outputKind: enum,
     serializedOutputLength: u64,
-    serializedOutput: bytes(serializedOutputLength)
+    outputHash: bytes(32)
 ]))
 ```
 
