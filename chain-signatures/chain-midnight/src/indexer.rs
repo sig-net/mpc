@@ -1426,6 +1426,7 @@ mod tests {
                                 block_height: 0x0102030405060708,
                                 outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
                                 serialized_output_length: 32,
+                                output_hash: [0x53; 32],
                                 digest: [0x54; 32],
                             },
                             x,
@@ -1464,6 +1465,7 @@ mod tests {
             mpc_primitives::AttestationOutcomeKind::Executed
         );
         assert_eq!(attestation.serialized_output_length, 32);
+        assert_eq!(attestation.output_hash, [0x53; 32]);
         assert_eq!(attestation.digest, [0x54; 32]);
     }
 
@@ -1499,6 +1501,7 @@ mod tests {
                                 block_height: 42,
                                 outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
                                 serialized_output_length: 32,
+                                output_hash: [0x53; 32],
                                 digest: [0x54; 32],
                             },
                             x,

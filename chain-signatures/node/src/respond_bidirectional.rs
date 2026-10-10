@@ -4,8 +4,8 @@ use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
     AttestationMetadata, AttestationOutcomeKind, BidirectionalTx, Chain, ChainConfig as _,
-    IndexedSignRequest, RespondBidirectionalSerializedOutput, RespondBidirectionalTx,
-    SerDeserFormat, SignArgs, SignId, SignKind,
+    IndexedSignRequest, PublishedAttestation, RespondBidirectionalSerializedOutput,
+    RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId, SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
 use std::sync::Arc;
@@ -38,6 +38,39 @@ fn respond_bidirectional_path(chain: Chain) -> Option<&'static str> {
 pub(crate) fn claims_attestation_key(request: &IndexedSignRequest) -> bool {
     !matches!(request.kind, SignKind::RespondBidirectional(_))
         && respond_bidirectional_path(request.chain) == Some(request.args.path.as_str())
+}
+
+/// The key tweak and payload a genuine published Midnight response for `tx` is signed
+/// with, recomputed from the event alone: the digest covers the output's length and hash,
+/// both carried by the event, so a node that never observed the outcome still binds the
+/// response to this request.
+pub(crate) fn published_midnight_signing_args(
+    tx: &BidirectionalTx,
+    published: &PublishedAttestation,
+) -> anyhow::Result<(Scalar, Scalar)> {
+    anyhow::ensure!(
+        tx.source_chain == Chain::Midnight,
+        "published attestations are Midnight responses"
+    );
+    let metadata = AttestationMetadata {
+        key_version: tx.key_version,
+        block_height: published.block_height,
+        outcome_kind: published.outcome_kind,
+    };
+    let digest = mpc_compact_hashing::compute_attestation_digest(
+        &tx.request_id,
+        &metadata,
+        published.serialized_output_length,
+        &published.output_hash,
+    );
+    anyhow::ensure!(
+        digest == published.digest,
+        "Midnight event digest differs from the response it names"
+    );
+    let payload = Scalar::from_bytes(digest)
+        .ok_or_else(|| anyhow::anyhow!("Midnight attestation digest is not a scalar"))?;
+    let epsilon = tx.epsilon(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH)?;
+    Ok((epsilon, payload))
 }
 
 pub struct CompletedTx {

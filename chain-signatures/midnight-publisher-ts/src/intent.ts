@@ -66,6 +66,7 @@ export interface WireAttestation {
   readonly blockHeight: string;
   readonly outputKind: 0 | 1 | 2;
   readonly serializedOutputLength: string;
+  readonly outputHash: string;
   readonly digest: string;
 }
 
@@ -172,6 +173,7 @@ export async function buildIntent(input: BuildIntentInput): Promise<Uint8Array> 
                   blockHeight: BigInt(input.attestation!.blockHeight),
                   outputKind: input.attestation!.outputKind,
                   serializedOutputLength: BigInt(input.attestation!.serializedOutputLength),
+                  outputHash: fromHex(input.attestation!.outputHash),
                   digest: fromHex(input.attestation!.digest),
                 },
               ] satisfies CircuitArguments<"respondBidirectional">),

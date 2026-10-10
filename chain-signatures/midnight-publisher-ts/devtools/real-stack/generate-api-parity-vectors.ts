@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createCircuitContext, createConstructorContext } from "@midnight-ntwrk/compact-runtime";
 import { SigningKey, getBytes } from "ethers";
 import {
+  calculateAttestedOutputHash,
   calculateRequestId,
   calculateEvmType2TxParamsDigest,
   decodeSignetLogEvents,
@@ -44,11 +45,11 @@ const record: Parameters<typeof pureCircuits.requestId34>[0] = {
     accessListEntryCount: 0n,
     accessList: [],
   },
-  executionDest: padded("eip155:31337", 32),
+  executionDest: padded("eip155:31337", 64),
   signatureDest: 0,
   params: new Uint8Array(64),
   outputDeserializationSchema: padded("uint256", 34),
-  respondSerializationSchema: padded("uint256", 34),
+  respondSerializationSchema: new Uint8Array(0),
 };
 const requestId = pureCircuits.requestId34(record);
 assert.deepEqual(requestId, calculateRequestId(record));
@@ -58,7 +59,6 @@ assert.deepEqual(
     signatureDest: 1,
     params: new Uint8Array(64).fill(7),
     outputDeserializationSchema: padded("different-output-schema", 34),
-    respondSerializationSchema: padded("different-response-schema", 34),
   }),
   requestId,
 );
@@ -209,6 +209,15 @@ const digests: ReadonlyMap<number, typeof pureCircuits.digest0> = new Map([
   [62, pureCircuits.digest62],
   [63, pureCircuits.digest63],
 ]);
+const outputHashes: ReadonlyMap<number, typeof pureCircuits.outputHash0> = new Map([
+  [0, pureCircuits.outputHash0],
+  [1, pureCircuits.outputHash1],
+  [30, pureCircuits.outputHash30],
+  [31, pureCircuits.outputHash31],
+  [32, pureCircuits.outputHash32],
+  [62, pureCircuits.outputHash62],
+  [63, pureCircuits.outputHash63],
+]);
 const inputs = [
   ...[0, 1, 30, 31, 32, 62, 63].map((width) => ({
     keyVersion: 1n,
@@ -228,6 +237,10 @@ const vectors = inputs.map((input) => {
   const digestFunction = digests.get(input.data.length);
   assert.ok(digestFunction);
   const cache = input.data;
+  const outputHashFunction = outputHashes.get(input.data.length);
+  assert.ok(outputHashFunction);
+  const outputHash = outputHashFunction(input.data);
+  assert.deepEqual(outputHash, calculateAttestedOutputHash(input.data));
   const digest = digestFunction(rid, input.blockHeight, input.kind, input.data);
   assert.deepEqual(
     digest,
@@ -235,6 +248,7 @@ const vectors = inputs.map((input) => {
   );
   return {
     ...input,
+    outputHash,
     digest,
     cache,
   };
@@ -255,6 +269,7 @@ const signedResponse = (
     blockHeight: 42n,
     outputKind: kind,
     serializedOutputLength: BigInt(data.length),
+    outputHash: calculateAttestedOutputHash(data),
     digest,
     signature: {
       bigR: { x: noncePoint.slice(1, 33).reverse(), y: noncePoint.slice(33) },
@@ -320,6 +335,7 @@ const responseEvent = {
   blockHeight: wireResponse.blockHeight.toString(),
   outputKind: wireResponse.outputKind,
   serializedOutputLength: wireResponse.serializedOutputLength.toString(),
+  outputHash: hex(wireResponse.outputHash),
   digest: hex(wireResponse.digest),
   signature: {
     bigR: { x: hex(wireResponse.signature.bigR.x), y: hex(wireResponse.signature.bigR.y) },
@@ -342,6 +358,7 @@ const fixture = {
     kind: Number(vector.kind),
     blockHeight: vector.blockHeight.toString(),
     data: hex(vector.data),
+    outputHash: hex(vector.outputHash),
     digest: hex(vector.digest),
     cache: hex(vector.cache),
   })),
