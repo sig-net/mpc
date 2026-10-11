@@ -888,7 +888,7 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
         &ethereum.sandbox.secret_key,
     );
     tokio::pin!(run);
-    let result = tokio::time::timeout(Duration::from_secs(60 * 60), async {
+    let result = tokio::time::timeout(Duration::from_secs(45 * 60), async {
         loop {
             tokio::select! {
                 result = &mut run => return result,
@@ -899,7 +899,7 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
         }
     })
     .await
-    .context("the vault run exceeded an hour")??;
+    .context("the vault run exceeded 45 minutes")??;
 
     let operations = result
         .operations
