@@ -94,7 +94,7 @@ pub struct MidnightPublisher {
     output_store: Option<Arc<dyn OutputStore>>,
     central_address: MidnightAddress,
     telemetry: Arc<dyn PublisherTelemetry>,
-    awaiter: Option<Arc<dyn ResponseAwaiter>>,
+    awaiter: Arc<dyn ResponseAwaiter>,
     /// One funding wallet and one DUST UTXO mean build-to-submit is one serial flow.
     flow: tokio::sync::Mutex<()>,
 }
@@ -105,7 +105,7 @@ impl MidnightPublisher {
     pub async fn connect(
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
-        awaiter: Option<Arc<dyn ResponseAwaiter>>,
+        awaiter: Arc<dyn ResponseAwaiter>,
     ) -> anyhow::Result<Self> {
         config.publisher.validate_output_storage()?;
         let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
@@ -134,7 +134,7 @@ impl MidnightPublisher {
         client: Arc<dyn IntentClient>,
         output_store: Option<Arc<dyn OutputStore>>,
         telemetry: Arc<dyn PublisherTelemetry>,
-        awaiter: Option<Arc<dyn ResponseAwaiter>>,
+        awaiter: Arc<dyn ResponseAwaiter>,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -148,12 +148,8 @@ impl MidnightPublisher {
         }
     }
 
-    /// `true` without an awaiter, so a publisher nothing wires keeps publishing.
     async fn still_awaited(&self, action: &PublishAction, stage: &'static str) -> bool {
-        let Some(awaiter) = &self.awaiter else {
-            return true;
-        };
-        if awaiter.still_awaited(action).await {
+        if self.awaiter.still_awaited(action).await {
             return true;
         }
         tracing::info!(
@@ -280,7 +276,7 @@ impl RecoveringMidnightPublisher {
     pub fn start(
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
-        awaiter: Option<Arc<dyn ResponseAwaiter>>,
+        awaiter: Arc<dyn ResponseAwaiter>,
     ) -> anyhow::Result<Self> {
         config.validate()?;
         let config = config.clone();
@@ -646,15 +642,7 @@ mod tests {
     }
 
     fn publisher(reads: Arc<dyn PinnedReads>, client: Arc<dyn IntentClient>) -> MidnightPublisher {
-        MidnightPublisher::new(
-            &config(),
-            MidnightAddress::from_hex(CENTRAL).expect("CENTRAL is a 32-byte hex address"),
-            reads,
-            client,
-            Some(Arc::new(StubOutputStore::default())),
-            Arc::new(NoopPublisherTelemetry),
-            None,
-        )
+        awaiting_publisher(reads, client, ScriptedAwaiter::new(&[]))
     }
 
     #[derive(Debug, PartialEq)]
@@ -1339,7 +1327,7 @@ mod tests {
             client,
             Some(Arc::new(StubOutputStore::default())),
             Arc::new(NoopPublisherTelemetry),
-            Some(awaiter),
+            awaiter,
         )
     }
 
@@ -1612,10 +1600,13 @@ mod tests {
             indexer: Default::default(),
         };
 
-        let error =
-            RecoveringMidnightPublisher::start(&config, Arc::new(NoopPublisherTelemetry), None)
-                .err()
-                .expect("an ftp node_url is refused before any connection attempt");
+        let error = RecoveringMidnightPublisher::start(
+            &config,
+            Arc::new(NoopPublisherTelemetry),
+            ScriptedAwaiter::new(&[]),
+        )
+        .err()
+        .expect("an ftp node_url is refused before any connection attempt");
         assert!(format!("{error:#}").contains("node_url"), "{error:#}");
     }
 }
