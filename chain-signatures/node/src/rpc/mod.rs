@@ -1313,6 +1313,22 @@ mod tests {
         assert!(publish_still_awaited(&backlog, &second_leg).await);
     }
 
+    /// The Midnight publisher's re-check reads the backlog's own answer.
+    #[tokio::test]
+    async fn backlog_awaiter_answers_from_the_backlog() {
+        use mpc_chain_midnight::ResponseAwaiter as _;
+
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([6u8; 32]);
+        let action = publish_action_for(&mock_sign_request(sign_id, Chain::Midnight));
+        let awaiter = BacklogAwaiter::new(backlog.clone());
+
+        backlog.insert_mock_sign(sign_id, Chain::Midnight).await;
+        assert!(awaiter.still_awaited(&action).await);
+        backlog.remove(Chain::Midnight, &sign_id).await;
+        assert!(!awaiter.still_awaited(&action).await);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn publish_retry_stops_once_the_response_is_observed() {
         let backlog = Backlog::new();

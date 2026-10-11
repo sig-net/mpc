@@ -1421,7 +1421,9 @@ mod tests {
             let publisher = publisher.clone();
             async move { publisher.publish_signature(&respond_action()).await }
         });
-        first_entered.await;
+        tokio::time::timeout(Duration::from_secs(5), first_entered)
+            .await
+            .expect("the first publish reaches submit");
         let second = tokio::spawn({
             let publisher = publisher.clone();
             async move { publisher.publish_signature(&respond_action()).await }
