@@ -72,6 +72,7 @@ pub struct WireAttestation {
     pub block_height: String,
     pub output_kind: u8,
     pub serialized_output_length: String,
+    pub output_hash: String,
     pub digest: String,
 }
 

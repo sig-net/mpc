@@ -69,6 +69,7 @@ describe("handleLine", () => {
       })),
       { ...bidirectional, attestation: { ...attestation, outputKind: 3 } },
       { ...bidirectional, attestation: { ...attestation, digest: "00" } },
+      { ...bidirectional, attestation: { ...attestation, outputHash: "00" } },
     ]) {
       expect(await answer(request(override))).toMatchObject({
         id: 7,

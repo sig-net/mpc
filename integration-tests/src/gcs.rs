@@ -81,4 +81,11 @@ impl GcsEmulator {
             .await?
             .to_vec())
     }
+
+    pub async fn stop(&self) -> anyhow::Result<()> {
+        self._container
+            .stop_with_timeout(Some(0))
+            .await
+            .context("stopping the test-owned GCS emulator")
+    }
 }
