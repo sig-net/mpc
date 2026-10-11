@@ -27,7 +27,6 @@ import {
   type AccountKeys,
   type MidnightNodeConfig,
 } from "@sig-net/midnight-contract-deploy";
-// The vault is written against @sig-net/midnight 0.24.0-rc.10, installed under this alias.
 import {
   asciiPadded,
   bytesToHex,
@@ -44,7 +43,7 @@ import {
   type RequestIdHex,
   type RespondBidirectionalEvent,
   type Secp256k1Point,
-} from "@sig-net/midnight-respond-oracle";
+} from "@sig-net/midnight";
 import { JsonRpcProvider } from "ethers";
 import {
   Action,
@@ -486,14 +485,7 @@ class VaultRun {
       if (event.blockHeight !== BigInt(request.evmBlockHeight)) {
         throw new Error(`${request.operation} attested height ${event.blockHeight}`);
       }
-      const circuitInput = respondBidirectionalEventToCircuitInput(event);
-      if (request.output.length === 1) {
-        await this.vault.callTx.queueAttestation1(circuitInput, request.output);
-      } else if (request.output.length === 32) {
-        await this.vault.callTx.queueAttestation32(circuitInput, request.output);
-      } else {
-        throw new Error(`no queue circuit takes ${String(request.output.length)} output bytes`);
-      }
+      await this.vault.callTx.queueAttestation(respondBidirectionalEventToCircuitInput(event));
       attested.set(request.operation, { ...request, event });
       this.operations.push({
         operation: request.operation,

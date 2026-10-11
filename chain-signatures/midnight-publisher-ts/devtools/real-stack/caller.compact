@@ -47,10 +47,8 @@ export circuit initialise(responseKey: Secp256k1Point): [] {
 circuit fileIsEvenRequest(
   call: IsEvenCall,
   keyVersion: Uint<8>,
-  to: Bytes<20>,
-  argWord: Bytes<32>,
   outputSchema: Bytes<64>
-): [] {
+): RequestId {
   const calldata = EvmCalldata<1> {
     selector: Bytes [0x2a, 0x2e, 0x13, 0x20],
     noWords: 1 as Uint<16>,
@@ -114,26 +112,24 @@ export circuit submitIsEvenRequest(
   keyVersion: Uint<8>,
   to: Bytes<20>,
   argWord: Bytes<32>,
-  outputSchema: Bytes<64>,
-  responseSchema: Bytes<64>
+  outputSchema: Bytes<64>
 ): RequestId {
   return notifySigner(fileIsEvenRequest(
     IsEvenCall { evmNonce: evmNonce, to: to, argWord: argWord },
     keyVersion,
-    outputSchema,
-    responseSchema
+    outputSchema
   ));
 }
 
 // Test-only transcript placements. Each circuit files and notifies Boolean-schema
-// requests, with the reserved respond schema left empty, at key version 1. Without `kernel.checkpoint()`, which this compiler's ZKIR v3
+// requests at key version 1. Without `kernel.checkpoint()`, which this compiler's ZKIR v3
 // backend does not implement, a call is either wholly guaranteed or wholly fallible.
 
 export circuit submitPlacedRequest(call: IsEvenCall, schema: Bytes<64>, fallible: Boolean): RequestId {
   if (disclose(fallible)) {
     addBallast();
   }
-  return notifySigner(fileIsEvenRequest(call, 1, schema, default<Bytes<64>>));
+  return notifySigner(fileIsEvenRequest(call, 1, schema));
 }
 
 // Both singleton calls take this call's phase and notify in call order.
@@ -146,8 +142,8 @@ export circuit submitPlacedRequestPair(
   if (disclose(fallible)) {
     addBallast();
   }
-  const firstId = notifySigner(fileIsEvenRequest(first, 1, schema, default<Bytes<64>>));
-  const secondId = notifySigner(fileIsEvenRequest(second, 1, schema, default<Bytes<64>>));
+  const firstId = notifySigner(fileIsEvenRequest(first, 1, schema));
+  const secondId = notifySigner(fileIsEvenRequest(second, 1, schema));
   return [firstId, secondId];
 }
 
@@ -156,7 +152,7 @@ export circuit submitPlacedRequestPair(
 export circuit submitGatedRequest(call: IsEvenCall, schema: Bytes<64>, expectedGate: Uint<64>): RequestId {
   addBallast();
   assert(gate == disclose(expectedGate), "Gate moved");
-  return notifySigner(fileIsEvenRequest(call, 1, schema, default<Bytes<64>>));
+  return notifySigner(fileIsEvenRequest(call, 1, schema));
 }
 
 export circuit bumpGate(): [] {

@@ -7,10 +7,10 @@
 // executing the EVM side. See ../../README.md for the full integration walkthrough.
 //
 // Contention: apart from initialise setting globalLastSeen once, flushQueue is the ONLY
-// circuit that reads or writes globalLastSeen and vaultAccountNonce. Every other
-// circuit touches only entries keyed by its own request, so user calls never conflict
-// with each other or with a flush.
-// See ../docs/contention-handling.md.
+// circuit that reads or writes globalLastSeen and vaultAccountNonce. Every user circuit
+// writes only entries keyed by its own request and reads configuration only the deployer
+// changes, so user calls never conflict with each other or with a flush.
+// See ../../docs/contention-handling.md.
 //
 // Layout: configuration, the admin circuits that send no EVM transaction (initialisation,
 // gas settings and allowed tokens), the request queue every action shares, the admin
@@ -236,8 +236,9 @@ export struct GasParams {
 // own arguments live in its args map under inIndex, and argsHash commits to them.
 export struct RequestBufferEntry {
   action: Action;
-  // false: evmNonce is the nonce the caller names, taken verbatim. true: the vault's
-  // account signs, and the flush overwrites evmNonce with the vault's next nonce.
+  // false: evmNonce is set at start and taken verbatim (a deposit's caller-named nonce,
+  // or the vault nonce a nonce replacement reads from the request it replaces). true: the
+  // vault's account signs, and the flush overwrites evmNonce with the vault's next nonce.
   useNextVaultAccountNonce: Boolean;
   evmNonce: Uint<64>;
   // The index of the entry in inputRequestBuffer and of its args in the action's args
@@ -255,13 +256,16 @@ export struct OutputRequestEntry {
   lastSeen: Uint<64>;
 }
 
-// A verified attestation, stored under its request id. The complete circuit re-supplies
-// the serialised output and checks it against the digest, so the record holds no output
-// and serves every output width.
+// A verified attestation, stored under its request id. The signature covers the output's
+// width and hash, so the record keeps those and no output: one queue circuit serves every
+// output width, and on an executed verdict the complete circuit re-supplies the serialised
+// output and checks it against them with verifyAttestedOutputV1 (a nonce replacement checks
+// the empty output on every verdict).
 export struct AttestationRecord {
   blockHeight: Uint<64>;
   outputKind: OutputKind;
-  digest: Bytes<32>;
+  serializedOutputLength: Uint<64>;
+  outputHash: Bytes<32>;
 }
 
 export enum FlushChannel { empty, request, attestation }
@@ -272,7 +276,8 @@ export struct FlushSlot {
   requestId: RequestId;    // read when channel == attestation
 }
 
-// The highest block height of any attestation the flush has folded.
+// The EVM height initialise() set, raised to the highest block height of any
+// attestation the flush has folded.
 export ledger globalLastSeen: Uint<64>;
 
 // The vault EVM account's next nonce. Starts at 0: each deployment derives a fresh
@@ -362,84 +367,32 @@ circuit flushAttestation(requestId: RequestId): [] {
   outputAttestationBuffer.insert(requestId, record);
 }
 
-circuit recordAttestation(
-  respondBidirectionalEvent: RespondBidirectionalEventV1,
-  digest: Bytes<32>
-): [] {
-  const requestId = respondBidirectionalEvent.requestId;
+// Queues an attestation for the flush once its signature verifies against the MPC
+// response key. The signed digest covers the request id, the height the flush folds, the
+// output kind and the output's width and hash, so the output itself is not needed here
+// and one circuit serves every output width. Anyone may submit one.
+export circuit queueAttestation(respondBidirectionalEvent: RespondBidirectionalEventV1): [] {
+  requireInitialised();
+  const attestation = disclose(respondBidirectionalEvent);
+  assert(
+    verifyRespondBidirectionalAttestationV1(attestation, mpcResponseKey),
+    "Invalid attestation signature"
+  );
+  const requestId = attestation.requestId;
   assert(evictionMap.member(requestId), "Request not sent");
   const outIndex = evictionMap.lookup(requestId);
   assert(outputRequestBuffer.member(outIndex), "Request not open");
   const out = outputRequestBuffer.lookup(outIndex);
   // TODO for audit v2, make this trigger a refund arm, even though this should be unreachable
-  assert(respondBidirectionalEvent.blockHeight > out.lastSeen, "Stale attestation");
+  assert(attestation.blockHeight > out.lastSeen, "Stale attestation");
   assert(!inputAttestationBuffer.member(requestId), "Attestation already queued");
   assert(!outputAttestationBuffer.member(requestId), "Attestation already flushed");
   inputAttestationBuffer.insert(requestId, AttestationRecord {
-    blockHeight: respondBidirectionalEvent.blockHeight,
-    outputKind: respondBidirectionalEvent.outputKind,
-    digest: digest,
+    blockHeight: attestation.blockHeight,
+    outputKind: attestation.outputKind,
+    serializedOutputLength: attestation.serializedOutputLength,
+    outputHash: attestation.outputHash,
   });
-}
-
-// Queues an attestation with an empty output.
-// The output is needed here, as the signed digest binds the
-// height to it and the flush trusts the height it folds.
-export circuit queueAttestation0(
-  respondBidirectionalEvent: RespondBidirectionalEventV1,
-  serializedOutput: Bytes<0>
-): [] {
-  requireInitialised();
-  const attestation = disclose(respondBidirectionalEvent);
-  const output = disclose(serializedOutput);
-  assert(
-    verifyRespondBidirectionalEventV1<0>(output, attestation, mpcResponseKey),
-    "Invalid attestation signature"
-  );
-  const digest = calculateSignetAttestationDigestV1<0>(
-    attestation.requestId, attestation.blockHeight, attestation.outputKind, output
-  );
-  recordAttestation(attestation, digest);
-}
-
-// Queues an attestation with a 1-byte output (the ERC20 transfer bool). The output is
-// needed here, as the signed digest binds the height to it and the flush trusts the
-// height it folds.
-export circuit queueAttestation1(
-  respondBidirectionalEvent: RespondBidirectionalEventV1,
-  serializedOutput: Bytes<1>
-): [] {
-  requireInitialised();
-  const attestation = disclose(respondBidirectionalEvent);
-  const output = disclose(serializedOutput);
-  assert(
-    verifyRespondBidirectionalEventV1<1>(output, attestation, mpcResponseKey),
-    "Invalid attestation signature"
-  );
-  const digest = calculateSignetAttestationDigestV1<1>(
-    attestation.requestId, attestation.blockHeight, attestation.outputKind, output
-  );
-  recordAttestation(attestation, digest);
-}
-
-// Queues an attestation with a 32-byte output (a uint256 return value, attested whole).
-// The output is needed here, as the signed digest binds the height to it and the flush
-// trusts the height it folds.
-export circuit queueAttestation32(
-  respondBidirectionalEvent: RespondBidirectionalEventV1,
-  serializedOutput: Bytes<32>
-): [] {
-  requireInitialised();
-  const attestation = disclose(respondBidirectionalEvent);
-  const output = disclose(serializedOutput);
-  assert(
-    verifyRespondBidirectionalEventV1<32>(output, attestation, mpcResponseKey),
-    "Invalid attestation signature"
-  );
-  const digest = calculateSignetAttestationDigestV1<32>(
-    attestation.requestId, attestation.blockHeight, attestation.outputKind, output
-  );
-  recordAttestation(attestation, digest);
 }
 
 // Consumes the open request and the flushed attestation that settles it, for the
@@ -471,8 +424,9 @@ circuit settleRequest(
   return [out.entry, record];
 }
 
-// The outcomes for which the requested transaction never executed, so the
-// requester is refunded what they surrendered at start.
+// The outcomes after which the requested transaction moved nothing: it reverted
+// (failed) or can never be included (unviable), so the requester is refunded what they
+// surrendered at start.
 pure circuit outcomeRefunds(outputKind: OutputKind): Boolean {
   return outputKind == OutputKind.failed || outputKind == OutputKind.unviable;
 }
@@ -618,7 +572,7 @@ export circuit sendReplaceNonce(outIndex: Bytes<32>): [] {
 
 // Settles a replacement on every verdict by closing it: it surrendered nothing. Every
 // verdict's attestation commits to the empty output, which is checked against the record's
-// digest. Deployer-gated through the ownership commitment, one settle per request.
+// width and hash. Deployer-gated through the ownership commitment, one settle per request.
 export circuit completeReplaceNonce(requestId: RequestId): [] {
   requireInitialised();
   const disclosedId = disclose(requestId);
@@ -630,9 +584,7 @@ export circuit completeReplaceNonce(requestId: RequestId): [] {
   bidirectionalReplaceNonceMap.remove(disclosedId);
 
   assert(
-    calculateSignetAttestationDigestV1<0>(
-      disclosedId, record.blockHeight, record.outputKind, default<Bytes<0>>
-    ) == record.digest,
+    verifyAttestedOutputV1<0>(default<Bytes<0>>, record.serializedOutputLength, record.outputHash),
     "Output does not match the attestation"
   );
 }
@@ -668,7 +620,7 @@ circuit approveArgsHash(args: ApproveArgs): Bytes<32> {
 }
 
 // The allowance every approval grants: 2^128-1, so one approval per token and spender
-// suffices forever.
+// lasts until 2^128-1 base units have moved through it.
 export pure circuit unlimitedAllowance(): Uint<128> {
   return 340282366920938463463374607431768211455;
 }
@@ -792,9 +744,9 @@ export circuit completeApprove(requestId: RequestId, serializedOutput: Bytes<1>)
 
   if (record.outputKind == OutputKind.executed) {
     assert(
-      calculateSignetAttestationDigestV1<1>(
-        disclosedId, record.blockHeight, record.outputKind, disclose(serializedOutput)
-      ) == record.digest,
+      verifyAttestedOutputV1<1>(
+        disclose(serializedOutput), record.serializedOutputLength, record.outputHash
+      ),
       "Output does not match the attestation"
     );
   }
@@ -922,7 +874,7 @@ export circuit sendDeposit(outIndex: Bytes<32>): [] {
   );
 }
 
-// Settles a deposit on either verdict. Executed: checks the output against the
+// Settles a deposit on any verdict. Executed: checks the output against the
 // attestation, then mints the deposited amount when the transfer returned true. Failed
 // or unviable: nothing was surrendered, so it only closes the request, and
 // serializedOutput is ignored. Depositor-gated, one settle per request. mintNonce is
@@ -946,9 +898,7 @@ export circuit completeDeposit(
   if (record.outputKind == OutputKind.executed) {
     const output = disclose(serializedOutput);
     assert(
-      calculateSignetAttestationDigestV1<1>(
-        disclosedId, record.blockHeight, record.outputKind, output
-      ) == record.digest,
+      verifyAttestedOutputV1<1>(output, record.serializedOutputLength, record.outputHash),
       "Output does not match the attestation"
     );
     if (deserialize<VaultResponse, 1>(output).success) {
@@ -1092,7 +1042,7 @@ export circuit sendWithdraw(outIndex: Bytes<32>): [] {
   );
 }
 
-// Settles a withdrawal on either verdict. Executed: checks the output against the
+// Settles a withdrawal on any verdict. Executed: checks the output against the
 // attestation. A transfer that returned true moved the tokens, so the burn stands. One
 // that returned false, or a failed or unviable transaction, moved nothing, so the
 // surrendered amount is re-minted to the caller, and on a failure serializedOutput is
@@ -1117,9 +1067,7 @@ export circuit completeWithdraw(
   const output = disclose(serializedOutput);
   if (executed) {
     assert(
-      calculateSignetAttestationDigestV1<1>(
-        disclosedId, record.blockHeight, record.outputKind, output
-      ) == record.digest,
+      verifyAttestedOutputV1<1>(output, record.serializedOutputLength, record.outputHash),
       "Output does not match the attestation"
     );
   }
@@ -1290,7 +1238,7 @@ export pure circuit swapAmountIn(output: Bytes<32>): Uint<64> {
   return checkedTruncationU128(output) as Uint<64>;
 }
 
-// Settles a swap on either verdict. Executed: checks the output against the
+// Settles a swap on any verdict. Executed: checks the output against the
 // attestation, then mints exactly amountOut of erc20AddressOut and the unspent
 // amountInMaximum - amountIn of erc20AddressIn as change, a zero-value coin on an exact
 // spend. Failed or unviable: the swap spent nothing, so the surrendered amountInMaximum
@@ -1318,9 +1266,7 @@ export circuit completeSwap(
   if (record.outputKind == OutputKind.executed) {
     const output = disclose(serializedOutput);
     assert(
-      calculateSignetAttestationDigestV1<32>(
-        disclosedId, record.blockHeight, record.outputKind, output
-      ) == record.digest,
+      verifyAttestedOutputV1<32>(output, record.serializedOutputLength, record.outputHash),
       "Output does not match the attestation"
     );
     // changeNonce and mintNonce must be sampled independently and uniformly at random. No check
@@ -1491,7 +1437,7 @@ export pure circuit supplyShares(output: Bytes<32>): Uint<64> {
   return checkedTruncationU128(output) as Uint<64>;
 }
 
-// Settles a supply on either verdict. Executed: checks the output against the
+// Settles a supply on any verdict. Executed: checks the output against the
 // attestation, then mints the attested shares as the stataToken vault coin. Failed or
 // unviable: the wrapper took nothing, so the surrendered stataUnderlying amount is
 // re-minted, and serializedOutput is ignored. Either mint goes to the caller.
@@ -1516,9 +1462,7 @@ export circuit completeSupply(
   if (record.outputKind == OutputKind.executed) {
     const output = disclose(serializedOutput);
     assert(
-      calculateSignetAttestationDigestV1<32>(
-        disclosedId, record.blockHeight, record.outputKind, output
-      ) == record.digest,
+      verifyAttestedOutputV1<32>(output, record.serializedOutputLength, record.outputHash),
       "Output does not match the attestation"
     );
     mintShieldedToken(
@@ -1678,7 +1622,7 @@ export pure circuit redeemAssets(output: Bytes<32>): Uint<64> {
   return checkedTruncationU128(output) as Uint<64>;
 }
 
-// Settles a redeem on either verdict. Executed: checks the output against the
+// Settles a redeem on any verdict. Executed: checks the output against the
 // attestation, then mints the attested assets as the stataUnderlying vault coin. Failed
 // or unviable: the wrapper burned nothing, so the surrendered stataToken shares are
 // re-minted, and serializedOutput is ignored. Either mint goes to the caller.
@@ -1703,9 +1647,7 @@ export circuit completeRedeem(
   if (record.outputKind == OutputKind.executed) {
     const output = disclose(serializedOutput);
     assert(
-      calculateSignetAttestationDigestV1<32>(
-        disclosedId, record.blockHeight, record.outputKind, output
-      ) == record.digest,
+      verifyAttestedOutputV1<32>(output, record.serializedOutputLength, record.outputHash),
       "Output does not match the attestation"
     );
     mintShieldedToken(

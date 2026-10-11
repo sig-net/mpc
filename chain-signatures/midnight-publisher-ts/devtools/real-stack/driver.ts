@@ -518,20 +518,23 @@ async function dispatch(request: Request): Promise<unknown> {
       return undefined;
     });
     const circuitInput = respondBidirectionalEventToCircuitInput(response);
-    const wrongRequestId = circuitInput.requestId.map((byte, index) =>
-      index === 0 ? byte ^ 1 : byte,
-    );
+    const flipFirst = (value: Uint8Array) =>
+      value.map((byte, index) => (index === 0 ? byte ^ 1 : byte));
     for (const [field, value] of [
-      ["requestId", { ...circuitInput, requestId: wrongRequestId }],
+      ["requestId", { ...circuitInput, requestId: flipFirst(circuitInput.requestId) }],
       ["blockHeight", { ...circuitInput, blockHeight: circuitInput.blockHeight ^ 1n }],
       ["outputKind", { ...circuitInput, outputKind: (circuitInput.outputKind + 1) % 3 }],
+      [
+        "serializedOutputLength",
+        { ...circuitInput, serializedOutputLength: circuitInput.serializedOutputLength ^ 1n },
+      ],
+      ["outputHash", { ...circuitInput, outputHash: flipFirst(circuitInput.outputHash) }],
     ] as const) {
       if (check(value, serializedOutput, responseKey))
         throw new Error(`accepted tampered ${field}`);
     }
     if (serializedOutput.length > 0) {
-      const wrongOutput = serializedOutput.map((byte, index) => (index === 0 ? byte ^ 1 : byte));
-      if (check(circuitInput, wrongOutput, responseKey))
+      if (check(circuitInput, flipFirst(serializedOutput), responseKey))
         throw new Error("accepted tampered serialized output");
     }
     const wrongWidth = new Uint8Array(serializedOutput.length === 32 ? 20 : 32);
@@ -540,16 +543,11 @@ async function dispatch(request: Request): Promise<unknown> {
       wrongWidth.length === 20 ? pureCircuits.checkResponse20 : pureCircuits.checkResponse32;
     if (checkWrongWidth(circuitInput, wrongWidth, responseKey))
       throw new Error("accepted serialized output at a different width");
-    // The upstream checker commits the actual Bytes<N> width; these two event
-    // fields are reader metadata and deliberately excluded from verification.
-    const wrongDigest = circuitInput.digest.map((byte, index) => (index === 0 ? byte ^ 1 : byte));
+    // The upstream checker recomputes the digest from the other event fields; the
+    // carried digest is reader metadata and deliberately excluded from verification.
     if (
       !check(
-        {
-          ...circuitInput,
-          serializedOutputLength: circuitInput.serializedOutputLength ^ 1n,
-          digest: wrongDigest,
-        },
+        { ...circuitInput, digest: flipFirst(circuitInput.digest) },
         serializedOutput,
         responseKey,
       )
@@ -606,8 +604,7 @@ async function dispatch(request: Request): Promise<unknown> {
     1n,
     bytes(request.target, 20),
     bytes(request.argument, 32),
-    // The output schema must be canonical JSON NUL-padded to the field width.
-    nulPadded(JSON.stringify([{ name: "success", type: request.outputType }]), 64),
+    requestOutputSchema(request),
   );
   return { requestId: bytesToHex(submitted.private.result), placement: active.lastPlacement };
 }
