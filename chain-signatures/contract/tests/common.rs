@@ -73,56 +73,6 @@ pub async fn init() -> (Worker<Sandbox>, Contract) {
     (worker, contract)
 }
 
-pub async fn init_with_candidates(
-    pk: Option<near_crypto::PublicKey>,
-) -> (Worker<Sandbox>, Contract, Vec<Account>) {
-    let (worker, contract) = init().await;
-    let (accounts, candidates) = accounts(&worker).await;
-
-    let init = if let Some(pk) = pk {
-        let participants_map = candidates
-            .into_iter()
-            .map(|(k, v)| (k, Into::<ParticipantInfo>::into(v)))
-            .collect::<BTreeMap<_, _>>();
-        let participants = Participants {
-            next_id: participants_map.len().try_into().unwrap(),
-            participants: participants_map.clone(),
-            account_to_participant_id: participants_map
-                .into_iter()
-                .enumerate()
-                .map(|(id, (account_id, _))| (account_id, id.try_into().unwrap()))
-                .collect(),
-        };
-        contract
-            .call("init_running")
-            .args_json(serde_json::json!({
-                "epoch": 0,
-                "threshold": 2,
-                "participants": participants,
-                "public_key": pk,
-            }))
-            .transact()
-            .await
-            .unwrap()
-            .into_result()
-            .unwrap()
-    } else {
-        contract
-            .call("init")
-            .args_json(serde_json::json!({
-                "threshold": 2,
-                "candidates": candidates
-            }))
-            .transact()
-            .await
-            .unwrap()
-            .into_result()
-            .unwrap()
-    };
-    dbg!(init);
-    (worker, contract, accounts)
-}
-
 pub async fn init_env() -> (Worker<Sandbox>, Contract, Vec<Account>, k256::SecretKey) {
     init_env_with_participant_count(PARTICIPANT_LEN, 2).await
 }
