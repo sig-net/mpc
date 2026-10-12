@@ -438,13 +438,6 @@ impl Backlog {
         Ok(checkpoint)
     }
 
-    /// Hydrate the backlog from storage: initializes the pending checkpoint counter
-    /// and recovers local backlog state from the latest durable checkpoint if one exists.
-    pub async fn hydrate(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
-        self.checkpoints.hydrate(chain).await?;
-        self.recover_local(chain).await
-    }
-
     /// Recovers local backlog state from the latest durable checkpoint if one exists.
     pub async fn recover_local(&self, chain: Chain) -> Result<Option<Checkpoint>, CheckpointError> {
         let Some(checkpoint) = self.checkpoints.latest(chain).await? else {
