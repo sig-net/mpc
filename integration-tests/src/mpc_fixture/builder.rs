@@ -102,9 +102,6 @@ struct MockedNodeContext {
     init_mesh: MeshState,
     contract_state: ContractStateWatcher,
     observe_lag: Option<std::time::Duration>,
-
-    #[allow(dead_code)]
-    node_account_id: AccountId,
 }
 
 /// Has the interface for a message channel but nothing is running, yet.
@@ -273,7 +270,6 @@ impl MpcFixtureBuilder {
                 init_mesh: initial_mesh_state.clone(),
                 contract_state,
                 observe_lag: self.fixture_config.observe_lag,
-                node_account_id: node.participant_info.account_id.clone(),
             };
 
             let started = node

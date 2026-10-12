@@ -461,7 +461,7 @@ impl Backlog {
     }
 
     /// Recover backlog state from a checkpoint into memory.
-    /// This is called when a node restarts (via `hydrate`) or regresses to consensus (via `regress`).
+    /// This is called when a node restarts (via `recover_local`) or regresses to consensus (via `regress`).
     pub async fn recover_by_checkpoint(&self, checkpoint: &Checkpoint) {
         let restored = PendingRequests::from_checkpoint(checkpoint);
         let chain = checkpoint.chain;
