@@ -114,7 +114,7 @@ describe("the proving provider", () => {
     const live = provingProvider("http://proof.invalid", new AbortController().signal);
     const request = await proofRequest();
     await expect(live.check(request.preimage, request.keyLocation)).rejects.toThrow(
-      "proof server answered 503 to /check: warming up",
+      /^proof server answered 503 to \/check after \d+\.\ds: warming up$/,
     );
     await expect(live.prove(request.preimage, request.keyLocation, 4n)).resolves.toEqual(
       Uint8Array.of(7, 8, 9),
@@ -127,6 +127,29 @@ describe("the proving provider", () => {
     );
     expect(body.length).toBe(expectedBody.length);
     expect(Buffer.compare(body, expectedBody)).toBe(0);
+  });
+
+  it("names the request, its wait and undici's cause when a proof-server fetch fails", async () => {
+    const headersTimeout = Object.assign(new Error("Headers Timeout Error"), {
+      name: "HeadersTimeoutError",
+      code: "UND_ERR_HEADERS_TIMEOUT",
+    });
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new TypeError("fetch failed", { cause: headersTimeout }),
+    );
+
+    const error = await proveTransaction(
+      "http://proof.invalid",
+      await unprovenTransaction(),
+      60_000,
+    ).then(
+      () => new Error("proving unexpectedly succeeded"),
+      (rejection: unknown) => rejection,
+    );
+
+    expect(String(error)).toMatch(
+      /proof server \/(check|prove) request failed after \d+\.\ds: TypeError: fetch failed: HeadersTimeoutError: Headers Timeout Error \(UND_ERR_HEADERS_TIMEOUT\)/,
+    );
   });
 
   it("enforces the aggregate proving budget when proof work ignores the provider and resolves late", async () => {

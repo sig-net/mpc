@@ -3,7 +3,7 @@
 
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -209,7 +209,9 @@ impl ChainPublisher for MidnightPublisher {
                 );
             }
         }
+        let queued = Instant::now();
         let _flow = self.flow.lock().await;
+        let queued_for = queued.elapsed();
         if !self.still_awaited(action, "queued").await {
             return Ok(());
         }
@@ -221,6 +223,7 @@ impl ChainPublisher for MidnightPublisher {
             central = %central_address,
             request_id = %hex::encode(call.request_id),
             elapsed = ?action.timestamp.elapsed(),
+            ?queued_for,
             "midnight: publishing signature"
         );
 
@@ -237,17 +240,23 @@ impl ChainPublisher for MidnightPublisher {
             ledger_parameters: hex::encode(&chain.ledger_parameters),
             ttl_seconds: ttl_seconds(&self.config, current_unix_timestamp()),
         };
+        let building = Instant::now();
         let bytes = self.client.build(&request).await?;
+        let build_took = building.elapsed();
         if !self.still_awaited(action, "built").await {
             return Ok(());
         }
 
+        // Both proofs run inside submit, so its time includes the proof server's queue.
+        let submitting = Instant::now();
         let receipt = self.client.submit(&bytes).await.with_context(|| {
             format!(
-                "submitting the midnight respond intent built over the chain at {}",
-                chain.at_hash
+                "submitting the midnight respond intent built over the chain at {} failed after {:?}",
+                chain.at_hash,
+                submitting.elapsed()
             )
         })?;
+        let submit_took = submitting.elapsed();
 
         tracing::info!(
             ?sign_id,
@@ -255,6 +264,8 @@ impl ChainPublisher for MidnightPublisher {
             at_hash = %chain.at_hash,
             receipt = %receipt,
             elapsed = ?action.timestamp.elapsed(),
+            ?build_took,
+            ?submit_took,
             "midnight: published respond successfully"
         );
         self.telemetry.record_publish_metrics(action);
@@ -1446,6 +1457,10 @@ mod tests {
         assert!(
             format!("{err:#}").contains("no spendable dust"),
             "got: {err:#}"
+        );
+        assert!(
+            format!("{err:#}").contains("failed after"),
+            "a failed submit says how long it ran: {err:#}"
         );
         assert_eq!(client.submissions(), 0);
     }
