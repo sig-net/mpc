@@ -742,7 +742,7 @@ pub async fn execute_publish(
                         ?sign_id,
                         ?chain,
                         elapsed = ?action.timestamp.elapsed(),
-                        "response already observed; dropping publish"
+                        "response no longer awaited; dropping publish"
                     );
                     return Ok(());
                 }

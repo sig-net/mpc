@@ -156,7 +156,7 @@ impl MidnightPublisher {
             sign_id = ?action.request.id,
             stage,
             elapsed = ?action.timestamp.elapsed(),
-            "midnight: response already observed; dropping publish"
+            "midnight: response no longer awaited; dropping publish"
         );
         false
     }
