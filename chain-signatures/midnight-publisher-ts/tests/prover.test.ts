@@ -7,6 +7,8 @@ import {
   type UnprovenTransaction,
 } from "@midnightntwrk/ledger-v9";
 import { expectedVk, type SignetContractCircuitId } from "@sig-net/midnight-contract";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildIntent } from "../src/intent.js";
@@ -150,6 +152,28 @@ describe("the proving provider", () => {
     expect(String(error)).toMatch(
       /proof server \/(check|prove) request failed after \d+\.\ds: TypeError: fetch failed: HeadersTimeoutError: Headers Timeout Error \(UND_ERR_HEADERS_TIMEOUT\)/,
     );
+  });
+
+  it("names undici's cause when the proof server drops the connection mid-response", async () => {
+    const server = createServer((request, response) => {
+      request.resume().on("end", () => {
+        response.writeHead(200, { "content-length": "1024" });
+        response.write(Uint8Array.of(1), () => response.socket?.destroy());
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const live = provingProvider(`http://127.0.0.1:${port}`, new AbortController().signal);
+      const request = await proofRequest();
+
+      await expect(live.prove(request.preimage, request.keyLocation, 4n)).rejects.toThrow(
+        /^proof server \/prove request failed after \d+\.\ds: TypeError: terminated: SocketError: other side closed \(UND_ERR_SOCKET\)$/,
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it("enforces the aggregate proving budget when proof work ignores the provider and resolves late", async () => {

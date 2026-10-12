@@ -75,8 +75,7 @@ async function post(
   const waited = (): string => `${((performance.now() - started) / 1000).toFixed(1)}s`;
   // The ledger keeps only the text of what `prove` and `check` throw, and undici puts the
   // real reason (refused, reset, headers timeout) in `cause`, so it must be in the message.
-  const transportFailure = (error: unknown): unknown => {
-    if (signal.aborted) return error;
+  const transportFailure = (error: unknown): Error => {
     const described = describeFailure(error);
     const code = (error as { cause?: { code?: unknown } } | undefined)?.cause?.code;
     const coded =
