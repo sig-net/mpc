@@ -684,36 +684,6 @@ impl SimulatedParticipant {
             committed_count,
         )
     }
-
-    /// Concurrently race against other participants to take the same target artifact IDs.
-    pub async fn race_take_conflicted(
-        self,
-        barrier: Arc<Barrier>,
-        target_ids: Vec<u64>,
-        owner: Participant,
-    ) -> (Vec<Duration>, Vec<Duration>, usize, usize) {
-        barrier.wait().await;
-        let mut win_latencies = Vec::new();
-        let mut conflict_latencies = Vec::new();
-        let mut wins = 0;
-        let mut conflicts = 0;
-
-        for id in target_ids {
-            let t0 = Instant::now();
-            let res = self.triples.take(id, owner).await;
-            let elapsed = t0.elapsed();
-
-            if res.is_some() {
-                win_latencies.push(elapsed);
-                wins += 1;
-            } else {
-                conflict_latencies.push(elapsed);
-                conflicts += 1;
-            }
-        }
-
-        (win_latencies, conflict_latencies, wins, conflicts)
-    }
 }
 
 /// Guard managing background polling tasks. Automatically stops and joins tasks on `.stop().await`.
@@ -1266,6 +1236,7 @@ impl RedisHarness {
     /// 1. 100ms background stockpile polling storms (continuous HLEN/SCARD).
     /// 2. High concurrency (many concurrent tasks competing for connection pool slots).
     /// 3. Intermittent Redis blocking events (simulating long remove_outdated Lua scripts or BGSAVE freezes).
+    ///
     /// Measures the resulting queueing delays and tail latencies.
     pub async fn bench_cascading_saturation(
         &self,
@@ -1884,10 +1855,19 @@ impl RedisHarness {
         let overall_start = Instant::now();
 
         let tasks: Vec<_> = (0..contenders_per_item)
-            .map(|_| {
-                let p = owner.clone();
+            .map(|contender_idx| {
+                // Each contender gets an independent storage handle with its own `reserved` RwLock,
+                // matching production where distinct nodes do not share in-memory reservation maps.
+                let contender = Participant::from(contender_idx as u32);
+                let triples = TriplePair::storage(&self.pool, &owner.account_id);
+                triples.set_me(contender);
                 let ids = target_ids.clone();
-                tokio::spawn(p.race_take_conflicted(barrier.clone(), ids, owner_participant))
+                tokio::spawn(Self::race_take_conflicted(
+                    triples,
+                    barrier.clone(),
+                    ids,
+                    owner_participant,
+                ))
             })
             .collect();
 
@@ -1912,6 +1892,36 @@ impl RedisHarness {
         let s1 = LatencySummary::calculate("take_winner_success", &mut all_wins, wall);
         let s2 = LatencySummary::calculate("take_conflict_rejected", &mut all_conflicts, wall);
         Ok(vec![s1, s2])
+    }
+
+    /// Helper task for racing contenders to take artifacts concurrently over Redis.
+    pub async fn race_take_conflicted(
+        triples: TripleStorage,
+        barrier: Arc<Barrier>,
+        target_ids: Vec<u64>,
+        owner: Participant,
+    ) -> (Vec<Duration>, Vec<Duration>, usize, usize) {
+        barrier.wait().await;
+        let mut win_latencies = Vec::new();
+        let mut conflict_latencies = Vec::new();
+        let mut wins = 0;
+        let mut conflicts = 0;
+
+        for id in target_ids {
+            let t0 = Instant::now();
+            let res = triples.take(id, owner).await;
+            let elapsed = t0.elapsed();
+
+            if res.is_some() {
+                win_latencies.push(elapsed);
+                wins += 1;
+            } else {
+                conflict_latencies.push(elapsed);
+                conflicts += 1;
+            }
+        }
+
+        (win_latencies, conflict_latencies, wins, conflicts)
     }
 }
 
