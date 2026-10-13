@@ -32,7 +32,7 @@ Both artifacts below have a single owner, the node that coordinated their genera
   * proposer sends Propose message to each peer  
   * peers answer Accept/Reject  
   * proposer sends Start carrying the final participant list to each accepter  
-  * the proposer reserves its artifact when proposing and commits it, removing it from the pool, when generation starts; aborting before the commit releases the reservation, aborting after does not  
+  * the proposer reserves its artifact when proposing and commits it, removing it from the pool, before sending Start; aborting before the commit releases the reservation, aborting after does not  
 
 * Instance: one attempt to run the protocol to completion over a specific artifact, named by that artifact
   * Signature: (sign\_id, presignature\_id) (the code's SignId wraps the request\_id above, same 32 bytes)  

@@ -86,6 +86,23 @@ impl PublishKind {
     }
 }
 
+/// The backlog as a Midnight publisher's [`ResponseAwaiter`], so a publish queued behind
+/// others re-checks its entry once its turn comes.
+pub struct BacklogAwaiter(Backlog);
+
+impl BacklogAwaiter {
+    pub fn new(backlog: Backlog) -> Self {
+        Self(backlog)
+    }
+}
+
+#[async_trait::async_trait]
+impl mpc_chain_midnight::ResponseAwaiter for BacklogAwaiter {
+    async fn still_awaited(&self, action: &PublishAction) -> bool {
+        publish_still_awaited(&self.0, action).await
+    }
+}
+
 /// Whether this node's backlog still waits for the response `action` carries.
 /// An entry that left the backlog was answered on chain or pruned by consensus.
 /// Either way there is nothing left to publish.
@@ -725,7 +742,7 @@ pub async fn execute_publish(
                         ?sign_id,
                         ?chain,
                         elapsed = ?action.timestamp.elapsed(),
-                        "response already observed; dropping publish"
+                        "response no longer awaited; dropping publish"
                     );
                     return Ok(());
                 }
@@ -1295,6 +1312,22 @@ mod tests {
         backlog.insert_mock_final(&tx).await;
         assert!(!publish_still_awaited(&backlog, &first_leg).await);
         assert!(publish_still_awaited(&backlog, &second_leg).await);
+    }
+
+    /// The Midnight publisher's re-check reads the backlog's own answer.
+    #[tokio::test]
+    async fn backlog_awaiter_answers_from_the_backlog() {
+        use mpc_chain_midnight::ResponseAwaiter as _;
+
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([6u8; 32]);
+        let action = publish_action_for(&mock_sign_request(sign_id, Chain::Midnight));
+        let awaiter = BacklogAwaiter::new(backlog.clone());
+
+        backlog.insert_mock_sign(sign_id, Chain::Midnight).await;
+        assert!(awaiter.still_awaited(&action).await);
+        backlog.remove(Chain::Midnight, &sign_id).await;
+        assert!(!awaiter.still_awaited(&action).await);
     }
 
     #[tokio::test(start_paused = true)]
