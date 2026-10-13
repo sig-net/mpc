@@ -652,6 +652,10 @@ the transaction's `raw` message exactly as the requester built it. The
 ref-block fields (`ref_block_bytes`, `ref_block_hash`) anchor replay to
 a recent Tron block the requester fetched; `timestamp`, `expiration`
 and `fee_limit` are requester-set. Nodes neither fill nor refresh them.
+Admission accepts an `expiration` only if it is in the future and at
+most 24 h past the request's Midnight timestamp (java-tron's cap):
+with no nonce, expiry is the only way a Tron request ends, so an
+unbounded one would be watched forever.
 
 Digest and identity. The signed digest is sha256 of those bytes, and one
 value serves as the MPC payload, the transaction ID and the replay key:
