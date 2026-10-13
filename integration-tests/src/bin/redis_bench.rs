@@ -7,7 +7,7 @@ use integration_tests::redis_harness::{print_summary_header, RedisHarness};
     about = "Redis Latency & Stress Benchmark Harness (Pure Redis Container - No MPC Nodes, NEAR, or Blockchains)"
 )]
 struct Args {
-    /// Benchmark scenario to run: 'all', 'baseline', 'storm', 'polling', 'proposer', 'saturation'
+    /// Benchmark scenario to run: 'all', 'baseline', 'storm', 'polling', 'proposer', 'saturation', 'clear', 'mixed', 'sync_prune'
     #[arg(short, long, default_value = "all")]
     scenario: String,
 
@@ -126,6 +126,40 @@ async fn main() -> anyhow::Result<()> {
         println!("\n>>> Running Scenario 5: Cascading Saturation & Head-of-Line Blocking (50ms - 6s Grafana conditions)");
         println!("    Simulating {} concurrent tasks across {} participants, 100ms background polling, and periodic {}ms Redis blocking spikes...", args.participants * tasks_per_p, args.participants, spike_ms);
         let results = harness.bench_cascading_saturation(tasks_per_p, items_per_task, spike_ms, 3).await?;
+        print_summary_header();
+        for r in &results {
+            r.print_row();
+        }
+        harness.print_diagnostics().await?;
+    }
+
+    if run_all || args.scenario == "clear" {
+        let stockpile = args.items.max(100);
+        println!("\n>>> Running Scenario 6: Mass Epoch Resharing `clear()` Storm ({} participants, {} items/participant)", args.participants, stockpile);
+        let results = harness.bench_clear_storm(stockpile).await?;
+        print_summary_header();
+        for r in &results {
+            r.print_row();
+        }
+        harness.print_diagnostics().await?;
+    }
+
+    if run_all || args.scenario == "mixed" {
+        let items = (args.items / 3).max(50);
+        println!("\n>>> Running Scenario 7: Realistic Mixed MPC Pipeline Contention (Triples + Presigs + Signers)");
+        println!("    Running concurrent triple gen, presig gen, sign requests (takes), and 100ms polling on a shared connection pool...");
+        let results = harness.bench_mixed_pipeline(items).await?;
+        print_summary_header();
+        for r in &results {
+            r.print_row();
+        }
+        harness.print_diagnostics().await?;
+    }
+
+    if run_all || args.scenario == "sync_prune" {
+        let items = args.items.max(100);
+        println!("\n>>> Running Scenario 8: State Sync Peer Drop & Pruning (`remove_holder_and_prune`)");
+        let results = harness.bench_sync_prune_storm(items).await?;
         print_summary_header();
         for r in &results {
             r.print_row();

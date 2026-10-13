@@ -979,6 +979,366 @@ impl RedisHarness {
         let summary = LatencySummary::calculate("saturated_insert_triple", &mut all_latencies, wall);
         Ok(vec![summary])
     }
+
+    /// SCENARIO 6: Mass Epoch Resharing `clear()` Storm.
+    /// Simulates network-wide resharing where all nodes simultaneously wipe both triples
+    /// and presignatures via `clear()`.
+    /// Directly measures execution time of the HKEYS + multi-DEL Lua script, Redis slowlog,
+    /// and keyspace drop.
+    pub async fn bench_clear_storm(
+        &self,
+        stockpile_per_participant: usize,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+
+        let run_base_id = next_id_block((self.participants.len() * stockpile_per_participant * 2) as u64 + 10_000);
+        let participant_list = self.participant_ids();
+
+        println!(
+            "   -> Pre-populating {stockpile_per_participant} triples AND {stockpile_per_participant} presignatures across {} participants...",
+            self.participants.len()
+        );
+
+        for (node_idx, p) in self.participants.iter().enumerate() {
+            let base_id = run_base_id + (node_idx as u64 * stockpile_per_participant as u64 * 2);
+            for i in 0..stockpile_per_participant {
+                let triple_id = base_id + (i as u64);
+                let pair = dummy_pair(triple_id, &participant_list);
+                if let Some(mut slot) = p.triples.create_slot(triple_id, p.participant).await {
+                    slot.insert(pair, p.participant).await;
+                }
+
+                let presig_id = base_id + (stockpile_per_participant as u64) + (i as u64);
+                let presig = dummy_presignature(presig_id, &participant_list);
+                if let Some(mut slot) = p.presignatures.create_slot(presig_id, p.participant).await {
+                    slot.insert(presig, p.participant).await;
+                }
+            }
+        }
+
+        let pre_mem = RedisDiagnostics::fetch_memory_snapshot(&self.pool).await?;
+        println!(
+            "   -> Pre-clear keyspace: {} keys in Redis, Memory: {}",
+            pre_mem.total_keys, pre_mem.used_memory_human
+        );
+
+        let barrier = Arc::new(Barrier::new(self.participants.len() * 2));
+        let mut clear_triple_tasks = Vec::new();
+        let mut clear_presig_tasks = Vec::new();
+        let clear_start = Instant::now();
+
+        for p in &self.participants {
+            let triples = p.triples.clone();
+            let b1 = barrier.clone();
+            clear_triple_tasks.push(tokio::spawn(async move {
+                b1.wait().await;
+                let t0 = Instant::now();
+                let ok = triples.clear().await;
+                (t0.elapsed(), ok)
+            }));
+
+            let presignatures = p.presignatures.clone();
+            let b2 = barrier.clone();
+            clear_presig_tasks.push(tokio::spawn(async move {
+                b2.wait().await;
+                let t0 = Instant::now();
+                let ok = presignatures.clear().await;
+                (t0.elapsed(), ok)
+            }));
+        }
+
+        let mut triple_latencies = Vec::new();
+        for t in clear_triple_tasks {
+            let (elapsed, ok) = t.await?;
+            assert!(ok, "triples clear should succeed");
+            triple_latencies.push(elapsed);
+        }
+
+        let mut presig_latencies = Vec::new();
+        for t in clear_presig_tasks {
+            let (elapsed, ok) = t.await?;
+            assert!(ok, "presignatures clear should succeed");
+            presig_latencies.push(elapsed);
+        }
+        let wall = clear_start.elapsed();
+
+        let post_mem = RedisDiagnostics::fetch_memory_snapshot(&self.pool).await?;
+        println!(
+            "   -> Post-clear keyspace: {} keys remaining in Redis, Memory: {}",
+            post_mem.total_keys, post_mem.used_memory_human
+        );
+
+        let s1 = LatencySummary::calculate("clear_triples_storm", &mut triple_latencies, wall);
+        let s2 = LatencySummary::calculate("clear_presigs_storm", &mut presig_latencies, wall);
+        Ok(vec![s1, s2])
+    }
+
+    /// SCENARIO 7: Realistic Mixed MPC Pipeline Contention.
+    /// Simulates production node conditions where a single connection pool is shared
+    /// across concurrent triple generation, presignature generation, sign requests
+    /// (taking 1 triple + 1 presignature), and background 100ms stockpile polling.
+    pub async fn bench_mixed_pipeline(
+        &self,
+        items_per_participant: usize,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+
+        let participant_list = self.participant_ids();
+        let num_p = self.participants.len();
+
+        let stockpile_base = next_id_block((num_p * items_per_participant * 2) as u64 + 10_000);
+        let gen_base = next_id_block((num_p * items_per_participant * 2) as u64 + 10_000);
+
+        println!(
+            "   -> Pre-stockpiling {items_per_participant} triples & presignatures per node across {num_p} participants..."
+        );
+        for (node_idx, p) in self.participants.iter().enumerate() {
+            let base_id = stockpile_base + (node_idx as u64 * items_per_participant as u64 * 2);
+            for i in 0..items_per_participant {
+                let triple_id = base_id + (i as u64);
+                let pair = dummy_pair(triple_id, &participant_list);
+                if let Some(mut slot) = p.triples.create_slot(triple_id, p.participant).await {
+                    slot.insert(pair, p.participant).await;
+                }
+
+                let presig_id = base_id + (items_per_participant as u64) + (i as u64);
+                let presig = dummy_presignature(presig_id, &participant_list);
+                if let Some(mut slot) = p.presignatures.create_slot(presig_id, p.participant).await {
+                    slot.insert(presig, p.participant).await;
+                }
+            }
+        }
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let mut bg_handles = Vec::new();
+
+        // 1. Background 100ms polling for all participants (both triples and presignatures)
+        for p in &self.participants {
+            let triples = p.triples.clone();
+            let presignatures = p.presignatures.clone();
+            let me = p.participant;
+            let stop = stop_flag.clone();
+
+            bg_handles.push(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(100));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                while !stop.load(Ordering::Relaxed) {
+                    interval.tick().await;
+                    let _ = triples.len_generated().await;
+                    let _ = triples.len_by_owner(me).await;
+                    let _ = presignatures.len_generated().await;
+                    let _ = presignatures.len_by_owner(me).await;
+                }
+            }));
+        }
+
+        // 2. Launch concurrent workers:
+        // - Generators creating new triples
+        // - Generators creating new presignatures
+        // - Signers taking 1 triple + 1 presignature
+        let barrier = Arc::new(Barrier::new(num_p * 3));
+        let mut triple_gen_tasks = Vec::new();
+        let mut presig_gen_tasks = Vec::new();
+        let mut signer_tasks = Vec::new();
+        let overall_start = Instant::now();
+
+        for (node_idx, p) in self.participants.iter().enumerate() {
+            let me = p.participant;
+            let participants = participant_list.clone();
+
+            // Triple generator task
+            {
+                let triples = p.triples.clone();
+                let b = barrier.clone();
+                let p_list = participants.clone();
+                let base_id = gen_base + (node_idx as u64 * items_per_participant as u64 * 2);
+
+                triple_gen_tasks.push(tokio::spawn(async move {
+                    b.wait().await;
+                    let mut latencies = Vec::with_capacity(items_per_participant);
+                    for i in 0..items_per_participant {
+                        let id = base_id + (i as u64);
+                        let pair = dummy_pair(id, &p_list);
+                        let t0 = Instant::now();
+                        if let Some(mut slot) = triples.create_slot(id, me).await {
+                            slot.insert(pair, me).await;
+                        }
+                        latencies.push(t0.elapsed());
+                    }
+                    latencies
+                }));
+            }
+
+            // Presignature generator task
+            {
+                let presignatures = p.presignatures.clone();
+                let b = barrier.clone();
+                let p_list = participants.clone();
+                let base_id = gen_base + (node_idx as u64 * items_per_participant as u64 * 2) + items_per_participant as u64;
+
+                presig_gen_tasks.push(tokio::spawn(async move {
+                    b.wait().await;
+                    let mut latencies = Vec::with_capacity(items_per_participant);
+                    for i in 0..items_per_participant {
+                        let id = base_id + (i as u64);
+                        let presig = dummy_presignature(id, &p_list);
+                        let t0 = Instant::now();
+                        if let Some(mut slot) = presignatures.create_slot(id, me).await {
+                            slot.insert(presig, me).await;
+                        }
+                        latencies.push(t0.elapsed());
+                    }
+                    latencies
+                }));
+            }
+
+            // Signer consumer task (takes 1 triple and 1 presignature per signature request)
+            {
+                let triples = p.triples.clone();
+                let presignatures = p.presignatures.clone();
+                let b = barrier.clone();
+                let base_id = stockpile_base + (node_idx as u64 * items_per_participant as u64 * 2);
+
+                signer_tasks.push(tokio::spawn(async move {
+                    b.wait().await;
+                    let mut take_triple_latencies = Vec::with_capacity(items_per_participant);
+                    let mut take_presig_latencies = Vec::with_capacity(items_per_participant);
+
+                    for i in 0..items_per_participant {
+                        let triple_id = base_id + (i as u64);
+                        let presig_id = base_id + (items_per_participant as u64) + (i as u64);
+
+                        let t0 = Instant::now();
+                        let _ = triples.take(triple_id, me).await;
+                        take_triple_latencies.push(t0.elapsed());
+
+                        let t1 = Instant::now();
+                        let _ = presignatures.take(presig_id, me).await;
+                        take_presig_latencies.push(t1.elapsed());
+                    }
+                    (take_triple_latencies, take_presig_latencies)
+                }));
+            }
+        }
+
+        let mut all_insert_triples = Vec::new();
+        for t in triple_gen_tasks {
+            all_insert_triples.extend(t.await?);
+        }
+
+        let mut all_insert_presigs = Vec::new();
+        for t in presig_gen_tasks {
+            all_insert_presigs.extend(t.await?);
+        }
+
+        let mut all_take_triples = Vec::new();
+        let mut all_take_presigs = Vec::new();
+        for t in signer_tasks {
+            let (tt, tp) = t.await?;
+            all_take_triples.extend(tt);
+            all_take_presigs.extend(tp);
+        }
+        let wall = overall_start.elapsed();
+
+        stop_flag.store(true, Ordering::Relaxed);
+        for h in bg_handles {
+            let _ = h.await;
+        }
+
+        let s1 = LatencySummary::calculate("mixed_insert_triple", &mut all_insert_triples, wall);
+        let s2 = LatencySummary::calculate("mixed_insert_presig", &mut all_insert_presigs, wall);
+        let s3 = LatencySummary::calculate("mixed_take_triple", &mut all_take_triples, wall);
+        let s4 = LatencySummary::calculate("mixed_take_presig", &mut all_take_presigs, wall);
+
+        Ok(vec![s1, s2, s3, s4])
+    }
+
+    /// SCENARIO 8: State Sync Peer Drop & Pruning (`remove_holder_and_prune`).
+    /// Simulates a peer drop or desync during state sync (as seen in `sync/mod.rs`),
+    /// where surviving participants batch-prune missing IDs through the Lua script.
+    pub async fn bench_sync_prune_storm(
+        &self,
+        items_per_participant: usize,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+
+        let run_base_id = next_id_block((self.participants.len() * items_per_participant * 2) as u64 + 10_000);
+        let participant_list = self.participant_ids();
+        let target_peer = participant_list[0];
+
+        println!(
+            "   -> Pre-populating {items_per_participant} triples and presignatures across {} participants...",
+            self.participants.len()
+        );
+        let mut triple_ids_by_p = Vec::new();
+        let mut presig_ids_by_p = Vec::new();
+
+        for (node_idx, p) in self.participants.iter().enumerate() {
+            let base_id = run_base_id + (node_idx as u64 * items_per_participant as u64 * 2);
+            let mut p_triple_ids = Vec::with_capacity(items_per_participant);
+            let mut p_presig_ids = Vec::with_capacity(items_per_participant);
+
+            for i in 0..items_per_participant {
+                let triple_id = base_id + (i as u64);
+                let pair = dummy_pair(triple_id, &participant_list);
+                if let Some(mut slot) = p.triples.create_slot(triple_id, p.participant).await {
+                    slot.insert(pair, p.participant).await;
+                }
+                p_triple_ids.push(triple_id);
+
+                let presig_id = base_id + (items_per_participant as u64) + (i as u64);
+                let presig = dummy_presignature(presig_id, &participant_list);
+                if let Some(mut slot) = p.presignatures.create_slot(presig_id, p.participant).await {
+                    slot.insert(presig, p.participant).await;
+                }
+                p_presig_ids.push(presig_id);
+            }
+            triple_ids_by_p.push(p_triple_ids);
+            presig_ids_by_p.push(p_presig_ids);
+        }
+
+        let threshold = (self.participants.len() * 2 / 3).max(1);
+        let barrier = Arc::new(Barrier::new(self.participants.len()));
+        let mut tasks = Vec::new();
+        let prune_start = Instant::now();
+
+        for (node_idx, p) in self.participants.iter().enumerate() {
+            let triples = p.triples.clone();
+            let presignatures = p.presignatures.clone();
+            let barrier = barrier.clone();
+            let my_triple_ids = triple_ids_by_p[node_idx].clone();
+            let my_presig_ids = presig_ids_by_p[node_idx].clone();
+
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let t0 = Instant::now();
+                let triple_res = triples.remove_holder_and_prune(target_peer, threshold, &my_triple_ids).await;
+                let triple_elapsed = t0.elapsed();
+
+                let t1 = Instant::now();
+                let presig_res = presignatures.remove_holder_and_prune(target_peer, threshold, &my_presig_ids).await;
+                let presig_elapsed = t1.elapsed();
+
+                (triple_elapsed, triple_res, presig_elapsed, presig_res)
+            }));
+        }
+
+        let mut all_triple_latencies = Vec::new();
+        let mut all_presig_latencies = Vec::new();
+
+        for t in tasks {
+            let (t_lat, t_res, p_lat, p_res) = t.await?;
+            assert!(t_res.is_ok(), "triples remove_holder_and_prune should succeed");
+            assert!(p_res.is_ok(), "presignatures remove_holder_and_prune should succeed");
+            all_triple_latencies.push(t_lat);
+            all_presig_latencies.push(p_lat);
+        }
+        let wall = prune_start.elapsed();
+
+        let s1 = LatencySummary::calculate("sync_prune_triples", &mut all_triple_latencies, wall);
+        let s2 = LatencySummary::calculate("sync_prune_presigs", &mut all_presig_latencies, wall);
+        Ok(vec![s1, s2])
+    }
 }
 
 pub fn dummy_presignature(id: u64, participants: &[Participant]) -> Presignature {
