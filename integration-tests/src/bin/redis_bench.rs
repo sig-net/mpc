@@ -211,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
 
     if should_run(BenchScenario::DeepStockpile) {
         let stockpile = (args.items * 5).max(1000);
-        let num_seekers = args.participants.min(6).max(2);
+        let num_seekers = args.participants.clamp(2, 6);
         let exclusions = 50;
         let seeks = 20;
         println!(
@@ -225,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
 
     if should_run(BenchScenario::ReservationChurn) {
         let stockpile = (args.items * 2).max(300);
-        let num_proposers = args.participants.min(4).max(2);
+        let num_proposers = args.participants.clamp(2, 4);
         let rounds = 25;
         let abort_percent = 40;
         println!(
@@ -239,7 +239,7 @@ async fn main() -> anyhow::Result<()> {
 
     if should_run(BenchScenario::ConflictedTake) {
         let items = (args.items / 5).max(30);
-        let contenders = args.participants.min(4).max(2);
+        let contenders = args.participants.clamp(2, 4);
         println!(
             "\n>>> Running Scenario 12: Conflicted Double-Take Race Storm ({items} items, {contenders} parallel contenders racing per item)"
         );
