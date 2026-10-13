@@ -7,6 +7,11 @@ import { configFromEnv } from "./config.js";
 import { handleLine } from "./protocol.js";
 import { shutdownPublisher } from "./submit.js";
 
+// SDK wallet effects log through the global console; reserve stdout for replies.
+console.log = console.error;
+console.info = console.error;
+console.debug = console.error;
+
 const config = configFromEnv();
 
 console.error(

@@ -161,41 +161,6 @@ impl Participants {
             .any(|participant_info| participant_info.account_id == *account_id)
     }
 
-    pub fn account_ids(&self) -> Vec<&AccountId> {
-        self.participants
-            .values()
-            .map(|participant_info| &participant_info.account_id)
-            .collect()
-    }
-
-    pub fn and(&self, other: &Self) -> Self {
-        let mut participants = self.participants.clone();
-        for (participant, info) in &other.participants {
-            participants.insert(*participant, info.clone());
-        }
-        Participants { participants }
-    }
-
-    pub fn intersection(&self, other: &[&[Participant]]) -> Self {
-        let mut intersect = BTreeMap::new();
-        let other = other
-            .iter()
-            .map(|participants| participants.iter().cloned().collect::<HashSet<_>>())
-            .collect::<Vec<_>>();
-
-        'outer: for (participant, info) in &self.participants {
-            for participants in &other {
-                if !participants.contains(participant) {
-                    continue 'outer;
-                }
-            }
-            intersect.insert(*participant, info.clone());
-        }
-        Participants {
-            participants: intersect,
-        }
-    }
-
     pub fn clear(&mut self) {
         self.participants.clear();
     }

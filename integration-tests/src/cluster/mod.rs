@@ -18,7 +18,8 @@ use crate::utils::{self, vote_join, vote_leave};
 use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
-use mpc_node::web::{BenchMetrics, StateView};
+use mpc_node::protocol::state::NodeStatus;
+use mpc_node::web::{BenchMetrics, StatusResponse};
 
 use anyhow::Context;
 use url::Url;
@@ -63,15 +64,36 @@ impl Cluster {
         Url::parse(self.nodes.url(id)).unwrap()
     }
 
-    pub async fn fetch_state(&self, id: usize) -> anyhow::Result<StateView> {
-        let url = self.url(id).join("/state").unwrap();
-        let state_view: StateView = self.http_client.get(url).send().await?.json().await?;
-        Ok(state_view)
+    pub async fn fetch_status(&self, id: usize) -> anyhow::Result<NodeStatus> {
+        let url = self.url(id).join("/status").unwrap();
+        let resp: StatusResponse = self.http_client.get(url).send().await?.json().await?;
+        Ok(resp.status)
     }
 
-    pub async fn fetch_states(&self) -> anyhow::Result<Vec<StateView>> {
-        let tasks = (0..self.len()).map(|id| self.fetch_state(id));
+    pub async fn fetch_statuses(&self) -> anyhow::Result<Vec<NodeStatus>> {
+        let tasks = (0..self.len()).map(|id| self.fetch_status(id));
         futures::future::try_join_all(tasks).await
+    }
+
+    /// Reads a gauge from the node's `/metrics`, ignoring its labels.
+    pub async fn fetch_gauge(&self, id: usize, name: &str) -> anyhow::Result<i64> {
+        let url = self.url(id).join("/metrics").unwrap();
+        let body = self.http_client.get(url).send().await?.text().await?;
+        body.lines()
+            .find_map(|line| {
+                let rest = line.strip_prefix(name)?;
+                // `name value` or `name{labels} value`
+                let rest = match rest.strip_prefix('{') {
+                    Some(labels) => &labels[labels.find('}')? + 1..],
+                    None => rest,
+                };
+                rest.strip_prefix(' ')
+            })
+            .with_context(|| format!("metric {name} not found"))?
+            .trim()
+            .parse::<f64>()
+            .map(|v| v as i64)
+            .with_context(|| format!("metric {name} is not a number"))
     }
 
     pub async fn fetch_bench_metrics(&self, id: usize) -> anyhow::Result<BenchMetrics> {

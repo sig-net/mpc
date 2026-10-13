@@ -33,8 +33,7 @@ pub enum ExtractionFailureKind {
     /// retried rather than resolved.
     Retryable,
     /// Deterministic failure of on-chain data against the request's schemas.
-    /// Every node observes it identically, so the execution is resolved as
-    /// failed.
+    /// The transaction executed; this cannot authorize a failure attestation.
     Terminal,
 }
 

@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ContractOperation, ContractState } from "@midnight-ntwrk/compact-runtime";
 import { ContractCall, type Proofish } from "@midnightntwrk/ledger-v9";
 
+import { decodeRespondBidirectionalEventPayload } from "@sig-net/midnight";
+
 import { buildIntent } from "../src/intent.js";
 import {
   calledEntryPoint,
@@ -71,10 +73,49 @@ describe("buildIntent", () => {
   });
 
   it("builds respondBidirectional without storage writes", async () => {
-    const bytes = await buildIntent(await respondInput({ circuit: "respondBidirectional" }));
+    const input = await respondInput({
+      circuit: "respondBidirectional",
+      attestation: {
+        blockHeight: "18364758544493064720",
+        outputKind: 2,
+        serializedOutputLength: "0",
+        digest: "55".repeat(32),
+      },
+    });
+    const bytes = await buildIntent(input);
 
     expect(calledEntryPoint(bytes)).toBe("respondBidirectional");
     const call = onlyCall(bytes);
+    const push = call.guaranteedTranscript?.program.find(
+      (op) => typeof op !== "string" && "push" in op,
+    );
+    if (
+      push === undefined ||
+      typeof push === "string" ||
+      !("push" in push) ||
+      push.push.value.tag !== "array"
+    )
+      throw new Error("missing event push");
+    const event = push.push.value.content[2];
+    if (event?.tag !== "cell") throw new Error("missing misc event cell");
+    const bytes288 = new Uint8Array(288);
+    bytes288.set(event.content.value[0]!);
+    const decoded = decodeRespondBidirectionalEventPayload(bytes288.slice(32)).event;
+    expect(decoded).toEqual({
+      requestId: Uint8Array.from(Buffer.from(input.requestId, "hex")),
+      blockHeight: BigInt(input.attestation!.blockHeight),
+      outputKind: 2,
+      serializedOutputLength: 0n,
+      digest: Uint8Array.from(Buffer.from(input.attestation!.digest, "hex")),
+      signature: {
+        bigR: {
+          x: Uint8Array.from(Buffer.from(input.signature.bigR.x, "hex")),
+          y: Uint8Array.from(Buffer.from(input.signature.bigR.y, "hex")),
+        },
+        s: Uint8Array.from(Buffer.from(input.signature.s, "hex")),
+        recoveryId: BigInt(input.signature.recoveryId),
+      },
+    });
     expect(call.guaranteedTranscript).toBeDefined();
     expect(call.fallibleTranscript).toBeUndefined();
     expect(storageWrites(call)).toHaveLength(0);

@@ -184,14 +184,11 @@ impl EthereumTestEnvironment {
     fn config(&self, optimistic_requests: bool) -> EthConfig {
         EthConfig {
             account_sk: self.sandbox.secret_key.parse().unwrap(),
-            consensus_rpc_http_url: self.sandbox.external_http_endpoint.clone(),
             execution_rpc_http_url: self.sandbox.external_http_endpoint.parse().unwrap(),
             contract_address: self.contract_address,
             network: "sepolia".to_string(),
-            helios_data_path: "/tmp/helios".to_string(),
             refresh_finalized_interval: 500,
             optimistic_requests,
-            light_client: false,
             gas: Default::default(),
             indexer: Default::default(),
             publisher: Default::default(),
@@ -581,17 +578,15 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         NoopChainTelemetry,
     ));
 
+    let mut saw_resolved_completion = false;
     let mut saw_execution_follow_up = false;
     let mut saw_catchup_request = false;
     let mut saw_requeued_request = false;
 
     for _ in 0..8 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await? {
-            SignCommand::Completion(sign_id) => {
-                assert_ne!(
-                    sign_id, resolved_sign_id,
-                    "pre-catchup resolved request should not emit a completion"
-                );
+            SignCommand::Completion(sign_id) if sign_id == resolved_sign_id => {
+                saw_resolved_completion = true;
             }
             SignCommand::Request(req) if req.sign_id() == execution_sign_id => {
                 assert!(matches!(
@@ -614,11 +609,19 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
             _ => {}
         }
 
-        if saw_execution_follow_up && saw_catchup_request && saw_requeued_request {
+        if saw_resolved_completion
+            && saw_execution_follow_up
+            && saw_catchup_request
+            && saw_requeued_request
+        {
             break;
         }
     }
 
+    assert!(
+        saw_resolved_completion,
+        "expected a completion for the request resolved during catchup"
+    );
     assert!(
         saw_execution_follow_up,
         "expected execution follow-up request after catchup"
@@ -1005,6 +1008,123 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
             );
         }
     }
+
+    Ok(())
+}
+
+/// A node that indexes a replacement's Midnight signature only after processing
+/// the Ethereum block that mined it registers the replacement's watcher late.
+/// The displaced request must still resolve as unviable at the replacement's
+/// inclusion height, which a node that watched in time also attests.
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_late_replacement_watcher_resolves_displaced_midnight_request(
+) -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+
+    let responder_secret_key = random_secret_key();
+    let (responder, responder_address) = eth::client(
+        &ctx.sandbox.external_http_endpoint,
+        &responder_secret_key,
+        ctx.sandbox.chain_id,
+    )?;
+    let fund_tx = transfer_tx(responder_address, U256::from(1_000_000_000_000_000_000u64));
+    let _ = ctx
+        .signer
+        .send_transaction(fund_tx)
+        .await?
+        .get_receipt()
+        .await
+        .context("failed to mine responder funding transaction")?;
+    let nonce = responder.get_transaction_count(responder_address).await?;
+
+    // A signed request whose transaction is never broadcast, watched before the
+    // replacement is mined.
+    let displaced_sign_id = SignId::new([0x73; 32]);
+    let displaced_tx_id = mpc_primitives::BidirectionalTxId([0x74; 32]);
+    let mut displaced =
+        test_eth_bidirectional_tx(displaced_tx_id, displaced_sign_id, responder_address, nonce);
+    displaced.source_chain = Chain::Midnight;
+    displaced.serialized_transaction = vec![0x74];
+    backlog.insert_mock_executing(&displaced).await;
+
+    let mut stream = stream_ethereum(&ctx, backlog.clone()).await?;
+    stream
+        .wait_for(
+            |event| matches!(event, ChainEvent::Block(_)),
+            Duration::from_secs(30),
+        )
+        .await
+        .context("the stream processed no block with the displaced watcher")?;
+
+    // The replacement consumes the nonce while this node does not watch it yet.
+    let receipt = responder
+        .send_transaction(transfer_tx(ctx.wallet, U256::ZERO).nonce(nonce))
+        .await?
+        .get_receipt()
+        .await
+        .context("replacement transaction was not mined")?;
+    let replaced_at = receipt
+        .block_number
+        .context("replacement receipt missing block number")?;
+    stream
+        .wait_for(
+            |event| matches!(event, ChainEvent::Block(height) if *height >= replaced_at),
+            Duration::from_secs(30),
+        )
+        .await
+        .context("the stream did not process the replacement's block")?;
+
+    let replacement_sign_id = SignId::new([0x75; 32]);
+    let replacement_tx_id = mpc_primitives::BidirectionalTxId(receipt.transaction_hash.0);
+    let mut replacement = test_eth_bidirectional_tx(
+        replacement_tx_id,
+        replacement_sign_id,
+        responder_address,
+        nonce,
+    );
+    replacement.source_chain = Chain::Midnight;
+    replacement.serialized_transaction = vec![0x75];
+    backlog.insert_mock_executing(&replacement).await;
+
+    let mut confirmations = std::collections::HashMap::new();
+    stream
+        .wait_for(
+            |event| {
+                if let ChainEvent::ExecutionConfirmed {
+                    tx_id,
+                    block_height,
+                    result,
+                    ..
+                } = event
+                {
+                    confirmations
+                        .entry(*tx_id)
+                        .or_insert_with(|| (*block_height, result.clone()));
+                }
+                confirmations.contains_key(&displaced_tx_id)
+                    && confirmations.contains_key(&replacement_tx_id)
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .context("the late replacement did not resolve both watchers")?;
+
+    let (height, result) = &confirmations[&replacement_tx_id];
+    assert_eq!(*height, replaced_at);
+    assert!(
+        matches!(result, mpc_primitives::ExecutionOutcome::Success { .. }),
+        "the replacement executed: {result:?}"
+    );
+    let (height, result) = &confirmations[&displaced_tx_id];
+    assert_eq!(
+        *height, replaced_at,
+        "the displaced request resolves at the replacement's inclusion height"
+    );
+    assert!(
+        matches!(result, mpc_primitives::ExecutionOutcome::Unviable),
+        "the displaced request is unviable: {result:?}"
+    );
 
     Ok(())
 }

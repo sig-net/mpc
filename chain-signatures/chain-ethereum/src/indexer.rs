@@ -833,7 +833,6 @@ mod tests {
     async fn missing_catchup_block_propagates_error_when_refetch_rpc_fails() {
         let indexer = test_utils::TestIndexerBuilder::new("http://127.0.0.1:1")
             .client_url("http://127.0.0.1:1")
-            .rpc_urls("", "http://127.0.0.1:1")
             .build()
             .await;
         let (events_tx, mut events_rx) = chain_event_channel();

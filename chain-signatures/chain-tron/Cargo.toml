@@ -1,0 +1,24 @@
+[package]
+name = "mpc-chain-tron"
+edition = "2021"
+version.workspace = true
+publish.workspace = true
+description = "Tron chain integration for MPC"
+
+[dependencies]
+alloy.workspace = true
+anyhow.workspace = true
+bs58 = "0.5.1"
+hex.workspace = true
+mpc-chain-integration-core.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11.0"
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+mockito.workspace = true

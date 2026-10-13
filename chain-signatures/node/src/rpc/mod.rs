@@ -1,10 +1,11 @@
 mod near_governance;
 
-use crate::backlog::{Publishing, SignEntry};
+use crate::backlog::{Backlog, Publishing, SignEntry};
 use crate::config::Config;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
+use crate::sign_bidirectional::{BidirectionalProgress, SignStatus};
 use crate::types::CheckpointWatcher;
 use enum_map::EnumMap;
 use std::collections::BTreeSet;
@@ -66,6 +67,51 @@ impl PublishKind {
             SignKind::RespondBidirectional(_) => PublishKind::BidirectionalResponse,
         }
     }
+
+    /// Whether an entry in `status` still waits for this response. A leg the
+    /// entry has moved past was observed on chain, so publishing it again only
+    /// adds a duplicate.
+    fn awaited_in(self, status: &SignStatus) -> bool {
+        match status {
+            SignStatus::Sign(_) | SignStatus::Bidirectional(BidirectionalProgress::Initial(_)) => {
+                self == PublishKind::Response
+            }
+            SignStatus::Bidirectional(BidirectionalProgress::Final { .. }) => {
+                self == PublishKind::BidirectionalResponse
+            }
+            SignStatus::Bidirectional(
+                BidirectionalProgress::Executing(_) | BidirectionalProgress::Parked(_),
+            ) => false,
+        }
+    }
+}
+
+/// The backlog as a Midnight publisher's [`ResponseAwaiter`], so a publish queued behind
+/// others re-checks its entry once its turn comes.
+pub struct BacklogAwaiter(Backlog);
+
+impl BacklogAwaiter {
+    pub fn new(backlog: Backlog) -> Self {
+        Self(backlog)
+    }
+}
+
+#[async_trait::async_trait]
+impl mpc_chain_midnight::ResponseAwaiter for BacklogAwaiter {
+    async fn still_awaited(&self, action: &PublishAction) -> bool {
+        publish_still_awaited(&self.0, action).await
+    }
+}
+
+/// Whether this node's backlog still waits for the response `action` carries.
+/// An entry that left the backlog was answered on chain or pruned by consensus.
+/// Either way there is nothing left to publish.
+async fn publish_still_awaited(backlog: &Backlog, action: &PublishAction) -> bool {
+    let request = &action.request;
+    backlog
+        .get(request.chain, &request.id)
+        .await
+        .is_some_and(|entry| PublishKind::of(&request.kind).awaited_in(entry.status()))
 }
 
 /// Checkpoint votes admitted by the dispatch loop: each digest maps to the
@@ -452,6 +498,7 @@ impl RpcExecutor {
 
     pub async fn run(
         mut self,
+        backlog: Backlog,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
         checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
@@ -463,19 +510,16 @@ impl RpcExecutor {
         let near = self.near.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
-                tokio::spawn(update_contract_data(
-                    near.clone(),
-                    contract.clone(),
-                    config.clone(),
-                    checkpoints.clone(),
-                ));
+                update_contract_data(&near, &contract, &config, &checkpoints).await;
             }
         });
 
         Self::dispatch_loop(
             &self.publishers,
+            Some(backlog),
             Some(self.near.clone()),
             &consensus,
             &mut self.action_rx,
@@ -486,6 +530,7 @@ impl RpcExecutor {
     /// Dispatches incoming RPC actions to the appropriate chain publishers.
     async fn dispatch_loop(
         publishers: &HashMap<Chain, Arc<dyn ChainPublisher>>,
+        backlog: Option<Backlog>,
         near: Option<NearGovernanceClient>,
         consensus: &EnumMap<Chain, CheckpointWatcher>,
         action_rx: &mut mpsc::Receiver<RpcAction>,
@@ -522,10 +567,11 @@ impl RpcExecutor {
                     }
 
                     let publisher = publisher.clone();
+                    let backlog = backlog.clone();
                     let in_flight = in_flight.clone();
                     tokio::spawn(async move {
                         let _guard = InFlightGuard { in_flight, id: key };
-                        execute_publish(publisher, action).await;
+                        execute_publish(publisher, backlog, action).await;
                     });
                 }
                 RpcAction::VoteCheckpoint {
@@ -573,10 +619,10 @@ impl RpcExecutor {
 }
 
 async fn update_contract_data(
-    near: NearGovernanceClient,
-    contract: watch::Sender<Option<ProtocolState>>,
-    config: watch::Sender<Config>,
-    checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
+    near: &NearGovernanceClient,
+    contract: &watch::Sender<Option<ProtocolState>>,
+    config: &watch::Sender<Config>,
+    checkpoints: &EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
 ) {
     let reads = vec![Read::State, Read::Config, Read::Checkpoints];
     let views = match near.read(reads).await {
@@ -624,7 +670,7 @@ async fn update_contract_data(
     }
 
     if let Some(signed_checkpoints) = checkpoints_view {
-        for (chain, tx) in &checkpoints {
+        for (chain, tx) in checkpoints {
             let new_digest = signed_checkpoints.get(&chain).copied();
             tx.send_if_modified(|old| {
                 if *old == new_digest {
@@ -651,7 +697,13 @@ impl Drop for InFlightGuard {
 }
 
 /// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
-pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: PublishAction) {
+/// With a `backlog`, each attempt first checks that this node still waits for the
+/// response: once any node's response is observed, a retry would only land a duplicate.
+pub async fn execute_publish(
+    publisher: Arc<dyn ChainPublisher>,
+    backlog: Option<Backlog>,
+    action: PublishAction,
+) {
     let chain = action.request.chain;
     let sign_id = action.request.id;
 
@@ -679,11 +731,24 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
                 retry_count = attempt,
                 elapsed = ?action.timestamp.elapsed(),
                 ?chain,
-                "failed to publish ({err}), retrying in {sleep:?}"
+                "failed to publish ({err:#}), retrying in {sleep:?}"
             );
         },
         // Try to publish the signature
-        { publisher.publish_signature(&action).await }
+        {
+            if let Some(backlog) = &backlog {
+                if !publish_still_awaited(backlog, &action).await {
+                    tracing::info!(
+                        ?sign_id,
+                        ?chain,
+                        elapsed = ?action.timestamp.elapsed(),
+                        "response no longer awaited; dropping publish"
+                    );
+                    return Ok(());
+                }
+            }
+            publisher.publish_signature(&action).await
+        }
     );
 
     // TODO: Consider adding a metric update for failed publish attempts here, if needed.
@@ -807,14 +872,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backlog::mock::{
+        mock_bidi_request, mock_bidi_response, mock_bidirectional_tx, mock_sign_request,
+        BacklogTestExt as _,
+    };
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
     use mpc_chain_integration_core::utils::test::make_publish_action;
+    use mpc_chain_integration_core::GatedPublisher;
     use mpc_primitives::{SignId, SignKind};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     #[tokio::test]
@@ -1096,7 +1166,7 @@ mod tests {
         // Returns once the channel drains. A wrongly admitted vote would already
         // be spawned; the short wait gives it time to reach the server. It bounds
         // a negative check, so a slow run can only pass, never fail spuriously.
-        RpcExecutor::dispatch_loop(&HashMap::new(), Some(near), &consensus, &mut rx).await;
+        RpcExecutor::dispatch_loop(&HashMap::new(), None, Some(near), &consensus, &mut rx).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         mock.assert_async().await;
     }
@@ -1187,6 +1257,96 @@ mod tests {
         }
     }
 
+    /// A publisher whose submission is rejected while another node's response
+    /// lands: every call fails, and the first one removes the entry from the
+    /// backlog as the observed response would.
+    struct AnsweredElsewherePublisher {
+        backlog: Backlog,
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for AnsweredElsewherePublisher {
+        async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.backlog
+                .remove(action.request.chain, &action.request.id)
+                .await;
+            anyhow::bail!("submission rejected")
+        }
+    }
+
+    fn publish_action_for(request: &IndexedSignRequest) -> PublishAction {
+        make_publish_action(request.chain, request.kind.clone(), request.id)
+    }
+
+    #[tokio::test]
+    async fn publish_is_awaited_only_while_its_leg_is_pending() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([3u8; 32]);
+        let sign = publish_action_for(&mock_sign_request(sign_id, Chain::Solana));
+        assert!(!publish_still_awaited(&backlog, &sign).await);
+        backlog.insert_mock_sign(sign_id, Chain::Solana).await;
+        assert!(publish_still_awaited(&backlog, &sign).await);
+
+        let tx = mock_bidirectional_tx(SignId::new([4u8; 32]), Chain::Midnight);
+        let first_leg = publish_action_for(&mock_bidi_request(tx.sign_id(), tx.source_chain));
+        let second_leg = publish_action_for(&mock_bidi_response(&tx));
+        backlog
+            .insert_mock_bidirectional(tx.sign_id(), tx.source_chain)
+            .await;
+        assert!(publish_still_awaited(&backlog, &first_leg).await);
+        assert!(!publish_still_awaited(&backlog, &second_leg).await);
+
+        backlog.remove(tx.source_chain, &tx.sign_id()).await;
+        let executing = backlog.insert_mock_executing(&tx).await;
+        assert!(!publish_still_awaited(&backlog, &first_leg).await);
+        assert!(!publish_still_awaited(&backlog, &second_leg).await);
+
+        executing.park().await.unwrap();
+        assert!(backlog.get(tx.source_chain, &tx.sign_id()).await.is_some());
+        assert!(!publish_still_awaited(&backlog, &first_leg).await);
+        assert!(!publish_still_awaited(&backlog, &second_leg).await);
+
+        backlog.remove(tx.source_chain, &tx.sign_id()).await;
+        backlog.insert_mock_final(&tx).await;
+        assert!(!publish_still_awaited(&backlog, &first_leg).await);
+        assert!(publish_still_awaited(&backlog, &second_leg).await);
+    }
+
+    /// The Midnight publisher's re-check reads the backlog's own answer.
+    #[tokio::test]
+    async fn backlog_awaiter_answers_from_the_backlog() {
+        use mpc_chain_midnight::ResponseAwaiter as _;
+
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([6u8; 32]);
+        let action = publish_action_for(&mock_sign_request(sign_id, Chain::Midnight));
+        let awaiter = BacklogAwaiter::new(backlog.clone());
+
+        backlog.insert_mock_sign(sign_id, Chain::Midnight).await;
+        assert!(awaiter.still_awaited(&action).await);
+        backlog.remove(Chain::Midnight, &sign_id).await;
+        assert!(!awaiter.still_awaited(&action).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn publish_retry_stops_once_the_response_is_observed() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([5u8; 32]);
+        backlog.insert_mock_sign(sign_id, Chain::Midnight).await;
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let publisher = Arc::new(AnsweredElsewherePublisher {
+            backlog: backlog.clone(),
+            call_count: call_count.clone(),
+        });
+
+        let action = publish_action_for(&mock_sign_request(sign_id, Chain::Midnight));
+        execute_publish(publisher, Some(backlog), action).await;
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
     fn test_participants() -> Participants {
         let mut participants = Participants::default();
         participants.insert(&Participant::from(0), ParticipantInfo::new(0));
@@ -1275,7 +1435,7 @@ mod tests {
         // Closing the channel will cause dispatch_loop to return
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
 
         // Give spawned tasks a chance to complete
         tokio::task::yield_now().await;
@@ -1309,7 +1469,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 0);
@@ -1349,7 +1509,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
 
         // Yield enough times to let both spawned tasks complete.
         // Each task calls publish_signature once and returns immediately.
@@ -1409,7 +1569,7 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
         tokio::task::yield_now().await;
 
         assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);
@@ -1432,7 +1592,8 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let publishers = HashMap::new();
         let dispatch = tokio::spawn(async move {
-            RpcExecutor::dispatch_loop(&publishers, Some(near), &no_consensus(), &mut rx).await;
+            RpcExecutor::dispatch_loop(&publishers, None, Some(near), &no_consensus(), &mut rx)
+                .await;
         });
 
         tx.send(RpcAction::VoteCheckpoint {
@@ -1483,11 +1644,188 @@ mod tests {
 
         drop(tx);
 
-        RpcExecutor::dispatch_loop(&publishers, None, &no_consensus(), &mut rx).await;
+        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
 
         // Let the single in-flight publish finish.
         tokio::task::yield_now().await;
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Records the instant of its first call; always succeeds.
+    struct TimestampingPublisher {
+        first_call: Arc<Mutex<Option<Instant>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for TimestampingPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            let mut first = self.first_call.lock().unwrap();
+            if first.is_none() {
+                *first = Some(Instant::now());
+            }
+            Ok(())
+        }
+    }
+
+    /// Fails its first call with a throttle error, then succeeds; records call times.
+    struct ThrottledFirstPublisher {
+        calls: Arc<Mutex<Vec<Instant>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for ThrottledFirstPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            let mut calls = self.calls.lock().unwrap();
+            let first = calls.is_empty();
+            calls.push(Instant::now());
+            drop(calls);
+            if first {
+                anyhow::bail!("HTTP 429 Too Many Requests");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_parks_a_gated_publisher_on_its_own_chains_cooldown_gate() {
+        let canton_call = Arc::new(Mutex::new(None));
+        let midnight_call = Arc::new(Mutex::new(None));
+
+        // canton's gate is already cooling down when the action arrives
+        let canton_gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(400), Duration::from_millis(800));
+        canton_gate.extend_cooldown();
+
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(
+            Chain::Canton,
+            Arc::new(GatedPublisher::new(
+                TimestampingPublisher {
+                    first_call: canton_call.clone(),
+                },
+                canton_gate,
+                "canton publish",
+            )),
+        );
+        publishers.insert(
+            Chain::Midnight,
+            Arc::new(GatedPublisher::new(
+                TimestampingPublisher {
+                    first_call: midnight_call.clone(),
+                },
+                SharedBackoff::new(),
+                "midnight publish",
+            )),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let sent_at = Instant::now();
+        // canton is sent first; midnight overtaking it below proves the gates are per-chain
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::Canton,
+            SignKind::Sign,
+            SignId::new([0u8; 32]),
+        )))
+        .await
+        .unwrap();
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::Midnight,
+            SignKind::Sign,
+            SignId::new([1u8; 32]),
+        )))
+        .await
+        .unwrap();
+
+        // close the channel so dispatch_loop drains the two actions and returns
+        drop(tx);
+        RpcExecutor::dispatch_loop(&publishers, None, None, &no_consensus(), &mut rx).await;
+
+        // midnight fired while canton was still parked; canton lands once
+        // its window elapses
+        let canton_at = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(at) = *canton_call.lock().unwrap() {
+                    return at;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("canton publish fires after its window");
+        let midnight_at = midnight_call
+            .lock()
+            .unwrap()
+            .expect("midnight publish fired");
+
+        assert!(
+            canton_at.duration_since(sent_at) >= Duration::from_millis(350),
+            "canton publish must wait out its engaged gate, took {:?}",
+            canton_at.duration_since(sent_at)
+        );
+        assert!(
+            midnight_at < canton_at,
+            "midnight's idle gate must not park behind canton's cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_publish_parks_on_the_gate_a_throttled_publisher_engaged() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(300), Duration::from_millis(600));
+        let publisher: Arc<dyn ChainPublisher> = Arc::new(GatedPublisher::new(
+            ThrottledFirstPublisher {
+                calls: calls.clone(),
+            },
+            gate,
+            "midnight publish",
+        ));
+
+        // first publish hits the 429: the gated publisher engages the window
+        let throttled = tokio::spawn(execute_publish(
+            publisher.clone(),
+            None,
+            make_publish_action(Chain::Midnight, SignKind::Sign, SignId::new([2u8; 32])),
+        ));
+
+        let first_at = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(at) = calls.lock().unwrap().first().copied() {
+                    return at;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("first (throttled) call fires");
+
+        // concurrent same-chain publish: its first attempt must wait for the
+        // window the 429 response opened
+        let concurrent = tokio::spawn(execute_publish(
+            publisher,
+            None,
+            make_publish_action(Chain::Midnight, SignKind::Sign, SignId::new([3u8; 32])),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if calls.lock().unwrap().len() >= 2 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("concurrent publish fires");
+
+        let second_at = calls.lock().unwrap()[1];
+        assert!(
+            second_at.duration_since(first_at) >= Duration::from_millis(250),
+            "a publish sharing the gate must wait out the window the 429 opened, took {:?}",
+            second_at.duration_since(first_at)
+        );
+
+        throttled.abort();
+        concurrent.abort();
     }
 }

@@ -148,18 +148,28 @@ where
         }
     }
 
+    /// Reaps the next finished task, as `Ok((key, output))`, or `Err(key)` if it
+    /// panicked or was cancelled. `None` means no tasks are left.
+    ///
+    /// A task whose key was aborted or replaced runs until reaped, but its
+    /// mapping is gone and it carries nothing to report: skip it and keep
+    /// polling, so `None` describes the set rather than one stale task.
     pub async fn join_next(&mut self) -> Option<Result<(T, U), T>> {
-        let outcome = self.tasks.join_next_with_id().await?;
-        let (id, outcome) = match outcome {
-            Ok((id, outcome)) => (id, Some(outcome)),
-            Err(err) => (err.id(), None),
-        };
+        loop {
+            let outcome = self.tasks.join_next_with_id().await?;
+            let (id, outcome) = match outcome {
+                Ok((id, outcome)) => (id, Some(outcome)),
+                Err(err) => (err.id(), None),
+            };
 
-        let key = self.mapping_id.remove(&id)?;
-        self.mapping.remove(&key);
-        match outcome {
-            Some(outcome) => Some(Ok((key, outcome))),
-            None => Some(Err(key)),
+            let Some(key) = self.mapping_id.remove(&id) else {
+                continue;
+            };
+            self.mapping.remove(&key);
+            return match outcome {
+                Some(outcome) => Some(Ok((key, outcome))),
+                None => Some(Err(key)),
+            };
         }
     }
 }
@@ -179,6 +189,80 @@ mod tests {
         atomic::{AtomicU32, Ordering},
         Arc,
     };
+
+    #[tokio::test]
+    async fn join_next_skips_an_aborted_task_and_still_reports_the_tracked_one() {
+        let mut map: JoinMap<u8, u8> = JoinMap::new();
+        map.spawn(1, async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            1
+        });
+        map.spawn(2, async { 2 });
+        map.abort(1);
+
+        // The aborted task is reaped silently; the tracked one still surfaces.
+        assert_eq!(map.join_next().await, Some(Ok((2, 2))));
+        assert_eq!(map.join_next().await, None, "no tasks are left");
+    }
+
+    /// Callers select on `join_next` alongside other work: skipping a stale
+    /// completion must not hold up the branches beside it.
+    #[tokio::test]
+    async fn join_next_leaves_sibling_select_branches_responsive() {
+        let mut map: JoinMap<u8, u8> = JoinMap::new();
+        // Finishes first and is untracked when reaped, so join_next skips it.
+        map.spawn(1, async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            1
+        });
+        // Tracked, but outlives the test: join_next parks on it after skipping.
+        map.spawn(2, async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            2
+        });
+        map.abort(1);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = tx.send("sibling event").await;
+        });
+
+        let started = std::time::Instant::now();
+        let event = tokio::select! {
+            Some(result) = map.join_next(), if !map.is_empty() => {
+                panic!("no tracked task should be reported: {result:?}")
+            }
+            Some(event) = rx.recv() => event,
+        };
+
+        assert_eq!(event, "sibling event");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "sibling branch waited on the skipped completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_next_reports_tasks_spawned_after_abort_all() {
+        let mut map: JoinMap<u8, u8> = JoinMap::new();
+        map.spawn(1, async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            1
+        });
+        map.abort_all();
+        map.spawn(2, async { 2 });
+
+        assert_eq!(map.join_next().await, Some(Ok((2, 2))));
+    }
+
+    #[tokio::test]
+    async fn join_next_reports_a_panicked_task_by_key() {
+        let mut map: JoinMap<u8, u8> = JoinMap::new();
+        map.spawn(3, async { panic!("boom") });
+
+        assert_eq!(map.join_next().await, Some(Err(3)));
+    }
 
     #[tokio::test]
     async fn retry_until_some_retries_on_none_then_yields_value() {

@@ -11,7 +11,7 @@ use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature,
-    SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
 use tokio::sync::mpsc;
@@ -99,16 +99,6 @@ fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
 fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
-    if event.deposit == U256::ZERO {
-        tracing::warn!("deposit is 0, skipping sign request");
-        return None;
-    }
-
-    if event.key_version > LATEST_MPC_KEY_VERSION {
-        tracing::warn!("unsupported key version: {}", event.key_version);
-        return None;
-    }
-
     // Create sign request from event
     let Some(payload) = Scalar::from_bytes(event.payload_hash) else {
         tracing::warn!(
@@ -127,7 +117,14 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
         event.key_version,
         format!("0x{}", event.requester.encode_hex()).as_str(),
         &event.path,
-    );
+    )
+    .inspect_err(|_| {
+        tracing::info!(
+            key_version = event.key_version,
+            "unsupported key version; dropping sign request"
+        )
+    })
+    .ok()?;
 
     // Use transaction hash as entropy
     let tx_hash = log.transaction_hash.unwrap_or_default();
@@ -185,7 +182,6 @@ fn parse_event(log: &Log) -> Option<SignatureRequestedEvent> {
         payload_hash: event.payload.into(),
         path: event.path,
         key_version: event.keyVersion,
-        deposit: event.deposit,
         chain_id: event.chainId,
         algo: event.algo,
         dest: event.dest,
@@ -199,7 +195,6 @@ struct SignatureRequestedEvent {
     payload_hash: [u8; 32],
     path: String,
     key_version: u32,
-    deposit: U256,
     chain_id: U256,
     algo: String,
     dest: String,
@@ -284,7 +279,6 @@ mod tests {
         assert_eq!(parsed.requester, event.sender);
         assert_eq!(parsed.payload_hash, event.payload.0);
         assert_eq!(parsed.key_version, event.keyVersion);
-        assert_eq!(parsed.deposit, event.deposit);
         assert_eq!(parsed.chain_id, event.chainId);
         assert_eq!(parsed.path, event.path);
         assert_eq!(parsed.algo, event.algo);

@@ -9,19 +9,18 @@ use async_trait::async_trait;
 use futures_util::stream::{self, StreamExt};
 use futures_util::Stream;
 use mpc_chain_integration_core::{
-    ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
+    utils::retry::SharedBackoff, ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
-use mpc_primitives::{Chain, ChainEvent};
+use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use mpc_utils::task::retry_until_ok;
 use solana_sdk::{pubkey::Pubkey, signature::Signature};
-use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{EncodedTransactionWithStatusMeta, UiConfirmedBlock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
 use crate::config::SolIndexerConfig;
-use crate::events::{emit_events, extract_tx_signature};
+use crate::events::emit_events;
 use crate::{SolConfig, SolanaClient};
 
 /// Per-run state for the indexer poll loop.
@@ -111,6 +110,8 @@ pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
     program_id: Pubkey,
     client: SolanaClient,
     config: SolIndexerConfig,
+    /// Frozen-anchor budget from `feed_stall_timeout_secs`; tests override.
+    slot_stall_timeout: Duration,
     state_manager: S,
     telemetry: T,
 }
@@ -131,7 +132,12 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         }
     }
 
-    pub fn new(config: SolConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
+    pub fn new(
+        config: SolConfig,
+        state_manager: S,
+        telemetry: T,
+        shared_backoff: SharedBackoff,
+    ) -> anyhow::Result<Self> {
         let program_id = Pubkey::from_str(&config.program_address).with_context(|| {
             format!(
                 "failed to parse solana program address: {}",
@@ -143,12 +149,14 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             config.rpc_http_url.clone(),
             program_id,
             Arc::new(NoopPublisherTelemetry), // Indexer does not publish
+            shared_backoff,
         );
 
         Ok(Self {
             program_id,
             client,
             config: config.indexer,
+            slot_stall_timeout: Duration::from_secs(Chain::Solana.feed_stall_timeout_secs()),
             state_manager,
             telemetry,
         })
@@ -488,8 +496,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         let started_at = Instant::now();
 
         if let Some(transactions) = &block.transactions {
+            let program_id = self.program_id.to_string();
             for tx in transactions {
-                process_transaction(events_tx, &self.program_id, tx).await?;
+                process_transaction(events_tx, &program_id, tx).await?;
             }
         }
 
@@ -515,7 +524,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 /// produce durable state on chain, so their events must not be indexed.
 async fn process_transaction(
     events_tx: &mpsc::Sender<ChainEvent>,
-    program_id: &Pubkey,
+    program_id: &str,
     tx: &EncodedTransactionWithStatusMeta,
 ) -> anyhow::Result<()> {
     let Some(meta) = tx.meta.as_ref() else {
@@ -524,12 +533,7 @@ async fn process_transaction(
     if meta.err.is_some() {
         return Ok(());
     }
-    let OptionSerializer::Some(logs) = meta.log_messages.as_ref() else {
-        return Ok(());
-    };
-
-    let signature = extract_tx_signature(&tx.transaction)?;
-    emit_events(events_tx, program_id, signature, tx, logs).await
+    emit_events(events_tx, program_id, tx).await
 }
 
 #[async_trait]
@@ -552,7 +556,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
                 return Ok(());
             };
             let anchor = res?;
-            state = state.observe_anchor(anchor, self.config.slot_stall_timeout)?;
+            state = state.observe_anchor(anchor, self.slot_stall_timeout)?;
 
             let tick_started_at = Instant::now();
             self.drain_range(&events_tx, anchor, state.next_start, &cancel)
@@ -596,7 +600,9 @@ mod tests {
     use super::*;
     use crate::events::SolanaSignEvent;
     use anchor_lang::{AnchorSerialize, Discriminator};
-    use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
+    use mpc_chain_integration_core::{
+        utils::retry::SharedBackoff, MockStateManager, NoopChainTelemetry,
+    };
     use mpc_primitives::SignId;
     use signet_program::{SignatureRequestedEvent, SignatureRespondedEvent};
     use solana_commitment_config::CommitmentLevel;
@@ -615,12 +621,14 @@ mod tests {
             url.to_string(),
             program_id,
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .with_fast_retry();
         SolanaIndexer {
             program_id,
             client,
             config: SolIndexerConfig::default(),
+            slot_stall_timeout: Duration::from_secs(30),
             state_manager,
             telemetry: NoopChainTelemetry,
         }
@@ -652,7 +660,6 @@ mod tests {
     fn event_transaction(
         program_id: Pubkey,
         signature: Signature,
-        instruction: &str,
         event_data: String,
     ) -> serde_json::Value {
         serde_json::json!({
@@ -671,11 +678,6 @@ mod tests {
                         "stackHeight": 2
                     }]
                 }],
-                "logMessages": [
-                    format!("Program {program_id} invoke [1]"),
-                    format!("Program log: Instruction: {instruction}"),
-                    format!("Program {program_id} success")
-                ],
                 "preTokenBalances": [],
                 "postTokenBalances": [],
                 "rewards": null,
@@ -697,6 +699,32 @@ mod tests {
             },
             "version": "legacy"
         })
+    }
+
+    /// A `SignatureRespondedEvent` with a valid curve point (the secp256k1 generator).
+    fn responded_event(request_id: [u8; 32]) -> SignatureRespondedEvent {
+        SignatureRespondedEvent {
+            request_id,
+            responder: Pubkey::new_unique(),
+            signature: signet_program::Signature {
+                big_r: signet_program::AffinePoint {
+                    x: hex::decode(
+                        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                    )
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                    y: hex::decode(
+                        "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
+                    )
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                },
+                s: [1; 32],
+                recovery_id: 0,
+            },
+        }
     }
 
     fn event_block_response(
@@ -731,15 +759,17 @@ mod tests {
 
     impl RunFixture {
         /// Spawn `run()` with a getSlot mock serving `slots` in order (the
-        /// last repeats forever), an optional persisted watermark, and an
-        /// optional `SolIndexerConfig` (defaults: fast poll, slow stall timeout).
+        /// last repeats forever), an optional persisted watermark, an optional
+        /// `SolIndexerConfig` (default: fast poll), and the anchor-stall
+        /// budget for the spawned run.
         async fn spawn(
             slots: &[u64],
             processed: Option<u64>,
             config: impl Into<Option<SolIndexerConfig>>,
+            slot_stall_timeout: Duration,
         ) -> Self {
             let server = mockito::Server::new_async().await;
-            Self::spawn_with_server(server, slots, processed, config).await
+            Self::spawn_with_server(server, slots, processed, config, slot_stall_timeout).await
         }
 
         /// Variant taking a pre-built mockito server
@@ -748,6 +778,7 @@ mod tests {
             slots: &[u64],
             processed: Option<u64>,
             config: impl Into<Option<SolIndexerConfig>>,
+            slot_stall_timeout: Duration,
         ) -> Self {
             // Serve the slots in order, repeating the last one forever
             let bodies = Arc::new(std::sync::Mutex::new(
@@ -785,8 +816,8 @@ mod tests {
             let mut indexer = test_indexer(&server.url(), state_manager);
             indexer.config = config.into().unwrap_or(SolIndexerConfig {
                 poll_interval: Duration::from_millis(5),
-                slot_stall_timeout: Duration::from_secs(30),
             });
+            indexer.slot_stall_timeout = slot_stall_timeout;
 
             let (events_tx, events_rx) = mpsc::channel(64);
             let cancel = CancellationToken::new();
@@ -1069,28 +1100,7 @@ mod tests {
             fee_payer: None,
         };
         let request_id = SolanaSignEvent::SignatureRequested(request.clone()).generate_request_id();
-        let response = SignatureRespondedEvent {
-            request_id,
-            responder: Pubkey::new_unique(),
-            signature: signet_program::Signature {
-                big_r: signet_program::AffinePoint {
-                    x: hex::decode(
-                        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-                    )
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-                    y: hex::decode(
-                        "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
-                    )
-                    .unwrap()
-                    .try_into()
-                    .unwrap(),
-                },
-                s: [1; 32],
-                recovery_id: 0,
-            },
-        };
+        let response = responded_event(request_id);
 
         let entries: Vec<_> = [8, 7, 5].into_iter().map(signature_entry).collect();
         let _signatures = server
@@ -1112,7 +1122,6 @@ mod tests {
                 event_transaction(
                     indexer.program_id,
                     Signature::new_unique(),
-                    "Sign",
                     cpi_event_instruction(&request),
                 ),
             ),
@@ -1122,7 +1131,6 @@ mod tests {
                 event_transaction(
                     indexer.program_id,
                     Signature::new_unique(),
-                    "Respond",
                     cpi_event_instruction(&response),
                 ),
             ),
@@ -1179,7 +1187,6 @@ mod tests {
         let mut transaction = event_transaction(
             indexer.program_id,
             Signature::new_unique(),
-            "Sign",
             cpi_event_instruction(&request),
         );
         let error = serde_json::json!({ "InstructionError": [0, { "Custom": 1 }] });
@@ -1194,6 +1201,48 @@ mod tests {
 
         assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
         assert!(events_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn emits_every_cpi_event_in_a_transaction() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let request = SignatureRequestedEvent {
+            sender: Pubkey::new_unique(),
+            payload: [1; 32],
+            key_version: 0,
+            deposit: 1,
+            chain_id: "solana".to_string(),
+            path: "test".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "test".to_string(),
+            params: String::new(),
+            fee_payer: None,
+        };
+        let request_id = SolanaSignEvent::SignatureRequested(request.clone()).generate_request_id();
+        let mut transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            cpi_event_instruction(&request),
+        );
+        let instructions = &mut transaction["meta"]["innerInstructions"][0]["instructions"];
+        let mut respond_ix = instructions[0].clone();
+        respond_ix["data"] = cpi_event_instruction(&responded_event(request_id)).into();
+        instructions.as_array_mut().unwrap().push(respond_ix);
+
+        let response = event_block_response(0, 7, transaction);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest { request, .. }) if request.id == SignId::new(request_id)
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Respond(event)) if event.request_id == request_id
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
     }
 
     #[tokio::test]
@@ -1242,7 +1291,6 @@ mod tests {
             event_transaction(
                 indexer.program_id,
                 Signature::new_unique(),
-                "Sign",
                 cpi_event_instruction(&req_a),
             ),
         );
@@ -1253,7 +1301,6 @@ mod tests {
             .push(event_transaction(
                 indexer.program_id,
                 Signature::new_unique(),
-                "Sign",
                 cpi_event_instruction(&req_b),
             ));
 
@@ -1498,7 +1545,7 @@ mod tests {
     async fn run_emits_single_catchup_completed_when_anchor_frozen() {
         // Frozen anchor: the range [10, 10) covers no new slots, so the only
         // event is exactly one CatchupCompleted — no Block markers.
-        let mut f = RunFixture::spawn(&[10], Some(9), None).await;
+        let mut f = RunFixture::spawn(&[10], Some(9), None, Duration::from_secs(30)).await;
 
         assert!(matches!(
             f.next_event().await,
@@ -1517,15 +1564,7 @@ mod tests {
         // A frozen RPC node: getSlot keeps returning the same slot forever.
         // Dense markers cover only drained slots, so a frozen anchor stops
         // Block flow; the indexer-side stall watchdog trips first.
-        let f = RunFixture::spawn(
-            &[10],
-            Some(9),
-            SolIndexerConfig {
-                poll_interval: Duration::from_millis(5),
-                slot_stall_timeout: Duration::from_millis(100),
-            },
-        )
-        .await;
+        let f = RunFixture::spawn(&[10], Some(9), None, Duration::from_millis(100)).await;
 
         let err = f
             .await_result()
@@ -1568,7 +1607,14 @@ mod tests {
 
         // getSlot script: seed 10, tick 1 at 10 (empty range), tick 2 at 12
         // (drains [10, 12)), tick 3 at 12 again (empty, proves no re-drain).
-        let mut f = RunFixture::spawn_with_server(server, &[10, 10, 12], Some(9), None).await;
+        let mut f = RunFixture::spawn_with_server(
+            server,
+            &[10, 10, 12],
+            Some(9),
+            None,
+            Duration::from_secs(30),
+        )
+        .await;
 
         // Tick 1: empty range — caught up at once, no markers.
         assert!(matches!(
@@ -1670,7 +1716,14 @@ mod tests {
                 .create_async()
                 .await;
 
-            let mut f = RunFixture::spawn_with_server(server, slots, Some(9), None).await;
+            let mut f = RunFixture::spawn_with_server(
+                server,
+                slots,
+                Some(9),
+                None,
+                Duration::from_secs(30),
+            )
+            .await;
             let mut heights = Vec::new();
             while heights.len() < 3 {
                 if let Some(ChainEvent::Block(height)) = f.next_event().await {
@@ -1728,12 +1781,14 @@ mod tests {
             http_url.clone(),
             Pubkey::from_str(&sol_addr).unwrap(),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         );
 
         let indexer = SolanaIndexer {
             program_id: Pubkey::from_str(&sol_addr).unwrap(),
             client,
             config: SolIndexerConfig::default(),
+            slot_stall_timeout: Duration::from_secs(30),
             state_manager,
             telemetry: NoopChainTelemetry,
         };
