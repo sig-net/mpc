@@ -17,10 +17,14 @@ use elliptic_curve::CurveArithmetic;
 use k256::Secp256k1;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
+use mpc_node::storage::protocol_storage::RemoveOutdatedResult;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use near_account_id::AccountId;
 use tokio::sync::Barrier;
+pub use deadpool_redis::redis;
+use deadpool_redis::{Config as RedisPoolConfig, Pool, Runtime as RedisRuntime};
+use redis::{cmd, Script, Value};
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::containers::Redis;
@@ -64,12 +68,12 @@ impl RedisDiagnostics {
     /// Configure Redis to log all commands slower than `slowlog_threshold_us` (e.g. 1000us = 1ms)
     /// and enable latency monitoring threshold `latency_threshold_ms`.
     pub async fn setup(
-        pool: &deadpool_redis::Pool,
+        pool: &Pool,
         slowlog_threshold_us: i64,
         latency_threshold_ms: i64,
     ) -> anyhow::Result<()> {
         let mut conn = pool.get().await.context("failed to get connection")?;
-        deadpool_redis::redis::cmd("CONFIG")
+        cmd("CONFIG")
             .arg("SET")
             .arg("slowlog-log-slower-than")
             .arg(slowlog_threshold_us)
@@ -77,7 +81,7 @@ impl RedisDiagnostics {
             .await
             .context("failed to set slowlog threshold")?;
 
-        deadpool_redis::redis::cmd("CONFIG")
+        cmd("CONFIG")
             .arg("SET")
             .arg("slowlog-max-len")
             .arg(1024)
@@ -85,7 +89,7 @@ impl RedisDiagnostics {
             .await
             .context("failed to set slowlog max-len")?;
 
-        deadpool_redis::redis::cmd("CONFIG")
+        cmd("CONFIG")
             .arg("SET")
             .arg("latency-monitor-threshold")
             .arg(latency_threshold_ms)
@@ -93,7 +97,7 @@ impl RedisDiagnostics {
             .await
             .context("failed to set latency-monitor-threshold")?;
 
-        deadpool_redis::redis::cmd("SLOWLOG")
+        cmd("SLOWLOG")
             .arg("RESET")
             .query_async::<()>(&mut conn)
             .await
@@ -103,9 +107,9 @@ impl RedisDiagnostics {
     }
 
     /// Reset the Redis slow log.
-    pub async fn reset_slowlog(pool: &deadpool_redis::Pool) -> anyhow::Result<()> {
+    pub async fn reset_slowlog(pool: &Pool) -> anyhow::Result<()> {
         let mut conn = pool.get().await.context("failed to get connection")?;
-        deadpool_redis::redis::cmd("SLOWLOG")
+        cmd("SLOWLOG")
             .arg("RESET")
             .query_async::<()>(&mut conn)
             .await
@@ -115,18 +119,18 @@ impl RedisDiagnostics {
 
     /// Fetch entries from Redis SLOWLOG.
     pub async fn fetch_slowlog(
-        pool: &deadpool_redis::Pool,
+        pool: &Pool,
         count: usize,
     ) -> anyhow::Result<Vec<SlowlogRecord>> {
         let mut conn = pool.get().await.context("failed to get connection")?;
-        let raw: deadpool_redis::redis::Value = deadpool_redis::redis::cmd("SLOWLOG")
+        let raw: Value = cmd("SLOWLOG")
             .arg("GET")
             .arg(count)
             .query_async(&mut conn)
             .await
             .context("failed to query slowlog")?;
 
-        let deadpool_redis::redis::Value::Array(entries) = raw else {
+        let Value::Array(entries) = raw else {
             return Ok(Vec::new());
         };
 
@@ -135,16 +139,16 @@ impl RedisDiagnostics {
 
     /// Fetch latest latency spikes reported by Redis LATENCY LATEST.
     pub async fn fetch_latency_latest(
-        pool: &deadpool_redis::Pool,
+        pool: &Pool,
     ) -> anyhow::Result<Vec<LatencyRecord>> {
         let mut conn = pool.get().await.context("failed to get connection")?;
-        let raw: deadpool_redis::redis::Value = deadpool_redis::redis::cmd("LATENCY")
+        let raw: Value = cmd("LATENCY")
             .arg("LATEST")
             .query_async(&mut conn)
             .await
             .context("failed to query latency latest")?;
 
-        let deadpool_redis::redis::Value::Array(entries) = raw else {
+        let Value::Array(entries) = raw else {
             return Ok(Vec::new());
         };
 
@@ -153,10 +157,10 @@ impl RedisDiagnostics {
 
     /// Query INFO commandstats.
     pub async fn fetch_commandstats(
-        pool: &deadpool_redis::Pool,
+        pool: &Pool,
     ) -> anyhow::Result<HashMap<String, CommandStat>> {
         let mut conn = pool.get().await.context("failed to get connection")?;
-        let raw: String = deadpool_redis::redis::cmd("INFO")
+        let raw: String = cmd("INFO")
             .arg("commandstats")
             .query_async(&mut conn)
             .await
@@ -167,7 +171,7 @@ impl RedisDiagnostics {
             let Some(rest) = line.strip_prefix("cmdstat_") else {
                 continue;
             };
-            let Some((cmd, values)) = rest.split_once(':') else {
+            let Some((cmd_name, values)) = rest.split_once(':') else {
                 continue;
             };
 
@@ -185,17 +189,17 @@ impl RedisDiagnostics {
                     _ => {}
                 }
             }
-            stats.insert(cmd.to_string(), CommandStat { calls, usec, usec_per_call });
+            stats.insert(cmd_name.to_string(), CommandStat { calls, usec, usec_per_call });
         }
         Ok(stats)
     }
 
     /// Query memory snapshot and dbsize.
     pub async fn fetch_memory_snapshot(
-        pool: &deadpool_redis::Pool,
+        pool: &Pool,
     ) -> anyhow::Result<MemorySnapshot> {
         let mut conn = pool.get().await.context("failed to get connection")?;
-        let raw: String = deadpool_redis::redis::cmd("INFO")
+        let raw: String = cmd("INFO")
             .arg("memory")
             .query_async(&mut conn)
             .await
@@ -219,7 +223,7 @@ impl RedisDiagnostics {
             }
         }
 
-        let total_keys: i64 = deadpool_redis::redis::cmd("DBSIZE")
+        let total_keys: i64 = cmd("DBSIZE")
             .query_async(&mut conn)
             .await
             .unwrap_or(0);
@@ -233,31 +237,31 @@ impl RedisDiagnostics {
     }
 }
 
-fn parse_slowlog_entry(entry: deadpool_redis::redis::Value) -> Option<SlowlogRecord> {
-    let deadpool_redis::redis::Value::Array(fields) = entry else {
+fn parse_slowlog_entry(entry: Value) -> Option<SlowlogRecord> {
+    let Value::Array(fields) = entry else {
         return None;
     };
     if fields.len() < 4 {
         return None;
     }
     let id = match fields[0] {
-        deadpool_redis::redis::Value::Int(val) => val,
+        Value::Int(val) => val,
         _ => 0,
     };
     let timestamp = match fields[1] {
-        deadpool_redis::redis::Value::Int(val) => val,
+        Value::Int(val) => val,
         _ => 0,
     };
     let duration_us = match fields[2] {
-        deadpool_redis::redis::Value::Int(val) => val,
+        Value::Int(val) => val,
         _ => 0,
     };
     let command = match &fields[3] {
-        deadpool_redis::redis::Value::Array(cmd_parts) => cmd_parts
+        Value::Array(cmd_parts) => cmd_parts
             .iter()
             .take(4)
             .map(|p| match p {
-                deadpool_redis::redis::Value::BulkString(bytes) => {
+                Value::BulkString(bytes) => {
                     String::from_utf8_lossy(bytes).to_string()
                 }
                 other => format!("{other:?}"),
@@ -268,7 +272,7 @@ fn parse_slowlog_entry(entry: deadpool_redis::redis::Value) -> Option<SlowlogRec
     };
     let client_addr = if fields.len() >= 5 {
         match &fields[4] {
-            deadpool_redis::redis::Value::BulkString(bytes) => {
+            Value::BulkString(bytes) => {
                 String::from_utf8_lossy(bytes).to_string()
             }
             _ => String::new(),
@@ -286,29 +290,29 @@ fn parse_slowlog_entry(entry: deadpool_redis::redis::Value) -> Option<SlowlogRec
     })
 }
 
-fn parse_latency_record(entry: deadpool_redis::redis::Value) -> Option<LatencyRecord> {
-    let deadpool_redis::redis::Value::Array(fields) = entry else {
+fn parse_latency_record(entry: Value) -> Option<LatencyRecord> {
+    let Value::Array(fields) = entry else {
         return None;
     };
     if fields.len() < 4 {
         return None;
     }
     let event = match &fields[0] {
-        deadpool_redis::redis::Value::BulkString(bytes) => {
+        Value::BulkString(bytes) => {
             String::from_utf8_lossy(bytes).to_string()
         }
         _ => "unknown".to_string(),
     };
     let timestamp = match fields[1] {
-        deadpool_redis::redis::Value::Int(val) => val,
+        Value::Int(val) => val,
         _ => 0,
     };
     let latest_latency_ms = match fields[2] {
-        deadpool_redis::redis::Value::Int(val) => val,
+        Value::Int(val) => val,
         _ => 0,
     };
     let max_latency_ms = match fields[3] {
-        deadpool_redis::redis::Value::Int(val) => val,
+        Value::Int(val) => val,
         _ => 0,
     };
     Some(LatencyRecord {
@@ -425,11 +429,16 @@ pub struct SimulatedParticipant {
 
 impl SimulatedParticipant {
     /// Populate a sequential range of triples starting at `base_id`.
-    pub async fn populate_triples(&self, base_id: u64, count: usize, participants: &[Participant]) -> Vec<u64> {
+    pub async fn populate_triples(
+        self,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+    ) -> Vec<u64> {
         let mut ids = Vec::with_capacity(count);
         for i in 0..count {
             let id = base_id + i as u64;
-            let pair = dummy_pair(id, participants);
+            let pair = dummy_pair(id, &participants);
             let Some(mut slot) = self.triples.create_slot(id, self.participant).await else {
                 continue;
             };
@@ -441,11 +450,16 @@ impl SimulatedParticipant {
     }
 
     /// Populate a sequential range of presignatures starting at `base_id`.
-    pub async fn populate_presignatures(&self, base_id: u64, count: usize, participants: &[Participant]) -> Vec<u64> {
+    pub async fn populate_presignatures(
+        self,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+    ) -> Vec<u64> {
         let mut ids = Vec::with_capacity(count);
         for i in 0..count {
             let id = base_id + i as u64;
-            let presig = dummy_presignature(id, participants);
+            let presig = dummy_presignature(id, &participants);
             let Some(mut slot) = self.presignatures.create_slot(id, self.participant).await else {
                 continue;
             };
@@ -454,6 +468,252 @@ impl SimulatedParticipant {
             }
         }
         ids
+    }
+
+    /// Run the 100ms background stockpile polling loop until stopped.
+    pub async fn run_polling_loop(
+        self,
+        stop: Arc<AtomicBool>,
+        include_presignatures: bool,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        while !stop.load(Ordering::Relaxed) {
+            interval.tick().await;
+            let _ = self.triples.len_generated().await;
+            let _ = self.triples.len_by_owner(self.participant).await;
+            if include_presignatures {
+                let _ = self.presignatures.len_generated().await;
+                let _ = self.presignatures.len_by_owner(self.participant).await;
+            }
+        }
+    }
+
+    /// Concurrently insert a range of triples, measuring latency per insert.
+    pub async fn insert_triples_measured(
+        self,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+        barrier: Arc<Barrier>,
+    ) -> Vec<Duration> {
+        barrier.wait().await;
+        let mut latencies = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let id = base_id + i as u64;
+            let pair = dummy_pair(id, &participants);
+
+            let t0 = Instant::now();
+            let Some(mut slot) = self.triples.create_slot(id, self.participant).await else {
+                continue;
+            };
+            slot.insert(pair, self.participant).await;
+            latencies.push(t0.elapsed());
+        }
+
+        latencies
+    }
+
+    /// Concurrently take a list of triple IDs, measuring latency for each take.
+    pub async fn take_triples(
+        self,
+        ids: Vec<u64>,
+        barrier: Option<Arc<Barrier>>,
+    ) -> Vec<Duration> {
+        if let Some(b) = barrier {
+            b.wait().await;
+        }
+        let mut latencies = Vec::with_capacity(ids.len());
+        for id in ids {
+            let t0 = Instant::now();
+            let _ = self.triples.take(id, self.participant).await;
+            latencies.push(t0.elapsed());
+        }
+        latencies
+    }
+
+    /// Concurrently invoke remove_outdated on triples storage.
+    pub async fn remove_outdated_shares(
+        self,
+        barrier: Arc<Barrier>,
+        remaining_shares: Vec<u64>,
+    ) -> (Duration, anyhow::Result<RemoveOutdatedResult<u64>>) {
+        barrier.wait().await;
+        let t0 = Instant::now();
+        let res = self.triples.remove_outdated(self.participant, &remaining_shares).await;
+        (t0.elapsed(), res.map_err(anyhow::Error::from))
+    }
+
+    /// Concurrently clear all triples storage.
+    pub async fn clear_triples(self, barrier: Arc<Barrier>) -> (Duration, bool) {
+        barrier.wait().await;
+        let t0 = Instant::now();
+        let ok = self.triples.clear().await;
+        (t0.elapsed(), ok)
+    }
+
+    /// Concurrently clear all presignatures storage.
+    pub async fn clear_presignatures(self, barrier: Arc<Barrier>) -> (Duration, bool) {
+        barrier.wait().await;
+        let t0 = Instant::now();
+        let ok = self.presignatures.clear().await;
+        (t0.elapsed(), ok)
+    }
+
+    /// Concurrently invoke remove_holder_and_prune across both triples and presignatures.
+    pub async fn prune_artifacts(
+        self,
+        barrier: Arc<Barrier>,
+        target_peer: Participant,
+        threshold: usize,
+        triple_ids: Vec<u64>,
+        presig_ids: Vec<u64>,
+    ) -> (
+        Duration,
+        anyhow::Result<(Vec<u64>, Vec<u64>)>,
+        Duration,
+        anyhow::Result<(Vec<u64>, Vec<u64>)>,
+    ) {
+        barrier.wait().await;
+        let t0 = Instant::now();
+        let triple_res = self.triples.remove_holder_and_prune(target_peer, threshold, &triple_ids).await;
+        let triple_elapsed = t0.elapsed();
+
+        let t1 = Instant::now();
+        let presig_res = self.presignatures.remove_holder_and_prune(target_peer, threshold, &presig_ids).await;
+        let presig_elapsed = t1.elapsed();
+
+        (
+            triple_elapsed,
+            triple_res.map_err(anyhow::Error::from),
+            presig_elapsed,
+            presig_res.map_err(anyhow::Error::from),
+        )
+    }
+
+    /// Concurrently insert a range of presignatures, measuring latency per insert.
+    pub async fn insert_presignatures_measured(
+        self,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+        barrier: Arc<Barrier>,
+    ) -> Vec<Duration> {
+        barrier.wait().await;
+        let mut latencies = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let id = base_id + i as u64;
+            let presig = dummy_presignature(id, &participants);
+
+            let t0 = Instant::now();
+            let Some(mut slot) = self.presignatures.create_slot(id, self.participant).await else {
+                continue;
+            };
+            slot.insert(presig, self.participant).await;
+            latencies.push(t0.elapsed());
+        }
+
+        latencies
+    }
+
+    /// Concurrently take pairs of (triple, presignature), measuring latency for each.
+    pub async fn take_triple_and_presig_pairs(
+        self,
+        barrier: Arc<Barrier>,
+        triple_ids: Vec<u64>,
+        presig_ids: Vec<u64>,
+    ) -> (Vec<Duration>, Vec<Duration>) {
+        barrier.wait().await;
+        let count = triple_ids.len().min(presig_ids.len());
+        let mut take_triple_latencies = Vec::with_capacity(count);
+        let mut take_presig_latencies = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let triple_id = triple_ids[i];
+            let presig_id = presig_ids[i];
+
+            let t0 = Instant::now();
+            let _ = self.triples.take(triple_id, self.participant).await;
+            take_triple_latencies.push(t0.elapsed());
+
+            let t1 = Instant::now();
+            let _ = self.presignatures.take(presig_id, self.participant).await;
+            take_presig_latencies.push(t1.elapsed());
+        }
+
+        (take_triple_latencies, take_presig_latencies)
+    }
+
+    /// Concurrently peek and commit reservations in a proposer race.
+    pub async fn race_proposals(
+        self,
+        barrier: Arc<Barrier>,
+        base_id: u64,
+        racer_id: usize,
+        proposals_per_racer: usize,
+    ) -> (Vec<Duration>, Vec<Duration>) {
+        barrier.wait().await;
+        let mut peek_latencies = Vec::with_capacity(proposals_per_racer);
+        let mut commit_latencies = Vec::with_capacity(proposals_per_racer);
+
+        let excluded: Vec<u64> = (0..50)
+            .map(|x| base_id + (x as u64) + (racer_id as u64 * 100))
+            .collect();
+
+        for _ in 0..proposals_per_racer {
+            let t0 = Instant::now();
+            let reservation = self.triples.peek_mine(&excluded).await;
+            peek_latencies.push(t0.elapsed());
+
+            let Some(reservation) = reservation else {
+                continue;
+            };
+            let t1 = Instant::now();
+            let taken = reservation.commit().await;
+            commit_latencies.push(t1.elapsed());
+            if taken.is_none() {
+                tracing::debug!("lost reservation race on commit, as expected in concurrent proposers");
+            }
+        }
+
+        (peek_latencies, commit_latencies)
+    }
+
+    /// Concurrently insert triples and track successful IDs vs failures (e.g. during client kill tests).
+    pub async fn insert_triples_tracked(
+        self,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+        barrier: Arc<Barrier>,
+    ) -> (Vec<Duration>, Vec<u64>, usize) {
+        barrier.wait().await;
+        let mut latencies = Vec::with_capacity(count);
+        let mut success_ids = Vec::with_capacity(count);
+        let mut failure_count = 0;
+
+        for i in 0..count {
+            let id = base_id + (i as u64);
+            let pair = dummy_pair(id, &participants);
+
+            let t0 = Instant::now();
+            let success = match self.triples.create_slot(id, self.participant).await {
+                Some(mut slot) => slot.insert(pair, self.participant).await,
+                None => false,
+            };
+
+            if success {
+                success_ids.push(id);
+            } else {
+                failure_count += 1;
+            }
+            latencies.push(t0.elapsed());
+        }
+
+        (latencies, success_ids, failure_count)
     }
 }
 
@@ -480,7 +740,7 @@ impl BackgroundPollerGuard {
 pub struct RedisHarness {
     pub redis: Option<Redis>,
     pub redis_url: String,
-    pub pool: deadpool_redis::Pool,
+    pub pool: Pool,
     pub participants: Vec<SimulatedParticipant>,
 }
 
@@ -516,11 +776,11 @@ impl RedisHarness {
         redis_url: &str,
         max_pool_size: Option<usize>,
         timeout: Option<Duration>,
-    ) -> anyhow::Result<deadpool_redis::Pool> {
+    ) -> anyhow::Result<Pool> {
         let parsed_url = url::Url::parse(redis_url).context("invalid redis url")?;
-        let mut builder = deadpool_redis::Config::from_url(parsed_url)
+        let mut builder = RedisPoolConfig::from_url(parsed_url)
             .builder()?
-            .runtime(deadpool_redis::Runtime::Tokio1);
+            .runtime(RedisRuntime::Tokio1);
 
         if let Some(size) = max_pool_size {
             builder = builder.max_size(size);
@@ -544,9 +804,9 @@ impl RedisHarness {
     /// Connect to an existing external Redis instance at the given URL (e.g. redis://127.0.0.1:6379).
     pub async fn from_url(redis_url: &str, num_participants: usize) -> anyhow::Result<Self> {
         let parsed_url = url::Url::parse(redis_url).context("invalid redis url")?;
-        let cfg = deadpool_redis::Config::from_url(parsed_url);
+        let cfg = RedisPoolConfig::from_url(parsed_url);
         let pool = cfg
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .create_pool(Some(RedisRuntime::Tokio1))
             .context("failed to create redis pool")?;
 
         Self::init(None, redis_url.to_string(), pool, num_participants).await
@@ -555,7 +815,7 @@ impl RedisHarness {
     async fn init(
         redis: Option<Redis>,
         redis_url: String,
-        pool: deadpool_redis::Pool,
+        pool: Pool,
         num_participants: usize,
     ) -> anyhow::Result<Self> {
         RedisDiagnostics::setup(&pool, 1000, 1).await?;
@@ -664,17 +924,15 @@ impl RedisHarness {
     /// Returns the list of generated triple IDs grouped by participant index.
     pub async fn populate_all_triples(&self, base_id: u64, count: usize) -> Vec<Vec<u64>> {
         let participant_list = self.participant_ids();
-        let mut handles = Vec::with_capacity(self.participants.len());
-
-        for (idx, p) in self.participants.iter().enumerate() {
-            let p = p.clone();
-            let p_list = participant_list.clone();
-            let p_base = base_id + (idx as u64 * count as u64);
-
-            handles.push(tokio::spawn(async move {
-                p.populate_triples(p_base, count, &p_list).await
-            }));
-        }
+        let handles: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(idx, p)| {
+                let p_base = base_id + (idx as u64 * count as u64);
+                tokio::spawn(p.clone().populate_triples(p_base, count, participant_list.clone()))
+            })
+            .collect();
 
         let mut results = Vec::with_capacity(handles.len());
         for h in handles {
@@ -687,17 +945,15 @@ impl RedisHarness {
     /// Returns the list of generated presignature IDs grouped by participant index.
     pub async fn populate_all_presignatures(&self, base_id: u64, count: usize) -> Vec<Vec<u64>> {
         let participant_list = self.participant_ids();
-        let mut handles = Vec::with_capacity(self.participants.len());
-
-        for (idx, p) in self.participants.iter().enumerate() {
-            let p = p.clone();
-            let p_list = participant_list.clone();
-            let p_base = base_id + (idx as u64 * count as u64);
-
-            handles.push(tokio::spawn(async move {
-                p.populate_presignatures(p_base, count, &p_list).await
-            }));
-        }
+        let handles: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(idx, p)| {
+                let p_base = base_id + (idx as u64 * count as u64);
+                tokio::spawn(p.clone().populate_presignatures(p_base, count, participant_list.clone()))
+            })
+            .collect();
 
         let mut results = Vec::with_capacity(handles.len());
         for h in handles {
@@ -709,31 +965,46 @@ impl RedisHarness {
     /// Spawn 100ms background stockpile polling loop across all participants.
     pub fn spawn_background_polling(&self, include_presignatures: bool) -> BackgroundPollerGuard {
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let mut handles = Vec::with_capacity(self.participants.len());
-
-        for p in &self.participants {
-            let triples = p.triples.clone();
-            let presignatures = p.presignatures.clone();
-            let me = p.participant;
-            let stop = stop_flag.clone();
-
-            handles.push(tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_millis(100));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-                while !stop.load(Ordering::Relaxed) {
-                    interval.tick().await;
-                    let _ = triples.len_generated().await;
-                    let _ = triples.len_by_owner(me).await;
-                    if include_presignatures {
-                        let _ = presignatures.len_generated().await;
-                        let _ = presignatures.len_by_owner(me).await;
-                    }
-                }
-            }));
-        }
+        let handles = self
+            .participants
+            .iter()
+            .map(|p| tokio::spawn(p.clone().run_polling_loop(stop_flag.clone(), include_presignatures)))
+            .collect();
 
         BackgroundPollerGuard { stop_flag, handles }
+    }
+
+    /// Run intermittent blocking Lua scripts on the Redis instance until stopped or completed.
+    pub async fn run_intermittent_spike(
+        pool: Pool,
+        stop_flag: Arc<AtomicBool>,
+        spike_ms: u64,
+        num_spikes: usize,
+    ) {
+        let spike_script = Script::new(r#"
+            local t0 = redis.call('time')
+            local limit_ms = tonumber(ARGV[1])
+            while true do
+                local t1 = redis.call('time')
+                local elapsed_ms = (tonumber(t1[1]) - tonumber(t0[1])) * 1000 + math.floor((tonumber(t1[2]) - tonumber(t0[2])) / 1000)
+                if elapsed_ms >= limit_ms then
+                    break
+                end
+            end
+            return 1
+        "#);
+
+        tokio::time::sleep(Duration::from_millis(15)).await;
+
+        for _ in 0..num_spikes {
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Ok(mut conn) = pool.get().await {
+                let _: Result<i32, _> = spike_script.arg(spike_ms).invoke_async(&mut conn).await;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Spawn a task that periodically executes a blocking Lua script on Redis.
@@ -746,39 +1017,39 @@ impl RedisHarness {
         if spike_ms == 0 || num_spikes == 0 {
             return None;
         }
-        let pool = self.pool.clone();
-        Some(tokio::spawn(async move {
-            let spike_script = deadpool_redis::redis::Script::new(r#"
-                local t0 = redis.call('time')
-                local limit_ms = tonumber(ARGV[1])
-                while true do
-                    local t1 = redis.call('time')
-                    local elapsed_ms = (tonumber(t1[1]) - tonumber(t0[1])) * 1000 + math.floor((tonumber(t1[2]) - tonumber(t0[2])) / 1000)
-                    if elapsed_ms >= limit_ms then
-                        break
-                    end
-                end
-                return 1
-            "#);
+        Some(tokio::spawn(Self::run_intermittent_spike(
+            self.pool.clone(),
+            stop_flag,
+            spike_ms,
+            num_spikes,
+        )))
+    }
 
-            tokio::time::sleep(Duration::from_millis(15)).await;
+    /// Helper task for disconnecting clients after a given delay.
+    pub async fn run_client_killer(
+        pool: Pool,
+        barrier: Arc<Barrier>,
+        kill_delay_ms: u64,
+    ) -> i64 {
+        barrier.wait().await;
+        tokio::time::sleep(Duration::from_millis(kill_delay_ms)).await;
 
-            for _ in 0..num_spikes {
-                if stop_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-                if let Ok(mut conn) = pool.get().await {
-                    let _: Result<i32, _> = spike_script.arg(spike_ms).invoke_async(&mut conn).await;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+        match Self::kill_client_connections_on_pool(&pool).await {
+            Ok(count) => {
+                println!("   [CLIENT KILL] Severed {count} active Redis client connections!");
+                count
             }
-        }))
+            Err(e) => {
+                tracing::warn!("CLIENT KILL failed: {e:#}");
+                0
+            }
+        }
     }
 
     /// Sever all client connections to Redis using `CLIENT KILL TYPE normal SKIPME yes`.
-    pub async fn kill_client_connections_on_pool(pool: &deadpool_redis::Pool) -> anyhow::Result<i64> {
+    pub async fn kill_client_connections_on_pool(pool: &Pool) -> anyhow::Result<i64> {
         let mut conn = pool.get().await.context("failed to get connection")?;
-        let count: i64 = deadpool_redis::redis::cmd("CLIENT")
+        let count: i64 = cmd("CLIENT")
             .arg("KILL")
             .arg("TYPE")
             .arg("normal")
@@ -812,36 +1083,23 @@ impl RedisHarness {
 
         let run_base_id = next_id_block((self.participants.len() * items_per_participant) as u64 + 1000);
         let barrier = Arc::new(Barrier::new(self.participants.len()));
-        let mut insert_tasks = Vec::with_capacity(self.participants.len());
         let overall_start = Instant::now();
         let participant_list = self.participant_ids();
 
-        for (node_idx, p) in self.participants.iter().enumerate() {
-            let triples = p.triples.clone();
-            let me = p.participant;
-            let barrier = barrier.clone();
-            let participants = participant_list.clone();
-
-            insert_tasks.push(tokio::spawn(async move {
-                barrier.wait().await;
-                let mut insert_triple_latencies = Vec::with_capacity(items_per_participant);
+        let insert_tasks: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(node_idx, p)| {
                 let base_id = run_base_id + (node_idx as u64 * items_per_participant as u64);
-
-                for i in 0..items_per_participant {
-                    let id = base_id + (i as u64);
-                    let pair = dummy_pair(id, &participants);
-
-                    let t0 = Instant::now();
-                    let Some(mut slot) = triples.create_slot(id, me).await else {
-                        continue;
-                    };
-                    slot.insert(pair, me).await;
-                    insert_triple_latencies.push(t0.elapsed());
-                }
-
-                insert_triple_latencies
-            }));
-        }
+                tokio::spawn(p.clone().insert_triples_measured(
+                    base_id,
+                    items_per_participant,
+                    participant_list.clone(),
+                    barrier.clone(),
+                ))
+            })
+            .collect();
 
         let mut all_insert_latencies = Vec::with_capacity(self.participants.len() * items_per_participant);
         for task in insert_tasks {
@@ -851,29 +1109,18 @@ impl RedisHarness {
 
         // Concurrent taking of the inserted items
         let barrier = Arc::new(Barrier::new(self.participants.len()));
-        let mut take_tasks = Vec::with_capacity(self.participants.len());
         let take_start = Instant::now();
 
-        for (node_idx, p) in self.participants.iter().enumerate() {
-            let triples = p.triples.clone();
-            let me = p.participant;
-            let barrier = barrier.clone();
-
-            take_tasks.push(tokio::spawn(async move {
-                barrier.wait().await;
-                let mut take_latencies = Vec::with_capacity(items_per_participant);
+        let take_tasks: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(node_idx, p)| {
                 let base_id = run_base_id + (node_idx as u64 * items_per_participant as u64);
-
-                for i in 0..items_per_participant {
-                    let id = base_id + (i as u64);
-                    let t0 = Instant::now();
-                    triples.take(id, me).await;
-                    take_latencies.push(t0.elapsed());
-                }
-
-                take_latencies
-            }));
-        }
+                let ids: Vec<u64> = (base_id..base_id + items_per_participant as u64).collect();
+                tokio::spawn(p.clone().take_triples(ids, Some(barrier.clone())))
+            })
+            .collect();
 
         let mut all_take_latencies = Vec::with_capacity(self.participants.len() * items_per_participant);
         for task in take_tasks {
@@ -909,22 +1156,17 @@ impl RedisHarness {
 
         // 2. Prepare remaining shares (simulating that `prune_count` items were consumed/outdated)
         let barrier = Arc::new(Barrier::new(self.participants.len()));
-        let mut storm_tasks = Vec::new();
         let storm_start = Instant::now();
 
-        for (node_idx, p) in self.participants.iter().enumerate() {
-            let triples = p.triples.clone();
-            let me = p.participant;
-            let barrier = barrier.clone();
-            let remaining_shares = all_ids.get(node_idx).map(|ids| ids[prune_count..].to_vec()).unwrap_or_default();
-
-            storm_tasks.push(tokio::spawn(async move {
-                barrier.wait().await;
-                let t0 = Instant::now();
-                let res = triples.remove_outdated(me, &remaining_shares).await;
-                (t0.elapsed(), res)
-            }));
-        }
+        let storm_tasks: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(node_idx, p)| {
+                let remaining_shares = all_ids.get(node_idx).map(|ids| ids[prune_count..].to_vec()).unwrap_or_default();
+                tokio::spawn(p.clone().remove_outdated_shares(barrier.clone(), remaining_shares))
+            })
+            .collect();
 
         let mut latencies = Vec::new();
         for task in storm_tasks {
@@ -974,46 +1216,25 @@ impl RedisHarness {
         }
 
         let p = self.participants.get(participant_idx).context("invalid participant index")?;
-        let triples = p.triples.clone();
         let participant_list = self.participant_ids();
 
         println!("   -> Stockpiling {initial_stockpile} triples on participant {participant_idx}...");
         let base_id = next_id_block(initial_stockpile as u64 + 1000);
-        p.populate_triples(base_id, initial_stockpile, &participant_list).await;
+        p.clone().populate_triples(base_id, initial_stockpile, participant_list).await;
 
         let barrier = Arc::new(Barrier::new(num_racers));
-        let mut racer_tasks = Vec::new();
         let race_start = Instant::now();
 
-        for racer_id in 0..num_racers {
-            let triples = triples.clone();
-            let barrier = barrier.clone();
-
-            racer_tasks.push(tokio::spawn(async move {
-                barrier.wait().await;
-                let mut peek_latencies = Vec::new();
-                let mut commit_latencies = Vec::new();
-
-                let excluded: Vec<u64> = (0..50).map(|x| base_id + (x as u64) + (racer_id as u64 * 100)).collect();
-
-                for _ in 0..proposals_per_racer {
-                    let t0 = Instant::now();
-                    let reservation = triples.peek_mine(&excluded).await;
-                    peek_latencies.push(t0.elapsed());
-
-                    if let Some(reservation) = reservation {
-                        let t1 = Instant::now();
-                        let taken = reservation.commit().await;
-                        commit_latencies.push(t1.elapsed());
-                        if taken.is_none() {
-                            tracing::debug!("lost reservation race on commit, as expected in concurrent proposers");
-                        }
-                    }
-                }
-
-                (peek_latencies, commit_latencies)
-            }));
-        }
+        let racer_tasks: Vec<_> = (0..num_racers)
+            .map(|racer_id| {
+                tokio::spawn(p.clone().race_proposals(
+                    barrier.clone(),
+                    base_id,
+                    racer_id,
+                    proposals_per_racer,
+                ))
+            })
+            .collect();
 
         let mut all_peek = Vec::new();
         let mut all_commit = Vec::new();
@@ -1061,36 +1282,20 @@ impl RedisHarness {
         let total_items = self.participants.len() * tasks_per_participant * items_per_task;
         let run_base_id = next_id_block(total_items as u64 + 10_000);
         let barrier = Arc::new(Barrier::new(self.participants.len() * tasks_per_participant));
-        let mut worker_tasks = Vec::new();
         let overall_start = Instant::now();
         let participant_list = self.participant_ids();
 
+        let mut worker_tasks = Vec::with_capacity(self.participants.len() * tasks_per_participant);
         for (p_idx, p) in self.participants.iter().enumerate() {
             for t_idx in 0..tasks_per_participant {
-                let triples = p.triples.clone();
-                let me = p.participant;
-                let barrier = barrier.clone();
-                let participants = participant_list.clone();
                 let task_id = p_idx * tasks_per_participant + t_idx;
                 let base_id = run_base_id + (task_id as u64 * items_per_task as u64);
-
-                worker_tasks.push(tokio::spawn(async move {
-                    barrier.wait().await;
-                    let mut latencies = Vec::with_capacity(items_per_task);
-
-                    for i in 0..items_per_task {
-                        let id = base_id + (i as u64);
-                        let pair = dummy_pair(id, &participants);
-
-                        let t0 = Instant::now();
-                        if let Some(mut slot) = triples.create_slot(id, me).await {
-                            slot.insert(pair, me).await;
-                        }
-                        latencies.push(t0.elapsed());
-                    }
-
-                    latencies
-                }));
+                worker_tasks.push(tokio::spawn(p.clone().insert_triples_measured(
+                    base_id,
+                    items_per_task,
+                    participant_list.clone(),
+                    barrier.clone(),
+                )));
             }
         }
 
@@ -1146,29 +1351,19 @@ impl RedisHarness {
         );
 
         let barrier = Arc::new(Barrier::new(num_p * 2));
-        let mut clear_triple_tasks = Vec::with_capacity(num_p);
-        let mut clear_presig_tasks = Vec::with_capacity(num_p);
         let clear_start = Instant::now();
 
-        for p in &self.participants {
-            let triples = p.triples.clone();
-            let b1 = barrier.clone();
-            clear_triple_tasks.push(tokio::spawn(async move {
-                b1.wait().await;
-                let t0 = Instant::now();
-                let ok = triples.clear().await;
-                (t0.elapsed(), ok)
-            }));
+        let clear_triple_tasks: Vec<_> = self
+            .participants
+            .iter()
+            .map(|p| tokio::spawn(p.clone().clear_triples(barrier.clone())))
+            .collect();
 
-            let presignatures = p.presignatures.clone();
-            let b2 = barrier.clone();
-            clear_presig_tasks.push(tokio::spawn(async move {
-                b2.wait().await;
-                let t0 = Instant::now();
-                let ok = presignatures.clear().await;
-                (t0.elapsed(), ok)
-            }));
-        }
+        let clear_presig_tasks: Vec<_> = self
+            .participants
+            .iter()
+            .map(|p| tokio::spawn(p.clone().clear_presignatures(barrier.clone())))
+            .collect();
 
         let mut triple_latencies = Vec::with_capacity(num_p);
         for t in clear_triple_tasks {
@@ -1237,91 +1432,52 @@ impl RedisHarness {
         // - Generators creating new presignatures
         // - Signers taking 1 triple + 1 presignature
         let barrier = Arc::new(Barrier::new(num_p * 3));
-        let mut triple_gen_tasks = Vec::with_capacity(num_p);
-        let mut presig_gen_tasks = Vec::with_capacity(num_p);
-        let mut signer_tasks = Vec::with_capacity(num_p);
         let overall_start = Instant::now();
 
-        for (node_idx, p) in self.participants.iter().enumerate() {
-            let me = p.participant;
-            let participants = participant_list.clone();
-
-            // Triple generator task
-            {
-                let triples = p.triples.clone();
-                let b = barrier.clone();
-                let p_list = participants.clone();
+        let triple_gen_tasks: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(node_idx, p)| {
                 let base_id = gen_base + (node_idx as u64 * items_per_participant as u64 * 2);
+                tokio::spawn(p.clone().insert_triples_measured(
+                    base_id,
+                    items_per_participant,
+                    participant_list.clone(),
+                    barrier.clone(),
+                ))
+            })
+            .collect();
 
-                triple_gen_tasks.push(tokio::spawn(async move {
-                    b.wait().await;
-                    let mut latencies = Vec::with_capacity(items_per_participant);
-                    for i in 0..items_per_participant {
-                        let id = base_id + (i as u64);
-                        let pair = dummy_pair(id, &p_list);
-                        let t0 = Instant::now();
-                        if let Some(mut slot) = triples.create_slot(id, me).await {
-                            slot.insert(pair, me).await;
-                        }
-                        latencies.push(t0.elapsed());
-                    }
-                    latencies
-                }));
-            }
-
-            // Presignature generator task
-            {
-                let presignatures = p.presignatures.clone();
-                let b = barrier.clone();
-                let p_list = participants.clone();
+        let presig_gen_tasks: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(node_idx, p)| {
                 let base_id = gen_base + (node_idx as u64 * items_per_participant as u64 * 2) + items_per_participant as u64;
+                tokio::spawn(p.clone().insert_presignatures_measured(
+                    base_id,
+                    items_per_participant,
+                    participant_list.clone(),
+                    barrier.clone(),
+                ))
+            })
+            .collect();
 
-                presig_gen_tasks.push(tokio::spawn(async move {
-                    b.wait().await;
-                    let mut latencies = Vec::with_capacity(items_per_participant);
-                    for i in 0..items_per_participant {
-                        let id = base_id + (i as u64);
-                        let presig = dummy_presignature(id, &p_list);
-                        let t0 = Instant::now();
-                        if let Some(mut slot) = presignatures.create_slot(id, me).await {
-                            slot.insert(presig, me).await;
-                        }
-                        latencies.push(t0.elapsed());
-                    }
-                    latencies
-                }));
-            }
-
-            // Signer consumer task (takes 1 triple and 1 presignature per signature request)
-            {
-                let triples = p.triples.clone();
-                let presignatures = p.presignatures.clone();
-                let b = barrier.clone();
+        let signer_tasks: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(node_idx, p)| {
                 let my_triple_ids = triple_stockpile_ids.get(node_idx).cloned().unwrap_or_default();
                 let my_presig_ids = presig_stockpile_ids.get(node_idx).cloned().unwrap_or_default();
-
-                signer_tasks.push(tokio::spawn(async move {
-                    b.wait().await;
-                    let count = my_triple_ids.len().min(my_presig_ids.len());
-                    let mut take_triple_latencies = Vec::with_capacity(count);
-                    let mut take_presig_latencies = Vec::with_capacity(count);
-
-                    for i in 0..count {
-                        let triple_id = my_triple_ids[i];
-                        let presig_id = my_presig_ids[i];
-
-                        let t0 = Instant::now();
-                        let _ = triples.take(triple_id, me).await;
-                        take_triple_latencies.push(t0.elapsed());
-
-                        let t1 = Instant::now();
-                        let _ = presignatures.take(presig_id, me).await;
-                        take_presig_latencies.push(t1.elapsed());
-                    }
-                    (take_triple_latencies, take_presig_latencies)
-                }));
-            }
-        }
+                tokio::spawn(p.clone().take_triple_and_presig_pairs(
+                    barrier.clone(),
+                    my_triple_ids,
+                    my_presig_ids,
+                ))
+            })
+            .collect();
 
         let mut all_insert_triples = Vec::with_capacity(num_p * items_per_participant);
         for t in triple_gen_tasks {
@@ -1383,29 +1539,24 @@ impl RedisHarness {
 
         let threshold = (num_p * 2 / 3).max(1);
         let barrier = Arc::new(Barrier::new(num_p));
-        let mut tasks = Vec::with_capacity(num_p);
         let prune_start = Instant::now();
 
-        for (node_idx, p) in self.participants.iter().enumerate() {
-            let triples = p.triples.clone();
-            let presignatures = p.presignatures.clone();
-            let barrier = barrier.clone();
-            let my_triple_ids = triple_ids_by_p.get(node_idx).cloned().unwrap_or_default();
-            let my_presig_ids = presig_ids_by_p.get(node_idx).cloned().unwrap_or_default();
-
-            tasks.push(tokio::spawn(async move {
-                barrier.wait().await;
-                let t0 = Instant::now();
-                let triple_res = triples.remove_holder_and_prune(target_peer, threshold, &my_triple_ids).await;
-                let triple_elapsed = t0.elapsed();
-
-                let t1 = Instant::now();
-                let presig_res = presignatures.remove_holder_and_prune(target_peer, threshold, &my_presig_ids).await;
-                let presig_elapsed = t1.elapsed();
-
-                (triple_elapsed, triple_res, presig_elapsed, presig_res)
-            }));
-        }
+        let tasks: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(node_idx, p)| {
+                let my_triple_ids = triple_ids_by_p.get(node_idx).cloned().unwrap_or_default();
+                let my_presig_ids = presig_ids_by_p.get(node_idx).cloned().unwrap_or_default();
+                tokio::spawn(p.clone().prune_artifacts(
+                    barrier.clone(),
+                    target_peer,
+                    threshold,
+                    my_triple_ids,
+                    my_presig_ids,
+                ))
+            })
+            .collect();
 
         let mut all_triple_latencies = Vec::with_capacity(num_p);
         let mut all_presig_latencies = Vec::with_capacity(num_p);
@@ -1454,62 +1605,29 @@ impl RedisHarness {
         );
 
         // 1. Killer task that severs all client connections using shared pool helper
-        let pool = self.pool.clone();
-        let killer_barrier = barrier.clone();
-        let killer_task = tokio::spawn(async move {
-            killer_barrier.wait().await;
-            tokio::time::sleep(Duration::from_millis(kill_delay_ms)).await;
-
-            match Self::kill_client_connections_on_pool(&pool).await {
-                Ok(count) => {
-                    println!("   [CLIENT KILL] Severed {count} active Redis client connections!");
-                    count
-                }
-                Err(e) => {
-                    tracing::warn!("CLIENT KILL failed: {e:#}");
-                    0
-                }
-            }
-        });
+        let killer_task = tokio::spawn(Self::run_client_killer(
+            self.pool.clone(),
+            barrier.clone(),
+            kill_delay_ms,
+        ));
 
         // 2. Active participant tasks
-        let mut worker_tasks = Vec::with_capacity(num_p);
         let overall_start = Instant::now();
 
-        for (node_idx, p) in self.participants.iter().enumerate() {
-            let triples = p.triples.clone();
-            let me = p.participant;
-            let b = barrier.clone();
-            let participants = participant_list.clone();
-            let base_id = run_base_id + (node_idx as u64 * items_per_participant as u64);
-
-            worker_tasks.push(tokio::spawn(async move {
-                b.wait().await;
-                let mut latencies = Vec::with_capacity(items_per_participant);
-                let mut success_ids = Vec::new();
-                let mut failure_count = 0;
-
-                for i in 0..items_per_participant {
-                    let id = base_id + (i as u64);
-                    let pair = dummy_pair(id, &participants);
-
-                    let t0 = Instant::now();
-                    let success = match triples.create_slot(id, me).await {
-                        Some(mut slot) => slot.insert(pair, me).await,
-                        None => false,
-                    };
-
-                    if success {
-                        success_ids.push(id);
-                    } else {
-                        failure_count += 1;
-                    }
-                    latencies.push(t0.elapsed());
-                }
-
-                (latencies, success_ids, failure_count)
-            }));
-        }
+        let worker_tasks: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(node_idx, p)| {
+                let base_id = run_base_id + (node_idx as u64 * items_per_participant as u64);
+                tokio::spawn(p.clone().insert_triples_tracked(
+                    base_id,
+                    items_per_participant,
+                    participant_list.clone(),
+                    barrier.clone(),
+                ))
+            })
+            .collect();
 
         let killed_connections = killer_task.await?;
 
@@ -1534,24 +1652,15 @@ impl RedisHarness {
         );
 
         // 3. Post-kill verification: take the successfully inserted items to measure pool recovery
-        let mut take_tasks = Vec::with_capacity(all_success_ids.len());
         let take_start = Instant::now();
 
-        for (node_idx, ids) in all_success_ids {
-            let p = &self.participants[node_idx];
-            let triples = p.triples.clone();
-            let me = p.participant;
-
-            take_tasks.push(tokio::spawn(async move {
-                let mut take_lats = Vec::with_capacity(ids.len());
-                for id in ids {
-                    let t0 = Instant::now();
-                    let _ = triples.take(id, me).await;
-                    take_lats.push(t0.elapsed());
-                }
-                take_lats
-            }));
-        }
+        let take_tasks: Vec<_> = all_success_ids
+            .into_iter()
+            .map(|(node_idx, ids)| {
+                let p = self.participants[node_idx].clone();
+                tokio::spawn(p.take_triples(ids, None))
+            })
+            .collect();
 
         let mut all_take_latencies = Vec::new();
         for t in take_tasks {

@@ -18,6 +18,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::FullSignature;
+use deadpool_redis::redis;
+use deadpool_redis::{Config as RedisPoolConfig, Pool as RedisPool, Runtime as RedisRuntime};
 use elliptic_curve::rand_core::OsRng;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
@@ -291,16 +293,16 @@ impl Redis {
 
     /// Wait for the Redis container to be reachable via the host port.
     async fn wait_for_host_port_readiness(internal_address: &str) {
-        let cfg = deadpool_redis::Config::from_url(
+        let cfg = RedisPoolConfig::from_url(
             url::Url::parse(internal_address).expect("valid redis url"),
         );
         let pool = cfg
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .create_pool(Some(RedisRuntime::Tokio1))
             .expect("valid redis pool config");
 
         let ping = || async {
             let mut conn = pool.get().await.map_err(anyhow::Error::from)?;
-            deadpool_redis::redis::cmd("PING")
+            redis::cmd("PING")
                 .query_async::<()>(&mut conn)
                 .await
                 .map_err(anyhow::Error::from)
@@ -325,11 +327,11 @@ impl Redis {
         }
     }
 
-    pub fn pool(&self) -> deadpool_redis::Pool {
+    pub fn pool(&self) -> RedisPool {
         let redis_url = url::Url::parse(self.internal_address.as_str()).unwrap();
-        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+        let redis_cfg = RedisPoolConfig::from_url(redis_url);
         redis_cfg
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .create_pool(Some(RedisRuntime::Tokio1))
             .unwrap()
     }
 

@@ -12,6 +12,7 @@ use crate::mpc_fixture::mock_stream::MockStream;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
 
 use cait_sith::protocol::Participant;
+use deadpool_redis::Pool as RedisPool;
 use mpc_contract::config::{
     min_to_ms, PresignatureConfig, ProtocolConfig, SignatureConfig, TripleConfig,
 };
@@ -98,7 +99,7 @@ struct FixtureConfig {
 struct MockedNodeContext {
     protocol_config: ProtocolConfig,
     routing_table: HashMap<Participant, Sender<Ciphered>>,
-    redis_pool: deadpool_redis::Pool,
+    redis_pool: RedisPool,
     init_mesh: MeshState,
     contract_state: ContractStateWatcher,
     observe_lag: Option<std::time::Duration>,
