@@ -208,6 +208,7 @@ fn parse_slowlog_entry(entry: Value) -> Option<SlowlogRecord> {
 pub struct LatencySummary {
     pub op_name: String,
     pub count: usize,
+    pub failures: usize,
     pub min_ms: f64,
     pub mean_ms: f64,
     pub p50_ms: f64,
@@ -223,6 +224,7 @@ impl LatencySummary {
         Self {
             op_name: op_name.into(),
             count: 0,
+            failures: 0,
             min_ms: 0.0,
             mean_ms: 0.0,
             p50_ms: 0.0,
@@ -239,9 +241,20 @@ impl LatencySummary {
         samples: &mut [Duration],
         total_wall_time: Duration,
     ) -> Self {
+        Self::calculate_with_failures(op_name, samples, total_wall_time, 0)
+    }
+
+    pub fn calculate_with_failures(
+        op_name: impl Into<String>,
+        samples: &mut [Duration],
+        total_wall_time: Duration,
+        failures: usize,
+    ) -> Self {
         let op_name = op_name.into();
         if samples.is_empty() {
-            return Self::empty(op_name);
+            let mut summary = Self::empty(op_name);
+            summary.failures = failures;
+            return summary;
         }
 
         samples.sort();
@@ -267,6 +280,7 @@ impl LatencySummary {
         Self {
             op_name,
             count,
+            failures,
             min_ms,
             mean_ms,
             p50_ms,
@@ -280,9 +294,10 @@ impl LatencySummary {
 
     pub fn print_row(&self) {
         println!(
-            "{:<24} | {:>7} | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>8.1}",
+            "{:<24} | {:>7} | {:>8} | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>8.1}",
             self.op_name,
             self.count,
+            self.failures,
             self.p50_ms,
             self.p90_ms,
             self.p95_ms,
@@ -294,12 +309,12 @@ impl LatencySummary {
 }
 
 pub fn print_summary_header() {
-    println!("{:-<105}", "");
+    println!("{:-<116}", "");
     println!(
-        "{:<24} | {:>7} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>8}",
-        "Operation", "Samples", "p50", "p90", "p95", "p99", "Max", "Ops/Sec"
+        "{:<24} | {:>7} | {:>8} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>8}",
+        "Operation", "Samples", "Failures", "p50", "p90", "p95", "p99", "Max", "Ops/Sec"
     );
-    println!("{:-<105}", "");
+    println!("{:-<116}", "");
 }
 
 /// Partitions a combined wall duration between two interleaved operations
@@ -388,44 +403,57 @@ impl SimulatedParticipant {
         }
     }
 
-    /// Concurrently insert a range of triples, measuring latency per insert.
+    /// Concurrently insert a range of triples, measuring latency per insert and tracking failures.
     pub async fn insert_triples_measured(
         self,
         base_id: u64,
         count: usize,
         participants: Vec<Participant>,
         barrier: Arc<Barrier>,
-    ) -> Vec<Duration> {
+    ) -> (Vec<Duration>, usize) {
         barrier.wait().await;
         let mut latencies = Vec::with_capacity(count);
+        let mut failures = 0;
 
         for i in 0..count {
             let id = base_id + i as u64;
             let pair = dummy_pair(id, &participants);
 
             let t0 = Instant::now();
-            let Some(mut slot) = self.triples.create_slot(id, self.participant).await else {
-                continue;
+            let success = match self.triples.create_slot(id, self.participant).await {
+                Some(mut slot) => slot.insert(pair, self.participant).await,
+                None => false,
             };
-            slot.insert(pair, self.participant).await;
-            latencies.push(t0.elapsed());
+            if success {
+                latencies.push(t0.elapsed());
+            } else {
+                failures += 1;
+            }
         }
 
-        latencies
+        (latencies, failures)
     }
 
-    /// Concurrently take a list of triple IDs, measuring latency for each take.
-    pub async fn take_triples(self, ids: Vec<u64>, barrier: Option<Arc<Barrier>>) -> Vec<Duration> {
+    /// Concurrently take a list of triple IDs, measuring latency for each take and tracking failures.
+    pub async fn take_triples(
+        self,
+        ids: Vec<u64>,
+        barrier: Option<Arc<Barrier>>,
+    ) -> (Vec<Duration>, usize) {
         if let Some(b) = barrier {
             b.wait().await;
         }
         let mut latencies = Vec::with_capacity(ids.len());
+        let mut failures = 0;
         for id in ids {
             let t0 = Instant::now();
-            let _ = self.triples.take(id, self.participant).await;
-            latencies.push(t0.elapsed());
+            if self.triples.take(id, self.participant).await.is_some() {
+                latencies.push(t0.elapsed());
+            } else {
+                failures += 1;
+            }
         }
-        latencies
+        (latencies, failures)
     }
 
     /// Concurrently invoke remove_outdated on triples storage.
@@ -496,58 +524,76 @@ impl SimulatedParticipant {
         )
     }
 
-    /// Concurrently insert a range of presignatures, measuring latency per insert.
+    /// Concurrently insert a range of presignatures, measuring latency per insert and tracking failures.
     pub async fn insert_presignatures_measured(
         self,
         base_id: u64,
         count: usize,
         participants: Vec<Participant>,
         barrier: Arc<Barrier>,
-    ) -> Vec<Duration> {
+    ) -> (Vec<Duration>, usize) {
         barrier.wait().await;
         let mut latencies = Vec::with_capacity(count);
+        let mut failures = 0;
 
         for i in 0..count {
             let id = base_id + i as u64;
             let presig = dummy_presignature(id, &participants);
 
             let t0 = Instant::now();
-            let Some(mut slot) = self.presignatures.create_slot(id, self.participant).await else {
-                continue;
+            let success = match self.presignatures.create_slot(id, self.participant).await {
+                Some(mut slot) => slot.insert(presig, self.participant).await,
+                None => false,
             };
-            slot.insert(presig, self.participant).await;
-            latencies.push(t0.elapsed());
+            if success {
+                latencies.push(t0.elapsed());
+            } else {
+                failures += 1;
+            }
         }
 
-        latencies
+        (latencies, failures)
     }
 
-    /// Concurrently take pairs of (triple, presignature), measuring latency for each.
+    /// Concurrently take pairs of (triple, presignature), measuring latency for each and tracking failures.
     pub async fn take_triple_and_presig_pairs(
         self,
         barrier: Arc<Barrier>,
         triple_ids: Vec<u64>,
         presig_ids: Vec<u64>,
-    ) -> (Vec<Duration>, Vec<Duration>) {
+    ) -> (Vec<Duration>, usize, Vec<Duration>, usize) {
         barrier.wait().await;
         let count = triple_ids.len().min(presig_ids.len());
         let mut take_triple_latencies = Vec::with_capacity(count);
         let mut take_presig_latencies = Vec::with_capacity(count);
+        let mut triple_failures = 0;
+        let mut presig_failures = 0;
 
         for i in 0..count {
             let triple_id = triple_ids[i];
             let presig_id = presig_ids[i];
 
             let t0 = Instant::now();
-            let _ = self.triples.take(triple_id, self.participant).await;
-            take_triple_latencies.push(t0.elapsed());
+            if self.triples.take(triple_id, self.participant).await.is_some() {
+                take_triple_latencies.push(t0.elapsed());
+            } else {
+                triple_failures += 1;
+            }
 
             let t1 = Instant::now();
-            let _ = self.presignatures.take(presig_id, self.participant).await;
-            take_presig_latencies.push(t1.elapsed());
+            if self.presignatures.take(presig_id, self.participant).await.is_some() {
+                take_presig_latencies.push(t1.elapsed());
+            } else {
+                presig_failures += 1;
+            }
         }
 
-        (take_triple_latencies, take_presig_latencies)
+        (
+            take_triple_latencies,
+            triple_failures,
+            take_presig_latencies,
+            presig_failures,
+        )
     }
 
     /// Concurrently peek and commit reservations in a proposer race.
@@ -1116,8 +1162,11 @@ impl RedisHarness {
 
         let mut all_insert_latencies =
             Vec::with_capacity(self.participants.len() * items_per_participant);
+        let mut insert_failures = 0;
         for task in insert_tasks {
-            all_insert_latencies.extend(task.await?);
+            let (lat, fails) = task.await?;
+            all_insert_latencies.extend(lat);
+            insert_failures += fails;
         }
         let insert_wall = overall_start.elapsed();
 
@@ -1138,18 +1187,26 @@ impl RedisHarness {
 
         let mut all_take_latencies =
             Vec::with_capacity(self.participants.len() * items_per_participant);
+        let mut take_failures = 0;
         for task in take_tasks {
-            all_take_latencies.extend(task.await?);
+            let (lat, fails) = task.await?;
+            all_take_latencies.extend(lat);
+            take_failures += fails;
         }
         let take_wall = take_start.elapsed();
 
-        let s1 = LatencySummary::calculate(
+        let s1 = LatencySummary::calculate_with_failures(
             "concurrent_insert_triple",
             &mut all_insert_latencies,
             insert_wall,
+            insert_failures,
         );
-        let s2 =
-            LatencySummary::calculate("concurrent_take_triple", &mut all_take_latencies, take_wall);
+        let s2 = LatencySummary::calculate_with_failures(
+            "concurrent_take_triple",
+            &mut all_take_latencies,
+            take_wall,
+            take_failures,
+        );
 
         Ok(vec![s1, s2])
     }
@@ -1347,8 +1404,11 @@ impl RedisHarness {
         }
 
         let mut all_latencies = Vec::new();
+        let mut total_failures = 0;
         for task in worker_tasks {
-            all_latencies.extend(task.await?);
+            let (lat, fails) = task.await?;
+            all_latencies.extend(lat);
+            total_failures += fails;
         }
         let wall = overall_start.elapsed();
 
@@ -1358,8 +1418,12 @@ impl RedisHarness {
             let _ = h.await;
         }
 
-        let summary =
-            LatencySummary::calculate("saturated_insert_triple", &mut all_latencies, wall);
+        let summary = LatencySummary::calculate_with_failures(
+            "saturated_insert_triple",
+            &mut all_latencies,
+            wall,
+            total_failures,
+        );
         Ok(vec![summary])
     }
 
@@ -1553,47 +1617,73 @@ impl RedisHarness {
 
         let triple_gen = async {
             let mut all = Vec::with_capacity(num_p * items_per_participant);
+            let mut fails = 0;
             for t in triple_gen_tasks {
-                all.extend(t.await?);
+                let (lats, f) = t.await?;
+                all.extend(lats);
+                fails += f;
             }
-            Ok::<_, anyhow::Error>((all, overall_start.elapsed()))
+            Ok::<_, anyhow::Error>((all, fails, overall_start.elapsed()))
         };
 
         let presig_gen = async {
             let mut all = Vec::with_capacity(num_p * items_per_participant);
+            let mut fails = 0;
             for t in presig_gen_tasks {
-                all.extend(t.await?);
+                let (lats, f) = t.await?;
+                all.extend(lats);
+                fails += f;
             }
-            Ok::<_, anyhow::Error>((all, overall_start.elapsed()))
+            Ok::<_, anyhow::Error>((all, fails, overall_start.elapsed()))
         };
 
         let signers = async {
             let mut all_t = Vec::with_capacity(num_p * items_per_participant);
             let mut all_p = Vec::with_capacity(num_p * items_per_participant);
+            let mut fails_t = 0;
+            let mut fails_p = 0;
             for t in signer_tasks {
-                let (tt, tp) = t.await?;
+                let (tt, ft, tp, fp) = t.await?;
                 all_t.extend(tt);
+                fails_t += ft;
                 all_p.extend(tp);
+                fails_p += fp;
             }
-            Ok::<_, anyhow::Error>((all_t, all_p, overall_start.elapsed()))
+            Ok::<_, anyhow::Error>((all_t, fails_t, all_p, fails_p, overall_start.elapsed()))
         };
 
         let (
-            (mut all_insert_triples, triple_wall),
-            (mut all_insert_presigs, presig_wall),
-            (mut all_take_triples, mut all_take_presigs, signer_wall),
+            (mut all_insert_triples, triple_fails, triple_wall),
+            (mut all_insert_presigs, presig_fails, presig_wall),
+            (mut all_take_triples, take_triple_fails, mut all_take_presigs, take_presig_fails, signer_wall),
         ) = tokio::try_join!(triple_gen, presig_gen, signers)?;
 
         poller.stop().await;
 
-        let s1 =
-            LatencySummary::calculate("mixed_insert_triple", &mut all_insert_triples, triple_wall);
-        let s2 =
-            LatencySummary::calculate("mixed_insert_presig", &mut all_insert_presigs, presig_wall);
-        let s3 =
-            LatencySummary::calculate("mixed_take_triple", &mut all_take_triples, signer_wall);
-        let s4 =
-            LatencySummary::calculate("mixed_take_presig", &mut all_take_presigs, signer_wall);
+        let s1 = LatencySummary::calculate_with_failures(
+            "mixed_insert_triple",
+            &mut all_insert_triples,
+            triple_wall,
+            triple_fails,
+        );
+        let s2 = LatencySummary::calculate_with_failures(
+            "mixed_insert_presig",
+            &mut all_insert_presigs,
+            presig_wall,
+            presig_fails,
+        );
+        let s3 = LatencySummary::calculate_with_failures(
+            "mixed_take_triple",
+            &mut all_take_triples,
+            signer_wall,
+            take_triple_fails,
+        );
+        let s4 = LatencySummary::calculate_with_failures(
+            "mixed_take_presig",
+            &mut all_take_presigs,
+            signer_wall,
+            take_presig_fails,
+        );
 
         Ok(vec![s1, s2, s3, s4])
     }
@@ -1779,18 +1869,26 @@ impl RedisHarness {
             .collect();
 
         let mut all_take_latencies = Vec::new();
+        let mut total_take_failures = 0;
         for t in take_tasks {
-            all_take_latencies.extend(t.await?);
+            let (lats, fails) = t.await?;
+            all_take_latencies.extend(lats);
+            total_take_failures += fails;
         }
         let take_wall = take_start.elapsed();
 
-        let s1 = LatencySummary::calculate(
+        let s1 = LatencySummary::calculate_with_failures(
             "insert_under_client_kill",
             &mut all_insert_latencies,
             insert_wall,
+            total_insert_failures,
         );
-        let s2 =
-            LatencySummary::calculate("take_post_reconnect", &mut all_take_latencies, take_wall);
+        let s2 = LatencySummary::calculate_with_failures(
+            "take_post_reconnect",
+            &mut all_take_latencies,
+            take_wall,
+            total_take_failures,
+        );
         Ok(vec![s1, s2])
     }
 
