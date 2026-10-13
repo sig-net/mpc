@@ -25,6 +25,9 @@ pub trait ChainPublisher: Send + Sync + 'static {
 /// warn (e.g. "hydration publish") so shared-gate events stay attributable
 /// per chain. Single-attempt like the inner publisher — the caller's retry
 /// loop still owns retries.
+///
+/// TODO: transitional - deleted once every client gates its publishes
+/// internally.
 pub struct GatedPublisher<P> {
     inner: P,
     gate: SharedBackoff,

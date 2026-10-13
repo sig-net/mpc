@@ -654,11 +654,7 @@ async fn test_solana_respond_round_trip() -> Result<()> {
         .await?;
     let request = wait_for_sign_request(&mut indexer).await?;
 
-    let publisher = SolanaClient::from_config(
-        &config,
-        Arc::new(NoopPublisherTelemetry),
-        SharedBackoff::new(),
-    );
+    let publisher = SolanaClient::from_config(&config, Arc::new(NoopPublisherTelemetry));
 
     // Publish a signature for the request
     publisher
@@ -702,11 +698,7 @@ async fn test_solana_respond_bidirectional_round_trip() -> Result<()> {
     let sign_id = SignId::new([9u8; 32]);
     let request = mock_bidi_response_request(sign_id, BidirectionalTxId([1u8; 32]), Chain::Solana);
 
-    let publisher = SolanaClient::from_config(
-        &config,
-        Arc::new(NoopPublisherTelemetry),
-        SharedBackoff::new(),
-    );
+    let publisher = SolanaClient::from_config(&config, Arc::new(NoopPublisherTelemetry));
     publisher
         .publish_signature(&PublishAction {
             request: request.clone(),

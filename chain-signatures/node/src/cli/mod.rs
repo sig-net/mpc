@@ -518,8 +518,11 @@ impl ChainStack {
     }
 
     /// Wraps an internally-ungated publisher in [`GatedPublisher`] bound to
-    /// this stack's gate for `chain` (Midnight and Hydration are externally
-    /// gated). `operation` labels the adapter's throttle warn per chain.
+    /// this stack's gate for `chain` (Solana, Midnight and Hydration are
+    /// externally gated — their clients don't gate publishes themselves).
+    /// `operation` labels the adapter's throttle warn per chain.
+    ///
+    /// TODO: deleted once those clients gate publishes internally
     fn gated_publisher<P: ChainPublisher>(
         &self,
         chain: Chain,
@@ -547,12 +550,11 @@ impl ChainStack {
         }
         if let Some(sol) = &self.configs.sol {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Solana));
-            let client = Arc::new(SolanaClient::from_config(
-                sol,
-                telemetry,
-                self.gate(Chain::Solana),
-            ));
-            publishers.insert(Chain::Solana, client);
+            let client = SolanaClient::from_config(sol, telemetry);
+            publishers.insert(
+                Chain::Solana,
+                self.gated_publisher(Chain::Solana, "solana publish", client),
+            );
         }
         if let Some(hydration) = &self.configs.hydration {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
@@ -934,6 +936,8 @@ async fn spawn_indexers(
 
     if let Some(hydration_config) = hydration {
         let hydration_telemetry = NodeTelemetry::new(Chain::Hydration);
+        // TODO: read-side gating - this indexer's reads don't share the
+        // chain's cooldown gate yet
         let hydration_indexer =
             HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
         tracing::info!("hydration indexer created successfully");
@@ -986,6 +990,8 @@ async fn spawn_indexers(
 
     if let Some(midnight_config) = midnight {
         let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
+        // TODO: read-side gating - this indexer's reads don't share the
+        // chain's cooldown gate yet
         match MidnightIndexer::new(midnight_config, backlog.clone(), midnight_telemetry.clone())
             .await
         {
