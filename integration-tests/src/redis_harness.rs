@@ -1539,7 +1539,9 @@ impl RedisHarness {
             .populate_all_presignatures(presigs_base, items_per_participant)
             .await;
 
-        let threshold = (num_p * 2 / 3).max(1);
+        // Threshold = num_p ensures removing target_peer drops remaining holders from num_p to (num_p - 1),
+        // which falls strictly below threshold and executes the actual HDEL/DEL/SREM pruning path in Lua.
+        let threshold = num_p;
         let barrier = Arc::new(Barrier::new(num_p));
         let prune_start = Instant::now();
 
@@ -1562,21 +1564,30 @@ impl RedisHarness {
 
         let mut all_triple_latencies = Vec::with_capacity(num_p);
         let mut all_presig_latencies = Vec::with_capacity(num_p);
+        let mut total_pruned_triples = 0;
+        let mut total_pruned_presigs = 0;
 
         for t in tasks {
             let (t_lat, t_res, p_lat, p_res) = t.await?;
-            assert!(
-                t_res.is_ok(),
-                "triples remove_holder_and_prune should succeed"
-            );
-            assert!(
-                p_res.is_ok(),
-                "presignatures remove_holder_and_prune should succeed"
-            );
+            let (t_removed, _t_updated) =
+                t_res.context("triples remove_holder_and_prune should succeed")?;
+            let (p_removed, _p_updated) =
+                p_res.context("presignatures remove_holder_and_prune should succeed")?;
+            total_pruned_triples += t_removed.len();
+            total_pruned_presigs += p_removed.len();
             all_triple_latencies.push(t_lat);
             all_presig_latencies.push(p_lat);
         }
         let wall = prune_start.elapsed();
+
+        assert_eq!(
+            total_pruned_triples, total_items,
+            "all triples should be pruned when falling below threshold"
+        );
+        assert_eq!(
+            total_pruned_presigs, total_items,
+            "all presignatures should be pruned when falling below threshold"
+        );
 
         let s1 = LatencySummary::calculate("sync_prune_triples", &mut all_triple_latencies, wall);
         let s2 = LatencySummary::calculate("sync_prune_presigs", &mut all_presig_latencies, wall);
