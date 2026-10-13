@@ -14,6 +14,9 @@ pub enum BenchScenario {
     Mixed,
     SyncPrune,
     ClientKill,
+    DeepStockpile,
+    ReservationChurn,
+    ConflictedTake,
 }
 
 impl std::fmt::Display for BenchScenario {
@@ -29,6 +32,9 @@ impl std::fmt::Display for BenchScenario {
             Self::Mixed => write!(f, "mixed"),
             Self::SyncPrune => write!(f, "sync_prune"),
             Self::ClientKill => write!(f, "client_kill"),
+            Self::DeepStockpile => write!(f, "deep_stockpile"),
+            Self::ReservationChurn => write!(f, "reservation_churn"),
+            Self::ConflictedTake => write!(f, "conflicted_take"),
         }
     }
 }
@@ -39,7 +45,7 @@ impl std::fmt::Display for BenchScenario {
     about = "Redis Latency & Stress Benchmark Harness (Pure Redis Container - No MPC Nodes, NEAR, or Blockchains)"
 )]
 struct Args {
-    /// Benchmark scenario to run: 'all', 'baseline', 'polling', 'storm', 'proposer', 'saturation', 'clear', 'mixed', 'sync_prune', 'client_kill'
+    /// Benchmark scenario to run: 'all', 'baseline', 'polling', 'storm', 'proposer', 'saturation', 'clear', 'mixed', 'sync_prune', 'client_kill', 'deep_stockpile', 'reservation_churn', 'conflicted_take'
     #[arg(short, long, value_enum, default_value_t = BenchScenario::All)]
     scenario: BenchScenario,
 
@@ -200,6 +206,40 @@ async fn main() -> anyhow::Result<()> {
         let items = args.items.max(100);
         println!("\n>>> Running Scenario 9: Connection Drop & Reconnection Shock (`CLIENT KILL`)");
         let results = harness.bench_client_kill(items, 30).await?;
+        harness.report_results(&results).await?;
+    }
+
+    if should_run(BenchScenario::DeepStockpile) {
+        let stockpile = (args.items * 5).max(1000);
+        let num_seekers = args.participants.min(6).max(2);
+        let exclusions = 50;
+        let seeks = 20;
+        println!(
+            "\n>>> Running Scenario 10: Large Stockpile Deep-Seek (`peek_mine` with {exclusions} exclusions across {stockpile} items)"
+        );
+        let results = harness.bench_deep_stockpile_seek(stockpile, num_seekers, exclusions, seeks).await?;
+        harness.report_results(&results).await?;
+    }
+
+    if should_run(BenchScenario::ReservationChurn) {
+        let stockpile = (args.items * 2).max(300);
+        let num_proposers = args.participants.min(4).max(2);
+        let rounds = 25;
+        let abort_percent = 40;
+        println!(
+            "\n>>> Running Scenario 11: Proposer Churn & Aborted Reservation Storm ({rounds} rounds, {abort_percent}% timeout/abort rate)"
+        );
+        let results = harness.bench_reservation_churn_abort(stockpile, num_proposers, rounds, abort_percent).await?;
+        harness.report_results(&results).await?;
+    }
+
+    if should_run(BenchScenario::ConflictedTake) {
+        let items = (args.items / 5).max(30);
+        let contenders = args.participants.min(4).max(2);
+        println!(
+            "\n>>> Running Scenario 12: Conflicted Double-Take Race Storm ({items} items, {contenders} parallel contenders racing per item)"
+        );
+        let results = harness.bench_conflicted_take(items, contenders).await?;
         harness.report_results(&results).await?;
     }
 

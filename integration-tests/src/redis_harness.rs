@@ -715,6 +715,122 @@ impl SimulatedParticipant {
 
         (latencies, success_ids, failure_count)
     }
+
+    /// Concurrently peek available artifacts from a large stockpile with an exclusion list.
+    pub async fn seek_deep_stockpile(
+        self,
+        barrier: Arc<Barrier>,
+        base_id: u64,
+        worker_id: usize,
+        seeks_count: usize,
+        exclusions_count: usize,
+    ) -> (Vec<Duration>, Vec<Duration>) {
+        barrier.wait().await;
+        let mut peek_latencies = Vec::with_capacity(seeks_count);
+        let mut commit_latencies = Vec::with_capacity(seeks_count);
+
+        // Exclusion list simulates accumulated rejected / timed-out IDs from prior reorg rounds
+        let excluded: Vec<u64> = (0..exclusions_count)
+            .map(|x| base_id + (x as u64) + (worker_id as u64 * 100))
+            .collect();
+
+        for _ in 0..seeks_count {
+            let t0 = Instant::now();
+            let reservation = self.triples.peek_mine(&excluded).await;
+            peek_latencies.push(t0.elapsed());
+
+            let Some(reservation) = reservation else {
+                continue;
+            };
+            let t1 = Instant::now();
+            let taken = reservation.commit().await;
+            commit_latencies.push(t1.elapsed());
+            if taken.is_none() {
+                tracing::debug!("lost reservation race on commit in deep stockpile seek");
+            }
+        }
+
+        (peek_latencies, commit_latencies)
+    }
+
+    /// Concurrently simulate proposer deliberation with partial timeout / reject drops.
+    pub async fn run_proposer_churn(
+        self,
+        barrier: Arc<Barrier>,
+        proposer_id: usize,
+        rounds: usize,
+        abort_percent: u8,
+        deliberation_delay_ms: u64,
+    ) -> (Vec<Duration>, Vec<Duration>, usize, usize) {
+        barrier.wait().await;
+        let mut peek_latencies = Vec::with_capacity(rounds);
+        let mut commit_latencies = Vec::with_capacity(rounds);
+        let mut aborted_count = 0;
+        let mut committed_count = 0;
+
+        let mut local_excluded: Vec<u64> = Vec::new();
+
+        for round_idx in 0..rounds {
+            let t0 = Instant::now();
+            let reservation = self.triples.peek_mine(&local_excluded).await;
+            peek_latencies.push(t0.elapsed());
+
+            let Some(reservation) = reservation else {
+                continue;
+            };
+
+            if deliberation_delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(deliberation_delay_ms)).await;
+            }
+
+            let should_abort = ((proposer_id * 17 + round_idx * 31) % 100) < (abort_percent as usize);
+            if should_abort {
+                let id = reservation.id;
+                // Dropping reservation aborts pending state without commit, returning item to Redis pool
+                drop(reservation);
+                local_excluded.push(id);
+                aborted_count += 1;
+            } else {
+                let t1 = Instant::now();
+                if reservation.commit().await.is_some() {
+                    committed_count += 1;
+                }
+                commit_latencies.push(t1.elapsed());
+            }
+        }
+
+        (peek_latencies, commit_latencies, aborted_count, committed_count)
+    }
+
+    /// Concurrently race against other participants to take the same target artifact IDs.
+    pub async fn race_take_conflicted(
+        self,
+        barrier: Arc<Barrier>,
+        target_ids: Vec<u64>,
+        owner: Participant,
+    ) -> (Vec<Duration>, Vec<Duration>, usize, usize) {
+        barrier.wait().await;
+        let mut win_latencies = Vec::new();
+        let mut conflict_latencies = Vec::new();
+        let mut wins = 0;
+        let mut conflicts = 0;
+
+        for id in target_ids {
+            let t0 = Instant::now();
+            let res = self.triples.take(id, owner).await;
+            let elapsed = t0.elapsed();
+
+            if res.is_some() {
+                win_latencies.push(elapsed);
+                wins += 1;
+            } else {
+                conflict_latencies.push(elapsed);
+                conflicts += 1;
+            }
+        }
+
+        (win_latencies, conflict_latencies, wins, conflicts)
+    }
 }
 
 /// Guard managing background polling tasks. Automatically stops and joins tasks on `.stop().await`.
@@ -1670,6 +1786,196 @@ impl RedisHarness {
 
         let s1 = LatencySummary::calculate("insert_under_client_kill", &mut all_insert_latencies, insert_wall);
         let s2 = LatencySummary::calculate("take_post_reconnect", &mut all_take_latencies, take_wall);
+        Ok(vec![s1, s2])
+    }
+
+    /// SCENARIO 10: Large Stockpile Deep-Seek (`peek_mine` with large exclusion sets).
+    /// Pre-populates a large stockpile (e.g. 2,000–10,000 items) and tests `peek_mine`
+    /// when nodes pass large exclusion lists accumulated from repeated round reorgs.
+    /// Reproduces the single-threaded Lua O(N) iteration spike that causes 50ms - 6s tail latency.
+    pub async fn bench_deep_stockpile_seek(
+        &self,
+        stockpile_size: usize,
+        num_seekers: usize,
+        exclusions_count: usize,
+        seeks_per_worker: usize,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+
+        if self.participants.is_empty() || stockpile_size == 0 || num_seekers == 0 {
+            return Ok(vec![
+                LatencySummary::empty("deep_peek_mine"),
+                LatencySummary::empty("deep_commit_reservation"),
+            ]);
+        }
+
+        let p = &self.participants[0];
+        let participant_list = self.participant_ids();
+        let base_id = next_id_block(stockpile_size as u64 + 10_000);
+
+        println!("   -> Pre-populating large stockpile of {stockpile_size} items on participant 0...");
+        p.clone().populate_triples(base_id, stockpile_size, participant_list).await;
+
+        println!(
+            "   -> Launching {num_seekers} concurrent seekers (each evaluating exclusion lists of {exclusions_count} IDs)..."
+        );
+        let barrier = Arc::new(Barrier::new(num_seekers));
+        let overall_start = Instant::now();
+
+        let tasks: Vec<_> = (0..num_seekers)
+            .map(|worker_id| {
+                tokio::spawn(p.clone().seek_deep_stockpile(
+                    barrier.clone(),
+                    base_id,
+                    worker_id,
+                    seeks_per_worker,
+                    exclusions_count,
+                ))
+            })
+            .collect();
+
+        let mut all_peek = Vec::new();
+        let mut all_commit = Vec::new();
+
+        for t in tasks {
+            let (peek, commit) = t.await?;
+            all_peek.extend(peek);
+            all_commit.extend(commit);
+        }
+        let wall = overall_start.elapsed();
+
+        let s1 = LatencySummary::calculate("deep_peek_mine", &mut all_peek, wall);
+        let s2 = LatencySummary::calculate("deep_commit_reservation", &mut all_commit, wall);
+        Ok(vec![s1, s2])
+    }
+
+    /// SCENARIO 11: Proposer Churn & Aborted Reservation Storm.
+    /// Simulates deliberation timeouts and reject reorgs seen in production logs:
+    /// proposers peek presignatures, hold them for simulated deliberation, and a portion
+    /// aborts/drops without commit, while concurrent proposers race to re-peek and commit.
+    pub async fn bench_reservation_churn_abort(
+        &self,
+        initial_stockpile: usize,
+        num_proposers: usize,
+        rounds_per_proposer: usize,
+        abort_percent: u8,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+
+        if self.participants.is_empty() || initial_stockpile == 0 || num_proposers == 0 {
+            return Ok(vec![
+                LatencySummary::empty("churn_peek_mine"),
+                LatencySummary::empty("churn_commit_reservation"),
+            ]);
+        }
+
+        let p = &self.participants[0];
+        let participant_list = self.participant_ids();
+        let base_id = next_id_block(initial_stockpile as u64 + 10_000);
+
+        println!("   -> Pre-stockpiling {initial_stockpile} triples on participant 0...");
+        p.clone().populate_triples(base_id, initial_stockpile, participant_list).await;
+
+        println!(
+            "   -> Simulating {num_proposers} proposers with {abort_percent}% deliberation timeout/abort rate across {rounds_per_proposer} rounds..."
+        );
+        let barrier = Arc::new(Barrier::new(num_proposers));
+        let overall_start = Instant::now();
+
+        let tasks: Vec<_> = (0..num_proposers)
+            .map(|proposer_id| {
+                tokio::spawn(p.clone().run_proposer_churn(
+                    barrier.clone(),
+                    proposer_id,
+                    rounds_per_proposer,
+                    abort_percent,
+                    15,
+                ))
+            })
+            .collect();
+
+        let mut all_peek = Vec::new();
+        let mut all_commit = Vec::new();
+        let mut total_aborts = 0;
+        let mut total_commits = 0;
+
+        for t in tasks {
+            let (peek, commit, aborted, committed) = t.await?;
+            all_peek.extend(peek);
+            all_commit.extend(commit);
+            total_aborts += aborted;
+            total_commits += committed;
+        }
+        let wall = overall_start.elapsed();
+
+        println!(
+            "   -> Churn outcome: {total_commits} successfully committed, {total_aborts} dropped back to pool on timeout/reject"
+        );
+
+        let s1 = LatencySummary::calculate("churn_peek_mine", &mut all_peek, wall);
+        let s2 = LatencySummary::calculate("churn_commit_reservation", &mut all_commit, wall);
+        Ok(vec![s1, s2])
+    }
+
+    /// SCENARIO 12: Conflicted Double-Take Race Storm.
+    /// Simulates concurrent attempts by multiple nodes to `take` the exact same artifact IDs,
+    /// reproducing the "WARN: artifact X is not owned by this owner" Lua failure path.
+    pub async fn bench_conflicted_take(
+        &self,
+        num_items: usize,
+        contenders_per_item: usize,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+
+        if self.participants.is_empty() || num_items == 0 || contenders_per_item == 0 {
+            return Ok(vec![
+                LatencySummary::empty("take_winner_success"),
+                LatencySummary::empty("take_conflict_rejected"),
+            ]);
+        }
+
+        let owner = &self.participants[0];
+        let owner_participant = owner.participant;
+        let participant_list = self.participant_ids();
+        let base_id = next_id_block(num_items as u64 + 10_000);
+
+        println!("   -> Pre-populating {num_items} items on owner participant...");
+        let target_ids = owner.clone().populate_triples(base_id, num_items, participant_list).await;
+
+        println!(
+            "   -> Launching {contenders_per_item} parallel tasks racing to take each item (reproducing 'not owned by this owner' Lua errors)..."
+        );
+        let barrier = Arc::new(Barrier::new(contenders_per_item));
+        let overall_start = Instant::now();
+
+        let tasks: Vec<_> = (0..contenders_per_item)
+            .map(|_| {
+                let p = owner.clone();
+                let ids = target_ids.clone();
+                tokio::spawn(p.race_take_conflicted(barrier.clone(), ids, owner_participant))
+            })
+            .collect();
+
+        let mut all_wins = Vec::new();
+        let mut all_conflicts = Vec::new();
+        let mut total_wins = 0;
+        let mut total_conflicts = 0;
+
+        for t in tasks {
+            let (wins, conflicts, w_count, c_count) = t.await?;
+            all_wins.extend(wins);
+            all_conflicts.extend(conflicts);
+            total_wins += w_count;
+            total_conflicts += c_count;
+        }
+        let wall = overall_start.elapsed();
+
+        println!(
+            "   -> Conflict outcome: {total_wins} successful takes, {total_conflicts} rejected (SREM == 0 Lua conflict errors)"
+        );
+
+        let s1 = LatencySummary::calculate("take_winner_success", &mut all_wins, wall);
+        let s2 = LatencySummary::calculate("take_conflict_rejected", &mut all_conflicts, wall);
         Ok(vec![s1, s2])
     }
 }
