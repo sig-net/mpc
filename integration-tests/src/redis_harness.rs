@@ -430,6 +430,15 @@ impl RedisHarness {
     /// Spawn a fresh Redis container via testcontainers and prepare N simulated participants.
     /// Notice: No MPC node processes, no NEAR sandbox, and no blockchains are spawned.
     pub async fn spawn(num_participants: usize) -> anyhow::Result<Self> {
+        Self::spawn_with_pool_config(num_participants, None, None).await
+    }
+
+    /// Spawn a fresh Redis container with custom connection pool constraints (matching production deadpool settings).
+    pub async fn spawn_with_pool_config(
+        num_participants: usize,
+        max_pool_size: Option<usize>,
+        timeout: Option<Duration>,
+    ) -> anyhow::Result<Self> {
         let spawner = ClusterSpawner::default()
             .network("bench-redis-harness")
             .init_network()
@@ -437,10 +446,32 @@ impl RedisHarness {
             .context("failed to init docker network")?;
 
         let redis = crate::containers::Redis::run(&spawner).await;
-        let pool = redis.pool();
         let redis_url = redis.internal_address.clone();
+        let pool = Self::build_pool(&redis_url, max_pool_size, timeout)?;
 
         Self::init(Some(redis), redis_url, pool, num_participants).await
+    }
+
+    pub fn build_pool(
+        redis_url: &str,
+        max_pool_size: Option<usize>,
+        timeout: Option<Duration>,
+    ) -> anyhow::Result<deadpool_redis::Pool> {
+        let parsed_url = url::Url::parse(redis_url).context("invalid redis url")?;
+        let mut builder = deadpool_redis::Config::from_url(parsed_url)
+            .builder()?
+            .runtime(deadpool_redis::Runtime::Tokio1);
+
+        if let Some(size) = max_pool_size {
+            builder = builder.max_size(size);
+        }
+        if let Some(to) = timeout {
+            builder = builder
+                .wait_timeout(Some(to))
+                .create_timeout(Some(to))
+                .recycle_timeout(Some(to));
+        }
+        Ok(builder.build()?)
     }
 
     /// Construct harness from an existing `Redis` container handle.
@@ -826,6 +857,127 @@ impl RedisHarness {
         let s2 = LatencySummary::calculate("commit_reservation", &mut all_commit, wall);
 
         Ok(vec![s1, s2])
+    }
+
+    /// SCENARIO 5: Production Cascading Saturation & Head-of-Line Blocking (reproducing 50ms - 6s latencies).
+    /// Simulates production conditions:
+    /// 1. 100ms background stockpile polling storms (continuous HLEN/SCARD).
+    /// 2. High concurrency (many concurrent tasks competing for connection pool slots).
+    /// 3. Intermittent Redis blocking events (simulating long remove_outdated Lua scripts or BGSAVE freezes).
+    /// Measures the resulting queueing delays and tail latencies.
+    pub async fn bench_cascading_saturation(
+        &self,
+        tasks_per_participant: usize,
+        items_per_task: usize,
+        blocking_spike_ms: u64,
+        num_spikes: usize,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let mut background_handles = Vec::new();
+
+        // 1. Continuous 100ms polling across all participants
+        for p in &self.participants {
+            let triples = p.triples.clone();
+            let me = p.participant;
+            let stop = stop_flag.clone();
+
+            background_handles.push(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(100));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                while !stop.load(Ordering::Relaxed) {
+                    interval.tick().await;
+                    let _ = triples.len_generated().await;
+                    let _ = triples.len_by_owner(me).await;
+                }
+            }));
+        }
+
+        // 2. Intermittent blocking spikes on Redis main thread (simulating large Lua scripts or BGSAVE stalls)
+        if blocking_spike_ms > 0 && num_spikes > 0 {
+            let pool = self.pool.clone();
+            let stop = stop_flag.clone();
+
+            background_handles.push(tokio::spawn(async move {
+                let spike_script = deadpool_redis::redis::Script::new(r#"
+                    local t0 = redis.call('time')
+                    local limit_ms = tonumber(ARGV[1])
+                    while true do
+                        local t1 = redis.call('time')
+                        local elapsed_ms = (tonumber(t1[1]) - tonumber(t0[1])) * 1000 + math.floor((tonumber(t1[2]) - tonumber(t0[2])) / 1000)
+                        if elapsed_ms >= limit_ms then
+                            break
+                        end
+                    end
+                    return 1
+                "#);
+
+                // Start almost immediately so workers are in-flight when the freeze occurs
+                tokio::time::sleep(Duration::from_millis(15)).await;
+
+                for _ in 0..num_spikes {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if let Ok(mut conn) = pool.get().await {
+                        let _: Result<i32, _> = spike_script.arg(blocking_spike_ms).invoke_async(&mut conn).await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }));
+        }
+
+        // 3. High-concurrency operations across participants
+        let total_items = self.participants.len() * tasks_per_participant * items_per_task;
+        let run_base_id = next_id_block(total_items as u64 + 10_000);
+        let barrier = Arc::new(Barrier::new(self.participants.len() * tasks_per_participant));
+        let mut worker_tasks = Vec::new();
+        let overall_start = Instant::now();
+        let participant_list = self.participant_ids();
+
+        for (p_idx, p) in self.participants.iter().enumerate() {
+            for t_idx in 0..tasks_per_participant {
+                let triples = p.triples.clone();
+                let me = p.participant;
+                let barrier = barrier.clone();
+                let participants = participant_list.clone();
+                let task_id = p_idx * tasks_per_participant + t_idx;
+                let base_id = run_base_id + (task_id as u64 * items_per_task as u64);
+
+                worker_tasks.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    let mut latencies = Vec::with_capacity(items_per_task);
+
+                    for i in 0..items_per_task {
+                        let id = base_id + (i as u64);
+                        let pair = dummy_pair(id, &participants);
+
+                        let t0 = Instant::now();
+                        if let Some(mut slot) = triples.create_slot(id, me).await {
+                            slot.insert(pair, me).await;
+                        }
+                        latencies.push(t0.elapsed());
+                    }
+
+                    latencies
+                }));
+            }
+        }
+
+        let mut all_latencies = Vec::new();
+        for task in worker_tasks {
+            all_latencies.extend(task.await?);
+        }
+        let wall = overall_start.elapsed();
+
+        stop_flag.store(true, Ordering::Relaxed);
+        for h in background_handles {
+            let _ = h.await;
+        }
+
+        let summary = LatencySummary::calculate("saturated_insert_triple", &mut all_latencies, wall);
+        Ok(vec![summary])
     }
 }
 

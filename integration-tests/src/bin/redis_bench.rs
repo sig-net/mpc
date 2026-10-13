@@ -7,7 +7,7 @@ use integration_tests::redis_harness::{print_summary_header, RedisHarness};
     about = "Redis Latency & Stress Benchmark Harness (Pure Redis Container - No MPC Nodes, NEAR, or Blockchains)"
 )]
 struct Args {
-    /// Benchmark scenario to run: 'all', 'baseline', 'storm', 'polling', 'proposer'
+    /// Benchmark scenario to run: 'all', 'baseline', 'storm', 'polling', 'proposer', 'saturation'
     #[arg(short, long, default_value = "all")]
     scenario: String,
 
@@ -18,6 +18,14 @@ struct Args {
     /// Number of items (triples/presignatures) per participant
     #[arg(short, long, default_value_t = 300)]
     items: usize,
+
+    /// Optional connection pool max size constraint (e.g. 8 to simulate production pool saturation)
+    #[arg(long)]
+    pool_size: Option<usize>,
+
+    /// Duration of periodic blocking spikes on Redis in milliseconds (default: 250ms)
+    #[arg(long, default_value_t = 250)]
+    spike_ms: u64,
 
     /// Optional external Redis URL (e.g. redis://127.0.0.1:6379). If omitted, spawns an isolated Redis container.
     #[arg(long)]
@@ -47,7 +55,11 @@ async fn main() -> anyhow::Result<()> {
     println!("Initializing Redis benchmark harness...");
     let harness = match &args.redis_url {
         Some(url) => RedisHarness::from_url(url, args.participants).await?,
-        None => RedisHarness::spawn(args.participants).await?,
+        None => RedisHarness::spawn_with_pool_config(
+            args.participants,
+            args.pool_size,
+            Some(std::time::Duration::from_secs(5)),
+        ).await?,
     };
     println!("Connected to Redis at: {}", harness.redis_url);
 
@@ -100,6 +112,20 @@ async fn main() -> anyhow::Result<()> {
         let per_racer = 50;
         println!("\n>>> Running Scenario 4: Proposer Race (`peek_mine` + `commit`) - {} racers, {} proposals each", racers, per_racer);
         let results = harness.bench_proposer_race(0, initial_stockpile, racers, per_racer).await?;
+        print_summary_header();
+        for r in &results {
+            r.print_row();
+        }
+        harness.print_diagnostics().await?;
+    }
+
+    if run_all || args.scenario == "saturation" {
+        let tasks_per_p = 5;
+        let items_per_task = (args.items / tasks_per_p).max(10);
+        let spike_ms = args.spike_ms;
+        println!("\n>>> Running Scenario 5: Cascading Saturation & Head-of-Line Blocking (50ms - 6s Grafana conditions)");
+        println!("    Simulating {} concurrent tasks across {} participants, 100ms background polling, and periodic {}ms Redis blocking spikes...", args.participants * tasks_per_p, args.participants, spike_ms);
+        let results = harness.bench_cascading_saturation(tasks_per_p, items_per_task, spike_ms, 3).await?;
         print_summary_header();
         for r in &results {
             r.print_row();
