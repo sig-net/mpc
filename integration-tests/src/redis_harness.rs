@@ -1339,6 +1339,145 @@ impl RedisHarness {
         let s2 = LatencySummary::calculate("sync_prune_presigs", &mut all_presig_latencies, wall);
         Ok(vec![s1, s2])
     }
+
+    /// SCENARIO 9: Connection Drop & Reconnection Shock (`CLIENT KILL`).
+    /// Simulates cloud network blips, pod restarts, or proxy TCP resets (as seen in devnet/testnet
+    /// with ConnectionResetByPeer / Timeout(Create)).
+    /// While participants are actively performing inserts and takes, background task triggers
+    /// `CLIENT KILL TYPE normal SKIPME yes` to sever all client connections.
+    /// Measures how many operations fail or recover, and the resulting latency tail.
+    pub async fn bench_client_kill(
+        &self,
+        items_per_participant: usize,
+        kill_delay_ms: u64,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+
+        let run_base_id = next_id_block((self.participants.len() * items_per_participant) as u64 + 10_000);
+        let barrier = Arc::new(Barrier::new(self.participants.len() + 1));
+        let participant_list = self.participant_ids();
+
+        println!(
+            "   -> Launching {} participant workers ({} items each) with mid-flight CLIENT KILL shock at +{}ms...",
+            self.participants.len(), items_per_participant, kill_delay_ms
+        );
+
+        // 1. Killer task that severs all client connections
+        let pool = self.pool.clone();
+        let killer_barrier = barrier.clone();
+        let killer_task = tokio::spawn(async move {
+            killer_barrier.wait().await;
+            tokio::time::sleep(Duration::from_millis(kill_delay_ms)).await;
+
+            let mut killed_total = 0;
+            if let Ok(mut conn) = pool.get().await {
+                let killed: Result<i64, _> = deadpool_redis::redis::cmd("CLIENT")
+                    .arg("KILL")
+                    .arg("TYPE")
+                    .arg("normal")
+                    .arg("SKIPME")
+                    .arg("yes")
+                    .query_async(&mut conn)
+                    .await;
+
+                if let Ok(count) = killed {
+                    killed_total = count;
+                    println!("   [CLIENT KILL] Severed {count} active Redis client connections!");
+                }
+            }
+            killed_total
+        });
+
+        // 2. Active participant tasks
+        let mut worker_tasks = Vec::new();
+        let overall_start = Instant::now();
+
+        for (node_idx, p) in self.participants.iter().enumerate() {
+            let triples = p.triples.clone();
+            let me = p.participant;
+            let b = barrier.clone();
+            let participants = participant_list.clone();
+            let base_id = run_base_id + (node_idx as u64 * items_per_participant as u64);
+
+            worker_tasks.push(tokio::spawn(async move {
+                b.wait().await;
+                let mut latencies = Vec::with_capacity(items_per_participant);
+                let mut success_ids = Vec::new();
+                let mut failure_count = 0;
+
+                for i in 0..items_per_participant {
+                    let id = base_id + (i as u64);
+                    let pair = dummy_pair(id, &participants);
+
+                    let t0 = Instant::now();
+                    if let Some(mut slot) = triples.create_slot(id, me).await {
+                        if slot.insert(pair, me).await {
+                            success_ids.push(id);
+                        } else {
+                            failure_count += 1;
+                        }
+                    } else {
+                        failure_count += 1;
+                    }
+                    latencies.push(t0.elapsed());
+                }
+
+                (latencies, success_ids, failure_count)
+            }));
+        }
+
+        let killed_connections = killer_task.await?;
+
+        let mut all_insert_latencies = Vec::new();
+        let mut all_success_ids = Vec::new();
+        let mut total_insert_failures = 0;
+
+        for (node_idx, t) in worker_tasks.into_iter().enumerate() {
+            let (lats, s_ids, f) = t.await?;
+            all_insert_latencies.extend(lats);
+            all_success_ids.push((node_idx, s_ids));
+            total_insert_failures += f;
+        }
+        let insert_wall = overall_start.elapsed();
+
+        let total_inserts = self.participants.len() * items_per_participant;
+        let total_success_inserts: usize = all_success_ids.iter().map(|(_, ids)| ids.len()).sum();
+
+        println!(
+            "   -> Insert outcome: {}/{} successful, {} failed/aborted (Severed {} connections)",
+            total_success_inserts, total_inserts, total_insert_failures, killed_connections
+        );
+
+        // 3. Post-kill verification: take the successfully inserted items to measure pool recovery
+        let mut take_tasks = Vec::new();
+        let take_start = Instant::now();
+
+        for (node_idx, ids) in all_success_ids {
+            let p = &self.participants[node_idx];
+            let triples = p.triples.clone();
+            let me = p.participant;
+
+            take_tasks.push(tokio::spawn(async move {
+                let mut take_lats = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let t0 = Instant::now();
+                    let _ = triples.take(id, me).await;
+                    take_lats.push(t0.elapsed());
+                }
+                take_lats
+            }));
+        }
+
+        let mut all_take_latencies = Vec::new();
+        for t in take_tasks {
+            all_take_latencies.extend(t.await?);
+        }
+        let take_wall = take_start.elapsed();
+
+        let s1 = LatencySummary::calculate("insert_under_client_kill", &mut all_insert_latencies, insert_wall);
+        let s2 = LatencySummary::calculate("take_post_reconnect", &mut all_take_latencies, take_wall);
+        Ok(vec![s1, s2])
+    }
 }
 
 pub fn dummy_presignature(id: u64, participants: &[Participant]) -> Presignature {

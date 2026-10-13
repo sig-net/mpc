@@ -7,7 +7,7 @@ use integration_tests::redis_harness::{print_summary_header, RedisHarness};
     about = "Redis Latency & Stress Benchmark Harness (Pure Redis Container - No MPC Nodes, NEAR, or Blockchains)"
 )]
 struct Args {
-    /// Benchmark scenario to run: 'all', 'baseline', 'storm', 'polling', 'proposer', 'saturation', 'clear', 'mixed', 'sync_prune'
+    /// Benchmark scenario to run: 'all', 'baseline', 'storm', 'polling', 'proposer', 'saturation', 'clear', 'mixed', 'sync_prune', 'client_kill'
     #[arg(short, long, default_value = "all")]
     scenario: String,
 
@@ -160,6 +160,17 @@ async fn main() -> anyhow::Result<()> {
         let items = args.items.max(100);
         println!("\n>>> Running Scenario 8: State Sync Peer Drop & Pruning (`remove_holder_and_prune`)");
         let results = harness.bench_sync_prune_storm(items).await?;
+        print_summary_header();
+        for r in &results {
+            r.print_row();
+        }
+        harness.print_diagnostics().await?;
+    }
+
+    if run_all || args.scenario == "client_kill" {
+        let items = args.items.max(100);
+        println!("\n>>> Running Scenario 9: Connection Drop & Reconnection Shock (`CLIENT KILL`)");
+        let results = harness.bench_client_kill(items, 30).await?;
         print_summary_header();
         for r in &results {
             r.print_row();
