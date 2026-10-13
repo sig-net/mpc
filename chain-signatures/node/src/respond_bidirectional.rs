@@ -3,9 +3,10 @@ use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
-    AttestationMetadata, AttestationOutcomeKind, BidirectionalTx, Chain, ChainConfig as _,
-    IndexedSignRequest, PublishedAttestation, RespondBidirectionalSerializedOutput,
-    RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId, SignKind,
+    AttestationError, AttestationMetadata, AttestationOutcomeKind, BidirectionalTx, Chain,
+    ChainConfig as _, IndexedSignRequest, PublishedAttestation,
+    RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
+    SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
 use std::sync::Arc;
@@ -49,8 +50,9 @@ pub(crate) fn published_midnight_signing_args(
     published: &PublishedAttestation,
 ) -> anyhow::Result<(Scalar, Scalar)> {
     anyhow::ensure!(
-        tx.source_chain == Chain::Midnight,
-        "published attestations are Midnight responses"
+        published.outcome_kind == AttestationOutcomeKind::Executed
+            || published.serialized_output_length == 0,
+        AttestationError::NonemptyFailureOutput
     );
     let metadata = AttestationMetadata {
         key_version: tx.key_version,
@@ -604,6 +606,96 @@ mod tests {
                     .create_unviable_sign_request()
                     .is_err(),
                 "{chain}"
+            );
+        }
+    }
+
+    /// A node that missed the outcome must verify against exactly what the signing
+    /// node signed, for every outcome.
+    #[tokio::test]
+    async fn published_midnight_signing_args_match_the_signed_response() {
+        let tx = sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]);
+        let completed = CompletedTx::new(Arc::clone(&tx), None, None, 456);
+        for request in [
+            completed
+                .create_sign_request_from_serialized_output((1..=32).collect())
+                .unwrap(),
+            completed.create_failed_sign_request().await.unwrap(),
+            completed.create_unviable_sign_request().unwrap(),
+        ] {
+            let published = mpc_chain_midnight::validate_attestation_response(&request).unwrap();
+            assert_eq!(
+                published_midnight_signing_args(&tx, &published).unwrap(),
+                (request.args.epsilon, request.args.payload),
+                "{:?}",
+                published.outcome_kind
+            );
+        }
+    }
+
+    #[test]
+    fn published_midnight_signing_args_reject_a_digest_for_another_response() {
+        let tx = sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]);
+        let request = CompletedTx::new(Arc::clone(&tx), None, None, 456)
+            .create_sign_request_from_serialized_output((1..=32).collect())
+            .unwrap();
+        let published = mpc_chain_midnight::validate_attestation_response(&request).unwrap();
+        let other_request = sample_bidirectional_tx(Chain::Midnight, [0x30; 32]);
+        assert!(published_midnight_signing_args(&other_request, &published).is_err());
+        for tampered in [
+            PublishedAttestation {
+                block_height: 457,
+                ..published
+            },
+            PublishedAttestation {
+                serialized_output_length: 31,
+                ..published
+            },
+            PublishedAttestation {
+                output_hash: [0; 32],
+                ..published
+            },
+            PublishedAttestation {
+                digest: [0; 32],
+                ..published
+            },
+        ] {
+            assert!(
+                published_midnight_signing_args(&tx, &tampered).is_err(),
+                "{tampered:?}"
+            );
+        }
+    }
+
+    /// The digest is consistent with the claimed fields, so only the output rule rejects it.
+    #[test]
+    fn published_midnight_signing_args_reject_output_on_a_failure() {
+        let tx = sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]);
+        let output_hash = mpc_compact_hashing::compute_attested_output_hash(&[1]);
+        for outcome_kind in [
+            AttestationOutcomeKind::Failed,
+            AttestationOutcomeKind::Unviable,
+        ] {
+            let metadata = AttestationMetadata {
+                key_version: tx.key_version,
+                block_height: 456,
+                outcome_kind,
+            };
+            let published = PublishedAttestation {
+                block_height: 456,
+                outcome_kind,
+                serialized_output_length: 1,
+                output_hash,
+                digest: mpc_compact_hashing::compute_attestation_digest(
+                    &tx.request_id,
+                    &metadata,
+                    1,
+                    &output_hash,
+                ),
+            };
+            assert!(
+                published_midnight_signing_args(&tx, &published).is_err(),
+                "{outcome_kind:?}"
             );
         }
     }
