@@ -1,5 +1,5 @@
 use alloy::dyn_abi::{DynSolType, DynSolValue};
-use alloy::primitives::Bytes;
+use alloy::primitives::{Address, Bytes, B256, I256, U256};
 use borsh::BorshSerialize;
 use mpc_midnight_respond_codec::{executed_output, validate_output_schema, TracedReturn};
 use mpc_primitives::SerDeserFormat;
@@ -183,8 +183,10 @@ pub fn build_serialized_output(
 }
 
 /// Refuse, before signing, what [`build_serialized_output`] refuses on the schemas
-/// alone, by running it on all-zero return data, which decodes for every output type.
-/// Refusals that depend on the real return data stay with extraction.
+/// alone, by running it on a [`sample_value`] of the output schema. Refusals that depend
+/// on the real return data stay with extraction, except one: an array element type the
+/// respond schema does not match is refused here even though extraction accepts it
+/// whenever the real array is empty.
 pub fn validate_schemas(
     calldata: &[u8],
     output_deserialization_schema: &[u8],
@@ -197,11 +199,8 @@ pub fn validate_schemas(
     }
     let trace = if is_contract_call && !output_schema_is_empty(output_deserialization_schema)? {
         let schema = parse_output_schema_fields(output_deserialization_schema)?;
-        let words = parse_schema_type(&schema)?.minimum_words();
-        let bytes = words
-            .checked_mul(32)
-            .ok_or_else(|| anyhow::anyhow!("output schema needs {words} words"))?;
-        TraceOutput::Output(vec![0; bytes].into())
+        let sample = sample_value(&parse_schema_type(&schema)?)?;
+        TraceOutput::Output(sample.abi_encode_params().into())
     } else {
         TraceOutput::NoReturnData
     };
@@ -213,6 +212,31 @@ pub fn validate_schemas(
         respond_serialization_schema,
     )
     .map(drop)
+}
+
+/// A value of `ty` with zero scalars and one element in every dynamic array, so that
+/// encoding it checks the element type, which an empty array would match for any type.
+fn sample_value(ty: &DynSolType) -> anyhow::Result<DynSolValue> {
+    Ok(match ty {
+        DynSolType::Bool => DynSolValue::Bool(false),
+        DynSolType::Address => DynSolValue::Address(Address::ZERO),
+        DynSolType::Int(bits) => DynSolValue::Int(I256::ZERO, *bits),
+        DynSolType::Uint(bits) => DynSolValue::Uint(U256::ZERO, *bits),
+        DynSolType::FixedBytes(size) => DynSolValue::FixedBytes(B256::ZERO, *size),
+        DynSolType::Bytes => DynSolValue::Bytes(Vec::new()),
+        DynSolType::String => DynSolValue::String(String::new()),
+        DynSolType::Array(element) => DynSolValue::Array(vec![sample_value(element)?]),
+        DynSolType::FixedArray(element, len) => {
+            DynSolValue::FixedArray(vec![sample_value(element)?; *len])
+        }
+        DynSolType::Tuple(types) => DynSolValue::Tuple(
+            types
+                .iter()
+                .map(sample_value)
+                .collect::<anyhow::Result<_>>()?,
+        ),
+        other => anyhow::bail!("no sample value for type {other}"),
+    })
 }
 
 fn output_schema_is_empty(schema_json: &[u8]) -> anyhow::Result<bool> {
@@ -411,7 +435,6 @@ fn default_output_for_non_contract_call(schema: &[AbiField]) -> anyhow::Result<O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{I256, U256};
 
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
 
@@ -426,7 +449,8 @@ mod tests {
         abi_uint256(u64::from(value))
     }
 
-    /// Admission refuses exactly the schemas extraction refuses on real return data.
+    /// Admission refuses exactly the schemas extraction refuses on real return data,
+    /// as long as that data has no empty array.
     #[test]
     fn validate_schemas_agrees_with_extraction() {
         use SerDeserFormat::{Abi, Borsh, Fab};
@@ -435,6 +459,13 @@ mod tests {
         let string_schema: &[u8] = br#"[{"name":"s","type":"string"}]"#;
         let uint64_schema: &[u8] = br#"[{"name":"n","type":"uint64"}]"#;
         let function_schema: &[u8] = br#"[{"name":"f","type":"function"}]"#;
+        let uint256_array_schema: &[u8] = br#"[{"name":"a","type":"uint256[]"}]"#;
+        let uint8_array_schema: &[u8] = br#"[{"name":"a","type":"uint8[]"}]"#;
+        let uint256_array_output = || {
+            let five = DynSolValue::Uint(U256::from(5), 256);
+            let tuple = DynSolValue::Tuple(vec![DynSolValue::Array(vec![five])]);
+            Bytes::from(tuple.abi_encode_params())
+        };
         let string_output = Bytes::from(
             DynSolValue::Tuple(vec![DynSolValue::String("hi".into())]).abi_encode_params(),
         );
@@ -449,9 +480,11 @@ mod tests {
             bool,
         );
         #[rustfmt::skip]
-        let cases: [Case; 15] = [
+        let cases: [Case; 17] = [
             (&call, bool_schema, Abi, bool_schema, traced(abi_bool(true)), true),
             (&call, string_schema, Abi, string_schema, traced(string_output), true),
+            (&call, uint256_array_schema, Abi, uint256_array_schema, traced(uint256_array_output()), true),
+            (&call, uint256_array_schema, Abi, uint8_array_schema, traced(uint256_array_output()), false),
             (&call, b"{", Abi, bool_schema, traced(abi_bool(true)), false),
             (&call, bool_schema, Abi, string_schema, traced(abi_bool(true)), false),
             (&[], b"{", Abi, bool_schema, TraceOutput::NotTraced, true),
