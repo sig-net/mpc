@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -68,9 +69,19 @@ impl SharedBackoff {
         cooldown
     }
 
-    /// Resets the penalty level after a successful call.
+    /// Resets the penalty level once the cooldown window has fully elapsed
     pub fn report_success(&self) {
+        if self.remaining() > Duration::ZERO {
+            return;
+        }
         self.inner.penalty_level.store(0, Ordering::Relaxed);
+    }
+
+    /// Extends the cooldown if `err` looks like provider throttling (429/402).
+    /// Returns the applied cooldown, or `None` when the error is not a
+    /// throttle
+    pub fn engage_if_throttled(&self, err: &anyhow::Error) -> Option<Duration> {
+        is_provider_throttled(err).then(|| self.extend_cooldown())
     }
 
     /// Sleeps until the global cooldown window has elapsed, plus random jitter
@@ -102,6 +113,37 @@ impl SharedBackoff {
     }
 }
 
+/// Runs a single call under `gate`: waits out any engaged cooldown, resets the
+/// penalty level on success, and extends the window when the error looks like
+/// provider throttling (429/402). Single attempt — the caller owns retries.
+pub async fn run_gated<T, F>(
+    gate: &SharedBackoff,
+    operation: &'static str,
+    call: F,
+) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    gate.wait().await;
+    match call.await {
+        Ok(value) => {
+            gate.report_success();
+            Ok(value)
+        }
+        Err(err) => {
+            if let Some(cooldown) = gate.engage_if_throttled(&err) {
+                tracing::warn!(
+                    operation,
+                    error = %err,
+                    ?cooldown,
+                    "provider throttled (429/402), engaging shared cooldown"
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -111,8 +153,10 @@ fn now_ms() -> u64 {
 
 /// Returns true if the error looks like the provider throttling us: HTTP 429
 /// (rate limited) or 402 (payment required, e.g. exhausted credits).
-pub fn is_provider_throttled(e: &anyhow::Error) -> bool {
-    let s = e.to_string();
+fn is_provider_throttled(e: &anyhow::Error) -> bool {
+    // `{:#}` renders the full context chain — a 429 can sit underneath
+    // `with_context` wrappers whose outer message would hide it
+    let s = format!("{e:#}");
     contains_status_code(&s, "429") || contains_status_code(&s, "402")
 }
 
@@ -148,8 +192,9 @@ fn contains_status_code(s: &str, code: &str) -> bool {
     while let Some(pos) = s[start..].find(code) {
         let i = start + pos;
         let end = i + code.len();
-        let before_ok = i == 0 || !bytes[i - 1].is_ascii_digit();
-        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_digit();
+        // alphanumeric boundaries: hex/base58 runs (…a429f…) must not read as status codes
+        let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
         if before_ok && after_ok {
             return true;
         }
@@ -318,27 +363,12 @@ macro_rules! retry_rpc_gated {
         let shared = &$shared;
         let mut attempt_counter: u32 = 0;
         let op = || async {
-            shared.wait().await;
-            let fut = async { $($code)* };
-            match tokio::time::timeout($timeout, fut).await {
-                Ok(Ok(res)) => {
-                    shared.report_success();
-                    Ok(res)
-                }
-                Ok(Err(e)) => {
-                    if $crate::utils::retry::is_provider_throttled(&e) {
-                        let cooldown = shared.extend_cooldown();
-                        tracing::warn!(
-                            operation = $op_name,
-                            error = %e,
-                            ?cooldown,
-                            "provider throttled (429/402), engaging global cooldown"
-                        );
-                    }
-                    Err(e)
-                }
-                Err(_) => Err(anyhow::anyhow!("Operation timed out after {:?}", $timeout)),
-            }
+            $crate::utils::retry::run_gated(shared, $op_name, async {
+                tokio::time::timeout($timeout, async { $($code)* })
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Operation timed out after {:?}", $timeout))?
+            })
+            .await
         };
         use $crate::backon::Retryable as _;
         op.retry(&$strategy.build())
@@ -361,23 +391,14 @@ macro_rules! retry_rpc_gated {
     ($timeout:expr, $strategy:expr, $shared:expr, |$attempt:ident, $err:ident, $sleep:ident| $notify:block, { $($code:tt)* }) => {{
         let shared = &$shared;
         let mut attempt_counter: u32 = 0;
+        // TODO: "rpc" is temporary, replace it with the operation literal as a required parameter
         let op = || async {
-            shared.wait().await;
-            let fut = async { $($code)* };
-            match tokio::time::timeout($timeout, fut).await {
-                Ok(Ok(res)) => {
-                    shared.report_success();
-                    Ok(res)
-                }
-                Ok(Err(e)) => {
-                    if $crate::utils::retry::is_provider_throttled(&e) {
-                        let cooldown = shared.extend_cooldown();
-                        tracing::warn!(error = %e, ?cooldown, "provider throttled (429/402), engaging global cooldown");
-                    }
-                    Err(e)
-                }
-                Err(_) => Err(anyhow::anyhow!("Operation timed out after {:?}", $timeout)),
-            }
+            $crate::utils::retry::run_gated(shared, "rpc", async {
+                tokio::time::timeout($timeout, async { $($code)* })
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Operation timed out after {:?}", $timeout))?
+            })
+            .await
         };
         use $crate::backon::Retryable as _;
         op.retry(&$strategy.build())
@@ -395,6 +416,38 @@ macro_rules! retry_rpc_gated {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_success_keeps_escalation_while_window_active() {
+        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(1), Duration::from_secs(60));
+        let base = gate.extend_cooldown();
+
+        gate.report_success();
+
+        // a success landing inside the active window must not de-escalate
+        assert_eq!(
+            gate.extend_cooldown(),
+            base * 2,
+            "success during an active window must keep the penalty level"
+        );
+    }
+
+    #[test]
+    fn report_success_resets_escalation_after_window_elapses() {
+        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(1), Duration::from_secs(60));
+        let base = gate.extend_cooldown();
+        gate.extend_cooldown();
+
+        // simulate the window having elapsed
+        gate.inner.limited_until_ms.store(0, Ordering::Relaxed);
+        gate.report_success();
+
+        assert_eq!(
+            gate.extend_cooldown(),
+            base,
+            "success after the window elapsed must reset escalation"
+        );
+    }
 
     #[test]
     fn client_errors_are_not_retryable() {
@@ -421,19 +474,11 @@ mod tests {
         let sb = SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
         sb.extend_cooldown();
         let long = sb.extend_cooldown();
-        sb.report_success();
+        // simulate the level having been reset
+        sb.inner.penalty_level.store(0, Ordering::Relaxed);
         let short = sb.extend_cooldown();
         assert!(short < long);
         assert!(sb.remaining() > short);
-    }
-
-    #[test]
-    fn shared_backoff_success_resets_penalty() {
-        let sb = SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
-        sb.extend_cooldown();
-        sb.extend_cooldown();
-        sb.report_success();
-        assert_eq!(sb.extend_cooldown(), Duration::from_millis(100));
     }
 
     #[test]
@@ -450,6 +495,20 @@ mod tests {
         )));
         assert!(!is_provider_throttled(&anyhow::anyhow!(
             "HTTP status client error (403 Forbidden)"
+        )));
+        // a 429 underneath `with_context` still engages (full chain scanned)
+        assert!(is_provider_throttled(
+            &anyhow::anyhow!(
+                "HTTP status client error (429 Too Many Requests) for url (http://x/)"
+            )
+            .context("submitting the midnight respond intent built over the chain at 0x9c1f")
+        ));
+        // hex fragments must not read as throttles (alphanumeric boundaries)
+        assert!(!is_provider_throttled(&anyhow::anyhow!(
+            "submitting the midnight respond intent built over the chain at 0xa429f"
+        )));
+        assert!(!is_provider_throttled(&anyhow::anyhow!(
+            "no spendable dust for transfer c402e5819d2b"
         )));
     }
 
