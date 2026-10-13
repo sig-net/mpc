@@ -43,9 +43,9 @@ struct Args {
     #[arg(short, long, default_value_t = 300)]
     items: usize,
 
-    /// Optional connection pool max size constraint (e.g. 8 to simulate production pool saturation)
-    #[arg(long)]
-    pool_size: Option<usize>,
+    /// Connection pool max size constraint (default: 8 matching production pool size; 0 for unbounded)
+    #[arg(long, default_value_t = 8)]
+    pool_size: usize,
 
     /// Duration of periodic blocking spikes on Redis in milliseconds (default: 250ms)
     #[arg(long, default_value_t = 250)]
@@ -65,6 +65,11 @@ async fn main() -> anyhow::Result<()> {
     integration_tests::utils::init_tracing_log();
     let args = Args::parse();
     let should_flush = !args.no_flush;
+    let effective_pool_size = if args.pool_size == 0 {
+        None
+    } else {
+        Some(args.pool_size)
+    };
 
     println!("\n=========================================================================");
     println!("     MPC REDIS BENCHMARK HARNESS - ISOLATED CONTAINER BASELINE SUITE     ");
@@ -82,6 +87,13 @@ async fn main() -> anyhow::Result<()> {
     );
     println!("  Scenario:               {}", args.scenario);
     println!(
+        "  Connection Pool Max:    {}",
+        match effective_pool_size {
+            Some(sz) => sz.to_string(),
+            None => "Unbounded".to_string(),
+        }
+    );
+    println!(
         "  Keyspace Isolation:     {}",
         if should_flush {
             "Isolated by default (FLUSHDB between scenarios)"
@@ -93,18 +105,31 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Initializing Redis benchmark harness...");
     let mut harness = match &args.redis_url {
-        Some(url) => RedisHarness::from_url(url, args.participants).await?,
+        Some(url) => {
+            RedisHarness::from_url_with_pool_config(
+                url,
+                args.participants,
+                effective_pool_size,
+                Some(std::time::Duration::from_secs(5)),
+            )
+            .await?
+        }
         None => {
             RedisHarness::spawn_with_pool_config(
                 args.participants,
-                args.pool_size,
+                effective_pool_size,
                 Some(std::time::Duration::from_secs(5)),
             )
             .await?
         }
     };
     harness.set_flush_between(should_flush);
+    let pool_status = harness.pool.status();
     println!("Connected to Redis at: {}", harness.redis_url);
+    println!(
+        "Connection pool ready: max_size={}, current_size={}, available={}",
+        pool_status.max_size, pool_status.size, pool_status.available
+    );
 
     let should_run = |s: BenchScenario| args.scenario == BenchScenario::All || args.scenario == s;
 

@@ -847,12 +847,17 @@ impl RedisHarness {
 
     /// Connect to an existing external Redis instance at the given URL (e.g. redis://127.0.0.1:6379).
     pub async fn from_url(redis_url: &str, num_participants: usize) -> anyhow::Result<Self> {
-        let parsed_url = url::Url::parse(redis_url).context("invalid redis url")?;
-        let cfg = RedisPoolConfig::from_url(parsed_url);
-        let pool = cfg
-            .create_pool(Some(RedisRuntime::Tokio1))
-            .context("failed to create redis pool")?;
+        Self::from_url_with_pool_config(redis_url, num_participants, None, None).await
+    }
 
+    /// Connect to an existing external Redis instance with explicit connection pool configuration.
+    pub async fn from_url_with_pool_config(
+        redis_url: &str,
+        num_participants: usize,
+        max_pool_size: Option<usize>,
+        timeout: Option<Duration>,
+    ) -> anyhow::Result<Self> {
+        let pool = Self::build_pool(redis_url, max_pool_size, timeout)?;
         Self::init(None, redis_url.to_string(), pool, num_participants).await
     }
 
@@ -954,12 +959,16 @@ impl RedisHarness {
         }
 
         let mem = RedisDiagnostics::fetch_memory_snapshot(&self.pool).await?;
+        let status = self.pool.status();
         println!(
-            "   Keyspace post-run: {} keys in Redis (DBSIZE) | Memory: used={} rss={} frag_ratio={:.2}",
+            "   Keyspace post-run: {} keys in Redis (DBSIZE) | Memory: used={} rss={} frag_ratio={:.2} | Pool: max={} active={} available={}",
             mem.total_keys,
             mem.used_memory_human,
             mem.used_memory_rss_human,
-            mem.fragmentation_ratio
+            mem.fragmentation_ratio,
+            status.max_size,
+            status.size,
+            status.available
         );
         Ok(())
     }
@@ -1371,6 +1380,12 @@ impl RedisHarness {
         if self.participants.is_empty() || tasks_per_participant == 0 || items_per_task == 0 {
             return Ok(vec![LatencySummary::empty("saturated_insert_triple")]);
         }
+
+        let pool_status = self.pool.status();
+        println!(
+            "   -> Connection pool status: max_size={} (active={}, available={}, waiting={})",
+            pool_status.max_size, pool_status.size, pool_status.available, pool_status.waiting
+        );
 
         // 1. Continuous 100ms polling across all participants
         let poller = self.spawn_background_polling(false);
