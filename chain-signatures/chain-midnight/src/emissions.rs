@@ -957,6 +957,170 @@ mod tests {
         );
     }
 
+    /// `direct_caller` trusts the ledger to reject call graphs that would attribute a
+    /// singleton call to a contract that did not make it. Pin those rules on the pinned
+    /// ledger, so a ledger upgrade that relaxes one fails here.
+    #[test]
+    fn the_ledger_rejects_call_graphs_that_would_misattribute_the_singleton_caller() {
+        use midnight_ledger_v9::error::{
+            EffectsCheckError, MalformedTransaction, SequencingCheckError,
+        };
+        use midnight_ledger_v9::structure::LedgerState;
+        use midnight_ledger_v9::verify::WellFormedStrictness;
+
+        #[derive(Debug)]
+        enum Verdict {
+            /// Hand-built intents carry no real binding commitment, so reaching the
+            /// Pedersen check means every call-graph check passed.
+            CallGraphAccepted,
+            ClaimOfAbsentCall,
+            DoubleClaim,
+            DuplicatedClaimedCall,
+        }
+        /// Case name, transaction, ledger verdict, and the direct caller the MPC reads
+        /// for each singleton call.
+        type Case = (
+            &'static str,
+            DecodedTransaction,
+            Verdict,
+            Vec<Option<[u8; 32]>>,
+        );
+
+        let in_segments = |segments: Vec<(u16, Vec<ContractCall<ProofMarker, DefaultDB>>)>| {
+            let mut intents = HashMap::new();
+            for (segment, calls) in segments {
+                let actions: Vec<ContractAction<ProofMarker, DefaultDB>> =
+                    calls.into_iter().map(ContractAction::from).collect();
+                intents = intents.insert(
+                    segment,
+                    Intent {
+                        guaranteed_unshielded_offer: None,
+                        fallible_unshielded_offer: None,
+                        actions: Array::new_from_slice(&actions),
+                        dust_actions: None,
+                        ttl: Timestamp::from_secs(0),
+                        binding_commitment: PureGeneratorPedersen::largest_representable(),
+                    },
+                );
+            }
+            midnight_ledger_v9::structure::Transaction::Standard(StandardTransaction {
+                network_id: "undeployed".to_string(),
+                intents,
+                guaranteed_coins: None,
+                fallible_coins: HashMap::new(),
+                binding_randomness: EmbeddedFr::default(),
+            })
+        };
+
+        const IMPOSTOR: [u8; 32] = [0x56; 32];
+        let singleton = call(SINGLETON, Some(Vec::new()), None);
+        let mut unrelated_singleton = call(SINGLETON, Some(Vec::new()), None);
+        unrelated_singleton.communication_commitment = Fr::from(7u64);
+        let cases: Vec<Case> = vec![
+            (
+                "the integrator claims the singleton call",
+                transaction(vec![
+                    claiming(OTHER_CONTRACT, &singleton),
+                    singleton.clone(),
+                ]),
+                Verdict::CallGraphAccepted,
+                vec![Some(OTHER_CONTRACT)],
+            ),
+            (
+                "an unclaimed singleton call beside a call on the integrator",
+                transaction(vec![
+                    call(OTHER_CONTRACT, Some(Vec::new()), None),
+                    singleton.clone(),
+                ]),
+                Verdict::CallGraphAccepted,
+                vec![None],
+            ),
+            (
+                "the integrator claims a call the transaction does not contain",
+                transaction(vec![
+                    claiming(OTHER_CONTRACT, &unrelated_singleton),
+                    singleton.clone(),
+                ]),
+                Verdict::ClaimOfAbsentCall,
+                vec![None],
+            ),
+            (
+                "the claim and the singleton call sit in different intents",
+                in_segments(vec![
+                    (1, vec![claiming(OTHER_CONTRACT, &singleton)]),
+                    (2, vec![singleton.clone()]),
+                ]),
+                Verdict::ClaimOfAbsentCall,
+                vec![None],
+            ),
+            (
+                "the integrator and an impostor both claim the singleton call",
+                transaction(vec![
+                    claiming(OTHER_CONTRACT, &singleton),
+                    claiming(IMPOSTOR, &singleton),
+                    singleton.clone(),
+                ]),
+                Verdict::DoubleClaim,
+                vec![None],
+            ),
+            (
+                "a copy of the claimed singleton call rides along unclaimed",
+                transaction(vec![
+                    claiming(OTHER_CONTRACT, &singleton),
+                    singleton.clone(),
+                    singleton.clone(),
+                ]),
+                Verdict::DuplicatedClaimedCall,
+                // Both copies would read as the integrator's: only the ledger stops this.
+                vec![Some(OTHER_CONTRACT), Some(OTHER_CONTRACT)],
+            ),
+        ];
+
+        let mut strictness = WellFormedStrictness::default();
+        strictness.enforce_balancing = false;
+        strictness.verify_native_proofs = false;
+        strictness.verify_contract_proofs = false;
+        strictness.verify_signatures = false;
+        strictness.enforce_limits = false;
+        let state: LedgerState<DefaultDB> = LedgerState::new("undeployed");
+        for (name, tx, verdict, callers) in cases {
+            let err = tx
+                .well_formed(&state, strictness, Timestamp::from_secs(0))
+                .err()
+                .unwrap_or_else(|| panic!("{name}: hand-built intents cannot bind"));
+            let matched = match verdict {
+                Verdict::CallGraphAccepted => {
+                    matches!(err, MalformedTransaction::PedersenCheckFailure { .. })
+                }
+                Verdict::ClaimOfAbsentCall => matches!(
+                    err,
+                    MalformedTransaction::EffectsCheckFailure(
+                        EffectsCheckError::RealCallsSubsetCheckFailure(_)
+                    )
+                ),
+                Verdict::DoubleClaim => matches!(
+                    err,
+                    MalformedTransaction::EffectsCheckFailure(
+                        EffectsCheckError::ClaimedCallsUniquenessFailure(_)
+                    )
+                ),
+                Verdict::DuplicatedClaimedCall => matches!(
+                    err,
+                    MalformedTransaction::SequencingCheckFailure(
+                        SequencingCheckError::SequencingCorrelationViolation { .. }
+                    )
+                ),
+            };
+            assert!(matched, "{name}: expected {verdict:?}, got {err:?}");
+            let decoded: Vec<Option<[u8; 32]>> = emissions_in(&tx, &SINGLETON)
+                .unwrap()
+                .iter()
+                .map(|call| call.caller)
+                .collect();
+            assert_eq!(decoded, callers, "{name}: direct caller");
+        }
+    }
+
     #[test]
     fn retains_a_silent_singleton_call() {
         let tx = transaction(vec![call(SINGLETON, None, None)]);

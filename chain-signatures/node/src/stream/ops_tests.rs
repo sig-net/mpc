@@ -1450,7 +1450,7 @@ async fn midnight_execution_response_binds_receipt_height_and_outcome() {
 
 #[tokio::test]
 async fn midnight_completion_requires_the_published_metadata_to_match_the_signature() {
-    for case in 0..6 {
+    for case in 0..7 {
         let backlog = Backlog::new();
         let tx = test_bidirectional_tx(94, Chain::Midnight, Chain::Ethereum);
         let entry = backlog.insert_mock_final(&tx).await;
@@ -1474,6 +1474,7 @@ async fn midnight_completion_requires_the_published_metadata_to_match_the_signat
                 block_height: metadata.block_height,
                 outcome_kind: metadata.outcome_kind,
                 serialized_output_length: response.output.len() as u64,
+                output_hash: mpc_compact_hashing::compute_attested_output_hash(&response.output),
                 digest,
             }),
         };
@@ -1487,6 +1488,7 @@ async fn midnight_completion_requires_the_published_metadata_to_match_the_signat
             3 => event.attestation.as_mut().unwrap().serialized_output_length += 1,
             4 => event.attestation.as_mut().unwrap().digest[0] ^= 1,
             5 => {}
+            6 => event.attestation.as_mut().unwrap().output_hash[0] ^= 1,
             _ => unreachable!(),
         }
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -1759,17 +1761,25 @@ async fn published_midnight_response(
     (backlog, event)
 }
 
-/// A response without output has a digest that follows from the request alone, so a node
-/// that never observed the outcome settles it at the same source event as the nodes that
-/// attested it, and their checkpoints agree.
+/// The event carries the output's length and hash, so a response's digest follows from
+/// the request and the event alone: a node that never observed the outcome settles it at
+/// the same source event as the nodes that attested it, and their checkpoints agree.
 #[tokio::test]
-async fn midnight_output_free_response_settles_entries_that_missed_the_outcome() {
+async fn midnight_response_settles_entries_that_missed_the_outcome() {
     let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
     for (outcome, parked) in [
         (ExecutionOutcome::Unviable, false),
         (ExecutionOutcome::Failed, false),
         (ExecutionOutcome::Success { output: vec![] }, false),
+        (ExecutionOutcome::Success { output: vec![1] }, false),
+        (
+            ExecutionOutcome::Success {
+                output: (0..100).collect(),
+            },
+            false,
+        ),
         (ExecutionOutcome::Unviable, true),
+        (ExecutionOutcome::Success { output: vec![1] }, true),
     ] {
         let case = format!("{outcome:?}, parked: {parked}");
         let tx = test_bidirectional_tx(101, Chain::Midnight, Chain::Ethereum);
@@ -1831,8 +1841,7 @@ async fn midnight_output_free_response_settles_entries_that_missed_the_outcome()
 }
 
 /// Every response of one contract and key version is signed by the same attestation key, so
-/// only a digest recomputed from this request binds a response to it. A response carrying
-/// output cannot be recomputed before the execution is observed.
+/// only a digest recomputed from this request and the event binds a response to it.
 #[tokio::test]
 async fn midnight_unobserved_entries_keep_responses_they_cannot_bind() {
     let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
@@ -1842,8 +1851,9 @@ async fn midnight_unobserved_entries_keep_responses_they_cannot_bind() {
         "altered height",
         "altered kind",
         "altered digest",
+        "altered output length",
+        "altered output hash",
         "forged signature",
-        "response with output",
         "legacy source chain",
     ] {
         let (tx, event) = match case {
@@ -1853,12 +1863,6 @@ async fn midnight_unobserved_entries_keep_responses_they_cannot_bind() {
                     published_midnight_response(&other, ExecutionOutcome::Unviable, 7123, &root_sk)
                         .await;
                 event.request_id = pending.request_id;
-                (pending.clone(), event)
-            }
-            "response with output" => {
-                let output = ExecutionOutcome::Success { output: vec![1] };
-                let (_, event) =
-                    published_midnight_response(&pending, output, 7123, &root_sk).await;
                 (pending.clone(), event)
             }
             "legacy source chain" => {
@@ -1881,6 +1885,8 @@ async fn midnight_unobserved_entries_keep_responses_they_cannot_bind() {
                         attestation.outcome_kind = mpc_primitives::AttestationOutcomeKind::Failed
                     }
                     "altered digest" => attestation.digest[0] ^= 1,
+                    "altered output length" => attestation.serialized_output_length += 1,
+                    "altered output hash" => attestation.output_hash[0] ^= 1,
                     "forged signature" => event.signature.s += Scalar::ONE,
                     _ => unreachable!(),
                 }
@@ -1893,11 +1899,7 @@ async fn midnight_unobserved_entries_keep_responses_they_cannot_bind() {
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
         let result =
             process_respond_bidirectional_event(event, &ctx, root_sk.public_key().into()).await;
-        assert_eq!(
-            result.is_ok(),
-            matches!(case, "response with output" | "legacy source chain"),
-            "{case}"
-        );
+        assert_eq!(result.is_ok(), case == "legacy source chain", "{case}");
         assert!(
             ctx.backlog
                 .get(tx.source_chain, &tx.sign_id())

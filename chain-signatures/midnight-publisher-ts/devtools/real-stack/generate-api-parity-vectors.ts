@@ -1,12 +1,14 @@
 import { writeFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { createCircuitContext, createConstructorContext } from "@midnight-ntwrk/compact-runtime";
-import { SigningKey, getBytes } from "ethers";
+import { SigningKey, decodeRlp, encodeRlp, getBytes, toBeArray } from "ethers";
 import {
+  calculateAttestedOutputHash,
   calculateRequestId,
   calculateEvmType2TxParamsDigest,
   decodeSignetLogEvents,
   decodeRespondBidirectionalEventPayload,
+  signBidirectionalEventToUnsignedEvmTransaction,
 } from "@sig-net/midnight";
 import { calculateSignetAttestationDigest } from "@sig-net/midnight/testing";
 import { Contract as SingletonContract } from "@sig-net/midnight-contract";
@@ -44,11 +46,11 @@ const record: Parameters<typeof pureCircuits.requestId34>[0] = {
     accessListEntryCount: 0n,
     accessList: [],
   },
-  executionDest: padded("eip155:31337", 32),
+  executionDest: padded("eip155:31337", 64),
   signatureDest: 0,
   params: new Uint8Array(64),
   outputDeserializationSchema: padded("uint256", 34),
-  respondSerializationSchema: padded("uint256", 34),
+  respondSerializationSchema: new Uint8Array(0),
 };
 const requestId = pureCircuits.requestId34(record);
 assert.deepEqual(requestId, calculateRequestId(record));
@@ -58,7 +60,6 @@ assert.deepEqual(
     signatureDest: 1,
     params: new Uint8Array(64).fill(7),
     outputDeserializationSchema: padded("different-output-schema", 34),
-    respondSerializationSchema: padded("different-response-schema", 34),
   }),
   requestId,
 );
@@ -109,6 +110,29 @@ const partial: Parameters<typeof pureCircuits.requestId223>[0] = {
 };
 type Records = [typeof record, typeof minimal, typeof unused, typeof partial];
 const defaults: Records = [record, minimal, unused, partial];
+function unsignedTransaction(request: Records[number]) {
+  if (request.txParams.nonce <= BigInt(Number.MAX_SAFE_INTEGER)) {
+    return {
+      serializedTransaction:
+        signBidirectionalEventToUnsignedEvmTransaction(request).unsignedSerialized.slice(2),
+      transactionOracle: "SDK signBidirectionalEventToUnsignedEvmTransaction",
+    };
+  }
+  // The SDK converts nonce to a JS number; ethers rejects non-safe integers.
+  // Retain its field assembly but encode the full-width nonce with ethers RLP.
+  assert.throws(() => signBidirectionalEventToUnsignedEvmTransaction(request), /overflow/);
+  const transaction = signBidirectionalEventToUnsignedEvmTransaction({
+    ...request,
+    txParams: { ...request.txParams, nonce: 0n },
+  });
+  const fields = decodeRlp(`0x${transaction.unsignedSerialized.slice(4)}`);
+  assert.ok(Array.isArray(fields));
+  fields[1] = `0x${hex(toBeArray(request.txParams.nonce))}`;
+  return {
+    serializedTransaction: `02${encodeRlp(fields).slice(2)}`,
+    transactionOracle: "SDK field assembly with ethers RLP full-width nonce",
+  };
+}
 async function requestVector(name: string, index: 0 | 1 | 2 | 3, records = defaults) {
   const ids = [
     pureCircuits.requestId34(records[0]),
@@ -134,6 +158,7 @@ async function requestVector(name: string, index: 0 | 1 | 2 | 3, records = defau
     name,
     requestId: hex(ids[index]!),
     txParamsDigest: hex(digests[index]!),
+    ...unsignedTransaction(records[index]),
     atoms: cell.value.map(hex),
     widths: cell.alignment.map((segment) => {
       assert.ok(segment.tag === "atom" && segment.value.tag === "bytes");
@@ -209,6 +234,15 @@ const digests: ReadonlyMap<number, typeof pureCircuits.digest0> = new Map([
   [62, pureCircuits.digest62],
   [63, pureCircuits.digest63],
 ]);
+const outputHashes: ReadonlyMap<number, typeof pureCircuits.outputHash0> = new Map([
+  [0, pureCircuits.outputHash0],
+  [1, pureCircuits.outputHash1],
+  [30, pureCircuits.outputHash30],
+  [31, pureCircuits.outputHash31],
+  [32, pureCircuits.outputHash32],
+  [62, pureCircuits.outputHash62],
+  [63, pureCircuits.outputHash63],
+]);
 const inputs = [
   ...[0, 1, 30, 31, 32, 62, 63].map((width) => ({
     keyVersion: 1n,
@@ -228,6 +262,10 @@ const vectors = inputs.map((input) => {
   const digestFunction = digests.get(input.data.length);
   assert.ok(digestFunction);
   const cache = input.data;
+  const outputHashFunction = outputHashes.get(input.data.length);
+  assert.ok(outputHashFunction);
+  const outputHash = outputHashFunction(input.data);
+  assert.deepEqual(outputHash, calculateAttestedOutputHash(input.data));
   const digest = digestFunction(rid, input.blockHeight, input.kind, input.data);
   assert.deepEqual(
     digest,
@@ -235,6 +273,7 @@ const vectors = inputs.map((input) => {
   );
   return {
     ...input,
+    outputHash,
     digest,
     cache,
   };
@@ -255,6 +294,7 @@ const signedResponse = (
     blockHeight: 42n,
     outputKind: kind,
     serializedOutputLength: BigInt(data.length),
+    outputHash: calculateAttestedOutputHash(data),
     digest,
     signature: {
       bigR: { x: noncePoint.slice(1, 33).reverse(), y: noncePoint.slice(33) },
@@ -320,6 +360,7 @@ const responseEvent = {
   blockHeight: wireResponse.blockHeight.toString(),
   outputKind: wireResponse.outputKind,
   serializedOutputLength: wireResponse.serializedOutputLength.toString(),
+  outputHash: hex(wireResponse.outputHash),
   digest: hex(wireResponse.digest),
   signature: {
     bigR: { x: hex(wireResponse.signature.bigR.x), y: hex(wireResponse.signature.bigR.y) },
@@ -332,8 +373,8 @@ const fixture = {
   responseEvent,
   compiler: "0.33.0-rc.2",
   runtime: "0.18.0-rc.1",
-  reference: "@sig-net/midnight@0.24.0-rc.4/src/Signet.compact",
-  referenceCommit: "f3c3e3906d193db903430f101bdf56aea9713dcf",
+  reference: "@sig-net/midnight@0.25.0-rc.1/src/Signet.compact",
+  referenceCommit: "350f9a3080e4b4073e0f1dafaa3603b05c22be92",
   request: requestVectors[0],
   requestVectors,
   attestations: vectors.map((vector) => ({
@@ -342,6 +383,7 @@ const fixture = {
     kind: Number(vector.kind),
     blockHeight: vector.blockHeight.toString(),
     data: hex(vector.data),
+    outputHash: hex(vector.outputHash),
     digest: hex(vector.digest),
     cache: hex(vector.cache),
   })),

@@ -21,6 +21,7 @@ import {
   type WalletFacade,
 } from "@sig-net/midnight-contract-deploy";
 import {
+  bytesToHex,
   contractAddressFromHex,
   assembleCalldata,
   signatureRespondedEventToSignature,
@@ -34,19 +35,24 @@ import {
   type Secp256k1Point,
   type SignetPublicStateSource,
 } from "@sig-net/midnight";
-import { ledger, pureCircuits, type Contract } from "./managed/caller/contract/index.js";
+import { submitPlacement, type IsEvenCall, type PlacementScenario } from "./fallible.js";
+import { ledger, pureCircuits } from "./managed/caller/contract/index.js";
+import type { CallPlacement } from "./placement.js";
 import {
   buildCallerProviders,
   callerCompiledContract,
   CALLER_PRIVATE_STATE_ID,
+  type CallerContract,
+  type CallerProviders,
 } from "./providers.js";
-import { createCallerPrivateState, type CallerPrivateState } from "./witnesses.js";
+import { runVault } from "./vault.js";
+import { createCallerPrivateState } from "./witnesses.js";
 
 const DEPLOYER_SEED = "02".repeat(32);
 const INVOKER_SEED = "03".repeat(32);
 const PUBLISHER_SEED = "04".repeat(32);
 
-type CallerHandle = FoundContract<Contract<CallerPrivateState>>;
+type CallerHandle = FoundContract<CallerContract>;
 
 interface BootstrapRequest {
   op: "bootstrap";
@@ -64,7 +70,9 @@ interface SubmitRequest {
   nonce: string;
   target: string;
   argument: string;
-  outputType: "bool" | "uint256" | "bytes32";
+  outputType?: "bool" | "uint256" | "bytes32";
+  /** Raw output schema bytes as hex, in place of `outputType`. */
+  outputSchema?: string;
 }
 
 interface SignedTransactionRequest {
@@ -85,6 +93,25 @@ interface NotifyAsCallerRequest {
   requestId: string;
 }
 
+interface PlacementCall {
+  nonce: string;
+  target: string;
+  argument: string;
+}
+
+interface SubmitPlacementRequest {
+  op: "submitPlacement";
+  scenario: PlacementScenario;
+  calls: PlacementCall[];
+}
+
+interface RunVaultRequest {
+  op: "runVault";
+  mpcPublicKey: string;
+  evmRpcUrl: string;
+  evmFunderKey: string;
+}
+
 interface ShutdownRequest {
   op: "shutdown";
 }
@@ -96,16 +123,24 @@ type Request =
   | SignedTransactionRequest
   | SettleResponseRequest
   | NotifyAsCallerRequest
+  | SubmitPlacementRequest
+  | RunVaultRequest
   | ShutdownRequest;
 
 interface Session {
+  config: MidnightNodeConfig;
+  artifactDir: string;
   facade: WalletFacade;
+  providers: CallerProviders;
   caller: CallerHandle;
   callerAddress: string;
+  centralAddress: string;
   impersonator: CallerHandle;
   publicDataProvider: SignetPublicStateSource;
   reader: SignetRequestResponseReader;
   responseKey?: Secp256k1Point;
+  /** Placement of the transaction most recently handed to the proof server. */
+  lastPlacement?: CallPlacement[];
 }
 
 let session: Session | undefined;
@@ -116,14 +151,6 @@ const diagnostics = (...values: unknown[]) => {
 console.log = diagnostics;
 console.info = diagnostics;
 console.warn = diagnostics;
-
-function nulPadded(text: string, width: number): Uint8Array {
-  const encoded = new TextEncoder().encode(text);
-  if (encoded.length > width) throw new Error(`'${text}' exceeds ${String(width)} bytes`);
-  const padded = new Uint8Array(width);
-  padded.set(encoded);
-  return padded;
-}
 
 function bytes(hex: string, width?: number): Uint8Array {
   const bare = hex.replace(/^0x/i, "");
@@ -137,6 +164,29 @@ function bytes(hex: string, width?: number): Uint8Array {
     throw new Error(`expected ${width} bytes, got ${result.length}`);
   }
   return result;
+}
+
+// The output schema must be canonical JSON NUL-padded to the caller's 64-byte field.
+function padSchema(schema: Uint8Array): Uint8Array {
+  if (schema.length > 64) throw new Error(`schema exceeds 64 bytes: ${schema.length}`);
+  const padded = new Uint8Array(64);
+  padded.set(schema);
+  return padded;
+}
+
+function outputSchema(outputType: string): Uint8Array {
+  return padSchema(
+    new TextEncoder().encode(JSON.stringify([{ name: "success", type: outputType }])),
+  );
+}
+
+function requestOutputSchema(request: SubmitRequest): Uint8Array {
+  if (request.outputSchema !== undefined) {
+    if (request.outputType !== undefined) throw new Error("give outputType or outputSchema");
+    return padSchema(bytes(request.outputSchema));
+  }
+  if (request.outputType === undefined) throw new Error("outputType or outputSchema is required");
+  return outputSchema(request.outputType);
 }
 
 async function waitFor<T>(description: string, read: () => Promise<T | undefined>): Promise<T> {
@@ -292,6 +342,9 @@ async function bootstrap(request: BootstrapRequest) {
     invokerKeys,
     request.config,
     join(request.artifactDir, "caller.leveldb"),
+    (placement) => {
+      if (session !== undefined) session.lastPlacement = placement;
+    },
   );
   const findCaller = (contractAddress: string) =>
     findDeployedContract(providers, {
@@ -303,9 +356,13 @@ async function bootstrap(request: BootstrapRequest) {
   const caller = await findCaller(callerDeployment.contractAddress);
   const impersonator = await findCaller(impersonatorDeployment.contractAddress);
   session = {
+    config: request.config,
+    artifactDir: request.artifactDir,
     facade,
+    providers,
     caller,
     callerAddress: callerDeployment.contractAddress,
+    centralAddress: central.contractAddress,
     impersonator,
     publicDataProvider: providers.publicDataProvider,
     reader: new SignetRequestResponseReader({
@@ -348,6 +405,37 @@ async function dispatch(request: Request): Promise<unknown> {
       requestIdBytes(requestId),
     );
     return {};
+  }
+  if (request.op === "runVault") {
+    return runVault({
+      config: active.config,
+      artifactDir: active.artifactDir,
+      centralAddress: active.centralAddress,
+      mpcPublicKey: request.mpcPublicKey,
+      evmRpcUrl: request.evmRpcUrl,
+      evmFunderKey: request.evmFunderKey,
+      deployerSeed: DEPLOYER_SEED,
+      userSeed: INVOKER_SEED,
+      userFacade: active.facade,
+    });
+  }
+  if (request.op === "submitPlacement") {
+    const calls = request.calls.map((call): IsEvenCall => ({
+      evmNonce: BigInt(call.nonce),
+      to: bytes(call.target, 20),
+      argWord: bytes(call.argument, 32),
+    }));
+    return submitPlacement(
+      {
+        providers: active.providers,
+        callerAddress: active.callerAddress,
+        signetAddress: active.centralAddress,
+        schema: outputSchema("bool"),
+        bumpGate: () => active.caller.callTx.bumpGate(),
+      },
+      request.scenario,
+      calls,
+    );
   }
   if (request.op === "signedTransaction") {
     const requestId = parseRequestIdHex(request.requestId);
@@ -410,9 +498,11 @@ async function dispatch(request: Request): Promise<unknown> {
           ? pureCircuits.checkResponse1
           : serializedOutput.length === 8
             ? pureCircuits.checkResponse8
-            : serializedOutput.length === 32
-              ? pureCircuits.checkResponse32
-              : undefined;
+            : serializedOutput.length === 20
+              ? pureCircuits.checkResponse20
+              : serializedOutput.length === 32
+                ? pureCircuits.checkResponse32
+                : undefined;
     if (check === undefined) throw new Error(`unsupported output width ${serializedOutput.length}`);
     const response = await waitFor("a verified respondBidirectional entry", async () => {
       for (const candidate of await active.reader.getRespondBidirectionalEvents(requestId)) {
@@ -428,6 +518,41 @@ async function dispatch(request: Request): Promise<unknown> {
       return undefined;
     });
     const circuitInput = respondBidirectionalEventToCircuitInput(response);
+    const flipFirst = (value: Uint8Array) =>
+      value.map((byte, index) => (index === 0 ? byte ^ 1 : byte));
+    for (const [field, value] of [
+      ["requestId", { ...circuitInput, requestId: flipFirst(circuitInput.requestId) }],
+      ["blockHeight", { ...circuitInput, blockHeight: circuitInput.blockHeight ^ 1n }],
+      ["outputKind", { ...circuitInput, outputKind: (circuitInput.outputKind + 1) % 3 }],
+      [
+        "serializedOutputLength",
+        { ...circuitInput, serializedOutputLength: circuitInput.serializedOutputLength ^ 1n },
+      ],
+      ["outputHash", { ...circuitInput, outputHash: flipFirst(circuitInput.outputHash) }],
+    ] as const) {
+      if (check(value, serializedOutput, responseKey))
+        throw new Error(`accepted tampered ${field}`);
+    }
+    if (serializedOutput.length > 0) {
+      if (check(circuitInput, flipFirst(serializedOutput), responseKey))
+        throw new Error("accepted tampered serialized output");
+    }
+    const wrongWidth = new Uint8Array(serializedOutput.length === 32 ? 20 : 32);
+    wrongWidth.set(serializedOutput.subarray(0, wrongWidth.length));
+    const checkWrongWidth =
+      wrongWidth.length === 20 ? pureCircuits.checkResponse20 : pureCircuits.checkResponse32;
+    if (checkWrongWidth(circuitInput, wrongWidth, responseKey))
+      throw new Error("accepted serialized output at a different width");
+    // The upstream checker recomputes the digest from the other event fields; the
+    // carried digest is reader metadata and deliberately excluded from verification.
+    if (
+      !check(
+        { ...circuitInput, digest: flipFirst(circuitInput.digest) },
+        serializedOutput,
+        responseKey,
+      )
+    )
+      throw new Error("reader metadata changed upstream circuit verification");
     if (request.rejectPaddedReplay === true) {
       const padded = new Uint8Array(8);
       padded.set(serializedOutput);
@@ -451,28 +576,37 @@ async function dispatch(request: Request): Promise<unknown> {
           ? active.caller.callTx.verifyResponse
           : serializedOutput.length === 8
             ? active.caller.callTx.verifyResponse8
-            : serializedOutput.length === 32
-              ? active.caller.callTx.verifyResponse32
-              : undefined;
+            : serializedOutput.length === 20
+              ? active.caller.callTx.verifyResponse20
+              : serializedOutput.length === 32
+                ? active.caller.callTx.verifyResponse32
+                : undefined;
     if (verify === undefined)
       throw new Error(`unsupported output width ${serializedOutput.length}`);
     await verify(circuitInput, serializedOutput);
     await waitFor("the caller request to be removed", async () =>
       (await callerHasRequest(active, requestId)) ? undefined : true,
     );
+    let duplicateRejected = false;
+    try {
+      await verify(circuitInput, serializedOutput);
+    } catch (error) {
+      if (!String(error).includes("Request not found")) throw error;
+      duplicateRejected = true;
+    }
+    if (!duplicateRejected) throw new Error("Compact accepted a duplicate settlement");
+    if (await callerHasRequest(active, requestId))
+      throw new Error("duplicate settlement restored the consumed request");
     return {};
   }
-  await active.caller.callTx.submitIsEvenRequest(
+  const submitted = await active.caller.callTx.submitIsEvenRequest(
     BigInt(request.nonce),
     1n,
     bytes(request.target, 20),
     bytes(request.argument, 32),
-    // The output schema must be canonical JSON NUL-padded to the field width, and the
-    // reserved respond schema stays empty.
-    nulPadded(JSON.stringify([{ name: "success", type: request.outputType }]), 64),
-    new Uint8Array(64),
+    requestOutputSchema(request),
   );
-  return {};
+  return { requestId: bytesToHex(submitted.private.result), placement: active.lastPlacement };
 }
 
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });

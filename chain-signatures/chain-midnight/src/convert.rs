@@ -174,7 +174,7 @@ mod tests {
             event.output_deserialization_schema,
             record.output_deserialization_schema
         );
-        assert_eq!(event.respond_serialization_schema, b"uint256".to_vec());
+        assert!(event.respond_serialization_schema.is_empty());
         assert_eq!(event.params, "", "params is reserved and travels blank");
         assert_eq!(event.chain, Chain::Midnight);
         assert_eq!(event.chain_ctx, None);

@@ -167,6 +167,16 @@
       "expectedOutputHex": "ababababababababababababababababababababababababababababababababdeadbeef8ba1f109551bd432803012645ac136ddd64dba72100f0e0d0c0b0a0908070605040302010000000000000000000000000000000001"
     },
     {
+      "name": "bytes12 then address keep schema order in a 64-byte schema",
+      "outputSchemaHex": "5b7b226e616d65223a22746167222c2274797065223a2262797465733132227d2c7b226e616d65223a22746f222c2274797065223a2261646472657373227d5d",
+      "isContractCall": true,
+      "trace": {
+        "kind": "Output",
+        "returnDataHex": "a1a2a3a4a5a6a7a8a9aaabac00000000000000000000000000000000000000000000000000000000000000000102030405060708090a0b0c0d0e0f1011121314"
+      },
+      "expectedOutputHex": "a1a2a3a4a5a6a7a8a9aaabac0102030405060708090a0b0c0d0e0f1011121314"
+    },
+    {
       "name": "identifier name '$' is accepted",
       "outputSchemaHex": "5b7b226e616d65223a2224222c2274797065223a22626f6f6c227d5d",
       "isContractCall": true,
