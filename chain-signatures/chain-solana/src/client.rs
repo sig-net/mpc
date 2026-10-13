@@ -120,6 +120,8 @@ impl SolanaClient {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
             catchup_retry: catchup_retry_strategy(),
+            // TODO: `from_config` retakes the stack gate once publish gating
+            // moves inside the client
             shared_backoff: SharedBackoff::new(),
             rpc_client,
             rpc_http_url: sol.rpc_http_url.clone(),
@@ -134,6 +136,7 @@ impl SolanaClient {
         rpc_http_url: String,
         program_address: Pubkey,
         telemetry: Arc<dyn PublisherTelemetry>,
+        shared_backoff: SharedBackoff,
     ) -> Self {
         let keypair = Keypair::new(); // Dummy keypair for indexer mode
         let payer = Arc::new(keypair);
@@ -149,7 +152,9 @@ impl SolanaClient {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
             catchup_retry: catchup_retry_strategy(),
-            shared_backoff: SharedBackoff::new(),
+            // the stack's gate: indexer reads share one cooldown window with
+            // publishes (and vice versa)
+            shared_backoff,
             rpc_client,
             rpc_http_url,
             http_client: reqwest::Client::new(),
@@ -569,6 +574,7 @@ mod tests {
             url.to_string(),
             Pubkey::new_unique(),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .with_fast_retry()
     }
