@@ -297,11 +297,19 @@ fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
         1,
     );
     sign_and_hash_transaction(unsigned_rlp, placeholder)?;
-    let (fields, data_index) = if is_eip1559(unsigned_rlp) {
-        (Rlp::new(&unsigned_rlp[1..]), 7)
+    let (fields, to_index, data_index) = if is_eip1559(unsigned_rlp) {
+        (Rlp::new(&unsigned_rlp[1..]), 5, 7)
     } else {
-        (Rlp::new(unsigned_rlp), 5)
+        (Rlp::new(unsigned_rlp), 3, 5)
     };
+    // An empty `to` creates a contract, which extraction refuses, and Ethereum
+    // rejects any other length.
+    let to = fields.at(to_index)?.data()?;
+    anyhow::ensure!(
+        to.len() == 20,
+        "`to` is {} bytes, not a 20-byte call target",
+        to.len()
+    );
     // A list here would make Ethereum reject the transaction.
     Ok(fields.at(data_index)?.data()?)
 }
@@ -547,7 +555,13 @@ mod tests {
 
     fn legacy_tx(chain_id: u64) -> Vec<u8> {
         let mut rlp = super::EthereumTxRlp::new_list(9);
-        for _ in 0..6 {
+        // nonce, gas price, gas limit
+        for _ in 0..3 {
+            rlp.append_u64(0);
+        }
+        rlp.stream.append(&vec![0x11u8; 20]);
+        // value, data
+        for _ in 0..2 {
             rlp.append_u64(0);
         }
         rlp.append_u64(chain_id);
@@ -617,6 +631,29 @@ mod tests {
         let boundary = (u64::MAX - 35) / 2;
         assert!(super::validate_unsigned_transaction(&legacy_tx(boundary)).is_err());
         assert!(super::validate_unsigned_transaction(&legacy_tx(boundary - 1)).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_contract_creation() {
+        let eip1559 = |to| {
+            TxEip1559 {
+                chain_id: 1,
+                to,
+                ..Default::default()
+            }
+            .encoded_for_signing()
+        };
+        let call = TxKind::Call(alloy::primitives::Address::repeat_byte(0x11));
+        assert!(super::validate_unsigned_transaction(&eip1559(call)).is_ok());
+        assert!(super::validate_unsigned_transaction(&eip1559(TxKind::Create)).is_err());
+
+        // nonce, gas price, gas limit, empty `to`, value, data, then EIP-155 chain id 1
+        let mut legacy_create = super::EthereumTxRlp::new_list(9);
+        for field in [0, 0, 0, 0, 0, 0, 1, 0, 0] {
+            legacy_create.append_u64(field);
+        }
+        assert!(super::validate_unsigned_transaction(&legacy_tx(1)).is_ok());
+        assert!(super::validate_unsigned_transaction(&legacy_create.into_vec()).is_err());
     }
 
     #[test]

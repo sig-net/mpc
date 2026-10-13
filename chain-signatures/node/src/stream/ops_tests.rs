@@ -398,7 +398,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
     rlp_s.append(&0u64);
     rlp_s.append(&0u64);
     rlp_s.append(&0u64);
-    rlp_s.append(&Vec::<u8>::new());
+    rlp_s.append(&vec![0x11u8; 20]);
     rlp_s.append(&0u64);
     rlp_s.append(&Vec::<u8>::new());
     rlp_s.append(&1u64);
@@ -966,7 +966,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     rlp_s.append(&0u64);
     rlp_s.append(&0u64);
     rlp_s.append(&0u64);
-    rlp_s.append(&Vec::<u8>::new());
+    rlp_s.append(&vec![0x11u8; 20]);
     rlp_s.append(&0u64);
     rlp_s.append(&Vec::<u8>::new());
     rlp_s.append(&1u64);
