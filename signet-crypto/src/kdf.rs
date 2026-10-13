@@ -482,6 +482,14 @@ mod tests {
         );
     }
 
+    /// `versioned_derivation_path` pins each version to a format by hand, so a
+    /// bump of `LATEST_MPC_KEY_VERSION` without a new match arm would reject
+    /// every request at the new version.
+    #[test]
+    fn latest_key_version_is_supported() {
+        assert!(derive_epsilon_eth(LATEST_MPC_KEY_VERSION, "sender", "path").is_ok());
+    }
+
     #[test]
     fn test_derive_epsilon_checkpoint() {
         let p = DerivationParams::SystemKey("checkpoint".to_string())

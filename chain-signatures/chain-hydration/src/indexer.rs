@@ -183,8 +183,6 @@ impl HydrationSignBidirectionalRequestedEvent {
 
         let request_id = self.generate_request_id();
 
-        // Call the existing derive_epsilon_sol function with the correct parameters
-        // to match the TypeScript implementation
         let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
             self.key_version,
             &self.sender_string(),
