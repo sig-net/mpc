@@ -302,6 +302,24 @@ pub fn print_summary_header() {
     println!("{:-<105}", "");
 }
 
+/// Partitions a combined wall duration between two interleaved operations
+/// proportionally according to the total active time measured for each operation.
+pub fn partition_wall_by_active_time(
+    wall: Duration,
+    op1_samples: &[Duration],
+    op2_samples: &[Duration],
+) -> (Duration, Duration) {
+    let t1: Duration = op1_samples.iter().copied().sum();
+    let t2: Duration = op2_samples.iter().copied().sum();
+    let total = t1 + t2;
+    if total > Duration::ZERO {
+        let r1 = t1.as_secs_f64() / total.as_secs_f64();
+        (wall.mul_f64(r1), wall.mul_f64(1.0 - r1))
+    } else {
+        (wall, wall)
+    }
+}
+
 /// Simulated participant storage handles in the isolated Redis harness.
 #[derive(Clone)]
 pub struct SimulatedParticipant {
@@ -1268,9 +1286,11 @@ impl RedisHarness {
             all_commit.extend(commit);
         }
         let wall = race_start.elapsed();
+        let (peek_wall, commit_wall) =
+            partition_wall_by_active_time(wall, &all_peek, &all_commit);
 
-        let s1 = LatencySummary::calculate("peek_mine_contended", &mut all_peek, wall);
-        let s2 = LatencySummary::calculate("commit_reservation", &mut all_commit, wall);
+        let s1 = LatencySummary::calculate("peek_mine_contended", &mut all_peek, peek_wall);
+        let s2 = LatencySummary::calculate("commit_reservation", &mut all_commit, commit_wall);
 
         Ok(vec![s1, s2])
     }
@@ -1395,20 +1415,28 @@ impl RedisHarness {
             .map(|p| tokio::spawn(p.clone().clear_presignatures(barrier.clone())))
             .collect();
 
-        let mut triple_latencies = Vec::with_capacity(num_p);
-        for t in clear_triple_tasks {
-            let (elapsed, ok) = t.await?;
-            assert!(ok, "triples clear should succeed");
-            triple_latencies.push(elapsed);
-        }
+        let clear_triples = async {
+            let mut latencies = Vec::with_capacity(num_p);
+            for t in clear_triple_tasks {
+                let (elapsed, ok) = t.await?;
+                assert!(ok, "triples clear should succeed");
+                latencies.push(elapsed);
+            }
+            Ok::<_, anyhow::Error>((latencies, clear_start.elapsed()))
+        };
 
-        let mut presig_latencies = Vec::with_capacity(num_p);
-        for t in clear_presig_tasks {
-            let (elapsed, ok) = t.await?;
-            assert!(ok, "presignatures clear should succeed");
-            presig_latencies.push(elapsed);
-        }
-        let wall = clear_start.elapsed();
+        let clear_presigs = async {
+            let mut latencies = Vec::with_capacity(num_p);
+            for t in clear_presig_tasks {
+                let (elapsed, ok) = t.await?;
+                assert!(ok, "presignatures clear should succeed");
+                latencies.push(elapsed);
+            }
+            Ok::<_, anyhow::Error>((latencies, clear_start.elapsed()))
+        };
+
+        let ((mut triple_latencies, triple_wall), (mut presig_latencies, presig_wall)) =
+            tokio::try_join!(clear_triples, clear_presigs)?;
 
         let post_mem = RedisDiagnostics::fetch_memory_snapshot(&self.pool).await?;
         println!(
@@ -1416,8 +1444,10 @@ impl RedisHarness {
             post_mem.total_keys, post_mem.used_memory_human
         );
 
-        let s1 = LatencySummary::calculate("clear_triples_storm", &mut triple_latencies, wall);
-        let s2 = LatencySummary::calculate("clear_presigs_storm", &mut presig_latencies, wall);
+        let s1 =
+            LatencySummary::calculate("clear_triples_storm", &mut triple_latencies, triple_wall);
+        let s2 =
+            LatencySummary::calculate("clear_presigs_storm", &mut presig_latencies, presig_wall);
         Ok(vec![s1, s2])
     }
 
@@ -1521,31 +1551,49 @@ impl RedisHarness {
             })
             .collect();
 
-        let mut all_insert_triples = Vec::with_capacity(num_p * items_per_participant);
-        for t in triple_gen_tasks {
-            all_insert_triples.extend(t.await?);
-        }
+        let triple_gen = async {
+            let mut all = Vec::with_capacity(num_p * items_per_participant);
+            for t in triple_gen_tasks {
+                all.extend(t.await?);
+            }
+            Ok::<_, anyhow::Error>((all, overall_start.elapsed()))
+        };
 
-        let mut all_insert_presigs = Vec::with_capacity(num_p * items_per_participant);
-        for t in presig_gen_tasks {
-            all_insert_presigs.extend(t.await?);
-        }
+        let presig_gen = async {
+            let mut all = Vec::with_capacity(num_p * items_per_participant);
+            for t in presig_gen_tasks {
+                all.extend(t.await?);
+            }
+            Ok::<_, anyhow::Error>((all, overall_start.elapsed()))
+        };
 
-        let mut all_take_triples = Vec::with_capacity(num_p * items_per_participant);
-        let mut all_take_presigs = Vec::with_capacity(num_p * items_per_participant);
-        for t in signer_tasks {
-            let (tt, tp) = t.await?;
-            all_take_triples.extend(tt);
-            all_take_presigs.extend(tp);
-        }
-        let wall = overall_start.elapsed();
+        let signers = async {
+            let mut all_t = Vec::with_capacity(num_p * items_per_participant);
+            let mut all_p = Vec::with_capacity(num_p * items_per_participant);
+            for t in signer_tasks {
+                let (tt, tp) = t.await?;
+                all_t.extend(tt);
+                all_p.extend(tp);
+            }
+            Ok::<_, anyhow::Error>((all_t, all_p, overall_start.elapsed()))
+        };
+
+        let (
+            (mut all_insert_triples, triple_wall),
+            (mut all_insert_presigs, presig_wall),
+            (mut all_take_triples, mut all_take_presigs, signer_wall),
+        ) = tokio::try_join!(triple_gen, presig_gen, signers)?;
 
         poller.stop().await;
 
-        let s1 = LatencySummary::calculate("mixed_insert_triple", &mut all_insert_triples, wall);
-        let s2 = LatencySummary::calculate("mixed_insert_presig", &mut all_insert_presigs, wall);
-        let s3 = LatencySummary::calculate("mixed_take_triple", &mut all_take_triples, wall);
-        let s4 = LatencySummary::calculate("mixed_take_presig", &mut all_take_presigs, wall);
+        let s1 =
+            LatencySummary::calculate("mixed_insert_triple", &mut all_insert_triples, triple_wall);
+        let s2 =
+            LatencySummary::calculate("mixed_insert_presig", &mut all_insert_presigs, presig_wall);
+        let s3 =
+            LatencySummary::calculate("mixed_take_triple", &mut all_take_triples, signer_wall);
+        let s4 =
+            LatencySummary::calculate("mixed_take_presig", &mut all_take_presigs, signer_wall);
 
         Ok(vec![s1, s2, s3, s4])
     }
@@ -1633,8 +1681,13 @@ impl RedisHarness {
             "all presignatures should be pruned when falling below threshold"
         );
 
-        let s1 = LatencySummary::calculate("sync_prune_triples", &mut all_triple_latencies, wall);
-        let s2 = LatencySummary::calculate("sync_prune_presigs", &mut all_presig_latencies, wall);
+        let (triple_wall, presig_wall) =
+            partition_wall_by_active_time(wall, &all_triple_latencies, &all_presig_latencies);
+
+        let s1 =
+            LatencySummary::calculate("sync_prune_triples", &mut all_triple_latencies, triple_wall);
+        let s2 =
+            LatencySummary::calculate("sync_prune_presigs", &mut all_presig_latencies, presig_wall);
         Ok(vec![s1, s2])
     }
 
@@ -1799,9 +1852,12 @@ impl RedisHarness {
             all_commit.extend(commit);
         }
         let wall = overall_start.elapsed();
+        let (peek_wall, commit_wall) =
+            partition_wall_by_active_time(wall, &all_peek, &all_commit);
 
-        let s1 = LatencySummary::calculate("deep_peek_mine", &mut all_peek, wall);
-        let s2 = LatencySummary::calculate("deep_commit_reservation", &mut all_commit, wall);
+        let s1 = LatencySummary::calculate("deep_peek_mine", &mut all_peek, peek_wall);
+        let s2 =
+            LatencySummary::calculate("deep_commit_reservation", &mut all_commit, commit_wall);
         Ok(vec![s1, s2])
     }
 
@@ -1865,13 +1921,16 @@ impl RedisHarness {
             total_commits += committed;
         }
         let wall = overall_start.elapsed();
+        let (peek_wall, commit_wall) =
+            partition_wall_by_active_time(wall, &all_peek, &all_commit);
 
         println!(
             "   -> Churn outcome: {total_commits} successfully committed, {total_aborts} dropped back to pool on timeout/reject"
         );
 
-        let s1 = LatencySummary::calculate("churn_peek_mine", &mut all_peek, wall);
-        let s2 = LatencySummary::calculate("churn_commit_reservation", &mut all_commit, wall);
+        let s1 = LatencySummary::calculate("churn_peek_mine", &mut all_peek, peek_wall);
+        let s2 =
+            LatencySummary::calculate("churn_commit_reservation", &mut all_commit, commit_wall);
         Ok(vec![s1, s2])
     }
 
@@ -1939,13 +1998,16 @@ impl RedisHarness {
             total_conflicts += c_count;
         }
         let wall = overall_start.elapsed();
+        let (win_wall, conflict_wall) =
+            partition_wall_by_active_time(wall, &all_wins, &all_conflicts);
 
         println!(
             "   -> Conflict outcome: {total_wins} successful takes, {total_conflicts} rejected (SREM == 0 Lua conflict errors)"
         );
 
-        let s1 = LatencySummary::calculate("take_winner_success", &mut all_wins, wall);
-        let s2 = LatencySummary::calculate("take_conflict_rejected", &mut all_conflicts, wall);
+        let s1 = LatencySummary::calculate("take_winner_success", &mut all_wins, win_wall);
+        let s2 =
+            LatencySummary::calculate("take_conflict_rejected", &mut all_conflicts, conflict_wall);
         Ok(vec![s1, s2])
     }
 
