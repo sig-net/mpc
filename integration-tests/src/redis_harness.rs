@@ -902,9 +902,11 @@ impl RedisHarness {
         self.print_diagnostics().await
     }
 
-    /// Populate `count` triples on all participants concurrently.
-    /// Returns the list of generated triple IDs grouped by participant index.
-    pub async fn populate_all_triples(&self, base_id: u64, count: usize) -> Vec<Vec<u64>> {
+    async fn populate_all<F, Fut>(&self, base_id: u64, count: usize, f: F) -> Vec<Vec<u64>>
+    where
+        F: Fn(SimulatedParticipant, u64, usize, Vec<Participant>) -> Fut,
+        Fut: std::future::Future<Output = Vec<u64>> + Send + 'static,
+    {
         let participant_list = self.participant_ids();
         let handles: Vec<_> = self
             .participants
@@ -912,10 +914,7 @@ impl RedisHarness {
             .enumerate()
             .map(|(idx, p)| {
                 let p_base = base_id + (idx as u64 * count as u64);
-                tokio::spawn(
-                    p.clone()
-                        .populate_triples(p_base, count, participant_list.clone()),
-                )
+                tokio::spawn(f(p.clone(), p_base, count, participant_list.clone()))
             })
             .collect();
 
@@ -926,29 +925,18 @@ impl RedisHarness {
         results
     }
 
+    /// Populate `count` triples on all participants concurrently.
+    /// Returns the list of generated triple IDs grouped by participant index.
+    pub async fn populate_all_triples(&self, base_id: u64, count: usize) -> Vec<Vec<u64>> {
+        self.populate_all(base_id, count, SimulatedParticipant::populate_triples)
+            .await
+    }
+
     /// Populate `count` presignatures on all participants concurrently.
     /// Returns the list of generated presignature IDs grouped by participant index.
     pub async fn populate_all_presignatures(&self, base_id: u64, count: usize) -> Vec<Vec<u64>> {
-        let participant_list = self.participant_ids();
-        let handles: Vec<_> = self
-            .participants
-            .iter()
-            .enumerate()
-            .map(|(idx, p)| {
-                let p_base = base_id + (idx as u64 * count as u64);
-                tokio::spawn(p.clone().populate_presignatures(
-                    p_base,
-                    count,
-                    participant_list.clone(),
-                ))
-            })
-            .collect();
-
-        let mut results = Vec::with_capacity(handles.len());
-        for h in handles {
-            results.push(h.await.unwrap_or_default());
-        }
-        results
+        self.populate_all(base_id, count, SimulatedParticipant::populate_presignatures)
+            .await
     }
 
     /// Spawn 100ms background stockpile polling loop across all participants.
