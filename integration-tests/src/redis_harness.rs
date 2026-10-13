@@ -88,6 +88,16 @@ impl RedisDiagnostics {
         Ok(())
     }
 
+    /// Flush the Redis database (FLUSHDB).
+    pub async fn flush_db(pool: &Pool) -> anyhow::Result<()> {
+        let mut conn = pool.get().await.context("failed to get connection")?;
+        cmd("FLUSHDB")
+            .query_async::<()>(&mut conn)
+            .await
+            .context("failed to flush database")?;
+        Ok(())
+    }
+
     /// Fetch entries from Redis SLOWLOG.
     pub async fn fetch_slowlog(pool: &Pool, count: usize) -> anyhow::Result<Vec<SlowlogRecord>> {
         let mut conn = pool.get().await.context("failed to get connection")?;
@@ -711,6 +721,7 @@ pub struct RedisHarness {
     pub redis_url: String,
     pub pool: Pool,
     pub participants: Vec<SimulatedParticipant>,
+    pub flush_between: bool,
 }
 
 pub type RedisHarnessCluster = RedisHarness;
@@ -822,6 +833,7 @@ impl RedisHarness {
             redis_url,
             pool,
             participants,
+            flush_between: true,
         })
     }
 
@@ -829,9 +841,34 @@ impl RedisHarness {
         self.participants.iter().map(|p| p.participant).collect()
     }
 
-    /// Reset slowlog before running a test case.
+    /// Enable or disable FLUSHDB between benchmark scenarios (default: true).
+    pub fn set_flush_between(&mut self, flush: bool) {
+        self.flush_between = flush;
+    }
+
+    /// Flush the Redis database (FLUSHDB).
+    pub async fn flush_db(&self) -> anyhow::Result<()> {
+        RedisDiagnostics::flush_db(&self.pool).await
+    }
+
+    /// Fetch memory snapshot and total key count (DBSIZE) from Redis.
+    pub async fn memory_snapshot(&self) -> anyhow::Result<MemorySnapshot> {
+        RedisDiagnostics::fetch_memory_snapshot(&self.pool).await
+    }
+
+    /// Reset slowlog (and optionally FLUSHDB if flush_between is enabled) before running a test case,
+    /// logging the pre-run keyspace and memory state.
     pub async fn reset_diagnostics(&self) -> anyhow::Result<()> {
-        RedisDiagnostics::reset_slowlog(&self.pool).await
+        if self.flush_between {
+            self.flush_db().await?;
+        }
+        RedisDiagnostics::reset_slowlog(&self.pool).await?;
+        let mem = self.memory_snapshot().await?;
+        println!(
+            "   -> Keyspace pre-run: {} keys in Redis (DBSIZE), Memory: {}",
+            mem.total_keys, mem.used_memory_human
+        );
+        Ok(())
     }
 
     /// Print slowlog entries and memory stats captured during the last run.
@@ -854,11 +891,11 @@ impl RedisHarness {
 
         let mem = RedisDiagnostics::fetch_memory_snapshot(&self.pool).await?;
         println!(
-            "   Memory: used={} rss={} frag_ratio={:.2} total_keys={}",
+            "   Keyspace post-run: {} keys in Redis (DBSIZE) | Memory: used={} rss={} frag_ratio={:.2}",
+            mem.total_keys,
             mem.used_memory_human,
             mem.used_memory_rss_human,
-            mem.fragmentation_ratio,
-            mem.total_keys
+            mem.fragmentation_ratio
         );
         Ok(())
     }
@@ -1023,7 +1060,14 @@ impl RedisHarness {
         items_per_participant: usize,
     ) -> anyhow::Result<Vec<LatencySummary>> {
         self.reset_diagnostics().await?;
+        self.run_concurrent_insert_and_take(items_per_participant)
+            .await
+    }
 
+    async fn run_concurrent_insert_and_take(
+        &self,
+        items_per_participant: usize,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
         if self.participants.is_empty() || items_per_participant == 0 {
             return Ok(vec![
                 LatencySummary::empty("concurrent_insert_triple"),
@@ -1160,7 +1204,7 @@ impl RedisHarness {
 
         let poller = enable_polling.then(|| self.spawn_background_polling(false));
         let summaries = self
-            .bench_concurrent_insert_and_take(workload_items)
+            .run_concurrent_insert_and_take(workload_items)
             .await?;
         if let Some(p) = poller {
             p.stop().await;

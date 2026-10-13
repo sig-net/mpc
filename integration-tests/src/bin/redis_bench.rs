@@ -54,12 +54,17 @@ struct Args {
     /// Optional external Redis URL (e.g. redis://127.0.0.1:6379). If omitted, spawns an isolated Redis container.
     #[arg(long)]
     redis_url: Option<String>,
+
+    /// Disable flushing Redis between scenarios (by default, FLUSHDB runs between scenarios for isolation).
+    #[arg(long)]
+    no_flush: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     integration_tests::utils::init_tracing_log();
     let args = Args::parse();
+    let should_flush = !args.no_flush;
 
     println!("\n=========================================================================");
     println!("     MPC REDIS BENCHMARK HARNESS - ISOLATED CONTAINER BASELINE SUITE     ");
@@ -76,10 +81,18 @@ async fn main() -> anyhow::Result<()> {
         "  Architecture:           Pure Redis container (Zero nodes / NEAR / chain processes)"
     );
     println!("  Scenario:               {}", args.scenario);
+    println!(
+        "  Keyspace Isolation:     {}",
+        if should_flush {
+            "Isolated by default (FLUSHDB between scenarios)"
+        } else {
+            "Disabled (accumulating keys across scenarios)"
+        }
+    );
     println!("=========================================================================\n");
 
     println!("Initializing Redis benchmark harness...");
-    let harness = match &args.redis_url {
+    let mut harness = match &args.redis_url {
         Some(url) => RedisHarness::from_url(url, args.participants).await?,
         None => {
             RedisHarness::spawn_with_pool_config(
@@ -90,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
             .await?
         }
     };
+    harness.set_flush_between(should_flush);
     println!("Connected to Redis at: {}", harness.redis_url);
 
     let should_run = |s: BenchScenario| args.scenario == BenchScenario::All || args.scenario == s;
