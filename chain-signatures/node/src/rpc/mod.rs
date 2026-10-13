@@ -19,7 +19,7 @@ use cait_sith::protocol::Participant;
 use dashmap::{mapref::entry::Entry, DashMap, DashSet};
 use k256::AffinePoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, retry_rpc_gated, RetryConfig, SharedBackoff},
+    utils::retry::{retry_op, retry_rpc, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
@@ -721,9 +721,10 @@ pub async fn execute_publish(
         jitter: true,
     };
 
-    let publish_res = retry_rpc!(
+    let publish_res = retry_op!(
         Duration::MAX, // Prevent from timing out
         retry_config,
+        "publish",
         // Log the error and retry attempt
         |attempt, err, sleep| {
             tracing::warn!(
@@ -830,10 +831,11 @@ where
     F: Fn() -> Fut + Send + Sync,
     Fut: std::future::Future<Output = anyhow::Result<CheckpointVoteOutcome>> + Send,
 {
-    let result = retry_rpc_gated!(
+    let result = retry_rpc!(
         timeout,
         retry_config,
         gate,
+        "vote checkpoint",
         |attempt, err, sleep| {
             tracing::warn!(
                 ?checkpoint,

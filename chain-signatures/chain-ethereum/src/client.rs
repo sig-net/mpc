@@ -8,7 +8,7 @@ use crate::rpc::RpcEthereumClient;
 use crate::EthConfig;
 #[cfg(test)]
 use mpc_chain_integration_core::utils::retry::RetryConfig;
-use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, SharedBackoff};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, SharedBackoff};
 
 /// Block number alias shared by the client and indexer.
 pub type BlockNumber = u64;
@@ -176,10 +176,11 @@ impl EthereumClient {
     /// `Ok(None)` if the block is not found, or an error if the request fails.
     pub async fn get_block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
         let max_attempts = self.rpc.retry.max_times;
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
+            "get_block",
             |attempt, err, sleep| {
                 tracing::warn!(
                     "get_block failed (attempt {attempt}/{max_attempts}) for {block_id:?}: {err:#}; retrying in {sleep:?}"
@@ -197,10 +198,11 @@ impl EthereumClient {
         let max_attempts = self.rpc.retry.max_times;
         let num_blocks = block_ids.len();
 
-        let res = retry_rpc_gated!(
+        let res = retry_rpc!(
             self.rpc.batch_timeout,
             self.rpc.retry,
             self.shared_backoff,
+            "get_blocks",
             |attempt, err, sleep| {
                 tracing::warn!(
                     num_blocks,
@@ -226,7 +228,7 @@ impl EthereumClient {
         &self,
         tx_hash: B256,
     ) -> anyhow::Result<Option<TransactionReceipt>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
@@ -238,7 +240,7 @@ impl EthereumClient {
     /// Fetch all logs emitted by `address` within `block_id` via a single
     /// server-filtered `eth_getLogs`.
     pub async fn get_logs(&self, address: Address, block_id: BlockId) -> anyhow::Result<Vec<Log>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
@@ -255,7 +257,7 @@ impl EthereumClient {
         address: Address,
         block_ids: &[BlockId],
     ) -> anyhow::Result<Vec<Vec<Log>>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.batch_timeout,
             self.rpc.retry,
             self.shared_backoff,
@@ -301,7 +303,7 @@ impl EthereumClient {
     }
 
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
@@ -314,7 +316,7 @@ impl EthereumClient {
         &self,
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
@@ -327,7 +329,7 @@ impl EthereumClient {
         &self,
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Option<alloy::primitives::Bytes>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.trace_timeout,
             self.rpc.retry,
             self.shared_backoff,
