@@ -1,4 +1,5 @@
 use mpc_chain_solana::{Keypair, Pubkey, SolConfig, SolIndexerConfig};
+use secrecy::{ExposeSecret as _, SecretString};
 use url::Url;
 
 /// Configures Solana indexer.
@@ -14,7 +15,7 @@ pub struct SolArgs {
         value_parser = parse_account_sk,
         requires_all = ["sol_rpc_http_url", "sol_program_address"]
     )]
-    pub sol_account_sk: Option<String>,
+    pub sol_account_sk: Option<SecretString>,
     /// Solana RPC HTTP URL
     #[arg(
         long,
@@ -39,7 +40,7 @@ fn parse_account_sk(value: &str) -> Result<String, String> {
 impl SolArgs {
     pub fn into_config(self) -> Option<SolConfig> {
         Some(SolConfig {
-            account_sk: self.sol_account_sk?,
+            account_sk: self.sol_account_sk?.expose_secret().to_string(),
             rpc_http_url: self.sol_rpc_http_url?,
             program_address: self.sol_program_address?,
             indexer: SolIndexerConfig::default(),
