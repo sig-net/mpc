@@ -211,6 +211,7 @@ impl ChainPublisher for MidnightPublisher {
         }
         let queued = Instant::now();
         let _flow = self.flow.lock().await;
+        let queued_for = queued.elapsed();
         if !self.still_awaited(action, "queued").await {
             return Ok(());
         }
@@ -241,6 +242,7 @@ impl ChainPublisher for MidnightPublisher {
         };
         let building = Instant::now();
         let bytes = self.client.build(&request).await?;
+        let build_took = building.elapsed();
         if !self.still_awaited(action, "built").await {
             return Ok(());
         }
