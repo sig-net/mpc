@@ -2,49 +2,54 @@
 
 ## TL;DR
 
-The backlog is a node's in-memory map, one per source chain, of the requests it has admitted and that are not yet finished there, with what the source chain says about them.
+The backlog is a node's map, one per source chain, of the requests it has admitted and that are not yet finished there, with what the source chain says about them.
 Checkpoints keep these maps in sync across nodes and they let a joining or rejoining node catch up without replaying every block.
 
 ### Approach
 Checkpoints are due at fixed heights, the same grid for every node.
 A node reaching a checkpoint height votes in the governance contract for a digest of its backlog at that height.
-The contract settles that height once t nodes, the signing threshold, have voted for the same digest.
+The contract settles that height once t nodes, the signing threshold, have voted for the same digest: it records that digest as the agreed checkpoint for the height and never changes it.
 Every node polls for what settled and rebases onto it, from its own store if it created that checkpoint and from a peer if not, so everything it indexes from then on descends from it.
 A node that has run as far ahead of its base as it may stops and waits for a settlement.
 
 ## 1. Background
 
-The network is n nodes, at most f < n/3 faulty, in a crash-recovery model: correct nodes follow the protocol and may crash and restart; faulty nodes may deviate from it arbitrarily.
-t is the signing threshold, f+1 ≤ t ≤ n - f: fewer than t nodes cannot sign, and the correct nodes alone can.
+The model, n nodes of which at most f are faulty, crash-recovery, and the signing threshold t, is that of [protocol_properties.md](protocol_properties.md).
+This doc relies on f < t ≤ n - f: fewer than t nodes cannot sign, and the correct nodes alone can.
 Protocol upgrades, committee and threshold changes are out of scope of this doc.
 
 A correct node is told the truth by its RPC provider, and keeps up: it indexes faster than the chain produces blocks, so it reaches the head from wherever it starts.
 A node whose provider misleads it is faulty, one of the f.
+So a provider that misleads makes every node it serves faulty, and the model holds only if no single provider serves more than f nodes, for any source chain and for the governance chain.
 The governance chain is assumed live and readable throughout.
-A correct node's durable storage survives a crash; a node that lost it, but not its key share, rejoins as a new node (S4).
+A correct node's durable storage survives a crash.
+A node that lost it, but not its key share, starts again from a settled checkpoint fetched from a peer (S4) and has lost only its node-local records.
 
-Requests, signatures, executions, attestations and the source and destination chains are those of bidirectional_calls.md.
+Requests, signatures, executions, attestations and the source and destination chains are those of [bidirectional_calls.md](bidirectional_calls.md).
 
 Vocabulary, per node per source chain:
 
-* **Boundary**: a height at which a checkpoint is due, one every fixed number of blocks.
-  Every correct node computes the same ones.
+* **Boundary**: a height at which a checkpoint is due, one every fixed number of heights.
+  Every correct node uses the same interval.
 
 * **Processed height**: the last height whose block the node has finished processing, its events applied to the backlog.
-  The indexer reports every height, even one where nothing happened, so the processed height passes through every boundary.
+  The indexer reports every height in order, with all of its events, including heights where nothing happened.
   Apart from the indexer, only a re-index (see Base) moves it, back or forward.
 
-* **Caught up**: the node has finished processing every block up to the chain's finalised head, as in bidirectional_calls.md (Section 4.3).
+* **Caught up**: the node has finished processing every block up to the chain's finalised head, the newest block its provider reports as finalised, as in [bidirectional_calls.md](bidirectional_calls.md) (Section 4.3).
+  Acting waits for it, so that a node behind the head does not spend presignatures, posit rounds and peer messages on requests the chain has already answered.
 
 * **Backlog**: one *entry* per request admitted and not *finished*, that is, not yet removed by a finalised source-chain event.
-  An entry holds the request id (rid) as its key, the request as the chain gave it, the contract that made it, and `signatures`.
-  `signatures` is the set of signatures for the request published in finalised blocks on the source chain.
-  * Only finalised source-chain events add, change or remove an entry, and nothing read from a destination chain does; it is the same backlog as in bidirectional_calls.md.
+  An entry holds the request id (rid) as its key, the request as the chain gave it, the contract that made it, and, for a bidirectional request, `signatures`: the signatures for it published in finalised blocks on the source chain.
+  A plain sign request is finished by its first published signature, so it won't have signatures in its entry.
+  * Only finalised source-chain events change the backlog: for a bidirectional request, the handlers of [bidirectional_calls.md](bidirectional_calls.md) (Section 4.3); for a plain sign request, its admission and its first published signature.
+  * Nothing read from a destination chain changes the backlog, and neither does anything the node produced itself.
   * Everything else a node keeps about a request is *node-local*. A node stores in `local` the signatures and attestations it took part in producing and what it read on the destination chain. `local` is persisted and does not go into checkpoints.
 
 * **Acting**: for each entry in the backlog, doing whatever it still needs: signing, looking for the execution, attesting, publishing.
+  These are steps, not states of the entry; how far a node got is node-local.
   Taking part in a signing that a peer started is acting too.
-  It covers what bidirectional_calls.md (Section 4.3) does on admission, on a destination block and on a `Response`.
+  It covers what [bidirectional_calls.md](bidirectional_calls.md) (Section 4.3) does on admission, on a destination block and on a `Response`.
 
 * **Checkpoint**: a height and a snapshot of the backlog at that height.
   Its *digest* binds the chain, the height and the entries over a canonical encoding (Section 2).
@@ -78,7 +83,7 @@ digest(height, backlog) = H(
 
 The request goes in whole because the rid does not cover all of it, e.g., the schema.
 `signatures` goes in because a node rebased onto a checkpoint never reads the `Signature` events below its height again.
-A peer that served a checkpoint without one of them would leave that node looking for too few executions: each signature fixes one transaction ID to look for, and a request can have several (bidirectional_calls.md, Section 2).
+A peer that served a checkpoint without one of them would leave that node looking for too few executions: each signature fixes one transaction ID to look for, and a request can have several, one per signing round whose signature was published ([bidirectional_calls.md](bidirectional_calls.md), Section 2).
 
 The encoding of the entry must be canonical, one byte string per entry; the request has variable-length fields, so each gets its length before it.
 The order must be fixed too: entries go in rid order, and an entry's signatures in the order of their bytes.
@@ -97,10 +102,10 @@ latest_checkpoint(chain) -> CheckpointDigest?
 The contract is the only writer of settled checkpoint digests.
 It settles a height when one digest has votes from t nodes, settles it at most once, and its settled height never decreases.
 A vote arriving at or below the settled height is rejected, and votes it holds at or below a newly settled height are dropped in the settlement step.
-A node's vote counts once per digest, and a node may hold votes for several digests at one height.
+The contract counts each node at most once per digest, so voting again for the same digest adds nothing; a node may still vote for several digests at one height.
 
-Any threshold from f+1 up puts a correct voter behind every settled digest.
-t is the signing threshold: a node that rebases onto a settled checkpoint adopts its requests, so fewer nodes than can sign must not be able to settle one.
+Any settlement threshold of at least f+1 votes guarantees that at least one node that voted for a settled digest is correct, since at most f are faulty, and that one correct voter is all S1's induction needs.
+The contract uses t, the signing threshold, as a margin against bugs, which the model does not cover: a node that rebases onto a settled checkpoint adopts its requests, and at f+1 the faulty nodes and one correct node with a bug could settle a wrong checkpoint, while at t the bug has to be on t - f correct nodes.
 At t = n - f this is every correct node (Section 6).
 
 ### Peer
@@ -117,10 +122,10 @@ get_checkpoint(chain, height, digest) -> Checkpoint
 
 **S1 Agreement.** The backlog at a height is a deterministic function of the node's base and the finalised blocks since, so correct nodes at a height hold the same backlog.
 
-**S2 Validity.** Every settled `(chain, height, digest)` was created by at least one correct node, descending from a settled checkpoint below it.
+**S2 Validity.** Every settled `(chain, height, digest)` was created by at least t - f ≥ 1 correct nodes, each descending from a settled checkpoint below it.
 
 **S3 Containment.** (i) A node neither acts on a source chain's backlog nor casts a new vote while it is missing the newest settled checkpoint it has read from the contract.
-(ii) A node acts and votes only within a bounded distance of its base.
+(ii) A node acts and votes only within `MAX_PENDING` boundaries of its base, and votes at every boundary up to there, skipping none.
 At that bound it stops acting and creates no new checkpoint, until it rebases onto a newer checkpoint.
 
 **S4 Sufficiency.** A node holding only a settled checkpoint and its key share can do the same as a node that indexed from genesis but didn't participate in signing: join signing rounds, find executions, attest, and vote at the next boundary.
@@ -137,12 +142,13 @@ The exception is attesting Unviable (Section 6).
 Described for one node, one source chain; `backlog` is the node's backlog.
 
 * The node indexes finalised blocks in order.
-  At every boundary it creates a checkpoint, stores it in `pending` under its height, and votes for it.
+  At every boundary it passes, not only the next one above its base, it creates a checkpoint, stores it in `pending` under its height, and votes for it.
 * It polls the contract for the settled checkpoint, and one of three things follows.
   * Nothing new has settled: the node does nothing.
   * The settled checkpoint is the one the node stored at that height: it becomes the base.
     If the node has processed up to that height or past it, it carries on.
-    If not, it re-indexes from it.
+    If it is still below that height, it re-indexes from the checkpoint it stored in `pending` at that height, and so jumps forward without fetching anything.
+    This happens after a restart, for instance, since a restart re-indexes from the older base.
   * The settled checkpoint is another one: the node stops indexing, fetches it from a peer, makes it the base and re-indexes from it.
 * A node is *at the cap* when its processed height is `MAX_PENDING` boundaries above its base.
   There it processes no block and waits for a settlement, caught up or not.
@@ -181,9 +187,9 @@ on start:
 ```
 Indexing
 ```
-on block b finalised, the next one above the processed height:
-  if want is set or at the cap:           // wait for checkpoint or settlement;
-    return                                // b comes again
+on block b finalised at height processed_height + 1:
+  if want is set or at the cap:           // leave b unprocessed; indexing
+    return                                // resumes at b after a rebase
   backlog.update(b)                       // add/change/remove entries
   processed_height = height(b)
   if processed_height is a boundary:
@@ -203,7 +209,8 @@ on settlement poll period expiry:
   if h <= base.height:               // nothing new; another digest at
     return                           // base.height is a bug to alert on
   if want is set and h < want.height:
-    return                           // older than what we already read
+    return                           // older than an earlier read: a
+                                     // stale RPC read
   if pending[h] has digest d:        // we created it, so we hold it
     rebase(pending[h])
   else:
@@ -220,12 +227,12 @@ on receiving a peer's reply c to what we asked for:
 Handlers run one at a time on the state above.
 What a handler starts, a contract call, a signing round, a request to a peer, need not finish inside the handler.
 Acting waits until the node is caught up because behind the head its backlog may still hold requests the chain has answered.
-What the node already produced is in its node-local records, so it repeats nothing (bidirectional_calls.md, Section 4.3).
+What the node already produced is in its node-local records, so it repeats nothing ([bidirectional_calls.md](bidirectional_calls.md), Section 4.3).
 
-That document deletes a node-local record when the node processes the `Response` for its request.
+[bidirectional_calls.md](bidirectional_calls.md) (Section 4.3, the `Response` handler) deletes a node-local record when the node processes the `Response` for its request.
 A node that rebases forward skips those Responses, so a caught-up node also deletes the records of requests that are not in its backlog.
 A node that is behind does not, since it may hold a record for a request above its processed height.
-If the node takes a stale head for the real head, it deletes the record of a request it has not reached yet, and later signs or sends for that request a second time, which bidirectional_calls.md makes harmless (C3a, replay protection).
+If the node takes a stale head for the real head, it deletes the record of a request it has not reached yet, and later signs or sends for that request a second time, which [bidirectional_calls.md](bidirectional_calls.md) makes harmless (C3a, replay protection).
 
 ### Rebase and re-index
 
@@ -272,11 +279,11 @@ What it rests on is the blocks being the same, and a node whose provider gave it
 It also needs every node to reach the same verdict on an event from the event alone, which a `Response` does not yet allow (Section 6).
 
 Effects sit outside that argument.
-Acting ahead of agreement can publish a signature or send a transaction twice, and bidirectional_calls.md makes both harmless (C3a, replay protection).
+Acting ahead of agreement can publish a signature or send a transaction twice, and [bidirectional_calls.md](bidirectional_calls.md) makes both harmless (C3a, replay protection).
 
 ### *S2, a settled digest is created by a correct node, chained from genesis.*
 A settled digest has votes from t nodes.
-At most f < t of them are faulty, so one is correct, and a correct node votes only for a checkpoint it built itself, from its base and the blocks after it.
+At most f < t of them are faulty, so at least t - f are correct, and a correct node votes only for a checkpoint it built itself, from its base and the blocks after it.
 The digest covers the entries, so a checkpoint that matches it holds that backlog, and a peer serving it can substitute nothing.
 The base of that node is a settled checkpoint or genesis, so by induction over settled heights the chain goes back to genesis.
 A vote a correct node cast before it rebased or re-indexed stays valid: it is for a checkpoint built the same way from an earlier base.
@@ -295,9 +302,9 @@ Each thing a node does for a request reads the entry and nothing older than the 
 Signing and joining a round read the request and the contract, which give the key and the bytes to sign, and `signatures`, whose being empty says that no signature is final yet.
 Finding an execution reads `signatures`, which give the transaction IDs, and attesting reads the request's schema.
 Voting reads the backlog, which the node builds from the checkpoint and the blocks after it (S1).
-Attesting Unviable is the exception: it follows from the execution or the `Response` of another request (bidirectional_calls.md, Section 4.3), and once that request has left the backlog the checkpoint holds no trace of it.
+Attesting Unviable is the exception: it follows from the execution or the `Response` of another request ([bidirectional_calls.md](bidirectional_calls.md), Section 4.3), and once that request has left the backlog the checkpoint holds no trace of it.
 What the checkpoint cannot give back is node-local: a node that lost its storage has lost the signatures it issued and not yet seen published.
-They are not lost to the network where another correct node was in the round, which keeps and publishes its own (bidirectional_calls.md, Section 6).
+They are not lost to the network where another correct node was in the round, which keeps and publishes its own ([bidirectional_calls.md](bidirectional_calls.md), Section 6).
 
 ### *L1, checkpoints keep settling.*
 Correct nodes agree (S1), so what is left is how many are up:
@@ -348,7 +355,7 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
   Nodes restarted with the fix build the same checkpoints from the base again, and the next settlement realigns them.
 * A node that wrongly takes a request for finished deletes its record, with the signatures it issued.
 * Every copy of a settled checkpoint may be lost.
-  Nothing here recovers from that; retention (Section 5, L2) makes it unlikely.
+  Retention (Section 5, L2) makes it unlikely; rebuilding it by indexing (Options) is the way out.
 * A node that rebuilds a checkpoint at a height and gets a different one is the sign of such a bug.
   It stores and votes for the new one; nothing here stops it, but it is worth alerting on.
   An earlier vote of the node for the old one can still settle it, with no node holding it any more.
@@ -363,6 +370,11 @@ Each closes one of the limits above, at a price.
   A restart then replays at most one interval instead of everything above the newest settled checkpoint.
 * Settle at f+1 instead of t, the smallest threshold with a correct voter behind every settled digest.
   Settlement then needs the fewest nodes up and agreeing: n - 2f - 1 correct nodes may be down.
+* Index to a settled checkpoint instead of only fetching it: a node whose processed height is below `want` keeps indexing from its base, without acting or voting, and holds the settled checkpoint once it reaches that height with the same digest (S1).
+  The cap does not apply while it does so, since it neither acts nor votes.
+  A node that is only behind then needs no peer.
+  It also covers losing every copy of a settled checkpoint: a node with an older base rebuilds it, and a node without any base starts from the genesis checkpoint, given providers that serve blocks back to the chain's start height and the time to index them.
+  A node whose backlog differs builds a different digest and still needs a peer.
 * One vote per node and height in the contract, the newest replacing an older one.
   A vote in flight at a restart can then not settle a digest its node no longer holds, and faulty nodes cannot inflate a tally.
   The price is a contract change.
