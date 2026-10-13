@@ -363,6 +363,13 @@ impl SimulatedParticipant {
                 ids.push(id);
             }
         }
+        assert_eq!(
+            ids.len(),
+            count,
+            "failed to populate expected stockpile triples: requested {}, successfully created {}",
+            count,
+            ids.len()
+        );
         ids
     }
 
@@ -384,6 +391,13 @@ impl SimulatedParticipant {
                 ids.push(id);
             }
         }
+        assert_eq!(
+            ids.len(),
+            count,
+            "failed to populate expected stockpile presignatures: requested {}, successfully created {}",
+            count,
+            ids.len()
+        );
         ids
     }
 
@@ -1253,7 +1267,10 @@ impl RedisHarness {
             .map(|(node_idx, p)| {
                 let remaining_shares = all_ids
                     .get(node_idx)
-                    .map(|ids| ids[prune_count..].to_vec())
+                    .map(|ids| {
+                        let prune_idx = prune_count.min(ids.len());
+                        ids[prune_idx..].to_vec()
+                    })
                     .unwrap_or_default();
                 tokio::spawn(
                     p.clone()
