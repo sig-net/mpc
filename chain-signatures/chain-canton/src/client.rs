@@ -927,8 +927,11 @@ mod tests {
         );
 
         let err = client.publish_signature(&action).await.unwrap_err();
-        assert!(err.to_string().contains("500"));
-        assert!(err.to_string().contains("exhausted"));
+
+        // Check that the error contains the HTTP status code and indicates that retries were exhausted.
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("500"));
+        assert!(rendered.contains("exhausted"));
         submit_mock.assert_async().await;
     }
 
@@ -1019,7 +1022,7 @@ mod tests {
         );
 
         let err = client.publish_signature(&action).await.unwrap_err();
-        assert!(err.to_string().contains("400"));
+        assert!(format!("{err:#}").contains("400"));
         submit_mock.assert_async().await;
     }
 

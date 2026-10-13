@@ -428,15 +428,7 @@ macro_rules! retry_op {
                 );
             })
             .await
-            .map_err(|e| {
-                // Stringify only on true exhaustion; terminal errors must keep
-                // their type for downstream classification
-                if $crate::utils::retry::is_retryable(&e) {
-                    anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1)
-                } else {
-                    e
-                }
-            })
+            .map_err(|e| e.context(format!("exhausted after {} attempts", attempt_counter + 1)))
     }};
 
     // Full form: op_name string, custom notify closure
@@ -461,15 +453,7 @@ macro_rules! retry_op {
                 $notify
             })
             .await
-            .map_err(|e| {
-                // Stringify only on true exhaustion; terminal errors must keep
-                // their type for downstream classification
-                if $crate::utils::retry::is_retryable(&e) {
-                    anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1)
-                } else {
-                    e
-                }
-            })
+            .map_err(|e| e.context(format!("exhausted after {} attempts", attempt_counter + 1)))
     }};
 }
 
@@ -521,15 +505,7 @@ macro_rules! retry_rpc {
                 );
             })
             .await
-            .map_err(|e| {
-                // Stringify only on true exhaustion; terminal errors must keep
-                // their type for downstream classification
-                if $crate::utils::retry::is_retryable(&e) {
-                    anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1)
-                } else {
-                    e
-                }
-            })
+            .map_err(|e| e.context(format!("exhausted after {} attempts", attempt_counter + 1)))
     }};
 
     // Full form: op_name string, custom notify closure
@@ -553,15 +529,7 @@ macro_rules! retry_rpc {
                 $notify
             })
             .await
-            .map_err(|e| {
-                // Stringify only on true exhaustion; terminal errors must keep
-                // their type for downstream classification
-                if $crate::utils::retry::is_retryable(&e) {
-                    anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1)
-                } else {
-                    e
-                }
-            })
+            .map_err(|e| e.context(format!("exhausted after {} attempts", attempt_counter + 1)))
     }};
 }
 
