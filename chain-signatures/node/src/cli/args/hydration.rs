@@ -1,4 +1,5 @@
 use mpc_chain_hydration::HydrationConfig;
+use secrecy::{ExposeSecret as _, SecretString};
 
 /// Configures Hydration indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -17,7 +18,7 @@ pub struct HydrationArgs {
         env("MPC_HYDRATION_SIGNER_URI"),
         requires = "rpc_ws_url"
     )]
-    pub signer_uri: Option<String>,
+    pub signer_uri: Option<SecretString>,
 }
 
 impl HydrationArgs {
@@ -27,7 +28,10 @@ impl HydrationArgs {
             args.extend(["--hydration-rpc-ws-url".to_string(), rpc_ws_url]);
         }
         if let Some(signer_uri) = self.signer_uri {
-            args.extend(["--hydration-signer-uri".to_string(), signer_uri]);
+            args.extend([
+                "--hydration-signer-uri".to_string(),
+                signer_uri.expose_secret().to_string(),
+            ]);
         }
         args
     }
@@ -35,7 +39,7 @@ impl HydrationArgs {
     pub fn into_config(self) -> Option<HydrationConfig> {
         Some(HydrationConfig {
             rpc_ws_url: self.rpc_ws_url?,
-            signer_uri: self.signer_uri?,
+            signer_uri: self.signer_uri?.expose_secret().to_string(),
         })
     }
 
@@ -43,7 +47,7 @@ impl HydrationArgs {
         match config {
             Some(config) => HydrationArgs {
                 rpc_ws_url: Some(config.rpc_ws_url),
-                signer_uri: Some(config.signer_uri),
+                signer_uri: Some(config.signer_uri.into()),
             },
             None => HydrationArgs {
                 rpc_ws_url: None,

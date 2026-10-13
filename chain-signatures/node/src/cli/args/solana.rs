@@ -1,4 +1,5 @@
 use mpc_chain_solana::{SolConfig, SolIndexerConfig};
+use secrecy::{ExposeSecret as _, SecretString};
 use std::time::Duration;
 
 /// Configures Solana indexer.
@@ -11,7 +12,7 @@ pub struct SolArgs {
         env("MPC_SOL_ACCOUNT_SK"),
         requires_all = ["sol_rpc_http_url", "sol_program_address"]
     )]
-    pub sol_account_sk: Option<String>,
+    pub sol_account_sk: Option<SecretString>,
     /// Solana RPC HTTP URL
     #[arg(long, env("MPC_SOL_RPC_HTTP_URL"), requires = "sol_account_sk")]
     pub sol_rpc_http_url: Option<String>,
@@ -27,7 +28,10 @@ impl SolArgs {
     pub fn into_str_args(self) -> Vec<String> {
         let mut args = Vec::with_capacity(6);
         if let Some(sol_account_sk) = self.sol_account_sk {
-            args.extend(["--sol-account-sk".to_string(), sol_account_sk]);
+            args.extend([
+                "--sol-account-sk".to_string(),
+                sol_account_sk.expose_secret().to_string(),
+            ]);
         }
         if let Some(sol_rpc_http_url) = self.sol_rpc_http_url {
             args.extend(["--sol-rpc-http-url".to_string(), sol_rpc_http_url]);
@@ -44,7 +48,7 @@ impl SolArgs {
 
     pub fn into_config(self) -> Option<SolConfig> {
         Some(SolConfig {
-            account_sk: self.sol_account_sk?,
+            account_sk: self.sol_account_sk?.expose_secret().to_string(),
             rpc_http_url: self.sol_rpc_http_url?,
             program_address: self.sol_program_address?,
             indexer: SolIndexerConfig {
@@ -56,7 +60,7 @@ impl SolArgs {
     pub fn from_config(config: Option<SolConfig>) -> Self {
         match config {
             Some(config) => SolArgs {
-                sol_account_sk: Some(config.account_sk),
+                sol_account_sk: Some(config.account_sk.into()),
                 sol_rpc_http_url: Some(config.rpc_http_url),
                 sol_program_address: Some(config.program_address),
                 sol_poll_interval_ms: config.indexer.poll_interval.as_millis() as u64,
