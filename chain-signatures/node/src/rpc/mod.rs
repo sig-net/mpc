@@ -731,7 +731,7 @@ pub async fn execute_publish(
                 retry_count = attempt,
                 elapsed = ?action.timestamp.elapsed(),
                 ?chain,
-                "failed to publish ({err}), retrying in {sleep:?}"
+                "failed to publish ({err:#}), retrying in {sleep:?}"
             );
         },
         // Try to publish the signature
