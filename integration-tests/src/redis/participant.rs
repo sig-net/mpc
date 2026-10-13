@@ -1,0 +1,515 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use cait_sith::protocol::Participant;
+use cait_sith::triples::{TriplePub, TripleShare};
+use cait_sith::PresignOutput;
+use elliptic_curve::CurveArithmetic;
+use k256::Secp256k1;
+use mpc_node::protocol::presignature::Presignature;
+use mpc_node::protocol::triple::Triple;
+use mpc_node::storage::protocol_storage::RemoveOutdatedResult;
+use mpc_node::storage::triple_storage::TriplePair;
+use mpc_node::storage::{PresignatureStorage, TripleStorage};
+use near_account_id::AccountId;
+use tokio::sync::Barrier;
+
+static GLOBAL_ID_COUNTER: AtomicU64 = AtomicU64::new(10_000_000);
+
+pub fn next_id_block(count: u64) -> u64 {
+    GLOBAL_ID_COUNTER.fetch_add(count, Ordering::Relaxed)
+}
+
+/// Simulated participant storage handles in the isolated Redis harness.
+#[derive(Clone)]
+pub struct SimulatedParticipant {
+    pub participant: Participant,
+    pub account_id: AccountId,
+    pub triples: TripleStorage,
+    pub presignatures: PresignatureStorage,
+}
+
+impl SimulatedParticipant {
+    /// Populate a sequential range of triples starting at `base_id`.
+    pub async fn populate_triples(
+        self,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+    ) -> Vec<u64> {
+        let mut ids = Vec::with_capacity(count);
+        for i in 0..count {
+            let id = base_id + i as u64;
+            let pair = dummy_pair(id, &participants);
+            let Some(mut slot) = self.triples.create_slot(id, self.participant).await else {
+                continue;
+            };
+            if slot.insert(pair, self.participant).await {
+                ids.push(id);
+            }
+        }
+        assert_eq!(
+            ids.len(),
+            count,
+            "failed to populate expected stockpile triples: requested {}, successfully created {}",
+            count,
+            ids.len()
+        );
+        ids
+    }
+
+    /// Populate a sequential range of presignatures starting at `base_id`.
+    pub async fn populate_presignatures(
+        self,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+    ) -> Vec<u64> {
+        let mut ids = Vec::with_capacity(count);
+        for i in 0..count {
+            let id = base_id + i as u64;
+            let presig = dummy_presignature(id, &participants);
+            let Some(mut slot) = self.presignatures.create_slot(id, self.participant).await else {
+                continue;
+            };
+            if slot.insert(presig, self.participant).await {
+                ids.push(id);
+            }
+        }
+        assert_eq!(
+            ids.len(),
+            count,
+            "failed to populate expected stockpile presignatures: requested {}, successfully created {}",
+            count,
+            ids.len()
+        );
+        ids
+    }
+
+    /// Run the 100ms background stockpile polling loop until stopped.
+    pub async fn run_polling_loop(self, stop: Arc<AtomicBool>, include_presignatures: bool) {
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        while !stop.load(Ordering::Relaxed) {
+            interval.tick().await;
+            let _ = self.triples.len_generated().await;
+            let _ = self.triples.len_by_owner(self.participant).await;
+            if include_presignatures {
+                let _ = self.presignatures.len_generated().await;
+                let _ = self.presignatures.len_by_owner(self.participant).await;
+            }
+        }
+    }
+
+    /// Concurrently insert a range of triples, measuring latency per insert and tracking failures.
+    pub async fn insert_triples_measured(
+        self,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+        barrier: Arc<Barrier>,
+    ) -> (Vec<Duration>, usize) {
+        barrier.wait().await;
+        let mut latencies = Vec::with_capacity(count);
+        let mut failures = 0;
+
+        for i in 0..count {
+            let id = base_id + i as u64;
+            let pair = dummy_pair(id, &participants);
+
+            let t0 = Instant::now();
+            let success = match self.triples.create_slot(id, self.participant).await {
+                Some(mut slot) => slot.insert(pair, self.participant).await,
+                None => false,
+            };
+            if success {
+                latencies.push(t0.elapsed());
+            } else {
+                failures += 1;
+            }
+        }
+
+        (latencies, failures)
+    }
+
+    /// Concurrently take a list of triple IDs, measuring latency for each take and tracking failures.
+    pub async fn take_triples(
+        self,
+        ids: Vec<u64>,
+        barrier: Option<Arc<Barrier>>,
+    ) -> (Vec<Duration>, usize) {
+        if let Some(b) = barrier {
+            b.wait().await;
+        }
+        let mut latencies = Vec::with_capacity(ids.len());
+        let mut failures = 0;
+        for id in ids {
+            let t0 = Instant::now();
+            if self.triples.take(id, self.participant).await.is_some() {
+                latencies.push(t0.elapsed());
+            } else {
+                failures += 1;
+            }
+        }
+        (latencies, failures)
+    }
+
+    /// Concurrently invoke remove_outdated on triples storage.
+    pub async fn remove_outdated_shares(
+        self,
+        barrier: Arc<Barrier>,
+        remaining_shares: Vec<u64>,
+    ) -> (Duration, anyhow::Result<RemoveOutdatedResult<u64>>) {
+        barrier.wait().await;
+        let t0 = Instant::now();
+        let res = self
+            .triples
+            .remove_outdated(self.participant, &remaining_shares)
+            .await;
+        (t0.elapsed(), res.map_err(anyhow::Error::from))
+    }
+
+    /// Concurrently clear all triples storage.
+    pub async fn clear_triples(self, barrier: Arc<Barrier>) -> (Duration, bool) {
+        barrier.wait().await;
+        let t0 = Instant::now();
+        let ok = self.triples.clear().await;
+        (t0.elapsed(), ok)
+    }
+
+    /// Concurrently clear all presignatures storage.
+    pub async fn clear_presignatures(self, barrier: Arc<Barrier>) -> (Duration, bool) {
+        barrier.wait().await;
+        let t0 = Instant::now();
+        let ok = self.presignatures.clear().await;
+        (t0.elapsed(), ok)
+    }
+
+    /// Concurrently invoke remove_holder_and_prune across both triples and presignatures.
+    pub async fn prune_artifacts(
+        self,
+        barrier: Arc<Barrier>,
+        target_peer: Participant,
+        threshold: usize,
+        triple_ids: Vec<u64>,
+        presig_ids: Vec<u64>,
+    ) -> (
+        Duration,
+        anyhow::Result<(Vec<u64>, Vec<u64>)>,
+        Duration,
+        anyhow::Result<(Vec<u64>, Vec<u64>)>,
+    ) {
+        barrier.wait().await;
+        let t0 = Instant::now();
+        let triple_res = self
+            .triples
+            .remove_holder_and_prune(target_peer, threshold, &triple_ids)
+            .await;
+        let triple_elapsed = t0.elapsed();
+
+        let t1 = Instant::now();
+        let presig_res = self
+            .presignatures
+            .remove_holder_and_prune(target_peer, threshold, &presig_ids)
+            .await;
+        let presig_elapsed = t1.elapsed();
+
+        (
+            triple_elapsed,
+            triple_res.map_err(anyhow::Error::from),
+            presig_elapsed,
+            presig_res.map_err(anyhow::Error::from),
+        )
+    }
+
+    /// Concurrently insert a range of presignatures, measuring latency per insert and tracking failures.
+    pub async fn insert_presignatures_measured(
+        self,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+        barrier: Arc<Barrier>,
+    ) -> (Vec<Duration>, usize) {
+        barrier.wait().await;
+        let mut latencies = Vec::with_capacity(count);
+        let mut failures = 0;
+
+        for i in 0..count {
+            let id = base_id + i as u64;
+            let presig = dummy_presignature(id, &participants);
+
+            let t0 = Instant::now();
+            let success = match self.presignatures.create_slot(id, self.participant).await {
+                Some(mut slot) => slot.insert(presig, self.participant).await,
+                None => false,
+            };
+            if success {
+                latencies.push(t0.elapsed());
+            } else {
+                failures += 1;
+            }
+        }
+
+        (latencies, failures)
+    }
+
+    /// Concurrently take pairs of (triple, presignature), measuring latency for each and tracking failures.
+    pub async fn take_triple_and_presig_pairs(
+        self,
+        barrier: Arc<Barrier>,
+        triple_ids: Vec<u64>,
+        presig_ids: Vec<u64>,
+    ) -> (Vec<Duration>, usize, Vec<Duration>, usize) {
+        barrier.wait().await;
+        let count = triple_ids.len().min(presig_ids.len());
+        let mut take_triple_latencies = Vec::with_capacity(count);
+        let mut take_presig_latencies = Vec::with_capacity(count);
+        let mut triple_failures = 0;
+        let mut presig_failures = 0;
+
+        for i in 0..count {
+            let triple_id = triple_ids[i];
+            let presig_id = presig_ids[i];
+
+            let t0 = Instant::now();
+            if self.triples.take(triple_id, self.participant).await.is_some() {
+                take_triple_latencies.push(t0.elapsed());
+            } else {
+                triple_failures += 1;
+            }
+
+            let t1 = Instant::now();
+            if self.presignatures.take(presig_id, self.participant).await.is_some() {
+                take_presig_latencies.push(t1.elapsed());
+            } else {
+                presig_failures += 1;
+            }
+        }
+
+        (
+            take_triple_latencies,
+            triple_failures,
+            take_presig_latencies,
+            presig_failures,
+        )
+    }
+
+    /// Concurrently peek and commit reservations in a proposer race.
+    pub async fn race_proposals(
+        self,
+        barrier: Arc<Barrier>,
+        base_id: u64,
+        racer_id: usize,
+        proposals_per_racer: usize,
+    ) -> (Vec<Duration>, Vec<Duration>) {
+        barrier.wait().await;
+        let mut peek_latencies = Vec::with_capacity(proposals_per_racer);
+        let mut commit_latencies = Vec::with_capacity(proposals_per_racer);
+
+        let excluded: Vec<u64> = (0..50)
+            .map(|x| base_id + (x as u64) + (racer_id as u64 * 100))
+            .collect();
+
+        for _ in 0..proposals_per_racer {
+            let t0 = Instant::now();
+            let reservation = self.triples.peek_mine(&excluded).await;
+            peek_latencies.push(t0.elapsed());
+
+            let Some(reservation) = reservation else {
+                continue;
+            };
+            let t1 = Instant::now();
+            let taken = reservation.commit().await;
+            commit_latencies.push(t1.elapsed());
+            if taken.is_none() {
+                tracing::debug!(
+                    "lost reservation race on commit, as expected in concurrent proposers"
+                );
+            }
+        }
+
+        (peek_latencies, commit_latencies)
+    }
+
+    /// Concurrently insert triples and track successful IDs vs failures (e.g. during client kill tests).
+    pub async fn insert_triples_tracked(
+        self,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+        barrier: Arc<Barrier>,
+    ) -> (Vec<Duration>, Vec<u64>, usize) {
+        barrier.wait().await;
+        let mut latencies = Vec::with_capacity(count);
+        let mut success_ids = Vec::with_capacity(count);
+        let mut failure_count = 0;
+
+        for i in 0..count {
+            let id = base_id + (i as u64);
+            let pair = dummy_pair(id, &participants);
+
+            let t0 = Instant::now();
+            let success = match self.triples.create_slot(id, self.participant).await {
+                Some(mut slot) => slot.insert(pair, self.participant).await,
+                None => false,
+            };
+
+            if success {
+                success_ids.push(id);
+            } else {
+                failure_count += 1;
+            }
+            latencies.push(t0.elapsed());
+        }
+
+        (latencies, success_ids, failure_count)
+    }
+
+    /// Concurrently peek available artifacts from a large stockpile with an exclusion list.
+    pub async fn seek_deep_stockpile(
+        self,
+        barrier: Arc<Barrier>,
+        base_id: u64,
+        worker_id: usize,
+        seeks_count: usize,
+        exclusions_count: usize,
+    ) -> (Vec<Duration>, Vec<Duration>) {
+        barrier.wait().await;
+        let mut peek_latencies = Vec::with_capacity(seeks_count);
+        let mut commit_latencies = Vec::with_capacity(seeks_count);
+
+        // Exclusion list simulates accumulated rejected / timed-out IDs from prior reorg rounds
+        let excluded: Vec<u64> = (0..exclusions_count)
+            .map(|x| base_id + (x as u64) + (worker_id as u64 * 100))
+            .collect();
+
+        for _ in 0..seeks_count {
+            let t0 = Instant::now();
+            let reservation = self.triples.peek_mine(&excluded).await;
+            peek_latencies.push(t0.elapsed());
+
+            let Some(reservation) = reservation else {
+                continue;
+            };
+            let t1 = Instant::now();
+            let taken = reservation.commit().await;
+            commit_latencies.push(t1.elapsed());
+            if taken.is_none() {
+                tracing::debug!("lost reservation race on commit in deep stockpile seek");
+            }
+        }
+
+        (peek_latencies, commit_latencies)
+    }
+
+    /// Concurrently simulate proposer deliberation with partial timeout / reject drops.
+    pub async fn run_proposer_churn(
+        self,
+        barrier: Arc<Barrier>,
+        proposer_id: usize,
+        rounds: usize,
+        abort_percent: u8,
+        deliberation_delay_ms: u64,
+    ) -> (Vec<Duration>, Vec<Duration>, usize, usize) {
+        barrier.wait().await;
+        let mut peek_latencies = Vec::with_capacity(rounds);
+        let mut commit_latencies = Vec::with_capacity(rounds);
+        let mut aborted_count = 0;
+        let mut committed_count = 0;
+
+        let mut local_excluded: Vec<u64> = Vec::new();
+
+        for round_idx in 0..rounds {
+            let t0 = Instant::now();
+            let reservation = self.triples.peek_mine(&local_excluded).await;
+            peek_latencies.push(t0.elapsed());
+
+            let Some(reservation) = reservation else {
+                continue;
+            };
+
+            if deliberation_delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(deliberation_delay_ms)).await;
+            }
+
+            let should_abort =
+                ((proposer_id * 17 + round_idx * 31) % 100) < (abort_percent as usize);
+            if should_abort {
+                let id = reservation.id;
+                // Dropping reservation aborts pending state without commit, returning item to Redis pool
+                drop(reservation);
+                local_excluded.push(id);
+                aborted_count += 1;
+            } else {
+                let t1 = Instant::now();
+                if reservation.commit().await.is_some() {
+                    committed_count += 1;
+                }
+                commit_latencies.push(t1.elapsed());
+            }
+        }
+
+        (
+            peek_latencies,
+            commit_latencies,
+            aborted_count,
+            committed_count,
+        )
+    }
+}
+
+/// Guard managing background polling tasks. Automatically stops and joins tasks on `.stop().await`.
+pub struct BackgroundPollerGuard {
+    pub(crate) stop_flag: Arc<AtomicBool>,
+    pub(crate) handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl BackgroundPollerGuard {
+    pub async fn stop(self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        for h in self.handles {
+            let _ = h.await;
+        }
+    }
+}
+
+pub fn dummy_presignature(id: u64, participants: &[Participant]) -> Presignature {
+    Presignature {
+        id,
+        output: PresignOutput {
+            big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
+            k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
+            sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
+        },
+        participants: participants.to_vec(),
+        holders: Some(participants.to_vec()),
+    }
+}
+
+pub fn dummy_pair(id: u64, participants: &[Participant]) -> TriplePair {
+    TriplePair {
+        id,
+        triple0: dummy_triple(participants),
+        triple1: dummy_triple(participants),
+        holders: Some(participants.to_vec()),
+    }
+}
+
+pub fn dummy_triple(participants: &[Participant]) -> Triple {
+    Triple {
+        share: TripleShare {
+            a: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
+            b: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
+            c: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
+        },
+        public: TriplePub {
+            big_a: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
+            big_b: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
+            big_c: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
+            participants: participants.to_vec(),
+            threshold: (participants.len() * 2 / 3).max(1),
+        },
+    }
+}

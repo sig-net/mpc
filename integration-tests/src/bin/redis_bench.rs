@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use integration_tests::redis_harness::RedisHarness;
+use integration_tests::redis::{RedisHarness, RedisHarnessConfig};
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "snake_case")]
@@ -104,26 +104,13 @@ async fn main() -> anyhow::Result<()> {
     println!("=========================================================================\n");
 
     println!("Initializing Redis benchmark harness...");
-    let mut harness = match &args.redis_url {
-        Some(url) => {
-            RedisHarness::from_url_with_pool_config(
-                url,
-                args.participants,
-                effective_pool_size,
-                Some(std::time::Duration::from_secs(5)),
-            )
-            .await?
-        }
-        None => {
-            RedisHarness::spawn_with_pool_config(
-                args.participants,
-                effective_pool_size,
-                Some(std::time::Duration::from_secs(5)),
-            )
-            .await?
-        }
-    };
-    harness.set_flush_between(should_flush);
+    let mut config = RedisHarnessConfig::new(args.participants)
+        .with_pool_size(effective_pool_size)
+        .with_flush_between(should_flush);
+    if let Some(ref url) = args.redis_url {
+        config = config.with_redis_url(url);
+    }
+    let harness = RedisHarness::new(config).await?;
     let pool_status = harness.pool.status();
     println!("Connected to Redis at: {}", harness.redis_url);
     println!(
