@@ -6,9 +6,6 @@ use std::time::Duration;
 pub struct SolIndexerConfig {
     /// Delay between polling iterations
     pub poll_interval: Duration,
-    /// Maximum time to wait for the anchor slot to advance before bailing. This is a safety check against frozen RPC nodes.
-    /// Supervisor watchdog is not enough because it only sees the last block event, which can be a heartbeat from a lagging replica.
-    pub slot_stall_timeout: Duration,
 }
 
 impl Default for SolIndexerConfig {
@@ -17,7 +14,6 @@ impl Default for SolIndexerConfig {
             // The finalized frontier advances ~every 400ms,
             // polling faster than that can never observe a new anchor
             poll_interval: Duration::from_secs(1),
-            slot_stall_timeout: Duration::from_secs(60),
         }
     }
 }

@@ -14,9 +14,10 @@ use crate::storage::presignature_storage::PresignatureTaken;
 pub struct GeneratingPhase {
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
-    /// Our reservation when we are the proposer; `None` for a deliberator,
-    /// whose share is taken from storage when generation starts.
-    pub presignature: Option<PresignatureReservation>,
+    /// The presignature the proposer already committed before announcing START.
+    /// `None` for a deliberator, whose share is taken from storage when
+    /// generation starts.
+    pub presignature: Option<Box<PresignatureTaken>>,
     pub accepted_participants: Vec<Participant>,
 }
 
@@ -27,10 +28,12 @@ pub enum SignPhase {
     /// us, take a concurrency slot, reserve a presignature, and broadcast Propose.
     Organizing(OrganizingPhase),
     /// Agree on the presignature and participant set: the proposer collects
-    /// Accepts and broadcasts Start; each deliberator does Propose -> Accept -> Start.
+    /// Accepts, commits its reservation, and broadcasts Start; each deliberator
+    /// does Propose -> Accept -> Start.
     Posit(PositPhase),
-    /// Take the agreed presignature (commit our reservation, or take our share
-    /// from storage) and run the signing protocol to completion.
+    /// Take the agreed presignature (the proposer's is already committed, a
+    /// deliberator takes its share from storage) and run the signing protocol
+    /// to completion.
     Generating(GeneratingPhase),
     /// Terminal: the request finished (`Ok`) or aborted (`Err`).
     Complete(Result<(), SignError>),
@@ -114,14 +117,11 @@ impl GeneratingPhase {
         }
     }
 
-    /// The proposer commits its reservation. A deliberator takes its share from
-    /// storage. Reorganize in case of a failure.
+    /// The proposer already committed its presignature before START went out.
+    /// A deliberator takes its share from storage, which can fail.
     async fn take_presignature(&mut self, ctx: &SignTask) -> Result<PresignatureTaken, String> {
-        if let Some(reservation) = self.presignature.take() {
-            return reservation
-                .commit()
-                .await
-                .ok_or_else(|| "failed to commit presignature reservation".to_string());
+        if let Some(taken) = self.presignature.take() {
+            return Ok(*taken);
         }
 
         let id = self.presignature_id;

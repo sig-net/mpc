@@ -156,22 +156,22 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
                 self.key_version,
                 &self.sender_string()?,
                 &self.path,
-            )),
+            )?),
             Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
                 self.key_version,
                 &self.sender_string()?,
                 &self.path,
-            )),
+            )?),
             Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
                 self.key_version,
                 &self.sender_string()?,
                 &self.path,
-            )),
+            )?),
             Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
                 self.key_version,
                 &self.sender_string()?,
                 &self.path,
-            )),
+            )?),
             _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
         }
     }
@@ -254,22 +254,22 @@ impl BidirectionalTxExt for BidirectionalTx {
                 self.key_version,
                 &self.sender_string()?,
                 path,
-            )),
+            )?),
             Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
                 self.key_version,
                 &self.sender_string()?,
                 path,
-            )),
+            )?),
             Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
                 self.key_version,
                 &self.sender_string()?,
                 path,
-            )),
+            )?),
             Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
                 self.key_version,
                 &self.sender_string()?,
                 path,
-            )),
+            )?),
             _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
         }
     }
@@ -478,7 +478,8 @@ mod derive_tests {
         let mpc_pk = hex::decode(mpc_key).unwrap();
         let mpc_pk = EncodedPoint::from_bytes(mpc_pk).unwrap();
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
-        let derivation_epsilon = derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
+        let derivation_epsilon =
+            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test").unwrap();
         let expected: Address = "0x083c8776b5e447e91bae43b7883a92a9bdb66d1d"
             .parse()
             .unwrap();

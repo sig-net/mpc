@@ -7,7 +7,8 @@ use mpc_chain_canton::{
     der_encode_signature, CantonChainCtx, CantonIndexer,
 };
 use mpc_chain_integration_core::{
-    utils::hashing::hash_payload, utils::test::ChainIndexerStream, NoopChainTelemetry, StateManager,
+    utils::hashing::hash_payload, utils::retry::SharedBackoff, utils::test::ChainIndexerStream,
+    NoopChainTelemetry, StateManager,
 };
 use mpc_node::backlog::Backlog;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
@@ -28,7 +29,7 @@ async fn run_canton_indexer(
     backlog: Backlog,
 ) -> Result<ChainIndexerStream> {
     let config = sandbox.get_config();
-    let indexer = CantonIndexer::new(config, backlog, NoopChainTelemetry)
+    let indexer = CantonIndexer::new(config, backlog, NoopChainTelemetry, SharedBackoff::new())
         .await
         .context("failed to create CantonIndexer")?;
     ChainIndexerStream::start(indexer, Duration::from_secs(30)).await
