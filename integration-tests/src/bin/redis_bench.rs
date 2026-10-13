@@ -21,21 +21,7 @@ pub enum BenchScenario {
 
 impl std::fmt::Display for BenchScenario {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::All => write!(f, "all"),
-            Self::Baseline => write!(f, "baseline"),
-            Self::Polling => write!(f, "polling"),
-            Self::Storm => write!(f, "storm"),
-            Self::Proposer => write!(f, "proposer"),
-            Self::Saturation => write!(f, "saturation"),
-            Self::Clear => write!(f, "clear"),
-            Self::Mixed => write!(f, "mixed"),
-            Self::SyncPrune => write!(f, "sync_prune"),
-            Self::ClientKill => write!(f, "client_kill"),
-            Self::DeepStockpile => write!(f, "deep_stockpile"),
-            Self::ReservationChurn => write!(f, "reservation_churn"),
-            Self::ConflictedTake => write!(f, "conflicted_take"),
-        }
+        write!(f, "{}", self.to_possible_value().unwrap().get_name())
     }
 }
 

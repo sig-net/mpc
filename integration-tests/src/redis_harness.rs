@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,21 +39,6 @@ pub struct SlowlogRecord {
 }
 
 #[derive(Debug, Clone)]
-pub struct LatencyRecord {
-    pub event: String,
-    pub timestamp: i64,
-    pub latest_latency_ms: i64,
-    pub max_latency_ms: i64,
-}
-
-#[derive(Debug, Clone)]
-pub struct CommandStat {
-    pub calls: u64,
-    pub usec: u64,
-    pub usec_per_call: f64,
-}
-
-#[derive(Debug, Clone)]
 pub struct MemorySnapshot {
     pub used_memory_human: String,
     pub used_memory_rss_human: String,
@@ -65,13 +49,8 @@ pub struct MemorySnapshot {
 pub struct RedisDiagnostics;
 
 impl RedisDiagnostics {
-    /// Configure Redis to log all commands slower than `slowlog_threshold_us` (e.g. 1000us = 1ms)
-    /// and enable latency monitoring threshold `latency_threshold_ms`.
-    pub async fn setup(
-        pool: &Pool,
-        slowlog_threshold_us: i64,
-        latency_threshold_ms: i64,
-    ) -> anyhow::Result<()> {
+    /// Configure Redis to log all commands slower than `slowlog_threshold_us` (e.g. 1000us = 1ms).
+    pub async fn setup(pool: &Pool, slowlog_threshold_us: i64) -> anyhow::Result<()> {
         let mut conn = pool.get().await.context("failed to get connection")?;
         cmd("CONFIG")
             .arg("SET")
@@ -88,14 +67,6 @@ impl RedisDiagnostics {
             .query_async::<()>(&mut conn)
             .await
             .context("failed to set slowlog max-len")?;
-
-        cmd("CONFIG")
-            .arg("SET")
-            .arg("latency-monitor-threshold")
-            .arg(latency_threshold_ms)
-            .query_async::<()>(&mut conn)
-            .await
-            .context("failed to set latency-monitor-threshold")?;
 
         cmd("SLOWLOG")
             .arg("RESET")
@@ -135,69 +106,6 @@ impl RedisDiagnostics {
             .into_iter()
             .filter_map(parse_slowlog_entry)
             .collect())
-    }
-
-    /// Fetch latest latency spikes reported by Redis LATENCY LATEST.
-    pub async fn fetch_latency_latest(pool: &Pool) -> anyhow::Result<Vec<LatencyRecord>> {
-        let mut conn = pool.get().await.context("failed to get connection")?;
-        let raw: Value = cmd("LATENCY")
-            .arg("LATEST")
-            .query_async(&mut conn)
-            .await
-            .context("failed to query latency latest")?;
-
-        let Value::Array(entries) = raw else {
-            return Ok(Vec::new());
-        };
-
-        Ok(entries
-            .into_iter()
-            .filter_map(parse_latency_record)
-            .collect())
-    }
-
-    /// Query INFO commandstats.
-    pub async fn fetch_commandstats(pool: &Pool) -> anyhow::Result<HashMap<String, CommandStat>> {
-        let mut conn = pool.get().await.context("failed to get connection")?;
-        let raw: String = cmd("INFO")
-            .arg("commandstats")
-            .query_async(&mut conn)
-            .await
-            .context("failed to query commandstats")?;
-
-        let mut stats = HashMap::new();
-        for line in raw.lines() {
-            let Some(rest) = line.strip_prefix("cmdstat_") else {
-                continue;
-            };
-            let Some((cmd_name, values)) = rest.split_once(':') else {
-                continue;
-            };
-
-            let mut calls = 0;
-            let mut usec = 0;
-            let mut usec_per_call = 0.0;
-            for part in values.split(',') {
-                let Some((k, v)) = part.split_once('=') else {
-                    continue;
-                };
-                match k {
-                    "calls" => calls = v.parse().unwrap_or(0),
-                    "usec" => usec = v.parse().unwrap_or(0),
-                    "usec_per_call" => usec_per_call = v.parse().unwrap_or(0.0),
-                    _ => {}
-                }
-            }
-            stats.insert(
-                cmd_name.to_string(),
-                CommandStat {
-                    calls,
-                    usec,
-                    usec_per_call,
-                },
-            );
-        }
-        Ok(stats)
     }
 
     /// Query memory snapshot and dbsize.
@@ -282,37 +190,6 @@ fn parse_slowlog_entry(entry: Value) -> Option<SlowlogRecord> {
         duration_us,
         command,
         client_addr,
-    })
-}
-
-fn parse_latency_record(entry: Value) -> Option<LatencyRecord> {
-    let Value::Array(fields) = entry else {
-        return None;
-    };
-    if fields.len() < 4 {
-        return None;
-    }
-    let event = match &fields[0] {
-        Value::BulkString(bytes) => String::from_utf8_lossy(bytes).to_string(),
-        _ => "unknown".to_string(),
-    };
-    let timestamp = match fields[1] {
-        Value::Int(val) => val,
-        _ => 0,
-    };
-    let latest_latency_ms = match fields[2] {
-        Value::Int(val) => val,
-        _ => 0,
-    };
-    let max_latency_ms = match fields[3] {
-        Value::Int(val) => val,
-        _ => 0,
-    };
-    Some(LatencyRecord {
-        event,
-        timestamp,
-        latest_latency_ms,
-        max_latency_ms,
     })
 }
 
@@ -940,7 +817,7 @@ impl RedisHarness {
         pool: Pool,
         num_participants: usize,
     ) -> anyhow::Result<Self> {
-        RedisDiagnostics::setup(&pool, 1000, 1).await?;
+        RedisDiagnostics::setup(&pool, 1000).await?;
 
         let mut participants = Vec::new();
 
@@ -980,30 +857,6 @@ impl RedisHarness {
 
     pub fn participant_ids(&self) -> Vec<Participant> {
         self.participants.iter().map(|p| p.participant).collect()
-    }
-
-    /// Create or retrieve a triple storage handle for an arbitrary account and participant.
-    pub fn triple_storage(&self, account_id: &AccountId, me: Participant) -> TripleStorage {
-        if let Some(ref r) = self.redis {
-            return r.triple_storage(account_id, me);
-        }
-        let t = TriplePair::storage(&self.pool, account_id);
-        t.set_me(me);
-        t
-    }
-
-    /// Create or retrieve a presignature storage handle for an arbitrary account and participant.
-    pub fn presignature_storage(
-        &self,
-        account_id: &AccountId,
-        me: Participant,
-    ) -> PresignatureStorage {
-        if let Some(ref r) = self.redis {
-            return r.presignature_storage(account_id, me);
-        }
-        let p = Presignature::storage(&self.pool, account_id);
-        p.set_me(me);
-        p
     }
 
     /// Reset slowlog before running a test case.
