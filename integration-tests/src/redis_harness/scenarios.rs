@@ -216,14 +216,12 @@ impl RedisHarness {
         self.reset_diagnostics().await?;
 
         let poller = enable_polling.then(|| self.spawn_background_polling(false));
-        let summaries = self
-            .run_concurrent_insert_and_take(workload_items)
-            .await?;
+        let res = self.run_concurrent_insert_and_take(workload_items).await;
         if let Some(p) = poller {
             p.stop().await;
         }
 
-        Ok(summaries)
+        res
     }
 
     /// SCENARIO 4: Proposer Race (`peek_mine` + `commit`).
@@ -867,8 +865,9 @@ impl RedisHarness {
             .populate_triples(base_id, stockpile_size, participant_list)
             .await;
 
+        let coverage = (exclusions_count as f64 / stockpile_size as f64) * 100.0;
         println!(
-            "   -> Launching {num_seekers} concurrent seekers (each evaluating exclusion lists of {exclusions_count} IDs)..."
+            "   -> Launching {num_seekers} concurrent seekers across {stockpile_size} items with {exclusions_count} exclusions ({coverage:.1}% coverage - near-exhaustion tail)..."
         );
         let barrier = Arc::new(Barrier::new(num_seekers));
         let overall_start = Instant::now();
@@ -913,6 +912,7 @@ impl RedisHarness {
         num_proposers: usize,
         rounds_per_proposer: usize,
         abort_percent: u8,
+        deliberation_delay_ms: u64,
     ) -> anyhow::Result<Vec<LatencySummary>> {
         self.reset_diagnostics().await?;
 
@@ -920,6 +920,7 @@ impl RedisHarness {
             return Ok(vec![
                 LatencySummary::empty("churn_peek_mine"),
                 LatencySummary::empty("churn_commit_reservation"),
+                LatencySummary::empty("churn_simulated_deliberation"),
             ]);
         }
 
@@ -933,7 +934,7 @@ impl RedisHarness {
             .await;
 
         println!(
-            "   -> Simulating {num_proposers} proposers with {abort_percent}% deliberation timeout/abort rate across {rounds_per_proposer} rounds..."
+            "   -> Simulating {num_proposers} proposers with {abort_percent}% deliberation timeout/abort rate across {rounds_per_proposer} rounds (deliberation hold: {deliberation_delay_ms}ms)..."
         );
         let barrier = Arc::new(Barrier::new(num_proposers));
         let overall_start = Instant::now();
@@ -945,35 +946,56 @@ impl RedisHarness {
                     proposer_id,
                     rounds_per_proposer,
                     abort_percent,
-                    15,
+                    deliberation_delay_ms,
                 ))
             })
             .collect();
 
         let mut all_peek = Vec::new();
         let mut all_commit = Vec::new();
+        let mut all_deliberation = Vec::new();
         let mut total_aborts = 0;
         let mut total_commits = 0;
 
         for t in tasks {
-            let (peek, commit, aborted, committed) = t.await?;
+            let (peek, commit, deliberation, aborted, committed) = t.await?;
             all_peek.extend(peek);
             all_commit.extend(commit);
+            all_deliberation.extend(deliberation);
             total_aborts += aborted;
             total_commits += committed;
         }
-        let wall = overall_start.elapsed();
+        let total_wall = overall_start.elapsed();
+
+        // Calculate active Redis time (excluding simulated node deliberation sleep)
+        // so Redis command throughput accurately reflects database performance.
+        let total_deliberation_time: Duration = all_deliberation.iter().copied().sum();
+        let effective_redis_wall = if num_proposers > 0 {
+            let avg_deliberation = total_deliberation_time / num_proposers as u32;
+            total_wall.saturating_sub(avg_deliberation)
+        } else {
+            total_wall
+        };
+
         let (peek_wall, commit_wall) =
-            partition_wall_by_active_time(wall, &all_peek, &all_commit);
+            partition_wall_by_active_time(effective_redis_wall, &all_peek, &all_commit);
 
         println!(
             "   -> Churn outcome: {total_commits} successfully committed, {total_aborts} dropped back to pool on timeout/reject"
+        );
+        println!(
+            "   -> Deliberation hold time: {deliberation_delay_ms}ms per round (reported separately from Redis command throughput)"
         );
 
         let s1 = LatencySummary::calculate("churn_peek_mine", &mut all_peek, peek_wall);
         let s2 =
             LatencySummary::calculate("churn_commit_reservation", &mut all_commit, commit_wall);
-        Ok(vec![s1, s2])
+        let s3 = LatencySummary::calculate(
+            "churn_simulated_deliberation",
+            &mut all_deliberation,
+            total_deliberation_time,
+        );
+        Ok(vec![s1, s2, s3])
     }
 
     /// SCENARIO 12: Conflicted Double-Take Race Storm.

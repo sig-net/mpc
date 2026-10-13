@@ -372,7 +372,7 @@ impl SimulatedParticipant {
         self,
         barrier: Arc<Barrier>,
         base_id: u64,
-        worker_id: usize,
+        _worker_id: usize,
         seeks_count: usize,
         exclusions_count: usize,
     ) -> (Vec<Duration>, Vec<Duration>) {
@@ -380,23 +380,29 @@ impl SimulatedParticipant {
         let mut peek_latencies = Vec::with_capacity(seeks_count);
         let mut commit_latencies = Vec::with_capacity(seeks_count);
 
-        // Exclusion list simulates accumulated rejected / timed-out IDs from prior reorg rounds
-        let excluded: Vec<u64> = (0..exclusions_count)
-            .map(|x| base_id + (x as u64) + (worker_id as u64 * 100))
+        // Exclusion list covers the first `exclusions_count` IDs of the stockpile,
+        // simulating accumulated rejected / timed-out IDs from prior reorg rounds.
+        // This forces Lua's SMEMBERS to scan through the large exclusion set before
+        // finding unexcluded items, reproducing near-exhaustion tail latency.
+        let mut local_excluded: Vec<u64> = (0..exclusions_count)
+            .map(|x| base_id + (x as u64))
             .collect();
 
         for _ in 0..seeks_count {
             let t0 = Instant::now();
-            let reservation = self.triples.peek_mine(&excluded).await;
+            let reservation = self.triples.peek_mine(&local_excluded).await;
             peek_latencies.push(t0.elapsed());
 
             let Some(reservation) = reservation else {
                 continue;
             };
+            let id = reservation.id;
             let t1 = Instant::now();
             let taken = reservation.commit().await;
             commit_latencies.push(t1.elapsed());
-            if taken.is_none() {
+            if taken.is_some() {
+                local_excluded.push(id);
+            } else {
                 tracing::debug!("lost reservation race on commit in deep stockpile seek");
             }
         }
@@ -412,10 +418,11 @@ impl SimulatedParticipant {
         rounds: usize,
         abort_percent: u8,
         deliberation_delay_ms: u64,
-    ) -> (Vec<Duration>, Vec<Duration>, usize, usize) {
+    ) -> (Vec<Duration>, Vec<Duration>, Vec<Duration>, usize, usize) {
         barrier.wait().await;
         let mut peek_latencies = Vec::with_capacity(rounds);
         let mut commit_latencies = Vec::with_capacity(rounds);
+        let mut deliberation_latencies = Vec::with_capacity(rounds);
         let mut aborted_count = 0;
         let mut committed_count = 0;
 
@@ -431,7 +438,9 @@ impl SimulatedParticipant {
             };
 
             if deliberation_delay_ms > 0 {
+                let d0 = Instant::now();
                 tokio::time::sleep(Duration::from_millis(deliberation_delay_ms)).await;
+                deliberation_latencies.push(d0.elapsed());
             }
 
             let should_abort =
@@ -454,6 +463,7 @@ impl SimulatedParticipant {
         (
             peek_latencies,
             commit_latencies,
+            deliberation_latencies,
             aborted_count,
             committed_count,
         )
@@ -467,10 +477,20 @@ pub struct BackgroundPollerGuard {
 }
 
 impl BackgroundPollerGuard {
-    pub async fn stop(self) {
+    pub async fn stop(mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
-        for h in self.handles {
+        let handles = std::mem::take(&mut self.handles);
+        for h in handles {
             let _ = h.await;
+        }
+    }
+}
+
+impl Drop for BackgroundPollerGuard {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        for h in &self.handles {
+            h.abort();
         }
     }
 }

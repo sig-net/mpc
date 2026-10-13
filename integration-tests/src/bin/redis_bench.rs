@@ -51,6 +51,22 @@ struct Args {
     #[arg(long, default_value_t = 250)]
     spike_ms: u64,
 
+    /// Simulated proposer deliberation hold time in milliseconds for Scenario 11 (default: 15ms)
+    #[arg(long, default_value_t = 15)]
+    deliberation_ms: u64,
+
+    /// Total stockpile size for Scenario 10 Deep Stockpile Seek (default: max(items * 10, 2000))
+    #[arg(long)]
+    deep_stockpile: Option<usize>,
+
+    /// Number of excluded IDs for Scenario 10 Deep Stockpile Seek (default: 85% of stockpile for near-exhaustion tail)
+    #[arg(long)]
+    deep_exclusions: Option<usize>,
+
+    /// Number of seeks per worker in Scenario 10 Deep Stockpile Seek (default: 50)
+    #[arg(long, default_value_t = 50)]
+    deep_seeks: usize,
+
     /// Optional external Redis URL (e.g. redis://127.0.0.1:6379). If omitted, spawns an isolated Redis container.
     #[arg(long)]
     redis_url: Option<String>,
@@ -236,12 +252,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if should_run(BenchScenario::DeepStockpile) {
-        let stockpile = (args.items * 5).max(1000);
+        let stockpile = args
+            .deep_stockpile
+            .unwrap_or_else(|| (args.items * 10).max(2000));
         let num_seekers = args.participants.clamp(2, 6);
-        let exclusions = 50;
-        let seeks = 20;
+        let exclusions = args
+            .deep_exclusions
+            .unwrap_or_else(|| (stockpile * 85) / 100);
+        let seeks = args.deep_seeks;
+        let coverage = (exclusions as f64 / stockpile as f64) * 100.0;
         println!(
-            "\n>>> Running Scenario 10: Large Stockpile Deep-Seek (`peek_mine` with {exclusions} exclusions across {stockpile} items)"
+            "\n>>> Running Scenario 10: Large Stockpile Deep-Seek (`peek_mine` with {exclusions} exclusions across {stockpile} items - {coverage:.1}% near-exhaustion tail)"
         );
         let results = harness
             .bench_deep_stockpile_seek(stockpile, num_seekers, exclusions, seeks)
@@ -254,11 +275,18 @@ async fn main() -> anyhow::Result<()> {
         let num_proposers = args.participants.clamp(2, 4);
         let rounds = 25;
         let abort_percent = 40;
+        let deliberation_ms = args.deliberation_ms;
         println!(
-            "\n>>> Running Scenario 11: Proposer Churn & Aborted Reservation Storm ({rounds} rounds, {abort_percent}% timeout/abort rate)"
+            "\n>>> Running Scenario 11: Proposer Churn & Aborted Reservation Storm ({rounds} rounds, {abort_percent}% timeout/abort rate, {deliberation_ms}ms deliberation hold)"
         );
         let results = harness
-            .bench_reservation_churn_abort(stockpile, num_proposers, rounds, abort_percent)
+            .bench_reservation_churn_abort(
+                stockpile,
+                num_proposers,
+                rounds,
+                abort_percent,
+                deliberation_ms,
+            )
             .await?;
         harness.report_results(&results).await?;
     }
