@@ -721,7 +721,8 @@ The single append-only enum has at most 256 variants and assigns these indices:
 
 `E` must preserve the leading tag: inputs with different tags must have
 different encodings, including when their remaining tuple shapes differ.
-Within each domain, `E` must encode the declared fields unambiguously.
+Within each domain, `E` must encode the declared fields of one tuple
+shape unambiguously.
 The tags distinguish hash domains and fold steps. The counts commit to
 the number of used entries within each step sequence.
 
@@ -925,6 +926,12 @@ digest = bytes32(H(E[
     outputHash: bytes(32)
 ]))
 ```
+
+A verifier holding the output checks that its hash equals `outputHash`
+and its width equals `serializedOutputLength`. The hash alone is not
+enough, since `E` need not encode a byte string's width: in Compact, the
+outputs `01` and `0100` have the same `outputHash`. The signed digest
+covers `serializedOutputLength`, which tells them apart.
 
 ##### 7.4.2.2 Output Recovery
 
