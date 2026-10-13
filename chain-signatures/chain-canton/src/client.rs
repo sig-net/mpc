@@ -265,7 +265,20 @@ impl CantonClient {
                         // Acceptance ends submission retries; verified ledger events still settle the request.
                         return Ok(SubmissionOutcome::AlreadyAccepted);
                     }
-                    anyhow::bail!("{context} failed: {status} {body}");
+                    // SUBMISSION_ALREADY_IN_FLIGHT is another submission racing
+                    // us — retryable despite the 409; other failures classify
+                    // by their HTTP status
+                    let code = serde_json::from_str::<JsCantonError>(&body)
+                        .ok()
+                        .map(|error| error.code);
+                    let in_flight = code.as_deref() == Some("SUBMISSION_ALREADY_IN_FLIGHT");
+                    let message = format!("{context} failed: {status} {body}");
+                    let failure = if in_flight {
+                        RpcFailure::with_verdict(status, false, message)
+                    } else {
+                        RpcFailure::with_status(status, message)
+                    };
+                    return Err(anyhow::Error::new(failure));
                 }
                 Ok(SubmissionOutcome::Transaction(resp.json().await?))
             }
@@ -304,7 +317,7 @@ async fn check_response(
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         // typed carrier: classification reads the status, not the hex-laden body
-        // TODO: also carry the Canton error code for finer verdicts
+        // TODO: fold reads into the same code-aware classification as the submit path
         let failure = RpcFailure::with_status(status, format!("{context} failed: {status} {text}"));
         return Err(anyhow::Error::new(failure));
     }
@@ -679,6 +692,41 @@ mod tests {
                 "must not accept status {status}: {body}"
             );
             response.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_conflict_verdict_depends_on_canton_code() {
+        // fast_retry_strategy allows 2 retries (3 attempts): in-flight races get
+        // retried, other conflicts fail fast on the terminal verdict
+        for (body, attempts) in [
+            (r#"{"code":"SUBMISSION_ALREADY_IN_FLIGHT"}"#, 3),
+            (r#"{"code":"DUPLICATE_CONTRACT_KEY"}"#, 1),
+        ] {
+            let mut server = setup_mock_server_with_auth().await;
+            let mock = server
+                .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+                .with_status(409)
+                .with_body(body)
+                .expect(attempts)
+                .create_async()
+                .await;
+            let client = CantonClient::new(
+                &mock_canton_config(&server.url()),
+                Arc::new(NoopPublisherTelemetry),
+                SharedBackoff::new(),
+            )
+            .await
+            .unwrap()
+            .with_retry_strategy(fast_retry_strategy());
+
+            let err = client
+                .publish_signature(&final_response_action())
+                .await
+                .unwrap_err();
+            let retryable = mpc_chain_integration_core::utils::retry::is_retryable(&err);
+            assert_eq!(retryable, attempts > 1, "body {body}");
+            mock.assert_async().await;
         }
     }
 
