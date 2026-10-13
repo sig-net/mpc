@@ -185,11 +185,19 @@ pub struct RpcFailure {
 
 impl RpcFailure {
     /// Constructs a new `RpcFailure` with the given HTTP status and message.
+    /// The verdict is derived from the status via [`http_status_retryable`].
     pub fn with_status(status: StatusCode, message: String) -> Self {
+        Self::with_verdict(status, !http_status_retryable(status), message)
+    }
+
+    /// Constructs a new `RpcFailure` with an explicit verdict, for cases where
+    /// a chain error code overrules the status (e.g. a concurrent-submission
+    /// 409 that is worth retrying). Throttle detection still reads the status.
+    pub fn with_verdict(status: StatusCode, terminal: bool, message: String) -> Self {
         Self {
             message,
             status: Some(status),
-            terminal: !http_status_retryable(status),
+            terminal,
         }
     }
 
