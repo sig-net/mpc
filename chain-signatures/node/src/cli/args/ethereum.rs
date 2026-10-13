@@ -26,6 +26,7 @@ pub struct EthArgs {
     #[arg(
         long,
         env("MPC_ETH_EXECUTION_RPC_HTTP_URL"),
+        hide_env_values = true,
         requires = "eth_account_sk"
     )]
     pub eth_execution_rpc_http_url: Option<String>,

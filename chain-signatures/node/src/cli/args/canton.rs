@@ -7,6 +7,7 @@ pub struct CantonArgs {
     #[arg(
         long,
         env("MPC_CANTON_JSON_API_URL"),
+        hide_env_values = true,
         requires_all = [
             "canton_json_api_ws_url",
             "canton_ledger_api_user",
@@ -23,6 +24,7 @@ pub struct CantonArgs {
     #[arg(
         long,
         env("MPC_CANTON_JSON_API_WS_URL"),
+        hide_env_values = true,
         requires = "canton_json_api_url"
     )]
     pub canton_json_api_ws_url: Option<String>,
@@ -35,6 +37,7 @@ pub struct CantonArgs {
     #[arg(
         long,
         env("MPC_CANTON_OIDC_TOKEN_URL"),
+        hide_env_values = true,
         requires = "canton_json_api_url"
     )]
     pub canton_oidc_token_url: Option<String>,

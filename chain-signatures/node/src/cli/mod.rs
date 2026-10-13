@@ -60,7 +60,8 @@ pub enum Cli {
         #[arg(
             long,
             env("MPC_NEAR_RPC"),
-            default_value("https://rpc.testnet.near.org")
+            default_value("https://rpc.testnet.near.org"),
+            hide_env_values = true
         )]
         near_rpc: String,
         /// MPC contract id
@@ -1515,7 +1516,8 @@ mod tests {
             .find_subcommand("start")
             .expect("start subcommand must exist");
 
-        let secret_arg_ids = [
+        let sensitive_arg_ids = [
+            // Secret keys & credentials
             "account_sk",
             "cipher_sk",
             "sign_sk",
@@ -1525,9 +1527,21 @@ mod tests {
             "signer_uri",
             "canton_oidc_client_secret",
             "midnight_funding_seed",
+            "near_rpc",
+            "otlp_endpoint",
+            "eth_execution_rpc_http_url",
+            "sol_rpc_http_url",
+            "rpc_ws_url",
+            "canton_json_api_url",
+            "canton_json_api_ws_url",
+            "canton_oidc_token_url",
+            "midnight_node_url",
+            "midnight_proof_server_url",
+            "midnight_indexer_url",
+            "midnight_indexer_ws_url",
         ];
 
-        for arg_id in secret_arg_ids {
+        for arg_id in sensitive_arg_ids {
             let arg = start
                 .get_arguments()
                 .find(|a| a.get_id() == arg_id)

@@ -14,7 +14,12 @@ pub struct SolArgs {
     )]
     pub sol_account_sk: Option<String>,
     /// Solana RPC HTTP URL
-    #[arg(long, env("MPC_SOL_RPC_HTTP_URL"), requires = "sol_account_sk")]
+    #[arg(
+        long,
+        env("MPC_SOL_RPC_HTTP_URL"),
+        hide_env_values = true,
+        requires = "sol_account_sk"
+    )]
     pub sol_rpc_http_url: Option<String>,
     /// The program address to watch
     #[arg(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]

@@ -12,6 +12,7 @@ pub struct MidnightArgs {
     #[arg(
         long,
         env("MPC_MIDNIGHT_NODE_URL"),
+        hide_env_values = true,
         requires_all = [
             "midnight_central_address",
             "midnight_funding_seed",
@@ -51,18 +52,25 @@ pub struct MidnightArgs {
     #[arg(
         long,
         env("MPC_MIDNIGHT_PROOF_SERVER_URL"),
+        hide_env_values = true,
         requires = "midnight_node_url"
     )]
     pub midnight_proof_server_url: Option<String>,
     /// Indexer GraphQL URL. Required to respond: the funding wallet's spendable
     /// DUST is only derivable from the ledger events the indexer serves.
-    #[arg(long, env("MPC_MIDNIGHT_INDEXER_URL"), requires = "midnight_node_url")]
+    #[arg(
+        long,
+        env("MPC_MIDNIGHT_INDEXER_URL"),
+        hide_env_values = true,
+        requires = "midnight_node_url"
+    )]
     pub midnight_indexer_url: Option<String>,
     /// Indexer GraphQL subscription URL: the wallet catches up over the URL
     /// above and follows over this one.
     #[arg(
         long,
         env("MPC_MIDNIGHT_INDEXER_WS_URL"),
+        hide_env_values = true,
         requires = "midnight_node_url"
     )]
     pub midnight_indexer_ws_url: Option<String>,
