@@ -188,7 +188,7 @@ pub fn init(
             ))
         }
         #[cfg(any(test, feature = "test-feature"))]
-        (None, None) => {
+        (_, None) => {
             if let Some(sk_share_local_path) = &opts.sk_share_local_path {
                 let path = format!("{sk_share_local_path}-{_account_id}");
                 tracing::info!("using DiskNodeStorage with path: {path}");
@@ -354,18 +354,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_fails_closed_when_gcp_service_without_secret_id() {
+    async fn init_uses_disk_when_gcp_service_present_but_no_secret_id() {
         let opts = Options {
             sk_share_secret_id: None,
-            sk_share_local_path: None,
+            sk_share_local_path: Some("/tmp/share".into()),
             gcp_project_id: "test-project".to_string(),
             redis_url: "redis://localhost".to_string(),
         };
         let account_id = make_test_account_id();
         let gcp_service = GcpService::init(&opts).await.unwrap();
 
-        let res = init(Some(&gcp_service), &opts, &account_id);
-        assert!(matches!(res, Err(SecretStorageError::Unconfigured)));
+        let storage = init(Some(&gcp_service), &opts, &account_id).unwrap();
+        assert!(matches!(storage, SecretNodeStorageVariant::Disk(_)));
     }
 
     #[test]
