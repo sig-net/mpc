@@ -15,4 +15,6 @@ pub enum SecretStorageError {
     SerdeError(#[from] serde_json::Error),
     #[error("base64 decode error: {0}")]
     Base64(#[from] base64::DecodeError),
+    #[error("secret storage not configured")]
+    Unconfigured,
 }

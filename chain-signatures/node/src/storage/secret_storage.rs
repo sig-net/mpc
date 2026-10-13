@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::gcp::{GcpService, SecretResult};
+use crate::gcp::error::SecretStorageError;
+use crate::gcp::{GcpService, SecretManagerService, SecretResult};
+use crate::protocol::state::PersistentNodeData;
 use crate::storage::Options;
-use crate::{gcp::SecretManagerService, protocol::state::PersistentNodeData};
 use async_trait::async_trait;
 
 use near_account_id::AccountId;
@@ -177,30 +178,38 @@ impl SecretNodeStorageVariant {
 pub fn init(
     gcp_service: Option<&GcpService>,
     opts: &Options,
-    account_id: &AccountId,
-) -> SecretNodeStorageVariant {
-    match gcp_service {
-        Some(gcp) if opts.sk_share_secret_id.is_some() => {
+    _account_id: &AccountId,
+) -> SecretResult<SecretNodeStorageVariant> {
+    match (gcp_service, &opts.sk_share_secret_id) {
+        (Some(gcp), Some(secret_id)) => {
             tracing::info!("using SecretManagerNodeStorage");
-            SecretNodeStorageVariant::Gcp(SecretManagerNodeStorage::new(
-                &gcp.secret_manager.clone(),
-                opts.sk_share_secret_id.clone().unwrap(),
+            Ok(SecretNodeStorageVariant::Gcp(
+                SecretManagerNodeStorage::new(&gcp.secret_manager, secret_id.clone()),
             ))
         }
-        _ => {
+        #[cfg(any(test, feature = "test-feature"))]
+        (None, None) => {
             if let Some(sk_share_local_path) = &opts.sk_share_local_path {
-                let path = format!("{sk_share_local_path}-{account_id}");
-                tracing::info!("using DiskNodeStorage with path: {}", path);
-                SecretNodeStorageVariant::Disk(DiskNodeStorage::new(&path))
+                let path = format!("{sk_share_local_path}-{_account_id}");
+                tracing::info!("using DiskNodeStorage with path: {path}");
+                Ok(SecretNodeStorageVariant::Disk(DiskNodeStorage::new(&path)))
             } else {
                 tracing::info!("using MemoryNodeStorage");
-                SecretNodeStorageVariant::Memory(MemoryNodeStorage::default())
+                Ok(SecretNodeStorageVariant::Memory(
+                    MemoryNodeStorage::default(),
+                ))
             }
+        }
+        _ => {
+            tracing::error!(
+                "secret storage is unconfigured: sk_share_secret_id and GCP service required"
+            );
+            Err(SecretStorageError::Unconfigured)
         }
     }
 }
 
-#[cfg(feature = "test-feature")]
+#[cfg(any(test, feature = "test-feature"))]
 pub fn test_store(
     epoch: u64,
     private_share: crate::types::SecretKeyShare,
@@ -309,7 +318,7 @@ mod tests {
             redis_url: "redis://localhost".to_string(),
         };
 
-        let storage = init(None, &opts, &make_test_account_id());
+        let storage = init(None, &opts, &make_test_account_id()).unwrap();
 
         assert!(matches!(storage, SecretNodeStorageVariant::Memory(_)));
     }
@@ -323,7 +332,7 @@ mod tests {
             redis_url: "redis://localhost".to_string(),
         };
 
-        let storage = init(None, &opts, &make_test_account_id());
+        let storage = init(None, &opts, &make_test_account_id()).unwrap();
 
         assert!(matches!(storage, SecretNodeStorageVariant::Disk(_)));
     }
@@ -339,8 +348,37 @@ mod tests {
         let account_id = make_test_account_id();
         let gcp_service = GcpService::init(&opts).await.unwrap();
 
-        let storage = init(Some(&gcp_service), &opts, &account_id);
+        let storage = init(Some(&gcp_service), &opts, &account_id).unwrap();
 
         assert!(matches!(storage, SecretNodeStorageVariant::Gcp(_)));
+    }
+
+    #[tokio::test]
+    async fn init_fails_closed_when_gcp_service_without_secret_id() {
+        let opts = Options {
+            sk_share_secret_id: None,
+            sk_share_local_path: None,
+            gcp_project_id: "test-project".to_string(),
+            redis_url: "redis://localhost".to_string(),
+        };
+        let account_id = make_test_account_id();
+        let gcp_service = GcpService::init(&opts).await.unwrap();
+
+        let res = init(Some(&gcp_service), &opts, &account_id);
+        assert!(matches!(res, Err(SecretStorageError::Unconfigured)));
+    }
+
+    #[test]
+    fn init_fails_closed_when_secret_id_without_gcp_service() {
+        let opts = Options {
+            sk_share_secret_id: Some("secret-id".to_string()),
+            sk_share_local_path: None,
+            gcp_project_id: "test-project".to_string(),
+            redis_url: "redis://localhost".to_string(),
+        };
+        let account_id = make_test_account_id();
+
+        let res = init(None, &opts, &account_id);
+        assert!(matches!(res, Err(SecretStorageError::Unconfigured)));
     }
 }
