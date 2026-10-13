@@ -1,7 +1,13 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+static GLOBAL_ID_COUNTER: AtomicU64 = AtomicU64::new(10_000_000);
+
+pub fn next_id_block(count: u64) -> u64 {
+    GLOBAL_ID_COUNTER.fetch_add(count, Ordering::Relaxed)
+}
 
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
@@ -398,87 +404,131 @@ pub fn print_summary_header() {
     println!("{:-<105}", "");
 }
 
-/// Simulated node actor in the Redis test cluster.
-pub struct NodeActor {
+/// Simulated participant storage handles in the isolated Redis harness.
+pub struct SimulatedParticipant {
     pub participant: Participant,
     pub account_id: AccountId,
     pub triples: TripleStorage,
     pub presignatures: PresignatureStorage,
 }
 
-/// Test Cluster that simulates N nodes interacting with Redis.
-pub struct RedisHarnessCluster {
-    _redis_container: Option<Redis>,
+/// Standalone Redis benchmark harness.
+///
+/// Spawns ONLY an isolated Redis container (zero MPC node processes, zero NEAR
+/// sandbox, zero smart contracts, and zero external chains).
+/// Interfaces with Redis purely through `redis.triple_storage(...)` and `redis.presignature_storage(...)`.
+pub struct RedisHarness {
+    pub redis: Option<Redis>,
     pub redis_url: String,
     pub pool: deadpool_redis::Pool,
-    pub nodes: Vec<NodeActor>,
-    pub participants: Vec<Participant>,
+    pub participants: Vec<SimulatedParticipant>,
 }
 
-impl RedisHarnessCluster {
-    /// Spawn a fresh Redis container via testcontainers and prepare N simulated nodes.
-    pub async fn spawn(num_nodes: usize) -> anyhow::Result<Self> {
+pub type RedisHarnessCluster = RedisHarness;
+
+impl RedisHarness {
+    /// Spawn a fresh Redis container via testcontainers and prepare N simulated participants.
+    /// Notice: No MPC node processes, no NEAR sandbox, and no blockchains are spawned.
+    pub async fn spawn(num_participants: usize) -> anyhow::Result<Self> {
         let spawner = ClusterSpawner::default()
             .network("bench-redis-harness")
             .init_network()
             .await
             .context("failed to init docker network")?;
 
-        let redis = spawner.spawn_redis().await;
+        let redis = crate::containers::Redis::run(&spawner).await;
         let pool = redis.pool();
         let redis_url = redis.internal_address.clone();
 
-        Self::init_with_pool(Some(redis), redis_url, pool, num_nodes).await
+        Self::init(Some(redis), redis_url, pool, num_participants).await
     }
 
-    /// Connect to an existing Redis instance at the given URL (e.g. redis://127.0.0.1:6379).
-    pub async fn from_url(redis_url: &str, num_nodes: usize) -> anyhow::Result<Self> {
+    /// Construct harness from an existing `Redis` container handle.
+    pub async fn from_redis(redis: Redis, num_participants: usize) -> anyhow::Result<Self> {
+        let pool = redis.pool();
+        let redis_url = redis.internal_address.clone();
+        Self::init(Some(redis), redis_url, pool, num_participants).await
+    }
+
+    /// Connect to an existing external Redis instance at the given URL (e.g. redis://127.0.0.1:6379).
+    pub async fn from_url(redis_url: &str, num_participants: usize) -> anyhow::Result<Self> {
         let parsed_url = url::Url::parse(redis_url).context("invalid redis url")?;
         let cfg = deadpool_redis::Config::from_url(parsed_url);
         let pool = cfg
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .context("failed to create redis pool")?;
 
-        Self::init_with_pool(None, redis_url.to_string(), pool, num_nodes).await
+        Self::init(None, redis_url.to_string(), pool, num_participants).await
     }
 
-    async fn init_with_pool(
-        redis_container: Option<Redis>,
+    async fn init(
+        redis: Option<Redis>,
         redis_url: String,
         pool: deadpool_redis::Pool,
-        num_nodes: usize,
+        num_participants: usize,
     ) -> anyhow::Result<Self> {
         RedisDiagnostics::setup(&pool, 1000, 1).await?;
 
-        let mut nodes = Vec::new();
         let mut participants = Vec::new();
 
-        for i in 0..num_nodes {
+        for i in 0..num_participants {
             let participant = Participant::from(i as u32);
             let account_id: AccountId = format!("node-{i}.testnet").parse().unwrap();
 
-            let triples = TriplePair::storage(&pool, &account_id);
-            triples.set_me(participant);
+            // Directly use redis.triple_storage and redis.presignature_storage when available
+            let (triples, presignatures) = if let Some(ref r) = redis {
+                (
+                    r.triple_storage(&account_id, participant),
+                    r.presignature_storage(&account_id, participant),
+                )
+            } else {
+                let t = TriplePair::storage(&pool, &account_id);
+                t.set_me(participant);
+                let p = Presignature::storage(&pool, &account_id);
+                p.set_me(participant);
+                (t, p)
+            };
 
-            let presignatures = Presignature::storage(&pool, &account_id);
-            presignatures.set_me(participant);
-
-            nodes.push(NodeActor {
+            participants.push(SimulatedParticipant {
                 participant,
                 account_id,
                 triples,
                 presignatures,
             });
-            participants.push(participant);
         }
 
         Ok(Self {
-            _redis_container: redis_container,
+            redis,
             redis_url,
             pool,
-            nodes,
             participants,
         })
+    }
+
+    pub fn participant_ids(&self) -> Vec<Participant> {
+        self.participants.iter().map(|p| p.participant).collect()
+    }
+
+    /// Create or retrieve a triple storage handle for an arbitrary account and participant.
+    pub fn triple_storage(&self, account_id: &AccountId, me: Participant) -> TripleStorage {
+        if let Some(ref r) = self.redis {
+            r.triple_storage(account_id, me)
+        } else {
+            let t = TriplePair::storage(&self.pool, account_id);
+            t.set_me(me);
+            t
+        }
+    }
+
+    /// Create or retrieve a presignature storage handle for an arbitrary account and participant.
+    pub fn presignature_storage(&self, account_id: &AccountId, me: Participant) -> PresignatureStorage {
+        if let Some(ref r) = self.redis {
+            r.presignature_storage(account_id, me)
+        } else {
+            let p = Presignature::storage(&self.pool, account_id);
+            p.set_me(me);
+            p
+        }
     }
 
     /// Reset slowlog before running a test case.
@@ -513,29 +563,31 @@ impl RedisHarnessCluster {
     }
 
     /// SCENARIO 1: Concurrent Insert & Take Throughput.
-    /// Simulates N nodes inserting pairs and presignatures simultaneously.
+    /// Simulates N participants inserting pairs simultaneously and subsequently taking them.
     pub async fn bench_concurrent_insert_and_take(
         &self,
-        items_per_node: usize,
+        items_per_participant: usize,
     ) -> anyhow::Result<Vec<LatencySummary>> {
         self.reset_diagnostics().await?;
 
-        let barrier = Arc::new(Barrier::new(self.nodes.len()));
+        let run_base_id = next_id_block((self.participants.len() * items_per_participant) as u64 + 1000);
+        let barrier = Arc::new(Barrier::new(self.participants.len()));
         let mut insert_tasks = Vec::new();
         let overall_start = Instant::now();
+        let participant_list = self.participant_ids();
 
-        for (node_idx, node) in self.nodes.iter().enumerate() {
-            let triples = node.triples.clone();
-            let me = node.participant;
+        for (node_idx, p) in self.participants.iter().enumerate() {
+            let triples = p.triples.clone();
+            let me = p.participant;
             let barrier = barrier.clone();
-            let participants = self.participants.clone();
+            let participants = participant_list.clone();
 
             insert_tasks.push(tokio::spawn(async move {
                 barrier.wait().await;
-                let mut insert_triple_latencies = Vec::with_capacity(items_per_node);
-                let base_id = (node_idx as u64) * 1_000_000;
+                let mut insert_triple_latencies = Vec::with_capacity(items_per_participant);
+                let base_id = run_base_id + (node_idx as u64 * items_per_participant as u64);
 
-                for i in 0..items_per_node {
+                for i in 0..items_per_participant {
                     let id = base_id + (i as u64);
                     let pair = dummy_pair(id, &participants);
 
@@ -555,22 +607,22 @@ impl RedisHarnessCluster {
         }
         let insert_wall = overall_start.elapsed();
 
-        // Now test concurrent taking of the inserted items
-        let barrier = Arc::new(Barrier::new(self.nodes.len()));
+        // Concurrent taking of the inserted items
+        let barrier = Arc::new(Barrier::new(self.participants.len()));
         let mut take_tasks = Vec::new();
         let take_start = Instant::now();
 
-        for (node_idx, node) in self.nodes.iter().enumerate() {
-            let triples = node.triples.clone();
-            let me = node.participant;
+        for (node_idx, p) in self.participants.iter().enumerate() {
+            let triples = p.triples.clone();
+            let me = p.participant;
             let barrier = barrier.clone();
 
             take_tasks.push(tokio::spawn(async move {
                 barrier.wait().await;
-                let mut take_latencies = Vec::with_capacity(items_per_node);
-                let base_id = (node_idx as u64) * 1_000_000;
+                let mut take_latencies = Vec::with_capacity(items_per_participant);
+                let base_id = run_base_id + (node_idx as u64 * items_per_participant as u64);
 
-                for i in 0..items_per_node {
+                for i in 0..items_per_participant {
                     let id = base_id + (i as u64);
                     let t0 = Instant::now();
                     triples.take(id, me).await;
@@ -594,38 +646,40 @@ impl RedisHarnessCluster {
     }
 
     /// SCENARIO 2: `remove_outdated` Pruning Storm.
-    /// Pre-populates owned items across all nodes, then triggers `remove_outdated` concurrently
-    /// across all nodes with `batch_size` owner shares (reproducing the 110ms slowlog spike).
+    /// Pre-populates owned items across participants, then triggers `remove_outdated` concurrently
+    /// across all participants with remaining shares (reproducing the slowlog spike).
     pub async fn bench_remove_outdated_storm(
         &self,
         stockpile_count: usize,
         prune_count: usize,
     ) -> anyhow::Result<LatencySummary> {
         self.reset_diagnostics().await?;
+        let participant_list = self.participant_ids();
+        let run_base_id = next_id_block((self.participants.len() * stockpile_count) as u64 + 1000);
 
-        // 1. Populate items on all nodes
-        println!("   -> Pre-populating {stockpile_count} triples per node across {} nodes...", self.nodes.len());
-        for (node_idx, node) in self.nodes.iter().enumerate() {
-            let base_id = (node_idx as u64) * 10_000_000;
+        // 1. Populate items on all participants
+        println!("   -> Pre-populating {stockpile_count} triples per participant across {} participants...", self.participants.len());
+        for (node_idx, p) in self.participants.iter().enumerate() {
+            let base_id = run_base_id + (node_idx as u64 * stockpile_count as u64);
             for i in 0..stockpile_count {
                 let id = base_id + (i as u64);
-                let pair = dummy_pair(id, &self.participants);
-                if let Some(mut slot) = node.triples.create_slot(id, node.participant).await {
-                    slot.insert(pair, node.participant).await;
+                let pair = dummy_pair(id, &participant_list);
+                if let Some(mut slot) = p.triples.create_slot(id, p.participant).await {
+                    slot.insert(pair, p.participant).await;
                 }
             }
         }
 
         // 2. Prepare remaining shares (simulating that `prune_count` items were consumed/outdated)
-        let barrier = Arc::new(Barrier::new(self.nodes.len()));
+        let barrier = Arc::new(Barrier::new(self.participants.len()));
         let mut storm_tasks = Vec::new();
         let storm_start = Instant::now();
 
-        for (node_idx, node) in self.nodes.iter().enumerate() {
-            let triples = node.triples.clone();
-            let me = node.participant;
+        for (node_idx, p) in self.participants.iter().enumerate() {
+            let triples = p.triples.clone();
+            let me = p.participant;
             let barrier = barrier.clone();
-            let base_id = (node_idx as u64) * 10_000_000;
+            let base_id = run_base_id + (node_idx as u64 * stockpile_count as u64);
 
             // owner_shares contains only the items that the owner STILL HAS (from prune_count..stockpile_count)
             let remaining_shares: Vec<u64> = (prune_count..stockpile_count)
@@ -652,7 +706,7 @@ impl RedisHarnessCluster {
     }
 
     /// SCENARIO 3: Stockpile 100ms Background Polling Contention.
-    /// Runs a write/read workload with vs. without 100ms background polling (HLEN / SCARD) across all nodes.
+    /// Runs a write/read workload with vs. without 100ms background polling (HLEN / SCARD) across all participants.
     pub async fn bench_polling_contention(
         &self,
         workload_items: usize,
@@ -664,9 +718,9 @@ impl RedisHarnessCluster {
         let mut poller_handles = Vec::new();
 
         if enable_polling {
-            for node in &self.nodes {
-                let triples = node.triples.clone();
-                let me = node.participant;
+            for p in &self.participants {
+                let triples = p.triples.clone();
+                let me = p.participant;
                 let stop = stop_flag.clone();
 
                 poller_handles.push(tokio::spawn(async move {
@@ -699,25 +753,26 @@ impl RedisHarnessCluster {
     }
 
     /// SCENARIO 4: Proposer Race (`peek_mine` + `commit`).
-    /// Multiple concurrent tasks on a single node racing to reserve artifacts with exclusion lists.
+    /// Multiple concurrent tasks on a single participant storage racing to reserve artifacts with exclusion lists.
     pub async fn bench_proposer_race(
         &self,
-        node_idx: usize,
+        participant_idx: usize,
         initial_stockpile: usize,
         num_racers: usize,
         proposals_per_racer: usize,
     ) -> anyhow::Result<Vec<LatencySummary>> {
         self.reset_diagnostics().await?;
 
-        let node = &self.nodes[node_idx];
-        let me = node.participant;
-        let triples = node.triples.clone();
+        let p = &self.participants[participant_idx];
+        let me = p.participant;
+        let triples = p.triples.clone();
+        let participant_list = self.participant_ids();
 
-        println!("   -> Stockpiling {initial_stockpile} triples on node {node_idx}...");
-        let base_id = 50_000_000u64;
+        println!("   -> Stockpiling {initial_stockpile} triples on participant {participant_idx}...");
+        let base_id = next_id_block(initial_stockpile as u64 + 1000);
         for i in 0..initial_stockpile {
             let id = base_id + (i as u64);
-            let pair = dummy_pair(id, &self.participants);
+            let pair = dummy_pair(id, &participant_list);
             if let Some(mut slot) = triples.create_slot(id, me).await {
                 slot.insert(pair, me).await;
             }
