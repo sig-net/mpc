@@ -13,6 +13,7 @@ pub struct EthArgs {
     #[arg(
         long,
         env("MPC_ETH_ACCOUNT_SK"),
+        hide_env_values = true,
         requires_all = ["eth_execution_rpc_http_url", "eth_contract_address"]
     )]
     pub eth_account_sk: Option<SecretString>,

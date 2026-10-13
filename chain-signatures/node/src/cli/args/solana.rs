@@ -9,6 +9,7 @@ pub struct SolArgs {
     #[arg(
         long,
         env("MPC_SOL_ACCOUNT_SK"),
+        hide_env_values = true,
         requires_all = ["sol_rpc_http_url", "sol_program_address"]
     )]
     pub sol_account_sk: Option<String>,

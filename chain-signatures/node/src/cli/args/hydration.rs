@@ -15,6 +15,7 @@ pub struct HydrationArgs {
     #[arg(
         long = "hydration-signer-uri",
         env("MPC_HYDRATION_SIGNER_URI"),
+        hide_env_values = true,
         requires = "rpc_ws_url"
     )]
     pub signer_uri: Option<String>,

@@ -29,7 +29,12 @@ pub struct MidnightArgs {
     )]
     pub midnight_central_address: Option<String>,
     /// Hex seed of the wallet that funds respond transactions.
-    #[arg(long, env("MPC_MIDNIGHT_FUNDING_SEED"), requires = "midnight_node_url")]
+    #[arg(
+        long,
+        env("MPC_MIDNIGHT_FUNDING_SEED"),
+        hide_env_values = true,
+        requires = "midnight_node_url"
+    )]
     pub midnight_funding_seed: Option<SecretString>,
     /// argv of the intent builder child process, JSON-encoded:
     /// `["node","dist/main.js"]`. One clap value rather than a multi-value

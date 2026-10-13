@@ -47,6 +47,7 @@ pub struct CantonArgs {
     #[arg(
         long,
         env("MPC_CANTON_OIDC_CLIENT_SECRET"),
+        hide_env_values = true,
         requires = "canton_json_api_url"
     )]
     pub canton_oidc_client_secret: Option<String>,
