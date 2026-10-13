@@ -86,7 +86,9 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .unwrap_or("Ephemeral Docker Container (redis:7.4.2)")
     );
-    println!("  Architecture:           Pure Redis container (Zero nodes / NEAR / chain processes)");
+    println!(
+        "  Architecture:           Pure Redis container (Zero nodes / NEAR / chain processes)"
+    );
     println!("  Scenario:               {}", args.scenario);
     println!("=========================================================================\n");
 
@@ -118,13 +120,17 @@ async fn main() -> anyhow::Result<()> {
     if should_run(BenchScenario::Polling) {
         println!("\n>>> Running Scenario 2: Stockpile 100ms Polling Contention Comparison");
         println!("    Phase A: Workload WITHOUT background polling...");
-        let without_polling = harness.bench_polling_contention(args.items / 2, false).await?;
+        let without_polling = harness
+            .bench_polling_contention(args.items / 2, false)
+            .await?;
 
         println!(
             "    Phase B: Workload WITH 100ms background polling (HLEN/SCARD across {} participants)...",
             args.participants
         );
-        let with_polling = harness.bench_polling_contention(args.items / 2, true).await?;
+        let with_polling = harness
+            .bench_polling_contention(args.items / 2, true)
+            .await?;
 
         println!("\n  Comparison (Without vs. With 100ms Polling Contention):");
         let mut combined = Vec::with_capacity(without_polling.len() + with_polling.len());
@@ -147,7 +153,9 @@ async fn main() -> anyhow::Result<()> {
             stockpile * args.participants,
             prune * args.participants
         );
-        let results = harness.bench_remove_outdated_storm(stockpile, prune).await?;
+        let results = harness
+            .bench_remove_outdated_storm(stockpile, prune)
+            .await?;
         harness.report_results(&results).await?;
     }
 
@@ -158,7 +166,9 @@ async fn main() -> anyhow::Result<()> {
         println!(
             "\n>>> Running Scenario 4: Proposer Race (`peek_mine` + `commit`) - {racers} racers, {per_racer} proposals each"
         );
-        let results = harness.bench_proposer_race(0, initial_stockpile, racers, per_racer).await?;
+        let results = harness
+            .bench_proposer_race(0, initial_stockpile, racers, per_racer)
+            .await?;
         harness.report_results(&results).await?;
     }
 
@@ -173,7 +183,9 @@ async fn main() -> anyhow::Result<()> {
             args.participants,
             spike_ms
         );
-        let results = harness.bench_cascading_saturation(tasks_per_p, items_per_task, spike_ms, 3).await?;
+        let results = harness
+            .bench_cascading_saturation(tasks_per_p, items_per_task, spike_ms, 3)
+            .await?;
         harness.report_results(&results).await?;
     }
 
@@ -197,7 +209,9 @@ async fn main() -> anyhow::Result<()> {
 
     if should_run(BenchScenario::SyncPrune) {
         let items = args.items.max(100);
-        println!("\n>>> Running Scenario 8: State Sync Peer Drop & Pruning (`remove_holder_and_prune`)");
+        println!(
+            "\n>>> Running Scenario 8: State Sync Peer Drop & Pruning (`remove_holder_and_prune`)"
+        );
         let results = harness.bench_sync_prune_storm(items).await?;
         harness.report_results(&results).await?;
     }
@@ -217,7 +231,9 @@ async fn main() -> anyhow::Result<()> {
         println!(
             "\n>>> Running Scenario 10: Large Stockpile Deep-Seek (`peek_mine` with {exclusions} exclusions across {stockpile} items)"
         );
-        let results = harness.bench_deep_stockpile_seek(stockpile, num_seekers, exclusions, seeks).await?;
+        let results = harness
+            .bench_deep_stockpile_seek(stockpile, num_seekers, exclusions, seeks)
+            .await?;
         harness.report_results(&results).await?;
     }
 
@@ -229,7 +245,9 @@ async fn main() -> anyhow::Result<()> {
         println!(
             "\n>>> Running Scenario 11: Proposer Churn & Aborted Reservation Storm ({rounds} rounds, {abort_percent}% timeout/abort rate)"
         );
-        let results = harness.bench_reservation_churn_abort(stockpile, num_proposers, rounds, abort_percent).await?;
+        let results = harness
+            .bench_reservation_churn_abort(stockpile, num_proposers, rounds, abort_percent)
+            .await?;
         harness.report_results(&results).await?;
     }
 

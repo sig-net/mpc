@@ -293,9 +293,8 @@ impl Redis {
 
     /// Wait for the Redis container to be reachable via the host port.
     async fn wait_for_host_port_readiness(internal_address: &str) {
-        let cfg = RedisPoolConfig::from_url(
-            url::Url::parse(internal_address).expect("valid redis url"),
-        );
+        let cfg =
+            RedisPoolConfig::from_url(url::Url::parse(internal_address).expect("valid redis url"));
         let pool = cfg
             .create_pool(Some(RedisRuntime::Tokio1))
             .expect("valid redis pool config");
@@ -330,9 +329,7 @@ impl Redis {
     pub fn pool(&self) -> RedisPool {
         let redis_url = url::Url::parse(self.internal_address.as_str()).unwrap();
         let redis_cfg = RedisPoolConfig::from_url(redis_url);
-        redis_cfg
-            .create_pool(Some(RedisRuntime::Tokio1))
-            .unwrap()
+        redis_cfg.create_pool(Some(RedisRuntime::Tokio1)).unwrap()
     }
 
     pub fn triple_storage(
