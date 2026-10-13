@@ -154,7 +154,9 @@ fn now_ms() -> u64 {
 /// Returns true if the error looks like the provider throttling us: HTTP 429
 /// (rate limited) or 402 (payment required, e.g. exhausted credits).
 fn is_provider_throttled(e: &anyhow::Error) -> bool {
-    let s = e.to_string();
+    // `{:#}` renders the full context chain — a 429 can sit underneath
+    // `with_context` wrappers whose outer message would hide it
+    let s = format!("{e:#}");
     contains_status_code(&s, "429") || contains_status_code(&s, "402")
 }
 
@@ -190,8 +192,9 @@ fn contains_status_code(s: &str, code: &str) -> bool {
     while let Some(pos) = s[start..].find(code) {
         let i = start + pos;
         let end = i + code.len();
-        let before_ok = i == 0 || !bytes[i - 1].is_ascii_digit();
-        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_digit();
+        // alphanumeric boundaries: hex/base58 runs (…a429f…) must not read as status codes
+        let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
         if before_ok && after_ok {
             return true;
         }
@@ -492,6 +495,20 @@ mod tests {
         )));
         assert!(!is_provider_throttled(&anyhow::anyhow!(
             "HTTP status client error (403 Forbidden)"
+        )));
+        // a 429 underneath `with_context` still engages (full chain scanned)
+        assert!(is_provider_throttled(
+            &anyhow::anyhow!(
+                "HTTP status client error (429 Too Many Requests) for url (http://x/)"
+            )
+            .context("submitting the midnight respond intent built over the chain at 0x9c1f")
+        ));
+        // hex fragments must not read as throttles (alphanumeric boundaries)
+        assert!(!is_provider_throttled(&anyhow::anyhow!(
+            "submitting the midnight respond intent built over the chain at 0xa429f"
+        )));
+        assert!(!is_provider_throttled(&anyhow::anyhow!(
+            "no spendable dust for transfer c402e5819d2b"
         )));
     }
 
