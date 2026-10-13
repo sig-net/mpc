@@ -75,15 +75,18 @@ async function post(
   const waited = (): string => `${((performance.now() - started) / 1000).toFixed(1)}s`;
   // The ledger keeps only the text of what `prove` and `check` throw, and undici puts the
   // real reason (refused, reset, headers timeout) in `cause`, so it must be in the message.
-  const transportFailure = (error: unknown): Error => {
+  const describeTransport = (error: unknown): string => {
     const described = describeFailure(error);
     const code = (error as { cause?: { code?: unknown } } | undefined)?.cause?.code;
-    const coded =
-      typeof code === "string" && !described.includes(code) ? `${described} (${code})` : described;
-    return new Error(`proof server ${path} request failed after ${waited()}: ${coded}`, {
-      cause: error,
-    });
+    return typeof code === "string" && !described.includes(code)
+      ? `${described} (${code})`
+      : described;
   };
+  const transportFailure = (error: unknown): Error =>
+    new Error(
+      `proof server ${path} request failed after ${waited()}: ${describeTransport(error)}`,
+      { cause: error },
+    );
   const response = await fetch(new URL(path, proofServerUrl), {
     method: "POST",
     headers: { "content-type": "application/octet-stream" },
@@ -93,8 +96,11 @@ async function post(
     throw transportFailure(error);
   });
   if (response.status !== 200) {
+    const detail = await response
+      .text()
+      .catch((error: unknown) => `<body unreadable: ${describeTransport(error)}>`);
     throw new Error(
-      `proof server answered ${response.status} to ${path} after ${waited()}: ${await response.text()}`,
+      `proof server answered ${response.status} to ${path} after ${waited()}: ${detail}`,
     );
   }
   return new Uint8Array(

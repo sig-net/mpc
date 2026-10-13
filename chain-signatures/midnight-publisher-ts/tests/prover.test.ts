@@ -176,6 +176,28 @@ describe("the proving provider", () => {
     }
   });
 
+  it("keeps the status and undici's cause when an error response is cut off", async () => {
+    const server = createServer((request, response) => {
+      request.resume().on("end", () => {
+        response.writeHead(503, { "content-length": "1024" });
+        response.write("w", () => response.socket?.destroy());
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const live = provingProvider(`http://127.0.0.1:${port}`, new AbortController().signal);
+      const request = await proofRequest();
+
+      await expect(live.prove(request.preimage, request.keyLocation, 4n)).rejects.toThrow(
+        /^proof server answered 503 to \/prove after \d+\.\ds: <body unreadable: TypeError: terminated: SocketError: other side closed \(UND_ERR_SOCKET\)>$/,
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("enforces the aggregate proving budget when proof work ignores the provider and resolves late", async () => {
     vi.useFakeTimers();
     const lateResult = { proven: "too late" } as unknown as UnboundTransaction;
