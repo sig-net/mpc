@@ -204,24 +204,6 @@ fn bench_load_keys(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("remove_outdated 1000 triples", |b| {
-        let shares: Vec<u64> = (0..500).collect();
-        b.iter(|| {
-            rt.block_on(async {
-                let _ = env.triples.remove_outdated(env.me, &shares).await;
-            });
-        });
-    });
-
-    c.bench_function("peek_mine triple 50 exclusions", |b| {
-        let excluded: Vec<u64> = (0..50).collect();
-        b.iter(|| {
-            rt.block_on(async {
-                let _ = env.triples.peek_mine(&excluded).await;
-            });
-        });
-    });
-
     // async drop:
     rt.block_on(async {
         drop(env);
