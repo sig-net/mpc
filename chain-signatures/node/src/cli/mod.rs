@@ -1029,7 +1029,6 @@ async fn spawn_indexers(
 #[cfg(test)]
 mod tests {
     use mpc_chain_integration_core::utils::test::make_publish_action;
-    use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{SignId, SignKind};
     use std::str::FromStr;
     use std::time::Duration;
@@ -1446,26 +1445,6 @@ mod tests {
             indexer: Default::default(),
         }
     }
-
-    fn near_client_stub() -> NearClient {
-        use near_crypto::{InMemorySigner, KeyType, SecretKey};
-        let account: AccountId = "test.near".parse().unwrap();
-        let signer = match InMemorySigner::from_secret_key(
-            account.clone(),
-            SecretKey::from_seed(KeyType::ED25519, "wiring-test"),
-        ) {
-            near_crypto::Signer::InMemory(s) => s,
-            _ => unreachable!(),
-        };
-        NearClient::new(
-            near_fetch::Client::new("http://127.0.0.1:1"),
-            &account,
-            signer,
-            NearRpcGates::new(SharedBackoff::new()),
-            Arc::new(NoopPublisherTelemetry),
-        )
-    }
-
     #[tokio::test]
     async fn solana_publisher_shares_the_stacks_cooldown_gate() {
         let stack = ChainStack::new(ChainConfigs {
@@ -1477,7 +1456,9 @@ mod tests {
             tron: None,
         });
 
-        let publishers = stack.publishers(near_client_stub(), Backlog::new()).await;
+        let publishers = stack
+            .publishers(undialed_near_client(), Backlog::new())
+            .await;
         let publisher = publishers
             .get(&Chain::Solana)
             .expect("solana publisher must be wired when configured");
