@@ -1308,5 +1308,61 @@ async fn test_vote_reshare_validation_errors() -> anyhow::Result<()> {
         .await?;
     assert!(execution.is_failure());
 
+    // 5. Surviving old participants cannot go below current threshold
+    // 3 participants, threshold 2: kicking 2 participants leaves 3 - 2 = 1 < 2, rejected
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [alice.id()],
+            "kicks": [accounts[1].id(), accounts[2].id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure());
+    let failure = format!("{:?}", execution.failures());
+    assert!(failure.contains("Number of participants cannot go below threshold"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_reshare_rejects_surviving_cohort_below_threshold() -> anyhow::Result<()> {
+    // 5 participants, threshold 3
+    let (worker, contract, accounts, _) = init_env_with_participant_count(5, 3).await;
+
+    let alice = worker.dev_create_account().await?;
+    let bob = worker.dev_create_account().await?;
+    assert!(join(&alice, &contract).await?.is_success());
+    assert!(join(&bob, &contract).await?.is_success());
+
+    // Proposal: 3 kicks, 2 joins.
+    // Resulting cohort size = 5 - 3 + 2 = 4 >= 2.
+    // BUT surviving old participants = 5 - 3 = 2 < 3 (current threshold).
+    // This must be rejected because cait-sith cannot reconstruct the old key with < threshold old shares.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [alice.id(), bob.id()],
+            "kicks": [accounts[1].id(), accounts[2].id(), accounts[3].id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure());
+    let failure = format!("{:?}", execution.failures());
+    assert!(failure.contains("Number of participants cannot go below threshold"));
+
+    // Proposal: 2 kicks, 2 joins.
+    // Surviving old participants = 5 - 2 = 3 >= 3 (current threshold).
+    // This should be valid and accepted.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [alice.id(), bob.id()],
+            "kicks": [accounts[1].id(), accounts[2].id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
     Ok(())
 }

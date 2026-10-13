@@ -407,13 +407,12 @@ impl MpcContract {
                     }
                 }
 
-                // 4. Validate resulting cohort size meets minimum viable MPC threshold
-                let new_count = participants
-                    .len()
-                    .checked_sub(kicks.len())
-                    .and_then(|c| c.checked_add(joins.len()))
-                    .ok_or(VoteError::ParticipantsBelowThreshold)?;
+                // 4. Validate cohort size & threshold invariants
+                if participants.len().saturating_sub(kicks.len()) < *threshold {
+                    return Err(VoteError::ParticipantsBelowThreshold.into());
+                }
 
+                let new_count = (participants.len() - kicks.len()) + joins.len();
                 const MIN_PARTICIPANTS: usize = 2;
                 if new_count < MIN_PARTICIPANTS {
                     return Err(VoteError::ParticipantsBelowThreshold.into());
