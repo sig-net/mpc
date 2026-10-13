@@ -210,7 +210,8 @@ describe("the proving provider", () => {
       const live = provingProvider(`http://127.0.0.1:${port}`, new AbortController().signal);
       const request = await proofRequest();
 
-      for (let i = 0; i < 3; i++) await live.prove(request.preimage, request.keyLocation, 4n);
+      // A built-in key location sends no contract key material, keeping each upload small.
+      for (let i = 0; i < 3; i++) await live.prove(request.preimage, "midnight/zswap/spend", 4n);
 
       expect(sockets.size).toBe(3);
     } finally {
