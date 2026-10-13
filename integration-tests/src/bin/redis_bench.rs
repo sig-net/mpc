@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use integration_tests::redis::{RedisHarness, RedisHarnessConfig};
+use integration_tests::redis_harness::{RedisHarness, RedisHarnessConfig};
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "snake_case")]
