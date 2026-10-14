@@ -149,6 +149,13 @@ where
     }
 }
 
+/// Attaches the exhaustion context to a failed retry chain without
+/// re-stringifying the error, so typed causes survive for outer gates.
+#[doc(hidden)]
+pub fn exhausted(e: anyhow::Error, attempts: u32) -> anyhow::Error {
+    e.context(format!("exhausted after {} attempts", attempts))
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -430,7 +437,7 @@ macro_rules! retry_op {
                 );
             })
             .await
-            .map_err(|e| e.context(format!("exhausted after {} attempts", attempt_counter + 1)))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
     }};
 
     // Full form: op_name string, custom notify closure
@@ -455,7 +462,7 @@ macro_rules! retry_op {
                 $notify
             })
             .await
-            .map_err(|e| e.context(format!("exhausted after {} attempts", attempt_counter + 1)))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
     }};
 }
 
@@ -507,7 +514,7 @@ macro_rules! retry_rpc {
                 );
             })
             .await
-            .map_err(|e| e.context(format!("exhausted after {} attempts", attempt_counter + 1)))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
     }};
 
     // Full form: op_name string, custom notify closure
@@ -531,7 +538,7 @@ macro_rules! retry_rpc {
                 $notify
             })
             .await
-            .map_err(|e| e.context(format!("exhausted after {} attempts", attempt_counter + 1)))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
     }};
 }
 
