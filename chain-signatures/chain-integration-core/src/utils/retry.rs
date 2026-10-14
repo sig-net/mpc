@@ -229,35 +229,35 @@ impl RpcFailure {
     }
 }
 
-/// First [`RpcFailure`] in the anyhow chain, if any.
-fn rpc_failure(e: &anyhow::Error) -> Option<&RpcFailure> {
-    e.chain()
-        .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+/// Typed signals from one walk of the anyhow chain: the first [`RpcFailure`]`/
+/// its verdict, and the first typed HTTP status (on a [`RpcFailure`] or an
+/// alloy transport error wrapping an HTTP response).
+fn typed_signals(e: &anyhow::Error) -> (Option<&RpcFailure>, Option<StatusCode>) {
+    e.chain().fold((None, None), |(failure, status), cause| {
+        (
+            failure.or_else(|| cause.downcast_ref::<RpcFailure>()),
+            status.or_else(|| cause_status(cause)),
+        )
+    })
 }
 
-/// First typed HTTP status in the anyhow chain: a [`RpcFailure`] carrying one,
-/// or an alloy transport error wrapping an HTTP response.
-fn typed_http_status(e: &anyhow::Error) -> Option<StatusCode> {
-    for cause in e.chain() {
-        if let Some(f) = cause.downcast_ref::<RpcFailure>() {
-            if let Some(status) = f.status {
-                return Some(status);
-            }
-        }
-        if let Some(err) = cause.downcast_ref::<AlloyTransportError>() {
-            if let AlloyRpcError::Transport(TransportErrorKind::HttpError(http)) = err {
-                return StatusCode::from_u16(http.status).ok();
-            }
-        }
+/// HTTP status carried by a single error cause, if any.
+fn cause_status(cause: &(dyn std::error::Error + 'static)) -> Option<StatusCode> {
+    if let Some(failure) = cause.downcast_ref::<RpcFailure>() {
+        return failure.status;
     }
-    None
+    let err = cause.downcast_ref::<AlloyTransportError>()?;
+    let AlloyRpcError::Transport(TransportErrorKind::HttpError(http)) = err else {
+        return None;
+    };
+    StatusCode::from_u16(http.status).ok()
 }
 
 /// Returns true if the error looks like the provider throttling us: HTTP 429
 /// (rate limited) or 402 (payment required, e.g. exhausted credits).
 fn is_provider_throttled(e: &anyhow::Error) -> bool {
     // Typed status is authoritative over body text (if present).
-    if let Some(status) = typed_http_status(e) {
+    if let Some(status) = typed_signals(e).1 {
         return status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::PAYMENT_REQUIRED;
     }
     // TODO: last-resort fallback for chains surfacing statuses only as text;
@@ -313,13 +313,13 @@ fn contains_status_code(s: &str, code: &str) -> bool {
 /// Helper to identify whether an RPC error should be retried.
 /// Protects against endlessly retrying terminal client errors (4xx).
 pub fn is_retryable(e: &anyhow::Error) -> bool {
-    // Explicit typed verdict wins over any message text
-    if let Some(f) = rpc_failure(e) {
+    // Explicit typed verdict wins over any message text; otherwise the first
+    // typed HTTP status decides.
+    let (failure, status) = typed_signals(e);
+    if let Some(f) = failure {
         return !f.terminal;
     }
-
-    // Check for a typed HTTP status code.
-    if let Some(status) = typed_http_status(e) {
+    if let Some(status) = status {
         return http_status_retryable(status);
     }
 
