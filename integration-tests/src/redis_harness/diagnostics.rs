@@ -318,6 +318,6 @@ pub fn partition_wall_by_active_time(
         let r1 = t1.as_secs_f64() / total.as_secs_f64();
         (wall.mul_f64(r1), wall.mul_f64(1.0 - r1))
     } else {
-        (wall, wall)
+        (Duration::ZERO, Duration::ZERO)
     }
 }
