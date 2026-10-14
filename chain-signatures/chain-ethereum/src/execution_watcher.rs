@@ -1615,213 +1615,193 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn midnight_issuance_requires_a_decodable_success_or_reverted_receipt() {
+    async fn outcome_requires_a_decodable_success_or_reverted_receipt() {
         let unexpected_output = format!("0x{}1", "0".repeat(63));
         // Receipt status None means the nonce was consumed with no receipt for
         // this transaction. Trace output None represents a transport failure.
-        for (name, source_chain, receipt_status, trace_output, expected) in [
-            (
-                "midnight undecodable success",
-                Chain::Midnight,
-                Some(true),
-                Some(unexpected_output.as_str()),
-                Some(ExecutionOutcome::ExtractionFailed),
-            ),
-            (
-                "legacy undecodable success",
-                Chain::Solana,
-                Some(true),
-                Some(unexpected_output.as_str()),
-                Some(ExecutionOutcome::ExtractionFailed),
-            ),
-            (
-                "midnight reverted",
-                Chain::Midnight,
-                Some(false),
-                Some("0x"),
-                Some(ExecutionOutcome::Failed),
-            ),
-            (
-                "midnight decodable success",
-                Chain::Midnight,
-                Some(true),
-                Some("0x"),
-                Some(ExecutionOutcome::Success { output: vec![] }),
-            ),
-            (
-                "midnight nonce consumed",
-                Chain::Midnight,
-                None,
-                Some("0x"),
-                None,
-            ),
-            (
-                "legacy nonce consumed",
-                Chain::Solana,
-                None,
-                Some("0x"),
-                None,
-            ),
-            (
-                "midnight trace unavailable",
-                Chain::Midnight,
-                Some(true),
-                None,
-                None,
-            ),
-        ] {
-            let mut server = Server::new_async().await;
-            let tx_hash = b256!("cccc000000000000000000000000000000000000000000000000000000000000");
-            let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
-            let mut receipt = serde_json::Value::Null;
-            if let Some(succeeded) = receipt_status {
-                receipt = success_receipt(tx_hash, from_address, 3);
-                receipt["status"] = json!(if succeeded { "0x1" } else { "0x0" });
-            }
-            // Drive the late-watcher RPC path at block 5; receipt inclusion was
-            // block 3, which must remain the height of attestable outcomes.
-            let mut receipt_mock = None;
-            for (method, result) in [
-                ("eth_getTransactionCount", json!("0x1")),
-                ("eth_getTransactionReceipt", receipt),
+        for source_chain in [Chain::Midnight, Chain::Solana] {
+            for (case, receipt_status, trace_output, expected) in [
                 (
-                    "eth_getTransactionByHash",
-                    contract_call_transaction(tx_hash, from_address, from_address),
+                    "undecodable success",
+                    Some(true),
+                    Some(unexpected_output.as_str()),
+                    Some(ExecutionOutcome::ExtractionFailed),
                 ),
+                (
+                    "reverted",
+                    Some(false),
+                    Some("0x"),
+                    Some(ExecutionOutcome::Failed),
+                ),
+                (
+                    "decodable success",
+                    Some(true),
+                    Some("0x"),
+                    Some(ExecutionOutcome::Success { output: vec![] }),
+                ),
+                ("nonce consumed", None, Some("0x"), None),
+                ("trace unavailable", Some(true), None, None),
             ] {
-                let mock = server
+                let name = format!("{source_chain} {case}");
+                let mut server = Server::new_async().await;
+                let tx_hash =
+                    b256!("cccc000000000000000000000000000000000000000000000000000000000000");
+                let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+                let mut receipt = serde_json::Value::Null;
+                if let Some(succeeded) = receipt_status {
+                    receipt = success_receipt(tx_hash, from_address, 3);
+                    receipt["status"] = json!(if succeeded { "0x1" } else { "0x0" });
+                }
+                // Drive the late-watcher RPC path at block 5; receipt inclusion was
+                // block 3, which must remain the height of attestable outcomes.
+                let mut receipt_mock = None;
+                for (method, result) in [
+                    ("eth_getTransactionCount", json!("0x1")),
+                    ("eth_getTransactionReceipt", receipt),
+                    (
+                        "eth_getTransactionByHash",
+                        contract_call_transaction(tx_hash, from_address, from_address),
+                    ),
+                ] {
+                    let mock = server
+                        .mock("POST", "/")
+                        .match_body(Matcher::PartialJson(json!({ "method": method })))
+                        .with_status(200)
+                        .with_header("content-type", "application/json")
+                        .with_body(
+                            json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string(),
+                        )
+                        .create_async()
+                        .await;
+                    if method == "eth_getTransactionReceipt" {
+                        receipt_mock = Some(mock);
+                    }
+                }
+                let trace_mock = server
                     .mock("POST", "/")
-                    .match_body(Matcher::PartialJson(json!({ "method": method })))
-                    .with_status(200)
+                    .match_body(Matcher::PartialJson(
+                        json!({ "method": "debug_traceTransaction" }),
+                    ))
+                    .with_status(if trace_output.is_some() { 200 } else { 500 })
                     .with_header("content-type", "application/json")
-                    .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string())
+                    .with_body(
+                        json!({
+                            "jsonrpc": "2.0", "id": 1,
+                            "result": { "type": "CALL", "output": trace_output },
+                        })
+                        .to_string(),
+                    )
                     .create_async()
                     .await;
-                if method == "eth_getTransactionReceipt" {
-                    receipt_mock = Some(mock);
-                }
-            }
-            let trace_mock = server
-                .mock("POST", "/")
-                .match_body(Matcher::PartialJson(
-                    json!({ "method": "debug_traceTransaction" }),
-                ))
-                .with_status(if trace_output.is_some() { 200 } else { 500 })
-                .with_header("content-type", "application/json")
-                .with_body(
-                    json!({
-                        "jsonrpc": "2.0", "id": 1,
-                        "result": { "type": "CALL", "output": trace_output },
-                    })
-                    .to_string(),
-                )
-                .create_async()
-                .await;
 
-            let harness = test_utils::WatcherHarness::new(&server.url()).await;
-            let mut tx = empty_output_schema_tx(tx_hash, from_address);
-            Arc::make_mut(&mut tx).source_chain = source_chain;
-            harness
-                .state_manager
-                .watch_execution(Chain::Ethereum, SignId::new([0xcc; 32]), tx)
-                .await;
-            let mut block: Block = Block::default();
-            block.header.number = 5;
-            block.transactions = BlockTransactions::Hashes(Vec::new());
-            let events = harness.watcher().collect(&block).await.unwrap();
+                let harness = test_utils::WatcherHarness::new(&server.url()).await;
+                let mut tx = empty_output_schema_tx(tx_hash, from_address);
+                Arc::make_mut(&mut tx).source_chain = source_chain;
+                harness
+                    .state_manager
+                    .watch_execution(Chain::Ethereum, SignId::new([0xcc; 32]), tx)
+                    .await;
+                let mut block: Block = Block::default();
+                block.header.number = 5;
+                block.transactions = BlockTransactions::Hashes(Vec::new());
+                let events = harness.watcher().collect(&block).await.unwrap();
 
-            if let Some(expected) = expected {
-                assert_eq!(events.len(), 1, "{name}");
-                let ChainEvent::ExecutionConfirmed {
-                    source_chain: actual_source,
-                    block_height,
-                    result,
-                    ..
-                } = &events[0]
-                else {
-                    panic!("{name}: unexpected event {:?}", events[0]);
-                };
-                assert_eq!(*actual_source, source_chain, "{name}");
-                assert_eq!(
-                    *block_height,
-                    if receipt_status.is_some() { 3 } else { 5 },
-                    "{name}"
-                );
-                assert_eq!(
-                    std::mem::discriminant(result),
-                    std::mem::discriminant(&expected),
-                    "{name}: {result:?} instead of {expected:?}"
-                );
-                if let (
-                    ExecutionOutcome::Success { output },
-                    ExecutionOutcome::Success {
-                        output: expected_output,
-                    },
-                ) = (result, expected)
-                {
-                    assert_eq!(*output, expected_output, "{name}");
-                }
-            } else {
-                assert!(events.is_empty(), "{name}: {events:?}");
-                assert_eq!(
-                    harness.telemetry.retryable_failures(),
-                    usize::from(trace_output.is_none()),
-                    "{name}"
-                );
-                assert!(
-                    harness
-                        .state_manager
-                        .get_execution_watchers(Chain::Ethereum)
-                        .await
-                        .contains_key(&BidirectionalTxId(tx_hash.0)),
-                    "{name}: watcher remains pending"
-                );
-                assert_eq!(harness.telemetry.terminal_failures(), 0, "{name}");
-                if receipt_status.is_none() {
-                    receipt_mock.as_ref().unwrap().remove_async().await;
-                    server
-                        .mock("POST", "/")
-                        .match_body(Matcher::PartialJson(
-                            json!({ "method": "eth_getTransactionReceipt" }),
-                        ))
-                        .with_status(200)
-                        .with_header("content-type", "application/json")
-                        .with_body(
-                            json!({ "jsonrpc": "2.0", "id": 1,
-                            "result": success_receipt(tx_hash, from_address, 3) })
-                            .to_string(),
-                        )
-                        .create_async()
-                        .await;
-                    block.header.number = harness.config.watcher_slow_sweep_interval;
+                if let Some(expected) = expected {
+                    assert_eq!(events.len(), 1, "{name}");
+                    let ChainEvent::ExecutionConfirmed {
+                        source_chain: actual_source,
+                        block_height,
+                        result,
+                        ..
+                    } = &events[0]
+                    else {
+                        panic!("{name}: unexpected event {:?}", events[0]);
+                    };
+                    assert_eq!(*actual_source, source_chain, "{name}");
+                    assert_eq!(
+                        *block_height,
+                        if receipt_status.is_some() { 3 } else { 5 },
+                        "{name}"
+                    );
+                    assert_eq!(
+                        std::mem::discriminant(result),
+                        std::mem::discriminant(&expected),
+                        "{name}: {result:?} instead of {expected:?}"
+                    );
+                    if let (
+                        ExecutionOutcome::Success { output },
+                        ExecutionOutcome::Success {
+                            output: expected_output,
+                        },
+                    ) = (result, expected)
+                    {
+                        // Other source chains encode the output from the respond schema.
+                        if source_chain == Chain::Midnight {
+                            assert_eq!(*output, expected_output, "{name}");
+                        }
+                    }
                 } else {
-                    trace_mock.remove_async().await;
-                    server
-                        .mock("POST", "/")
-                        .match_body(Matcher::PartialJson(
-                            json!({ "method": "debug_traceTransaction" }),
-                        ))
-                        .with_status(200)
-                        .with_header("content-type", "application/json")
-                        .with_body(
-                            json!({ "jsonrpc": "2.0", "id": 1,
+                    assert!(events.is_empty(), "{name}: {events:?}");
+                    assert_eq!(
+                        harness.telemetry.retryable_failures(),
+                        usize::from(trace_output.is_none()),
+                        "{name}"
+                    );
+                    assert!(
+                        harness
+                            .state_manager
+                            .get_execution_watchers(Chain::Ethereum)
+                            .await
+                            .contains_key(&BidirectionalTxId(tx_hash.0)),
+                        "{name}: watcher remains pending"
+                    );
+                    assert_eq!(harness.telemetry.terminal_failures(), 0, "{name}");
+                    if receipt_status.is_none() {
+                        receipt_mock.as_ref().unwrap().remove_async().await;
+                        server
+                            .mock("POST", "/")
+                            .match_body(Matcher::PartialJson(
+                                json!({ "method": "eth_getTransactionReceipt" }),
+                            ))
+                            .with_status(200)
+                            .with_header("content-type", "application/json")
+                            .with_body(
+                                json!({ "jsonrpc": "2.0", "id": 1,
+                            "result": success_receipt(tx_hash, from_address, 3) })
+                                .to_string(),
+                            )
+                            .create_async()
+                            .await;
+                        block.header.number = harness.config.watcher_slow_sweep_interval;
+                    } else {
+                        trace_mock.remove_async().await;
+                        server
+                            .mock("POST", "/")
+                            .match_body(Matcher::PartialJson(
+                                json!({ "method": "debug_traceTransaction" }),
+                            ))
+                            .with_status(200)
+                            .with_header("content-type", "application/json")
+                            .with_body(
+                                json!({ "jsonrpc": "2.0", "id": 1,
                             "result": { "type": "CALL", "output": "0x" } })
-                            .to_string(),
-                        )
-                        .create_async()
-                        .await;
-                    block.header.number = 6;
-                }
-                let recovered = harness.watcher().collect(&block).await.unwrap();
-                assert!(matches!(recovered.as_slice(), [ChainEvent::ExecutionConfirmed {
+                                .to_string(),
+                            )
+                            .create_async()
+                            .await;
+                        block.header.number = 6;
+                    }
+                    let recovered = harness.watcher().collect(&block).await.unwrap();
+                    assert!(matches!(recovered.as_slice(), [ChainEvent::ExecutionConfirmed {
                     block_height: 3, result: ExecutionOutcome::Success { .. }, ..
                 }]), "{name}: later receipt/trace must recover at the inclusion height: {recovered:?}");
+                }
             }
         }
     }
 
     #[test]
-    fn observed_replacement_resolves_midnight_without_changing_legacy_policy() {
+    fn observed_replacement_resolves_its_displaced_sibling_on_every_source_chain() {
         let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
         for source_chain in [
             Chain::Midnight,
@@ -1864,7 +1844,7 @@ mod tests {
     }
 
     #[test]
-    fn midnight_unviable_requires_different_unsigned_bytes_at_the_same_nonce() {
+    fn displacement_requires_different_unsigned_bytes_at_the_same_nonce() {
         let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
         let tx_hash = alloy::primitives::B256::repeat_byte(0xdd);
         for (source_chain, case) in [
@@ -1971,7 +1951,7 @@ mod tests {
     /// A replacement the nonce gate sees late resolves its displaced sibling at its own inclusion
     /// height, whatever its outcome, while this node still watches it when it lists the sibling.
     #[tokio::test]
-    async fn late_replacement_resolves_its_displaced_midnight_sibling() {
+    async fn late_replacement_resolves_its_displaced_sibling() {
         /// When this node lists each watcher, relative to the replacement's
         /// inclusion in block 5.
         #[derive(PartialEq)]

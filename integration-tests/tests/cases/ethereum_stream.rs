@@ -975,13 +975,22 @@ async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Resul
     Ok(())
 }
 
-/// A node that indexes a replacement's Midnight signature only after processing
-/// the Ethereum block that mined it registers the replacement's watcher late.
-/// The displaced request must still resolve as unviable at the replacement's
-/// inclusion height, which a node that watched in time also attests.
+/// A node that indexes a replacement's signature only after processing the
+/// Ethereum block that mined it registers the replacement's watcher late. The
+/// displaced request must still resolve at the replacement's inclusion height,
+/// which a node that watched in time also attests: Unviable on Midnight, Failed
+/// on source chains that cannot encode Unviable yet.
 #[test_log::test(tokio::test)]
-async fn test_ethereum_stream_late_replacement_watcher_resolves_displaced_midnight_request(
-) -> Result<()> {
+async fn test_ethereum_stream_late_replacement_watcher_resolves_displaced_request() -> Result<()> {
+    for source_chain in [Chain::Midnight, Chain::Solana] {
+        late_replacement_watcher_resolves_displaced_request(source_chain)
+            .await
+            .with_context(|| format!("source chain {source_chain}"))?;
+    }
+    Ok(())
+}
+
+async fn late_replacement_watcher_resolves_displaced_request(source_chain: Chain) -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
 
@@ -1007,7 +1016,7 @@ async fn test_ethereum_stream_late_replacement_watcher_resolves_displaced_midnig
     let displaced_tx_id = mpc_primitives::BidirectionalTxId([0x74; 32]);
     let mut displaced =
         test_eth_bidirectional_tx(displaced_tx_id, displaced_sign_id, responder_address, nonce);
-    displaced.source_chain = Chain::Midnight;
+    displaced.source_chain = source_chain;
     displaced.serialized_transaction = vec![0x74];
     backlog.insert_mock_executing(&displaced).await;
 
@@ -1046,7 +1055,7 @@ async fn test_ethereum_stream_late_replacement_watcher_resolves_displaced_midnig
         responder_address,
         nonce,
     );
-    replacement.source_chain = Chain::Midnight;
+    replacement.source_chain = source_chain;
     replacement.serialized_transaction = vec![0x75];
     backlog.insert_mock_executing(&replacement).await;
 
@@ -1084,10 +1093,17 @@ async fn test_ethereum_stream_late_replacement_watcher_resolves_displaced_midnig
         *height, replaced_at,
         "the displaced request resolves at the replacement's inclusion height"
     );
-    assert!(
-        matches!(result, mpc_primitives::ExecutionOutcome::Unviable),
-        "the displaced request is unviable: {result:?}"
-    );
+    if source_chain == Chain::Midnight {
+        assert!(
+            matches!(result, mpc_primitives::ExecutionOutcome::Unviable),
+            "the displaced request is unviable: {result:?}"
+        );
+    } else {
+        assert!(
+            matches!(result, mpc_primitives::ExecutionOutcome::Failed),
+            "the displaced request failed: {result:?}"
+        );
+    }
 
     Ok(())
 }
