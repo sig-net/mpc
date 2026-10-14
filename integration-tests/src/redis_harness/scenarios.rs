@@ -148,7 +148,7 @@ impl RedisHarness {
         Ok(vec![s1, s2])
     }
 
-    /// SCENARIO 2: `remove_outdated` Pruning Storm.
+    /// SCENARIO 3: `remove_outdated` Pruning Storm.
     /// Pre-populates owned items across participants, then triggers `remove_outdated` concurrently
     /// across all participants with remaining shares (reproducing the slowlog spike).
     pub async fn bench_remove_outdated_storm(
@@ -224,7 +224,7 @@ impl RedisHarness {
         )])
     }
 
-    /// SCENARIO 3: Stockpile 100ms Background Polling Contention.
+    /// SCENARIO 2: Stockpile 100ms Background Polling Contention.
     /// Runs a write/read workload with vs. without 100ms background polling (HLEN / SCARD) across all participants.
     pub async fn bench_polling_contention(
         &self,
