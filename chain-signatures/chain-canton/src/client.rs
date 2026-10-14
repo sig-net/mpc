@@ -11,7 +11,7 @@ use crate::{
     signing::der_encode_signature,
     CantonChainCtx,
 };
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, RpcFailure, SharedBackoff};
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind};
 use std::{sync::Arc, time::Duration};
@@ -265,7 +265,20 @@ impl CantonClient {
                         // Acceptance ends submission retries; verified ledger events still settle the request.
                         return Ok(SubmissionOutcome::AlreadyAccepted);
                     }
-                    anyhow::bail!("{context} failed: {status} {body}");
+                    // SUBMISSION_ALREADY_IN_FLIGHT is another submission racing
+                    // us — retryable despite the 409; other failures classify
+                    // by their HTTP status
+                    let code = serde_json::from_str::<JsCantonError>(&body)
+                        .ok()
+                        .map(|error| error.code);
+                    let in_flight = code.as_deref() == Some("SUBMISSION_ALREADY_IN_FLIGHT");
+                    let message = format!("{context} failed: {status} {body}");
+                    let failure = if in_flight {
+                        RpcFailure::with_verdict(status, false, message)
+                    } else {
+                        RpcFailure::with_status(status, message)
+                    };
+                    return Err(anyhow::Error::new(failure));
                 }
                 Ok(SubmissionOutcome::Transaction(resp.json().await?))
             }
@@ -303,7 +316,10 @@ async fn check_response(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("{context} failed: {status} {text}");
+        // typed carrier: classification reads the status, not the hex-laden body
+        // TODO: fold reads into the same code-aware classification as the submit path
+        let failure = RpcFailure::with_status(status, format!("{context} failed: {status} {text}"));
+        return Err(anyhow::Error::new(failure));
     }
     Ok(resp)
 }
@@ -412,7 +428,7 @@ mod tests {
     use super::*;
     use crate::config::{CantonAuthConfig, CantonConfig};
     use mockito::{Matcher, Server, ServerGuard};
-    use mpc_chain_integration_core::utils::retry::retry_op;
+    use mpc_chain_integration_core::utils::retry::{is_retryable, retry_op};
     use mpc_chain_integration_core::{utils::test::make_publish_action, NoopPublisherTelemetry};
     use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignId, SignKind};
     use serde_json::json;
@@ -680,6 +696,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_submit_conflict_verdict_depends_on_canton_code() {
+        // fast_retry_strategy allows 2 retries (3 attempts): in-flight races get
+        // retried, other conflicts fail fast on the terminal verdict
+        for (body, attempts) in [
+            (r#"{"code":"SUBMISSION_ALREADY_IN_FLIGHT"}"#, 3),
+            (r#"{"code":"DUPLICATE_CONTRACT_KEY"}"#, 1),
+        ] {
+            let mut server = setup_mock_server_with_auth().await;
+            let mock = server
+                .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+                .with_status(409)
+                .with_body(body)
+                .expect(attempts)
+                .create_async()
+                .await;
+            let client = CantonClient::new(
+                &mock_canton_config(&server.url()),
+                Arc::new(NoopPublisherTelemetry),
+                SharedBackoff::new(),
+            )
+            .await
+            .unwrap()
+            .with_retry_strategy(fast_retry_strategy());
+
+            let err = client
+                .publish_signature(&final_response_action())
+                .await
+                .unwrap_err();
+            let retryable = mpc_chain_integration_core::utils::retry::is_retryable(&err);
+            assert_eq!(retryable, attempts > 1, "body {body}");
+            mock.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
     async fn test_submit_and_wait_duplicate_cannot_fabricate_transaction() {
         let mut server = setup_mock_server_with_auth().await;
         let response = server
@@ -876,8 +927,11 @@ mod tests {
         );
 
         let err = client.publish_signature(&action).await.unwrap_err();
-        assert!(err.to_string().contains("500"));
-        assert!(err.to_string().contains("exhausted"));
+
+        // Check that the error contains the HTTP status code and indicates that retries were exhausted.
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("500"));
+        assert!(rendered.contains("exhausted"));
         submit_mock.assert_async().await;
     }
 
@@ -968,7 +1022,7 @@ mod tests {
         );
 
         let err = client.publish_signature(&action).await.unwrap_err();
-        assert!(err.to_string().contains("400"));
+        assert!(format!("{err:#}").contains("400"));
         submit_mock.assert_async().await;
     }
 
@@ -1067,5 +1121,38 @@ mod tests {
             "healthy client must wait out the cooldown opened by the throttled one, took {:?}",
             start.elapsed()
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_4xx_fails_fast_and_hex_bodies_do_not_engage_the_gate() {
+        let mut server = setup_mock_server_with_auth().await;
+        let mock = server
+            .mock("GET", "/v2/state/ledger-end")
+            .with_status(409)
+            // hex ids in the body must not read as status codes
+            .with_body("conflict over party 0xa429f and command c402e58")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let gate = SharedBackoff::new();
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+            gate.clone(),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
+
+        let err = client.fetch_ledger_end().await.unwrap_err();
+
+        // Check_response wraps the response in RpcFailure with the typed status:
+        // 409 is terminal, so the retry loop stops after the single attempt
+        assert!(!is_retryable(&err), "409 must classify as terminal");
+
+        // The gate should not have engaged because the 409 response is terminal and not a throttle.
+        assert_eq!(gate.remaining(), Duration::ZERO);
+        mock.assert_async().await;
     }
 }
