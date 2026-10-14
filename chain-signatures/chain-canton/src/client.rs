@@ -11,7 +11,7 @@ use crate::{
     signing::der_encode_signature,
     CantonChainCtx,
 };
-use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind};
 use std::{sync::Arc, time::Duration};
@@ -144,7 +144,7 @@ impl CantonClient {
     }
 
     pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
-        retry_rpc_gated!(
+        retry_rpc!(
             CANTON_RPC_TIMEOUT,
             self.retry_strategy,
             self.shared_backoff,
@@ -193,7 +193,7 @@ impl CantonClient {
             },
         };
 
-        retry_rpc_gated!(
+        retry_rpc!(
             CANTON_RPC_TIMEOUT,
             self.retry_strategy,
             self.shared_backoff,
@@ -231,10 +231,11 @@ impl CantonClient {
         context: &str,
     ) -> anyhow::Result<SubmissionOutcome> {
         let max_attempts = self.retry_strategy.max_times;
-        retry_rpc_gated!(
+        retry_rpc!(
             CANTON_RPC_TIMEOUT,
             self.retry_strategy,
             self.shared_backoff,
+            "submit command",
             |attempt, err, sleep| {
                 tracing::warn!(
                     context,
@@ -411,7 +412,7 @@ mod tests {
     use super::*;
     use crate::config::{CantonAuthConfig, CantonConfig};
     use mockito::{Matcher, Server, ServerGuard};
-    use mpc_chain_integration_core::utils::retry::retry_rpc;
+    use mpc_chain_integration_core::utils::retry::retry_op;
     use mpc_chain_integration_core::{utils::test::make_publish_action, NoopPublisherTelemetry};
     use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignId, SignKind};
     use serde_json::json;
@@ -620,7 +621,7 @@ mod tests {
         .with_retry_strategy(fast_retry_strategy());
         let action = final_response_action();
 
-        let result = retry_rpc!(Duration::MAX, fast_retry_strategy(), "publish", {
+        let result = retry_op!(Duration::MAX, fast_retry_strategy(), "publish", {
             client.publish_signature(&action).await
         });
         drop(release);
@@ -883,7 +884,7 @@ mod tests {
     #[tokio::test]
     async fn test_publish_canton_retries_on_500_then_succeeds() {
         let mut server = setup_mock_server_with_auth().await;
-        // First submit attempt → 500, second → success. The retry_rpc! wrapper
+        // First submit attempt → 500, second → success. The retry_op! wrapper
         // should transparently retry the failing call and recover.
         let _fail = server
             .mock("POST", "/v2/commands/submit-and-wait-for-transaction")

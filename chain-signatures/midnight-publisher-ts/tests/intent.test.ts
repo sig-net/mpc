@@ -79,6 +79,7 @@ describe("buildIntent", () => {
         blockHeight: "18364758544493064720",
         outputKind: 2,
         serializedOutputLength: "0",
+        outputHash: "56".repeat(32),
         digest: "55".repeat(32),
       },
     });
@@ -106,6 +107,7 @@ describe("buildIntent", () => {
       blockHeight: BigInt(input.attestation!.blockHeight),
       outputKind: 2,
       serializedOutputLength: 0n,
+      outputHash: Uint8Array.from(Buffer.from(input.attestation!.outputHash, "hex")),
       digest: Uint8Array.from(Buffer.from(input.attestation!.digest, "hex")),
       signature: {
         bigR: {

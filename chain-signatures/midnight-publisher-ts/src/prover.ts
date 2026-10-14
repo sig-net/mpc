@@ -22,7 +22,7 @@ import {
 import { expectedVk } from "@sig-net/midnight-contract";
 import { signetContractManagedPath } from "@sig-net/midnight-contract-deploy";
 
-import { PublisherError } from "./errors.js";
+import { describeFailure, PublisherError } from "./errors.js";
 import { RESPOND_CIRCUITS, type RespondCircuit } from "./intent.js";
 
 export type UnboundTransaction = Transaction<SignatureEnabled, Proof, PreBinding>;
@@ -71,18 +71,45 @@ async function post(
   body: Uint8Array,
   signal: AbortSignal,
 ): Promise<Uint8Array> {
+  const started = performance.now();
+  const waited = (): string => `${((performance.now() - started) / 1000).toFixed(1)}s`;
+  // The ledger keeps only the text of what `prove` and `check` throw, and undici puts the
+  // real reason (refused, reset, headers timeout) in `cause`, so it must be in the message.
+  const describeTransport = (error: unknown): string => {
+    const described = describeFailure(error);
+    const code = (error as { cause?: { code?: unknown } } | undefined)?.cause?.code;
+    return typeof code === "string" && !described.includes(code)
+      ? `${described} (${code})`
+      : described;
+  };
+  const transportFailure = (error: unknown): Error =>
+    new Error(
+      `proof server ${path} request failed after ${waited()}: ${describeTransport(error)}`,
+      { cause: error },
+    );
+  // A busy proof server closes kept-alive sockets that undici still reuses, failing the
+  // upload with `write EPIPE` or `other side closed`; one connection per request avoids it.
   const response = await fetch(new URL(path, proofServerUrl), {
     method: "POST",
-    headers: { "content-type": "application/octet-stream" },
+    headers: { "content-type": "application/octet-stream", connection: "close" },
     body,
     signal,
+  }).catch((error: unknown) => {
+    throw transportFailure(error);
   });
   if (response.status !== 200) {
+    const detail = await response
+      .text()
+      .catch((error: unknown) => `<body unreadable: ${describeTransport(error)}>`);
     throw new Error(
-      `proof server answered ${response.status} to ${path}: ${await response.text()}`,
+      `proof server answered ${response.status} to ${path} after ${waited()}: ${detail}`,
     );
   }
-  return new Uint8Array(await response.arrayBuffer());
+  return new Uint8Array(
+    await response.arrayBuffer().catch((error: unknown) => {
+      throw transportFailure(error);
+    }),
+  );
 }
 
 export function provingProvider(proofServerUrl: string, signal: AbortSignal): ProvingProvider {

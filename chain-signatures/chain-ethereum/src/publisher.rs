@@ -12,7 +12,7 @@ use alloy::providers::{
 use alloy::rpc::types::TransactionReceipt;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc_gated, SharedBackoff},
+    utils::retry::{retry_rpc, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{SignId, Signature};
@@ -198,11 +198,12 @@ impl BatchPublisher {
             "publishing batch of ethereum signatures",
         );
         let max_attempts = self.config.batch_publish_retry.max_times;
-        let res = retry_rpc_gated!(
+        let res = retry_rpc!(
             // Every step inside is individually timeout-bounded (estimate, send, receipt).
             Duration::MAX,
             self.config.batch_publish_retry,
             self.shared_backoff,
+            "batch publish",
             |attempt, err, sleep| {
                 tracing::warn!(
                     num_requests = actions.len(),
@@ -234,10 +235,11 @@ impl BatchPublisher {
         tx_hash: B256,
         sign_ids: &[SignId],
     ) -> anyhow::Result<TransactionReceipt> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.config.receipt_timeout,
             self.config.receipt_retry,
             self.shared_backoff,
+            "get tx receipt",
             // Log the error and retry attempt
             |attempt, err, sleep| {
                 tracing::error!(
@@ -274,10 +276,11 @@ impl BatchPublisher {
         gas: u64,
         sign_ids: &[SignId],
     ) -> anyhow::Result<B256> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.config.send_timeout,
             self.config.send_retry,
             self.shared_backoff,
+            "send tx",
             |attempt, err, sleep| {
                 tracing::warn!(
                     ?sign_ids,
