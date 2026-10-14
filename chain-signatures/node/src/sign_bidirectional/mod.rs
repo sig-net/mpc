@@ -1,0 +1,248 @@
+//! Bidirectional signing: event admission, response construction, and the
+//! backlog-facing progress state. Chain-targeted signing lives in `signing`,
+//! the Ethereum wire encoding in `eth_tx`.
+
+mod eth_tx;
+mod progress;
+mod signing;
+
+use crate::protocol::Chain;
+use anyhow::Context as _;
+use k256::Scalar;
+use mpc_primitives::ChainConfig as _;
+pub use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
+};
+
+pub use eth_tx::{derive_user_address, public_key_to_address};
+pub use progress::{BidirectionalProgress, SignProgress, SignStatus};
+pub use signing::sign_and_hash_transaction;
+use signing::validate_unsigned_transaction;
+
+/// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
+pub trait SignBidirectionalEventExt {
+    fn sender_string(&self) -> anyhow::Result<String>;
+    fn epsilon(&self) -> anyhow::Result<Scalar>;
+    fn target_chain(&self) -> Result<Chain, ChainFromError>;
+
+    /// The deterministic derivations respond processing runs for every bidirectional
+    /// request. Shared between admission (reject before the backlog) and the respond
+    /// path's failure handling (quarantine): both must agree on what "can never
+    /// advance" means.
+    fn validate(&self) -> anyhow::Result<()>;
+
+    /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
+    fn to_bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        mpc_sig: Signature,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx>;
+}
+
+impl SignBidirectionalEventExt for SignBidirectionalEvent {
+    fn sender_string(&self) -> anyhow::Result<String> {
+        match self.chain {
+            Chain::Canton | Chain::Midnight => Ok(hex::encode(self.sender)),
+            _ => crate::stream::ops::sender_string(self.sender, self.chain),
+        }
+    }
+
+    fn epsilon(&self) -> anyhow::Result<Scalar> {
+        match self.chain {
+            Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )?),
+            Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )?),
+            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )?),
+            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )?),
+            _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
+        }
+    }
+
+    fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
+        Chain::from_caip2_chain_id(&self.caip2_id)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.serialized_transaction.is_empty(),
+            "empty serialized_transaction"
+        );
+        let target = self
+            .target_chain()
+            .map_err(|err| anyhow::anyhow!("bad target chain: {err:?}"))?;
+        anyhow::ensure!(
+            target.supports_bidirectional_signing(),
+            "unsupported target chain {target}"
+        );
+        self.epsilon().context("cannot derive epsilon")?;
+        validate_unsigned_transaction(target, &self.serialized_transaction)
+            .context("undecodable serialized_transaction")?;
+        Ok(())
+    }
+
+    fn to_bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        mpc_sig: Signature,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx> {
+        let target_chain = self.target_chain().with_context(|| {
+            format!("failed to determine target chain for request: {request_id:?}")
+        })?;
+        let epsilon = self.epsilon()?;
+        let from_address = derive_user_address(root_pk, epsilon);
+        let (signed_tx_hash, nonce) =
+            sign_and_hash_transaction(target_chain, &self.serialized_transaction, mpc_sig)?;
+
+        Ok(BidirectionalTx {
+            id: BidirectionalTxId(signed_tx_hash),
+            sender: self.sender,
+            serialized_transaction: self.serialized_transaction.clone(),
+            source_chain: self.chain,
+            target_chain,
+            caip2_id: self.caip2_id.clone(),
+            key_version: self.key_version,
+            deposit: self.deposit,
+            path: self.path.clone(),
+            algo: self.algo.clone(),
+            dest: self.dest.clone(),
+            params: self.params.clone(),
+            output_deserialization_schema: self.output_deserialization_schema.clone(),
+            respond_serialization_schema: self.respond_serialization_schema.clone(),
+            request_id,
+            from_address: **from_address,
+            nonce,
+        })
+    }
+}
+
+/// Extension trait for `BidirectionalTx` to provide additional helper methods.
+pub trait BidirectionalTxExt {
+    fn sender_string(&self) -> anyhow::Result<String>;
+    fn epsilon(&self, path: &str) -> anyhow::Result<Scalar>;
+}
+
+impl BidirectionalTxExt for BidirectionalTx {
+    fn sender_string(&self) -> anyhow::Result<String> {
+        if matches!(self.source_chain, Chain::Canton | Chain::Midnight) {
+            return Ok(hex::encode(self.sender));
+        }
+        crate::stream::ops::sender_string(self.sender, self.source_chain)
+    }
+
+    fn epsilon(&self, path: &str) -> anyhow::Result<Scalar> {
+        match self.source_chain {
+            Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )?),
+            Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )?),
+            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )?),
+            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )?),
+            _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::eth_tx::legacy_tx;
+    use super::{SignBidirectionalEvent, SignBidirectionalEventExt as _};
+    use crate::protocol::Chain;
+
+    #[test]
+    fn validate_rejects_unsupported_target_chain() {
+        let event = |target: Chain| SignBidirectionalEvent {
+            sender: Default::default(),
+            serialized_transaction: legacy_tx(1),
+            dest: String::new(),
+            caip2_id: target.caip2_chain_id().to_string(),
+            key_version: 0,
+            deposit: 0,
+            path: "m/0".to_string(),
+            algo: "ECDSA".to_string(),
+            params: "{}".to_string(),
+            chain: Chain::Solana,
+            chain_ctx: None,
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+        };
+        assert!(event(Chain::Ethereum).validate().is_ok());
+        assert!(event(Chain::Solana).validate().is_err());
+    }
+
+    #[test]
+    fn validate_and_sign_accept_a_tron_target() {
+        // Recorded mainnet USDT transfer (chain-tron fixture 1): the bare
+        // `raw` message, satisfying admission — one TriggerSmartContract,
+        // ref-block fields, expiration set.
+        const RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a154120eb85916a10d2c6542613e4c9517b5e99b2dee9121541a614f803b6fd780986a42c78ec9c7f77e6ded13c2244a9059cbb000000000000000000000000d9e02baf48ed306afc63cfa816a2b6be8442036a0000000000000000000000000000000000000000000000000000000008f428f870bad8e2a49134900180e1eb17";
+        const TXID_HEX: &str = "d3741faef8cd6594923d7d827b610b12ce9bc80f65822c827c8fd7a612570540";
+
+        let unsigned = hex::decode(RAW_HEX).unwrap();
+
+        let event = SignBidirectionalEvent {
+            sender: Default::default(),
+            serialized_transaction: unsigned.clone(),
+            dest: String::new(),
+            caip2_id: Chain::Tron.caip2_chain_id().to_string(),
+            key_version: 0,
+            deposit: 0,
+            path: "m/0".to_string(),
+            algo: "ECDSA".to_string(),
+            params: "{}".to_string(),
+            chain: Chain::Midnight,
+            chain_ctx: None,
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+        };
+        assert!(event.validate().is_ok());
+
+        // The txID is sha256(raw_data): independent of the signature, so any
+        // (low-s normalized) signature names the same transaction.
+        let big_r = k256::ProjectivePoint::GENERATOR.to_affine();
+        let id_of = |s, recovery_id| {
+            super::sign_and_hash_transaction(
+                Chain::Tron,
+                &unsigned,
+                mpc_primitives::Signature::new(big_r, s, recovery_id),
+            )
+            .unwrap()
+        };
+        let low = k256::Scalar::from(5u64);
+        let (id_low, nonce) = id_of(low, 1);
+        let (id_high, _) = id_of(-low, 0);
+        assert_eq!(id_low, id_high);
+        assert_eq!(nonce, 0);
+        assert_eq!(hex::encode(id_low), TXID_HEX);
+    }
+}
