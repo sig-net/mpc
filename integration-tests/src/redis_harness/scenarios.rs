@@ -10,7 +10,9 @@ use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::TripleStorage;
 use tokio::sync::Barrier;
 
-use super::diagnostics::{partition_wall_by_active_time, LatencySummary, RedisDiagnostics};
+use super::diagnostics::{
+    partition_wall_3, partition_wall_by_active_time, LatencySummary, RedisDiagnostics,
+};
 use super::participant::{next_id_block, SimulatedParticipant};
 use super::RedisHarness;
 
@@ -300,10 +302,8 @@ impl RedisHarness {
             all_commit_losses.extend(losses);
         }
         let wall = race_start.elapsed();
-        let (peek_wall, commit_wall) =
-            partition_wall_by_active_time(wall, &all_peek, &all_commit_wins);
-        let (win_wall, loss_wall) =
-            partition_wall_by_active_time(commit_wall, &all_commit_wins, &all_commit_losses);
+        let (peek_wall, win_wall, loss_wall) =
+            partition_wall_3(wall, &all_peek, &all_commit_wins, &all_commit_losses);
 
         let s1 = LatencySummary::calculate("peek_mine_contended", &mut all_peek, peek_wall);
         let s2 =
@@ -1027,10 +1027,8 @@ impl RedisHarness {
             all_commit_losses.extend(losses);
         }
         let wall = overall_start.elapsed();
-        let (peek_wall, commit_wall) =
-            partition_wall_by_active_time(wall, &all_peek, &all_commit_wins);
-        let (win_wall, loss_wall) =
-            partition_wall_by_active_time(commit_wall, &all_commit_wins, &all_commit_losses);
+        let (peek_wall, win_wall, loss_wall) =
+            partition_wall_3(wall, &all_peek, &all_commit_wins, &all_commit_losses);
 
         let s1 = LatencySummary::calculate("deep_peek_mine", &mut all_peek, peek_wall);
         let s2 =
@@ -1124,10 +1122,12 @@ impl RedisHarness {
             total_wall
         };
 
-        let (peek_wall, commit_wall) =
-            partition_wall_by_active_time(effective_redis_wall, &all_peek, &all_commit_wins);
-        let (win_wall, loss_wall) =
-            partition_wall_by_active_time(commit_wall, &all_commit_wins, &all_commit_losses);
+        let (peek_wall, win_wall, loss_wall) = partition_wall_3(
+            effective_redis_wall,
+            &all_peek,
+            &all_commit_wins,
+            &all_commit_losses,
+        );
 
         println!(
             "   -> Churn outcome: {total_commits} successfully committed, {} rejected on conflict, {total_aborts} dropped back to pool on timeout/reject",

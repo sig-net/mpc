@@ -21,8 +21,8 @@ use crate::containers::Redis;
 
 pub use config::RedisHarnessConfig;
 pub use diagnostics::{
-    partition_wall_by_active_time, print_summary_header, LatencySummary, MemorySnapshot,
-    RedisDiagnostics, SlowlogRecord,
+    partition_wall_3, partition_wall_by_active_time, print_summary_header, LatencySummary,
+    MemorySnapshot, RedisDiagnostics, SlowlogRecord,
 };
 pub use participant::{
     dummy_pair, dummy_presignature, dummy_triple, next_id_block, BackgroundPollerGuard,

@@ -347,3 +347,27 @@ pub fn partition_wall_by_active_time(
         (Duration::ZERO, Duration::ZERO)
     }
 }
+
+/// Partitions a combined wall duration between three interleaved operations
+/// proportionally according to the total active time measured for each operation.
+pub fn partition_wall_3(
+    wall: Duration,
+    op1_samples: &[Duration],
+    op2_samples: &[Duration],
+    op3_samples: &[Duration],
+) -> (Duration, Duration, Duration) {
+    let t1: Duration = op1_samples.iter().copied().sum();
+    let t2: Duration = op2_samples.iter().copied().sum();
+    let t3: Duration = op3_samples.iter().copied().sum();
+    let total = t1 + t2 + t3;
+    if total > Duration::ZERO {
+        let total_secs = total.as_secs_f64();
+        (
+            wall.mul_f64(t1.as_secs_f64() / total_secs),
+            wall.mul_f64(t2.as_secs_f64() / total_secs),
+            wall.mul_f64(t3.as_secs_f64() / total_secs),
+        )
+    } else {
+        (Duration::ZERO, Duration::ZERO, Duration::ZERO)
+    }
+}
