@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
+use deadpool_redis::Pool;
 use elliptic_curve::CurveArithmetic;
 use k256::Secp256k1;
 use mpc_node::protocol::presignature::Presignature;
@@ -31,6 +32,25 @@ pub struct SimulatedParticipant {
 }
 
 impl SimulatedParticipant {
+    /// Create a new participant with independent in-memory storage handles.
+    pub fn new(pool: &Pool, account_id: &AccountId, participant: Participant) -> Self {
+        let triples = TriplePair::storage(pool, account_id);
+        triples.set_me(participant);
+        let presignatures = Presignature::storage(pool, account_id);
+        presignatures.set_me(participant);
+        Self {
+            participant,
+            account_id: account_id.clone(),
+            triples,
+            presignatures,
+        }
+    }
+
+    /// Clear all in-memory reservations across both triples and presignatures storage.
+    pub async fn reset_reservations(&self) {
+        self.triples.reset_reservations().await;
+        self.presignatures.reset_reservations().await;
+    }
     /// Populate a sequential range of triples starting at `base_id`.
     pub async fn populate_triples(
         self,

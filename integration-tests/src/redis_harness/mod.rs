@@ -212,12 +212,20 @@ impl RedisHarness {
         RedisDiagnostics::fetch_memory_snapshot(&self.pool).await
     }
 
-    /// Reset slowlog (and optionally FLUSHDB if flush_between is enabled) before running a test case,
-    /// logging the pre-run keyspace and memory state.
+    /// Clear all in-memory reservations across all participants' storage handles.
+    pub async fn reset_reservations(&self) {
+        for p in &self.participants {
+            p.reset_reservations().await;
+        }
+    }
+
+    /// Reset slowlog, clear in-memory reservations (and optionally FLUSHDB if flush_between is enabled)
+    /// before running a test case, logging the pre-run keyspace and memory state.
     pub async fn reset_diagnostics(&self) -> anyhow::Result<()> {
         if self.flush_between {
             self.flush_db().await?;
         }
+        self.reset_reservations().await;
         RedisDiagnostics::reset_slowlog(&self.pool).await?;
         let mem = self.memory_snapshot().await?;
         println!(
