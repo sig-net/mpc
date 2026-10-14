@@ -640,7 +640,7 @@ mod tests {
         );
 
         assert!(r1.is_err() && r2.is_err());
-        assert!(r1.unwrap_err().to_string().contains("429"));
+        assert!(format!("{:#}", r1.unwrap_err()).contains("429"));
         // The gate forces retries into separate >= 50ms cooldown windows.
         assert!(start.elapsed() >= Duration::from_millis(100));
     }

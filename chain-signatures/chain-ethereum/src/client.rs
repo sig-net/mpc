@@ -377,6 +377,7 @@ mod tests {
     use alloy::primitives::Bloom;
     use futures_util::StreamExt;
     use mockito::{Matcher, Server};
+    use mpc_chain_integration_core::utils::retry::is_retryable;
     use serde_json::json;
     use std::time::Duration;
 
@@ -441,12 +442,75 @@ mod tests {
             client.get_logs(Address::ZERO, BlockId::Number(BlockNumberOrTag::Number(2))),
         );
 
-        // HTTP status surfaces in the error (retry classification relies on
-        // this string match) and retries are exhausted.
+        // Retries exhausted, the 429 lives under the exhaustion context
         assert!(r1.is_err() && r2.is_err());
-        assert!(r1.unwrap_err().to_string().contains("429"));
+        assert!(format!("{:#}", r1.unwrap_err()).contains("429"));
         // The gate forces retries into separate >= 50ms cooldown windows.
         assert!(start.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn typed_client_error_410_fails_fast() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/")
+            .with_status(410)
+            .with_body(
+                r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"network goerli not supported"}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        
+        let client = test_utils::create_test_ethereum_client_with_catchup(
+            &server.url(),
+            Default::default(),
+            SharedBackoff::new(),
+        )
+        .await;
+
+        let err = client
+            .get_logs(Address::ZERO, BlockId::Number(BlockNumberOrTag::Number(1)))
+            .await
+            .unwrap_err();
+        
+        // Exactly one attempt (expect(1) above) and a terminal verdict
+        assert!(!is_retryable(&err), "err: {err:#}");
+        assert!(format!("{err:#}").contains("410"));
+    }
+
+    #[tokio::test]
+    async fn exhausted_throttle_survives_the_retry_macro_for_outer_gates() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/")
+            // provider-style rate limit: 429 with a JSON-RPC error body —
+            // the status, not the body text, must drive the verdict
+            .with_status(429)
+            .with_body(
+                r#"{"jsonrpc":"2.0","error":{"code":429,"message":"compute unit capacity exceeded, try again later"}}"#,
+            )
+            // 1 initial + max_times(2) retries: the throttle exhausts the strategy
+            .expect(3)
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client_with_catchup(
+            &server.url(),
+            Default::default(),
+            SharedBackoff::new(),
+        )
+        .await;
+
+        let err = client
+            .get_logs(Address::ZERO, BlockId::Number(BlockNumberOrTag::Number(1)))
+            .await
+            .unwrap_err();
+
+        // Exhaustion note is added as context, not a re-wrap
+        assert!(format!("{err:#}").contains("exhausted"));
+        // The outer gate should still recognize the throttled error.
+        assert!(SharedBackoff::new().engage_if_throttled(&err).is_some());
     }
 
     #[tokio::test]
