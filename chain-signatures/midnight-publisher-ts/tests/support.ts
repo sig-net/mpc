@@ -64,6 +64,7 @@ export async function respondInput(
             blockHeight: "42",
             outputKind: 0 as const,
             serializedOutputLength: "32",
+            outputHash: "56".repeat(32),
             digest: "55".repeat(32),
           },
         }

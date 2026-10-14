@@ -32,11 +32,11 @@ The node validates the transaction structure; the reader checks whether it can r
 
 ## Midnight attestation API
 
-The publisher and real-stack caller use `@sig-net/midnight`, `@sig-net/midnight-contract`, and `@sig-net/midnight-contract-deploy` version `0.24.0-rc.4`. Every protocol hash input starts with its SDK `HashDomain` tag. Request identity commits to `(keyVersion, sender, path, algo, txParamType, txParamsDigest, executionDest)`. The transaction digest includes only used calldata words, access-list entries, and storage keys; unused capacity and absent calldata contents do not affect it. Reserved signature destination, extra MPC parameters, and serialization schemas remain outside the identity. The EVM account nonce remains part of the transaction.
+The publisher and real-stack caller use `@sig-net/midnight`, `@sig-net/midnight-contract`, and `@sig-net/midnight-contract-deploy` version `0.25.0-rc.1`. Every protocol hash input starts with its SDK `HashDomain` tag. Request identity commits to `(keyVersion, sender, path, algo, txParamType, txParamsDigest, executionDest)`. The transaction digest includes only used calldata words, access-list entries, and storage keys; unused capacity and absent calldata contents do not affect it. Reserved signature destination, extra MPC parameters, and serialization schemas remain outside the identity. The EVM account nonce remains part of the transaction.
 
-Final attestations bind `(requestId, blockHeight, outputKind, serializedOutputLength, serializedOutput)` using the SDK's Compact transient hash. Output kinds are `executed = 0`, `failed = 1`, and `unviable = 2`. The published response includes the request ID, height, kind, output length, digest, and signature; serialized output travels separately through the raw output cache at `<prefix>/<network>/<central>/<requestId>.bin`.
+Final attestations bind `(requestId, blockHeight, outputKind, serializedOutputLength, outputHash)` using the SDK's Compact transient hash, where `outputHash` is the `attestedOutput`-tagged hash of the serialized output. Output kinds are `executed = 0`, `failed = 1`, and `unviable = 2`. The published response includes the request ID, height, kind, output length, output hash, digest, and signature, so a node checks it without the output; serialized output travels separately through the raw output cache at `<prefix>/<network>/<central>/<requestId>.bin`.
 
-A `build` request for `respondBidirectional` requires `attestation: { blockHeight, outputKind, serializedOutputLength, digest }`. Both uint64 fields are decimal strings, `outputKind` is a numeric enum index, and `digest` is 64 lowercase hex characters. The existing `requestId` and `signature` fields remain common to both response circuits. `respond` rejects attestation metadata. Both circuits receive one SDK record containing the request ID.
+A `build` request for `respondBidirectional` requires `attestation: { blockHeight, outputKind, serializedOutputLength, outputHash, digest }`. Both uint64 fields are decimal strings, `outputKind` is a numeric enum index, and `outputHash` and `digest` are 64 lowercase hex characters each. The existing `requestId` and `signature` fields remain common to both response circuits. `respond` rejects attestation metadata. Both circuits receive one SDK record containing the request ID.
 
 `devtools/real-stack/caller.compact` imports the canonical SDK request and attestation circuits directly. The vector generator compares its compiled Compact digests with the SDK TypeScript helper and extracts the response payload from the installed singleton's emitted event.
 
@@ -76,7 +76,7 @@ npm run typecheck
 npm test
 ```
 
-`npm run gen:api-parity-vectors` compiles the pinned Compact oracle and regenerates the request-cell, attestation-digest, and cache fixtures consumed by Rust tests. Run `npm run compile:real-stack-caller` before `npm run typecheck:real-stack`; it also compiles the oracle bindings.
+`npm run gen:api-parity-vectors` compiles the pinned Compact oracle and regenerates the request-cell, output-hash, attestation-digest, and cache fixtures consumed by Rust tests. Run `npm run compile:real-stack-caller` before `npm run typecheck:real-stack`; it also compiles the oracle bindings.
 
 `npm run start` runs the TypeScript entry point during development. `npm run format` and `npm run lint:fix` apply the local formatting and lint fixes. `npm test` builds first because the process tests execute `dist/main.js`; `npm run build` emits that runtime entry point without opening or synchronizing a wallet.
 

@@ -13,9 +13,9 @@ pub struct SignBidirectionalRecord {
     /// `TxParamType` enum, one byte: evmType2 = 0, reserved = 1
     pub tx_param_type: u8,
     pub tx_params: EvmType2TxParams,
-    /// ASCII `Bytes<32>`, trailing-zero-trimmed on the wire and re-padded to 32 bytes
+    /// ASCII `Bytes<64>`, trailing-zero-trimmed on the wire and re-padded to 64 bytes
     /// in the preimage
-    pub execution_dest: [u8; 32],
+    pub execution_dest: [u8; 64],
     /// `MPCDestination` enum, one byte: unused = 0, reserved = 1.
     /// This and the remaining protocol fields are outside request identity.
     pub signature_dest: u8,
