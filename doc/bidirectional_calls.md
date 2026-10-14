@@ -645,6 +645,32 @@ a path from B48 through A15; the first at A12 has none.
   entries nobody clears.
 
 
+### 6.1 Tron targets
+
+Request format. The request's `txParams` (`txParamType` `tron`) carries
+the transaction's fields — the ref-block fields (`ref_block_bytes`,
+`ref_block_hash`), `timestamp`, `expiration` and `fee_limit`, the target
+contract, call value and call data — the way `evmType2` carries chain id
+and nonce. Nodes assemble the protobuf `raw` message from them, fixing
+the contract type to `TriggerSmartContract` and setting `owner_address`
+from the request's derived key; they neither fill nor refresh any field
+and read nothing from Tron. Admission accepts an `expiration` only if it
+is in the future and at most 24 h past the request's Midnight timestamp
+(java-tron's cap): with no nonce, expiry is the only way a Tron request
+ends, so an unbounded one would be watched forever.
+
+Digest and identity. The signed digest is sha256 of those bytes, and one
+value serves as the MPC payload, the transaction ID and the replay key:
+the signature sits outside the digest's preimage, so a differently
+signed copy of the same bytes names the same transaction ID and the
+chain rejects it as a duplicate. A node therefore needs no signature to
+find an execution (the note above).
+
+Outcomes. No `Unviable` outcome arises: there is no nonce-like sequence
+to use up, and same-key bytes that differ are a different request. A
+transaction whose `expiration` passes unexecuted goes unanswered by
+Section 2's expiry rule, and nodes stop watching it at expiry.
+
 ## 7. Canonical Protocol Structures
 
 The structures the library, the signet contract and the MPC agree on. They
