@@ -172,6 +172,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         events.extend(sibling_events);
 
         // Candidates for a replacement that the nonce gate below observes late.
+        // TODO: avoid this clone by having the sibling resolvers borrow their watchers.
         let late_candidates = unmined_watchers.clone();
 
         // Nonce gate: one-shot for new watchers, every block for retries,
