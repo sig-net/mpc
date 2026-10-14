@@ -789,6 +789,8 @@ impl RedisHarness {
 
         if self.participants.is_empty() || items_per_participant == 0 || rounds == 0 {
             return Ok(vec![
+                LatencySummary::empty("sync_update_triples"),
+                LatencySummary::empty("sync_update_presigs"),
                 LatencySummary::empty("sync_prune_triples"),
                 LatencySummary::empty("sync_prune_presigs"),
             ]);
@@ -798,13 +800,20 @@ impl RedisHarness {
         let total_items = num_p * items_per_participant;
         let participant_list = self.participant_ids();
         let target_peer = participant_list[0];
-        let threshold = num_p;
+        let second_peer = participant_list[1 % num_p];
+        let threshold_update = (num_p / 2).max(1);
+        let threshold_prune = num_p;
 
-        let mut all_triple_latencies = Vec::with_capacity(num_p * rounds);
-        let mut all_presig_latencies = Vec::with_capacity(num_p * rounds);
-        let mut triple_fails = 0;
-        let mut presig_fails = 0;
-        let mut total_wall = Duration::ZERO;
+        let mut all_update_triple_latencies = Vec::with_capacity(num_p * rounds);
+        let mut all_update_presig_latencies = Vec::with_capacity(num_p * rounds);
+        let mut all_prune_triple_latencies = Vec::with_capacity(num_p * rounds);
+        let mut all_prune_presig_latencies = Vec::with_capacity(num_p * rounds);
+        let mut update_triple_fails = 0;
+        let mut update_presig_fails = 0;
+        let mut prune_triple_fails = 0;
+        let mut prune_presig_fails = 0;
+        let mut total_update_wall = Duration::ZERO;
+        let mut total_prune_wall = Duration::ZERO;
 
         println!(
             "   -> Running {rounds} rounds of state sync peer drop & prune storm across {num_p} participants ({items_per_participant} items/participant/round)..."
@@ -822,8 +831,9 @@ impl RedisHarness {
                 .populate_all_presignatures(presigs_base, items_per_participant)
                 .await?;
 
-            let barrier = Arc::new(Barrier::new(num_p));
-            let tasks: Vec<_> = self
+            // Phase 1: Holder update without prune (count >= threshold, standard sync update path)
+            let update_barrier = Arc::new(Barrier::new(num_p));
+            let update_tasks: Vec<_> = self
                 .participants
                 .iter()
                 .enumerate()
@@ -831,9 +841,74 @@ impl RedisHarness {
                     let my_triple_ids = triple_ids_by_p.get(node_idx).cloned().unwrap_or_default();
                     let my_presig_ids = presig_ids_by_p.get(node_idx).cloned().unwrap_or_default();
                     tokio::spawn(p.clone().prune_artifacts(
-                        barrier.clone(),
+                        update_barrier.clone(),
                         target_peer,
-                        threshold,
+                        threshold_update,
+                        my_triple_ids,
+                        my_presig_ids,
+                    ))
+                })
+                .collect();
+
+            let update_start = Instant::now();
+            let mut round_updated_triples = 0;
+            let mut round_updated_presigs = 0;
+            let mut round_update_triple_errors = 0;
+            let mut round_update_presig_errors = 0;
+
+            for t in update_tasks {
+                let (t_lat, t_res, p_lat, p_res) = t.await?;
+                match t_res {
+                    Ok((_, t_upd)) => {
+                        round_updated_triples += t_upd.len();
+                        all_update_triple_latencies.push(t_lat);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to update holder triples in S8: {e:#}");
+                        update_triple_fails += 1;
+                        round_update_triple_errors += 1;
+                    }
+                }
+                match p_res {
+                    Ok((_, p_upd)) => {
+                        round_updated_presigs += p_upd.len();
+                        all_update_presig_latencies.push(p_lat);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to update holder presignatures in S8: {e:#}");
+                        update_presig_fails += 1;
+                        round_update_presig_errors += 1;
+                    }
+                }
+            }
+            total_update_wall += update_start.elapsed();
+
+            if round_update_triple_errors == 0 && round_updated_triples != total_items {
+                tracing::warn!(
+                    "Incomplete triple holder update in S8 round: expected {total_items}, updated {round_updated_triples}"
+                );
+                update_triple_fails += 1;
+            }
+            if round_update_presig_errors == 0 && round_updated_presigs != total_items {
+                tracing::warn!(
+                    "Incomplete presignature holder update in S8 round: expected {total_items}, updated {round_updated_presigs}"
+                );
+                update_presig_fails += 1;
+            }
+
+            // Phase 2: Below-threshold prune (count < threshold, items removed from Redis)
+            let prune_barrier = Arc::new(Barrier::new(num_p));
+            let prune_tasks: Vec<_> = self
+                .participants
+                .iter()
+                .enumerate()
+                .map(|(node_idx, p)| {
+                    let my_triple_ids = triple_ids_by_p.get(node_idx).cloned().unwrap_or_default();
+                    let my_presig_ids = presig_ids_by_p.get(node_idx).cloned().unwrap_or_default();
+                    tokio::spawn(p.clone().prune_artifacts(
+                        prune_barrier.clone(),
+                        second_peer,
+                        threshold_prune,
                         my_triple_ids,
                         my_presig_ids,
                     ))
@@ -843,67 +918,81 @@ impl RedisHarness {
             let prune_start = Instant::now();
             let mut round_pruned_triples = 0;
             let mut round_pruned_presigs = 0;
-            let mut round_triple_errors = 0;
-            let mut round_presig_errors = 0;
+            let mut round_prune_triple_errors = 0;
+            let mut round_prune_presig_errors = 0;
 
-            for t in tasks {
+            for t in prune_tasks {
                 let (t_lat, t_res, p_lat, p_res) = t.await?;
                 match t_res {
                     Ok((t_rem, _)) => {
                         round_pruned_triples += t_rem.len();
-                        all_triple_latencies.push(t_lat);
+                        all_prune_triple_latencies.push(t_lat);
                     }
                     Err(e) => {
                         tracing::warn!("Failed to prune triples in S8: {e:#}");
-                        triple_fails += 1;
-                        round_triple_errors += 1;
+                        prune_triple_fails += 1;
+                        round_prune_triple_errors += 1;
                     }
                 }
                 match p_res {
                     Ok((p_rem, _)) => {
                         round_pruned_presigs += p_rem.len();
-                        all_presig_latencies.push(p_lat);
+                        all_prune_presig_latencies.push(p_lat);
                     }
                     Err(e) => {
                         tracing::warn!("Failed to prune presignatures in S8: {e:#}");
-                        presig_fails += 1;
-                        round_presig_errors += 1;
+                        prune_presig_fails += 1;
+                        round_prune_presig_errors += 1;
                     }
                 }
             }
-            total_wall += prune_start.elapsed();
+            total_prune_wall += prune_start.elapsed();
 
             // Soft-failure tracking consistent with S3/S6 to avoid aborting multi-scenario runs on partial prunes
-            if round_triple_errors == 0 && round_pruned_triples != total_items {
+            if round_prune_triple_errors == 0 && round_pruned_triples != total_items {
                 tracing::warn!(
                     "Incomplete triple prune in S8 round: expected {total_items}, pruned {round_pruned_triples}"
                 );
-                triple_fails += 1;
+                prune_triple_fails += 1;
             }
-            if round_presig_errors == 0 && round_pruned_presigs != total_items {
+            if round_prune_presig_errors == 0 && round_pruned_presigs != total_items {
                 tracing::warn!(
                     "Incomplete presignature prune in S8 round: expected {total_items}, pruned {round_pruned_presigs}"
                 );
-                presig_fails += 1;
+                prune_presig_fails += 1;
             }
         }
 
-        let (triple_wall, presig_wall) =
-            partition_wall_by_active_time(total_wall, &all_triple_latencies, &all_presig_latencies);
+        let (update_triple_wall, update_presig_wall) =
+            partition_wall_by_active_time(total_update_wall, &all_update_triple_latencies, &all_update_presig_latencies);
+        let (prune_triple_wall, prune_presig_wall) =
+            partition_wall_by_active_time(total_prune_wall, &all_prune_triple_latencies, &all_prune_presig_latencies);
 
         let s1 = LatencySummary::calculate_with_failures(
-            "sync_prune_triples",
-            &mut all_triple_latencies,
-            triple_wall,
-            triple_fails,
+            "sync_update_triples",
+            &mut all_update_triple_latencies,
+            update_triple_wall,
+            update_triple_fails,
         );
         let s2 = LatencySummary::calculate_with_failures(
-            "sync_prune_presigs",
-            &mut all_presig_latencies,
-            presig_wall,
-            presig_fails,
+            "sync_update_presigs",
+            &mut all_update_presig_latencies,
+            update_presig_wall,
+            update_presig_fails,
         );
-        Ok(vec![s1, s2])
+        let s3 = LatencySummary::calculate_with_failures(
+            "sync_prune_triples",
+            &mut all_prune_triple_latencies,
+            prune_triple_wall,
+            prune_triple_fails,
+        );
+        let s4 = LatencySummary::calculate_with_failures(
+            "sync_prune_presigs",
+            &mut all_prune_presig_latencies,
+            prune_presig_wall,
+            prune_presig_fails,
+        );
+        Ok(vec![s1, s2, s3, s4])
     }
 
     /// SCENARIO 9: Connection Drop & Reconnection Shock (`CLIENT KILL`).
