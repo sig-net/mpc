@@ -100,7 +100,7 @@ impl RpcEthereumClient {
         batch
             .send()
             .await
-            .context(format!("eth_getBlock batch failed"))?;
+            .context("eth_getBlock batch failed".to_string())?;
 
         let mut blocks = Vec::with_capacity(block_ids.len());
         for (waiter, &block_id) in waiters.into_iter().zip(block_ids) {
@@ -178,13 +178,13 @@ impl RpcEthereumClient {
         batch
             .send()
             .await
-            .context(format!("eth_getLogs batch failed"))?;
+            .context("eth_getLogs batch failed".to_string())?;
 
         let mut results = Vec::with_capacity(block_ids.len());
         for waiter in waiters {
             let logs = waiter
                 .await
-                .context(format!("eth_getLogs batch member failed"))?;
+                .context("eth_getLogs batch member failed".to_string())?;
             results.push(logs.unwrap_or_default());
         }
         Ok(results)
