@@ -89,6 +89,10 @@ struct Args {
     /// Number of repeat runs to perform (default: 1)
     #[arg(long, default_value_t = 1)]
     repeats: usize,
+
+    /// Number of storm/batch rounds for Scenarios 3, 6, and 8 (default: adaptive ceil(100 / participants), e.g. 9 for 12 nodes, 25 for 4 nodes)
+    #[arg(long)]
+    rounds: Option<usize>,
 }
 
 #[tokio::main]
@@ -102,11 +106,19 @@ async fn main() -> anyhow::Result<()> {
         Some(args.pool_size)
     };
 
+    let adaptive_rounds = (100 + args.participants - 1) / args.participants.max(1);
+    let storm_rounds = args.rounds.unwrap_or(adaptive_rounds).max(1);
+
     println!("\n=========================================================================");
     println!("     MPC REDIS BENCHMARK HARNESS - ISOLATED CONTAINER BASELINE SUITE     ");
     println!("=========================================================================");
     println!("  Simulated Participants: {}", args.participants);
     println!("  Items per Participant:  {}", args.items);
+    println!(
+        "  Batch Storm Rounds:     {} ({} total samples)",
+        storm_rounds,
+        storm_rounds * args.participants
+    );
     println!(
         "  Target Redis:           {}",
         args.redis_url
@@ -203,12 +215,12 @@ async fn main() -> anyhow::Result<()> {
             let stockpile = (args.items * 2).max(500);
             let prune = stockpile / 2;
             println!(
-                "\n>>> Running Scenario 3: `remove_outdated` Pruning Storm ({} items total, {} pruned)",
+                "\n>>> Running Scenario 3: `remove_outdated` Pruning Storm ({storm_rounds} rounds, {} items total/round, {} pruned/round)",
                 stockpile * args.participants,
                 prune * args.participants
             );
             let results = harness
-                .bench_remove_outdated_storm(stockpile, prune)
+                .bench_remove_outdated_storm(stockpile, prune, storm_rounds)
                 .await?;
             harness.report_results(&results).await?;
             all_results.extend(results);
@@ -249,10 +261,10 @@ async fn main() -> anyhow::Result<()> {
         if should_run(BenchScenario::Clear) {
             let stockpile = args.items.max(100);
             println!(
-                "\n>>> Running Scenario 6: Mass Epoch Resharing `clear()` Storm ({} participants, {} items/participant)",
+                "\n>>> Running Scenario 6: Mass Epoch Resharing `clear()` Storm ({storm_rounds} rounds, {} participants, {} items/participant/round)",
                 args.participants, stockpile
             );
-            let results = harness.bench_clear_storm(stockpile).await?;
+            let results = harness.bench_clear_storm(stockpile, storm_rounds).await?;
             harness.report_results(&results).await?;
             all_results.extend(results);
         }
@@ -269,9 +281,9 @@ async fn main() -> anyhow::Result<()> {
         if should_run(BenchScenario::SyncPrune) {
             let items = args.items.max(100);
             println!(
-                "\n>>> Running Scenario 8: State Sync Peer Drop & Pruning (`remove_holder_and_prune`)"
+                "\n>>> Running Scenario 8: State Sync Peer Drop & Pruning (`remove_holder_and_prune` - {storm_rounds} rounds, {items} items/participant/round)"
             );
-            let results = harness.bench_sync_prune_storm(items).await?;
+            let results = harness.bench_sync_prune_storm(items, storm_rounds).await?;
             harness.report_results(&results).await?;
             all_results.extend(results);
         }

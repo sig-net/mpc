@@ -153,56 +153,67 @@ impl RedisHarness {
         &self,
         stockpile_count: usize,
         prune_count: usize,
+        rounds: usize,
     ) -> anyhow::Result<Vec<LatencySummary>> {
         self.reset_diagnostics().await?;
 
-        if self.participants.is_empty() || stockpile_count == 0 {
+        if self.participants.is_empty() || stockpile_count == 0 || rounds == 0 {
             return Ok(vec![LatencySummary::empty("remove_outdated_storm")]);
         }
 
-        let run_base_id = next_id_block((self.participants.len() * stockpile_count) as u64 + 1000);
+        let num_p = self.participants.len();
+        let mut all_latencies = Vec::with_capacity(num_p * rounds);
+        let mut total_failures = 0;
+        let mut storm_wall = Duration::ZERO;
 
-        // 1. Populate items concurrently across participants
-        println!("   -> Pre-populating {stockpile_count} triples per participant across {} participants...", self.participants.len());
-        let all_ids = self
-            .populate_all_triples(run_base_id, stockpile_count)
-            .await;
+        println!(
+            "   -> Running {rounds} rounds of `remove_outdated` pruning storm across {num_p} participants ({stockpile_count} items/participant, {prune_count} pruned/round)..."
+        );
 
-        // 2. Prepare remaining shares (simulating that `prune_count` items were consumed/outdated)
-        let barrier = Arc::new(Barrier::new(self.participants.len()));
-        let storm_start = Instant::now();
+        for _ in 0..rounds {
+            self.reset_reservations().await;
+            let run_base_id = next_id_block((num_p * stockpile_count) as u64 + 1000);
+            let all_ids = self
+                .populate_all_triples(run_base_id, stockpile_count)
+                .await;
 
-        let storm_tasks: Vec<_> = self
-            .participants
-            .iter()
-            .enumerate()
-            .map(|(node_idx, p)| {
-                let remaining_shares = all_ids
-                    .get(node_idx)
-                    .map(|ids| {
-                        let prune_idx = prune_count.min(ids.len());
-                        ids[prune_idx..].to_vec()
-                    })
-                    .unwrap_or_default();
-                tokio::spawn(
-                    p.clone()
-                        .remove_outdated_shares(barrier.clone(), remaining_shares),
-                )
-            })
-            .collect();
+            let barrier = Arc::new(Barrier::new(num_p));
+            let storm_tasks: Vec<_> = self
+                .participants
+                .iter()
+                .enumerate()
+                .map(|(node_idx, p)| {
+                    let remaining_shares = all_ids
+                        .get(node_idx)
+                        .map(|ids| {
+                            let prune_idx = prune_count.min(ids.len());
+                            ids[prune_idx..].to_vec()
+                        })
+                        .unwrap_or_default();
+                    tokio::spawn(
+                        p.clone()
+                            .remove_outdated_shares(barrier.clone(), remaining_shares),
+                    )
+                })
+                .collect();
 
-        let mut latencies = Vec::new();
-        for task in storm_tasks {
-            let (lat, res) = task.await?;
-            assert!(res.is_ok(), "remove_outdated should succeed");
-            latencies.push(lat);
+            let storm_start = Instant::now();
+            for task in storm_tasks {
+                let (lat, res) = task.await?;
+                if res.is_ok() {
+                    all_latencies.push(lat);
+                } else {
+                    total_failures += 1;
+                }
+            }
+            storm_wall += storm_start.elapsed();
         }
-        let wall = storm_start.elapsed();
 
-        Ok(vec![LatencySummary::calculate(
+        Ok(vec![LatencySummary::calculate_with_failures(
             "remove_outdated_storm",
-            &mut latencies,
-            wall,
+            &mut all_latencies,
+            storm_wall,
+            total_failures,
         )])
     }
 
@@ -427,10 +438,11 @@ impl RedisHarness {
     pub async fn bench_clear_storm(
         &self,
         stockpile_per_participant: usize,
+        rounds: usize,
     ) -> anyhow::Result<Vec<LatencySummary>> {
         self.reset_diagnostics().await?;
 
-        if self.participants.is_empty() || stockpile_per_participant == 0 {
+        if self.participants.is_empty() || stockpile_per_participant == 0 || rounds == 0 {
             return Ok(vec![
                 LatencySummary::empty("clear_triples_storm"),
                 LatencySummary::empty("clear_presigs_storm"),
@@ -439,60 +451,82 @@ impl RedisHarness {
 
         let num_p = self.participants.len();
         let total_items = num_p * stockpile_per_participant;
-        let triples_base = next_id_block(total_items as u64 + 10_000);
-        let presigs_base = next_id_block(total_items as u64 + 10_000);
+        let mut all_triple_latencies = Vec::with_capacity(num_p * rounds);
+        let mut all_presig_latencies = Vec::with_capacity(num_p * rounds);
+        let mut triple_fails = 0;
+        let mut presig_fails = 0;
+        let mut total_triple_wall = Duration::ZERO;
+        let mut total_presig_wall = Duration::ZERO;
 
         println!(
-            "   -> Pre-populating {stockpile_per_participant} triples AND {stockpile_per_participant} presignatures across {num_p} participants..."
-        );
-        self.populate_all_triples(triples_base, stockpile_per_participant)
-            .await;
-        self.populate_all_presignatures(presigs_base, stockpile_per_participant)
-            .await;
-
-        let pre_mem = RedisDiagnostics::fetch_memory_snapshot(&self.pool).await?;
-        println!(
-            "   -> Pre-clear keyspace: {} keys in Redis, Memory: {}",
-            pre_mem.total_keys, pre_mem.used_memory_human
+            "   -> Running {rounds} rounds of mass clear storm across {num_p} participants ({stockpile_per_participant} triples + presignatures/participant/round)..."
         );
 
-        let barrier = Arc::new(Barrier::new(num_p * 2));
-        let clear_start = Instant::now();
+        for _ in 0..rounds {
+            self.reset_reservations().await;
+            let triples_base = next_id_block(total_items as u64 + 10_000);
+            let presigs_base = next_id_block(total_items as u64 + 10_000);
 
-        let clear_triple_tasks: Vec<_> = self
-            .participants
-            .iter()
-            .map(|p| tokio::spawn(p.clone().clear_triples(barrier.clone())))
-            .collect();
+            self.populate_all_triples(triples_base, stockpile_per_participant)
+                .await;
+            self.populate_all_presignatures(presigs_base, stockpile_per_participant)
+                .await;
 
-        let clear_presig_tasks: Vec<_> = self
-            .participants
-            .iter()
-            .map(|p| tokio::spawn(p.clone().clear_presignatures(barrier.clone())))
-            .collect();
+            let barrier = Arc::new(Barrier::new(num_p * 2));
+            let clear_start = Instant::now();
 
-        let clear_triples = async {
-            let mut latencies = Vec::with_capacity(num_p);
-            for t in clear_triple_tasks {
-                let (elapsed, ok) = t.await?;
-                assert!(ok, "triples clear should succeed");
-                latencies.push(elapsed);
-            }
-            Ok::<_, anyhow::Error>((latencies, clear_start.elapsed()))
-        };
+            let clear_triple_tasks: Vec<_> = self
+                .participants
+                .iter()
+                .map(|p| tokio::spawn(p.clone().clear_triples(barrier.clone())))
+                .collect();
 
-        let clear_presigs = async {
-            let mut latencies = Vec::with_capacity(num_p);
-            for t in clear_presig_tasks {
-                let (elapsed, ok) = t.await?;
-                assert!(ok, "presignatures clear should succeed");
-                latencies.push(elapsed);
-            }
-            Ok::<_, anyhow::Error>((latencies, clear_start.elapsed()))
-        };
+            let clear_presig_tasks: Vec<_> = self
+                .participants
+                .iter()
+                .map(|p| tokio::spawn(p.clone().clear_presignatures(barrier.clone())))
+                .collect();
 
-        let ((mut triple_latencies, triple_wall), (mut presig_latencies, presig_wall)) =
-            tokio::try_join!(clear_triples, clear_presigs)?;
+            let clear_triples = async {
+                let mut latencies = Vec::with_capacity(num_p);
+                let mut fails = 0;
+                for t in clear_triple_tasks {
+                    let (elapsed, ok) = t.await?;
+                    if ok {
+                        latencies.push(elapsed);
+                    } else {
+                        fails += 1;
+                    }
+                }
+                Ok::<_, anyhow::Error>((latencies, fails, clear_start.elapsed()))
+            };
+
+            let clear_presigs = async {
+                let mut latencies = Vec::with_capacity(num_p);
+                let mut fails = 0;
+                for t in clear_presig_tasks {
+                    let (elapsed, ok) = t.await?;
+                    if ok {
+                        latencies.push(elapsed);
+                    } else {
+                        fails += 1;
+                    }
+                }
+                Ok::<_, anyhow::Error>((latencies, fails, clear_start.elapsed()))
+            };
+
+            let (
+                (round_triple_lats, round_triple_fails, round_triple_wall),
+                (round_presig_lats, round_presig_fails, round_presig_wall),
+            ) = tokio::try_join!(clear_triples, clear_presigs)?;
+
+            all_triple_latencies.extend(round_triple_lats);
+            all_presig_latencies.extend(round_presig_lats);
+            triple_fails += round_triple_fails;
+            presig_fails += round_presig_fails;
+            total_triple_wall += round_triple_wall;
+            total_presig_wall += round_presig_wall;
+        }
 
         let post_mem = RedisDiagnostics::fetch_memory_snapshot(&self.pool).await?;
         println!(
@@ -500,10 +534,18 @@ impl RedisHarness {
             post_mem.total_keys, post_mem.used_memory_human
         );
 
-        let s1 =
-            LatencySummary::calculate("clear_triples_storm", &mut triple_latencies, triple_wall);
-        let s2 =
-            LatencySummary::calculate("clear_presigs_storm", &mut presig_latencies, presig_wall);
+        let s1 = LatencySummary::calculate_with_failures(
+            "clear_triples_storm",
+            &mut all_triple_latencies,
+            total_triple_wall,
+            triple_fails,
+        );
+        let s2 = LatencySummary::calculate_with_failures(
+            "clear_presigs_storm",
+            &mut all_presig_latencies,
+            total_presig_wall,
+            presig_fails,
+        );
         Ok(vec![s1, s2])
     }
 
@@ -686,10 +728,11 @@ impl RedisHarness {
     pub async fn bench_sync_prune_storm(
         &self,
         items_per_participant: usize,
+        rounds: usize,
     ) -> anyhow::Result<Vec<LatencySummary>> {
         self.reset_diagnostics().await?;
 
-        if self.participants.is_empty() || items_per_participant == 0 {
+        if self.participants.is_empty() || items_per_participant == 0 || rounds == 0 {
             return Ok(vec![
                 LatencySummary::empty("sync_prune_triples"),
                 LatencySummary::empty("sync_prune_presigs"),
@@ -698,78 +741,93 @@ impl RedisHarness {
 
         let num_p = self.participants.len();
         let total_items = num_p * items_per_participant;
-        let triples_base = next_id_block(total_items as u64 + 10_000);
-        let presigs_base = next_id_block(total_items as u64 + 10_000);
         let participant_list = self.participant_ids();
         let target_peer = participant_list[0];
+        let threshold = num_p;
+
+        let mut all_triple_latencies = Vec::with_capacity(num_p * rounds);
+        let mut all_presig_latencies = Vec::with_capacity(num_p * rounds);
+        let mut total_failures = 0;
+        let mut total_wall = Duration::ZERO;
 
         println!(
-            "   -> Pre-populating {items_per_participant} triples and presignatures across {num_p} participants..."
+            "   -> Running {rounds} rounds of state sync peer drop & prune storm across {num_p} participants ({items_per_participant} items/participant/round)..."
         );
-        let triple_ids_by_p = self
-            .populate_all_triples(triples_base, items_per_participant)
-            .await;
-        let presig_ids_by_p = self
-            .populate_all_presignatures(presigs_base, items_per_participant)
-            .await;
 
-        // Threshold = num_p ensures removing target_peer drops remaining holders from num_p to (num_p - 1),
-        // which falls strictly below threshold and executes the actual HDEL/DEL/SREM pruning path in Lua.
-        let threshold = num_p;
-        let barrier = Arc::new(Barrier::new(num_p));
-        let prune_start = Instant::now();
+        for _ in 0..rounds {
+            self.reset_reservations().await;
+            let triples_base = next_id_block(total_items as u64 + 10_000);
+            let presigs_base = next_id_block(total_items as u64 + 10_000);
 
-        let tasks: Vec<_> = self
-            .participants
-            .iter()
-            .enumerate()
-            .map(|(node_idx, p)| {
-                let my_triple_ids = triple_ids_by_p.get(node_idx).cloned().unwrap_or_default();
-                let my_presig_ids = presig_ids_by_p.get(node_idx).cloned().unwrap_or_default();
-                tokio::spawn(p.clone().prune_artifacts(
-                    barrier.clone(),
-                    target_peer,
-                    threshold,
-                    my_triple_ids,
-                    my_presig_ids,
-                ))
-            })
-            .collect();
+            let triple_ids_by_p = self
+                .populate_all_triples(triples_base, items_per_participant)
+                .await;
+            let presig_ids_by_p = self
+                .populate_all_presignatures(presigs_base, items_per_participant)
+                .await;
 
-        let mut all_triple_latencies = Vec::with_capacity(num_p);
-        let mut all_presig_latencies = Vec::with_capacity(num_p);
-        let mut total_pruned_triples = 0;
-        let mut total_pruned_presigs = 0;
+            let barrier = Arc::new(Barrier::new(num_p));
+            let tasks: Vec<_> = self
+                .participants
+                .iter()
+                .enumerate()
+                .map(|(node_idx, p)| {
+                    let my_triple_ids = triple_ids_by_p.get(node_idx).cloned().unwrap_or_default();
+                    let my_presig_ids = presig_ids_by_p.get(node_idx).cloned().unwrap_or_default();
+                    tokio::spawn(p.clone().prune_artifacts(
+                        barrier.clone(),
+                        target_peer,
+                        threshold,
+                        my_triple_ids,
+                        my_presig_ids,
+                    ))
+                })
+                .collect();
 
-        for t in tasks {
-            let (t_lat, t_res, p_lat, p_res) = t.await?;
-            let (t_removed, _t_updated) =
-                t_res.context("triples remove_holder_and_prune should succeed")?;
-            let (p_removed, _p_updated) =
-                p_res.context("presignatures remove_holder_and_prune should succeed")?;
-            total_pruned_triples += t_removed.len();
-            total_pruned_presigs += p_removed.len();
-            all_triple_latencies.push(t_lat);
-            all_presig_latencies.push(p_lat);
+            let prune_start = Instant::now();
+            let mut round_pruned_triples = 0;
+            let mut round_pruned_presigs = 0;
+
+            for t in tasks {
+                match t.await? {
+                    (t_lat, Ok((t_rem, _)), p_lat, Ok((p_rem, _))) => {
+                        round_pruned_triples += t_rem.len();
+                        round_pruned_presigs += p_rem.len();
+                        all_triple_latencies.push(t_lat);
+                        all_presig_latencies.push(p_lat);
+                    }
+                    _ => {
+                        total_failures += 1;
+                    }
+                }
+            }
+            total_wall += prune_start.elapsed();
+
+            assert_eq!(
+                round_pruned_triples, total_items,
+                "all triples should be pruned when falling below threshold"
+            );
+            assert_eq!(
+                round_pruned_presigs, total_items,
+                "all presignatures should be pruned when falling below threshold"
+            );
         }
-        let wall = prune_start.elapsed();
-
-        assert_eq!(
-            total_pruned_triples, total_items,
-            "all triples should be pruned when falling below threshold"
-        );
-        assert_eq!(
-            total_pruned_presigs, total_items,
-            "all presignatures should be pruned when falling below threshold"
-        );
 
         let (triple_wall, presig_wall) =
-            partition_wall_by_active_time(wall, &all_triple_latencies, &all_presig_latencies);
+            partition_wall_by_active_time(total_wall, &all_triple_latencies, &all_presig_latencies);
 
-        let s1 =
-            LatencySummary::calculate("sync_prune_triples", &mut all_triple_latencies, triple_wall);
-        let s2 =
-            LatencySummary::calculate("sync_prune_presigs", &mut all_presig_latencies, presig_wall);
+        let s1 = LatencySummary::calculate_with_failures(
+            "sync_prune_triples",
+            &mut all_triple_latencies,
+            triple_wall,
+            total_failures,
+        );
+        let s2 = LatencySummary::calculate_with_failures(
+            "sync_prune_presigs",
+            &mut all_presig_latencies,
+            presig_wall,
+            total_failures,
+        );
         Ok(vec![s1, s2])
     }
 
