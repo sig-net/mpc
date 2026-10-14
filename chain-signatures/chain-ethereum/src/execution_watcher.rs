@@ -502,28 +502,20 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     ) {
         let mut events = Vec::new();
         // A watched hash in this final block proves its nonce is taken, receipt or not.
-        let mut consumed_slots: HashMap<_, _> = mined
+        let consumed_slots: HashMap<_, _> = mined
             .iter()
             .map(|(_, (_, tx))| ((Address::from(tx.from_address), tx.nonce), Arc::clone(tx)))
             .collect();
         let mut failed = HashSet::new();
 
-        for (tx_id, sign_id, pending_tx, result) in
-            self.fetch_watcher_receipts(mined, block_number).await
-        {
+        for (tx_id, sign_id, _, result) in self.fetch_watcher_receipts(mined, block_number).await {
             match result {
-                Ok(BackfillOutcome::Observed { confirmation, .. }) => {
-                    consumed_slots.insert(
-                        (Address::from(pending_tx.from_address), pending_tx.nonce),
-                        pending_tx,
-                    );
-                    match confirmation {
-                        ConfirmationOutcome::Confirmed(event) => events.push(event),
-                        ConfirmationOutcome::RetryExtraction => {
-                            failed.insert(tx_id);
-                        }
+                Ok(BackfillOutcome::Observed { confirmation, .. }) => match confirmation {
+                    ConfirmationOutcome::Confirmed(event) => events.push(event),
+                    ConfirmationOutcome::RetryExtraction => {
+                        failed.insert(tx_id);
                     }
-                }
+                },
                 Ok(BackfillOutcome::NotObserved) => {}
                 Err(err) => {
                     tracing::warn!(
