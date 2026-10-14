@@ -237,18 +237,24 @@ impl RedisHarness {
 
     /// Print slowlog entries and memory stats captured during the last run.
     pub async fn print_diagnostics(&self) -> anyhow::Result<()> {
-        let slowlog = RedisDiagnostics::fetch_slowlog(&self.pool, 10).await?;
+        let slowlog = RedisDiagnostics::fetch_slowlog(&self.pool, 20).await?;
         println!("\n  [Redis Diagnostics]");
         if slowlog.is_empty() {
             println!("   Slowlog (>=1ms): None recorded (all commands executed under 1ms)");
         } else {
-            println!("   Slowlog (top {} operations >=1ms):", slowlog.len());
+            println!("   Slowlog (top operations >=1ms):");
             for s in slowlog {
+                let tag = if s.command.starts_with("HLEN") || s.command.starts_with("SCARD") {
+                    " [background poller]"
+                } else {
+                    ""
+                };
                 println!(
-                    "     * ID {}: {:>7.2}ms | Cmd: {}",
+                    "     * ID {}: {:>7.2}ms | Cmd: {}{}",
                     s.id,
                     s.duration_us as f64 / 1000.0,
-                    s.command
+                    s.command,
+                    tag
                 );
             }
         }
