@@ -796,6 +796,8 @@ impl RedisHarness {
             let prune_start = Instant::now();
             let mut round_pruned_triples = 0;
             let mut round_pruned_presigs = 0;
+            let mut round_triple_errors = 0;
+            let mut round_presig_errors = 0;
 
             for t in tasks {
                 let (t_lat, t_res, p_lat, p_res) = t.await?;
@@ -807,6 +809,7 @@ impl RedisHarness {
                     Err(e) => {
                         tracing::warn!("Failed to prune triples in S8: {e:#}");
                         triple_fails += 1;
+                        round_triple_errors += 1;
                     }
                 }
                 match p_res {
@@ -817,19 +820,20 @@ impl RedisHarness {
                     Err(e) => {
                         tracing::warn!("Failed to prune presignatures in S8: {e:#}");
                         presig_fails += 1;
+                        round_presig_errors += 1;
                     }
                 }
             }
             total_wall += prune_start.elapsed();
 
             // Soft-failure tracking consistent with S3/S6 to avoid aborting multi-scenario runs on partial prunes
-            if round_pruned_triples != total_items {
+            if round_triple_errors == 0 && round_pruned_triples != total_items {
                 tracing::warn!(
                     "Incomplete triple prune in S8 round: expected {total_items}, pruned {round_pruned_triples}"
                 );
                 triple_fails += 1;
             }
-            if round_pruned_presigs != total_items {
+            if round_presig_errors == 0 && round_pruned_presigs != total_items {
                 tracing::warn!(
                     "Incomplete presignature prune in S8 round: expected {total_items}, pruned {round_pruned_presigs}"
                 );
