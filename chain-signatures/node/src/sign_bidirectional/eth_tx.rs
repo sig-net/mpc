@@ -84,12 +84,12 @@ pub(crate) fn sign_and_hash_legacy_from_unsigned(
     Ok((hash.into(), nonce))
 }
 
-struct EthereumTxRlp {
+pub(crate) struct EthereumTxRlp {
     stream: RlpStream,
 }
 
 impl EthereumTxRlp {
-    fn new_list(len: usize) -> Self {
+    pub(crate) fn new_list(len: usize) -> Self {
         Self {
             stream: RlpStream::new_list(len),
         }
@@ -103,7 +103,7 @@ impl EthereumTxRlp {
         self.stream.append(&value);
     }
 
-    fn append_u64(&mut self, value: u64) {
+    pub(crate) fn append_u64(&mut self, value: u64) {
         self.stream.append(&value);
     }
 
@@ -124,7 +124,7 @@ impl EthereumTxRlp {
         self.stream.as_raw()
     }
 
-    fn into_vec(self) -> Vec<u8> {
+    pub(crate) fn into_vec(self) -> Vec<u8> {
         self.stream.out().to_vec()
     }
 }
@@ -142,12 +142,19 @@ pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Sc
     public_key_to_address(user_pk.to_encoded_point(false).as_bytes())
 }
 
-/// An unsigned EIP-1559 legacy-shaped RLP body with `chain_id`, `0`, `0`
-/// appended: `[0; 6] ‖ [chain_id, 0, 0]`, nine fields.
+/// An unsigned EIP-1559 legacy-shaped RLP body with a 20-byte call target
+/// and `chain_id`, `0`, `0` appended: `[nonce, gasPrice, gasLimit, to,
+/// value, data, chain_id, 0, 0]`, nine fields.
 #[cfg(test)]
 pub(crate) fn legacy_tx(chain_id: u64) -> Vec<u8> {
     let mut rlp = EthereumTxRlp::new_list(9);
-    for _ in 0..6 {
+    // nonce, gas price, gas limit
+    for _ in 0..3 {
+        rlp.append_u64(0);
+    }
+    rlp.stream.append(&vec![0x11u8; 20]);
+    // value, data
+    for _ in 0..2 {
         rlp.append_u64(0);
     }
     rlp.append_u64(chain_id);

@@ -154,7 +154,7 @@ fn build_solana_to_ethereum_bidirectional_request(
     rlp_s.append(&0u64); // nonce
     rlp_s.append(&0u64); // gasPrice
     rlp_s.append(&0u64); // gasLimit
-    rlp_s.append(&Vec::<u8>::new()); // to
+    rlp_s.append(&vec![0x11u8; 20]); // to
     rlp_s.append(&0u64); // value
     rlp_s.append(&Vec::<u8>::new()); // data
     rlp_s.append(&1u64); // chain_id

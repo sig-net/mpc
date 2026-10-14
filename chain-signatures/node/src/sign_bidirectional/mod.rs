@@ -17,6 +17,7 @@ pub use mpc_primitives::{
 pub use eth_tx::{derive_user_address, public_key_to_address};
 pub use progress::{BidirectionalProgress, SignProgress, SignStatus};
 pub use signing::sign_and_hash_transaction;
+pub(crate) use signing::transaction_chain_id;
 use signing::validate_unsigned_transaction;
 
 /// The requester's chain-local identity string: Midnight and Canton senders
@@ -68,9 +69,10 @@ pub trait SignBidirectionalEventExt {
     fn target_chain(&self) -> Result<Chain, ChainFromError>;
 
     /// The deterministic derivations respond processing runs for every bidirectional
-    /// request. Shared between admission (reject before the backlog) and the respond
-    /// path's failure handling (quarantine): both must agree on what "can never
-    /// advance" means.
+    /// request, and the schema checks output extraction applies to whatever the
+    /// target chain returns. Shared between admission (reject before the backlog)
+    /// and the respond path's failure handling (quarantine): both must agree on
+    /// what "can never advance" means.
     fn validate(&self) -> anyhow::Result<()>;
 
     /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
@@ -117,9 +119,28 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         // must enforce §6.1's expiration bound (future, ≤ 24 h past the request's
         // Midnight timestamp) and set `owner_address` by construction; raw bytes
         // cannot check either.
-        validate_unsigned_transaction(target, &self.serialized_transaction)
+        let calldata = validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
-        Ok(())
+        match calldata {
+            Some(calldata) => mpc_chain_ethereum::validate_schemas(
+                calldata,
+                &self.output_deserialization_schema,
+                self.chain.respond_serialization_format(),
+                &self.respond_serialization_schema,
+            )
+            .context("unprocessable output schemas"),
+            // Tron: receipt-based output extraction arrives with the execution
+            // watcher, which also defines its schemas; until then admission
+            // requires a Tron target to carry none.
+            None => {
+                anyhow::ensure!(
+                    self.output_deserialization_schema.is_empty()
+                        && self.respond_serialization_schema.is_empty(),
+                    "Tron targets define no output schemas yet"
+                );
+                Ok(())
+            }
+        }
     }
 
     fn to_bidirectional_tx(
@@ -204,7 +225,7 @@ mod tests {
             chain: Chain::Solana,
             chain_ctx: None,
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
         };
         assert!(event(Chain::Ethereum).validate().is_ok());
         assert!(event(Chain::Solana).validate().is_err());
