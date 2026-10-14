@@ -699,6 +699,9 @@ impl RedisHarness {
 
         poller.stop().await;
 
+        let (take_triple_wall, take_presig_wall) =
+            partition_wall_by_active_time(signer_wall, &all_take_triples, &all_take_presigs);
+
         let s1 = LatencySummary::calculate_with_failures(
             "mixed_insert_triple",
             &mut all_insert_triples,
@@ -714,13 +717,13 @@ impl RedisHarness {
         let s3 = LatencySummary::calculate_with_failures(
             "mixed_take_triple",
             &mut all_take_triples,
-            signer_wall,
+            take_triple_wall,
             take_triple_fails,
         );
         let s4 = LatencySummary::calculate_with_failures(
             "mixed_take_presig",
             &mut all_take_presigs,
-            signer_wall,
+            take_presig_wall,
             take_presig_fails,
         );
 
