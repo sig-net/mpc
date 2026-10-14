@@ -189,11 +189,11 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             .target_chain()
             .map_err(|err| anyhow::anyhow!("bad target chain: {err:?}"))?;
         anyhow::ensure!(
-            target.has_execution_watcher(),
+            target.supports_bidirectional_signing(),
             "unsupported target chain {target}"
         );
         self.epsilon().context("cannot derive epsilon")?;
-        validate_unsigned_transaction(&self.serialized_transaction)
+        validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         Ok(())
     }
@@ -210,7 +210,7 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         let epsilon = self.epsilon()?;
         let from_address = derive_user_address(root_pk, epsilon);
         let (signed_tx_hash, nonce) =
-            sign_and_hash_transaction(&self.serialized_transaction, mpc_sig)?;
+            sign_and_hash_transaction(target_chain, &self.serialized_transaction, mpc_sig)?;
 
         Ok(BidirectionalTx {
             id: BidirectionalTxId(signed_tx_hash),
@@ -275,33 +275,74 @@ impl BidirectionalTxExt for BidirectionalTx {
     }
 }
 
-/// Check that `unsigned_rlp` would survive [`sign_and_hash_transaction`], without a
-/// real signature. Admission calls this so a transaction that cannot be signed at
-/// respond time is rejected before it enters the backlog; running the actual
-/// function is what keeps admission structurally equal to respond processing. The
-/// placeholder's recovery id is 1, the strict case: the legacy `v` computation adds
-/// `y_parity`, so validating with 0 would admit the one chain id whose `v` only
-/// overflows when the real signature draws parity 1.
-fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<()> {
+/// Checks the unsigned bytes against the target chain's signing rules.
+/// Admission calls this so a transaction that cannot be signed at respond
+/// time is rejected before it enters the backlog; running the actual
+/// signing path is what keeps admission structurally equal to respond
+/// processing.
+fn validate_unsigned_transaction(target: Chain, unsigned: &[u8]) -> anyhow::Result<()> {
+    match target {
+        Chain::Ethereum => validate_unsigned_ethereum(unsigned),
+        Chain::Tron => mpc_chain_tron::pb::RawTransaction::parse(unsigned).map(|_| ()),
+        _ => anyhow::bail!("unsupported target chain {target}"),
+    }
+}
+
+fn validate_unsigned_ethereum(unsigned_rlp: &[u8]) -> anyhow::Result<()> {
+    // The placeholder's recovery id is 1, the strict case: the legacy `v`
+    // computation adds `y_parity`, so validating with 0 would admit the one
+    // chain id whose `v` only overflows when the real signature draws parity 1.
     let placeholder = Signature::new(
         k256::ProjectivePoint::GENERATOR.to_affine(),
         k256::Scalar::ONE,
         1,
     );
-    sign_and_hash_transaction(unsigned_rlp, placeholder).map(|_| ())
+    sign_and_hash_ethereum(unsigned_rlp, placeholder).map(|_| ())
 }
 
+/// Signs `unsigned` for `target`, returning the transaction id the target
+/// chain records it under and the account-sequence field: Ethereum's nonce,
+/// or 0 for Tron, which has none (ref-block fields in the raw data serve
+/// that role).
 pub fn sign_and_hash_transaction(
+    target: Chain,
+    unsigned: &[u8],
+    signature: Signature,
+) -> anyhow::Result<([u8; 32], u64)> {
+    match target {
+        Chain::Ethereum => sign_and_hash_ethereum(unsigned, signature),
+        Chain::Tron => sign_and_hash_tron(unsigned, signature),
+        _ => anyhow::bail!("unsupported target chain {target}"),
+    }
+}
+
+/// Low-s normalized `(r, s, v)`: a chain includes only the low-s encoding,
+/// and negating s negates the recovered point, so the recovery id flips
+/// with it.
+fn normalized_rs_v(signature: &Signature) -> ([u8; 32], [u8; 32], u8) {
+    let negate = bool::from(signature.s.is_high());
+    let s_scalar = if negate { -signature.s } else { signature.s };
+    let v = ((signature.recovery_id == 1) ^ negate) as u8;
+    let mut r = [0u8; 32];
+    r.copy_from_slice(signature.big_r.x().as_slice());
+    let mut s = [0u8; 32];
+    s.copy_from_slice(s_scalar.to_bytes().as_slice());
+    (r, s, v)
+}
+
+fn sign_and_hash_tron(unsigned: &[u8], signature: Signature) -> anyhow::Result<([u8; 32], u64)> {
+    let (r, s, v) = normalized_rs_v(&signature);
+    let (_signed, txid) =
+        mpc_chain_tron::pb::RawTransaction::parse(unsigned)?.sign_and_hash(&r, &s, v)?;
+    Ok((txid, 0))
+}
+
+fn sign_and_hash_ethereum(
     unsigned_rlp: &[u8],
     signature: Signature,
 ) -> anyhow::Result<([u8; 32], u64)> {
-    // A chain includes only the low-s encoding, and negating s negates the
-    // recovered point, so the recovery id flips with it.
-    let negate = bool::from(signature.s.is_high());
-    let s_scalar = if negate { -signature.s } else { signature.s };
-    let y_parity = (signature.recovery_id == 1) ^ negate;
-    let r = signature.big_r.x().as_slice().to_vec();
-    let s = s_scalar.to_bytes().as_slice().to_vec();
+    let (r, s, v) = normalized_rs_v(&signature);
+    let y_parity = v == 1;
 
     if is_eip1559(unsigned_rlp) {
         sign_and_hash_eip1559_from_unsigned(unsigned_rlp, &r, &s, y_parity)
@@ -494,6 +535,7 @@ mod tests {
     use alloy::consensus::{SignableTransaction, TxEip1559};
     use alloy::eips::eip2718::Encodable2718;
     use alloy::primitives::{Bytes, FixedBytes, Signature, TxKind, U256};
+    use mpc_primitives::Chain;
     use std::sync::Arc;
 
     #[test]
@@ -557,6 +599,7 @@ mod tests {
 
         let id_of = |s, recovery_id| {
             super::sign_and_hash_transaction(
+                Chain::Ethereum,
                 &unsigned,
                 mpc_primitives::Signature::new(big_r, s, recovery_id),
             )
@@ -586,8 +629,9 @@ mod tests {
     #[test]
     fn validate_rejects_the_legacy_chain_id_that_only_overflows_on_parity_one() {
         let boundary = (u64::MAX - 35) / 2;
-        assert!(super::validate_unsigned_transaction(&legacy_tx(boundary)).is_err());
-        assert!(super::validate_unsigned_transaction(&legacy_tx(boundary - 1)).is_ok());
+        let chain = Chain::Ethereum;
+        assert!(super::validate_unsigned_transaction(chain, &legacy_tx(boundary)).is_err());
+        assert!(super::validate_unsigned_transaction(chain, &legacy_tx(boundary - 1)).is_ok());
     }
 
     #[test]
@@ -612,6 +656,55 @@ mod tests {
         };
         assert!(event(Chain::Ethereum).validate().is_ok());
         assert!(event(Chain::Solana).validate().is_err());
+    }
+
+    #[test]
+    fn validate_and_sign_accept_a_tron_target() {
+        use super::{SignBidirectionalEvent, SignBidirectionalEventExt as _};
+        use crate::protocol::Chain;
+
+        // Recorded mainnet USDT transfer (chain-tron fixture 1): the bare
+        // `raw` message, satisfying admission — one TriggerSmartContract,
+        // ref-block fields, expiration set.
+        const RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a154120eb85916a10d2c6542613e4c9517b5e99b2dee9121541a614f803b6fd780986a42c78ec9c7f77e6ded13c2244a9059cbb000000000000000000000000d9e02baf48ed306afc63cfa816a2b6be8442036a0000000000000000000000000000000000000000000000000000000008f428f870bad8e2a49134900180e1eb17";
+        const TXID_HEX: &str = "d3741faef8cd6594923d7d827b610b12ce9bc80f65822c827c8fd7a612570540";
+
+        let unsigned = hex::decode(RAW_HEX).unwrap();
+
+        let event = SignBidirectionalEvent {
+            sender: Default::default(),
+            serialized_transaction: unsigned.clone(),
+            dest: String::new(),
+            caip2_id: Chain::Tron.caip2_chain_id().to_string(),
+            key_version: 0,
+            deposit: 0,
+            path: "m/0".to_string(),
+            algo: "ECDSA".to_string(),
+            params: "{}".to_string(),
+            chain: Chain::Midnight,
+            chain_ctx: None,
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+        };
+        assert!(event.validate().is_ok());
+
+        // The txID is sha256(raw_data): independent of the signature, so any
+        // (low-s normalized) signature names the same transaction.
+        let big_r = k256::ProjectivePoint::GENERATOR.to_affine();
+        let id_of = |s, recovery_id| {
+            super::sign_and_hash_transaction(
+                Chain::Tron,
+                &unsigned,
+                mpc_primitives::Signature::new(big_r, s, recovery_id),
+            )
+            .unwrap()
+        };
+        let low = k256::Scalar::from(5u64);
+        let (id_low, nonce) = id_of(low, 1);
+        let (id_high, _) = id_of(-low, 0);
+        assert_eq!(id_low, id_high);
+        assert_eq!(nonce, 0);
+        assert_eq!(hex::encode(id_low), TXID_HEX);
     }
 
     #[test]
