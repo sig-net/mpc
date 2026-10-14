@@ -318,7 +318,10 @@ impl RedisHarness {
         self.reset_diagnostics().await?;
 
         if self.participants.is_empty() || tasks_per_participant == 0 || items_per_task == 0 {
-            return Ok(vec![LatencySummary::empty("saturated_insert_triple")]);
+            return Ok(vec![
+                LatencySummary::empty("saturated_insert_triple"),
+                LatencySummary::empty("saturated_take_triple"),
+            ]);
         }
 
         let pool_status = self.pool.status();
@@ -331,41 +334,68 @@ impl RedisHarness {
         let poller = self.spawn_background_polling(false);
 
         // 2. Intermittent blocking spikes on Redis main thread (simulating large Lua scripts or BGSAVE stalls)
+        // Spans both insert and take phases
         let spike_stop = Arc::new(AtomicBool::new(false));
         let spike_handle =
-            self.spawn_intermittent_spike(spike_stop.clone(), blocking_spike_ms, num_spikes);
+            self.spawn_intermittent_spike(spike_stop.clone(), blocking_spike_ms, num_spikes * 2);
 
-        // 3. High-concurrency operations across participants
+        // 3. Phase A: High-concurrency inserts across participants under saturation
         let total_items = self.participants.len() * tasks_per_participant * items_per_task;
         let run_base_id = next_id_block(total_items as u64 + 10_000);
-        let barrier = Arc::new(Barrier::new(
+        let insert_barrier = Arc::new(Barrier::new(
             self.participants.len() * tasks_per_participant,
         ));
-        let overall_start = Instant::now();
         let participant_list = self.participant_ids();
 
-        let mut worker_tasks = Vec::with_capacity(self.participants.len() * tasks_per_participant);
+        let mut insert_tasks = Vec::with_capacity(self.participants.len() * tasks_per_participant);
+        let mut task_id_ranges = Vec::with_capacity(self.participants.len() * tasks_per_participant);
+
         for (p_idx, p) in self.participants.iter().enumerate() {
             for t_idx in 0..tasks_per_participant {
                 let task_id = p_idx * tasks_per_participant + t_idx;
                 let base_id = run_base_id + (task_id as u64 * items_per_task as u64);
-                worker_tasks.push(tokio::spawn(p.clone().insert_triples_measured(
+                let ids: Vec<u64> = (base_id..base_id + items_per_task as u64).collect();
+                task_id_ranges.push((p.clone(), ids));
+                insert_tasks.push(tokio::spawn(p.clone().insert_triples_measured(
                     base_id,
                     items_per_task,
                     participant_list.clone(),
-                    barrier.clone(),
+                    insert_barrier.clone(),
                 )));
             }
         }
 
-        let mut all_latencies = Vec::new();
-        let mut total_failures = 0;
-        for task in worker_tasks {
+        let insert_start = Instant::now();
+        let mut all_insert_latencies = Vec::new();
+        let mut total_insert_failures = 0;
+        for task in insert_tasks {
             let (lat, fails) = task.await?;
-            all_latencies.extend(lat);
-            total_failures += fails;
+            all_insert_latencies.extend(lat);
+            total_insert_failures += fails;
         }
-        let wall = overall_start.elapsed();
+        let insert_wall = insert_start.elapsed();
+
+        // 4. Phase B: High-concurrency takes across participants under saturation
+        let take_barrier = Arc::new(Barrier::new(
+            self.participants.len() * tasks_per_participant,
+        ));
+        let mut take_tasks = Vec::with_capacity(self.participants.len() * tasks_per_participant);
+        for (p, ids) in task_id_ranges {
+            take_tasks.push(tokio::spawn(p.take_triples(
+                ids,
+                Some(take_barrier.clone()),
+            )));
+        }
+
+        let take_start = Instant::now();
+        let mut all_take_latencies = Vec::new();
+        let mut total_take_failures = 0;
+        for task in take_tasks {
+            let (lat, fails) = task.await?;
+            all_take_latencies.extend(lat);
+            total_take_failures += fails;
+        }
+        let take_wall = take_start.elapsed();
 
         poller.stop().await;
         if let Some(h) = spike_handle {
@@ -373,13 +403,20 @@ impl RedisHarness {
             let _ = h.await;
         }
 
-        let summary = LatencySummary::calculate_with_failures(
+        let insert_summary = LatencySummary::calculate_with_failures(
             "saturated_insert_triple",
-            &mut all_latencies,
-            wall,
-            total_failures,
+            &mut all_insert_latencies,
+            insert_wall,
+            total_insert_failures,
         );
-        Ok(vec![summary])
+        let take_summary = LatencySummary::calculate_with_failures(
+            "saturated_take_triple",
+            &mut all_take_latencies,
+            take_wall,
+            total_take_failures,
+        );
+
+        Ok(vec![insert_summary, take_summary])
     }
 
     /// SCENARIO 6: Mass Epoch Resharing `clear()` Storm.

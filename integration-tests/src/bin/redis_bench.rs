@@ -234,7 +234,7 @@ async fn main() -> anyhow::Result<()> {
             let spike_ms = args.spike_ms;
             println!("\n>>> Running Scenario 5: Cascading Saturation & Head-of-Line Blocking (50ms - 6s Grafana conditions)");
             println!(
-                "    Simulating {} concurrent tasks across {} participants, 100ms background polling, and periodic {}ms Redis blocking spikes...",
+                "    Simulating {} concurrent tasks across {} participants, 100ms background polling, and periodic {}ms Redis blocking spikes (insert + take)...",
                 args.participants * tasks_per_p,
                 args.participants,
                 spike_ms
