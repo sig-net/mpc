@@ -4,35 +4,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
-use deadpool_redis::Pool;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::TripleStorage;
 use tokio::sync::Barrier;
 
-use super::diagnostics::{
-    partition_wall_3, partition_wall_by_active_time, LatencySummary, RedisDiagnostics,
-};
+use super::diagnostics::{partition_wall_3, partition_wall_by_active_time, LatencySummary};
 use super::participant::{next_id_block, SimulatedParticipant};
 use super::RedisHarness;
 
 impl RedisHarness {
-    /// Helper task for disconnecting clients after a given delay.
-    pub async fn run_client_killer(pool: Pool, barrier: Arc<Barrier>, kill_delay_ms: u64) -> i64 {
-        barrier.wait().await;
-        tokio::time::sleep(Duration::from_millis(kill_delay_ms)).await;
-
-        match RedisDiagnostics::kill_client_connections(&pool).await {
-            Ok(count) => {
-                println!("   [CLIENT KILL] Severed {count} active Redis client connections!");
-                count
-            }
-            Err(e) => {
-                tracing::warn!("CLIENT KILL failed: {e:#}");
-                0
-            }
-        }
-    }
-
     /// SCENARIO 1: Concurrent Insert & Take Throughput.
     /// Simulates N participants inserting pairs simultaneously and subsequently taking them.
     pub async fn bench_concurrent_insert_and_take(
@@ -261,7 +241,7 @@ impl RedisHarness {
             .map(|_| {
                 // Each racer gets an independent storage handle with its own `reserved` RwLock,
                 // matching production where distinct nodes do not share in-memory reservation maps.
-                let racer = SimulatedParticipant::new(&self.pool, &p.account_id, p.participant);
+                let racer = SimulatedParticipant::new(&self.client.pool, &p.account_id, p.participant);
                 tokio::spawn(racer.race_proposals(
                     barrier.clone(),
                     base_id,
@@ -320,7 +300,7 @@ impl RedisHarness {
             ]);
         }
 
-        let pool_status = self.pool.status();
+        let pool_status = self.client.status();
         println!(
             "   -> Connection pool status: max_size={} (active={}, available={}, waiting={})",
             pool_status.max_size, pool_status.size, pool_status.available, pool_status.waiting
@@ -559,7 +539,7 @@ impl RedisHarness {
             total_presig_wall += round_presig_wall;
         }
 
-        let post_mem = RedisDiagnostics::fetch_memory_snapshot(&self.pool).await?;
+        let post_mem = self.client.fetch_memory_snapshot().await?;
         println!(
             "   -> Post-clear keyspace: {} keys remaining in Redis, Memory: {}",
             post_mem.total_keys, post_mem.used_memory_human
@@ -1004,12 +984,8 @@ impl RedisHarness {
             "   -> Launching {num_p} participant workers ({items_per_participant} items each) with mid-flight CLIENT KILL shock at +{kill_delay_ms}ms...",
         );
 
-        // 1. Killer task that severs all client connections using shared pool helper
-        let killer_task = tokio::spawn(Self::run_client_killer(
-            self.pool.clone(),
-            barrier.clone(),
-            kill_delay_ms,
-        ));
+        // 1. Killer task that severs all client connections using client helper
+        let killer_task = self.client.spawn_client_killer(barrier.clone(), kill_delay_ms);
 
         // 2. Active participant tasks (Phase A: mid-insert CLIENT KILL)
         let overall_start = Instant::now();
@@ -1053,11 +1029,7 @@ impl RedisHarness {
 
         // 3. Phase B: Mid-take CLIENT KILL shock (killing connections mid-take)
         let take_barrier = Arc::new(Barrier::new(num_p + 1));
-        let take_killer_task = tokio::spawn(Self::run_client_killer(
-            self.pool.clone(),
-            take_barrier.clone(),
-            kill_delay_ms,
-        ));
+        let take_killer_task = self.client.spawn_client_killer(take_barrier.clone(), kill_delay_ms);
 
         let mut kill_take_tasks = Vec::with_capacity(num_p);
         let mut post_take_batches = Vec::with_capacity(num_p);
@@ -1165,7 +1137,7 @@ impl RedisHarness {
             .map(|_| {
                 // Each seeker gets an independent storage handle with its own `reserved` RwLock,
                 // matching production where distinct nodes do not share in-memory reservation maps.
-                let seeker = SimulatedParticipant::new(&self.pool, &p.account_id, p.participant);
+                let seeker = SimulatedParticipant::new(&self.client.pool, &p.account_id, p.participant);
                 tokio::spawn(seeker.seek_deep_stockpile(
                     barrier.clone(),
                     base_id,
@@ -1242,7 +1214,7 @@ impl RedisHarness {
             .map(|proposer_id| {
                 // Each proposer gets an independent storage handle with its own `reserved` RwLock,
                 // matching production where distinct nodes do not share in-memory reservation maps.
-                let proposer = SimulatedParticipant::new(&self.pool, &p.account_id, p.participant);
+                let proposer = SimulatedParticipant::new(&self.client.pool, &p.account_id, p.participant);
                 tokio::spawn(proposer.run_proposer_churn(
                     barrier.clone(),
                     proposer_id,
@@ -1351,7 +1323,7 @@ impl RedisHarness {
                 // Each contender gets an independent storage handle with its own `reserved` RwLock,
                 // matching production where distinct nodes do not share in-memory reservation maps.
                 let contender = Participant::from(contender_idx as u32);
-                let triples = TriplePair::storage(&self.pool, &owner.account_id);
+                let triples = TriplePair::storage(&self.client.pool, &owner.account_id);
                 triples.set_me(contender);
                 let ids = target_ids.clone();
                 tokio::spawn(Self::race_take_conflicted(

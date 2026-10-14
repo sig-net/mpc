@@ -160,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
         config = config.with_redis_url(url);
     }
     let harness = RedisHarness::new(config).await?;
-    let pool_status = harness.pool.status();
+    let pool_status = harness.client.status();
     println!("Connected to Redis at: {}", harness.redis_url);
     println!("Connection pool ready: max_size={}", pool_status.max_size);
 

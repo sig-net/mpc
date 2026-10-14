@@ -3,18 +3,16 @@ pub mod diagnostics;
 pub mod participant;
 pub mod scenarios;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 pub use deadpool_redis::redis;
-use deadpool_redis::{Config as RedisPoolConfig, Hook, Pool, Runtime as RedisRuntime};
+use deadpool_redis::Pool;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::storage::triple_storage::TriplePair;
 use near_account_id::AccountId;
-use redis::Script;
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::containers::Redis;
@@ -22,7 +20,7 @@ use crate::containers::Redis;
 pub use config::RedisHarnessConfig;
 pub use diagnostics::{
     partition_wall_3, partition_wall_by_active_time, print_summary_header, LatencySummary,
-    MemorySnapshot, RedisDiagnostics, SlowlogRecord,
+    MemorySnapshot, RedisDiagnostics, RedisDiagnosticsClient, SlowlogRecord,
 };
 pub use participant::{
     dummy_pair, dummy_presignature, dummy_triple, next_id_block, BackgroundPollerGuard,
@@ -37,7 +35,7 @@ pub use participant::{
 pub struct RedisHarness {
     pub redis: Option<Redis>,
     pub redis_url: String,
-    pub pool: Pool,
+    pub client: RedisDiagnosticsClient,
     pub participants: Vec<SimulatedParticipant>,
     pub flush_between: bool,
     pub config: RedisHarnessConfig,
@@ -63,8 +61,12 @@ impl RedisHarness {
             (Some(container), url)
         };
 
-        let pool = Self::build_pool(&redis_url, config.max_pool_size, config.pool_timeout)?;
-        RedisDiagnostics::setup(&pool, 1000).await?;
+        let client = RedisDiagnosticsClient::from_url(
+            &redis_url,
+            config.max_pool_size,
+            config.pool_timeout,
+        )?;
+        client.setup(1000).await?;
 
         let mut participants = Vec::with_capacity(config.num_participants);
         for i in 0..config.num_participants {
@@ -72,9 +74,9 @@ impl RedisHarness {
             let account_id: AccountId = format!("node-{i}.testnet").parse().unwrap();
 
             // All participants strictly share the harness pool
-            let triples = TriplePair::storage(&pool, &account_id);
+            let triples = TriplePair::storage(&client.pool, &account_id);
             triples.set_me(participant);
-            let presignatures = Presignature::storage(&pool, &account_id);
+            let presignatures = Presignature::storage(&client.pool, &account_id);
             presignatures.set_me(participant);
 
             participants.push(SimulatedParticipant {
@@ -88,37 +90,16 @@ impl RedisHarness {
         Ok(Self {
             redis,
             redis_url,
-            pool,
+            client,
             participants,
             flush_between: config.flush_between,
             config,
         })
     }
 
-    pub fn build_pool(
-        redis_url: &str,
-        max_pool_size: Option<usize>,
-        timeout: Option<Duration>,
-    ) -> anyhow::Result<Pool> {
-        let parsed_url = url::Url::parse(redis_url).context("invalid redis url")?;
-        let mut builder = RedisPoolConfig::from_url(parsed_url)
-            .builder()?
-            .runtime(RedisRuntime::Tokio1);
-
-        if let Some(size) = max_pool_size {
-            builder = builder.max_size(size);
-        }
-        if let Some(to) = timeout {
-            builder = builder
-                .wait_timeout(Some(to))
-                .create_timeout(Some(to))
-                .recycle_timeout(Some(to))
-                .post_create(Hook::sync_fn(move |conn, _| {
-                    conn.set_response_timeout(to);
-                    Ok(())
-                }));
-        }
-        Ok(builder.build()?)
+    /// Access the underlying connection pool.
+    pub fn pool(&self) -> &Pool {
+        self.client.pool()
     }
 
     pub fn participant_ids(&self) -> Vec<Participant> {
@@ -133,12 +114,12 @@ impl RedisHarness {
 
     /// Flush the Redis database (FLUSHDB).
     pub async fn flush_db(&self) -> anyhow::Result<()> {
-        RedisDiagnostics::flush_db(&self.pool).await
+        self.client.flush_db().await
     }
 
     /// Sever all client connections to Redis using `CLIENT KILL TYPE normal SKIPME yes`.
     pub async fn kill_client_connections(&self) -> anyhow::Result<i64> {
-        RedisDiagnostics::kill_client_connections(&self.pool).await
+        self.client.kill_client_connections().await
     }
 
     /// Configure Redis persistence options (AOF enabled/disabled and fsync policy).
@@ -147,17 +128,19 @@ impl RedisHarness {
         append_only: bool,
         append_fsync: &str,
     ) -> anyhow::Result<()> {
-        RedisDiagnostics::configure_persistence(&self.pool, append_only, append_fsync).await
+        self.client
+            .configure_persistence(append_only, append_fsync)
+            .await
     }
 
     /// Trigger a background snapshot save via Redis BGSAVE.
     pub async fn trigger_bgsave(&self) -> anyhow::Result<()> {
-        RedisDiagnostics::trigger_bgsave(&self.pool).await
+        self.client.trigger_bgsave().await
     }
 
     /// Fetch memory snapshot and total key count (DBSIZE) from Redis.
     pub async fn memory_snapshot(&self) -> anyhow::Result<MemorySnapshot> {
-        RedisDiagnostics::fetch_memory_snapshot(&self.pool).await
+        self.client.fetch_memory_snapshot().await
     }
 
     /// Clear all in-memory reservations across all participants' storage handles.
@@ -174,7 +157,7 @@ impl RedisHarness {
             self.flush_db().await?;
         }
         self.reset_reservations().await;
-        RedisDiagnostics::reset_slowlog(&self.pool).await?;
+        self.client.reset_slowlog().await?;
         let mem = self.memory_snapshot().await?;
         println!(
             "   -> Keyspace pre-run: {} keys in Redis (DBSIZE), Memory: {}",
@@ -185,41 +168,7 @@ impl RedisHarness {
 
     /// Print slowlog entries and memory stats captured during the last run.
     pub async fn print_diagnostics(&self) -> anyhow::Result<()> {
-        let slowlog = RedisDiagnostics::fetch_slowlog(&self.pool, 20).await?;
-        println!("\n  [Redis Diagnostics]");
-        if slowlog.is_empty() {
-            println!("   Slowlog (>=1ms): None recorded (all commands executed under 1ms)");
-        } else {
-            println!("   Slowlog (top operations >=1ms):");
-            for s in slowlog {
-                let tag = if s.command.starts_with("HLEN") || s.command.starts_with("SCARD") {
-                    " [background poller]"
-                } else {
-                    ""
-                };
-                println!(
-                    "     * ID {}: {:>7.2}ms | Cmd: {}{}",
-                    s.id,
-                    s.duration_us as f64 / 1000.0,
-                    s.command,
-                    tag
-                );
-            }
-        }
-
-        let mem = RedisDiagnostics::fetch_memory_snapshot(&self.pool).await?;
-        let status = self.pool.status();
-        println!(
-            "   Keyspace post-run: {} keys in Redis (DBSIZE) | Memory: used={} rss={} frag_ratio={:.2} | Pool: max={} active={} available={}",
-            mem.total_keys,
-            mem.used_memory_human,
-            mem.used_memory_rss_human,
-            mem.fragmentation_ratio,
-            status.max_size,
-            status.size,
-            status.available
-        );
-        Ok(())
+        self.client.print_diagnostics().await
     }
 
     /// Helper to print scenario summary table and diagnostics.
@@ -352,51 +301,6 @@ impl RedisHarness {
         BackgroundPollerGuard { stop_flag, handles }
     }
 
-    /// Run intermittent blocking Lua scripts on the Redis instance until stopped or completed.
-    pub async fn run_intermittent_spike(
-        pool: Pool,
-        stop_flag: Arc<AtomicBool>,
-        spike_ms: u64,
-        num_spikes: usize,
-    ) {
-        let spike_script = Script::new(
-            r#"
-            local t0 = redis.call('time')
-            local limit_ms = tonumber(ARGV[1])
-            while true do
-                local t1 = redis.call('time')
-                local elapsed_ms = (tonumber(t1[1]) - tonumber(t0[1])) * 1000 + math.floor((tonumber(t1[2]) - tonumber(t0[2])) / 1000)
-                if elapsed_ms >= limit_ms then
-                    break
-                end
-            end
-            return 1
-        "#,
-        );
-
-        tokio::time::sleep(Duration::from_millis(15)).await;
-
-        for _ in 0..num_spikes {
-            if stop_flag.load(Ordering::Relaxed) {
-                break;
-            }
-            match pool.get().await {
-                Ok(mut conn) => {
-                    if let Err(e) = spike_script.arg(spike_ms).invoke_async::<i32>(&mut conn).await
-                    {
-                        tracing::warn!(
-                            "Failed to execute intermittent blocking Lua spike on Redis: {e:#}"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to get connection for blocking spike: {e:#}");
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
-
     /// Spawn a task that periodically executes a blocking Lua script on Redis.
     pub fn spawn_intermittent_spike(
         &self,
@@ -404,14 +308,7 @@ impl RedisHarness {
         spike_ms: u64,
         num_spikes: usize,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        if spike_ms == 0 || num_spikes == 0 {
-            return None;
-        }
-        Some(tokio::spawn(Self::run_intermittent_spike(
-            self.pool.clone(),
-            stop_flag,
-            spike_ms,
-            num_spikes,
-        )))
+        self.client
+            .spawn_intermittent_spike(stop_flag, spike_ms, num_spikes)
     }
 }
