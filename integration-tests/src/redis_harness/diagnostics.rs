@@ -180,7 +180,7 @@ pub fn parse_slowlog_entry(entry: Value) -> Option<SlowlogRecord> {
 }
 
 /// Computes statistical latency distribution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LatencySummary {
     pub op_name: String,
     pub count: usize,

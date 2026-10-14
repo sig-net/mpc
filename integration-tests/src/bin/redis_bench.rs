@@ -1,4 +1,7 @@
+use std::path::PathBuf;
+
 use clap::{Parser, ValueEnum};
+use integration_tests::redis_harness::diagnostics::LatencySummary;
 use integration_tests::redis_harness::{RedisHarness, RedisHarnessConfig};
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +77,18 @@ struct Args {
     /// Disable flushing Redis between scenarios (by default, FLUSHDB runs between scenarios for isolation).
     #[arg(long)]
     no_flush: bool,
+
+    /// Optional output file path for exporting results as JSON
+    #[arg(long)]
+    json_out: Option<PathBuf>,
+
+    /// Optional output file path for exporting results as CSV
+    #[arg(long)]
+    csv_out: Option<PathBuf>,
+
+    /// Number of repeat runs to perform (default: 1)
+    #[arg(long, default_value_t = 1)]
+    repeats: usize,
 }
 
 #[tokio::main]
@@ -132,170 +147,232 @@ async fn main() -> anyhow::Result<()> {
     println!("Connection pool ready: max_size={}", pool_status.max_size);
 
     let should_run = |s: BenchScenario| args.scenario == BenchScenario::All || args.scenario == s;
+    let mut all_results: Vec<LatencySummary> = Vec::new();
 
-    if should_run(BenchScenario::Baseline) {
+    for iteration in 1..=args.repeats {
+        if args.repeats > 1 {
+            println!(
+                "\n========================================================================="
+            );
+            println!("               BENCHMARK ITERATION {iteration}/{}", args.repeats);
+            println!(
+                "=========================================================================\n"
+            );
+        }
+
+        if should_run(BenchScenario::Baseline) {
+            println!(
+                "\n>>> Running Scenario 1: Concurrent Insert & Take ({} participants, {} items/participant)",
+                args.participants, args.items
+            );
+            let results = harness.bench_concurrent_insert_and_take(args.items).await?;
+            harness.report_results(&results).await?;
+            all_results.extend(results);
+        }
+
+        if should_run(BenchScenario::Polling) {
+            println!("\n>>> Running Scenario 2: Stockpile 100ms Polling Contention Comparison");
+            println!("    Phase A: Workload WITHOUT background polling...");
+            let without_polling = harness
+                .bench_polling_contention(args.items / 2, false)
+                .await?;
+
+            println!(
+                "    Phase B: Workload WITH 100ms background polling (HLEN/SCARD across {} participants)...",
+                args.participants
+            );
+            let with_polling = harness
+                .bench_polling_contention(args.items / 2, true)
+                .await?;
+
+            println!("\n  Comparison (Without vs. With 100ms Polling Contention):");
+            let mut combined = Vec::with_capacity(without_polling.len() + with_polling.len());
+            combined.extend(without_polling.into_iter().map(|mut r| {
+                r.op_name = format!("{}_no_poll", r.op_name);
+                r
+            }));
+            combined.extend(with_polling.into_iter().map(|mut r| {
+                r.op_name = format!("{}_with_poll", r.op_name);
+                r
+            }));
+            harness.report_results(&combined).await?;
+            all_results.extend(combined);
+        }
+
+        if should_run(BenchScenario::Storm) {
+            let stockpile = (args.items * 2).max(500);
+            let prune = stockpile / 2;
+            println!(
+                "\n>>> Running Scenario 3: `remove_outdated` Pruning Storm ({} items total, {} pruned)",
+                stockpile * args.participants,
+                prune * args.participants
+            );
+            let results = harness
+                .bench_remove_outdated_storm(stockpile, prune)
+                .await?;
+            harness.report_results(&results).await?;
+            all_results.extend(results);
+        }
+
+        if should_run(BenchScenario::Proposer) {
+            let initial_stockpile = args.items.max(200);
+            let racers = 4;
+            let per_racer = 50;
+            println!(
+                "\n>>> Running Scenario 4: Proposer Race (`peek_mine` + `commit`) - {racers} racers, {per_racer} proposals each"
+            );
+            let results = harness
+                .bench_proposer_race(0, initial_stockpile, racers, per_racer)
+                .await?;
+            harness.report_results(&results).await?;
+            all_results.extend(results);
+        }
+
+        if should_run(BenchScenario::Saturation) {
+            let tasks_per_p = 5;
+            let items_per_task = (args.items / tasks_per_p).max(10);
+            let spike_ms = args.spike_ms;
+            println!("\n>>> Running Scenario 5: Cascading Saturation & Head-of-Line Blocking (50ms - 6s Grafana conditions)");
+            println!(
+                "    Simulating {} concurrent tasks across {} participants, 100ms background polling, and periodic {}ms Redis blocking spikes...",
+                args.participants * tasks_per_p,
+                args.participants,
+                spike_ms
+            );
+            let results = harness
+                .bench_cascading_saturation(tasks_per_p, items_per_task, spike_ms, 3)
+                .await?;
+            harness.report_results(&results).await?;
+            all_results.extend(results);
+        }
+
+        if should_run(BenchScenario::Clear) {
+            let stockpile = args.items.max(100);
+            println!(
+                "\n>>> Running Scenario 6: Mass Epoch Resharing `clear()` Storm ({} participants, {} items/participant)",
+                args.participants, stockpile
+            );
+            let results = harness.bench_clear_storm(stockpile).await?;
+            harness.report_results(&results).await?;
+            all_results.extend(results);
+        }
+
+        if should_run(BenchScenario::Mixed) {
+            let items = (args.items / 3).max(50);
+            println!("\n>>> Running Scenario 7: Realistic Mixed MPC Pipeline Contention (Triples + Presigs + Signers)");
+            println!("    Running concurrent triple gen, presig gen, sign requests (takes), and 100ms polling on a shared connection pool...");
+            let results = harness.bench_mixed_pipeline(items).await?;
+            harness.report_results(&results).await?;
+            all_results.extend(results);
+        }
+
+        if should_run(BenchScenario::SyncPrune) {
+            let items = args.items.max(100);
+            println!(
+                "\n>>> Running Scenario 8: State Sync Peer Drop & Pruning (`remove_holder_and_prune`)"
+            );
+            let results = harness.bench_sync_prune_storm(items).await?;
+            harness.report_results(&results).await?;
+            all_results.extend(results);
+        }
+
+        if should_run(BenchScenario::ClientKill) {
+            let items = args.items.max(100);
+            println!("\n>>> Running Scenario 9: Connection Drop & Reconnection Shock (`CLIENT KILL`)");
+            let results = harness.bench_client_kill(items, 30).await?;
+            harness.report_results(&results).await?;
+            all_results.extend(results);
+        }
+
+        if should_run(BenchScenario::DeepStockpile) {
+            let stockpile = args
+                .deep_stockpile
+                .unwrap_or_else(|| (args.items * 10).max(2000));
+            let num_seekers = args.participants.clamp(2, 6);
+            let exclusions = args
+                .deep_exclusions
+                .unwrap_or_else(|| (stockpile * 85) / 100);
+            let seeks = args.deep_seeks;
+            let coverage = (exclusions as f64 / stockpile as f64) * 100.0;
+            println!(
+                "\n>>> Running Scenario 10: Large Stockpile Deep-Seek (`peek_mine` with {exclusions} exclusions across {stockpile} items - {coverage:.1}% near-exhaustion tail)"
+            );
+            let results = harness
+                .bench_deep_stockpile_seek(stockpile, num_seekers, exclusions, seeks)
+                .await?;
+            harness.report_results(&results).await?;
+            all_results.extend(results);
+        }
+
+        if should_run(BenchScenario::ReservationChurn) {
+            let stockpile = (args.items * 2).max(300);
+            let num_proposers = args.participants.clamp(2, 4);
+            let rounds = 25;
+            let abort_percent = 40;
+            let deliberation_ms = args.deliberation_ms;
+            println!(
+                "\n>>> Running Scenario 11: Proposer Churn & Aborted Reservation Storm ({rounds} rounds, {abort_percent}% timeout/abort rate, {deliberation_ms}ms deliberation hold)"
+            );
+            let results = harness
+                .bench_reservation_churn_abort(
+                    stockpile,
+                    num_proposers,
+                    rounds,
+                    abort_percent,
+                    deliberation_ms,
+                )
+                .await?;
+            harness.report_results(&results).await?;
+            all_results.extend(results);
+        }
+
+        if should_run(BenchScenario::ConflictedTake) {
+            let items = (args.items / 5).max(30);
+            let contenders = args.participants.clamp(2, 4);
+            println!(
+                "\n>>> Running Scenario 12: Conflicted Double-Take Race Storm ({items} items, {contenders} parallel contenders racing per item)"
+            );
+            let results = harness.bench_conflicted_take(items, contenders).await?;
+            harness.report_results(&results).await?;
+            all_results.extend(results);
+        }
+    }
+
+    if let Some(ref path) = args.json_out {
+        let json = serde_json::to_string_pretty(&all_results)?;
+        std::fs::write(path, json)?;
         println!(
-            "\n>>> Running Scenario 1: Concurrent Insert & Take ({} participants, {} items/participant)",
-            args.participants, args.items
+            "\nExported {} benchmark records to JSON: {}",
+            all_results.len(),
+            path.display()
         );
-        let results = harness.bench_concurrent_insert_and_take(args.items).await?;
-        harness.report_results(&results).await?;
     }
 
-    if should_run(BenchScenario::Polling) {
-        println!("\n>>> Running Scenario 2: Stockpile 100ms Polling Contention Comparison");
-        println!("    Phase A: Workload WITHOUT background polling...");
-        let without_polling = harness
-            .bench_polling_contention(args.items / 2, false)
-            .await?;
-
+    if let Some(ref path) = args.csv_out {
+        let mut csv = String::from(
+            "operation,samples,failures,p50_ms,p90_ms,p95_ms,p99_ms,max_ms,attempts_ops_sec,goodput_ops_sec\n",
+        );
+        for r in &all_results {
+            csv.push_str(&format!(
+                "{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.1},{:.1}\n",
+                r.op_name,
+                r.count,
+                r.failures,
+                r.p50_ms,
+                r.p90_ms,
+                r.p95_ms,
+                r.p99_ms,
+                r.max_ms,
+                r.attempts_ops_sec,
+                r.goodput_ops_sec
+            ));
+        }
+        std::fs::write(path, csv)?;
         println!(
-            "    Phase B: Workload WITH 100ms background polling (HLEN/SCARD across {} participants)...",
-            args.participants
+            "Exported {} benchmark records to CSV: {}",
+            all_results.len(),
+            path.display()
         );
-        let with_polling = harness
-            .bench_polling_contention(args.items / 2, true)
-            .await?;
-
-        println!("\n  Comparison (Without vs. With 100ms Polling Contention):");
-        let mut combined = Vec::with_capacity(without_polling.len() + with_polling.len());
-        combined.extend(without_polling.into_iter().map(|mut r| {
-            r.op_name = format!("{}_no_poll", r.op_name);
-            r
-        }));
-        combined.extend(with_polling.into_iter().map(|mut r| {
-            r.op_name = format!("{}_with_poll", r.op_name);
-            r
-        }));
-        harness.report_results(&combined).await?;
-    }
-
-    if should_run(BenchScenario::Storm) {
-        let stockpile = (args.items * 2).max(500);
-        let prune = stockpile / 2;
-        println!(
-            "\n>>> Running Scenario 3: `remove_outdated` Pruning Storm ({} items total, {} pruned)",
-            stockpile * args.participants,
-            prune * args.participants
-        );
-        let results = harness
-            .bench_remove_outdated_storm(stockpile, prune)
-            .await?;
-        harness.report_results(&results).await?;
-    }
-
-    if should_run(BenchScenario::Proposer) {
-        let initial_stockpile = args.items.max(200);
-        let racers = 4;
-        let per_racer = 50;
-        println!(
-            "\n>>> Running Scenario 4: Proposer Race (`peek_mine` + `commit`) - {racers} racers, {per_racer} proposals each"
-        );
-        let results = harness
-            .bench_proposer_race(0, initial_stockpile, racers, per_racer)
-            .await?;
-        harness.report_results(&results).await?;
-    }
-
-    if should_run(BenchScenario::Saturation) {
-        let tasks_per_p = 5;
-        let items_per_task = (args.items / tasks_per_p).max(10);
-        let spike_ms = args.spike_ms;
-        println!("\n>>> Running Scenario 5: Cascading Saturation & Head-of-Line Blocking (50ms - 6s Grafana conditions)");
-        println!(
-            "    Simulating {} concurrent tasks across {} participants, 100ms background polling, and periodic {}ms Redis blocking spikes...",
-            args.participants * tasks_per_p,
-            args.participants,
-            spike_ms
-        );
-        let results = harness
-            .bench_cascading_saturation(tasks_per_p, items_per_task, spike_ms, 3)
-            .await?;
-        harness.report_results(&results).await?;
-    }
-
-    if should_run(BenchScenario::Clear) {
-        let stockpile = args.items.max(100);
-        println!(
-            "\n>>> Running Scenario 6: Mass Epoch Resharing `clear()` Storm ({} participants, {} items/participant)",
-            args.participants, stockpile
-        );
-        let results = harness.bench_clear_storm(stockpile).await?;
-        harness.report_results(&results).await?;
-    }
-
-    if should_run(BenchScenario::Mixed) {
-        let items = (args.items / 3).max(50);
-        println!("\n>>> Running Scenario 7: Realistic Mixed MPC Pipeline Contention (Triples + Presigs + Signers)");
-        println!("    Running concurrent triple gen, presig gen, sign requests (takes), and 100ms polling on a shared connection pool...");
-        let results = harness.bench_mixed_pipeline(items).await?;
-        harness.report_results(&results).await?;
-    }
-
-    if should_run(BenchScenario::SyncPrune) {
-        let items = args.items.max(100);
-        println!(
-            "\n>>> Running Scenario 8: State Sync Peer Drop & Pruning (`remove_holder_and_prune`)"
-        );
-        let results = harness.bench_sync_prune_storm(items).await?;
-        harness.report_results(&results).await?;
-    }
-
-    if should_run(BenchScenario::ClientKill) {
-        let items = args.items.max(100);
-        println!("\n>>> Running Scenario 9: Connection Drop & Reconnection Shock (`CLIENT KILL`)");
-        let results = harness.bench_client_kill(items, 30).await?;
-        harness.report_results(&results).await?;
-    }
-
-    if should_run(BenchScenario::DeepStockpile) {
-        let stockpile = args
-            .deep_stockpile
-            .unwrap_or_else(|| (args.items * 10).max(2000));
-        let num_seekers = args.participants.clamp(2, 6);
-        let exclusions = args
-            .deep_exclusions
-            .unwrap_or_else(|| (stockpile * 85) / 100);
-        let seeks = args.deep_seeks;
-        let coverage = (exclusions as f64 / stockpile as f64) * 100.0;
-        println!(
-            "\n>>> Running Scenario 10: Large Stockpile Deep-Seek (`peek_mine` with {exclusions} exclusions across {stockpile} items - {coverage:.1}% near-exhaustion tail)"
-        );
-        let results = harness
-            .bench_deep_stockpile_seek(stockpile, num_seekers, exclusions, seeks)
-            .await?;
-        harness.report_results(&results).await?;
-    }
-
-    if should_run(BenchScenario::ReservationChurn) {
-        let stockpile = (args.items * 2).max(300);
-        let num_proposers = args.participants.clamp(2, 4);
-        let rounds = 25;
-        let abort_percent = 40;
-        let deliberation_ms = args.deliberation_ms;
-        println!(
-            "\n>>> Running Scenario 11: Proposer Churn & Aborted Reservation Storm ({rounds} rounds, {abort_percent}% timeout/abort rate, {deliberation_ms}ms deliberation hold)"
-        );
-        let results = harness
-            .bench_reservation_churn_abort(
-                stockpile,
-                num_proposers,
-                rounds,
-                abort_percent,
-                deliberation_ms,
-            )
-            .await?;
-        harness.report_results(&results).await?;
-    }
-
-    if should_run(BenchScenario::ConflictedTake) {
-        let items = (args.items / 5).max(30);
-        let contenders = args.participants.clamp(2, 4);
-        println!(
-            "\n>>> Running Scenario 12: Conflicted Double-Take Race Storm ({items} items, {contenders} parallel contenders racing per item)"
-        );
-        let results = harness.bench_conflicted_take(items, contenders).await?;
-        harness.report_results(&results).await?;
     }
 
     println!("\n=========================================================================");
