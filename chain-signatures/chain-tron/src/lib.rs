@@ -15,5 +15,4 @@ pub use address::{parse_hex, ParseTronAddressError, TronAddress, TRON_ADDRESS_PR
 pub use client::TronHttp;
 pub use config::TronConfig;
 pub use pb::Message;
-pub use tx::{TronIntent, EXPIRATION_MS, FEE_LIMIT_SUN};
 pub use types::{AccountResources, BroadcastOutcome, NowBlock, TronLog, TronReceipt};

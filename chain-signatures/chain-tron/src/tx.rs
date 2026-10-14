@@ -1,82 +1,32 @@
-//! Transaction assembly and signing — the protobuf-binary path: composes
-//! generated `pb::*` types only, no hand-rolled binary structs.
+//! Transaction validation and signing — the protobuf-binary path: uses
+//! `pb::*` types only, no hand-rolled binary structs.
 //!
-//! Derivations and constants are pinned by recorded mainnet fixtures
-//! (`tests/fixtures`): txID = sha256(raw_data), ref-block fields, and the
-//! 65-byte `[r ‖ s ‖ v]` signature with v ∈ {0,1}.
+//! The bytes the multichain API carries are the bare `raw` message;
+//! nodes assemble them from structured request parameters (§6.1 of
+//! `doc/bidirectional_calls.md`), so this crate ships no assembler.
+//! Derivations are pinned by recorded mainnet fixtures (`tests/fixtures`):
+//! txID = sha256(raw_data), ref-block fields, and the 65-byte
+//! `[r ‖ s ‖ v]` signature with v ∈ {0,1}.
 
-use crate::address::TronAddress;
-use crate::pb::{
-    Contract as TronContract, ContractType, Message, RawTransaction, Transaction,
-    TriggerSmartContract,
-};
-use crate::types::NowBlock;
-use prost_types::Any;
+use crate::pb::{ContractType, Message, RawTransaction, Transaction};
 use sha2::{Digest, Sha256};
-
-pub const TRIGGER_SMART_CONTRACT_TYPE_URL: &str =
-    "type.googleapis.com/protocol.TriggerSmartContract";
-
-/// Transaction validity window; observed on recorded transfers.
-pub const EXPIRATION_MS: i64 = 300_000;
-/// Cap on energy fees (50 TRX in sun); observed on recorded transfers.
-pub const FEE_LIMIT_SUN: i64 = 50_000_000;
-
-/// A contract call to execute on Tron.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TronIntent {
-    pub owner: TronAddress,
-    pub contract: TronAddress,
-    pub call_data: Vec<u8>,
-}
-
-impl TronIntent {
-    /// Assembles the unsigned `raw` transaction, referencing `reference` for
-    /// replay protection and expiring `EXPIRATION_MS` after `now_ms`.
-    pub fn raw_transaction(&self, reference: &NowBlock, now_ms: i64) -> RawTransaction {
-        let trigger = TriggerSmartContract {
-            owner_address: self.owner.as_bytes().to_vec(),
-            contract_address: self.contract.as_bytes().to_vec(),
-            call_value: 0,
-            data: self.call_data.clone(),
-            call_token_value: 0,
-            token_id: 0,
-        };
-        let contract = TronContract {
-            r#type: ContractType::TriggerSmartContract as i32,
-            parameter: Some(Any {
-                type_url: TRIGGER_SMART_CONTRACT_TYPE_URL.to_string(),
-                value: trigger.encode_to_vec(),
-            }),
-            permission_id: 0,
-        };
-        let (ref_block_bytes, ref_block_hash) = reference.reference_fields();
-        RawTransaction {
-            ref_block_bytes,
-            ref_block_num: 0,
-            ref_block_hash,
-            expiration: now_ms + EXPIRATION_MS,
-            timestamp: now_ms,
-            fee_limit: FEE_LIMIT_SUN,
-            contract: vec![contract],
-        }
-    }
-}
 
 impl RawTransaction {
     /// txID as defined by java-tron: sha256 over the serialized `raw` message.
     pub fn txid(&self) -> [u8; 32] {
         Sha256::digest(self.encode_to_vec()).into()
     }
-}
 
-impl RawTransaction {
     /// Parses and validates the bytes the multichain API carries for Tron
     /// targets: the bare `raw` message, unsigned by construction. The MPC's
     /// payload is `sha256` of exactly these bytes — the same hash as txID.
     pub fn parse(bytes: &[u8]) -> anyhow::Result<Self> {
         let raw = RawTransaction::decode(bytes)?;
         anyhow::ensure!(raw.contract.len() == 1, "expected exactly one contract");
+        anyhow::ensure!(
+            raw.contract[0].r#type == ContractType::TriggerSmartContract as i32,
+            "expected a TriggerSmartContract"
+        );
         anyhow::ensure!(!raw.ref_block_bytes.is_empty(), "missing ref_block_bytes");
         anyhow::ensure!(!raw.ref_block_hash.is_empty(), "missing ref_block_hash");
         anyhow::ensure!(raw.expiration > 0, "missing expiration");
