@@ -302,5 +302,12 @@ async fn main() -> anyhow::Result<()> {
     println!("                       BENCHMARK RUN COMPLETE                            ");
     println!("=========================================================================\n");
 
+    if should_flush {
+        println!("Performing post-benchmark flush on Redis...");
+        if let Err(e) = harness.flush_db().await {
+            tracing::warn!("Failed to flush Redis after benchmark run: {e:#}");
+        }
+    }
+
     Ok(())
 }
