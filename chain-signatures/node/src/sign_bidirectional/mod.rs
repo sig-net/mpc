@@ -19,6 +19,48 @@ pub use progress::{BidirectionalProgress, SignProgress, SignStatus};
 pub use signing::sign_and_hash_transaction;
 use signing::validate_unsigned_transaction;
 
+/// The requester's chain-local identity string: Midnight and Canton senders
+/// are 32-byte addresses whose canonical form is the lowercase hex of those
+/// bytes; other chains format natively.
+fn source_chain_sender_string(sender: [u8; 32], chain: Chain) -> anyhow::Result<String> {
+    match chain {
+        Chain::Canton | Chain::Midnight => Ok(hex::encode(sender)),
+        _ => crate::stream::ops::sender_string(sender, chain),
+    }
+}
+
+/// Derives the request key's epsilon on the requester's chain.
+fn derive_epsilon(
+    chain: Chain,
+    key_version: u32,
+    sender_string: &str,
+    path: &str,
+) -> anyhow::Result<Scalar> {
+    match chain {
+        Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
+            key_version,
+            sender_string,
+            path,
+        )?),
+        Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
+            key_version,
+            sender_string,
+            path,
+        )?),
+        Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+            key_version,
+            sender_string,
+            path,
+        )?),
+        Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
+            key_version,
+            sender_string,
+            path,
+        )?),
+        _ => anyhow::bail!("unsupported chain for epsilon derivation: {chain}"),
+    }
+}
+
 /// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
 pub trait SignBidirectionalEventExt {
     fn sender_string(&self) -> anyhow::Result<String>;
@@ -42,36 +84,16 @@ pub trait SignBidirectionalEventExt {
 
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
     fn sender_string(&self) -> anyhow::Result<String> {
-        match self.chain {
-            Chain::Canton | Chain::Midnight => Ok(hex::encode(self.sender)),
-            _ => crate::stream::ops::sender_string(self.sender, self.chain),
-        }
+        source_chain_sender_string(self.sender, self.chain)
     }
 
     fn epsilon(&self) -> anyhow::Result<Scalar> {
-        match self.chain {
-            Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
-                self.key_version,
-                &self.sender_string()?,
-                &self.path,
-            )?),
-            Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
-                self.key_version,
-                &self.sender_string()?,
-                &self.path,
-            )?),
-            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
-                self.key_version,
-                &self.sender_string()?,
-                &self.path,
-            )?),
-            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
-                self.key_version,
-                &self.sender_string()?,
-                &self.path,
-            )?),
-            _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
-        }
+        derive_epsilon(
+            self.chain,
+            self.key_version,
+            &self.sender_string()?,
+            &self.path,
+        )
     }
 
     fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
@@ -146,36 +168,16 @@ pub trait BidirectionalTxExt {
 
 impl BidirectionalTxExt for BidirectionalTx {
     fn sender_string(&self) -> anyhow::Result<String> {
-        if matches!(self.source_chain, Chain::Canton | Chain::Midnight) {
-            return Ok(hex::encode(self.sender));
-        }
-        crate::stream::ops::sender_string(self.sender, self.source_chain)
+        source_chain_sender_string(self.sender, self.source_chain)
     }
 
     fn epsilon(&self, path: &str) -> anyhow::Result<Scalar> {
-        match self.source_chain {
-            Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
-                self.key_version,
-                &self.sender_string()?,
-                path,
-            )?),
-            Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
-                self.key_version,
-                &self.sender_string()?,
-                path,
-            )?),
-            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
-                self.key_version,
-                &self.sender_string()?,
-                path,
-            )?),
-            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
-                self.key_version,
-                &self.sender_string()?,
-                path,
-            )?),
-            _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
-        }
+        derive_epsilon(
+            self.source_chain,
+            self.key_version,
+            &self.sender_string()?,
+            path,
+        )
     }
 }
 
