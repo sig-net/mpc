@@ -5,7 +5,7 @@ use std::time::Duration;
 pub struct RedisHarnessConfig {
     /// Number of simulated participants interacting with Redis.
     pub num_participants: usize,
-    /// Optional connection pool max size constraint (e.g. 8 to match production).
+    /// Optional connection pool max size constraint (e.g. 8 for benchmarking connection constraints).
     pub max_pool_size: Option<usize>,
     /// Optional connection pool operation timeout.
     pub pool_timeout: Option<Duration>,

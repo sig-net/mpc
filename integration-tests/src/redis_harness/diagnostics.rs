@@ -128,6 +128,58 @@ impl RedisDiagnostics {
             total_keys,
         })
     }
+
+    /// Sever all client connections to Redis using `CLIENT KILL TYPE normal SKIPME yes`.
+    pub async fn kill_client_connections(pool: &Pool) -> anyhow::Result<i64> {
+        let mut conn = pool.get().await.context("failed to get connection")?;
+        let count: i64 = cmd("CLIENT")
+            .arg("KILL")
+            .arg("TYPE")
+            .arg("normal")
+            .arg("SKIPME")
+            .arg("yes")
+            .query_async(&mut conn)
+            .await
+            .context("failed to kill client connections")?;
+        Ok(count)
+    }
+
+    /// Configure Redis persistence options (AOF enabled/disabled and fsync policy).
+    pub async fn configure_persistence(
+        pool: &Pool,
+        append_only: bool,
+        append_fsync: &str,
+    ) -> anyhow::Result<()> {
+        let mut conn = pool.get().await.context("failed to get connection")?;
+        let aof_val = if append_only { "yes" } else { "no" };
+        let _: () = cmd("CONFIG")
+            .arg("SET")
+            .arg("appendonly")
+            .arg(aof_val)
+            .query_async(&mut conn)
+            .await
+            .context("failed to set appendonly config")?;
+        if append_only {
+            let _: () = cmd("CONFIG")
+                .arg("SET")
+                .arg("appendfsync")
+                .arg(append_fsync)
+                .query_async(&mut conn)
+                .await
+                .context("failed to set appendfsync config")?;
+        }
+        Ok(())
+    }
+
+    /// Trigger a background snapshot save via Redis BGSAVE.
+    pub async fn trigger_bgsave(pool: &Pool) -> anyhow::Result<()> {
+        let mut conn = pool.get().await.context("failed to get connection")?;
+        let res: Result<(), _> = cmd("BGSAVE").query_async(&mut conn).await;
+        if let Err(e) = res {
+            tracing::warn!("BGSAVE notice: {e:#}");
+        }
+        Ok(())
+    }
 }
 
 pub fn parse_slowlog_entry(entry: Value) -> Option<SlowlogRecord> {

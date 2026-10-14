@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
-use deadpool_redis::redis::cmd;
 use deadpool_redis::Pool;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::TripleStorage;
@@ -22,7 +21,7 @@ impl RedisHarness {
         barrier.wait().await;
         tokio::time::sleep(Duration::from_millis(kill_delay_ms)).await;
 
-        match Self::kill_client_connections_on_pool(&pool).await {
+        match RedisDiagnostics::kill_client_connections(&pool).await {
             Ok(count) => {
                 println!("   [CLIENT KILL] Severed {count} active Redis client connections!");
                 count
@@ -32,26 +31,6 @@ impl RedisHarness {
                 0
             }
         }
-    }
-
-    /// Sever all client connections to Redis using `CLIENT KILL TYPE normal SKIPME yes`.
-    pub async fn kill_client_connections_on_pool(pool: &Pool) -> anyhow::Result<i64> {
-        let mut conn = pool.get().await.context("failed to get connection")?;
-        let count: i64 = cmd("CLIENT")
-            .arg("KILL")
-            .arg("TYPE")
-            .arg("normal")
-            .arg("SKIPME")
-            .arg("yes")
-            .query_async(&mut conn)
-            .await
-            .context("failed to kill client connections")?;
-        Ok(count)
-    }
-
-    /// Sever all client connections to Redis using `CLIENT KILL TYPE normal SKIPME yes`.
-    pub async fn kill_client_connections(&self) -> anyhow::Result<i64> {
-        Self::kill_client_connections_on_pool(&self.pool).await
     }
 
     /// SCENARIO 1: Concurrent Insert & Take Throughput.
@@ -148,6 +127,24 @@ impl RedisHarness {
         Ok(vec![s1, s2])
     }
 
+    /// SCENARIO 2: Stockpile 100ms Background Polling Contention.
+    /// Runs a write/read workload with vs. without 100ms background polling (HLEN / SCARD) across all participants.
+    pub async fn bench_polling_contention(
+        &self,
+        workload_items: usize,
+        enable_polling: bool,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+
+        let poller = enable_polling.then(|| self.spawn_background_polling(false));
+        let res = self.run_concurrent_insert_and_take(workload_items).await;
+        if let Some(p) = poller {
+            p.stop().await;
+        }
+
+        res
+    }
+
     /// SCENARIO 3: `remove_outdated` Pruning Storm.
     /// Pre-populates owned items across participants, then triggers `remove_outdated` concurrently
     /// across all participants with remaining shares (reproducing the slowlog spike).
@@ -222,24 +219,6 @@ impl RedisHarness {
             storm_wall,
             total_failures,
         )])
-    }
-
-    /// SCENARIO 2: Stockpile 100ms Background Polling Contention.
-    /// Runs a write/read workload with vs. without 100ms background polling (HLEN / SCARD) across all participants.
-    pub async fn bench_polling_contention(
-        &self,
-        workload_items: usize,
-        enable_polling: bool,
-    ) -> anyhow::Result<Vec<LatencySummary>> {
-        self.reset_diagnostics().await?;
-
-        let poller = enable_polling.then(|| self.spawn_background_polling(false));
-        let res = self.run_concurrent_insert_and_take(workload_items).await;
-        if let Some(p) = poller {
-            p.stop().await;
-        }
-
-        res
     }
 
     /// SCENARIO 4: Proposer Race (`peek_mine` + `commit`).
@@ -801,7 +780,7 @@ impl RedisHarness {
         let participant_list = self.participant_ids();
         let target_peer = participant_list[0];
         let second_peer = participant_list[1 % num_p];
-        let threshold_update = (num_p / 2).max(1);
+        let threshold_update = (num_p / 2).min(num_p.saturating_sub(1));
         let threshold_prune = num_p;
 
         let mut all_update_triple_latencies = Vec::with_capacity(num_p * rounds);
@@ -1561,27 +1540,6 @@ impl RedisHarness {
         );
 
         Ok(vec![s1, s2])
-    }
-
-    /// Configure Redis persistence options (AOF enabled/disabled and fsync policy).
-    pub async fn configure_persistence(&self, append_only: bool, append_fsync: &str) -> anyhow::Result<()> {
-        let mut conn = self.pool.get().await?;
-        let aof_val = if append_only { "yes" } else { "no" };
-        let _: () = cmd("CONFIG").arg("SET").arg("appendonly").arg(aof_val).query_async(&mut conn).await?;
-        if append_only {
-            let _: () = cmd("CONFIG").arg("SET").arg("appendfsync").arg(append_fsync).query_async(&mut conn).await?;
-        }
-        Ok(())
-    }
-
-    /// Trigger a background snapshot save via Redis BGSAVE.
-    pub async fn trigger_bgsave(&self) -> anyhow::Result<()> {
-        let mut conn = self.pool.get().await?;
-        let res: Result<(), _> = cmd("BGSAVE").query_async(&mut conn).await;
-        if let Err(e) = res {
-            tracing::warn!("BGSAVE notice: {e:#}");
-        }
-        Ok(())
     }
 
     /// SCENARIO 14: Real AOF & BGSAVE Disk Persistence Stalls vs In-Memory Execution.

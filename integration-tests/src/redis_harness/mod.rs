@@ -136,6 +136,25 @@ impl RedisHarness {
         RedisDiagnostics::flush_db(&self.pool).await
     }
 
+    /// Sever all client connections to Redis using `CLIENT KILL TYPE normal SKIPME yes`.
+    pub async fn kill_client_connections(&self) -> anyhow::Result<i64> {
+        RedisDiagnostics::kill_client_connections(&self.pool).await
+    }
+
+    /// Configure Redis persistence options (AOF enabled/disabled and fsync policy).
+    pub async fn configure_persistence(
+        &self,
+        append_only: bool,
+        append_fsync: &str,
+    ) -> anyhow::Result<()> {
+        RedisDiagnostics::configure_persistence(&self.pool, append_only, append_fsync).await
+    }
+
+    /// Trigger a background snapshot save via Redis BGSAVE.
+    pub async fn trigger_bgsave(&self) -> anyhow::Result<()> {
+        RedisDiagnostics::trigger_bgsave(&self.pool).await
+    }
+
     /// Fetch memory snapshot and total key count (DBSIZE) from Redis.
     pub async fn memory_snapshot(&self) -> anyhow::Result<MemorySnapshot> {
         RedisDiagnostics::fetch_memory_snapshot(&self.pool).await

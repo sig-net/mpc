@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
-use integration_tests::redis_harness::diagnostics::LatencySummary;
-use integration_tests::redis_harness::{RedisHarness, RedisHarnessConfig};
+use integration_tests::redis_harness::{LatencySummary, RedisHarness, RedisHarnessConfig};
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "snake_case")]
