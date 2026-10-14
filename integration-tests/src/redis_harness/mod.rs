@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 pub use deadpool_redis::redis;
-use deadpool_redis::{Config as RedisPoolConfig, Pool, Runtime as RedisRuntime};
+use deadpool_redis::{Config as RedisPoolConfig, Hook, Pool, Runtime as RedisRuntime};
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::storage::triple_storage::TriplePair;
 use near_account_id::AccountId;
@@ -44,46 +44,55 @@ pub struct RedisHarness {
 }
 
 impl RedisHarness {
-    /// Initialize a harness using the provided `RedisHarnessConfig`.
+    /// Initialize the Redis benchmark harness from a `RedisHarnessConfig`.
+    ///
+    /// If `config.redis_url` is specified, connects to that instance;
+    /// otherwise, automatically spins up an ephemeral isolated Docker Redis container.
+    /// All participants strictly share the single configured connection pool.
     pub async fn new(config: RedisHarnessConfig) -> anyhow::Result<Self> {
-        if let Some(ref url) = config.redis_url.clone() {
-            Self::from_url_with_config(url, config).await
+        let (redis, redis_url) = if let Some(ref url) = config.redis_url {
+            (None, url.clone())
         } else {
-            Self::spawn_with_config(config).await
-        }
-    }
+            let spawner = ClusterSpawner::default()
+                .network("bench-redis-harness")
+                .init_network()
+                .await
+                .context("failed to init docker network")?;
+            let container = crate::containers::Redis::run(&spawner).await;
+            let url = container.internal_address.clone();
+            (Some(container), url)
+        };
 
-    /// Spawn a fresh Redis container via testcontainers and prepare N simulated participants.
-    /// Notice: No MPC node processes, no NEAR sandbox, and no blockchains are spawned.
-    pub async fn spawn(num_participants: usize) -> anyhow::Result<Self> {
-        Self::spawn_with_pool_config(num_participants, None, None).await
-    }
-
-    /// Spawn a fresh Redis container with full configuration.
-    pub async fn spawn_with_config(config: RedisHarnessConfig) -> anyhow::Result<Self> {
-        let spawner = ClusterSpawner::default()
-            .network("bench-redis-harness")
-            .init_network()
-            .await
-            .context("failed to init docker network")?;
-
-        let redis = crate::containers::Redis::run(&spawner).await;
-        let redis_url = redis.internal_address.clone();
         let pool = Self::build_pool(&redis_url, config.max_pool_size, config.pool_timeout)?;
+        RedisDiagnostics::setup(&pool, 1000).await?;
 
-        Self::init(Some(redis), redis_url, pool, config).await
-    }
+        let mut participants = Vec::with_capacity(config.num_participants);
+        for i in 0..config.num_participants {
+            let participant = Participant::from(i as u32);
+            let account_id: AccountId = format!("node-{i}.testnet").parse().unwrap();
 
-    /// Spawn a fresh Redis container with custom connection pool constraints (matching production deadpool settings).
-    pub async fn spawn_with_pool_config(
-        num_participants: usize,
-        max_pool_size: Option<usize>,
-        timeout: Option<Duration>,
-    ) -> anyhow::Result<Self> {
-        let config = RedisHarnessConfig::new(num_participants)
-            .with_pool_size(max_pool_size)
-            .with_pool_timeout(timeout);
-        Self::spawn_with_config(config).await
+            // All participants strictly share the harness pool
+            let triples = TriplePair::storage(&pool, &account_id);
+            triples.set_me(participant);
+            let presignatures = Presignature::storage(&pool, &account_id);
+            presignatures.set_me(participant);
+
+            participants.push(SimulatedParticipant {
+                participant,
+                account_id,
+                triples,
+                presignatures,
+            });
+        }
+
+        Ok(Self {
+            redis,
+            redis_url,
+            pool,
+            participants,
+            flush_between: config.flush_between,
+            config,
+        })
     }
 
     pub fn build_pool(
@@ -103,93 +112,13 @@ impl RedisHarness {
             builder = builder
                 .wait_timeout(Some(to))
                 .create_timeout(Some(to))
-                .recycle_timeout(Some(to));
+                .recycle_timeout(Some(to))
+                .post_create(Hook::sync_fn(move |conn, _| {
+                    conn.set_response_timeout(to);
+                    Ok(())
+                }));
         }
         Ok(builder.build()?)
-    }
-
-    /// Construct harness from an existing `Redis` container handle.
-    pub async fn from_redis(redis: Redis, num_participants: usize) -> anyhow::Result<Self> {
-        let pool = redis.pool();
-        let redis_url = redis.internal_address.clone();
-        let config = RedisHarnessConfig::new(num_participants);
-        Self::init(Some(redis), redis_url, pool, config).await
-    }
-
-    /// Connect to an existing external Redis instance at the given URL (e.g. redis://127.0.0.1:6379).
-    pub async fn from_url(redis_url: &str, num_participants: usize) -> anyhow::Result<Self> {
-        Self::from_url_with_pool_config(redis_url, num_participants, None, None).await
-    }
-
-    /// Connect to an existing external Redis instance with explicit configuration.
-    pub async fn from_url_with_config(
-        redis_url: &str,
-        mut config: RedisHarnessConfig,
-    ) -> anyhow::Result<Self> {
-        config.redis_url = Some(redis_url.to_string());
-        let pool = Self::build_pool(redis_url, config.max_pool_size, config.pool_timeout)?;
-        Self::init(None, redis_url.to_string(), pool, config).await
-    }
-
-    /// Connect to an existing external Redis instance with explicit connection pool configuration.
-    pub async fn from_url_with_pool_config(
-        redis_url: &str,
-        num_participants: usize,
-        max_pool_size: Option<usize>,
-        timeout: Option<Duration>,
-    ) -> anyhow::Result<Self> {
-        let config = RedisHarnessConfig::new(num_participants)
-            .with_pool_size(max_pool_size)
-            .with_pool_timeout(timeout)
-            .with_redis_url(redis_url);
-        Self::from_url_with_config(redis_url, config).await
-    }
-
-    async fn init(
-        redis: Option<Redis>,
-        redis_url: String,
-        pool: Pool,
-        config: RedisHarnessConfig,
-    ) -> anyhow::Result<Self> {
-        RedisDiagnostics::setup(&pool, 1000).await?;
-
-        let mut participants = Vec::new();
-
-        for i in 0..config.num_participants {
-            let participant = Participant::from(i as u32);
-            let account_id: AccountId = format!("node-{i}.testnet").parse().unwrap();
-
-            // Directly use redis.triple_storage and redis.presignature_storage when available
-            let (triples, presignatures) = if let Some(ref r) = redis {
-                (
-                    r.triple_storage(&account_id, participant),
-                    r.presignature_storage(&account_id, participant),
-                )
-            } else {
-                let t = TriplePair::storage(&pool, &account_id);
-                t.set_me(participant);
-                let p = Presignature::storage(&pool, &account_id);
-                p.set_me(participant);
-                (t, p)
-            };
-
-            participants.push(SimulatedParticipant {
-                participant,
-                account_id,
-                triples,
-                presignatures,
-            });
-        }
-
-        let flush_between = config.flush_between;
-        Ok(Self {
-            redis,
-            redis_url,
-            pool,
-            participants,
-            flush_between,
-            config,
-        })
     }
 
     pub fn participant_ids(&self) -> Vec<Participant> {
