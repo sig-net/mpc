@@ -261,14 +261,13 @@ impl RedisHarness {
         let race_start = Instant::now();
 
         let racer_tasks: Vec<_> = (0..num_racers)
-            .map(|racer_id| {
+            .map(|_| {
                 // Each racer gets an independent storage handle with its own `reserved` RwLock,
                 // matching production where distinct nodes do not share in-memory reservation maps.
                 let racer = SimulatedParticipant::new(&self.pool, &p.account_id, p.participant);
                 tokio::spawn(racer.race_proposals(
                     barrier.clone(),
                     base_id,
-                    racer_id,
                     proposals_per_racer,
                 ))
             })

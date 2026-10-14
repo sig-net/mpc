@@ -321,7 +321,6 @@ impl SimulatedParticipant {
         self,
         barrier: Arc<Barrier>,
         base_id: u64,
-        _racer_id: usize,
         proposals_per_racer: usize,
     ) -> (Vec<Duration>, Vec<Duration>, Vec<Duration>) {
         barrier.wait().await;
