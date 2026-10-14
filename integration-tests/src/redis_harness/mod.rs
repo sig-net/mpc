@@ -262,6 +262,60 @@ impl RedisHarness {
             .await
     }
 
+    /// Populate `count` triples for a single participant concurrently across worker tasks.
+    pub async fn populate_triples_parallel(
+        &self,
+        participant: &SimulatedParticipant,
+        base_id: u64,
+        count: usize,
+    ) -> anyhow::Result<Vec<u64>> {
+        let num_workers = 8.min(count);
+        let chunk_size = count.div_ceil(num_workers);
+        let participant_list = self.participant_ids();
+
+        let mut handles = Vec::with_capacity(num_workers);
+        for w in 0..num_workers {
+            let start = w * chunk_size;
+            let end = (start + chunk_size).min(count);
+            if start >= end {
+                continue;
+            }
+            let chunk_count = end - start;
+            let p_base = base_id + start as u64;
+            let p = participant.clone();
+            let p_list = participant_list.clone();
+
+            handles.push(tokio::spawn(async move {
+                let mut ids = Vec::with_capacity(chunk_count);
+                for i in 0..chunk_count {
+                    let id = p_base + i as u64;
+                    let pair = dummy_pair(id, &p_list);
+                    let Some(mut slot) = p.triples.create_slot(id, p.participant).await else {
+                        continue;
+                    };
+                    if slot.insert(pair, p.participant).await {
+                        ids.push(id);
+                    }
+                }
+                ids
+            }));
+        }
+
+        let mut all_ids = Vec::with_capacity(count);
+        for h in handles {
+            let ids = h.await.context("parallel populate task failed")?;
+            all_ids.extend(ids);
+        }
+        all_ids.sort_unstable();
+        anyhow::ensure!(
+            all_ids.len() == count,
+            "failed to populate expected triples: requested {}, got {}",
+            count,
+            all_ids.len()
+        );
+        Ok(all_ids)
+    }
+
     /// Spawn 100ms background stockpile polling loop across all participants.
     pub fn spawn_background_polling(&self, include_presignatures: bool) -> BackgroundPollerGuard {
         let stop_flag = Arc::new(AtomicBool::new(false));

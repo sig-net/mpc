@@ -20,6 +20,7 @@ pub enum BenchScenario {
     DeepStockpile,
     ReservationChurn,
     ConflictedTake,
+    LargeBatchPrune,
 }
 
 impl std::fmt::Display for BenchScenario {
@@ -34,7 +35,7 @@ impl std::fmt::Display for BenchScenario {
     about = "Redis Latency & Stress Benchmark Harness (Pure Redis Container - No MPC Nodes, NEAR, or Blockchains)"
 )]
 struct Args {
-    /// Benchmark scenario to run: 'all', 'baseline', 'polling', 'storm', 'proposer', 'saturation', 'clear', 'mixed', 'sync_prune', 'client_kill', 'deep_stockpile', 'reservation_churn', 'conflicted_take'
+    /// Benchmark scenario to run: 'all', 'baseline', 'polling', 'storm', 'proposer', 'saturation', 'clear', 'mixed', 'sync_prune', 'client_kill', 'deep_stockpile', 'reservation_churn', 'conflicted_take', 'large_batch_prune'
     #[arg(short, long, value_enum, default_value_t = BenchScenario::All)]
     scenario: BenchScenario,
 
@@ -93,6 +94,10 @@ struct Args {
     /// Number of storm/batch rounds for Scenarios 3, 6, and 8 (default: adaptive ceil(100 / participants), e.g. 9 for 12 nodes, 25 for 4 nodes)
     #[arg(long)]
     rounds: Option<usize>,
+
+    /// Batch size for Scenario 13 Large ARGV & Batch Prune (default: max(items * 10, 5000), crossing the 4096 unpack limit)
+    #[arg(long)]
+    large_batch_size: Option<usize>,
 }
 
 #[tokio::main]
@@ -362,6 +367,25 @@ async fn main() -> anyhow::Result<()> {
                 "\n>>> Running Scenario 12: Conflicted Double-Take Race Storm ({items} items, {contenders} parallel contenders racing per item)"
             );
             let results = harness.bench_conflicted_take(items, contenders).await?;
+            harness.report_results(&results).await?;
+            record(results);
+        }
+
+        if should_run(BenchScenario::LargeBatchPrune) {
+            let batch_size = args.large_batch_size.unwrap_or_else(|| {
+                if args.items < 100 {
+                    4500
+                } else {
+                    (args.items * 10).max(5000)
+                }
+            });
+            let rounds = args.rounds.unwrap_or(3).max(1);
+            let keep_count = (batch_size / 25).max(10);
+            let prune_count = batch_size - keep_count;
+            println!(
+                "\n>>> Running Scenario 13: Large-Batch & ARGV Outdated Pruning ({rounds} rounds, {batch_size} items/round, {prune_count} pruned > 4,096 Lua unpack threshold)"
+            );
+            let results = harness.bench_large_batch_prune(batch_size, rounds).await?;
             harness.report_results(&results).await?;
             record(results);
         }

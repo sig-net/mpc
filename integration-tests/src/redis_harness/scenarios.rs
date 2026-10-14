@@ -1266,4 +1266,128 @@ impl RedisHarness {
 
         (win_latencies, conflict_latencies, wins, conflicts)
     }
+
+    /// SCENARIO 13: Large-Batch & ARGV Outdated Pruning (>4,096 items Lua unpack limit stress).
+    /// Pre-populates a large stockpile (>4,096 items) and exercises `remove_outdated`:
+    /// 1. `large_argv_sync`: Passes >4,096 IDs in ARGV to stress Lua argument table conversion and existence checks.
+    /// 2. `large_outdated_prune`: Prunes >4,096 items to stress Redis Lua's 4,096-item batch unpack (`unpack(outdated)`) and tail cleanup.
+    pub async fn bench_large_batch_prune(
+        &self,
+        batch_size: usize,
+        rounds: usize,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+
+        if self.participants.is_empty() || batch_size == 0 || rounds == 0 {
+            return Ok(vec![
+                LatencySummary::empty("large_argv_sync"),
+                LatencySummary::empty("large_outdated_prune"),
+            ]);
+        }
+
+        anyhow::ensure!(
+            batch_size > 4096,
+            "Scenario 13 batch_size must be > 4096 to stress Lua unpack limits, got {batch_size}"
+        );
+
+        let active_nodes = self.participants.len().min(2);
+        let keep_count = (batch_size / 25).max(10);
+        let prune_target = batch_size - keep_count;
+
+        println!(
+            "   -> Testing {rounds} rounds of large batch pruning across {active_nodes} participants ({batch_size} items/participant, {prune_target} pruned > 4,096 unpack threshold)..."
+        );
+
+        let mut all_argv_latencies = Vec::with_capacity(rounds * active_nodes);
+        let mut all_prune_latencies = Vec::with_capacity(rounds * active_nodes);
+        let mut argv_failures = 0;
+        let mut prune_failures = 0;
+        let mut total_argv_wall = Duration::ZERO;
+        let mut total_prune_wall = Duration::ZERO;
+
+        for _ in 0..rounds {
+            for node_idx in 0..active_nodes {
+                let p = &self.participants[node_idx];
+                p.triples.reset_reservations().await;
+                let _ = p.triples.clear().await;
+
+                let base_id = next_id_block(batch_size as u64 + 1000);
+                let all_ids = self
+                    .populate_triples_parallel(p, base_id, batch_size)
+                    .await?;
+
+                // Phase 1: Large ARGV sync (passing all >4,096 IDs in ARGV; 0 outdated)
+                let t_argv_start = Instant::now();
+                let argv_res = p
+                    .triples
+                    .remove_outdated(p.participant, &all_ids)
+                    .await;
+                let argv_lat = t_argv_start.elapsed();
+                total_argv_wall += argv_lat;
+
+                match argv_res {
+                    Ok(res) => {
+                        all_argv_latencies.push(argv_lat);
+                        if !res.not_found.is_empty() {
+                            tracing::warn!(
+                                "Unexpected not_found items in large ARGV sync: {}",
+                                res.not_found.len()
+                            );
+                            argv_failures += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed large ARGV sync: {e:#}");
+                        argv_failures += 1;
+                    }
+                }
+
+                // Phase 2: Large outdated prune (keeping only keep_count; pruning >4,096 items to hit Lua unpack)
+                let remaining_ids = &all_ids[..keep_count];
+                let t_prune_start = Instant::now();
+                let prune_res = p
+                    .triples
+                    .remove_outdated(p.participant, remaining_ids)
+                    .await;
+                let prune_lat = t_prune_start.elapsed();
+                total_prune_wall += prune_lat;
+
+                match prune_res {
+                    Ok(_) => {
+                        all_prune_latencies.push(prune_lat);
+                        let remaining_in_redis = p.triples.len_by_owner(p.participant).await;
+                        if remaining_in_redis != keep_count {
+                            tracing::warn!(
+                                "Incomplete large prune: expected {keep_count} remaining, found {remaining_in_redis}"
+                            );
+                            prune_failures += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed large outdated prune: {e:#}");
+                        prune_failures += 1;
+                    }
+                }
+
+                // Untimed cleanup
+                let _ = p.triples.clear().await;
+            }
+        }
+
+        let s1 = LatencySummary::calculate_with_failures(
+            "large_argv_sync",
+            &mut all_argv_latencies,
+            total_argv_wall,
+            argv_failures,
+        );
+        let s2 = LatencySummary::calculate_with_failures(
+            "large_outdated_prune",
+            &mut all_prune_latencies,
+            total_prune_wall,
+            prune_failures,
+        );
+
+        Ok(vec![s1, s2])
+    }
 }
+
