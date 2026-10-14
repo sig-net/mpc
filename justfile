@@ -145,6 +145,6 @@ test-canton filter="canton_stream": (setup "")
 test-compat:
     ./scripts/test-prod-compat.sh
 
-# Usage: just bench-redis [args] (e.g. just bench-redis, just bench-redis "--scenario storm --nodes 4 --items 50")
+# Usage: just bench-redis [args] (e.g. just bench-redis, or just bench-redis "--rounds 2 --items 50" for quick CI)
 bench-redis args="":
     MPC_SETUP_SKIP=1 cargo run --release -p integration-tests --bin redis-bench -- {{args}}

@@ -106,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
         Some(args.pool_size)
     };
 
-    let adaptive_rounds = (100 + args.participants - 1) / args.participants.max(1);
+    let adaptive_rounds = 100usize.div_ceil(args.participants.max(1));
     let storm_rounds = args.rounds.unwrap_or(adaptive_rounds).max(1);
 
     println!("\n=========================================================================");
