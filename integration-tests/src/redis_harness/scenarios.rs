@@ -873,11 +873,10 @@ impl RedisHarness {
         let overall_start = Instant::now();
 
         let tasks: Vec<_> = (0..num_seekers)
-            .map(|worker_id| {
+            .map(|_| {
                 tokio::spawn(p.clone().seek_deep_stockpile(
                     barrier.clone(),
                     base_id,
-                    worker_id,
                     seeks_per_worker,
                     exclusions_count,
                 ))

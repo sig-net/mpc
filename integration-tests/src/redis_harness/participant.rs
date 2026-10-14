@@ -372,7 +372,6 @@ impl SimulatedParticipant {
         self,
         barrier: Arc<Barrier>,
         base_id: u64,
-        _worker_id: usize,
         seeks_count: usize,
         exclusions_count: usize,
     ) -> (Vec<Duration>, Vec<Duration>) {
