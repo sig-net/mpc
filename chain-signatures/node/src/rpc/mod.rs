@@ -500,23 +500,12 @@ impl RpcExecutor {
 
         // Spin up update task for updating contract state, config and checkpoints
         let near = self.near.clone();
-        let updates = tokio::spawn(async move {
+        tokio::spawn(async move {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
                 update_contract_data(&near, &contract, &config, &checkpoints).await;
-            }
-        });
-        // Every contract watcher depends on that task, and it only ends by
-        // panicking: exit so the node restarts instead of running on a frozen
-        // contract view.
-        tokio::spawn(async move {
-            if let Err(err) = updates.await {
-                if err.is_panic() {
-                    tracing::error!(?err, "contract update task panicked, exiting");
-                    std::process::exit(1);
-                }
             }
         });
 
