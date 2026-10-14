@@ -93,31 +93,12 @@ struct Args {
     /// Number of storm/batch rounds for Scenarios 3, 6, and 8 (default: adaptive ceil(100 / participants), e.g. 9 for 12 nodes, 25 for 4 nodes)
     #[arg(long)]
     rounds: Option<usize>,
-
-    /// Explicitly allow destructive operations (FLUSHDB, CLIENT KILL) against external --redis-url
-    #[arg(long)]
-    allow_destructive: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     integration_tests::utils::init_tracing_log();
     let args = Args::parse();
-
-    if args.redis_url.is_some() && !args.allow_destructive {
-        if !args.no_flush {
-            anyhow::bail!(
-                "Refusing to run default FLUSHDB against external --redis-url without --allow-destructive.\n\
-                 Pass --allow-destructive to allow wiping keys, or pass --no-flush to disable FLUSHDB."
-            );
-        }
-        if args.scenario == BenchScenario::All || args.scenario == BenchScenario::ClientKill {
-            anyhow::bail!(
-                "Refusing to run Scenario 9 (CLIENT KILL) against external --redis-url without --allow-destructive.\n\
-                 Pass --allow-destructive to allow severing client connections, or specify a non-destructive scenario."
-            );
-        }
-    }
 
     let should_flush = !args.no_flush;
     let effective_pool_size = if args.pool_size == 0 {
