@@ -104,7 +104,9 @@ impl RpcEthereumClient {
 
         let mut blocks = Vec::with_capacity(block_ids.len());
         for (waiter, &block_id) in waiters.into_iter().zip(block_ids) {
-            let block = waiter.await.context(format!("eth_getBlock batch member for {block_id:?} failed"))?;
+            let block = waiter
+                .await
+                .context(format!("eth_getBlock batch member for {block_id:?} failed"))?;
             blocks.push(match block {
                 Some(block) => MaybeBlock::Block(block),
                 None => MaybeBlock::Missing(block_id),
@@ -140,7 +142,9 @@ impl RpcEthereumClient {
         self.client
             .request::<_, Vec<Log>>("eth_getLogs", (logs_filter(address, block_id),))
             .await
-            .context(format!("failed to get logs for {address:#x} at {block_id:?}"))
+            .context(format!(
+                "failed to get logs for {address:#x} at {block_id:?}"
+            ))
     }
 
     /// Fetch `eth_getLogs` for multiple blocks in a single JSON-RPC batch POST,
@@ -194,7 +198,9 @@ impl RpcEthereumClient {
             .client
             .request("eth_getTransactionCount", (address, block_id))
             .await
-            .context(format!("failed to get nonce for {address:#x} at {block_id:?}"))?;
+            .context(format!(
+                "failed to get nonce for {address:#x} at {block_id:?}"
+            ))?;
         Ok(nonce.to::<u64>())
     }
 

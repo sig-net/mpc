@@ -461,7 +461,7 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        
+
         let client = test_utils::create_test_ethereum_client_with_catchup(
             &server.url(),
             Default::default(),
@@ -473,7 +473,7 @@ mod tests {
             .get_logs(Address::ZERO, BlockId::Number(BlockNumberOrTag::Number(1)))
             .await
             .unwrap_err();
-        
+
         // Exactly one attempt (expect(1) above) and a terminal verdict
         assert!(!is_retryable(&err), "err: {err:#}");
         assert!(format!("{err:#}").contains("410"));
