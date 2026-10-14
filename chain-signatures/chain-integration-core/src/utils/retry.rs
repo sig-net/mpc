@@ -158,7 +158,9 @@ fn now_ms() -> u64 {
 
 /// Whether an HTTP status makes an RPC call worth retrying: 408/429 are
 /// transient, 402 stays retryable (pairs with the cooldown gate — providers
-/// refill credits on their own schedule), other 4xx are terminal, else retryable.
+/// refill credits on their own schedule), 5xx are the server's fault, and
+/// everything else — other 4xx, but also redirects — is terminal. A redirect
+/// loop never fixes itself by retrying, so it must not be retried to exhaustion.
 pub fn http_status_retryable(status: StatusCode) -> bool {
     if matches!(
         status,
@@ -166,7 +168,7 @@ pub fn http_status_retryable(status: StatusCode) -> bool {
     ) {
         return true;
     }
-    !status.is_client_error()
+    status.is_server_error()
 }
 
 /// Typed RPC failure chain for classifying errors in the retry logic.
@@ -766,8 +768,9 @@ mod tests {
         for n in [402, 408, 429] {
             assert!(http_status_retryable(status(n)), "{n} should be retryable");
         }
-        // every other 4xx is a client error another attempt cannot fix
-        for n in [400, 401, 403, 404, 405, 409, 422, 499] {
+        // every other 4xx is a client error another attempt cannot fix, and
+        // redirects (a redirect loop cannot be retried out of) are terminal too
+        for n in [400, 401, 403, 404, 405, 409, 410, 422, 499, 301, 308] {
             assert!(!http_status_retryable(status(n)), "{n} should be terminal");
         }
         // 5xx default to retryable
