@@ -29,6 +29,27 @@ pub(crate) fn validate_unsigned_transaction(
     }
 }
 
+/// Unsigned integer fields per transaction type, `(field index, max bytes)`,
+/// in consensus order. Legacy signs r and s as empty strings — EIP-155 hashes
+/// them empty, so anything else names another hash.
+const EIP1559_UINTS: &[(usize, usize)] = &[
+    (0, 32), // chain id
+    (1, 8),  // nonce
+    (2, 32), // max priority fee
+    (3, 32), // max fee
+    (4, 8),  // gas limit
+    (6, 32), // value
+];
+const LEGACY_UINTS: &[(usize, usize)] = &[
+    (0, 8),  // nonce
+    (1, 32), // gas price
+    (2, 8),  // gas limit
+    (4, 32), // value
+    (6, 32), // chain id
+    (7, 0),  // r
+    (8, 0),  // s
+];
+
 fn validate_unsigned_ethereum(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
     // The placeholder's recovery id is 1, the strict case: the legacy `v`
     // computation adds `y_parity`, so validating with 0 would admit the one
@@ -60,30 +81,25 @@ fn validate_unsigned_ethereum(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
     );
     // Signing copies these fields as they are, so each must already be what
     // Ethereum decodes for its type.
-    let (to_index, data_index) = if eip1559 {
-        uint_field(&fields, 0, 32)?; // chain id
-        uint_field(&fields, 1, 8)?; // nonce
-        let max_priority_fee = uint_field(&fields, 2, 32)?;
+    let (uints, to_index, data_index) = if eip1559 {
+        (EIP1559_UINTS, 5, 7)
+    } else {
+        (LEGACY_UINTS, 3, 5)
+    };
+    for &(index, max_bytes) in uints {
+        uint_field(&fields, index, max_bytes)?;
+    }
+    if eip1559 {
+        let priority_fee = uint_field(&fields, 2, 32)?;
         let max_fee = uint_field(&fields, 3, 32)?;
+        // Length first, bytes second: the numeric order of canonical
+        // big-endian integers.
         anyhow::ensure!(
-            (max_priority_fee.len(), max_priority_fee) <= (max_fee.len(), max_fee),
+            (priority_fee.len(), priority_fee) <= (max_fee.len(), max_fee),
             "max priority fee above max fee"
         );
-        uint_field(&fields, 4, 8)?; // gas limit
-        uint_field(&fields, 6, 32)?; // value
         validate_access_list(&fields.at(8)?)?;
-        (5, 7)
-    } else {
-        uint_field(&fields, 0, 8)?; // nonce
-        uint_field(&fields, 1, 32)?; // gas price
-        uint_field(&fields, 2, 8)?; // gas limit
-        uint_field(&fields, 4, 32)?; // value
-        uint_field(&fields, 6, 32)?; // chain id
-                                     // EIP-155 hashes r and s as empty strings; anything else signs another hash.
-        uint_field(&fields, 7, 0)?;
-        uint_field(&fields, 8, 0)?;
-        (3, 5)
-    };
+    }
     // An empty `to` creates a contract, which extraction refuses, and Ethereum
     // rejects any other length.
     let to = string_field(&fields, to_index)?;
@@ -97,18 +113,19 @@ fn validate_unsigned_ethereum(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
 
 /// `Rlp::data` also returns a list's payload and accepts a one-byte string
 /// below 0x80 behind a prefix; Ethereum decodes neither as a string.
-fn string_field<'a>(fields: &Rlp<'a>, index: usize) -> anyhow::Result<&'a [u8]> {
-    let field = fields.at(index)?;
-    anyhow::ensure!(
-        field.is_data(),
-        "transaction field {index} is an RLP list, not a string"
-    );
+fn string_atom<'a>(field: &Rlp<'a>) -> anyhow::Result<&'a [u8]> {
+    anyhow::ensure!(field.is_data(), "RLP list, not a string");
     let data = field.data()?;
     anyhow::ensure!(
-        !(field.as_raw()[0] == 0x81 && data[0] < 0x80),
-        "transaction field {index} is not canonical RLP"
+        !(field.as_raw().first() == Some(&0x81) && data.first().is_some_and(|b| *b < 0x80)),
+        "not canonical RLP"
     );
     Ok(data)
+}
+
+fn string_field<'a>(fields: &Rlp<'a>, index: usize) -> anyhow::Result<&'a [u8]> {
+    string_atom(&fields.at(index)?)
+        .map_err(|error| error.context(format!("transaction field {index}")))
 }
 
 /// An unsigned integer of at most `max_bytes` bytes, without leading zeros.
@@ -129,14 +146,15 @@ fn uint_field<'a>(fields: &Rlp<'a>, index: usize, max_bytes: usize) -> anyhow::R
 /// A list of `[20-byte address, list of 32-byte storage keys]`.
 fn validate_access_list(access_list: &Rlp) -> anyhow::Result<()> {
     anyhow::ensure!(access_list.is_list(), "access list is not an RLP list");
-    for i in 0..access_list.item_count()? {
-        let entry = access_list.at(i)?;
+    for (i, entry) in access_list.iter().enumerate() {
         anyhow::ensure!(
             entry.is_list() && entry.item_count()? == 2,
             "access list entry {i} is not [address, storage keys]"
         );
+        let address = string_atom(&entry.at(0)?)
+            .map_err(|error| error.context(format!("access list entry {i} address")))?;
         anyhow::ensure!(
-            string_field(&entry, 0)?.len() == 20,
+            address.len() == 20,
             "access list entry {i} has no 20-byte address"
         );
         let keys = entry.at(1)?;
@@ -144,9 +162,11 @@ fn validate_access_list(access_list: &Rlp) -> anyhow::Result<()> {
             keys.is_list(),
             "access list entry {i} storage keys are not an RLP list"
         );
-        for k in 0..keys.item_count()? {
+        for (k, key) in keys.iter().enumerate() {
+            let key = string_atom(&key)
+                .map_err(|error| error.context(format!("access list entry {i} storage key {k}")))?;
             anyhow::ensure!(
-                string_field(&keys, k)?.len() == 32,
+                key.len() == 32,
                 "access list entry {i} storage key {k} is not 32 bytes"
             );
         }
@@ -212,12 +232,15 @@ pub(crate) fn transaction_chain_id(unsigned_rlp: &[u8]) -> Option<u64> {
     }
     // Legacy with EIP-155 has 9 fields:
     // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
-    let rlp = Rlp::new(unsigned_rlp);
-    (rlp.item_count().ok()? >= 9).then(|| rlp.val_at(6).ok())?
+    let legacy = Rlp::new(unsigned_rlp);
+    match legacy.item_count() {
+        Ok(9) => legacy.val_at(6).ok(),
+        _ => None,
+    }
 }
 
 fn is_eip1559(unsigned_rlp: &[u8]) -> bool {
-    unsigned_rlp[0] == 0x02
+    unsigned_rlp.first() == Some(&0x02)
 }
 
 #[cfg(test)]
@@ -435,6 +458,13 @@ mod tests {
         let validate = |bytes: &[u8]| validate_unsigned_transaction(Chain::Ethereum, bytes).is_ok();
         assert!(!validate(&legacy_tx(boundary)));
         assert!(validate(&legacy_tx(boundary - 1)));
+    }
+
+    #[test]
+    fn validate_rejects_empty_bytes() {
+        for chain in [Chain::Ethereum, Chain::Tron] {
+            assert!(validate_unsigned_transaction(chain, &[]).is_err());
+        }
     }
 
     #[test]
