@@ -752,7 +752,8 @@ impl RedisHarness {
 
         let mut all_triple_latencies = Vec::with_capacity(num_p * rounds);
         let mut all_presig_latencies = Vec::with_capacity(num_p * rounds);
-        let mut total_failures = 0;
+        let mut triple_fails = 0;
+        let mut presig_fails = 0;
         let mut total_wall = Duration::ZERO;
 
         println!(
@@ -794,28 +795,43 @@ impl RedisHarness {
             let mut round_pruned_presigs = 0;
 
             for t in tasks {
-                match t.await? {
-                    (t_lat, Ok((t_rem, _)), p_lat, Ok((p_rem, _))) => {
+                let (t_lat, t_res, p_lat, p_res) = t.await?;
+                match t_res {
+                    Ok((t_rem, _)) => {
                         round_pruned_triples += t_rem.len();
-                        round_pruned_presigs += p_rem.len();
                         all_triple_latencies.push(t_lat);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to prune triples in S8: {e:#}");
+                        triple_fails += 1;
+                    }
+                }
+                match p_res {
+                    Ok((p_rem, _)) => {
+                        round_pruned_presigs += p_rem.len();
                         all_presig_latencies.push(p_lat);
                     }
-                    _ => {
-                        total_failures += 1;
+                    Err(e) => {
+                        tracing::warn!("Failed to prune presignatures in S8: {e:#}");
+                        presig_fails += 1;
                     }
                 }
             }
             total_wall += prune_start.elapsed();
 
-            assert_eq!(
-                round_pruned_triples, total_items,
-                "all triples should be pruned when falling below threshold"
-            );
-            assert_eq!(
-                round_pruned_presigs, total_items,
-                "all presignatures should be pruned when falling below threshold"
-            );
+            // Soft-failure tracking consistent with S3/S6 to avoid aborting multi-scenario runs on partial prunes
+            if round_pruned_triples != total_items {
+                tracing::warn!(
+                    "Incomplete triple prune in S8 round: expected {total_items}, pruned {round_pruned_triples}"
+                );
+                triple_fails += 1;
+            }
+            if round_pruned_presigs != total_items {
+                tracing::warn!(
+                    "Incomplete presignature prune in S8 round: expected {total_items}, pruned {round_pruned_presigs}"
+                );
+                presig_fails += 1;
+            }
         }
 
         let (triple_wall, presig_wall) =
@@ -825,13 +841,13 @@ impl RedisHarness {
             "sync_prune_triples",
             &mut all_triple_latencies,
             triple_wall,
-            total_failures,
+            triple_fails,
         );
         let s2 = LatencySummary::calculate_with_failures(
             "sync_prune_presigs",
             &mut all_presig_latencies,
             presig_wall,
-            total_failures,
+            presig_fails,
         );
         Ok(vec![s1, s2])
     }
