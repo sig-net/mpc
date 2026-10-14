@@ -496,7 +496,7 @@ mod tests {
             .await;
 
         let err = client.broadcast_transaction(&[0x0a]).await.unwrap_err();
-        assert!(err.to_string().contains("SERVER_BUSY"));
+        assert!(format!("{err:#}").contains("SERVER_BUSY"));
     }
 
     #[tokio::test]
