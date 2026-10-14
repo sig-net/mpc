@@ -156,4 +156,15 @@ mod tests {
         assert!(validate_unsigned_transaction(chain, &legacy_tx(boundary)).is_err());
         assert!(validate_unsigned_transaction(chain, &legacy_tx(boundary - 1)).is_ok());
     }
+
+    #[test]
+    fn sign_and_hash_rejects_an_unsupported_target() {
+        let unsigned = legacy_tx(1);
+        let sig = mpc_primitives::Signature::new(
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            k256::Scalar::ONE,
+            1,
+        );
+        assert!(sign_and_hash_transaction(Chain::Solana, &unsigned, sig).is_err());
+    }
 }

@@ -91,6 +91,10 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             "unsupported target chain {target}"
         );
         self.epsilon().context("cannot derive epsilon")?;
+        // TODO(tron): once the record carries structured params, admission
+        // must enforce §6.1's expiration bound (future, ≤ 24 h past the request's
+        // Midnight timestamp) and set `owner_address` by construction; raw bytes
+        // cannot check either.
         validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         Ok(())
@@ -107,6 +111,8 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         })?;
         let epsilon = self.epsilon()?;
         let from_address = derive_user_address(root_pk, epsilon);
+        // TODO(tron): `from_address` is EVM-shaped; Tron consumers need the
+        // derived key's Tron address (same EVM math, 0x41-prefixed form).
         let (signed_tx_hash, nonce) =
             sign_and_hash_transaction(target_chain, &self.serialized_transaction, mpc_sig)?;
 
@@ -198,6 +204,31 @@ mod tests {
         };
         assert!(event(Chain::Ethereum).validate().is_ok());
         assert!(event(Chain::Solana).validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_bytes_that_are_not_tron_raw() {
+        let event = |bytes: Vec<u8>| SignBidirectionalEvent {
+            sender: Default::default(),
+            serialized_transaction: bytes,
+            dest: String::new(),
+            caip2_id: Chain::Tron.caip2_chain_id().to_string(),
+            key_version: 0,
+            deposit: 0,
+            path: "m/0".to_string(),
+            algo: "ECDSA".to_string(),
+            params: "{}".to_string(),
+            chain: Chain::Midnight,
+            chain_ctx: None,
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+        };
+
+        // Ethereum RLP routed to a Tron target.
+        assert!(event(legacy_tx(1)).validate().is_err());
+
+        // Truncated Tron raw bytes.
+        assert!(event(vec![0x0a, 0x02, 0xdb]).validate().is_err());
     }
 
     #[test]
