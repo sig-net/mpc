@@ -313,7 +313,7 @@ impl RedisHarness {
         // Spans insert, peek, and take phases
         let spike_stop = Arc::new(AtomicBool::new(false));
         let spike_handle =
-            self.spawn_intermittent_spike(spike_stop.clone(), blocking_spike_ms, num_spikes * 3);
+            self.client.spawn_intermittent_spike(spike_stop.clone(), blocking_spike_ms, num_spikes * 3);
 
         // 3. Phase A: High-concurrency inserts across participants under saturation
         let total_items = self.participants.len() * tasks_per_participant * items_per_task;
@@ -1541,7 +1541,7 @@ impl RedisHarness {
         );
 
         // Phase 1: Pure in-memory insert baseline
-        let _ = self.configure_persistence(false, "no").await;
+        let _ = self.client.configure_persistence(false, "no").await;
         let base_id_1 = next_id_block((num_p * items_per_participant) as u64 + 10_000);
         let barrier_1 = Arc::new(Barrier::new(num_p));
 
@@ -1571,7 +1571,7 @@ impl RedisHarness {
         let mem_wall = t_start_1.elapsed();
 
         // Phase 2: Real AOF fsync disk writes (appendonly yes, appendfsync always)
-        let _ = self.configure_persistence(true, "always").await;
+        let _ = self.client.configure_persistence(true, "always").await;
         let base_id_2 = next_id_block((num_p * items_per_participant) as u64 + 10_000);
         let barrier_2 = Arc::new(Barrier::new(num_p));
 
@@ -1601,7 +1601,7 @@ impl RedisHarness {
         let aof_wall = t_start_2.elapsed();
 
         // Phase 3: BGSAVE snapshot fork under concurrent takes
-        let _ = self.trigger_bgsave().await;
+        let _ = self.client.trigger_bgsave().await;
         let barrier_3 = Arc::new(Barrier::new(num_p));
 
         let tasks_3: Vec<_> = self
@@ -1626,7 +1626,7 @@ impl RedisHarness {
         let bgsave_wall = t_start_3.elapsed();
 
         // Cleanup: disable AOF and reset keys
-        let _ = self.configure_persistence(false, "no").await;
+        let _ = self.client.configure_persistence(false, "no").await;
         for p in &self.participants {
             let _ = p.triples.clear().await;
         }

@@ -112,37 +112,6 @@ impl RedisHarness {
         self.config.flush_between = flush;
     }
 
-    /// Flush the Redis database (FLUSHDB).
-    pub async fn flush_db(&self) -> anyhow::Result<()> {
-        self.client.flush_db().await
-    }
-
-    /// Sever all client connections to Redis using `CLIENT KILL TYPE normal SKIPME yes`.
-    pub async fn kill_client_connections(&self) -> anyhow::Result<i64> {
-        self.client.kill_client_connections().await
-    }
-
-    /// Configure Redis persistence options (AOF enabled/disabled and fsync policy).
-    pub async fn configure_persistence(
-        &self,
-        append_only: bool,
-        append_fsync: &str,
-    ) -> anyhow::Result<()> {
-        self.client
-            .configure_persistence(append_only, append_fsync)
-            .await
-    }
-
-    /// Trigger a background snapshot save via Redis BGSAVE.
-    pub async fn trigger_bgsave(&self) -> anyhow::Result<()> {
-        self.client.trigger_bgsave().await
-    }
-
-    /// Fetch memory snapshot and total key count (DBSIZE) from Redis.
-    pub async fn memory_snapshot(&self) -> anyhow::Result<MemorySnapshot> {
-        self.client.fetch_memory_snapshot().await
-    }
-
     /// Clear all in-memory reservations across all participants' storage handles.
     pub async fn reset_reservations(&self) {
         for p in &self.participants {
@@ -154,21 +123,16 @@ impl RedisHarness {
     /// before running a test case, logging the pre-run keyspace and memory state.
     pub async fn reset_diagnostics(&self) -> anyhow::Result<()> {
         if self.flush_between {
-            self.flush_db().await?;
+            self.client.flush_db().await?;
         }
         self.reset_reservations().await;
         self.client.reset_slowlog().await?;
-        let mem = self.memory_snapshot().await?;
+        let mem = self.client.fetch_memory_snapshot().await?;
         println!(
             "   -> Keyspace pre-run: {} keys in Redis (DBSIZE), Memory: {}",
             mem.total_keys, mem.used_memory_human
         );
         Ok(())
-    }
-
-    /// Print slowlog entries and memory stats captured during the last run.
-    pub async fn print_diagnostics(&self) -> anyhow::Result<()> {
-        self.client.print_diagnostics().await
     }
 
     /// Helper to print scenario summary table and diagnostics.
@@ -177,7 +141,7 @@ impl RedisHarness {
         for r in results {
             r.print_row();
         }
-        self.print_diagnostics().await
+        self.client.print_diagnostics().await
     }
 
     async fn populate_all<F, Fut>(
@@ -299,16 +263,5 @@ impl RedisHarness {
             .collect();
 
         BackgroundPollerGuard { stop_flag, handles }
-    }
-
-    /// Spawn a task that periodically executes a blocking Lua script on Redis.
-    pub fn spawn_intermittent_spike(
-        &self,
-        stop_flag: Arc<AtomicBool>,
-        spike_ms: u64,
-        num_spikes: usize,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        self.client
-            .spawn_intermittent_spike(stop_flag, spike_ms, num_spikes)
     }
 }
