@@ -336,6 +336,7 @@ impl RedisHarness {
         if self.participants.is_empty() || tasks_per_participant == 0 || items_per_task == 0 {
             return Ok(vec![
                 LatencySummary::empty("saturated_insert_triple"),
+                LatencySummary::empty("saturated_peek_mine"),
                 LatencySummary::empty("saturated_take_triple"),
             ]);
         }
@@ -350,10 +351,10 @@ impl RedisHarness {
         let poller = self.spawn_background_polling(false);
 
         // 2. Intermittent blocking spikes on Redis main thread (simulating large Lua scripts or BGSAVE stalls)
-        // Spans both insert and take phases
+        // Spans insert, peek, and take phases
         let spike_stop = Arc::new(AtomicBool::new(false));
         let spike_handle =
-            self.spawn_intermittent_spike(spike_stop.clone(), blocking_spike_ms, num_spikes * 2);
+            self.spawn_intermittent_spike(spike_stop.clone(), blocking_spike_ms, num_spikes * 3);
 
         // 3. Phase A: High-concurrency inserts across participants under saturation
         let total_items = self.participants.len() * tasks_per_participant * items_per_task;
@@ -391,7 +392,47 @@ impl RedisHarness {
         }
         let insert_wall = insert_start.elapsed();
 
-        // 4. Phase B: High-concurrency takes across participants under saturation
+        // 4. Phase B: Concurrent peek_mine on available stockpile under saturation and blocking stalls
+        let peek_barrier = Arc::new(Barrier::new(
+            self.participants.len() * tasks_per_participant,
+        ));
+        let peek_items = items_per_task.min(25);
+        let mut peek_tasks = Vec::with_capacity(self.participants.len() * tasks_per_participant);
+        for p in &self.participants {
+            for _ in 0..tasks_per_participant {
+                let p = p.clone();
+                let b = peek_barrier.clone();
+                peek_tasks.push(tokio::spawn(async move {
+                    b.wait().await;
+                    let mut lats = Vec::with_capacity(peek_items);
+                    let mut fails = 0;
+                    for _ in 0..peek_items {
+                        let t0 = Instant::now();
+                        let res = p.triples.peek_mine(&[]).await;
+                        let elapsed = t0.elapsed();
+                        if res.is_some() {
+                            lats.push(elapsed);
+                        } else {
+                            fails += 1;
+                        }
+                    }
+                    (lats, fails)
+                }));
+            }
+        }
+
+        let peek_start = Instant::now();
+        let mut all_peek_latencies = Vec::new();
+        let mut total_peek_failures = 0;
+        for task in peek_tasks {
+            let (lat, fails) = task.await?;
+            all_peek_latencies.extend(lat);
+            total_peek_failures += fails;
+        }
+        let peek_wall = peek_start.elapsed();
+        self.reset_reservations().await;
+
+        // 5. Phase C: High-concurrency takes across participants under saturation
         let take_barrier = Arc::new(Barrier::new(
             self.participants.len() * tasks_per_participant,
         ));
@@ -425,6 +466,12 @@ impl RedisHarness {
             insert_wall,
             total_insert_failures,
         );
+        let peek_summary = LatencySummary::calculate_with_failures(
+            "saturated_peek_mine",
+            &mut all_peek_latencies,
+            peek_wall,
+            total_peek_failures,
+        );
         let take_summary = LatencySummary::calculate_with_failures(
             "saturated_take_triple",
             &mut all_take_latencies,
@@ -432,7 +479,7 @@ impl RedisHarness {
             total_take_failures,
         );
 
-        Ok(vec![insert_summary, take_summary])
+        Ok(vec![insert_summary, peek_summary, take_summary])
     }
 
     /// SCENARIO 6: Mass Epoch Resharing `clear()` Storm.
