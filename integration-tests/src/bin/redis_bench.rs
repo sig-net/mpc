@@ -46,7 +46,7 @@ struct Args {
     #[arg(short, long, default_value_t = 300)]
     items: usize,
 
-    /// Connection pool max size constraint (default: 8 matching production pool size; 0 for unbounded)
+    /// Connection pool max size constraint (default: 8; 0 for unbounded deadpool default)
     #[arg(long, default_value_t = 8)]
     pool_size: usize,
 
@@ -212,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if should_run(BenchScenario::Storm) {
-            let stockpile = (args.items * 2).max(500);
+            let stockpile = (args.items * 2).max(10);
             let prune = stockpile / 2;
             println!(
                 "\n>>> Running Scenario 3: `remove_outdated` Pruning Storm ({storm_rounds} rounds, {} items total/round, {} pruned/round)",
@@ -227,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if should_run(BenchScenario::Proposer) {
-            let initial_stockpile = args.items.max(200);
+            let initial_stockpile = args.items.max(50);
             let racers = 4;
             let per_racer = 50;
             println!(
@@ -299,7 +299,7 @@ async fn main() -> anyhow::Result<()> {
         if should_run(BenchScenario::DeepStockpile) {
             let stockpile = args
                 .deep_stockpile
-                .unwrap_or_else(|| (args.items * 10).max(2000));
+                .unwrap_or_else(|| (args.items * 10).max(100));
             let num_seekers = args.participants.clamp(2, 6);
             let exclusions = args
                 .deep_exclusions
@@ -317,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if should_run(BenchScenario::ReservationChurn) {
-            let stockpile = (args.items * 2).max(300);
+            let stockpile = (args.items * 2).max(50);
             let num_proposers = args.participants.clamp(2, 4);
             let rounds = 25;
             let abort_percent = 40;
@@ -339,7 +339,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if should_run(BenchScenario::ConflictedTake) {
-            let items = (args.items / 5).max(30);
+            let items = (args.items / 5).max(10);
             let contenders = args.participants.clamp(2, 4);
             println!(
                 "\n>>> Running Scenario 12: Conflicted Double-Take Race Storm ({items} items, {contenders} parallel contenders racing per item)"
