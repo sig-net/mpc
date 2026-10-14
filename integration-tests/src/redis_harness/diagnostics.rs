@@ -192,6 +192,8 @@ pub struct LatencySummary {
     pub p95_ms: f64,
     pub p99_ms: f64,
     pub max_ms: f64,
+    pub attempts_ops_sec: f64,
+    pub goodput_ops_sec: f64,
     pub throughput_ops_sec: f64,
 }
 
@@ -208,6 +210,8 @@ impl LatencySummary {
             p95_ms: 0.0,
             p99_ms: 0.0,
             max_ms: 0.0,
+            attempts_ops_sec: 0.0,
+            goodput_ops_sec: 0.0,
             throughput_ops_sec: 0.0,
         }
     }
@@ -227,9 +231,11 @@ impl LatencySummary {
         failures: usize,
     ) -> Self {
         let op_name = op_name.into();
+        let wall_sec = total_wall_time.as_secs_f64().max(0.0001);
         if samples.is_empty() {
             let mut summary = Self::empty(op_name);
             summary.failures = failures;
+            summary.attempts_ops_sec = failures as f64 / wall_sec;
             return summary;
         }
 
@@ -250,8 +256,10 @@ impl LatencySummary {
         let p95_ms = percentile(0.95);
         let p99_ms = percentile(0.99);
 
-        let wall_sec = total_wall_time.as_secs_f64().max(0.0001);
-        let throughput_ops_sec = count as f64 / wall_sec;
+        let total_attempts = count + failures;
+        let attempts_ops_sec = total_attempts as f64 / wall_sec;
+        let goodput_ops_sec = count as f64 / wall_sec;
+        let throughput_ops_sec = goodput_ops_sec;
 
         Self {
             op_name,
@@ -264,13 +272,15 @@ impl LatencySummary {
             p95_ms,
             p99_ms,
             max_ms,
+            attempts_ops_sec,
+            goodput_ops_sec,
             throughput_ops_sec,
         }
     }
 
     pub fn print_row(&self) {
         println!(
-            "{:<24} | {:>7} | {:>8} | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>8.1}",
+            "{:<26} | {:>7} | {:>8} | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>10.1} | {:>9.1}",
             self.op_name,
             self.count,
             self.failures,
@@ -279,18 +289,19 @@ impl LatencySummary {
             self.p95_ms,
             self.p99_ms,
             self.max_ms,
-            self.throughput_ops_sec,
+            self.attempts_ops_sec,
+            self.goodput_ops_sec,
         );
     }
 }
 
 pub fn print_summary_header() {
-    println!("{:-<116}", "");
+    println!("{:-<122}", "");
     println!(
-        "{:<24} | {:>7} | {:>8} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>8}",
-        "Operation", "Samples", "Failures", "p50", "p90", "p95", "p99", "Max", "Ops/Sec"
+        "{:<26} | {:>7} | {:>8} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>10} | {:>9}",
+        "Operation", "Samples", "Failures", "p50", "p90", "p95", "p99", "Max", "Attempts/s", "Goodput/s"
     );
-    println!("{:-<116}", "");
+    println!("{:-<122}", "");
 }
 
 /// Partitions a combined wall duration between two interleaved operations

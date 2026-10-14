@@ -321,16 +321,15 @@ impl SimulatedParticipant {
         self,
         barrier: Arc<Barrier>,
         base_id: u64,
-        racer_id: usize,
+        _racer_id: usize,
         proposals_per_racer: usize,
-    ) -> (Vec<Duration>, Vec<Duration>) {
+    ) -> (Vec<Duration>, Vec<Duration>, Vec<Duration>) {
         barrier.wait().await;
         let mut peek_latencies = Vec::with_capacity(proposals_per_racer);
-        let mut commit_latencies = Vec::with_capacity(proposals_per_racer);
+        let mut commit_win_latencies = Vec::with_capacity(proposals_per_racer);
+        let mut commit_loss_latencies = Vec::new();
 
-        let excluded: Vec<u64> = (0..50)
-            .map(|x| base_id + (x as u64) + (racer_id as u64 * 100))
-            .collect();
+        let excluded: Vec<u64> = (0..5).map(|x| base_id + (x as u64)).collect();
 
         for _ in 0..proposals_per_racer {
             let t0 = Instant::now();
@@ -342,15 +341,17 @@ impl SimulatedParticipant {
             };
             let t1 = Instant::now();
             let taken = reservation.commit().await;
-            commit_latencies.push(t1.elapsed());
-            if taken.is_none() {
+            if taken.is_some() {
+                commit_win_latencies.push(t1.elapsed());
+            } else {
+                commit_loss_latencies.push(t1.elapsed());
                 tracing::debug!(
                     "lost reservation race on commit, as expected in concurrent proposers"
                 );
             }
         }
 
-        (peek_latencies, commit_latencies)
+        (peek_latencies, commit_win_latencies, commit_loss_latencies)
     }
 
     /// Concurrently insert triples and track successful IDs vs failures (e.g. during client kill tests).
@@ -378,10 +379,10 @@ impl SimulatedParticipant {
 
             if success {
                 success_ids.push(id);
+                latencies.push(t0.elapsed());
             } else {
                 failure_count += 1;
             }
-            latencies.push(t0.elapsed());
         }
 
         (latencies, success_ids, failure_count)
@@ -394,10 +395,11 @@ impl SimulatedParticipant {
         base_id: u64,
         seeks_count: usize,
         exclusions_count: usize,
-    ) -> (Vec<Duration>, Vec<Duration>) {
+    ) -> (Vec<Duration>, Vec<Duration>, Vec<Duration>) {
         barrier.wait().await;
         let mut peek_latencies = Vec::with_capacity(seeks_count);
-        let mut commit_latencies = Vec::with_capacity(seeks_count);
+        let mut commit_win_latencies = Vec::with_capacity(seeks_count);
+        let mut commit_loss_latencies = Vec::new();
 
         // Exclusion list covers the first `exclusions_count` IDs of the stockpile,
         // simulating accumulated rejected / timed-out IDs from prior reorg rounds.
@@ -418,15 +420,16 @@ impl SimulatedParticipant {
             let id = reservation.id;
             let t1 = Instant::now();
             let taken = reservation.commit().await;
-            commit_latencies.push(t1.elapsed());
             if taken.is_some() {
+                commit_win_latencies.push(t1.elapsed());
                 local_excluded.push(id);
             } else {
+                commit_loss_latencies.push(t1.elapsed());
                 tracing::debug!("lost reservation race on commit in deep stockpile seek");
             }
         }
 
-        (peek_latencies, commit_latencies)
+        (peek_latencies, commit_win_latencies, commit_loss_latencies)
     }
 
     /// Concurrently simulate proposer deliberation with partial timeout / reject drops.
@@ -437,10 +440,18 @@ impl SimulatedParticipant {
         rounds: usize,
         abort_percent: u8,
         deliberation_delay_ms: u64,
-    ) -> (Vec<Duration>, Vec<Duration>, Vec<Duration>, usize, usize) {
+    ) -> (
+        Vec<Duration>,
+        Vec<Duration>,
+        Vec<Duration>,
+        Vec<Duration>,
+        usize,
+        usize,
+    ) {
         barrier.wait().await;
         let mut peek_latencies = Vec::with_capacity(rounds);
-        let mut commit_latencies = Vec::with_capacity(rounds);
+        let mut commit_win_latencies = Vec::with_capacity(rounds);
+        let mut commit_loss_latencies = Vec::new();
         let mut deliberation_latencies = Vec::with_capacity(rounds);
         let mut aborted_count = 0;
         let mut committed_count = 0;
@@ -473,15 +484,18 @@ impl SimulatedParticipant {
             } else {
                 let t1 = Instant::now();
                 if reservation.commit().await.is_some() {
+                    commit_win_latencies.push(t1.elapsed());
                     committed_count += 1;
+                } else {
+                    commit_loss_latencies.push(t1.elapsed());
                 }
-                commit_latencies.push(t1.elapsed());
             }
         }
 
         (
             peek_latencies,
-            commit_latencies,
+            commit_win_latencies,
+            commit_loss_latencies,
             deliberation_latencies,
             aborted_count,
             committed_count,

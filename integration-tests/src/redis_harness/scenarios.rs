@@ -238,7 +238,8 @@ impl RedisHarness {
         if self.participants.is_empty() || num_racers == 0 || proposals_per_racer == 0 {
             return Ok(vec![
                 LatencySummary::empty("peek_mine_contended"),
-                LatencySummary::empty("commit_reservation"),
+                LatencySummary::empty("commit_winner_success"),
+                LatencySummary::empty("commit_conflict_rejected"),
             ]);
         }
 
@@ -274,21 +275,31 @@ impl RedisHarness {
             .collect();
 
         let mut all_peek = Vec::new();
-        let mut all_commit = Vec::new();
+        let mut all_commit_wins = Vec::new();
+        let mut all_commit_losses = Vec::new();
 
         for task in racer_tasks {
-            let (peek, commit) = task.await?;
+            let (peek, wins, losses) = task.await?;
             all_peek.extend(peek);
-            all_commit.extend(commit);
+            all_commit_wins.extend(wins);
+            all_commit_losses.extend(losses);
         }
         let wall = race_start.elapsed();
         let (peek_wall, commit_wall) =
-            partition_wall_by_active_time(wall, &all_peek, &all_commit);
+            partition_wall_by_active_time(wall, &all_peek, &all_commit_wins);
+        let (win_wall, loss_wall) =
+            partition_wall_by_active_time(commit_wall, &all_commit_wins, &all_commit_losses);
 
         let s1 = LatencySummary::calculate("peek_mine_contended", &mut all_peek, peek_wall);
-        let s2 = LatencySummary::calculate("commit_reservation", &mut all_commit, commit_wall);
+        let s2 =
+            LatencySummary::calculate("commit_winner_success", &mut all_commit_wins, win_wall);
+        let s3 = LatencySummary::calculate(
+            "commit_conflict_rejected",
+            &mut all_commit_losses,
+            loss_wall,
+        );
 
-        Ok(vec![s1, s2])
+        Ok(vec![s1, s2, s3])
     }
 
     /// SCENARIO 5: Production Cascading Saturation & Head-of-Line Blocking (reproducing 50ms - 6s latencies).
@@ -853,7 +864,8 @@ impl RedisHarness {
         if self.participants.is_empty() || stockpile_size == 0 || num_seekers == 0 {
             return Ok(vec![
                 LatencySummary::empty("deep_peek_mine"),
-                LatencySummary::empty("deep_commit_reservation"),
+                LatencySummary::empty("deep_commit_winner"),
+                LatencySummary::empty("deep_commit_conflict"),
             ]);
         }
 
@@ -890,21 +902,30 @@ impl RedisHarness {
             .collect();
 
         let mut all_peek = Vec::new();
-        let mut all_commit = Vec::new();
+        let mut all_commit_wins = Vec::new();
+        let mut all_commit_losses = Vec::new();
 
         for t in tasks {
-            let (peek, commit) = t.await?;
+            let (peek, wins, losses) = t.await?;
             all_peek.extend(peek);
-            all_commit.extend(commit);
+            all_commit_wins.extend(wins);
+            all_commit_losses.extend(losses);
         }
         let wall = overall_start.elapsed();
         let (peek_wall, commit_wall) =
-            partition_wall_by_active_time(wall, &all_peek, &all_commit);
+            partition_wall_by_active_time(wall, &all_peek, &all_commit_wins);
+        let (win_wall, loss_wall) =
+            partition_wall_by_active_time(commit_wall, &all_commit_wins, &all_commit_losses);
 
         let s1 = LatencySummary::calculate("deep_peek_mine", &mut all_peek, peek_wall);
         let s2 =
-            LatencySummary::calculate("deep_commit_reservation", &mut all_commit, commit_wall);
-        Ok(vec![s1, s2])
+            LatencySummary::calculate("deep_commit_winner", &mut all_commit_wins, win_wall);
+        let s3 = LatencySummary::calculate(
+            "deep_commit_conflict",
+            &mut all_commit_losses,
+            loss_wall,
+        );
+        Ok(vec![s1, s2, s3])
     }
 
     /// SCENARIO 11: Proposer Churn & Aborted Reservation Storm.
@@ -924,7 +945,8 @@ impl RedisHarness {
         if self.participants.is_empty() || initial_stockpile == 0 || num_proposers == 0 {
             return Ok(vec![
                 LatencySummary::empty("churn_peek_mine"),
-                LatencySummary::empty("churn_commit_reservation"),
+                LatencySummary::empty("churn_commit_winner"),
+                LatencySummary::empty("churn_commit_conflict"),
                 LatencySummary::empty("churn_simulated_deliberation"),
             ]);
         }
@@ -960,15 +982,17 @@ impl RedisHarness {
             .collect();
 
         let mut all_peek = Vec::new();
-        let mut all_commit = Vec::new();
+        let mut all_commit_wins = Vec::new();
+        let mut all_commit_losses = Vec::new();
         let mut all_deliberation = Vec::new();
         let mut total_aborts = 0;
         let mut total_commits = 0;
 
         for t in tasks {
-            let (peek, commit, deliberation, aborted, committed) = t.await?;
+            let (peek, wins, losses, deliberation, aborted, committed) = t.await?;
             all_peek.extend(peek);
-            all_commit.extend(commit);
+            all_commit_wins.extend(wins);
+            all_commit_losses.extend(losses);
             all_deliberation.extend(deliberation);
             total_aborts += aborted;
             total_commits += committed;
@@ -986,10 +1010,13 @@ impl RedisHarness {
         };
 
         let (peek_wall, commit_wall) =
-            partition_wall_by_active_time(effective_redis_wall, &all_peek, &all_commit);
+            partition_wall_by_active_time(effective_redis_wall, &all_peek, &all_commit_wins);
+        let (win_wall, loss_wall) =
+            partition_wall_by_active_time(commit_wall, &all_commit_wins, &all_commit_losses);
 
         println!(
-            "   -> Churn outcome: {total_commits} successfully committed, {total_aborts} dropped back to pool on timeout/reject"
+            "   -> Churn outcome: {total_commits} successfully committed, {} rejected on conflict, {total_aborts} dropped back to pool on timeout/reject",
+            all_commit_losses.len()
         );
         println!(
             "   -> Deliberation hold time: {deliberation_delay_ms}ms per round (reported separately from Redis command throughput)"
@@ -997,13 +1024,18 @@ impl RedisHarness {
 
         let s1 = LatencySummary::calculate("churn_peek_mine", &mut all_peek, peek_wall);
         let s2 =
-            LatencySummary::calculate("churn_commit_reservation", &mut all_commit, commit_wall);
+            LatencySummary::calculate("churn_commit_winner", &mut all_commit_wins, win_wall);
         let s3 = LatencySummary::calculate(
+            "churn_commit_conflict",
+            &mut all_commit_losses,
+            loss_wall,
+        );
+        let s4 = LatencySummary::calculate(
             "churn_simulated_deliberation",
             &mut all_deliberation,
             total_deliberation_time,
         );
-        Ok(vec![s1, s2, s3])
+        Ok(vec![s1, s2, s3, s4])
     }
 
     /// SCENARIO 12: Conflicted Double-Take Race Storm.
