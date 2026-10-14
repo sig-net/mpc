@@ -1011,6 +1011,7 @@ impl RedisHarness {
         if self.participants.is_empty() || items_per_participant == 0 {
             return Ok(vec![
                 LatencySummary::empty("insert_under_client_kill"),
+                LatencySummary::empty("take_under_client_kill"),
                 LatencySummary::empty("take_post_reconnect"),
             ]);
         }
@@ -1031,7 +1032,7 @@ impl RedisHarness {
             kill_delay_ms,
         ));
 
-        // 2. Active participant tasks
+        // 2. Active participant tasks (Phase A: mid-insert CLIENT KILL)
         let overall_start = Instant::now();
 
         let worker_tasks: Vec<_> = self
@@ -1071,25 +1072,55 @@ impl RedisHarness {
             total_success_inserts, total_inserts, total_insert_failures, killed_connections
         );
 
-        // 3. Post-kill verification: take the successfully inserted items to measure pool recovery
-        let take_start = Instant::now();
+        // 3. Phase B: Mid-take CLIENT KILL shock (killing connections mid-take)
+        let take_barrier = Arc::new(Barrier::new(num_p + 1));
+        let take_killer_task = tokio::spawn(Self::run_client_killer(
+            self.pool.clone(),
+            take_barrier.clone(),
+            kill_delay_ms,
+        ));
 
-        let take_tasks: Vec<_> = all_success_ids
-            .into_iter()
-            .map(|(node_idx, ids)| {
-                let p = self.participants[node_idx].clone();
-                tokio::spawn(p.take_triples(ids, None))
-            })
-            .collect();
+        let mut kill_take_tasks = Vec::with_capacity(num_p);
+        let mut post_take_batches = Vec::with_capacity(num_p);
 
-        let mut all_take_latencies = Vec::new();
-        let mut total_take_failures = 0;
-        for t in take_tasks {
-            let (lats, fails) = t.await?;
-            all_take_latencies.extend(lats);
-            total_take_failures += fails;
+        for (node_idx, ids) in all_success_ids {
+            let p = self.participants[node_idx].clone();
+            let mid = ids.len() / 2;
+            let (first_half, second_half) = ids.split_at(mid);
+            kill_take_tasks.push(tokio::spawn(p.clone().take_triples(
+                first_half.to_vec(),
+                Some(take_barrier.clone()),
+            )));
+            post_take_batches.push((p, second_half.to_vec()));
         }
-        let take_wall = take_start.elapsed();
+
+        let take_kill_start = Instant::now();
+        let _ = take_killer_task.await?;
+
+        let mut all_kill_take_latencies = Vec::new();
+        let mut total_kill_take_failures = 0;
+        for t in kill_take_tasks {
+            let (lats, fails) = t.await?;
+            all_kill_take_latencies.extend(lats);
+            total_kill_take_failures += fails;
+        }
+        let take_kill_wall = take_kill_start.elapsed();
+
+        // 4. Phase C: Post-kill verification: take remaining items to measure pool recovery
+        let post_take_start = Instant::now();
+        let mut post_take_tasks = Vec::with_capacity(num_p);
+        for (p, ids) in post_take_batches {
+            post_take_tasks.push(tokio::spawn(p.take_triples(ids, None)));
+        }
+
+        let mut all_post_take_latencies = Vec::new();
+        let mut total_post_take_failures = 0;
+        for t in post_take_tasks {
+            let (lats, fails) = t.await?;
+            all_post_take_latencies.extend(lats);
+            total_post_take_failures += fails;
+        }
+        let post_take_wall = post_take_start.elapsed();
 
         let s1 = LatencySummary::calculate_with_failures(
             "insert_under_client_kill",
@@ -1098,12 +1129,18 @@ impl RedisHarness {
             total_insert_failures,
         );
         let s2 = LatencySummary::calculate_with_failures(
-            "take_post_reconnect",
-            &mut all_take_latencies,
-            take_wall,
-            total_take_failures,
+            "take_under_client_kill",
+            &mut all_kill_take_latencies,
+            take_kill_wall,
+            total_kill_take_failures,
         );
-        Ok(vec![s1, s2])
+        let s3 = LatencySummary::calculate_with_failures(
+            "take_post_reconnect",
+            &mut all_post_take_latencies,
+            post_take_wall,
+            total_post_take_failures,
+        );
+        Ok(vec![s1, s2, s3])
     }
 
     /// SCENARIO 10: Large Stockpile Deep-Seek (`peek_mine` with large exclusion sets).
