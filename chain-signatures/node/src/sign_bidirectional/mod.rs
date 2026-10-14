@@ -184,8 +184,10 @@ impl BidirectionalTxExt for BidirectionalTx {
 #[cfg(test)]
 mod tests {
     use super::eth_tx::legacy_tx;
-    use super::{SignBidirectionalEvent, SignBidirectionalEventExt as _};
+    use super::{SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature};
     use crate::protocol::Chain;
+    use k256::elliptic_curve::sec1::FromEncodedPoint;
+    use k256::{AffinePoint, EncodedPoint};
 
     #[test]
     fn validate_rejects_unsupported_target_chain() {
@@ -277,5 +279,46 @@ mod tests {
         assert_eq!(id_low, id_high);
         assert_eq!(nonce, 0);
         assert_eq!(hex::encode(id_low), TXID_HEX);
+    }
+
+    #[test]
+    fn to_bidirectional_tx_pins_the_tron_placeholder() {
+        const RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a154120eb85916a10d2c6542613e4c9517b5e99b2dee9121541a614f803b6fd780986a42c78ec9c7f77e6ded13c2244a9059cbb000000000000000000000000d9e02baf48ed306afc63cfa816a2b6be8442036a0000000000000000000000000000000000000000000000000000000008f428f870bad8e2a49134900180e1eb17";
+        const TXID_HEX: &str = "d3741faef8cd6594923d7d827b610b12ce9bc80f65822c827c8fd7a612570540";
+        const FROM_ADDRESS_HEX: &str = "e8f25ab4ae5101ae4de86bdeafc113bff28b4a68";
+
+        let mpc_key = hex::decode("045b4fa179e005361fd858f8a6f896d7afc23a53d3f95d6566a88cde954e7b2f1cb77c554705c35d4ffced67aeafbcda46d9d89d6f200c3a3d109f92872863b3dc").unwrap();
+        let encoded = EncodedPoint::from_bytes(mpc_key).unwrap();
+        let root_pk = AffinePoint::from_encoded_point(&encoded).unwrap();
+
+        let event = SignBidirectionalEvent {
+            sender: [0u8; 32],
+            serialized_transaction: hex::decode(RAW_HEX).unwrap(),
+            dest: String::new(),
+            caip2_id: Chain::Tron.caip2_chain_id().to_string(),
+            key_version: 0,
+            deposit: 0,
+            path: "m/0".to_string(),
+            algo: "ECDSA".to_string(),
+            params: "{}".to_string(),
+            chain: Chain::Midnight,
+            chain_ctx: None,
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+        };
+        let sig = Signature::new(
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            k256::Scalar::ONE,
+            1,
+        );
+
+        let tx = event.to_bidirectional_tx([7u8; 32], sig, root_pk).unwrap();
+
+        assert_eq!(tx.target_chain, Chain::Tron);
+        assert_eq!(tx.source_chain, Chain::Midnight);
+        assert_eq!(hex::encode(tx.id.0), TXID_HEX);
+        assert_eq!(tx.nonce, 0);
+        assert_eq!(hex::encode(tx.from_address), FROM_ADDRESS_HEX);
+        assert_eq!(tx.serialized_transaction, hex::decode(RAW_HEX).unwrap());
     }
 }
