@@ -129,10 +129,7 @@ async fn main() -> anyhow::Result<()> {
     let harness = RedisHarness::new(config).await?;
     let pool_status = harness.pool.status();
     println!("Connected to Redis at: {}", harness.redis_url);
-    println!(
-        "Connection pool ready: max_size={}, current_size={}, available={}",
-        pool_status.max_size, pool_status.size, pool_status.available
-    );
+    println!("Connection pool ready: max_size={}", pool_status.max_size);
 
     let should_run = |s: BenchScenario| args.scenario == BenchScenario::All || args.scenario == s;
 
