@@ -279,16 +279,42 @@ impl LatencySummary {
     }
 
     pub fn print_row(&self) {
+        let p50_str = if self.count == 0 {
+            "      n/a".to_string()
+        } else {
+            format!("{:>7.2}ms", self.p50_ms)
+        };
+        let p90_str = if self.count < 10 {
+            "      n/a".to_string()
+        } else {
+            format!("{:>7.2}ms", self.p90_ms)
+        };
+        let p95_str = if self.count < 20 {
+            "      n/a".to_string()
+        } else {
+            format!("{:>7.2}ms", self.p95_ms)
+        };
+        let p99_str = if self.count < 20 {
+            "      n/a".to_string()
+        } else {
+            format!("{:>7.2}ms", self.p99_ms)
+        };
+        let max_str = if self.count == 0 {
+            "      n/a".to_string()
+        } else {
+            format!("{:>7.2}ms", self.max_ms)
+        };
+
         println!(
-            "{:<26} | {:>7} | {:>8} | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>7.2}ms | {:>10.1} | {:>9.1}",
+            "{:<26} | {:>7} | {:>8} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>10.1} | {:>9.1}",
             self.op_name,
             self.count,
             self.failures,
-            self.p50_ms,
-            self.p90_ms,
-            self.p95_ms,
-            self.p99_ms,
-            self.max_ms,
+            p50_str,
+            p90_str,
+            p95_str,
+            p99_str,
+            max_str,
             self.attempts_ops_sec,
             self.goodput_ops_sec,
         );
