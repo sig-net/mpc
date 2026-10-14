@@ -1562,5 +1562,165 @@ impl RedisHarness {
 
         Ok(vec![s1, s2])
     }
+
+    /// Configure Redis persistence options (AOF enabled/disabled and fsync policy).
+    pub async fn configure_persistence(&self, append_only: bool, append_fsync: &str) -> anyhow::Result<()> {
+        let mut conn = self.pool.get().await?;
+        let aof_val = if append_only { "yes" } else { "no" };
+        let _: () = cmd("CONFIG").arg("SET").arg("appendonly").arg(aof_val).query_async(&mut conn).await?;
+        if append_only {
+            let _: () = cmd("CONFIG").arg("SET").arg("appendfsync").arg(append_fsync).query_async(&mut conn).await?;
+        }
+        Ok(())
+    }
+
+    /// Trigger a background snapshot save via Redis BGSAVE.
+    pub async fn trigger_bgsave(&self) -> anyhow::Result<()> {
+        let mut conn = self.pool.get().await?;
+        let res: Result<(), _> = cmd("BGSAVE").query_async(&mut conn).await;
+        if let Err(e) = res {
+            tracing::warn!("BGSAVE notice: {e:#}");
+        }
+        Ok(())
+    }
+
+    /// SCENARIO 14: Real AOF & BGSAVE Disk Persistence Stalls vs In-Memory Execution.
+    /// Evaluates filesystem write overhead and background snapshot fork stalls:
+    /// 1. `in_memory_insert`: Pure RAM baseline insert latency (`appendonly no`).
+    /// 2. `aof_fsync_insert`: Real disk-persisted insert with `appendonly yes` and `appendfsync always`.
+    /// 3. `bgsave_concurrent_take`: Concurrent takes running while `BGSAVE` background snapshot flushes to disk.
+    pub async fn bench_disk_persistence_stall(
+        &self,
+        items_per_participant: usize,
+    ) -> anyhow::Result<Vec<LatencySummary>> {
+        self.reset_diagnostics().await?;
+
+        if self.participants.is_empty() || items_per_participant == 0 {
+            return Ok(vec![
+                LatencySummary::empty("in_memory_insert"),
+                LatencySummary::empty("aof_fsync_insert"),
+                LatencySummary::empty("bgsave_concurrent_take"),
+            ]);
+        }
+
+        let num_p = self.participants.len();
+        let participant_list = self.participant_ids();
+
+        println!(
+            "   -> Running Scenario 14: AOF & BGSAVE Disk Persistence Stalls ({num_p} participants, {items_per_participant} items/participant)..."
+        );
+
+        // Phase 1: Pure in-memory insert baseline
+        let _ = self.configure_persistence(false, "no").await;
+        let base_id_1 = next_id_block((num_p * items_per_participant) as u64 + 10_000);
+        let barrier_1 = Arc::new(Barrier::new(num_p));
+
+        let tasks_1: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(node_idx, p)| {
+                let p_base = base_id_1 + (node_idx as u64 * items_per_participant as u64);
+                tokio::spawn(p.clone().insert_triples_measured(
+                    p_base,
+                    items_per_participant,
+                    participant_list.clone(),
+                    barrier_1.clone(),
+                ))
+            })
+            .collect();
+
+        let t_start_1 = Instant::now();
+        let mut mem_latencies = Vec::with_capacity(num_p * items_per_participant);
+        let mut mem_fails = 0;
+        for t in tasks_1 {
+            let (lats, f) = t.await?;
+            mem_latencies.extend(lats);
+            mem_fails += f;
+        }
+        let mem_wall = t_start_1.elapsed();
+
+        // Phase 2: Real AOF fsync disk writes (appendonly yes, appendfsync always)
+        let _ = self.configure_persistence(true, "always").await;
+        let base_id_2 = next_id_block((num_p * items_per_participant) as u64 + 10_000);
+        let barrier_2 = Arc::new(Barrier::new(num_p));
+
+        let tasks_2: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(node_idx, p)| {
+                let p_base = base_id_2 + (node_idx as u64 * items_per_participant as u64);
+                tokio::spawn(p.clone().insert_triples_measured(
+                    p_base,
+                    items_per_participant,
+                    participant_list.clone(),
+                    barrier_2.clone(),
+                ))
+            })
+            .collect();
+
+        let t_start_2 = Instant::now();
+        let mut aof_latencies = Vec::with_capacity(num_p * items_per_participant);
+        let mut aof_fails = 0;
+        for t in tasks_2 {
+            let (lats, f) = t.await?;
+            aof_latencies.extend(lats);
+            aof_fails += f;
+        }
+        let aof_wall = t_start_2.elapsed();
+
+        // Phase 3: BGSAVE snapshot fork under concurrent takes
+        let _ = self.trigger_bgsave().await;
+        let barrier_3 = Arc::new(Barrier::new(num_p));
+
+        let tasks_3: Vec<_> = self
+            .participants
+            .iter()
+            .enumerate()
+            .map(|(node_idx, p)| {
+                let p_base = base_id_2 + (node_idx as u64 * items_per_participant as u64);
+                let ids: Vec<u64> = (p_base..p_base + items_per_participant as u64).collect();
+                tokio::spawn(p.clone().take_triples(ids, Some(barrier_3.clone())))
+            })
+            .collect();
+
+        let t_start_3 = Instant::now();
+        let mut bgsave_latencies = Vec::with_capacity(num_p * items_per_participant);
+        let mut bgsave_fails = 0;
+        for t in tasks_3 {
+            let (lats, f) = t.await?;
+            bgsave_latencies.extend(lats);
+            bgsave_fails += f;
+        }
+        let bgsave_wall = t_start_3.elapsed();
+
+        // Cleanup: disable AOF and reset keys
+        let _ = self.configure_persistence(false, "no").await;
+        for p in &self.participants {
+            let _ = p.triples.clear().await;
+        }
+
+        let s1 = LatencySummary::calculate_with_failures(
+            "in_memory_insert",
+            &mut mem_latencies,
+            mem_wall,
+            mem_fails,
+        );
+        let s2 = LatencySummary::calculate_with_failures(
+            "aof_fsync_insert",
+            &mut aof_latencies,
+            aof_wall,
+            aof_fails,
+        );
+        let s3 = LatencySummary::calculate_with_failures(
+            "bgsave_concurrent_take",
+            &mut bgsave_latencies,
+            bgsave_wall,
+            bgsave_fails,
+        );
+
+        Ok(vec![s1, s2, s3])
+    }
 }
 

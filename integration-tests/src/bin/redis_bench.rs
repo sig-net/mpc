@@ -21,6 +21,7 @@ pub enum BenchScenario {
     ReservationChurn,
     ConflictedTake,
     LargeBatchPrune,
+    DiskStall,
 }
 
 impl std::fmt::Display for BenchScenario {
@@ -35,7 +36,7 @@ impl std::fmt::Display for BenchScenario {
     about = "Redis Latency & Stress Benchmark Harness (Pure Redis Container - No MPC Nodes, NEAR, or Blockchains)"
 )]
 struct Args {
-    /// Benchmark scenario to run: 'all', 'baseline', 'polling', 'storm', 'proposer', 'saturation', 'clear', 'mixed', 'sync_prune', 'client_kill', 'deep_stockpile', 'reservation_churn', 'conflicted_take', 'large_batch_prune'
+    /// Benchmark scenario to run: 'all', 'baseline', 'polling', 'storm', 'proposer', 'saturation', 'clear', 'mixed', 'sync_prune', 'client_kill', 'deep_stockpile', 'reservation_churn', 'conflicted_take', 'large_batch_prune', 'disk_stall'
     #[arg(short, long, value_enum, default_value_t = BenchScenario::All)]
     scenario: BenchScenario,
 
@@ -386,6 +387,16 @@ async fn main() -> anyhow::Result<()> {
                 "\n>>> Running Scenario 13: Large-Batch & ARGV Outdated Pruning ({rounds} rounds, {batch_size} items/round, {prune_count} pruned > 4,096 Lua unpack threshold)"
             );
             let results = harness.bench_large_batch_prune(batch_size, rounds).await?;
+            harness.report_results(&results).await?;
+            record(results);
+        }
+
+        if should_run(BenchScenario::DiskStall) {
+            let items = (args.items / 5).max(20);
+            println!(
+                "\n>>> Running Scenario 14: Real AOF & BGSAVE Disk Persistence Stalls ({items} items/participant)"
+            );
+            let results = harness.bench_disk_persistence_stall(items).await?;
             harness.report_results(&results).await?;
             record(results);
         }
