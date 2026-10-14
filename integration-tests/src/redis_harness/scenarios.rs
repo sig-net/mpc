@@ -11,7 +11,7 @@ use mpc_node::storage::TripleStorage;
 use tokio::sync::Barrier;
 
 use super::diagnostics::{partition_wall_by_active_time, LatencySummary, RedisDiagnostics};
-use super::participant::next_id_block;
+use super::participant::{next_id_block, SimulatedParticipant};
 use super::RedisHarness;
 
 impl RedisHarness {
@@ -261,7 +261,10 @@ impl RedisHarness {
 
         let racer_tasks: Vec<_> = (0..num_racers)
             .map(|racer_id| {
-                tokio::spawn(p.clone().race_proposals(
+                // Each racer gets an independent storage handle with its own `reserved` RwLock,
+                // matching production where distinct nodes do not share in-memory reservation maps.
+                let racer = SimulatedParticipant::new(&self.pool, &p.account_id, p.participant);
+                tokio::spawn(racer.race_proposals(
                     barrier.clone(),
                     base_id,
                     racer_id,
@@ -874,7 +877,10 @@ impl RedisHarness {
 
         let tasks: Vec<_> = (0..num_seekers)
             .map(|_| {
-                tokio::spawn(p.clone().seek_deep_stockpile(
+                // Each seeker gets an independent storage handle with its own `reserved` RwLock,
+                // matching production where distinct nodes do not share in-memory reservation maps.
+                let seeker = SimulatedParticipant::new(&self.pool, &p.account_id, p.participant);
+                tokio::spawn(seeker.seek_deep_stockpile(
                     barrier.clone(),
                     base_id,
                     seeks_per_worker,
@@ -940,7 +946,10 @@ impl RedisHarness {
 
         let tasks: Vec<_> = (0..num_proposers)
             .map(|proposer_id| {
-                tokio::spawn(p.clone().run_proposer_churn(
+                // Each proposer gets an independent storage handle with its own `reserved` RwLock,
+                // matching production where distinct nodes do not share in-memory reservation maps.
+                let proposer = SimulatedParticipant::new(&self.pool, &p.account_id, p.participant);
+                tokio::spawn(proposer.run_proposer_churn(
                     barrier.clone(),
                     proposer_id,
                     rounds_per_proposer,
