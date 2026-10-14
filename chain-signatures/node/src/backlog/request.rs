@@ -601,7 +601,10 @@ impl SignEntry<Bidirectional<Executing>> {
             ExecutionOutcome::Success { output } => {
                 completed_tx.create_sign_request_from_serialized_output(output)?
             }
-            ExecutionOutcome::Failed => completed_tx.create_failed_sign_request().await?,
+            ExecutionOutcome::Failed => {
+                tracing::info!("Tx failed: {:?}", self.execution_tx().id);
+                completed_tx.create_failed_sign_request().await?
+            }
             ExecutionOutcome::Unviable => completed_tx.create_unviable_sign_request()?,
 
             ExecutionOutcome::ExtractionFailed => {
