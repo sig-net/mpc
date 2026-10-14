@@ -307,8 +307,18 @@ impl RedisHarness {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            if let Ok(mut conn) = pool.get().await {
-                let _: Result<i32, _> = spike_script.arg(spike_ms).invoke_async(&mut conn).await;
+            match pool.get().await {
+                Ok(mut conn) => {
+                    if let Err(e) = spike_script.arg(spike_ms).invoke_async::<i32>(&mut conn).await
+                    {
+                        tracing::warn!(
+                            "Failed to execute intermittent blocking Lua spike on Redis: {e:#}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to get connection for blocking spike: {e:#}");
+                }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
