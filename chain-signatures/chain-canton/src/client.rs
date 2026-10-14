@@ -1135,10 +1135,11 @@ mod tests {
             .create_async()
             .await;
 
+        let gate = SharedBackoff::new();
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
-            SharedBackoff::new(),
+            gate.clone(),
         )
         .await
         .unwrap()
@@ -1149,9 +1150,9 @@ mod tests {
         // Check_response wraps the response in RpcFailure with the typed status:
         // 409 is terminal, so the retry loop stops after the single attempt
         assert!(!is_retryable(&err), "409 must classify as terminal");
-        // Typed 409 is authoritative for throttling — the hex in the
-        // body must not engage the cooldown gate
-        assert!(SharedBackoff::new().engage_if_throttled(&err).is_none());
+
+        // The gate should not have engaged because the 409 response is terminal and not a throttle.
+        assert_eq!(gate.remaining(), Duration::ZERO);
         mock.assert_async().await;
     }
 }
