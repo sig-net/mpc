@@ -87,9 +87,11 @@ async function post(
       `proof server ${path} request failed after ${waited()}: ${describeTransport(error)}`,
       { cause: error },
     );
+  // A busy proof server closes kept-alive sockets that undici still reuses, failing the
+  // upload with `write EPIPE` or `other side closed`; one connection per request avoids it.
   const response = await fetch(new URL(path, proofServerUrl), {
     method: "POST",
-    headers: { "content-type": "application/octet-stream" },
+    headers: { "content-type": "application/octet-stream", connection: "close" },
     body,
     signal,
   }).catch((error: unknown) => {
