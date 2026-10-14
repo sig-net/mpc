@@ -61,12 +61,12 @@ impl RedisHarness {
             (Some(container), url)
         };
 
-        let client = RedisDiagnosticsClient::from_url(
+        let client = RedisDiagnosticsClient::new(
             &redis_url,
             config.max_pool_size,
             config.pool_timeout,
-        )?;
-        client.setup(1000).await?;
+        )
+        .await?;
 
         let mut participants = Vec::with_capacity(config.num_participants);
         for i in 0..config.num_participants {

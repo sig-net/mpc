@@ -34,8 +34,17 @@ pub struct RedisDiagnosticsClient {
 pub type RedisDiagnostics = RedisDiagnosticsClient;
 
 impl RedisDiagnosticsClient {
-    pub fn new(pool: Pool) -> Self {
-        Self { pool }
+    /// Initialize the Redis diagnostics client from a URL and options,
+    /// constructing the connection pool and configuring slowlog thresholds.
+    pub async fn new(
+        redis_url: &str,
+        max_pool_size: Option<usize>,
+        timeout: Option<Duration>,
+    ) -> anyhow::Result<Self> {
+        let pool = Self::build_pool(redis_url, max_pool_size, timeout)?;
+        let client = Self { pool };
+        client.setup(1000).await?;
+        Ok(client)
     }
 
     pub fn build_pool(
@@ -62,15 +71,6 @@ impl RedisDiagnosticsClient {
                 }));
         }
         Ok(builder.build()?)
-    }
-
-    pub fn from_url(
-        redis_url: &str,
-        max_pool_size: Option<usize>,
-        timeout: Option<Duration>,
-    ) -> anyhow::Result<Self> {
-        let pool = Self::build_pool(redis_url, max_pool_size, timeout)?;
-        Ok(Self::new(pool))
     }
 
     pub fn pool(&self) -> &Pool {
