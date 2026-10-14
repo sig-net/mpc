@@ -178,8 +178,15 @@ async fn main() -> anyhow::Result<()> {
     println!("Connected to Redis at: {}", harness.redis_url);
     println!("Connection pool ready: max_size={}", pool_status.max_size);
 
+    #[derive(serde::Serialize)]
+    struct BenchmarkRecord {
+        iteration: usize,
+        #[serde(flatten)]
+        summary: LatencySummary,
+    }
+
     let should_run = |s: BenchScenario| args.scenario == BenchScenario::All || args.scenario == s;
-    let mut all_results: Vec<LatencySummary> = Vec::new();
+    let mut all_results: Vec<BenchmarkRecord> = Vec::new();
 
     for iteration in 1..=args.repeats {
         if args.repeats > 1 {
@@ -192,6 +199,15 @@ async fn main() -> anyhow::Result<()> {
             );
         }
 
+        let mut record = |results: Vec<LatencySummary>| {
+            for r in results {
+                all_results.push(BenchmarkRecord {
+                    iteration,
+                    summary: r,
+                });
+            }
+        };
+
         if should_run(BenchScenario::Baseline) {
             println!(
                 "\n>>> Running Scenario 1: Concurrent Insert & Take ({} participants, {} items/participant)",
@@ -199,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
             );
             let results = harness.bench_concurrent_insert_and_take(args.items).await?;
             harness.report_results(&results).await?;
-            all_results.extend(results);
+            record(results);
         }
 
         if should_run(BenchScenario::Polling) {
@@ -228,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
                 r
             }));
             harness.report_results(&combined).await?;
-            all_results.extend(combined);
+            record(combined);
         }
 
         if should_run(BenchScenario::Storm) {
@@ -243,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
                 .bench_remove_outdated_storm(stockpile, prune, storm_rounds)
                 .await?;
             harness.report_results(&results).await?;
-            all_results.extend(results);
+            record(results);
         }
 
         if should_run(BenchScenario::Proposer) {
@@ -257,7 +273,7 @@ async fn main() -> anyhow::Result<()> {
                 .bench_proposer_race(0, initial_stockpile, racers, per_racer)
                 .await?;
             harness.report_results(&results).await?;
-            all_results.extend(results);
+            record(results);
         }
 
         if should_run(BenchScenario::Saturation) {
@@ -275,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
                 .bench_cascading_saturation(tasks_per_p, items_per_task, spike_ms, 3)
                 .await?;
             harness.report_results(&results).await?;
-            all_results.extend(results);
+            record(results);
         }
 
         if should_run(BenchScenario::Clear) {
@@ -286,7 +302,7 @@ async fn main() -> anyhow::Result<()> {
             );
             let results = harness.bench_clear_storm(stockpile, storm_rounds).await?;
             harness.report_results(&results).await?;
-            all_results.extend(results);
+            record(results);
         }
 
         if should_run(BenchScenario::Mixed) {
@@ -295,7 +311,7 @@ async fn main() -> anyhow::Result<()> {
             println!("    Running concurrent triple gen, presig gen, sign requests (takes), and 100ms polling on a shared connection pool...");
             let results = harness.bench_mixed_pipeline(items).await?;
             harness.report_results(&results).await?;
-            all_results.extend(results);
+            record(results);
         }
 
         if should_run(BenchScenario::SyncPrune) {
@@ -305,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
             );
             let results = harness.bench_sync_prune_storm(items, storm_rounds).await?;
             harness.report_results(&results).await?;
-            all_results.extend(results);
+            record(results);
         }
 
         if should_run(BenchScenario::ClientKill) {
@@ -313,7 +329,7 @@ async fn main() -> anyhow::Result<()> {
             println!("\n>>> Running Scenario 9: Connection Drop & Reconnection Shock (`CLIENT KILL`)");
             let results = harness.bench_client_kill(items, 30).await?;
             harness.report_results(&results).await?;
-            all_results.extend(results);
+            record(results);
         }
 
         if should_run(BenchScenario::DeepStockpile) {
@@ -333,7 +349,7 @@ async fn main() -> anyhow::Result<()> {
                 .bench_deep_stockpile_seek(stockpile, num_seekers, exclusions, seeks)
                 .await?;
             harness.report_results(&results).await?;
-            all_results.extend(results);
+            record(results);
         }
 
         if should_run(BenchScenario::ReservationChurn) {
@@ -355,7 +371,7 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
             harness.report_results(&results).await?;
-            all_results.extend(results);
+            record(results);
         }
 
         if should_run(BenchScenario::ConflictedTake) {
@@ -366,7 +382,7 @@ async fn main() -> anyhow::Result<()> {
             );
             let results = harness.bench_conflicted_take(items, contenders).await?;
             harness.report_results(&results).await?;
-            all_results.extend(results);
+            record(results);
         }
     }
 
@@ -382,19 +398,28 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(ref path) = args.csv_out {
         let mut csv = String::from(
-            "operation,samples,failures,p50_ms,p90_ms,p95_ms,p99_ms,max_ms,attempts_ops_sec,goodput_ops_sec\n",
+            "iteration,operation,samples,failures,p50_ms,p90_ms,p95_ms,p99_ms,max_ms,attempts_ops_sec,goodput_ops_sec\n",
         );
-        for r in &all_results {
+        for rec in &all_results {
+            let r = &rec.summary;
+            let fmt_csv = |val: f64, min_samples: usize| -> String {
+                if r.count < min_samples {
+                    "n/a".to_string()
+                } else {
+                    format!("{:.2}", val)
+                }
+            };
             csv.push_str(&format!(
-                "{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.1},{:.1}\n",
+                "{},{},{},{},{},{},{},{},{},{:.1},{:.1}\n",
+                rec.iteration,
                 r.op_name,
                 r.count,
                 r.failures,
-                r.p50_ms,
-                r.p90_ms,
-                r.p95_ms,
-                r.p99_ms,
-                r.max_ms,
+                fmt_csv(r.p50_ms, 1),
+                fmt_csv(r.p90_ms, 10),
+                fmt_csv(r.p95_ms, 20),
+                fmt_csv(r.p99_ms, 20),
+                fmt_csv(r.max_ms, 1),
                 r.attempts_ops_sec,
                 r.goodput_ops_sec
             ));
