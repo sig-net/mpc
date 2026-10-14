@@ -177,7 +177,7 @@ impl RedisHarness {
             let run_base_id = next_id_block((num_p * stockpile_count) as u64 + 1000);
             let all_ids = self
                 .populate_all_triples(run_base_id, stockpile_count)
-                .await;
+                .await?;
 
             let barrier = Arc::new(Barrier::new(num_p));
             let storm_tasks: Vec<_> = self
@@ -473,9 +473,9 @@ impl RedisHarness {
             let presigs_base = next_id_block(total_items as u64 + 10_000);
 
             self.populate_all_triples(triples_base, stockpile_per_participant)
-                .await;
+                .await?;
             self.populate_all_presignatures(presigs_base, stockpile_per_participant)
-                .await;
+                .await?;
 
             let barrier = Arc::new(Barrier::new(num_p * 2));
             let clear_start = Instant::now();
@@ -586,10 +586,10 @@ impl RedisHarness {
         );
         let triple_stockpile_ids = self
             .populate_all_triples(stockpile_triples_base, items_per_participant)
-            .await;
+            .await?;
         let presig_stockpile_ids = self
             .populate_all_presignatures(stockpile_presigs_base, items_per_participant)
-            .await;
+            .await?;
 
         // 1. Background 100ms polling for all participants (both triples and presignatures)
         let poller = self.spawn_background_polling(true);
@@ -767,10 +767,10 @@ impl RedisHarness {
 
             let triple_ids_by_p = self
                 .populate_all_triples(triples_base, items_per_participant)
-                .await;
+                .await?;
             let presig_ids_by_p = self
                 .populate_all_presignatures(presigs_base, items_per_participant)
-                .await;
+                .await?;
 
             let barrier = Arc::new(Barrier::new(num_p));
             let tasks: Vec<_> = self
