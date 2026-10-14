@@ -194,7 +194,6 @@ pub struct LatencySummary {
     pub max_ms: f64,
     pub attempts_ops_sec: f64,
     pub goodput_ops_sec: f64,
-    pub throughput_ops_sec: f64,
 }
 
 impl LatencySummary {
@@ -212,7 +211,6 @@ impl LatencySummary {
             max_ms: 0.0,
             attempts_ops_sec: 0.0,
             goodput_ops_sec: 0.0,
-            throughput_ops_sec: 0.0,
         }
     }
 
@@ -259,7 +257,6 @@ impl LatencySummary {
         let total_attempts = count + failures;
         let attempts_ops_sec = total_attempts as f64 / wall_sec;
         let goodput_ops_sec = count as f64 / wall_sec;
-        let throughput_ops_sec = goodput_ops_sec;
 
         Self {
             op_name,
@@ -274,36 +271,23 @@ impl LatencySummary {
             max_ms,
             attempts_ops_sec,
             goodput_ops_sec,
-            throughput_ops_sec,
         }
     }
 
     pub fn print_row(&self) {
-        let p50_str = if self.count == 0 {
-            "      n/a".to_string()
-        } else {
-            format!("{:>7.2}ms", self.p50_ms)
+        let fmt_metric = |val: f64, min_samples: usize| -> String {
+            if self.count < min_samples {
+                "      n/a".to_string()
+            } else {
+                format!("{:>7.2}ms", val)
+            }
         };
-        let p90_str = if self.count < 10 {
-            "      n/a".to_string()
-        } else {
-            format!("{:>7.2}ms", self.p90_ms)
-        };
-        let p95_str = if self.count < 20 {
-            "      n/a".to_string()
-        } else {
-            format!("{:>7.2}ms", self.p95_ms)
-        };
-        let p99_str = if self.count < 20 {
-            "      n/a".to_string()
-        } else {
-            format!("{:>7.2}ms", self.p99_ms)
-        };
-        let max_str = if self.count == 0 {
-            "      n/a".to_string()
-        } else {
-            format!("{:>7.2}ms", self.max_ms)
-        };
+
+        let p50_str = fmt_metric(self.p50_ms, 1);
+        let p90_str = fmt_metric(self.p90_ms, 10);
+        let p95_str = fmt_metric(self.p95_ms, 20);
+        let p99_str = fmt_metric(self.p99_ms, 20);
+        let max_str = fmt_metric(self.max_ms, 1);
 
         println!(
             "{:<26} | {:>7} | {:>8} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>10.1} | {:>9.1}",
