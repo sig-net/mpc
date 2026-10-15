@@ -1523,7 +1523,7 @@ impl RedisHarness {
         );
 
         // Phase 1: Pure in-memory insert baseline
-        let _ = self.client.configure_persistence(false, "no").await;
+        self.client.configure_persistence(false, "no").await?;
         let base_id_1 = next_id_block((num_p * items_per_participant) as u64 + 10_000);
         let barrier_1 = Arc::new(Barrier::new(num_p));
 
@@ -1553,7 +1553,7 @@ impl RedisHarness {
         let mem_wall = t_start_1.elapsed();
 
         // Phase 2: Real AOF fsync disk writes (appendonly yes, appendfsync always)
-        let _ = self.client.configure_persistence(true, "always").await;
+        self.client.configure_persistence(true, "always").await?;
         let base_id_2 = next_id_block((num_p * items_per_participant) as u64 + 10_000);
         let barrier_2 = Arc::new(Barrier::new(num_p));
 
@@ -1583,7 +1583,7 @@ impl RedisHarness {
         let aof_wall = t_start_2.elapsed();
 
         // Phase 3: BGSAVE snapshot fork under concurrent takes
-        let _ = self.client.trigger_bgsave().await;
+        self.client.trigger_bgsave().await?;
         let barrier_3 = Arc::new(Barrier::new(num_p));
 
         let tasks_3: Vec<_> = self
@@ -1607,11 +1607,8 @@ impl RedisHarness {
         }
         let bgsave_wall = t_start_3.elapsed();
 
-        // Cleanup: disable AOF and reset keys
-        let _ = self.client.configure_persistence(false, "no").await;
-        for p in &self.participants {
-            let _ = p.triples.clear().await;
-        }
+        // Cleanup: disable AOF
+        self.client.configure_persistence(false, "no").await?;
 
         let s1 = LatencySummary::calculate_with_failures(
             "in_memory_insert",
