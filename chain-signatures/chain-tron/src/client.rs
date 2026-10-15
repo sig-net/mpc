@@ -5,10 +5,11 @@ use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
 
 use crate::address::{parse_hex, TronAddress};
 use crate::config::TronConfig;
+use crate::encoding::decode_bytes;
 use crate::types::{AccountResources, BroadcastOutcome, NowBlock, TronLog, TronReceipt};
 
 /// Tron HTTP client for interacting with the Tron blockchain.
@@ -41,7 +42,7 @@ impl TronHttp {
     /// `POST /wallet/getnowblock`. Tron has no nonces, this feeds the
     /// ref-block replay fields filled at assembly.
     pub async fn get_now_block(&self) -> anyhow::Result<NowBlock> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
@@ -64,7 +65,7 @@ impl TronHttp {
     /// `CONNECTION_CLOSED`) become `Err` so the gate rebroadcasts identical
     /// bytes. Other rejections are terminal.
     pub async fn broadcast_transaction(&self, raw_tx: &[u8]) -> anyhow::Result<BroadcastOutcome> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
@@ -79,7 +80,7 @@ impl TronHttp {
         &self,
         tx_id: &B256,
     ) -> anyhow::Result<Option<TronReceipt>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
@@ -116,7 +117,7 @@ impl TronHttp {
         &self,
         address: &TronAddress,
     ) -> anyhow::Result<AccountResources> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
@@ -125,7 +126,7 @@ impl TronHttp {
                 self.post_json(
                     "wallet/getaccountresource",
                     &serde_json::json!({
-                        "value": hex::encode(address.as_bytes()),
+                        "value": address.to_hex(),
                         "visible": false
                     }),
                 )
@@ -177,7 +178,7 @@ impl TronHttp {
 
 /// Tron error/reason strings (`message`, `resMessage`) are hex-encoded ASCII.
 fn decode_hex_ascii(s: &str) -> String {
-    hex::decode(s)
+    decode_bytes(s)
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_else(|| s.to_string())
@@ -294,9 +295,11 @@ where
                 .map(|t| t.parse::<B256>().with_context(|| format!("log topic {t}")))
                 .collect::<anyhow::Result<Vec<_>>>()
                 .map_err(serde::de::Error::custom)?;
-            let data = hex::decode(raw.data.strip_prefix("0x").unwrap_or(&raw.data))
+
+            let data = decode_bytes(&raw.data)
                 .context("decoding log data")
                 .map_err(serde::de::Error::custom)?;
+
             Log::new(
                 parse_hex(&raw.address).map_err(serde::de::Error::custom)?,
                 topics,
@@ -496,7 +499,7 @@ mod tests {
             .await;
 
         let err = client.broadcast_transaction(&[0x0a]).await.unwrap_err();
-        assert!(err.to_string().contains("SERVER_BUSY"));
+        assert!(format!("{err:#}").contains("SERVER_BUSY"));
     }
 
     #[tokio::test]

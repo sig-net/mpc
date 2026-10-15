@@ -23,26 +23,40 @@ impl MeshState {
         &self.need_sync
     }
 
-    pub fn update(&mut self, participant: Participant, status: NodeStatus, info: ParticipantInfo) {
-        match status {
-            NodeStatus::Active => {
-                self.active.insert(&participant, info);
-                self.need_sync.remove(&participant);
-            }
-            NodeStatus::Syncing => {
-                self.active.remove(&participant);
-                self.need_sync.insert(&participant, info);
-            }
-            NodeStatus::Inactive | NodeStatus::Offline => {
-                self.active.remove(&participant);
-                self.need_sync.remove(&participant);
-            }
+    /// `Active` or `Syncing` for a listed participant, `None` otherwise. The
+    /// state does not keep unreachable or inactive peers, so it cannot tell
+    /// those two apart.
+    pub fn status(&self, participant: Participant) -> Option<NodeStatus> {
+        if self.active.contains_key(&participant) {
+            Some(NodeStatus::Active)
+        } else if self.need_sync.contains_key(&participant) {
+            Some(NodeStatus::Syncing)
+        } else {
+            None
         }
     }
 
-    pub fn remove(&mut self, participant: Participant) {
-        self.active.remove(&participant);
-        self.need_sync.remove(&participant);
+    /// Returns whether the state changed.
+    pub fn update(
+        &mut self,
+        participant: Participant,
+        status: NodeStatus,
+        info: ParticipantInfo,
+    ) -> bool {
+        let (target, other) = match status {
+            NodeStatus::Active => (&mut self.active, &mut self.need_sync),
+            NodeStatus::Syncing => (&mut self.need_sync, &mut self.active),
+            NodeStatus::Inactive | NodeStatus::Offline => return self.remove(participant),
+        };
+        let moved = other.remove(&participant).is_some();
+        let same = target.get(&participant) == Some(&info);
+        target.insert(&participant, info);
+        moved || !same
+    }
+
+    /// Returns whether the state changed.
+    pub fn remove(&mut self, participant: Participant) -> bool {
+        self.active.remove(&participant).is_some() | self.need_sync.remove(&participant).is_some()
     }
 
     pub fn clear(&mut self) {
@@ -61,16 +75,22 @@ mod tests {
         let info = ParticipantInfo::new(7);
         let mut state = MeshState::default();
 
-        state.update(participant, NodeStatus::Active, info.clone());
-        assert!(state.active().contains_key(&participant));
+        assert!(state.update(participant, NodeStatus::Active, info.clone()));
+        assert_eq!(state.status(participant), Some(NodeStatus::Active));
         assert!(!state.need_sync().contains_key(&participant));
 
-        state.update(participant, NodeStatus::Syncing, info.clone());
+        assert!(state.update(participant, NodeStatus::Syncing, info.clone()));
+        assert_eq!(state.status(participant), Some(NodeStatus::Syncing));
         assert!(!state.active().contains_key(&participant));
-        assert!(state.need_sync().contains_key(&participant));
 
-        state.update(participant, NodeStatus::Active, info);
-        assert!(state.active().contains_key(&participant));
+        assert!(state.update(participant, NodeStatus::Active, info.clone()));
+        assert_eq!(state.status(participant), Some(NodeStatus::Active));
         assert!(!state.need_sync().contains_key(&participant));
+
+        // Same status and info again is not a change.
+        assert!(!state.update(participant, NodeStatus::Active, info.clone()));
+        assert!(state.update(participant, NodeStatus::Offline, info));
+        assert_eq!(state.status(participant), None);
+        assert!(!state.remove(participant));
     }
 }

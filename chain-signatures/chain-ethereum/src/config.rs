@@ -154,9 +154,6 @@ impl Default for PublisherConfig {
 /// Tuning for the indexing pipeline (catchup, live stream, finality waits).
 #[derive(Clone, Debug)]
 pub struct IndexerConfig {
-    /// Consecutive `get_block(Finalized)` failures after which the finalized-head
-    /// watcher escalates its retry warning (it never gives up)
-    pub max_finalized_failures: u32,
     /// Re-warn interval (seconds) while the finalized head is stalled
     pub stall_rewarn_secs: u64,
     /// Max concurrent JSON-RPC calls when resolving watcher receipts/nonces.
@@ -169,7 +166,6 @@ pub struct IndexerConfig {
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
-            max_finalized_failures: 20,
             stall_rewarn_secs: 300,
             max_concurrent_watcher_rpcs: 8,
             watcher_slow_sweep_interval: 10,
@@ -185,7 +181,7 @@ pub struct EthConfig {
     pub execution_rpc_http_url: Url,
     /// The contract address to watch
     pub contract_address: Address,
-    /// must be one of sepolia, mainnet
+    /// must be one of sepolia, mainnet, anvil
     pub network: String,
     /// refresh finalized block interval in milliseconds
     pub refresh_finalized_interval: u64,
@@ -203,6 +199,16 @@ impl EthConfig {
     /// Ethereum address derived from the configured account secret key.
     pub fn signer_address(&self) -> String {
         self.account_sk.address().to_string()
+    }
+
+    /// The EIP-155 chain id of `network`.
+    pub fn chain_id(&self) -> Option<u64> {
+        match self.network.as_str() {
+            "mainnet" => Some(1),
+            "sepolia" => Some(11_155_111),
+            "anvil" => Some(31_337),
+            _ => None,
+        }
     }
 }
 

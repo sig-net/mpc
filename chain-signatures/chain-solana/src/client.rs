@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff},
+    utils::retry::{retry_rpc, RetryConfig, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::SignKind;
@@ -120,6 +120,8 @@ impl SolanaClient {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
             catchup_retry: catchup_retry_strategy(),
+            // TODO: `from_config` retakes the stack gate once publish gating
+            // moves inside the client
             shared_backoff: SharedBackoff::new(),
             rpc_client,
             rpc_http_url: sol.rpc_http_url.clone(),
@@ -134,6 +136,7 @@ impl SolanaClient {
         rpc_http_url: String,
         program_address: Pubkey,
         telemetry: Arc<dyn PublisherTelemetry>,
+        shared_backoff: SharedBackoff,
     ) -> Self {
         let keypair = Keypair::new(); // Dummy keypair for indexer mode
         let payer = Arc::new(keypair);
@@ -149,7 +152,9 @@ impl SolanaClient {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
             catchup_retry: catchup_retry_strategy(),
-            shared_backoff: SharedBackoff::new(),
+            // the stack's gate: indexer reads share one cooldown window with
+            // publishes (and vice versa)
+            shared_backoff,
             rpc_client,
             rpc_http_url,
             http_client: reqwest::Client::new(),
@@ -187,7 +192,7 @@ impl SolanaClient {
     /// Get the latest finalized slot from the Solana RPC.
     /// This is used to determine the upper bound for catchup.
     pub async fn get_slot_finalized(&self) -> anyhow::Result<u64> {
-        retry_rpc_gated!(
+        retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.rpc_retry,
             self.shared_backoff,
@@ -206,10 +211,11 @@ impl SolanaClient {
     // TODO: Do not retry indefinitely on deterministic block errors like SlotWasSkipped or BlockNotAvailable
     pub async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
         let max_attempts = self.catchup_retry.max_times;
-        retry_rpc_gated!(
+        retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.catchup_retry,
             self.shared_backoff,
+            "get_block",
             // Notify on retry with structured logging
             |attempt, err, delay| {
                 tracing::warn!(
@@ -239,10 +245,11 @@ impl SolanaClient {
         }
 
         let max_attempts = self.catchup_retry.max_times;
-        let res = retry_rpc_gated!(
+        let res = retry_rpc!(
             SOL_BATCH_TIMEOUT,
             self.catchup_retry,
             self.shared_backoff,
+            "fetch_blocks",
             // Notify on retry with structured logging
             |attempt, err, delay| {
                 tracing::warn!(
@@ -311,10 +318,11 @@ impl SolanaClient {
         address: &Pubkey,
         before: Option<Signature>,
     ) -> anyhow::Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.catchup_retry,
             self.shared_backoff,
+            "fetch_signatures",
             // Notify on retry with structured logging
             |attempts, err, delay| {
                 tracing::warn!(
@@ -569,6 +577,7 @@ mod tests {
             url.to_string(),
             Pubkey::new_unique(),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .with_fast_retry()
     }

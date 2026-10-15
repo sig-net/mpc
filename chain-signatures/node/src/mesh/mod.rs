@@ -54,7 +54,7 @@ impl Mesh {
     ) -> Self {
         let ping_interval = Duration::from_millis(options.ping_interval);
         let (state_tx, state_rx) = watch::channel(MeshState::default());
-        let connections = connection::Pool::new(client, my_id, ping_interval);
+        let connections = connection::Pool::new(client, my_id, ping_interval, state_tx.clone());
         Self {
             connections,
             state_tx,
@@ -70,18 +70,6 @@ impl Mesh {
     }
 
     pub async fn run(mut self, mut contract: ContractStateWatcher) {
-        let state_tx = self.state_tx.clone();
-        let mut conn_update = self.connections.watch();
-        tokio::spawn(async move {
-            loop {
-                let (p, status, info) = conn_update.next().await;
-                tracing::info!(?p, ?status, "mesh connection status changed");
-                state_tx.send_modify(|state| {
-                    state.update(p, status, info);
-                });
-            }
-        });
-
         loop {
             tokio::select! {
                 Some(contract) = contract.next_state() => {
@@ -119,8 +107,8 @@ impl Mesh {
                         continue;
                     }
                     match kind {
-                        SyncKind::Synced => self.connections.report_node_synced(participant).await,
-                        SyncKind::Desynced => self.connections.report_node_desynced(participant).await,
+                        SyncKind::Synced => self.connections.report_node_synced(participant),
+                        SyncKind::Desynced => self.connections.report_node_desynced(participant),
                     }
                 }
             }
@@ -172,23 +160,6 @@ mod tests {
 
     const PING_INTERVAL: Duration = Duration::from_millis(10);
 
-    async fn expect_status(
-        watcher: &mut connection::ConnectionWatcher,
-        participant: Participant,
-        expected: NodeStatus,
-    ) {
-        for _ in 0..20 {
-            if let Ok((p, status, _info)) =
-                tokio::time::timeout(Duration::from_millis(500), watcher.next()).await
-            {
-                if p == participant && status == expected {
-                    return;
-                }
-            }
-        }
-        panic!("timed out waiting for {participant:?} to become {expected:?}");
-    }
-
     /// Wait for the mesh state to satisfy `f`. Sleeping a fixed span instead
     /// races the connection tasks, which have to complete a real `/status`
     /// round trip before any of our reports can take effect.
@@ -220,45 +191,25 @@ mod tests {
         let participants = servers.participants();
         let my_id = servers[0].account_id().clone();
 
-        let mut pool = Pool::new(&servers.client(), &my_id, PING_INTERVAL);
-        let mut watcher = pool.watch();
+        let (state_tx, mut state_rx) = watch::channel(MeshState::default());
+        let mut pool = Pool::new(&servers.client(), &my_id, PING_INTERVAL, state_tx);
         pool.connect_nodes(&participants, &mut HashSet::new()).await;
 
         // We do not sync with ourselves, so only expect 1..num_nodes
-        tokio::time::sleep(PING_INTERVAL * 3).await;
-        let mut syncing = HashSet::new();
-        for i in 1..num_nodes {
-            match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
-                Ok((participant, status, _info)) => {
-                    tracing::info!(?participant, ?status, "got connection update for syncing");
-                    if matches!(status, NodeStatus::Syncing) {
-                        syncing.insert(participant);
-                    }
-                }
-                Err(_) => {
-                    panic!("timed out waiting for syncing nodes idx={i}");
-                }
-            }
-        }
-        for i in 1..num_nodes {
-            pool.report_node_synced(servers[i].id()).await;
-        }
+        wait_for_state(&mut state_rx, "peers syncing", |state| {
+            (1..num_nodes).all(|i| state.need_sync().contains_key(&servers[i].id()))
+        })
+        .await;
+        assert!(state_rx.borrow().active().is_empty());
 
-        // Same with active. We only expect 1..num_nodes for new statuses
-        tokio::time::sleep(PING_INTERVAL * 3).await;
         for i in 1..num_nodes {
-            match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
-                Ok((participant, status, _info)) => {
-                    tracing::info!(?participant, ?status, "got connection update for active");
-                    if matches!(status, NodeStatus::Active) {
-                        syncing.insert(participant);
-                    }
-                }
-                Err(_) => {
-                    panic!("timed out waiting for active nodes idx={i}");
-                }
-            }
+            pool.report_node_synced(servers[i].id());
         }
+        wait_for_state(&mut state_rx, "peers active", |state| {
+            (1..num_nodes).all(|i| state.active().contains_key(&servers[i].id()))
+        })
+        .await;
+        assert!(state_rx.borrow().need_sync().is_empty());
     }
 
     #[test(tokio::test)]
@@ -392,22 +343,31 @@ mod tests {
 
         // A long ping interval so the statuses we observe are only the ones
         // our reports drive: the connection task ticks once, then sleeps.
-        let mut pool = Pool::new(&servers.client(), &my_id, Duration::from_secs(60));
-        let mut watcher = pool.watch();
+        let (state_tx, mut state_rx) = watch::channel(MeshState::default());
+        let mut pool = Pool::new(&servers.client(), &my_id, Duration::from_secs(60), state_tx);
         pool.connect_nodes(&participants, &mut HashSet::new()).await;
 
         // A fresh connection syncs before it is usable.
-        expect_status(&mut watcher, peer, NodeStatus::Syncing).await;
-        pool.report_node_synced(peer).await;
-        expect_status(&mut watcher, peer, NodeStatus::Active).await;
+        wait_for_state(&mut state_rx, "peer syncing", |state| {
+            state.status(peer) == Some(NodeStatus::Syncing)
+        })
+        .await;
+        pool.report_node_synced(peer);
+        wait_for_state(&mut state_rx, "peer active", |state| {
+            state.status(peer) == Some(NodeStatus::Active)
+        })
+        .await;
 
-        pool.report_node_desynced(peer).await;
-        expect_status(&mut watcher, peer, NodeStatus::Syncing).await;
+        pool.report_node_desynced(peer);
+        wait_for_state(&mut state_rx, "peer desynced", |state| {
+            state.status(peer) == Some(NodeStatus::Syncing)
+        })
+        .await;
 
-        // Already syncing, so this one must not reach the mesh at all.
-        pool.report_node_desynced(peer).await;
+        // Already syncing, so this one must not touch the mesh state at all.
+        pool.report_node_desynced(peer);
         assert!(
-            tokio::time::timeout(Duration::from_millis(200), watcher.next())
+            tokio::time::timeout(Duration::from_millis(200), state_rx.changed())
                 .await
                 .is_err(),
             "a repeated desync report must not notify the mesh again"
@@ -518,25 +478,28 @@ mod tests {
         let participants = servers.participants();
         let my_id = servers[0].account_id().clone();
 
-        let mut pool = Pool::new(&servers.client(), &my_id, PING_INTERVAL);
-        let mut watcher = pool.watch();
+        let (state_tx, mut state_rx) = watch::channel(MeshState::default());
+        let mut pool = Pool::new(&servers.client(), &my_id, PING_INTERVAL, state_tx);
         pool.connect_nodes(&participants, &mut HashSet::new()).await;
 
         let remote_id = servers[1].id();
+        let syncing = |state: &MeshState| state.status(remote_id) == Some(NodeStatus::Syncing);
+        let active = |state: &MeshState| state.status(remote_id) == Some(NodeStatus::Active);
+        let offline = |state: &MeshState| state.status(remote_id).is_none();
 
-        expect_status(&mut watcher, remote_id, NodeStatus::Syncing).await;
-        pool.report_node_synced(remote_id).await;
-        expect_status(&mut watcher, remote_id, NodeStatus::Active).await;
+        wait_for_state(&mut state_rx, "peer syncing", syncing).await;
+        pool.report_node_synced(remote_id);
+        wait_for_state(&mut state_rx, "peer active", active).await;
 
         servers[1].set_protocol_version(None).await;
-        expect_status(&mut watcher, remote_id, NodeStatus::Offline).await;
+        wait_for_state(&mut state_rx, "peer offline", offline).await;
 
         servers[1].make_online().await;
-        expect_status(&mut watcher, remote_id, NodeStatus::Syncing).await;
-        pool.report_node_synced(remote_id).await;
-        expect_status(&mut watcher, remote_id, NodeStatus::Active).await;
+        wait_for_state(&mut state_rx, "peer syncing again", syncing).await;
+        pool.report_node_synced(remote_id);
+        wait_for_state(&mut state_rx, "peer active again", active).await;
 
         servers[1].set_protocol_version(Some(0)).await;
-        expect_status(&mut watcher, remote_id, NodeStatus::Offline).await;
+        wait_for_state(&mut state_rx, "peer offline again", offline).await;
     }
 }
