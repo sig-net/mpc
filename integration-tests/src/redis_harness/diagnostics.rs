@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use deadpool_redis::redis::{cmd, Script, Value};
 use deadpool_redis::{Config as RedisPoolConfig, Hook, Pool, Runtime as RedisRuntime, Status};
+use tokio::sync::Barrier;
 
 /// Diagnostics and telemetry fetched directly from Redis.
 #[derive(Debug, Clone)]
@@ -245,7 +246,7 @@ impl RedisDiagnosticsClient {
     }
 
     /// Helper task for disconnecting clients after a given delay.
-    pub async fn run_client_killer(self, barrier: Arc<tokio::sync::Barrier>, kill_delay_ms: u64) -> i64 {
+    pub async fn run_client_killer(self, barrier: Arc<Barrier>, kill_delay_ms: u64) -> i64 {
         barrier.wait().await;
         tokio::time::sleep(Duration::from_millis(kill_delay_ms)).await;
 
@@ -262,7 +263,7 @@ impl RedisDiagnosticsClient {
     /// Spawn a background task to disconnect clients after a delay.
     pub fn spawn_client_killer(
         &self,
-        barrier: Arc<tokio::sync::Barrier>,
+        barrier: Arc<Barrier>,
         kill_delay_ms: u64,
     ) -> tokio::task::JoinHandle<i64> {
         tokio::spawn(self.clone().run_client_killer(barrier, kill_delay_ms))
