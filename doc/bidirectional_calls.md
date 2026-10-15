@@ -235,8 +235,9 @@ before the contract upgraded to this library.
 
 ### 3.3 Assumptions
 
-* Finality. A block the MPC treats as final stays in the chain. The MPC
-  reads requests and attests outcomes only from such blocks.
+* Finality. A block the MPC treats as final (on Tron, solidified) stays
+  in the chain. The MPC reads requests and attests outcomes only from
+  such blocks.
 * Replay protection. Executing a transaction uses up its replay protection:
   the account nonce on EVM, the spent output on a UTXO chain,
   the durable nonce on Solana. Each can be used up only once, and a
@@ -405,8 +406,11 @@ on Signature { rid, signature } finalised on the source chain:
 
 on target chain block at height h finalised on chain target:
     for (rid, e) in backlog for target and no local[rid].outcome:
-        ours = { txid(s, e.req.tx)
-                 for s in e.signatures + local[rid].issued }
+        if txid ignores the signature on target:
+            ours = { txid(e.req.tx) }
+        else:
+            ours = { txid(s, e.req.tx)
+                     for s in e.signatures + local[rid].issued }
         if some id in ours has receipt r in a final block at height h':  // M3
             for (rid', e') in backlog for target, other than rid, with e's
               account and e.req.tx's replay protection, and no
@@ -456,7 +460,8 @@ The MPC looks for a request's execution by transaction ID, under every
 signature it holds for the request, in any final block, so a node that
 starts looking late still finds it. A node holds the signatures published
 for the request and those it took part in producing. An execution under a
-signature it does not hold is not found (see Section 6 for alternatives).
+signature it does not hold is not found (see Section 6 for alternatives),
+except where the transaction ID ignores the signature: there it needs none.
 
 When the transaction of one request is included, every other request
 waiting on the same account and replay protection can never execute, and
@@ -752,7 +757,7 @@ stay out.
 | `respondSerializationSchema` | `bytes` | no | no longer used where the MPC derives the response encoding from `outputDeserializationSchema` and the source chain's types; integrations not yet migrated still read it |
 
 Enums: `MPCSignatureAlgorithm { ecdsa, reserved }`,
-`MPCDestination { unused, reserved }`, `TxParamType { evmType2, reserved }`.
+`MPCDestination { unused, reserved }`, `TxParamType { evmType2, tron }`.
 
 `RequestId` is `bytes(32)`. `Signature` is the MPC's ECDSA signature:
 `bigR`, an affine point `{ x: bytes(32), y: bytes(32) }`, `s: bytes(32)`
@@ -874,7 +879,7 @@ request's derived key. They neither fill nor refresh any field and read
 nothing from Tron. The signed digest is sha256 of those bytes, which is
 also the transaction ID (Section 2).
 
-Not yet specified: the `TxParamType` variant, the field types and the
+`txParamType` is `tron`. Not yet specified: the field types and the
 digest `D_tron`.
 
 ### 7.5 Responses
