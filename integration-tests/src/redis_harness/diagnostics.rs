@@ -245,7 +245,7 @@ impl RedisDiagnosticsClient {
     }
 
     /// Helper task for disconnecting clients after a given delay.
-    pub async fn run_client_killer(&self, barrier: Arc<tokio::sync::Barrier>, kill_delay_ms: u64) -> i64 {
+    pub async fn run_client_killer(self, barrier: Arc<tokio::sync::Barrier>, kill_delay_ms: u64) -> i64 {
         barrier.wait().await;
         tokio::time::sleep(Duration::from_millis(kill_delay_ms)).await;
 
@@ -265,8 +265,7 @@ impl RedisDiagnosticsClient {
         barrier: Arc<tokio::sync::Barrier>,
         kill_delay_ms: u64,
     ) -> tokio::task::JoinHandle<i64> {
-        let client = self.clone();
-        tokio::spawn(async move { client.run_client_killer(barrier, kill_delay_ms).await })
+        tokio::spawn(self.clone().run_client_killer(barrier, kill_delay_ms))
     }
 
     /// Configure Redis persistence options (AOF enabled/disabled and fsync policy).
@@ -308,7 +307,7 @@ impl RedisDiagnosticsClient {
 
     /// Run intermittent blocking Lua scripts on the Redis instance until stopped or completed.
     pub async fn run_intermittent_spike(
-        &self,
+        self,
         stop_flag: Arc<AtomicBool>,
         spike_ms: u64,
         num_spikes: usize,
@@ -360,12 +359,9 @@ impl RedisDiagnosticsClient {
         if spike_ms == 0 || num_spikes == 0 {
             return None;
         }
-        let client = self.clone();
-        Some(tokio::spawn(async move {
-            client
-                .run_intermittent_spike(stop_flag, spike_ms, num_spikes)
-                .await;
-        }))
+        Some(tokio::spawn(self.clone().run_intermittent_spike(
+            stop_flag, spike_ms, num_spikes,
+        )))
     }
 }
 

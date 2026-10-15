@@ -145,9 +145,9 @@ impl RedisHarness {
             "invalid participant index {participant_idx} (total participants: {})",
             self.participants.len()
         );
-        let p = &self.participants[participant_idx];
+        let p = self.participants[participant_idx].clone();
         let p_list = self.participant_ids();
-        p.populate(kind, base_id, count, &p_list).await
+        p.populate(kind, base_id, count, p_list).await
     }
 
     /// Populate `count` items (triples or presignatures) across all participants concurrently.
@@ -165,9 +165,7 @@ impl RedisHarness {
             .enumerate()
             .map(|(idx, p)| {
                 let p_base = base_id + (idx as u64 * count as u64);
-                let p = p.clone();
-                let p_list = p_list.clone();
-                tokio::spawn(async move { p.populate(kind, p_base, count, &p_list).await })
+                tokio::spawn(p.clone().populate(kind, p_base, count, p_list.clone()))
             })
             .collect();
 

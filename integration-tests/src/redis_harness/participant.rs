@@ -60,14 +60,51 @@ impl SimulatedParticipant {
         self.presignatures.reset_reservations().await;
     }
 
-    /// Populate `count` items (triples or presignatures) starting at `base_id`.
-    /// Automatically chunks work across up to 8 concurrent worker tasks for high throughput.
-    pub async fn populate(
-        &self,
+    async fn populate_chunk(
+        self,
         kind: StockpileKind,
         base_id: u64,
         count: usize,
-        participants: &[Participant],
+        participants: Vec<Participant>,
+    ) -> Vec<u64> {
+        let mut ids = Vec::with_capacity(count);
+        for i in 0..count {
+            let id = base_id + i as u64;
+            let inserted = match kind {
+                StockpileKind::Triples => {
+                    let pair = dummy_pair(id, &participants);
+                    if let Some(mut slot) = self.triples.create_slot(id, self.participant).await {
+                        slot.insert(pair, self.participant).await
+                    } else {
+                        false
+                    }
+                }
+                StockpileKind::Presignatures => {
+                    let presig = dummy_presignature(id, &participants);
+                    if let Some(mut slot) =
+                        self.presignatures.create_slot(id, self.participant).await
+                    {
+                        slot.insert(presig, self.participant).await
+                    } else {
+                        false
+                    }
+                }
+            };
+            if inserted {
+                ids.push(id);
+            }
+        }
+        ids
+    }
+
+    /// Populate `count` items (triples or presignatures) starting at `base_id`.
+    /// Automatically chunks work across up to 8 concurrent worker tasks for high throughput.
+    pub async fn populate(
+        self,
+        kind: StockpileKind,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
     ) -> anyhow::Result<Vec<u64>> {
         if count == 0 {
             return Ok(Vec::new());
@@ -85,39 +122,13 @@ impl SimulatedParticipant {
             }
             let chunk_count = end - start;
             let p_base = base_id + start as u64;
-            let p = self.clone();
-            let p_list = participants.to_vec();
 
-            handles.push(tokio::spawn(async move {
-                let mut ids = Vec::with_capacity(chunk_count);
-                for i in 0..chunk_count {
-                    let id = p_base + i as u64;
-                    let inserted = match kind {
-                        StockpileKind::Triples => {
-                            let pair = dummy_pair(id, &p_list);
-                            if let Some(mut slot) = p.triples.create_slot(id, p.participant).await {
-                                slot.insert(pair, p.participant).await
-                            } else {
-                                false
-                            }
-                        }
-                        StockpileKind::Presignatures => {
-                            let presig = dummy_presignature(id, &p_list);
-                            if let Some(mut slot) =
-                                p.presignatures.create_slot(id, p.participant).await
-                            {
-                                slot.insert(presig, p.participant).await
-                            } else {
-                                false
-                            }
-                        }
-                    };
-                    if inserted {
-                        ids.push(id);
-                    }
-                }
-                ids
-            }));
+            handles.push(tokio::spawn(self.clone().populate_chunk(
+                kind,
+                p_base,
+                chunk_count,
+                participants.clone(),
+            )));
         }
 
         let mut all_ids = Vec::with_capacity(count);
@@ -195,6 +206,27 @@ impl SimulatedParticipant {
         for id in ids {
             let t0 = Instant::now();
             if self.triples.take(id, self.participant).await.is_some() {
+                latencies.push(t0.elapsed());
+            } else {
+                failures += 1;
+            }
+        }
+        (latencies, failures)
+    }
+
+    /// Concurrently peek unreserved triples, measuring latency per peek and tracking empty results.
+    pub async fn peek_triples_measured(
+        self,
+        barrier: Arc<Barrier>,
+        count: usize,
+    ) -> (Vec<Duration>, usize) {
+        barrier.wait().await;
+        let mut latencies = Vec::with_capacity(count);
+        let mut failures = 0;
+        for _ in 0..count {
+            let t0 = Instant::now();
+            let res = self.triples.peek_mine(&[]).await;
+            if res.is_some() {
                 latencies.push(t0.elapsed());
             } else {
                 failures += 1;

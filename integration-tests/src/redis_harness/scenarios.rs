@@ -361,24 +361,10 @@ impl RedisHarness {
         let mut peek_tasks = Vec::with_capacity(self.participants.len() * tasks_per_participant);
         for p in &self.participants {
             for _ in 0..tasks_per_participant {
-                let p = p.clone();
-                let b = peek_barrier.clone();
-                peek_tasks.push(tokio::spawn(async move {
-                    b.wait().await;
-                    let mut lats = Vec::with_capacity(peek_items);
-                    let mut fails = 0;
-                    for _ in 0..peek_items {
-                        let t0 = Instant::now();
-                        let res = p.triples.peek_mine(&[]).await;
-                        let elapsed = t0.elapsed();
-                        if res.is_some() {
-                            lats.push(elapsed);
-                        } else {
-                            fails += 1;
-                        }
-                    }
-                    (lats, fails)
-                }));
+                peek_tasks.push(tokio::spawn(p.clone().peek_triples_measured(
+                    peek_barrier.clone(),
+                    peek_items,
+                )));
             }
         }
 
