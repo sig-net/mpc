@@ -5,7 +5,8 @@ Tron integration for the MPC chain-signatures stack. Tron is a
 `doc/bidirectional_calls.md`): requests originate on the source chain,
 nodes assemble and sign `TriggerSmartContract` transactions, and a
 relayer broadcasts them. There is no Tron indexer and no Tron contract —
-the crate is the wire layer.
+this crate is the transaction format: protobuf parsing, signing, and
+broadcast.
 
 Core pieces:
 
@@ -32,8 +33,9 @@ Core pieces:
 
 ## Live gate
 
-`tests/live_gate.rs` verifies the wire layer against a real network —
-currently [Nile](https://nileex.io), keyless via `https://nile.trongrid.io`.
+`tests/live_gate.rs` verifies the transaction path — parsing, signing,
+broadcast, and receipt settlement — against a real network, currently
+[Nile](https://nileex.io) keyless via `https://nile.trongrid.io`.
 A mock-backed sequence of the same code runs in CI; the live run is
 opt-in:
 
