@@ -515,7 +515,7 @@ properties of the network make that legitimate. None is specific to this
 design. The network is n nodes, at most f < n/3 of them faulty, the rest
 correct, with a signing threshold t, f+1 <= t <= n - f.
 
-* Threshold (Section 2 of protocol_properties.md). Fewer than t nodes cannot
+* Threshold (Section 2 of protocol-properties.md). Fewer than t nodes cannot
   produce a signature or an attestation, correct nodes alone can, and
   correct nodes eventually produce and publish what a request in their
   backlog needs.
@@ -523,7 +523,7 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
   they admit the same requests and hold the same published signatures for
   them, and they compute the same attestation for a rid, as a function of
   final target chain state and the request's schema only.
-* Distinct keys (ACCOUNT_DERIVATION.md). The derivation path contains the
+* Distinct keys (account-derivation.md). The derivation path contains the
   source chain's id and the requesting contract, so different (source
   chain, contract, key parameters) derive different keys, where the key
   parameters are a request's derivation path, key version and signing
