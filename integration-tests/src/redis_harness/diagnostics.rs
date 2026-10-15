@@ -249,16 +249,14 @@ impl RedisDiagnosticsClient {
         barrier.wait().await;
         tokio::time::sleep(Duration::from_millis(kill_delay_ms)).await;
 
-        match self.kill_client_connections().await {
-            Ok(count) => {
-                println!("   [CLIENT KILL] Severed {count} active Redis client connections!");
-                count
-            }
-            Err(e) => {
-                tracing::warn!("CLIENT KILL failed: {e:#}");
-                0
-            }
-        }
+        let Ok(count) = self.kill_client_connections().await.inspect_err(|e| {
+            tracing::warn!("CLIENT KILL failed: {e:#}");
+        }) else {
+            return 0;
+        };
+
+        println!("   [CLIENT KILL] Severed {count} active Redis client connections!");
+        count
     }
 
     /// Spawn a background task to disconnect clients after a delay.
@@ -336,18 +334,17 @@ impl RedisDiagnosticsClient {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            match self.pool.get().await {
-                Ok(mut conn) => {
-                    if let Err(e) = spike_script.arg(spike_ms).invoke_async::<i32>(&mut conn).await
-                    {
-                        tracing::warn!(
-                            "Failed to execute intermittent blocking Lua spike on Redis: {e:#}"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to get connection for blocking spike: {e:#}");
-                }
+            let Ok(mut conn) = self.pool.get().await.inspect_err(|e| {
+                tracing::warn!("Failed to get connection for blocking spike: {e:#}");
+            }) else {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            };
+
+            if let Err(e) = spike_script.arg(spike_ms).invoke_async::<i32>(&mut conn).await {
+                tracing::warn!(
+                    "Failed to execute intermittent blocking Lua spike on Redis: {e:#}"
+                );
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
