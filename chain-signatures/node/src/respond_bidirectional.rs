@@ -120,8 +120,6 @@ impl CompletedTx {
     }
 
     async fn process_failed_tx(&self) -> anyhow::Result<IndexedSignRequest> {
-        tracing::info!("Tx failed: {:?}", self.tx.id);
-
         let source_chain = self.tx.source_chain;
         if source_chain == Chain::Midnight {
             return self.create_respond_bidirectional_sign_request(
