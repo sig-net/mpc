@@ -404,6 +404,11 @@ mod tests {
             outcome(false, Some("DUP_TRANSACTION_ERROR")).unwrap(),
             BroadcastOutcome::AlreadyKnown
         );
+        // `result: true` outranks a stale code field.
+        assert_eq!(
+            outcome(true, Some("DUP_TRANSACTION_ERROR")).unwrap(),
+            BroadcastOutcome::Accepted
+        );
         for code in [
             "SERVER_BUSY",
             "NO_CONNECTION",

@@ -25,13 +25,13 @@ use url::Url;
 
 use alloy::primitives::{Address, B256};
 
-fn env_secs(name: &str, default: u64) -> Duration {
-    Duration::from_secs(
-        std::env::var(name)
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(default),
-    )
+fn env_secs(name: &str, default: u64) -> anyhow::Result<Duration> {
+    Ok(Duration::from_secs(match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .with_context(|| format!("{name}: not a number of seconds"))?,
+        Err(_) => default,
+    }))
 }
 
 /// Nile USDT; verified by `triggerconstantcontract name()` = "Tether USD".
@@ -81,10 +81,11 @@ fn derive_address(key: &SigningKey) -> Address {
 fn sign(key: &SigningKey, raw_bytes: &[u8]) -> anyhow::Result<(Vec<u8>, [u8; 32])> {
     let digest = Sha256::digest(raw_bytes);
     let (signature, recovery) = key.sign_prehash_recoverable(&digest)?;
-    let bytes = signature.to_bytes();
-    let (r, s): (&[u8; 32], &[u8; 32]) = (bytes[..32].try_into()?, bytes[32..].try_into()?);
+    let (r, s) = signature.split_bytes();
+    let r: [u8; 32] = r.into();
+    let s: [u8; 32] = s.into();
     let (signed, txid) =
-        RawTransaction::parse(raw_bytes)?.sign_and_hash(r, s, u8::from(recovery.is_y_odd()))?;
+        RawTransaction::parse(raw_bytes)?.sign_and_hash(&r, &s, u8::from(recovery.is_y_odd()))?;
     Ok((signed, txid))
 }
 
@@ -113,7 +114,7 @@ impl Gate {
             now_ms,
         );
         let raw_bytes = raw.encode_to_vec();
-        let local_txid: [u8; 32] = Sha256::digest(&raw_bytes)[..].try_into()?;
+        let local_txid: [u8; 32] = Sha256::digest(&raw_bytes).into();
         let (signed, txid) = sign(&self.key, &raw_bytes)?;
         anyhow::ensure!(
             txid == local_txid,
@@ -273,8 +274,9 @@ async fn relay_sequence_runs_against_a_mocked_endpoint() {
     let mut server = mockito::Server::new_async().await;
     let endpoint: Url = server.url().parse().unwrap();
 
-    // Mockito matches most recently created first: the accept mock answers
-    // the first broadcast, then falls through to the duplicate mock.
+    // Mockito picks the first matching mock (creation order) that still
+    // misses its expectation, else the last match: the accept mock's
+    // `expect(1)` answers the first broadcast, then the dup mock takes over.
     server
         .mock("POST", "/wallet/getnowblock")
         .with_status(200)
@@ -376,8 +378,8 @@ async fn live_gate() -> anyhow::Result<()> {
             .expect("pinned default contract parses"),
     };
 
-    let poll = env_secs("TRON_POLL_SECS", 3);
-    let deadline = env_secs("TRON_DEADLINE_SECS", 180);
+    let poll = env_secs("TRON_POLL_SECS", 3)?;
+    let deadline = env_secs("TRON_DEADLINE_SECS", 180)?;
     let config = TronConfig {
         endpoint,
         api_key: std::env::var("TRON_API_KEY").ok(),
