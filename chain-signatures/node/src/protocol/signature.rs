@@ -23,9 +23,8 @@ pub(crate) enum SignError {
     Aborted(String),
 }
 
-/// What the signing protocol needs to run. Publishing the result is the
-/// caller's job: the generator returns the signature and knows nothing about
-/// the chain or the backlog.
+/// What the signing protocol needs to run. The generator returns the
+/// signature.
 pub(crate) struct GenerateCtx {
     pub governance: GovernanceInfo,
     pub msg: MessageChannel,

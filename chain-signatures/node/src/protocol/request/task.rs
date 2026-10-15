@@ -11,6 +11,7 @@ use crate::storage::presignature_storage::PresignatureTaken;
 
 use cait_sith::FullSignature;
 use k256::Secp256k1;
+use std::future::Future;
 
 /// Generating phase — see [`SignPhase::Generating`].
 pub struct GeneratingPhase {
@@ -101,28 +102,39 @@ impl GeneratingPhase {
 
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS.inc();
 
-        // Drive generation while answering posit traffic: peers proposing this
-        // signature get a Reject so they don't wait for us. The generator itself
-        // knows nothing about posits.
         let generation = generator.run(&gen_ctx);
-        tokio::pin!(generation);
-        let result = loop {
-            tokio::select! {
-                result = &mut generation => break result,
-                task_msg = mailbox.recv() => {
-                    Self::reject_late_propose(ctx, state, task_msg).await;
-                }
+        let output = match Self::answering_posits(ctx, state, mailbox, generation).await {
+            Ok(output) => output,
+            Err(SignError::Aborted(cause)) => {
+                return state.reorganize(&format!("signature generation failed: {cause}"));
             }
         };
 
-        match result {
-            Ok(output) => SignPhase::Complete(
-                self.hand_off(ctx, state, output)
-                    .await
-                    .map_err(SignError::Aborted),
-            ),
-            Err(SignError::Aborted(cause)) => {
-                state.reorganize(&format!("signature generation failed: {cause}"))
+        // The backlog write queues behind the pending map's readers, so keep
+        // answering peers while it waits.
+        let hand_off = self.hand_off(ctx, state.entry.clone(), output);
+        SignPhase::Complete(
+            Self::answering_posits(ctx, state, mailbox, hand_off)
+                .await
+                .map_err(SignError::Aborted),
+        )
+    }
+
+    /// Drive `fut` to completion while answering posit traffic: peers proposing
+    /// this signature get a Reject so they don't wait for us.
+    async fn answering_posits<F: Future>(
+        ctx: &SignTask,
+        state: &mut SignState,
+        mailbox: &PositMailbox,
+        fut: F,
+    ) -> F::Output {
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                output = &mut fut => break output,
+                task_msg = mailbox.recv() => {
+                    Self::reject_late_propose(ctx, state, task_msg).await;
+                }
             }
         }
     }
@@ -136,15 +148,13 @@ impl GeneratingPhase {
     async fn hand_off(
         &self,
         ctx: &SignTask,
-        state: &SignState,
+        entry: SignEntry<Generating>,
         output: FullSignature<Secp256k1>,
     ) -> Result<(), String> {
         let sign_id = ctx.sign_id;
         let is_proposer = self.proposer == ctx.governance.me;
 
-        let entry = state
-            .entry
-            .clone()
+        let entry = entry
             .advance(
                 ctx.governance.public_key,
                 &output,
