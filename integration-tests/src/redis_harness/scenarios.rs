@@ -12,6 +12,19 @@ use super::diagnostics::{partition_wall_3, partition_wall_by_active_time, Latenc
 use super::participant::{next_id_block, SimulatedParticipant, StockpileKind};
 use super::RedisHarness;
 
+async fn collect_task_results(
+    tasks: impl IntoIterator<Item = tokio::task::JoinHandle<(Vec<Duration>, usize)>>,
+) -> anyhow::Result<(Vec<Duration>, usize)> {
+    let mut latencies = Vec::new();
+    let mut failures = 0;
+    for t in tasks {
+        let (lats, f) = t.await?;
+        latencies.extend(lats);
+        failures += f;
+    }
+    Ok((latencies, failures))
+}
+
 impl RedisHarness {
     /// SCENARIO 1: Concurrent Insert & Take Throughput.
     /// Simulates N participants inserting pairs simultaneously and subsequently taking them.
@@ -56,14 +69,8 @@ impl RedisHarness {
             })
             .collect();
 
-        let mut all_insert_latencies =
-            Vec::with_capacity(self.participants.len() * items_per_participant);
-        let mut insert_failures = 0;
-        for task in insert_tasks {
-            let (lat, fails) = task.await?;
-            all_insert_latencies.extend(lat);
-            insert_failures += fails;
-        }
+        let (mut all_insert_latencies, insert_failures) =
+            collect_task_results(insert_tasks).await?;
         let insert_wall = overall_start.elapsed();
 
         // Concurrent taking of the inserted items
@@ -81,14 +88,7 @@ impl RedisHarness {
             })
             .collect();
 
-        let mut all_take_latencies =
-            Vec::with_capacity(self.participants.len() * items_per_participant);
-        let mut take_failures = 0;
-        for task in take_tasks {
-            let (lat, fails) = task.await?;
-            all_take_latencies.extend(lat);
-            take_failures += fails;
-        }
+        let (mut all_take_latencies, take_failures) = collect_task_results(take_tasks).await?;
         let take_wall = take_start.elapsed();
 
         let s1 = LatencySummary::calculate_with_failures(
@@ -344,13 +344,8 @@ impl RedisHarness {
         }
 
         let insert_start = Instant::now();
-        let mut all_insert_latencies = Vec::new();
-        let mut total_insert_failures = 0;
-        for task in insert_tasks {
-            let (lat, fails) = task.await?;
-            all_insert_latencies.extend(lat);
-            total_insert_failures += fails;
-        }
+        let (mut all_insert_latencies, total_insert_failures) =
+            collect_task_results(insert_tasks).await?;
         let insert_wall = insert_start.elapsed();
 
         // 4. Phase B: Concurrent peek_mine on available stockpile under saturation and blocking stalls
@@ -369,13 +364,8 @@ impl RedisHarness {
         }
 
         let peek_start = Instant::now();
-        let mut all_peek_latencies = Vec::new();
-        let mut total_peek_failures = 0;
-        for task in peek_tasks {
-            let (lat, fails) = task.await?;
-            all_peek_latencies.extend(lat);
-            total_peek_failures += fails;
-        }
+        let (mut all_peek_latencies, total_peek_failures) =
+            collect_task_results(peek_tasks).await?;
         let peek_wall = peek_start.elapsed();
         self.reset_reservations().await;
 
@@ -392,13 +382,8 @@ impl RedisHarness {
         }
 
         let take_start = Instant::now();
-        let mut all_take_latencies = Vec::new();
-        let mut total_take_failures = 0;
-        for task in take_tasks {
-            let (lat, fails) = task.await?;
-            all_take_latencies.extend(lat);
-            total_take_failures += fails;
-        }
+        let (mut all_take_latencies, total_take_failures) =
+            collect_task_results(take_tasks).await?;
         let take_wall = take_start.elapsed();
 
         poller.stop().await;
@@ -649,24 +634,12 @@ impl RedisHarness {
             .collect();
 
         let triple_gen = async {
-            let mut all = Vec::with_capacity(num_p * items_per_participant);
-            let mut fails = 0;
-            for t in triple_gen_tasks {
-                let (lats, f) = t.await?;
-                all.extend(lats);
-                fails += f;
-            }
+            let (all, fails) = collect_task_results(triple_gen_tasks).await?;
             Ok::<_, anyhow::Error>((all, fails, overall_start.elapsed()))
         };
 
         let presig_gen = async {
-            let mut all = Vec::with_capacity(num_p * items_per_participant);
-            let mut fails = 0;
-            for t in presig_gen_tasks {
-                let (lats, f) = t.await?;
-                all.extend(lats);
-                fails += f;
-            }
+            let (all, fails) = collect_task_results(presig_gen_tasks).await?;
             Ok::<_, anyhow::Error>((all, fails, overall_start.elapsed()))
         };
 
@@ -1035,14 +1008,8 @@ impl RedisHarness {
 
         let take_kill_start = Instant::now();
         let _ = take_killer_task.await?;
-
-        let mut all_kill_take_latencies = Vec::new();
-        let mut total_kill_take_failures = 0;
-        for t in kill_take_tasks {
-            let (lats, fails) = t.await?;
-            all_kill_take_latencies.extend(lats);
-            total_kill_take_failures += fails;
-        }
+        let (mut all_kill_take_latencies, total_kill_take_failures) =
+            collect_task_results(kill_take_tasks).await?;
         let take_kill_wall = take_kill_start.elapsed();
 
         // 4. Phase C: Post-kill verification: take remaining items to measure pool recovery
@@ -1052,13 +1019,8 @@ impl RedisHarness {
             post_take_tasks.push(tokio::spawn(p.take_triples(ids, None)));
         }
 
-        let mut all_post_take_latencies = Vec::new();
-        let mut total_post_take_failures = 0;
-        for t in post_take_tasks {
-            let (lats, fails) = t.await?;
-            all_post_take_latencies.extend(lats);
-            total_post_take_failures += fails;
-        }
+        let (mut all_post_take_latencies, total_post_take_failures) =
+            collect_task_results(post_take_tasks).await?;
         let post_take_wall = post_take_start.elapsed();
 
         let s1 = LatencySummary::calculate_with_failures(
@@ -1543,13 +1505,7 @@ impl RedisHarness {
             .collect();
 
         let t_start_1 = Instant::now();
-        let mut mem_latencies = Vec::with_capacity(num_p * items_per_participant);
-        let mut mem_fails = 0;
-        for t in tasks_1 {
-            let (lats, f) = t.await?;
-            mem_latencies.extend(lats);
-            mem_fails += f;
-        }
+        let (mut mem_latencies, mem_fails) = collect_task_results(tasks_1).await?;
         let mem_wall = t_start_1.elapsed();
 
         // Phase 2: Real AOF fsync disk writes (appendonly yes, appendfsync always)
@@ -1573,13 +1529,7 @@ impl RedisHarness {
             .collect();
 
         let t_start_2 = Instant::now();
-        let mut aof_latencies = Vec::with_capacity(num_p * items_per_participant);
-        let mut aof_fails = 0;
-        for t in tasks_2 {
-            let (lats, f) = t.await?;
-            aof_latencies.extend(lats);
-            aof_fails += f;
-        }
+        let (mut aof_latencies, aof_fails) = collect_task_results(tasks_2).await?;
         let aof_wall = t_start_2.elapsed();
 
         // Phase 3: BGSAVE snapshot fork under concurrent takes
@@ -1598,13 +1548,7 @@ impl RedisHarness {
             .collect();
 
         let t_start_3 = Instant::now();
-        let mut bgsave_latencies = Vec::with_capacity(num_p * items_per_participant);
-        let mut bgsave_fails = 0;
-        for t in tasks_3 {
-            let (lats, f) = t.await?;
-            bgsave_latencies.extend(lats);
-            bgsave_fails += f;
-        }
+        let (mut bgsave_latencies, bgsave_fails) = collect_task_results(tasks_3).await?;
         let bgsave_wall = t_start_3.elapsed();
 
         // Cleanup: disable AOF
