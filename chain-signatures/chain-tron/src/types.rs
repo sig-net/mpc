@@ -5,7 +5,6 @@
 //! (see `proto/README.md`).
 
 use alloy::primitives::{Log, LogData, B256};
-use serde::Deserialize;
 
 /// Head block, as needed for ref-block fields at assembly time.
 #[derive(Debug, Clone, Copy)]
@@ -32,6 +31,9 @@ impl NowBlock {
 pub enum BroadcastOutcome {
     /// Accepted into the mempool
     Accepted,
+    /// `DUP_TRANSACTION_ERROR`: a transaction with this txID is already
+    /// known to the node — success for a relayer that rebroadcasts.
+    AlreadyKnown,
     /// Terminal rejection, retrying identical bytes cannot succeed.
     Rejected { code: String, message: String },
 }
@@ -57,20 +59,3 @@ pub struct TronReceipt {
 
 /// Receipt logs, EVM-shaped
 pub type TronLog = Log<LogData>;
-
-/// Resource usage and limits for an account. Names follow java-tron's `AccountResourceMessage`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct AccountResources {
-    #[serde(default, rename = "freeNetUsed")]
-    pub free_net_used: u64,
-    #[serde(default, rename = "freeNetLimit")]
-    pub free_net_limit: u64,
-    #[serde(default, rename = "NetUsed")]
-    pub net_used: u64,
-    #[serde(default, rename = "NetLimit")]
-    pub net_limit: u64,
-    #[serde(default, rename = "EnergyUsed")]
-    pub energy_used: u64,
-    #[serde(default, rename = "EnergyLimit")]
-    pub energy_limit: u64,
-}

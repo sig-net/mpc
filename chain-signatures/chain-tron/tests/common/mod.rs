@@ -1,8 +1,6 @@
 //! Shared test assembly: raw transactions from structured parameters.
 
-use mpc_chain_tron::pb::{
-    Contract, ContractType, Message, RawTransaction, TriggerSmartContract,
-};
+use mpc_chain_tron::pb::{Contract, ContractType, Message, RawTransaction, TriggerSmartContract};
 use mpc_chain_tron::{NowBlock, TronAddress};
 use prost_types::Any;
 

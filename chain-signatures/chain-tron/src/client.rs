@@ -10,7 +10,7 @@ use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBac
 use crate::address::{parse_hex, TronAddress};
 use crate::config::TronConfig;
 use crate::encoding::decode_bytes;
-use crate::types::{AccountResources, BroadcastOutcome, NowBlock, TronLog, TronReceipt};
+use crate::types::{BroadcastOutcome, NowBlock, TronLog, TronReceipt};
 
 /// Tron HTTP client for interacting with the Tron blockchain.
 pub struct TronHttp {
@@ -112,25 +112,25 @@ impl TronHttp {
         )
     }
 
-    /// `POST /wallet/getaccountresource`.
-    pub async fn get_account_resource(
-        &self,
-        address: &TronAddress,
-    ) -> anyhow::Result<AccountResources> {
+    /// `POST /wallet/getaccount`, returning the TRX balance in sun. Zero
+    /// for an account the chain has never seen.
+    pub async fn get_account_balance(&self, address: &TronAddress) -> anyhow::Result<u64> {
         retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
-            "get_account_resource",
+            "get_account_balance",
             {
-                self.post_json(
-                    "wallet/getaccountresource",
-                    &serde_json::json!({
-                        "value": address.to_hex(),
-                        "visible": false
-                    }),
-                )
-                .await
+                let response: AccountResponse = self
+                    .post_json(
+                        "wallet/getaccount",
+                        &serde_json::json!({
+                            "address": address.to_hex(),
+                            "visible": false
+                        }),
+                    )
+                    .await?;
+                Ok(response.balance)
             }
         )
     }
@@ -205,6 +205,13 @@ struct NowBlockRawData {
     timestamp: u64,
 }
 
+/// Response structure for `getaccount`; `{}` for unseen accounts.
+#[derive(Deserialize)]
+struct AccountResponse {
+    #[serde(default)]
+    balance: u64,
+}
+
 /// Response structure for the broadcast transaction result.
 #[derive(Deserialize)]
 struct BroadcastResponse {
@@ -222,7 +229,8 @@ impl BroadcastResponse {
     fn into_outcome(self) -> anyhow::Result<BroadcastOutcome> {
         let code = self.code.as_deref().unwrap_or_default();
         match (self.result, code) {
-            (_, "DUP_TRANSACTION_ERROR") | (true, _) => Ok(BroadcastOutcome::Accepted),
+            (true, _) => Ok(BroadcastOutcome::Accepted),
+            (_, "DUP_TRANSACTION_ERROR") => Ok(BroadcastOutcome::AlreadyKnown),
             (false, "SERVER_BUSY" | "NO_CONNECTION" | "NOT_ENOUGH_EFFECTIVE_CONNECTION") => {
                 Err(anyhow!("broadcast rejected: {code}"))
             }
@@ -394,7 +402,7 @@ mod tests {
         assert_eq!(outcome(true, None).unwrap(), BroadcastOutcome::Accepted);
         assert_eq!(
             outcome(false, Some("DUP_TRANSACTION_ERROR")).unwrap(),
-            BroadcastOutcome::Accepted
+            BroadcastOutcome::AlreadyKnown
         );
         for code in [
             "SERVER_BUSY",
@@ -455,7 +463,7 @@ mod tests {
             .await;
 
         let outcome = client.broadcast_transaction(&[0x0a]).await.unwrap();
-        assert_eq!(outcome, BroadcastOutcome::Accepted);
+        assert_eq!(outcome, BroadcastOutcome::AlreadyKnown);
         mock.assert_async().await;
     }
 
@@ -506,14 +514,14 @@ mod tests {
     async fn transport_errors_are_retried() {
         let (mut server, client) = test_client(fast_retry()).await;
         let mock = server
-            .mock("POST", "/wallet/getaccountresource")
+            .mock("POST", "/wallet/getaccount")
             .with_status(429)
             .expect_at_least(2)
             .create_async()
             .await;
 
         let err = client
-            .get_account_resource(&TronAddress::from_evm(Address::ZERO))
+            .get_account_balance(&TronAddress::from_evm(Address::ZERO))
             .await
             .unwrap_err();
         assert!(
@@ -601,36 +609,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(receipt.logs, vec![expected_log.clone(), expected_log]);
-    }
-
-    #[tokio::test]
-    async fn account_resources_parse() {
-        let (mut server, client) = test_client(fast_retry()).await;
-        server
-            .mock("POST", "/wallet/getaccountresource")
-            .match_header("TRON-PRO-API-KEY", "test-key")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                r#"{
-                    "freeNetUsed": 284,
-                    "freeNetLimit": 600,
-                    "NetUsed": 150,
-                    "NetLimit": 5000,
-                    "EnergyUsed": 131,
-                    "EnergyLimit": 100000
-                }"#,
-            )
-            .create_async()
-            .await;
-
-        let address = TronAddress::from_evm(Address::ZERO);
-        let resources = client.get_account_resource(&address).await.unwrap();
-        assert_eq!(resources.free_net_used, 284);
-        assert_eq!(resources.free_net_limit, 600);
-        assert_eq!(resources.net_used, 150);
-        assert_eq!(resources.net_limit, 5000);
-        assert_eq!(resources.energy_used, 131);
-        assert_eq!(resources.energy_limit, 100000);
     }
 }
