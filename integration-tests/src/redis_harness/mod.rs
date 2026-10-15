@@ -100,11 +100,14 @@ impl RedisHarness {
         self.config.flush_between
     }
 
-    /// Clear all in-memory reservations across all participants' storage handles.
+    /// Clear all in-memory reservations across all participants' storage handles concurrently.
     pub async fn reset_reservations(&self) {
-        for p in &self.participants {
-            p.reset_reservations().await;
-        }
+        futures::future::join_all(self.participants.iter().map(|p| p.reset_reservations())).await;
+    }
+
+    /// Clear all triples storage across all participants concurrently.
+    pub async fn clear_triples(&self) {
+        futures::future::join_all(self.participants.iter().map(|p| p.triples.clear())).await;
     }
 
     /// Reset slowlog, clear in-memory reservations (and optionally FLUSHDB if flush_between is enabled)

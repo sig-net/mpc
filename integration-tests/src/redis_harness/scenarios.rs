@@ -188,9 +188,7 @@ impl RedisHarness {
             storm_wall += storm_start.elapsed();
 
             // Untimed cleanup of leftover shares so subsequent rounds measure identical keyspace distributions
-            for p in &self.participants {
-                let _ = p.triples.clear().await;
-            }
+            self.clear_triples().await;
         }
 
         Ok(vec![LatencySummary::calculate_with_failures(
