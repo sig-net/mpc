@@ -32,7 +32,7 @@ Both artifacts below have a single owner, the node that coordinated their genera
   * proposer sends Propose message to each peer  
   * peers answer Accept/Reject  
   * proposer sends Start carrying the final participant list to each accepter  
-  * the proposer reserves its artifact when proposing and commits it, removing it from the pool, when generation starts; aborting before the commit releases the reservation, aborting after does not  
+  * the proposer reserves its artifact when proposing and commits it, removing it from the pool, before sending Start; aborting before the commit releases the reservation, aborting after does not  
 
 * Instance: one attempt to run the protocol to completion over a specific artifact, named by that artifact
   * Signature: (sign\_id, presignature\_id) (the code's SignId wraps the request\_id above, same 32 bytes)  
@@ -63,7 +63,7 @@ Both artifacts below have a single owner, the node that coordinated their genera
   * Channels are authenticated and encrypted. 
 * Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
 * Chain state reaches a node only through its RPC provider. Different nodes can use different RPC providers. The current security model assumes that the number of nodes using a specific RPC provider is below t.  
-* The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active), a subset of the committee. It may be wrong, and no two nodes ever need the same guess; §6 D2 governs what may be derived from it. A reachable peer is additionally kept *out* of the active set while a state sync runs (a transient Syncing state), whether that sync is the initial one, a post-reconnect one, or one triggered by a peer rejecting a proposal for an artifact we list it as holding, so "active" is strictly narrower than "reachable".
+* The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active), a subset of the committee. It may be wrong, and no two nodes ever need the same guess; §6 D2 governs what may be derived from it. A reachable peer is additionally kept *out* of the active set while a state sync runs (a transient Syncing state), whether that sync is the initial one, a post-reconnect one, or one triggered by the peer's `MissingArtifact` reject of a presignature we list it as holding (only when the rejects end the round), so "active" is strictly narrower than "reachable".
 
 ## 3\. Safety properties
 

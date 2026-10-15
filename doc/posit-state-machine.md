@@ -2,7 +2,7 @@
 
 Describes the current implementation in
 `chain-signatures/node/src/protocol/request/` (`task.rs`, `organize.rs`,
-`posit.rs`, `state.rs`) plus the generation tail in `protocol/signature.rs`. The
+`posit.rs`, `state.rs`, `mailbox.rs`, `mod.rs`) plus the generation tail in `protocol/signature.rs`. The
 cait-sith signing math and the presignature/triple pipelines are not depicted here.
 
 The top level state machine matches the `SignPhase` enum. Each
@@ -55,18 +55,18 @@ Three things reset this state.
 
 A **new round** starts when a recoverable failure sends the task back to the
 organizing phase while it keeps running. It resets the timeout clock and
-releases the permit; `r`, `highest_seen_round` and the buffer all carry
-across.
+releases the permit; `r`, `highest_seen_round` and the buffer all carry across.
 
 A **respawn** is a governance change: the committee this node signs with
 changed in membership, threshold, epoch, or by leaving the running state.
-Every in-flight task is aborted and rebuilt, but `r` survives.
+Every in-flight task is aborted and rebuilt, but `r` survives; the round clock
+restarts (§6).
 
 A **node restart** loses everything: the state lives only in memory and the
 request re-enters from the backlog at 0, so a node that restarts alone is
 behind its peers.
 
-Two things are held per node rather than kept per request: (i) the mesh's active set, used to select pre-signatures with shares held by reachable and up-to-date nodes, and (ii) dead_ids, a bounded record of the 4096 most recently retired requests. A posit arriving for a dead id is dropped. Without it, a late message would create an inbox that no task will ever read.
+Three things are held per node rather than kept per request: (i) the mesh's active set, used to select pre-signatures with shares held by reachable and up-to-date nodes, (ii) dead_ids, a bounded record of the 4096 most recently retired requests, and (iii) the proposer permits, `MAX_CONCURRENT_PROPOSERS` (4) per chain. A posit arriving for a dead id is dropped. Without it, a late message would create an inbox that no task will ever read.
 
 ## 2. Inside Organizing
 
@@ -114,12 +114,13 @@ stateDiagram-v2
     state "Organizing" as OrgIn
     state "<b>Propose sent</b>
     1. tally ACCEPT and REJECT
-    2. once enough ACCEPTs send START to accepters" as ProposeSent
+    2. once enough ACCEPTs, commit the presignature
+    3. send START to accepters" as ProposeSent
     state "Generating" as GenOut
 
     OrgIn --> ProposeSent: proposer, PROPOSE sent
     ProposeSent --> GenOut: START sent
-    ProposeSent --> OrgIn: too many REJECTs, or timeout
+    ProposeSent --> OrgIn: too many REJECTs, timeout, or commit failed
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
     class OrgIn,GenOut outside
@@ -181,8 +182,10 @@ None of the four messages is a cluster-wide broadcast.
 A member outside the `PROPOSE` set is never told that round `r` is running. It
 sits in `Waiting for Propose` until its timeout expires and bumps to `r+1`,
 where it may be elected proposer and reserve a *second* presignature for a
-request that is already being signed. Nothing limits that waste after the fact;
-the pause flag that once did was removed in #1182.
+request that is already being signed. Holders still generating reject it with
+`AlreadyGenerating`, which can end the round early (§8.3); holders that already
+finished drop it (`dead_ids`), so the proposer holds its reservation until the
+round times out.
 
 The tally is keyed on `SinglePositCounter::participants` and `process_action`
 drops senders outside that set, so a reply from a member the proposer did not
@@ -195,8 +198,7 @@ No message carries the outcome of a round, so an excluded member cannot tell
 "round `r` succeeded without me" from "round `r` still running". It keeps
 rotating: it burns the round for every peer still waiting, and in the rounds
 where it is elected proposer it takes one of the `MAX_CONCURRENT_PROPOSERS` (4)
-permits of its chain's pool (#1177), which is proposer-only, so a deliberator
-holds none, and reserves a
+permits, per chain and proposer-only, so a deliberator holds none, and reserves a
 presignature that it returns to the pool on timeout. The permit is therefore
 held intermittently rather than for the whole wait, and the steady cost is the
 wasted rounds and the repeated reservations.
@@ -205,8 +207,8 @@ wasted rounds and the repeated reservations.
 
 ```mermaid
 stateDiagram-v2
-    state "<b>Acquiring</b><br/>1. proposer commits its reservation, deliberator fetches the presignature from storage<br/>2. build the generator" as Acquiring
-    state "<b>Signing</b><br/>1. poke cait-sith, relay SendMany and SendPrivate<br/>2. answer late PROPOSE with REJECT AlreadyGenerating<br/>3. Action Return carries big_r and s" as Signing
+    state "<b>Acquiring</b><br/>1. the proposer already holds its committed presignature, the deliberator fetches it from storage<br/>2. build the generator" as Acquiring
+    state "<b>Signing</b><br/>1. poke cait-sith, relay SendMany and SendPrivate<br/>2. answer late PROPOSE with REJECT AlreadyGenerating, or StaleRound if the sender is behind<br/>3. Action Return carries big_r and s" as Signing
     state "<b>Recording</b><br/>1. reconstruct against the derived key<br/>2. mark the request publishing in the backlog<br/>3. proposer submits it" as Recording
     state "Posit" as PositIn
     state "Done" as DoneOut
@@ -218,7 +220,7 @@ stateDiagram-v2
     Signing --> Recording: Action Return
     Recording --> DoneOut: Complete Ok
 
-    Acquiring --> OrgOut: commit failed, or generator build failed
+    Acquiring --> OrgOut: deliberator take failed, or generator build failed
     Signing --> OrgOut: poke error, receive timeout, or inbox closed
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
@@ -226,13 +228,13 @@ stateDiagram-v2
 ```
 
 `Recording` has no exit to a new round. `SignEntry::advance` reconstructs the
-signature and only then marks the backlog. If reconstruction fails, or the
-marking fails (`NotFound`, `InvalidPublishTransition`), the request is trashed
-with a log line, `rpc.publish` never runs, and the task still returns `Ok`: the
-failure is silently recorded as success.
+signature and marks the backlog in one step. If that fails, nothing is
+submitted, the failure is only logged, and the task still returns `Ok`; the
+entry stays `PendingGeneration` until a restart or catchup requeues it.
 
 Only the proposer submits, though every node reconstructs the signature and
-marks the backlog.
+marks the backlog. Any participant may later republish a marked entry through
+publish failover (`protocol/publish_failover.rs`), outside this machine.
 
 The round timeout does not reach here, but generation is not untimed: every
 `recv` in the generator is wrapped in a deadline measured from when the
@@ -293,7 +295,7 @@ The two round-surviving variables, in detail:
 | Variable | Lives in | Changes when |
 |---|---|---|
 | `r` — round | `SignState.round`, mirrored into `SignEntry.round` (`Arc<AtomicUsize>`) | a new round: `r := max(r+1, highest_seen_round)`. Never decreases, and survives a task respawn. |
-| `highest_seen_round` | `SignState` | a peer message or a `StaleRound` reject reports a round above it. Raising it also clears the buffer. |
+| `highest_seen_round` | `SignState` | a peer message, a `StaleRound` reject, or a late `PROPOSE` answered from `Generating` reports a round above it. Raising it also clears the buffer. |
 
 Both the proposer and the round length follow from `r` alone, with no messaging,
 which is why agreeing on `r` is all the nodes need:
@@ -304,15 +306,15 @@ which is why agreeing on `r` is all the nodes need:
 ## 6. The round timeout
 
 `round_timeout(r)` starts when the round begins: at the round bump
-(`bump_round`), or at task spawn for round 0. It starts before `t` participants
-are known, and every state shares whatever is left of it.
+(`bump_round`), or at task spawn. A respawn at carried round `r` gets
+`max(round_timeout(r), 20s)`, because the skew a respawn injects does not shrink
+with the round. The clock starts before `t` participants are known, and every
+state shares whatever is left of it.
 
 Round 0 gets 20s. Round 1 starts at a 2s floor and each later round grows 1.15x,
 up to a 600s ceiling. Short early rounds rotate quickly past dead proposers;
 long later rounds outlast the skew between nodes that indexed the request at
-different times. A respawned task's first budget is `round_timeout(r)` or the
-round-0 budget, whichever is larger (#1320), so a respawn at a low round is not
-starved.
+different times.
 
 | State | Time limit |
 |---|---|
@@ -339,6 +341,10 @@ because the round timeout ran out.
   `Propose received`; a deliberator that never gets a `PROPOSE` sends nothing.
 - **The proposer's `START` set is a subset of the accepters**, so every node in
   `Generating` has agreed to the same presignature for the same round.
+- **The proposer commits its presignature before `START` goes out.** Accepters
+  take theirs from storage the moment they see `START`, so a proposer that
+  announced first and then failed to commit would spend their copies on a round
+  it had already left.
 - **`Generating` is not preempted by a new round**; a node only leaves it by
   finishing or failing.
 
@@ -353,7 +359,7 @@ because the round timeout ran out.
    sends `ACCEPT` after the proposer already sent `START`. The proposer is
    in `Generating` and drops `ACCEPT` there, so the late node waits out its
    timeout in `Waiting for Start` and only rejoins at `r+1`.
-3. **`REJECT MissingArtifact` can cost a whole round.** The proposer selects the presignature's holders that are active, itself included, and that set is only guaranteed to reach t. It abandons the round once the rejects exceed the set's size minus t. So at exactly threshold size it has no slack at all: every one of the other t−1 members must accept, and one reject ends the round. With k members of slack it takes k+1.
+3. **`REJECT MissingArtifact` can cost a whole round.** The proposer selects the presignature's holders that are active, itself included, and that set is only guaranteed to reach t. It abandons the round once the rejects exceed the set's size minus t. So at exactly threshold size it has no slack at all: every one of the other t−1 members must accept, and one reject ends the round. With k members of slack it takes k+1. Only if the rejects end the round does the proposer send each `MissingArtifact` rejector back through state sync.
 4. **One slot per sender assumes an ordering which is not guaranteed.**
    Buffers are overwritten on arrival, so the later of two messages for one
    round wins and the other is dropped silently. Causality rules this out
@@ -363,7 +369,8 @@ because the round timeout ran out.
    the batch, and nothing dedupes on receipt.
 5. **`Done` overstates completion.** `Complete(Ok)` fires after `rpc.publish`,
    before any on-chain confirmation, and also fires when reconstruction failed
-   and the backlog was never marked. The publish/confirm lifecycle lives in the
-   spawner and indexer, not in this machine.
+   and the backlog was never marked. The publish/confirm lifecycle, publish
+   failover included, lives in the backlog and the chain streams, not in this
+   machine.
 6. **`Waiting for participants` is unbounded**, and whatever time it spends is
    subtracted from the round that follows.

@@ -50,15 +50,12 @@ filter:
 | Output | Destination | Enabled by | Filter |
 |---|---|---|---|
 | FMT | console (stderr), human-readable | always | `RUST_LOG` |
-| OTLP | OpenTelemetry collector → tracing backends | always; endpoint `MPC_OTLP_ENDPOINT` / `--otlp-endpoint` (default `http://localhost:4318`) | none — call-site levels only |
+| OTLP | OpenTelemetry collector → tracing backends | `MPC_OPENTELEMETRY_LEVEL` / `--opentelemetry-level` (default `off`); endpoint `MPC_OTLP_ENDPOINT` / `--otlp-endpoint` | `MPC_OPENTELEMETRY_LEVEL` (info/debug/trace) |
 | Stackdriver | GCP Cloud Logging, structured stderr | on GCP unless `MPC_DISABLE_GCP_LOGS` / `--disable-gcp-logs` | `RUST_LOG` |
-
-`--opentelemetry-level` (`MPC_OPENTELEMETRY_LEVEL`) is accepted but not yet wired to the OTLP
-layer; it currently has no effect.
 
 ### Local OTLP setup
 
 1. Start a local collector, e.g. [Jaeger all-in-one](https://www.jaegertracing.io/docs/getting-started/).
-2. Run the node — it exports to `http://localhost:4318` by default; override with `MPC_OTLP_ENDPOINT`
-   or `--otlp-endpoint`.
+2. Run the node with `--opentelemetry-level=info|debug|trace` — it exports to
+   `http://localhost:4318` by default; override with `MPC_OTLP_ENDPOINT` or `--otlp-endpoint`.
 3. Open the backend UI to explore logs and traces.

@@ -39,6 +39,8 @@ RUN rustc --version --verbose
 WORKDIR /usr/src/app
 ARG GIT_COMMIT_HASH
 ENV GIT_COMMIT_HASH=$GIT_COMMIT_HASH
+ARG BUILD_TIMESTAMP
+ENV BUILD_TIMESTAMP=$BUILD_TIMESTAMP
 COPY chain-signatures/ ./chain-signatures
 COPY integration-tests/ ./integration-tests
 COPY signet-primitives/ ./signet-primitives

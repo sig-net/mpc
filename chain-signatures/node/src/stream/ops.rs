@@ -6,15 +6,18 @@ use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
-    claims_attestation_key, is_failed_execution_response, CompletedTx,
+    claims_attestation_key, is_failed_execution_response, published_midnight_signing_args,
+    CompletedTx,
 };
-use crate::sign_bidirectional::{BidirectionalProgress, SignBidirectionalEventExt, SignStatus};
+use crate::sign_bidirectional::{
+    transaction_chain_id, BidirectionalProgress, SignBidirectionalEventExt, SignStatus,
+};
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    AttestationOutcomeKind, Chain, ExecutionOutcome, IndexedSignRequest, RequestKind,
+    BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, RequestKind,
     RespondBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
 };
 use mpc_utils::time::unix_elapsed_checked;
@@ -46,9 +49,22 @@ pub(crate) async fn process_sign_request(
         // admitted here but failing there can never advance: its entry sticks in
         // pending-publish forever, and every node publishes a leg-1 response
         // whose second leg will never come.
-        SignKind::SignBidirectional(event) => event.validate().with_context(|| {
-            format!("rejecting bidirectional sign request {:?}", sign_request.id)
-        })?,
+        SignKind::SignBidirectional(event) => {
+            event.validate().with_context(|| {
+                format!("rejecting bidirectional sign request {:?}", sign_request.id)
+            })?;
+            // Here rather than in `validate`, so quarantine stays a function of the event.
+            let ethereum_target = matches!(event.target_chain(), Ok(Chain::Ethereum));
+            if let Some(expected) = ctx.ethereum_chain_id.filter(|_| ethereum_target) {
+                let chain_id = transaction_chain_id(&event.serialized_transaction);
+                anyhow::ensure!(
+                    chain_id == Some(expected),
+                    "rejecting bidirectional sign request {:?}: chain id {chain_id:?}, \
+                     but this node executes on {expected}",
+                    sign_request.id
+                );
+            }
+        }
         SignKind::Sign => {}
     }
 
@@ -279,9 +295,8 @@ pub(crate) async fn process_respond_bidirectional_event(
         Err(entry) if source_chain == Chain::Midnight => {
             return settle_unobserved_midnight_response(entry, &event, ctx, root_pk).await;
         }
-        Err(_) => {
-            tracing::warn!(?sign_id, "bidirectional tx not found on completion");
-            return Ok(());
+        Err(entry) => {
+            return settle_unobserved_failed_response(entry, &event, ctx, root_pk).await;
         }
     };
 
@@ -329,11 +344,11 @@ pub(crate) async fn process_respond_bidirectional_event(
     Ok(())
 }
 
-/// Settle a Midnight request whose outcome this node has not observed. A response without
-/// output has a digest that follows from the request and the published height and kind, so
-/// every node can bind it to the request and settle it at the same source event. A contract's
-/// responses under one key version share an attestation key: only that recomputed digest ties
-/// the signature to this request. A response with output needs the observed execution.
+/// Settle a Midnight request whose outcome this node has not observed. The event carries
+/// every input of the attestation digest (height, kind, output length and output hash), so
+/// every node recomputes it for this request and settles the response at the same source
+/// event. A contract's responses under one key version share an attestation key: only that
+/// recomputed digest ties the signature to this request.
 async fn settle_unobserved_midnight_response(
     entry: SignEntry,
     event: &RespondBidirectionalEvent,
@@ -341,48 +356,71 @@ async fn settle_unobserved_midnight_response(
     root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
     let sign_id = entry.sign_id();
-    let tx = match entry.status() {
-        SignStatus::Bidirectional(
-            BidirectionalProgress::Executing(tx) | BidirectionalProgress::Parked(tx),
-        ) => Arc::clone(tx),
-        _ => {
-            tracing::warn!(?sign_id, "bidirectional tx not found on completion");
-            return Ok(());
-        }
+    let Some(tx) = unobserved_tx(&entry) else {
+        return Ok(());
     };
     let published = event
         .attestation
         .context("Midnight response lacks attestation metadata")?;
-    if published.serialized_output_length != 0 {
-        tracing::warn!(
-            ?sign_id,
-            "response commits to an output this node has not observed; keeping the request"
-        );
-        return Ok(());
-    }
+    let (epsilon, payload) = published_midnight_signing_args(&tx, &published)?;
+    mpc_crypto::verify_signature(root_pk, epsilon, payload, &event.signature).with_context(
+        || format!("respond event carried invalid signature for sign id {sign_id:?}"),
+    )?;
 
-    // The response this node would sign for the published outcome; only checked, never stored.
-    let completed = CompletedTx::new(Arc::clone(&tx), None, None, published.block_height);
-    let request = match published.outcome_kind {
-        AttestationOutcomeKind::Executed => {
-            completed.create_sign_request_from_serialized_output(Vec::new())?
-        }
-        AttestationOutcomeKind::Failed => completed.create_failed_sign_request().await?,
-        AttestationOutcomeKind::Unviable => completed.create_unviable_sign_request()?,
+    settle_unobserved(entry, &tx, ctx).await
+}
+
+/// Settle a request on another source chain whose outcome this node has not observed, if the
+/// response is Failed: its digest covers only the request id and a fixed output.
+async fn settle_unobserved_failed_response(
+    entry: SignEntry,
+    event: &RespondBidirectionalEvent,
+    ctx: &StreamContext,
+    root_pk: mpc_primitives::PublicKey,
+) -> anyhow::Result<()> {
+    let sign_id = entry.sign_id();
+    let Some(tx) = unobserved_tx(&entry) else {
+        return Ok(());
     };
-    let expected = mpc_chain_midnight::validate_attestation_response(&request)?;
-    anyhow::ensure!(
-        event.attestation == Some(expected),
-        "Midnight event metadata differs from the response it names",
-    );
-    mpc_crypto::verify_signature(
+    // The height is not part of these digests.
+    let request = CompletedTx::new(Arc::clone(&tx), None, None, 0)
+        .create_failed_sign_request()
+        .await?;
+    let verified = mpc_crypto::verify_signature(
         root_pk,
         request.args.epsilon,
         request.args.payload,
         &event.signature,
-    )
-    .with_context(|| format!("respond event carried invalid signature for sign id {sign_id:?}"))?;
+    );
+    if verified.is_err() {
+        tracing::warn!(
+            ?sign_id,
+            "response is not a Failed one this node can check; keeping the request"
+        );
+        return Ok(());
+    }
 
+    settle_unobserved(entry, &tx, ctx).await
+}
+
+fn unobserved_tx(entry: &SignEntry) -> Option<Arc<BidirectionalTx>> {
+    match entry.status() {
+        SignStatus::Bidirectional(
+            BidirectionalProgress::Executing(tx) | BidirectionalProgress::Parked(tx),
+        ) => Some(Arc::clone(tx)),
+        _ => {
+            tracing::warn!(sign_id = ?entry.sign_id(), "bidirectional tx not found on completion");
+            None
+        }
+    }
+}
+
+async fn settle_unobserved(
+    entry: SignEntry,
+    tx: &BidirectionalTx,
+    ctx: &StreamContext,
+) -> anyhow::Result<()> {
+    let sign_id = entry.sign_id();
     // An unviable transaction is never mined, so no execution event would retire its watch.
     ctx.backlog.unwatch_execution(tx.target_chain, &tx.id).await;
     entry.complete().await;
@@ -446,36 +484,24 @@ pub async fn process_execution_confirmed(
     // outcome is what distinguishes a healthy round trip from a reverted one.
     let awaiting_execution = entry.awaiting_execution();
     if matches!(result, ExecutionOutcome::ExtractionFailed) {
-        if source_chain == Chain::Midnight {
-            // Destination streams advance independently of Midnight checkpoints.
-            // Keep membership until a source-observable transition can settle it.
-            entry.park().await?;
-            tracing::error!(
-                ?sign_id,
-                ?tx_id,
-                ?source_chain,
-                "output extraction failed terminally; parking request without an attestation"
-            );
-        } else {
-            tracing::error!(
-                ?sign_id,
-                ?tx_id,
-                ?source_chain,
-                output_deserialization_schema =
-                    %String::from_utf8_lossy(&entry.execution_tx().output_deserialization_schema),
-                respond_serialization_schema =
-                    %String::from_utf8_lossy(&entry.execution_tx().respond_serialization_schema),
-                "bidirectional output extraction failed terminally; resolving the request \
-                 without a response, even though the destination transaction executed."
-            );
-            entry.complete().await;
-            // Stop the signing task even during catchup: the removed request
-            // cannot produce another completion event.
-            ctx.sign_tx
-                .send(SignCommand::Completion(sign_id))
-                .await
-                .context("failed to send completion into queue")?;
-        }
+        tracing::error!(
+            ?sign_id,
+            ?tx_id,
+            ?source_chain,
+            output_deserialization_schema =
+                %String::from_utf8_lossy(&entry.execution_tx().output_deserialization_schema),
+            respond_serialization_schema =
+                %String::from_utf8_lossy(&entry.execution_tx().respond_serialization_schema),
+            "bidirectional output extraction failed terminally; parking the request \
+             without a response, even though the destination transaction executed."
+        );
+        // Removing it here, on a target-chain event, would split source checkpoints (#1363).
+        entry.park().await?;
+        // Sent even during catchup: nothing requeues a parked request.
+        ctx.sign_tx
+            .send(SignCommand::Completion(sign_id))
+            .await
+            .context("failed to send completion into queue")?;
         return Ok(());
     }
     let execution_failed = matches!(

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use mpc_chain_integration_core::utils::retry::retry_rpc;
+use mpc_chain_integration_core::utils::retry::retry_op;
 use mpc_utils::task::AbortOnDrop;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -72,6 +72,7 @@ pub struct WireAttestation {
     pub block_height: String,
     pub output_kind: u8,
     pub serialized_output_length: String,
+    pub output_hash: String,
     pub digest: String,
 }
 
@@ -363,7 +364,7 @@ fn take_wire_id(next_id: &mut u64) -> u64 {
 
 /// Starts the builder under the restart budget.
 async fn spawn_session(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Session> {
-    retry_rpc!(
+    retry_op!(
         config.publisher.request_timeout,
         config.publisher.restart_backoff,
         "midnight_intent_gen_spawn",

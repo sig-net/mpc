@@ -17,7 +17,7 @@ const SIGNER_PAUSE_MAX: Duration = Duration::from_secs(300);
 #[derive(Clone)]
 pub struct NearRpcGates {
     /// The NEAR endpoint's cooldown, extended on 429/402; every call waits it
-    /// out (see `retry_rpc_gated!`).
+    /// out (see `retry_rpc!`).
     pub provider: SharedBackoff,
     /// Pauses this node's transactions after a signer error retrying cannot fix,
     /// such as insufficient balance. Reads are unaffected.

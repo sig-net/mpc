@@ -19,7 +19,6 @@ pub struct BidirectionalTx {
     pub output_deserialization_schema: Vec<u8>,
     pub respond_serialization_schema: Vec<u8>,
     pub request_id: [u8; 32],
-    // TODO: Same as comment above for BidirectionalTxId: Use Address from Alloy once we can bump the minimum Rust version to 1.85+
     #[serde(with = "serde_bytes")]
     pub from_address: [u8; 20],
     pub nonce: u64,

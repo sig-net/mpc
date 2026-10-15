@@ -14,7 +14,7 @@ use mpc_chain_canton::{
     },
     CantonAuthConfig, CantonClient, CantonConfig,
 };
-use mpc_chain_integration_core::NoopPublisherTelemetry;
+use mpc_chain_integration_core::{utils::retry::SharedBackoff, NoopPublisherTelemetry};
 use mpc_node::protocol::Chain;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde::de::DeserializeOwned;
@@ -658,7 +658,12 @@ pub struct CantonTestClient {
 impl CantonTestClient {
     pub async fn new(config: CantonConfig) -> Result<Self> {
         Ok(Self {
-            ledger_client: CantonClient::new(&config, Arc::new(NoopPublisherTelemetry)).await?,
+            ledger_client: CantonClient::new(
+                &config,
+                Arc::new(NoopPublisherTelemetry),
+                SharedBackoff::new(),
+            )
+            .await?,
         })
     }
 

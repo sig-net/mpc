@@ -1,5 +1,5 @@
 use crate::protocol::Governance;
-use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, RetryConfig, SharedBackoff};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
 use mpc_chain_near::NearRpcGates;
 use mpc_contract::errors::CheckpointError;
 pub use mpc_contract::primitives::{Read, View};
@@ -75,7 +75,7 @@ impl NearGovernanceClient {
 
     /// Read views from the MPC contract.
     pub async fn read(&self, reads: Vec<Read>) -> anyhow::Result<Vec<View>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             NEAR_GOVERNANCE_TIMEOUT,
             NEAR_GOVERNANCE_RETRY,
             self.gates.provider,
@@ -159,7 +159,7 @@ impl Governance for NearGovernanceClient {
     fn propose_join(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
         tracing::info!(signer_id = %self.signer.account_id, "joining the protocol");
         async move {
-            retry_rpc_gated!(
+            retry_rpc!(
                 NEAR_GOVERNANCE_TIMEOUT,
                 NEAR_GOVERNANCE_RETRY,
                 self.gates.provider,
@@ -190,7 +190,7 @@ impl Governance for NearGovernanceClient {
     > + Send {
         let account_id = account_id.clone();
         async move {
-            retry_rpc_gated!(
+            retry_rpc!(
                 NEAR_GOVERNANCE_TIMEOUT,
                 NEAR_GOVERNANCE_RETRY,
                 self.gates.provider,
@@ -214,7 +214,7 @@ impl Governance for NearGovernanceClient {
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
         tracing::info!(%epoch, signer_id = %self.signer.account_id, "voting for reshared");
         async move {
-            retry_rpc_gated!(
+            retry_rpc!(
                 NEAR_GOVERNANCE_TIMEOUT,
                 NEAR_GOVERNANCE_RETRY,
                 self.gates.provider,
@@ -247,7 +247,7 @@ impl Governance for NearGovernanceClient {
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
         tracing::info!(%public_key, signer_id = %self.signer.account_id, "voting for public key");
         async move {
-            retry_rpc_gated!(
+            retry_rpc!(
                 NEAR_GOVERNANCE_TIMEOUT,
                 NEAR_GOVERNANCE_RETRY,
                 self.gates.provider,
@@ -284,7 +284,7 @@ impl Governance for NearGovernanceClient {
             "voting for new threshold"
         );
         async move {
-            retry_rpc_gated!(
+            retry_rpc!(
                 NEAR_GOVERNANCE_TIMEOUT,
                 NEAR_GOVERNANCE_RETRY,
                 self.gates.provider,

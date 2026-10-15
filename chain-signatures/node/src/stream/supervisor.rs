@@ -14,21 +14,6 @@ use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-/// Per-chain watchdog timeout. Chains whose processing synchronously waits for
-/// finality (Ethereum, ~12 min on mainnet) need a timeout that exceeds their
-/// finality cadence to avoid false restarts. We derive it from the chain's
-/// `expected_finality_time_secs` with a buffer, flooring at 300s for fast chains.
-pub(crate) fn live_block_timeout(chain: Chain) -> Duration {
-    const FLOOR_SECS: u64 = 300;
-    const BUFFER_SECS: u64 = 300;
-    Duration::from_secs(
-        chain
-            .expected_finality_time_secs()
-            .saturating_add(BUFFER_SECS)
-            .max(FLOOR_SECS),
-    )
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RegressionOutcome {
     /// Consensus digest mismatches local backlog — transition to Recovery.
@@ -147,8 +132,11 @@ async fn resubmit_pending_checkpoint_votes(
     Ok(())
 }
 
-/// Delay before respawning a `run()` that returned an error.
+/// Base delay before a restart; doubles up to `MAX_RESTART_DELAY` while
+/// restarts recur without a new highest block (replays don't count).
 const ERROR_RESTART_DELAY: Duration = Duration::from_secs(1);
+/// Upper bound of the exponential restart backoff.
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
 /// Maximum delay between consecutive backlog recovery retry attempts during storage outages.
 const MAX_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// How long a cancelled `run()` gets to drain before it is aborted.
@@ -157,12 +145,21 @@ const RUN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 /// Supervised indexer loop: node-side recovery, then spawn the chain's `run()`
 /// loop and dispatch its events. Regression or a watchdog stall cancels `run()`
 /// and restarts it, re-running light recovery (`load_local: false`) first.
+/// Restarts back off exponentially, resetting only when a run dispatches a
+/// new highest block — replayed catchup blocks keep the watchdog fed but do
+/// not reset the backoff.
 pub async fn run_supervised<I: ChainIndexer, T: ChainTelemetry>(
     indexer: I,
     ctx: StreamContext,
     telemetry: T,
 ) {
-    run_supervised_with_watchdog(indexer, ctx, telemetry, live_block_timeout(I::CHAIN)).await
+    run_supervised_with_watchdog(
+        indexer,
+        ctx,
+        telemetry,
+        Duration::from_secs(I::CHAIN.stall_timeout_secs()),
+    )
+    .await
 }
 
 async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
@@ -188,6 +185,12 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     // votes have been resubmitted.
     let mut resubmit_votes = true;
     let mut recovery_retry_delay = ERROR_RESTART_DELAY;
+    let mut restart_delay = ERROR_RESTART_DELAY;
+    // Highest block dispatched this supervisor instance. The persisted
+    // watermark only advances once caught up, so a persistent per-height
+    // failure replays the same catchup blocks every restart; only a new
+    // high-water mark is real progress.
+    let mut highest_block: u64 = 0;
     loop {
         // Cleared before recovery, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
@@ -245,7 +248,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                         run_finished = true;
                         // `run()` exited on its own: Ok shuts the chain down; an anyhow
                         // error or JoinError::Panic is a crash — either can hot-loop,
-                        // so back off before restarting.
+                        // so the restart backoff applies.
                         let result = match (&mut run_handle).await {
                             Ok(r) => r,
                             Err(e) => Err(anyhow::Error::from(e)),
@@ -258,12 +261,16 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                                     %chain,
                                     "chain run() failed; restarting"
                                 );
-                                tokio::time::sleep(ERROR_RESTART_DELAY).await;
                                 Exit::Restart
                             }
                         };
                     };
-                    if matches!(event, ChainEvent::Block(_)) {
+                    if let ChainEvent::Block(number) = event {
+                        // Update the highest observed block and reset the restart delay if this block is newer than any seen before.
+                        if number > highest_block {
+                            highest_block = number;
+                            restart_delay = ERROR_RESTART_DELAY;
+                        }
                         last_block_event = Instant::now();
                     }
                     if let Err(err) =
@@ -310,6 +317,16 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
             }
         }
 
+        if matches!(exit, Exit::Restart) {
+            tracing::info!(
+                %chain,
+                ?restart_delay,
+                "backing off before restarting chain indexer"
+            );
+            tokio::time::sleep(restart_delay).await;
+            restart_delay = (restart_delay * 2).min(MAX_RESTART_DELAY);
+        }
+
         if matches!(exit, Exit::Shutdown) {
             tracing::warn!(%chain, "supervised chain indexer shutting down");
             return;
@@ -331,6 +348,7 @@ mod tests {
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_primitives::{Chain, CheckpointDigest};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use tokio::sync::{mpsc, watch, Notify};
 
     /// Creates a test `StreamContext` along with channels for checkpoint and mesh state updates.
@@ -993,8 +1011,15 @@ mod tests {
 
         // The first (stalled) run is restarted by the watchdog; afterwards the
         // instant-Ok exits cannot be observed while the cap is full, so the
-        // supervisor must keep restarting instead of shutting down.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // supervisor must keep restarting instead of shutting down. The first
+        // restart waits out the 1s backoff base.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while attempts.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("watchdog should have restarted run() after the 1s backoff");
         assert!(
             !task.is_finished(),
             "supervisor must not shut down while the checkpoint cap is full"
@@ -1003,6 +1028,177 @@ mod tests {
             attempts.load(Ordering::SeqCst) >= 2,
             "watchdog should have restarted run()"
         );
+        task.abort();
+    }
+
+    /// Advances virtual time (auto-advance fills the gaps between the 50ms
+    /// ticks) until enough `run()` starts are recorded, failing after `budget`
+    /// of virtual time.
+    async fn wait_for_runs(started: &Mutex<Vec<Instant>>, target: usize, budget: Duration) {
+        let deadline = Instant::now() + budget;
+        while started.lock().expect("run timestamps").len() < target {
+            assert!(
+                Instant::now() < deadline,
+                "only {} runs started within {budget:?}",
+                started.lock().expect("run timestamps").len()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failing_runs_back_off_exponentially() {
+        struct FailIndexer {
+            started: Arc<Mutex<Vec<Instant>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ChainIndexer for FailIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn run(
+                &self,
+                _events_tx: mpsc::Sender<ChainEvent>,
+                _cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                self.started
+                    .lock()
+                    .expect("run timestamps")
+                    .push(Instant::now());
+                anyhow::bail!("boom")
+            }
+        }
+
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let indexer = FailIndexer {
+            started: started.clone(),
+        };
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
+
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(3600),
+        ));
+
+        // Restarts space out 1s → 2s → 4s between consecutive runs.
+        wait_for_runs(&started, 4, Duration::from_secs(30)).await;
+        let started = started.lock().expect("run timestamps").clone();
+        for (i, gap) in started.windows(2).map(|w| w[1] - w[0]).enumerate() {
+            let expected = Duration::from_secs(1 << i);
+            assert!(
+                gap >= expected && gap < expected + Duration::from_millis(100),
+                "restart gap {i} was {gap:?}, expected ~{expected:?}"
+            );
+        }
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn block_events_reset_the_restart_backoff() {
+        struct BlockThenFailIndexer {
+            started: Arc<Mutex<Vec<Instant>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ChainIndexer for BlockThenFailIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn run(
+                &self,
+                events_tx: mpsc::Sender<ChainEvent>,
+                _cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                let height = {
+                    let mut started = self.started.lock().expect("run timestamps");
+                    started.push(Instant::now());
+                    started.len() as u64
+                };
+                events_tx.send(ChainEvent::Block(height)).await.unwrap();
+                anyhow::bail!("boom")
+            }
+        }
+
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let indexer = BlockThenFailIndexer {
+            started: started.clone(),
+        };
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
+
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(3600),
+        ));
+
+        // Every run advances past the previous highest block before failing,
+        // so each restart waits out only the 1s base.
+        wait_for_runs(&started, 3, Duration::from_secs(30)).await;
+        let started = started.lock().expect("run timestamps").clone();
+        for (i, gap) in started.windows(2).map(|w| w[1] - w[0]).enumerate() {
+            assert!(
+                gap >= Duration::from_secs(1) && gap < Duration::from_secs(2),
+                "progressed run {i} backed off {gap:?}; new highest blocks must reset to the 1s base"
+            );
+        }
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replayed_blocks_do_not_reset_the_restart_backoff() {
+        // A persistent failure at one height (e.g. a Midnight BlockHold)
+        // replays the same catchup blocks on every restart; the replays must
+        // not reset the backoff, or the loop hammers at the 1s base forever.
+        struct ReplayThenFailIndexer {
+            started: Arc<Mutex<Vec<Instant>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ChainIndexer for ReplayThenFailIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn run(
+                &self,
+                events_tx: mpsc::Sender<ChainEvent>,
+                _cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                self.started
+                    .lock()
+                    .expect("run timestamps")
+                    .push(Instant::now());
+                events_tx.send(ChainEvent::Block(1)).await.unwrap();
+                anyhow::bail!("boom")
+            }
+        }
+
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let indexer = ReplayThenFailIndexer {
+            started: started.clone(),
+        };
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(Backlog::new(), sign_tx);
+
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            indexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(3600),
+        ));
+
+        // Same height every run: backoff doubles 1s → 2s.
+        wait_for_runs(&started, 3, Duration::from_secs(30)).await;
+        let started = started.lock().expect("run timestamps").clone();
+        for (i, gap) in started.windows(2).map(|w| w[1] - w[0]).enumerate() {
+            let expected = Duration::from_secs(1 << i);
+            assert!(
+                gap >= expected && gap < expected + Duration::from_millis(100),
+                "replay-only run {i} backed off {gap:?}, expected ~{expected:?}"
+            );
+        }
         task.abort();
     }
 }
