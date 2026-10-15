@@ -174,6 +174,7 @@ impl GeneratingPhase {
             })?;
 
         if is_proposer {
+            crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
             ctx.rpc.publish(entry);
         }
         Ok(())

@@ -280,10 +280,6 @@ impl SignGenerator {
                     crate::metrics::protocols::SIGN_GENERATION_LATENCY
                         .observe(self.created.elapsed().as_secs_f64());
                     crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS.inc();
-                    if self.proposer == me {
-                        crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
-                    }
-
                     break Ok(output);
                 }
             }
