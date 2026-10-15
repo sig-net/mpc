@@ -185,7 +185,8 @@ pub fn sign_and_hash_transaction(
 ) -> anyhow::Result<([u8; 32], u64)> {
     match target {
         Chain::Ethereum => sign_and_hash_ethereum(unsigned, signature),
-        Chain::Tron => sign_and_hash_tron(unsigned, signature),
+        // The txID is sha256(raw_data) — signature-independent by construction.
+        Chain::Tron => Ok((RawTransaction::parse(unsigned)?.txid(), 0)),
         _ => anyhow::bail!("unsupported target chain {target}"),
     }
 }
@@ -202,12 +203,6 @@ fn normalized_rs_v(signature: &Signature) -> ([u8; 32], [u8; 32], u8) {
     let mut s = [0u8; 32];
     s.copy_from_slice(s_scalar.to_bytes().as_slice());
     (r, s, v)
-}
-
-fn sign_and_hash_tron(unsigned: &[u8], signature: Signature) -> anyhow::Result<([u8; 32], u64)> {
-    let (r, s, v) = normalized_rs_v(&signature);
-    let (_signed, txid) = RawTransaction::parse(unsigned)?.sign_and_hash(&r, &s, v)?;
-    Ok((txid, 0))
 }
 
 fn sign_and_hash_ethereum(
