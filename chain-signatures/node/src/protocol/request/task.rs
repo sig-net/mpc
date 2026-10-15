@@ -37,10 +37,11 @@ pub enum SignPhase {
     /// deliberator takes its share from storage) and run the signing protocol
     /// to completion.
     Generating(GeneratingPhase),
-    /// Terminal. `Ok` means generation finished and the signature was handed
-    /// off to the backlog and the RPC queue; it does not mean a response is on
-    /// chain, which the backlog state and the chain streams track. `Err` means
-    /// the request aborted.
+    /// Terminal. `Ok` means the signature was recorded in the backlog and, on
+    /// the proposer, queued for the RPC worker; it does not mean a response is
+    /// on chain, which the backlog state and the chain streams track. `Err`
+    /// means the request aborted, including a signature that was generated but
+    /// could not be handed off.
     Complete(Result<(), SignError>),
 }
 
@@ -115,10 +116,11 @@ impl GeneratingPhase {
         };
 
         match result {
-            Ok(output) => {
-                self.hand_off(ctx, state, output).await;
-                SignPhase::Complete(Ok(()))
-            }
+            Ok(output) => SignPhase::Complete(
+                self.hand_off(ctx, state, output)
+                    .await
+                    .map_err(SignError::Aborted),
+            ),
             Err(SignError::Aborted(cause)) => {
                 state.reorganize(&format!("signature generation failed: {cause}"))
             }
@@ -128,13 +130,19 @@ impl GeneratingPhase {
     /// Hand the finished signature on. This is not the on-chain publish: every
     /// participant advances the backlog entry to publishing, the record that
     /// publish failover works from, and the proposer queues a publish for the
-    /// RPC worker, which submits and retries on its own. Neither outcome is
-    /// reported back here.
-    async fn hand_off(&self, ctx: &SignTask, state: &SignState, output: FullSignature<Secp256k1>) {
+    /// RPC worker, which submits and retries on its own. `Err` means the
+    /// signature went nowhere: it did not verify, or the backlog entry could
+    /// not be advanced.
+    async fn hand_off(
+        &self,
+        ctx: &SignTask,
+        state: &SignState,
+        output: FullSignature<Secp256k1>,
+    ) -> Result<(), String> {
         let sign_id = ctx.sign_id;
         let is_proposer = self.proposer == ctx.governance.me;
 
-        let entry = match state
+        let entry = state
             .entry
             .clone()
             .advance(
@@ -144,24 +152,21 @@ impl GeneratingPhase {
                 is_proposer,
             )
             .await
-        {
-            Ok(entry) => entry,
-            Err(BacklogError::InvalidSignature) => {
-                tracing::error!(
-                    ?sign_id,
-                    "generated signature does not verify against the derived key; dropping it"
-                );
-                return;
-            }
-            Err(err) => {
-                tracing::warn!(?sign_id, ?err, "failed to mark publishing for sign request");
-                return;
-            }
-        };
+            .map_err(|err| match err {
+                BacklogError::InvalidSignature => {
+                    tracing::error!(
+                        ?sign_id,
+                        "generated signature does not verify against the derived key; dropping it"
+                    );
+                    "generated signature does not verify".to_string()
+                }
+                err => format!("failed to mark publishing: {err}"),
+            })?;
 
         if is_proposer {
             ctx.rpc.publish(entry);
         }
+        Ok(())
     }
 
     /// The proposer already committed its presignature before START went out.
