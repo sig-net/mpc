@@ -70,3 +70,7 @@ fi
 
 ln -sfn "$tag" "$TARGET_ROOT/latest"
 echo "target/compat/latest -> $tag"
+if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+  echo "::notice title=Compatibility target::HEAD vs release $tag"
+  echo "Compatibility target: HEAD vs release **$tag**" >> "$GITHUB_STEP_SUMMARY"
+fi
