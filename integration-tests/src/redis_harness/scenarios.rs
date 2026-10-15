@@ -1549,8 +1549,9 @@ impl RedisHarness {
         let (mut bgsave_latencies, bgsave_fails) = collect_task_results(tasks_3).await?;
         let bgsave_wall = t_start_3.elapsed();
 
-        // Cleanup: disable AOF
+        // Cleanup: disable AOF and reset keys
         self.client.configure_persistence(false, "no").await?;
+        self.clear_triples().await;
 
         let s1 = LatencySummary::calculate_with_failures(
             "in_memory_insert",
