@@ -207,7 +207,7 @@ dependencies = [
  "either",
  "k256",
  "once_cell",
- "rand 0.8.5",
+ "rand 0.8.8",
  "secp256k1 0.30.0",
  "serde",
  "serde_json",
@@ -446,7 +446,7 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "k256",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
@@ -664,7 +664,7 @@ dependencies = [
  "alloy-signer",
  "async-trait",
  "k256",
- "rand 0.8.5",
+ "rand 0.8.8",
  "thiserror 2.0.19",
 ]
 
@@ -1547,7 +1547,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1df2c09229cbc5a028b1d70e00fdb2acee28b1055dfb5ca73eea49c5a25c4e7c"
 dependencies = [
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -1557,7 +1557,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94893f1e0c6eeab764ade8dc4c0db24caf4fe7cbbaafc0eba0a9030f447b5185"
 dependencies = [
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -1567,7 +1567,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "246a225cc6131e9ee4f24619af0f19d67761fff15d7ccc22e42b80846e69449a"
 dependencies = [
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -1577,7 +1577,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "367c9c827ed431bff6868b7aa926e05b16eb46603cc8b6e768e4a5553fa1d155"
 dependencies = [
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -2342,7 +2342,7 @@ dependencies = [
  "midnight-curves 0.2.1",
  "midnight-proofs 0.7.3",
  "num-bigint 0.4.6",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "serde_json",
 ]
@@ -2359,7 +2359,7 @@ dependencies = [
  "midnight-curves 0.3.1",
  "midnight-proofs 0.8.2",
  "num-bigint 0.4.6",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "serde_json",
 ]
@@ -2467,7 +2467,7 @@ dependencies = [
  "log",
  "num 0.4.3",
  "pin-project-lite",
- "rand 0.10.2",
+ "rand 0.10.3",
  "rustls",
  "rustls-native-certs",
  "rustls-pki-types",
@@ -2779,9 +2779,9 @@ dependencies = [
 
 [[package]]
 name = "chacha20"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if 1.0.4",
  "cpufeatures 0.3.0",
@@ -4383,7 +4383,7 @@ checksum = "2d391ba4af7f1d93f01fcf7b2f29e2bc9348e109dfdbf4dcbdc51dfa38dab0b6"
 dependencies = [
  "deunicode",
  "dummy",
- "rand 0.8.5",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -4448,7 +4448,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee93edf3c501f0035bbeffeccfed0b79e14c311f12195ec0e661e114a0f60da4"
 dependencies = [
  "portable-atomic",
- "rand 0.10.2",
+ "rand 0.10.3",
  "web-time",
 ]
 
@@ -4577,7 +4577,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "835c052cb0c08c1acf6ffd71c022172e18723949c8282f2b9f27efbc51e64534"
 dependencies = [
  "byteorder",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rustc-hex",
  "static_assertions",
 ]
@@ -4909,7 +4909,7 @@ version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ea1015b5a70616b688dc230cfe50c8af89d972cb132d5a622814d29773b10b9"
 dependencies = [
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_core 0.6.4",
 ]
 
@@ -4998,7 +4998,7 @@ dependencies = [
  "google-cloud-wkt",
  "http 1.3.1",
  "pin-project",
- "rand 0.10.2",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -5194,7 +5194,7 @@ dependencies = [
  "parking_lot",
  "portable-atomic",
  "quanta",
- "rand 0.8.5",
+ "rand 0.8.8",
  "smallvec",
  "spinning_top",
 ]
@@ -5206,7 +5206,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0f9ef7462f7c099f518d754361858f86d8a07af53ba9af0fe635bbccb151a63"
 dependencies = [
  "ff",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_core 0.6.4",
  "rand_xorshift",
  "subtle",
@@ -6010,7 +6010,7 @@ dependencies = [
  "near-primitives",
  "near-sdk",
  "near-workspaces",
- "rand 0.8.5",
+ "rand 0.8.8",
  "reqwest 0.12.28",
  "rlp",
  "serde",
@@ -6423,7 +6423,7 @@ dependencies = [
  "jsonrpsee-types",
  "parking_lot",
  "pin-project",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -6644,7 +6644,7 @@ dependencies = [
  "libsecp256k1-core",
  "libsecp256k1-gen-ecmult",
  "libsecp256k1-gen-genmult",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "sha2 0.9.9",
  "typenum",
@@ -6931,7 +6931,7 @@ dependencies = [
  "midnight-base-crypto-derive",
  "midnight-serialize",
  "pastey",
- "rand 0.8.5",
+ "rand 0.8.8",
  "reqwest 0.13.4",
  "serde",
  "serde_bytes",
@@ -6969,7 +6969,7 @@ dependencies = [
  "num-bigint 0.4.6",
  "num-integer",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rustc-hash",
  "sha2 0.10.9",
  "sha3-circuit 0.1.0",
@@ -6992,7 +6992,7 @@ dependencies = [
  "num-bigint 0.4.6",
  "num-integer",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_chacha 0.3.1",
  "ripemd 0.2.0",
  "rustc-hash",
@@ -7012,7 +7012,7 @@ dependencies = [
  "midnight-serialize",
  "midnight-storage-core",
  "midnight-transient-crypto 3.0.0",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "zeroize",
 ]
@@ -7108,7 +7108,7 @@ dependencies = [
  "midnight-transient-crypto 2.2.0",
  "midnight-transient-crypto 3.0.0",
  "midnight-zswap",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rayon",
  "serde",
  "sha2 0.11.0",
@@ -7137,7 +7137,7 @@ dependencies = [
  "midnight-serialize",
  "midnight-storage",
  "midnight-transient-crypto 3.0.0",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "serde_bytes",
  "tracing",
@@ -7157,7 +7157,7 @@ dependencies = [
  "midnight-storage",
  "midnight-transient-crypto 2.2.0",
  "midnight-transient-crypto 3.0.0",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "serde_bytes",
 ]
@@ -7177,7 +7177,7 @@ dependencies = [
  "midnight-serialize",
  "midnight-storage",
  "midnight-transient-crypto 3.0.0",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rpds",
  "serde",
  "serde_bytes",
@@ -7260,7 +7260,7 @@ dependencies = [
  "midnight-serialize",
  "midnight-storage-core",
  "parking_lot",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "sha2 0.10.9",
  "sysinfo 0.34.2",
@@ -7285,7 +7285,7 @@ dependencies = [
  "midnight-serialize",
  "midnight-storage-macros",
  "parking_lot",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "sha2 0.10.9",
  "sysinfo 0.34.2",
@@ -7330,7 +7330,7 @@ dependencies = [
  "midnight-storage-core",
  "midnight-zk-stdlib 1.3.0",
  "pastey",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -7365,7 +7365,7 @@ dependencies = [
  "midnight-storage-core",
  "midnight-zk-stdlib 2.3.4",
  "pastey",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -7392,7 +7392,7 @@ dependencies = [
  "midnight-proofs 0.7.3",
  "num-bigint 0.4.6",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rayon",
  "sha2 0.10.9",
  "sha3-circuit 0.1.0",
@@ -7416,7 +7416,7 @@ dependencies = [
  "midnight-proofs 0.8.2",
  "num-bigint 0.4.6",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rayon",
  "sha2 0.10.9",
  "sha3-circuit 0.2.0",
@@ -7443,7 +7443,7 @@ dependencies = [
  "midnight-zk-stdlib 1.3.0",
  "midnight-zk-stdlib 2.3.4",
  "num-bigint 0.4.6",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_chacha 0.3.1",
  "serde",
  "serde_bytes",
@@ -7473,7 +7473,7 @@ dependencies = [
  "midnight-transient-crypto 2.2.0",
  "midnight-transient-crypto 3.0.0",
  "midnight-zkir",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "tracing",
  "zeroize",
@@ -7636,7 +7636,7 @@ dependencies = [
  "k256",
  "mpc-crypto",
  "mpc-primitives",
- "rand 0.8.5",
+ "rand 0.8.8",
  "tokio",
  "tokio-util",
  "tracing",
@@ -7782,7 +7782,7 @@ dependencies = [
  "near-primitives",
  "near-sdk",
  "near-workspaces",
- "rand 0.8.5",
+ "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -7815,7 +7815,7 @@ version = "1.20.0"
 dependencies = [
  "hex",
  "hpke",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
 ]
 
@@ -7884,7 +7884,7 @@ dependencies = [
  "opentelemetry-otlp 0.29.0",
  "opentelemetry_sdk 0.29.0",
  "prometheus 0.14.0",
- "rand 0.8.5",
+ "rand 0.8.8",
  "redis",
  "reqwest 0.12.28",
  "rlp",
@@ -8091,7 +8091,7 @@ dependencies = [
  "near-schema-checker-lib",
  "near-stdx",
  "primitive-types 0.10.1",
- "rand 0.8.5",
+ "rand 0.8.8",
  "secp256k1 0.27.0",
  "serde",
  "serde_json",
@@ -8274,7 +8274,7 @@ dependencies = [
  "num-rational 0.3.2",
  "ordered-float 4.6.0",
  "primitive-types 0.10.1",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_chacha 0.3.1",
  "serde",
  "serde_json",
@@ -8501,7 +8501,7 @@ dependencies = [
  "parking_lot",
  "prefix-sum-vec",
  "prometheus 0.14.0",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rayon",
  "ripemd 0.1.3",
  "rustix 1.1.4",
@@ -8541,7 +8541,7 @@ dependencies = [
  "near-primitives",
  "near-sandbox",
  "near-token",
- "rand 0.8.5",
+ "rand 0.8.8",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -8738,7 +8738,7 @@ checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
  "num-integer",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -8909,7 +8909,7 @@ dependencies = [
  "chrono",
  "getrandom 0.2.16",
  "http 1.3.1",
- "rand 0.8.5",
+ "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -9228,7 +9228,7 @@ checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
 dependencies = [
  "borsh",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
 ]
 
@@ -9260,7 +9260,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e69bf016dc406eff7d53a7d3f7cf1c2e72c82b9088aac1118591e36dd2cd3e9"
 dependencies = [
  "bitcoin_hashes 0.13.0",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_core 0.6.4",
  "serde",
  "unicode-normalization",
@@ -9838,7 +9838,7 @@ dependencies = [
  "bitflags 2.11.0",
  "lazy_static",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_chacha 0.3.1",
  "rand_xorshift",
  "regex-syntax",
@@ -9997,7 +9997,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
- "rand 0.10.2",
+ "rand 0.10.3",
  "rand_pcg",
  "ring",
  "rustc-hash",
@@ -10059,9 +10059,9 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
-version = "0.8.5"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -10082,11 +10082,11 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
- "chacha20 0.10.1",
+ "chacha20 0.10.2",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
 ]
@@ -10499,7 +10499,7 @@ dependencies = [
  "parity-scale-codec",
  "primitive-types 0.12.2",
  "proptest",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand 0.9.5",
  "rlp",
  "ruint-macro",
@@ -11009,7 +11009,7 @@ version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25996b82292a7a57ed3508f052cfff8640d38d32018784acd714758b43da9c8f"
 dependencies = [
- "rand 0.8.5",
+ "rand 0.8.8",
  "secp256k1-sys 0.8.1",
 ]
 
@@ -11029,7 +11029,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b50c5943d326858130af85e049f2661ba3c78b26589b8ab98e65e80ae44a1252"
 dependencies = [
  "bitcoin_hashes 0.14.0",
- "rand 0.8.5",
+ "rand 0.8.8",
  "secp256k1-sys 0.10.1",
  "serde",
 ]
@@ -11484,7 +11484,7 @@ dependencies = [
  "midnight-curves 0.2.1",
  "midnight-proofs 0.7.3",
  "num-bigint 0.4.6",
- "rand 0.8.5",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -11498,7 +11498,7 @@ dependencies = [
  "midnight-curves 0.3.1",
  "midnight-proofs 0.8.2",
  "num-bigint 0.4.6",
- "rand 0.8.5",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -11728,7 +11728,7 @@ dependencies = [
  "pbkdf2 0.12.2",
  "pin-project",
  "poly1305",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_chacha 0.3.1",
  "ruzstd",
  "schnorrkel",
@@ -11771,7 +11771,7 @@ dependencies = [
  "lru 0.12.5",
  "parking_lot",
  "pin-project",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_chacha 0.3.1",
  "serde",
  "serde_json",
@@ -11824,7 +11824,7 @@ dependencies = [
  "http 1.3.1",
  "httparse",
  "log",
- "rand 0.8.5",
+ "rand 0.8.8",
  "sha1",
 ]
 
@@ -12147,7 +12147,7 @@ dependencies = [
  "futures-util",
  "indexmap 2.14.0",
  "log",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rayon",
  "solana-keypair",
  "solana-measure",
@@ -12227,7 +12227,7 @@ dependencies = [
  "digest 0.11.3",
  "ed25519",
  "hashbrown 0.15.5",
- "rand 0.10.2",
+ "rand 0.10.3",
  "rand_core 0.10.1",
  "rustc_version 0.4.1",
  "sha2 0.11.0",
@@ -12613,7 +12613,7 @@ dependencies = [
  "itertools 0.12.1",
  "log",
  "nix",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "socket2 0.6.4",
  "solana-serde",
@@ -12702,7 +12702,7 @@ dependencies = [
  "libc",
  "log",
  "nix",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rayon",
  "serde",
  "solana-hash 3.1.0",
@@ -12829,7 +12829,7 @@ version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8909d399deb0851aa524420beeb5646b115fd253ef446e35fe4504c904da3941"
 dependencies = [
- "rand 0.8.5",
+ "rand 0.8.8",
  "solana-address 1.1.0",
 ]
 
@@ -13323,7 +13323,7 @@ dependencies = [
  "num_cpus",
  "pem",
  "percentage",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rustls",
  "smallvec",
  "socket2 0.6.4",
@@ -13359,7 +13359,7 @@ version = "3.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b78cd0bfb102d4197ce8c590f800a119ba0d358369ca57b0f66e94d1317fd0e"
 dependencies = [
- "rand 0.8.5",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -13549,7 +13549,7 @@ dependencies = [
  "base64 0.22.1",
  "bincode 1.3.3",
  "log",
- "rand 0.8.5",
+ "rand 0.8.8",
  "solana-packet 3.0.0",
  "solana-perf",
  "solana-short-vec",
@@ -13646,7 +13646,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8b34a38f1aab0be22e3d9810c84229a5668a50839fc38e9a409912dabbc227"
 dependencies = [
  "agave-feature-set",
- "rand 0.8.5",
+ "rand 0.8.8",
  "semver 1.0.28",
  "serde",
  "solana-sanitize",
@@ -13708,7 +13708,7 @@ dependencies = [
  "merlin",
  "num-derive",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.8",
  "serde",
  "serde_derive",
  "serde_json",
@@ -13783,7 +13783,7 @@ dependencies = [
  "parking_lot",
  "paste",
  "primitive-types 0.13.1",
- "rand 0.8.5",
+ "rand 0.8.8",
  "scale-info",
  "schnorrkel",
  "secp256k1 0.28.2",
@@ -13903,7 +13903,7 @@ dependencies = [
  "num-traits",
  "parity-scale-codec",
  "paste",
- "rand 0.8.5",
+ "rand 0.8.8",
  "scale-info",
  "serde",
  "simple-mermaid",
@@ -13961,7 +13961,7 @@ dependencies = [
  "log",
  "parity-scale-codec",
  "parking_lot",
- "rand 0.8.5",
+ "rand 0.8.8",
  "smallvec",
  "sp-core",
  "sp-externalities",
@@ -14018,7 +14018,7 @@ dependencies = [
  "nohash-hasher",
  "parity-scale-codec",
  "parking_lot",
- "rand 0.8.5",
+ "rand 0.8.8",
  "scale-info",
  "schnellru",
  "sp-core",
@@ -14059,9 +14059,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "spinning_top"
@@ -14783,7 +14783,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand 2.3.0",
- "getrandom 0.4.3",
+ "getrandom 0.3.2",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -15029,7 +15029,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a129d95275ebf4c493ec53bf0f8cd95f5ac161bc4f381700809a54f595d4470"
 dependencies = [
  "pin-project-lite",
- "rand 0.10.2",
+ "rand 0.10.3",
  "tokio",
 ]
 
@@ -15569,9 +15569,9 @@ version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
- "cfg-if 1.0.4",
+ "cfg-if 0.1.10",
  "digest 0.10.7",
- "rand 0.8.5",
+ "rand 0.8.8",
  "static_assertions",
 ]
 
@@ -15862,7 +15862,7 @@ dependencies = [
  "ark-serialize-derive 0.4.2",
  "arrayref",
  "digest 0.10.7",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "sha2 0.10.9",
@@ -17016,7 +17016,7 @@ dependencies = [
  "byteorder",
  "crunchy",
  "lazy_static",
- "rand 0.8.5",
+ "rand 0.8.8",
  "rustc-hex",
 ]
 
