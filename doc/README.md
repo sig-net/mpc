@@ -4,6 +4,7 @@
 
 - [Protocol properties](protocol-properties.md): safety, liveness and efficiency properties of the coordination layer, and how the code enforces them.
 - [Posit state machine](posit-state-machine.md): the per-request signing state machine, rounds and timeouts, as implemented.
+- [Bidirectional calls](bidirectional-calls.md): entities, API and properties of a call signed for a target chain whose outcome is reported back to the source chain.
 - [Node specification](node-specification.md): the original design of protocol invocations, artifact lifecycle, peer status and state sync. Graph sources are in [graphs/](graphs/).
 
 ## Keys
