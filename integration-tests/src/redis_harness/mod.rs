@@ -24,7 +24,7 @@ pub use diagnostics::{
 };
 pub use participant::{
     dummy_pair, dummy_presignature, dummy_triple, next_id_block, BackgroundPollerGuard,
-    SimulatedParticipant,
+    SimulatedParticipant, StockpileKind,
 };
 
 /// Standalone Redis benchmark harness.
@@ -144,108 +144,68 @@ impl RedisHarness {
         self.client.print_diagnostics().await
     }
 
-    async fn populate_all<F, Fut>(
+    /// Populate `count` items (triples or presignatures) for a single participant.
+    pub async fn populate(
         &self,
+        kind: StockpileKind,
+        participant_idx: usize,
         base_id: u64,
         count: usize,
-        f: F,
-    ) -> anyhow::Result<Vec<Vec<u64>>>
-    where
-        F: Fn(SimulatedParticipant, u64, usize, Vec<Participant>) -> Fut,
-        Fut: std::future::Future<Output = Vec<u64>> + Send + 'static,
-    {
-        let participant_list = self.participant_ids();
+    ) -> anyhow::Result<Vec<u64>> {
+        anyhow::ensure!(
+            participant_idx < self.participants.len(),
+            "invalid participant index {participant_idx} (total participants: {})",
+            self.participants.len()
+        );
+        let p = &self.participants[participant_idx];
+        let p_list = self.participant_ids();
+        p.populate(kind, base_id, count, &p_list).await
+    }
+
+    /// Populate `count` items (triples or presignatures) across all participants concurrently.
+    /// Returns the list of generated IDs grouped by participant index.
+    pub async fn populate_all(
+        &self,
+        kind: StockpileKind,
+        base_id: u64,
+        count: usize,
+    ) -> anyhow::Result<Vec<Vec<u64>>> {
+        let p_list = self.participant_ids();
         let handles: Vec<_> = self
             .participants
             .iter()
             .enumerate()
             .map(|(idx, p)| {
                 let p_base = base_id + (idx as u64 * count as u64);
-                tokio::spawn(f(p.clone(), p_base, count, participant_list.clone()))
+                let p = p.clone();
+                let p_list = p_list.clone();
+                tokio::spawn(async move { p.populate(kind, p_base, count, &p_list).await })
             })
             .collect();
 
         let mut results = Vec::with_capacity(handles.len());
         for h in handles {
-            results.push(h.await.context("participant populate task failed or panicked")?);
+            results.push(h.await.context("participant populate task panicked")??);
         }
         Ok(results)
     }
 
-    /// Populate `count` triples on all participants concurrently.
-    /// Returns the list of generated triple IDs grouped by participant index.
+    /// Convenience alias to populate triples on all participants concurrently.
     pub async fn populate_all_triples(
         &self,
         base_id: u64,
         count: usize,
     ) -> anyhow::Result<Vec<Vec<u64>>> {
-        self.populate_all(base_id, count, SimulatedParticipant::populate_triples)
-            .await
+        self.populate_all(StockpileKind::Triples, base_id, count).await
     }
 
-    /// Populate `count` presignatures on all participants concurrently.
-    /// Returns the list of generated presignature IDs grouped by participant index.
+    /// Convenience alias to populate presignatures on all participants concurrently.
     pub async fn populate_all_presignatures(
         &self,
         base_id: u64,
         count: usize,
     ) -> anyhow::Result<Vec<Vec<u64>>> {
-        self.populate_all(base_id, count, SimulatedParticipant::populate_presignatures)
-            .await
-    }
-
-    /// Populate `count` triples for a single participant concurrently across worker tasks.
-    pub async fn populate_triples_parallel(
-        &self,
-        participant: &SimulatedParticipant,
-        base_id: u64,
-        count: usize,
-    ) -> anyhow::Result<Vec<u64>> {
-        let num_workers = 8.min(count);
-        let chunk_size = count.div_ceil(num_workers);
-        let participant_list = self.participant_ids();
-
-        let mut handles = Vec::with_capacity(num_workers);
-        for w in 0..num_workers {
-            let start = w * chunk_size;
-            let end = (start + chunk_size).min(count);
-            if start >= end {
-                continue;
-            }
-            let chunk_count = end - start;
-            let p_base = base_id + start as u64;
-            let p = participant.clone();
-            let p_list = participant_list.clone();
-
-            handles.push(tokio::spawn(async move {
-                let mut ids = Vec::with_capacity(chunk_count);
-                for i in 0..chunk_count {
-                    let id = p_base + i as u64;
-                    let pair = dummy_pair(id, &p_list);
-                    let Some(mut slot) = p.triples.create_slot(id, p.participant).await else {
-                        continue;
-                    };
-                    if slot.insert(pair, p.participant).await {
-                        ids.push(id);
-                    }
-                }
-                ids
-            }));
-        }
-
-        let mut all_ids = Vec::with_capacity(count);
-        for h in handles {
-            let ids = h.await.context("parallel populate task failed")?;
-            all_ids.extend(ids);
-        }
-        all_ids.sort_unstable();
-        anyhow::ensure!(
-            all_ids.len() == count,
-            "failed to populate expected triples: requested {}, got {}",
-            count,
-            all_ids.len()
-        );
-        Ok(all_ids)
+        self.populate_all(StockpileKind::Presignatures, base_id, count).await
     }
 
     /// Spawn 100ms background stockpile polling loop across all participants.

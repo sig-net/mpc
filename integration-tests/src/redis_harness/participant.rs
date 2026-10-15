@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
@@ -20,6 +21,13 @@ static GLOBAL_ID_COUNTER: AtomicU64 = AtomicU64::new(10_000_000);
 
 pub fn next_id_block(count: u64) -> u64 {
     GLOBAL_ID_COUNTER.fetch_add(count, Ordering::Relaxed)
+}
+
+/// The type of stockpile artifact to generate or manage in benchmark runs.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StockpileKind {
+    Triples,
+    Presignatures,
 }
 
 /// Simulated participant storage handles in the isolated Redis harness.
@@ -51,60 +59,79 @@ impl SimulatedParticipant {
         self.triples.reset_reservations().await;
         self.presignatures.reset_reservations().await;
     }
-    /// Populate a sequential range of triples starting at `base_id`.
-    pub async fn populate_triples(
-        self,
-        base_id: u64,
-        count: usize,
-        participants: Vec<Participant>,
-    ) -> Vec<u64> {
-        let mut ids = Vec::with_capacity(count);
-        for i in 0..count {
-            let id = base_id + i as u64;
-            let pair = dummy_pair(id, &participants);
-            let Some(mut slot) = self.triples.create_slot(id, self.participant).await else {
-                continue;
-            };
-            if slot.insert(pair, self.participant).await {
-                ids.push(id);
-            }
-        }
-        assert_eq!(
-            ids.len(),
-            count,
-            "failed to populate expected stockpile triples: requested {}, successfully created {}",
-            count,
-            ids.len()
-        );
-        ids
-    }
 
-    /// Populate a sequential range of presignatures starting at `base_id`.
-    pub async fn populate_presignatures(
-        self,
+    /// Populate `count` items (triples or presignatures) starting at `base_id`.
+    /// Automatically chunks work across up to 8 concurrent worker tasks for high throughput.
+    pub async fn populate(
+        &self,
+        kind: StockpileKind,
         base_id: u64,
         count: usize,
-        participants: Vec<Participant>,
-    ) -> Vec<u64> {
-        let mut ids = Vec::with_capacity(count);
-        for i in 0..count {
-            let id = base_id + i as u64;
-            let presig = dummy_presignature(id, &participants);
-            let Some(mut slot) = self.presignatures.create_slot(id, self.participant).await else {
-                continue;
-            };
-            if slot.insert(presig, self.participant).await {
-                ids.push(id);
-            }
+        participants: &[Participant],
+    ) -> anyhow::Result<Vec<u64>> {
+        if count == 0 {
+            return Ok(Vec::new());
         }
-        assert_eq!(
-            ids.len(),
-            count,
-            "failed to populate expected stockpile presignatures: requested {}, successfully created {}",
-            count,
-            ids.len()
+
+        let num_workers = 8.min(count);
+        let chunk_size = count.div_ceil(num_workers);
+        let mut handles = Vec::with_capacity(num_workers);
+
+        for w in 0..num_workers {
+            let start = w * chunk_size;
+            let end = (start + chunk_size).min(count);
+            if start >= end {
+                continue;
+            }
+            let chunk_count = end - start;
+            let p_base = base_id + start as u64;
+            let p = self.clone();
+            let p_list = participants.to_vec();
+
+            handles.push(tokio::spawn(async move {
+                let mut ids = Vec::with_capacity(chunk_count);
+                for i in 0..chunk_count {
+                    let id = p_base + i as u64;
+                    let inserted = match kind {
+                        StockpileKind::Triples => {
+                            let pair = dummy_pair(id, &p_list);
+                            if let Some(mut slot) = p.triples.create_slot(id, p.participant).await {
+                                slot.insert(pair, p.participant).await
+                            } else {
+                                false
+                            }
+                        }
+                        StockpileKind::Presignatures => {
+                            let presig = dummy_presignature(id, &p_list);
+                            if let Some(mut slot) =
+                                p.presignatures.create_slot(id, p.participant).await
+                            {
+                                slot.insert(presig, p.participant).await
+                            } else {
+                                false
+                            }
+                        }
+                    };
+                    if inserted {
+                        ids.push(id);
+                    }
+                }
+                ids
+            }));
+        }
+
+        let mut all_ids = Vec::with_capacity(count);
+        for h in handles {
+            let ids = h.await.context("participant populate task failed or panicked")?;
+            all_ids.extend(ids);
+        }
+        all_ids.sort_unstable();
+        anyhow::ensure!(
+            all_ids.len() == count,
+            "failed to populate expected stockpile {kind:?}: requested {count}, successfully created {}",
+            all_ids.len()
         );
-        ids
+        Ok(all_ids)
     }
 
     /// Run the 100ms background stockpile polling loop until stopped.

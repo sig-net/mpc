@@ -9,7 +9,7 @@ use mpc_node::storage::TripleStorage;
 use tokio::sync::Barrier;
 
 use super::diagnostics::{partition_wall_3, partition_wall_by_active_time, LatencySummary};
-use super::participant::{next_id_block, SimulatedParticipant};
+use super::participant::{next_id_block, SimulatedParticipant, StockpileKind};
 use super::RedisHarness;
 
 impl RedisHarness {
@@ -224,15 +224,17 @@ impl RedisHarness {
             .participants
             .get(participant_idx)
             .context("invalid participant index")?;
-        let participant_list = self.participant_ids();
-
         println!(
             "   -> Stockpiling {initial_stockpile} triples on participant {participant_idx}..."
         );
         let base_id = next_id_block(initial_stockpile as u64 + 1000);
-        p.clone()
-            .populate_triples(base_id, initial_stockpile, participant_list)
-            .await;
+        self.populate(
+            StockpileKind::Triples,
+            participant_idx,
+            base_id,
+            initial_stockpile,
+        )
+        .await?;
 
         let barrier = Arc::new(Barrier::new(num_racers));
         let race_start = Instant::now();
@@ -1116,15 +1118,13 @@ impl RedisHarness {
         }
 
         let p = &self.participants[0];
-        let participant_list = self.participant_ids();
         let base_id = next_id_block(stockpile_size as u64 + 10_000);
 
         println!(
             "   -> Pre-populating large stockpile of {stockpile_size} items on participant 0..."
         );
-        p.clone()
-            .populate_triples(base_id, stockpile_size, participant_list)
-            .await;
+        self.populate(StockpileKind::Triples, 0, base_id, stockpile_size)
+            .await?;
 
         let coverage = (exclusions_count as f64 / stockpile_size as f64) * 100.0;
         println!(
@@ -1196,13 +1196,11 @@ impl RedisHarness {
         }
 
         let p = &self.participants[0];
-        let participant_list = self.participant_ids();
         let base_id = next_id_block(initial_stockpile as u64 + 10_000);
 
         println!("   -> Pre-stockpiling {initial_stockpile} triples on participant 0...");
-        p.clone()
-            .populate_triples(base_id, initial_stockpile, participant_list)
-            .await;
+        self.populate(StockpileKind::Triples, 0, base_id, initial_stockpile)
+            .await?;
 
         println!(
             "   -> Simulating {num_proposers} proposers with {abort_percent}% deliberation timeout/abort rate across {rounds_per_proposer} rounds (deliberation hold: {deliberation_delay_ms}ms)..."
@@ -1303,14 +1301,12 @@ impl RedisHarness {
 
         let owner = &self.participants[0];
         let owner_participant = owner.participant;
-        let participant_list = self.participant_ids();
         let base_id = next_id_block(num_items as u64 + 10_000);
 
         println!("   -> Pre-populating {num_items} items on owner participant...");
-        let target_ids = owner
-            .clone()
-            .populate_triples(base_id, num_items, participant_list)
-            .await;
+        let target_ids = self
+            .populate(StockpileKind::Triples, 0, base_id, num_items)
+            .await?;
 
         println!(
             "   -> Launching {contenders_per_item} parallel tasks racing to take each item (reproducing 'not owned by this owner' Lua errors)..."
@@ -1437,7 +1433,7 @@ impl RedisHarness {
 
                 let base_id = next_id_block(batch_size as u64 + 1000);
                 let all_ids = self
-                    .populate_triples_parallel(p, base_id, batch_size)
+                    .populate(StockpileKind::Triples, node_idx, base_id, batch_size)
                     .await?;
 
                 // Phase 1: Large ARGV sync (passing all >4,096 IDs in ARGV; 0 outdated)
