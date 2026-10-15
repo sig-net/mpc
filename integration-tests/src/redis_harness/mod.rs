@@ -8,24 +8,16 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
-pub use deadpool_redis::redis;
 use deadpool_redis::Pool;
-use mpc_node::protocol::presignature::Presignature;
-use mpc_node::storage::triple_storage::TriplePair;
 use near_account_id::AccountId;
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::containers::Redis;
+use diagnostics::print_summary_header;
 
 pub use config::RedisHarnessConfig;
-pub use diagnostics::{
-    partition_wall_3, partition_wall_by_active_time, print_summary_header, LatencySummary,
-    MemorySnapshot, RedisDiagnostics, RedisDiagnosticsClient, SlowlogRecord,
-};
-pub use participant::{
-    dummy_pair, dummy_presignature, dummy_triple, next_id_block, BackgroundPollerGuard,
-    SimulatedParticipant, StockpileKind,
-};
+pub use diagnostics::{LatencySummary, MemorySnapshot, RedisDiagnosticsClient, SlowlogRecord};
+pub use participant::{BackgroundPollerGuard, SimulatedParticipant, StockpileKind};
 
 /// Standalone Redis benchmark harness.
 ///
@@ -37,7 +29,6 @@ pub struct RedisHarness {
     pub redis_url: String,
     pub client: RedisDiagnosticsClient,
     pub participants: Vec<SimulatedParticipant>,
-    pub flush_between: bool,
     pub config: RedisHarnessConfig,
 }
 
@@ -52,7 +43,7 @@ impl RedisHarness {
             (None, url.clone())
         } else {
             let spawner = ClusterSpawner::default()
-                .network("bench-redis-harness")
+                .network(&config.docker_network)
                 .init_network()
                 .await
                 .context("failed to init docker network")?;
@@ -65,6 +56,8 @@ impl RedisHarness {
             &redis_url,
             config.max_pool_size,
             config.pool_timeout,
+            config.slowlog_threshold_us,
+            config.slowlog_max_len,
         )
         .await?;
 
@@ -72,19 +65,11 @@ impl RedisHarness {
         for i in 0..config.num_participants {
             let participant = Participant::from(i as u32);
             let account_id: AccountId = format!("node-{i}.testnet").parse().unwrap();
-
-            // All participants strictly share the harness pool
-            let triples = TriplePair::storage(&client.pool, &account_id);
-            triples.set_me(participant);
-            let presignatures = Presignature::storage(&client.pool, &account_id);
-            presignatures.set_me(participant);
-
-            participants.push(SimulatedParticipant {
+            participants.push(SimulatedParticipant::new(
+                client.pool(),
+                &account_id,
                 participant,
-                account_id,
-                triples,
-                presignatures,
-            });
+            ));
         }
 
         Ok(Self {
@@ -92,7 +77,6 @@ impl RedisHarness {
             redis_url,
             client,
             participants,
-            flush_between: config.flush_between,
             config,
         })
     }
@@ -108,8 +92,12 @@ impl RedisHarness {
 
     /// Enable or disable FLUSHDB between benchmark scenarios (default: true).
     pub fn set_flush_between(&mut self, flush: bool) {
-        self.flush_between = flush;
         self.config.flush_between = flush;
+    }
+
+    /// Whether FLUSHDB runs between benchmark scenarios.
+    pub fn flush_between(&self) -> bool {
+        self.config.flush_between
     }
 
     /// Clear all in-memory reservations across all participants' storage handles.
@@ -122,7 +110,7 @@ impl RedisHarness {
     /// Reset slowlog, clear in-memory reservations (and optionally FLUSHDB if flush_between is enabled)
     /// before running a test case, logging the pre-run keyspace and memory state.
     pub async fn reset_diagnostics(&self) -> anyhow::Result<()> {
-        if self.flush_between {
+        if self.config.flush_between {
             self.client.flush_db().await?;
         }
         self.reset_reservations().await;

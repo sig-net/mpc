@@ -31,8 +31,6 @@ pub struct RedisDiagnosticsClient {
     pub pool: Pool,
 }
 
-pub type RedisDiagnostics = RedisDiagnosticsClient;
-
 impl RedisDiagnosticsClient {
     /// Initialize the Redis diagnostics client from a URL and options,
     /// constructing the connection pool and configuring slowlog thresholds.
@@ -40,10 +38,12 @@ impl RedisDiagnosticsClient {
         redis_url: &str,
         max_pool_size: Option<usize>,
         timeout: Option<Duration>,
+        slowlog_threshold_us: i64,
+        slowlog_max_len: i64,
     ) -> anyhow::Result<Self> {
         let pool = Self::build_pool(redis_url, max_pool_size, timeout)?;
         let client = Self { pool };
-        client.setup(1000).await?;
+        client.setup(slowlog_threshold_us, slowlog_max_len).await?;
         Ok(client)
     }
 
@@ -81,8 +81,13 @@ impl RedisDiagnosticsClient {
         self.pool.status()
     }
 
-    /// Configure Redis to log all commands slower than `slowlog_threshold_us` (e.g. 1000us = 1ms).
-    pub async fn setup(&self, slowlog_threshold_us: i64) -> anyhow::Result<()> {
+    /// Configure Redis to log all commands slower than `slowlog_threshold_us` (e.g. 1000us = 1ms)
+    /// and set maximum slowlog buffer to `slowlog_max_len`.
+    pub async fn setup(
+        &self,
+        slowlog_threshold_us: i64,
+        slowlog_max_len: i64,
+    ) -> anyhow::Result<()> {
         let mut conn = self.pool.get().await.context("failed to get connection")?;
         cmd("CONFIG")
             .arg("SET")
@@ -95,7 +100,7 @@ impl RedisDiagnosticsClient {
         cmd("CONFIG")
             .arg("SET")
             .arg("slowlog-max-len")
-            .arg(1024)
+            .arg(slowlog_max_len)
             .query_async::<()>(&mut conn)
             .await
             .context("failed to set slowlog max-len")?;
@@ -367,7 +372,7 @@ impl RedisDiagnosticsClient {
     }
 }
 
-pub fn parse_slowlog_entry(entry: Value) -> Option<SlowlogRecord> {
+fn parse_slowlog_entry(entry: Value) -> Option<SlowlogRecord> {
     let Value::Array(fields) = entry else {
         return None;
     };

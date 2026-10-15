@@ -554,7 +554,7 @@ impl Drop for BackgroundPollerGuard {
     }
 }
 
-pub fn dummy_presignature(id: u64, participants: &[Participant]) -> Presignature {
+pub(crate) fn dummy_presignature(id: u64, participants: &[Participant]) -> Presignature {
     Presignature {
         id,
         output: PresignOutput {
@@ -567,7 +567,7 @@ pub fn dummy_presignature(id: u64, participants: &[Participant]) -> Presignature
     }
 }
 
-pub fn dummy_pair(id: u64, participants: &[Participant]) -> TriplePair {
+pub(crate) fn dummy_pair(id: u64, participants: &[Participant]) -> TriplePair {
     TriplePair {
         id,
         triple0: dummy_triple(participants),
@@ -576,7 +576,7 @@ pub fn dummy_pair(id: u64, participants: &[Participant]) -> TriplePair {
     }
 }
 
-pub fn dummy_triple(participants: &[Participant]) -> Triple {
+pub(crate) fn dummy_triple(participants: &[Participant]) -> Triple {
     Triple {
         share: TripleShare {
             a: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,

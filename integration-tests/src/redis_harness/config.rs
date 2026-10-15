@@ -14,6 +14,12 @@ pub struct RedisHarnessConfig {
     /// Optional external Redis instance URL (e.g. redis://127.0.0.1:6379).
     /// If None, an ephemeral isolated Docker container is spawned.
     pub redis_url: Option<String>,
+    /// Slowlog threshold in microseconds. Commands taking longer than this are recorded (default: 1000us = 1ms).
+    pub slowlog_threshold_us: i64,
+    /// Maximum number of slowlog entries preserved in Redis memory (default: 1024).
+    pub slowlog_max_len: i64,
+    /// Docker network name when spawning an ephemeral Redis container (default: "bench-redis-harness").
+    pub docker_network: String,
 }
 
 impl Default for RedisHarnessConfig {
@@ -24,6 +30,9 @@ impl Default for RedisHarnessConfig {
             pool_timeout: Some(Duration::from_secs(5)),
             flush_between: true,
             redis_url: None,
+            slowlog_threshold_us: 1000,
+            slowlog_max_len: 1024,
+            docker_network: "bench-redis-harness".to_string(),
         }
     }
 }
@@ -53,6 +62,21 @@ impl RedisHarnessConfig {
 
     pub fn with_redis_url(mut self, url: impl Into<String>) -> Self {
         self.redis_url = Some(url.into());
+        self
+    }
+
+    pub fn with_slowlog_threshold(mut self, threshold_us: i64) -> Self {
+        self.slowlog_threshold_us = threshold_us;
+        self
+    }
+
+    pub fn with_slowlog_max_len(mut self, max_len: i64) -> Self {
+        self.slowlog_max_len = max_len;
+        self
+    }
+
+    pub fn with_docker_network(mut self, network: impl Into<String>) -> Self {
+        self.docker_network = network.into();
         self
     }
 }

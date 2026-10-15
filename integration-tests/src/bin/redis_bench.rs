@@ -79,6 +79,10 @@ struct Args {
     #[arg(long)]
     no_flush: bool,
 
+    /// Slowlog threshold in microseconds for recording slow Redis commands (default: 1000us = 1ms)
+    #[arg(long, default_value_t = 1000)]
+    slowlog_threshold: i64,
+
     /// Optional output file path for exporting results as JSON
     #[arg(long)]
     json_out: Option<PathBuf>,
@@ -155,7 +159,8 @@ async fn main() -> anyhow::Result<()> {
     println!("Initializing Redis benchmark harness...");
     let mut config = RedisHarnessConfig::new(args.participants)
         .with_pool_size(effective_pool_size)
-        .with_flush_between(should_flush);
+        .with_flush_between(should_flush)
+        .with_slowlog_threshold(args.slowlog_threshold);
     if let Some(ref url) = args.redis_url {
         config = config.with_redis_url(url);
     }
