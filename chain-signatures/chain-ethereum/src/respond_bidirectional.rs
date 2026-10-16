@@ -735,6 +735,23 @@ mod tests {
     }
 
     #[test]
+    fn build_serialized_output_decodes_one_and_two_byte_calldata_calls() {
+        let bool_schema: &[u8] = br#"[{"name":"ok","type":"bool"}]"#;
+        for calldata in [&[0xa9][..], &[0xa9, 0x05]] {
+            // Not the plain-transfer default `true`.
+            let out = build_serialized_output(
+                is_contract_call(&Bytes::copy_from_slice(calldata)),
+                bool_schema,
+                TraceOutput::Output(abi_bool(false)),
+                SerDeserFormat::Abi,
+                bool_schema,
+            )
+            .unwrap();
+            assert_eq!(out, abi_bool(false).to_vec(), "{calldata:?}");
+        }
+    }
+
+    #[test]
     fn build_serialized_output_requires_trace_for_contract_call() {
         let err = build_serialized_output(
             true,
