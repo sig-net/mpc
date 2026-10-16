@@ -17,7 +17,7 @@ use diagnostics::print_summary_header;
 
 pub use config::RedisHarnessConfig;
 pub use diagnostics::{LatencySummary, MemorySnapshot, RedisDiagnosticsClient, SlowlogRecord};
-pub use participant::{BackgroundPollerGuard, SimulatedParticipant, StockpileKind};
+pub use participant::{BackgroundPollerGuard, SimulatedParticipant, ArtifactKind};
 
 /// Standalone Redis benchmark harness.
 ///
@@ -138,7 +138,7 @@ impl RedisHarness {
     /// Populate `count` items (triples or presignatures) for a single participant.
     pub async fn populate(
         &self,
-        kind: StockpileKind,
+        kind: ArtifactKind,
         participant_idx: usize,
         base_id: u64,
         count: usize,
@@ -157,7 +157,7 @@ impl RedisHarness {
     /// Returns the list of generated IDs grouped by participant index.
     pub async fn populate_all(
         &self,
-        kind: StockpileKind,
+        kind: ArtifactKind,
         base_id: u64,
         count: usize,
     ) -> anyhow::Result<Vec<Vec<u64>>> {
@@ -185,7 +185,7 @@ impl RedisHarness {
         base_id: u64,
         count: usize,
     ) -> anyhow::Result<Vec<Vec<u64>>> {
-        self.populate_all(StockpileKind::Triples, base_id, count).await
+        self.populate_all(ArtifactKind::Triples, base_id, count).await
     }
 
     /// Convenience alias to populate presignatures on all participants concurrently.
@@ -194,7 +194,7 @@ impl RedisHarness {
         base_id: u64,
         count: usize,
     ) -> anyhow::Result<Vec<Vec<u64>>> {
-        self.populate_all(StockpileKind::Presignatures, base_id, count).await
+        self.populate_all(ArtifactKind::Presignatures, base_id, count).await
     }
 
     /// Spawn 100ms background stockpile polling loop across all participants.

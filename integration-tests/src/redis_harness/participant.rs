@@ -25,7 +25,7 @@ pub fn next_id_block(count: u64) -> u64 {
 
 /// The type of stockpile artifact to generate or manage in benchmark runs.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum StockpileKind {
+pub enum ArtifactKind {
     Triples,
     Presignatures,
 }
@@ -62,7 +62,7 @@ impl SimulatedParticipant {
 
     async fn populate_chunk(
         self,
-        kind: StockpileKind,
+        kind: ArtifactKind,
         base_id: u64,
         count: usize,
         participants: Vec<Participant>,
@@ -71,7 +71,7 @@ impl SimulatedParticipant {
         for i in 0..count {
             let id = base_id + i as u64;
             let inserted = match kind {
-                StockpileKind::Triples => {
+                ArtifactKind::Triples => {
                     let pair = dummy_pair(id, &participants);
                     if let Some(mut slot) = self.triples.create_slot(id, self.participant).await {
                         slot.insert(pair, self.participant).await
@@ -79,7 +79,7 @@ impl SimulatedParticipant {
                         false
                     }
                 }
-                StockpileKind::Presignatures => {
+                ArtifactKind::Presignatures => {
                     let presig = dummy_presignature(id, &participants);
                     if let Some(mut slot) =
                         self.presignatures.create_slot(id, self.participant).await
@@ -101,7 +101,7 @@ impl SimulatedParticipant {
     /// Automatically chunks work across up to 8 concurrent worker tasks for high throughput.
     pub async fn populate(
         self,
-        kind: StockpileKind,
+        kind: ArtifactKind,
         base_id: u64,
         count: usize,
         participants: Vec<Participant>,
@@ -164,7 +164,7 @@ impl SimulatedParticipant {
     /// Concurrently insert a range of items (triples or presignatures), measuring latency per insert and tracking failures.
     pub async fn insert_measured(
         self,
-        kind: StockpileKind,
+        kind: ArtifactKind,
         base_id: u64,
         count: usize,
         participants: Vec<Participant>,
@@ -178,14 +178,14 @@ impl SimulatedParticipant {
             let id = base_id + i as u64;
             let t0 = Instant::now();
             let success = match kind {
-                StockpileKind::Triples => {
+                ArtifactKind::Triples => {
                     let pair = dummy_pair(id, &participants);
                     match self.triples.create_slot(id, self.participant).await {
                         Some(mut slot) => slot.insert(pair, self.participant).await,
                         None => false,
                     }
                 }
-                StockpileKind::Presignatures => {
+                ArtifactKind::Presignatures => {
                     let presig = dummy_presignature(id, &participants);
                     match self.presignatures.create_slot(id, self.participant).await {
                         Some(mut slot) => slot.insert(presig, self.participant).await,
@@ -264,14 +264,14 @@ impl SimulatedParticipant {
     /// Concurrently clear storage for the given stockpile kind.
     pub async fn clear_measured(
         self,
-        kind: StockpileKind,
+        kind: ArtifactKind,
         barrier: Arc<Barrier>,
     ) -> (Duration, bool) {
         barrier.wait().await;
         let t0 = Instant::now();
         let ok = match kind {
-            StockpileKind::Triples => self.triples.clear().await,
-            StockpileKind::Presignatures => self.presignatures.clear().await,
+            ArtifactKind::Triples => self.triples.clear().await,
+            ArtifactKind::Presignatures => self.presignatures.clear().await,
         };
         (t0.elapsed(), ok)
     }

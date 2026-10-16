@@ -9,7 +9,7 @@ use mpc_node::storage::TripleStorage;
 use tokio::sync::Barrier;
 
 use super::diagnostics::{partition_wall_3, partition_wall_by_active_time, LatencySummary};
-use super::participant::{next_id_block, SimulatedParticipant, StockpileKind};
+use super::participant::{next_id_block, SimulatedParticipant, ArtifactKind};
 use super::RedisHarness;
 
 async fn collect_task_results(
@@ -61,7 +61,7 @@ impl RedisHarness {
             .map(|(node_idx, p)| {
                 let base_id = run_base_id + (node_idx as u64 * items_per_participant as u64);
                 tokio::spawn(p.clone().insert_measured(
-                    StockpileKind::Triples,
+                    ArtifactKind::Triples,
                     base_id,
                     items_per_participant,
                     participant_list.clone(),
@@ -228,7 +228,7 @@ impl RedisHarness {
         );
         let base_id = next_id_block(initial_stockpile as u64 + 1000);
         self.populate(
-            StockpileKind::Triples,
+            ArtifactKind::Triples,
             participant_idx,
             base_id,
             initial_stockpile,
@@ -334,7 +334,7 @@ impl RedisHarness {
                 let ids: Vec<u64> = (base_id..base_id + items_per_task as u64).collect();
                 task_id_ranges.push((p.clone(), ids));
                 insert_tasks.push(tokio::spawn(p.clone().insert_measured(
-                    StockpileKind::Triples,
+                    ArtifactKind::Triples,
                     base_id,
                     items_per_task,
                     participant_list.clone(),
@@ -459,7 +459,7 @@ impl RedisHarness {
             let barrier = Arc::new(Barrier::new(num_p * 2));
             let clear_start = Instant::now();
 
-            let spawn_clear_tasks = |kind: StockpileKind| {
+            let spawn_clear_tasks = |kind: ArtifactKind| {
                 self.participants
                     .iter()
                     .map(|p| tokio::spawn(p.clone().clear_measured(kind, barrier.clone())))
@@ -484,8 +484,8 @@ impl RedisHarness {
                 (round_triple_lats, round_triple_fails, round_triple_wall),
                 (round_presig_lats, round_presig_fails, round_presig_wall),
             ) = tokio::try_join!(
-                collect_clear(spawn_clear_tasks(StockpileKind::Triples)),
-                collect_clear(spawn_clear_tasks(StockpileKind::Presignatures)),
+                collect_clear(spawn_clear_tasks(ArtifactKind::Triples)),
+                collect_clear(spawn_clear_tasks(ArtifactKind::Presignatures)),
             )?;
 
             all_triple_latencies.extend(round_triple_lats);
@@ -571,7 +571,7 @@ impl RedisHarness {
             .map(|(node_idx, p)| {
                 let base_id = gen_base + (node_idx as u64 * items_per_participant as u64 * 2);
                 tokio::spawn(p.clone().insert_measured(
-                    StockpileKind::Triples,
+                    ArtifactKind::Triples,
                     base_id,
                     items_per_participant,
                     participant_list.clone(),
@@ -589,7 +589,7 @@ impl RedisHarness {
                     + (node_idx as u64 * items_per_participant as u64 * 2)
                     + items_per_participant as u64;
                 tokio::spawn(p.clone().insert_measured(
-                    StockpileKind::Presignatures,
+                    ArtifactKind::Presignatures,
                     base_id,
                     items_per_participant,
                     participant_list.clone(),
@@ -1057,7 +1057,7 @@ impl RedisHarness {
         println!(
             "   -> Pre-populating large stockpile of {stockpile_size} items on participant 0..."
         );
-        self.populate(StockpileKind::Triples, 0, base_id, stockpile_size)
+        self.populate(ArtifactKind::Triples, 0, base_id, stockpile_size)
             .await?;
 
         let coverage = (exclusions_count as f64 / stockpile_size as f64) * 100.0;
@@ -1133,7 +1133,7 @@ impl RedisHarness {
         let base_id = next_id_block(initial_stockpile as u64 + 10_000);
 
         println!("   -> Pre-stockpiling {initial_stockpile} triples on participant 0...");
-        self.populate(StockpileKind::Triples, 0, base_id, initial_stockpile)
+        self.populate(ArtifactKind::Triples, 0, base_id, initial_stockpile)
             .await?;
 
         println!(
@@ -1239,7 +1239,7 @@ impl RedisHarness {
 
         println!("   -> Pre-populating {num_items} items on owner participant...");
         let target_ids = self
-            .populate(StockpileKind::Triples, 0, base_id, num_items)
+            .populate(ArtifactKind::Triples, 0, base_id, num_items)
             .await?;
 
         println!(
@@ -1367,7 +1367,7 @@ impl RedisHarness {
 
                 let base_id = next_id_block(batch_size as u64 + 1000);
                 let all_ids = self
-                    .populate(StockpileKind::Triples, node_idx, base_id, batch_size)
+                    .populate(ArtifactKind::Triples, node_idx, base_id, batch_size)
                     .await?;
 
                 // Phase 1: Large ARGV sync (passing all >4,096 IDs in ARGV; 0 outdated)
@@ -1482,7 +1482,7 @@ impl RedisHarness {
             .map(|(node_idx, p)| {
                 let p_base = base_id_1 + (node_idx as u64 * items_per_participant as u64);
                 tokio::spawn(p.clone().insert_measured(
-                    StockpileKind::Triples,
+                    ArtifactKind::Triples,
                     p_base,
                     items_per_participant,
                     participant_list.clone(),
@@ -1507,7 +1507,7 @@ impl RedisHarness {
             .map(|(node_idx, p)| {
                 let p_base = base_id_2 + (node_idx as u64 * items_per_participant as u64);
                 tokio::spawn(p.clone().insert_measured(
-                    StockpileKind::Triples,
+                    ArtifactKind::Triples,
                     p_base,
                     items_per_participant,
                     participant_list.clone(),
