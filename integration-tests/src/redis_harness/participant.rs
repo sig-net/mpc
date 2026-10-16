@@ -161,9 +161,10 @@ impl SimulatedParticipant {
         }
     }
 
-    /// Concurrently insert a range of triples, measuring latency per insert and tracking failures.
-    pub async fn insert_triples_measured(
+    /// Concurrently insert a range of items (triples or presignatures), measuring latency per insert and tracking failures.
+    pub async fn insert_measured(
         self,
+        kind: StockpileKind,
         base_id: u64,
         count: usize,
         participants: Vec<Participant>,
@@ -175,12 +176,22 @@ impl SimulatedParticipant {
 
         for i in 0..count {
             let id = base_id + i as u64;
-            let pair = dummy_pair(id, &participants);
-
             let t0 = Instant::now();
-            let success = match self.triples.create_slot(id, self.participant).await {
-                Some(mut slot) => slot.insert(pair, self.participant).await,
-                None => false,
+            let success = match kind {
+                StockpileKind::Triples => {
+                    let pair = dummy_pair(id, &participants);
+                    match self.triples.create_slot(id, self.participant).await {
+                        Some(mut slot) => slot.insert(pair, self.participant).await,
+                        None => false,
+                    }
+                }
+                StockpileKind::Presignatures => {
+                    let presig = dummy_presignature(id, &participants);
+                    match self.presignatures.create_slot(id, self.participant).await {
+                        Some(mut slot) => slot.insert(presig, self.participant).await,
+                        None => false,
+                    }
+                }
             };
             if success {
                 latencies.push(t0.elapsed());
@@ -250,19 +261,18 @@ impl SimulatedParticipant {
         (t0.elapsed(), res.map_err(anyhow::Error::from))
     }
 
-    /// Concurrently clear all triples storage.
-    pub async fn clear_triples(self, barrier: Arc<Barrier>) -> (Duration, bool) {
+    /// Concurrently clear storage for the given stockpile kind.
+    pub async fn clear_measured(
+        self,
+        kind: StockpileKind,
+        barrier: Arc<Barrier>,
+    ) -> (Duration, bool) {
         barrier.wait().await;
         let t0 = Instant::now();
-        let ok = self.triples.clear().await;
-        (t0.elapsed(), ok)
-    }
-
-    /// Concurrently clear all presignatures storage.
-    pub async fn clear_presignatures(self, barrier: Arc<Barrier>) -> (Duration, bool) {
-        barrier.wait().await;
-        let t0 = Instant::now();
-        let ok = self.presignatures.clear().await;
+        let ok = match kind {
+            StockpileKind::Triples => self.triples.clear().await,
+            StockpileKind::Presignatures => self.presignatures.clear().await,
+        };
         (t0.elapsed(), ok)
     }
 
@@ -301,37 +311,6 @@ impl SimulatedParticipant {
             presig_elapsed,
             presig_res.map_err(anyhow::Error::from),
         )
-    }
-
-    /// Concurrently insert a range of presignatures, measuring latency per insert and tracking failures.
-    pub async fn insert_presignatures_measured(
-        self,
-        base_id: u64,
-        count: usize,
-        participants: Vec<Participant>,
-        barrier: Arc<Barrier>,
-    ) -> (Vec<Duration>, usize) {
-        barrier.wait().await;
-        let mut latencies = Vec::with_capacity(count);
-        let mut failures = 0;
-
-        for i in 0..count {
-            let id = base_id + i as u64;
-            let presig = dummy_presignature(id, &participants);
-
-            let t0 = Instant::now();
-            let success = match self.presignatures.create_slot(id, self.participant).await {
-                Some(mut slot) => slot.insert(presig, self.participant).await,
-                None => false,
-            };
-            if success {
-                latencies.push(t0.elapsed());
-            } else {
-                failures += 1;
-            }
-        }
-
-        (latencies, failures)
     }
 
     /// Concurrently take pairs of (triple, presignature), measuring latency for each and tracking failures.

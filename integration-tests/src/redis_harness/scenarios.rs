@@ -60,7 +60,8 @@ impl RedisHarness {
             .enumerate()
             .map(|(node_idx, p)| {
                 let base_id = run_base_id + (node_idx as u64 * items_per_participant as u64);
-                tokio::spawn(p.clone().insert_triples_measured(
+                tokio::spawn(p.clone().insert_measured(
+                    StockpileKind::Triples,
                     base_id,
                     items_per_participant,
                     participant_list.clone(),
@@ -332,7 +333,8 @@ impl RedisHarness {
                 let base_id = run_base_id + (task_id as u64 * items_per_task as u64);
                 let ids: Vec<u64> = (base_id..base_id + items_per_task as u64).collect();
                 task_id_ranges.push((p.clone(), ids));
-                insert_tasks.push(tokio::spawn(p.clone().insert_triples_measured(
+                insert_tasks.push(tokio::spawn(p.clone().insert_measured(
+                    StockpileKind::Triples,
                     base_id,
                     items_per_task,
                     participant_list.clone(),
@@ -457,36 +459,17 @@ impl RedisHarness {
             let barrier = Arc::new(Barrier::new(num_p * 2));
             let clear_start = Instant::now();
 
-            let clear_triple_tasks: Vec<_> = self
-                .participants
-                .iter()
-                .map(|p| tokio::spawn(p.clone().clear_triples(barrier.clone())))
-                .collect();
-
-            let clear_presig_tasks: Vec<_> = self
-                .participants
-                .iter()
-                .map(|p| tokio::spawn(p.clone().clear_presignatures(barrier.clone())))
-                .collect();
-
-            let clear_triples = async {
-                let mut latencies = Vec::with_capacity(num_p);
-                let mut fails = 0;
-                for t in clear_triple_tasks {
-                    let (elapsed, ok) = t.await?;
-                    if ok {
-                        latencies.push(elapsed);
-                    } else {
-                        fails += 1;
-                    }
-                }
-                Ok::<_, anyhow::Error>((latencies, fails, clear_start.elapsed()))
+            let spawn_clear_tasks = |kind: StockpileKind| {
+                self.participants
+                    .iter()
+                    .map(|p| tokio::spawn(p.clone().clear_measured(kind, barrier.clone())))
+                    .collect::<Vec<_>>()
             };
 
-            let clear_presigs = async {
+            let collect_clear = |tasks: Vec<tokio::task::JoinHandle<(Duration, bool)>>| async {
                 let mut latencies = Vec::with_capacity(num_p);
                 let mut fails = 0;
-                for t in clear_presig_tasks {
+                for t in tasks {
                     let (elapsed, ok) = t.await?;
                     if ok {
                         latencies.push(elapsed);
@@ -500,7 +483,10 @@ impl RedisHarness {
             let (
                 (round_triple_lats, round_triple_fails, round_triple_wall),
                 (round_presig_lats, round_presig_fails, round_presig_wall),
-            ) = tokio::try_join!(clear_triples, clear_presigs)?;
+            ) = tokio::try_join!(
+                collect_clear(spawn_clear_tasks(StockpileKind::Triples)),
+                collect_clear(spawn_clear_tasks(StockpileKind::Presignatures)),
+            )?;
 
             all_triple_latencies.extend(round_triple_lats);
             all_presig_latencies.extend(round_presig_lats);
@@ -584,7 +570,8 @@ impl RedisHarness {
             .enumerate()
             .map(|(node_idx, p)| {
                 let base_id = gen_base + (node_idx as u64 * items_per_participant as u64 * 2);
-                tokio::spawn(p.clone().insert_triples_measured(
+                tokio::spawn(p.clone().insert_measured(
+                    StockpileKind::Triples,
                     base_id,
                     items_per_participant,
                     participant_list.clone(),
@@ -601,7 +588,8 @@ impl RedisHarness {
                 let base_id = gen_base
                     + (node_idx as u64 * items_per_participant as u64 * 2)
                     + items_per_participant as u64;
-                tokio::spawn(p.clone().insert_presignatures_measured(
+                tokio::spawn(p.clone().insert_measured(
+                    StockpileKind::Presignatures,
                     base_id,
                     items_per_participant,
                     participant_list.clone(),
@@ -1493,7 +1481,8 @@ impl RedisHarness {
             .enumerate()
             .map(|(node_idx, p)| {
                 let p_base = base_id_1 + (node_idx as u64 * items_per_participant as u64);
-                tokio::spawn(p.clone().insert_triples_measured(
+                tokio::spawn(p.clone().insert_measured(
+                    StockpileKind::Triples,
                     p_base,
                     items_per_participant,
                     participant_list.clone(),
@@ -1517,7 +1506,8 @@ impl RedisHarness {
             .enumerate()
             .map(|(node_idx, p)| {
                 let p_base = base_id_2 + (node_idx as u64 * items_per_participant as u64);
-                tokio::spawn(p.clone().insert_triples_measured(
+                tokio::spawn(p.clone().insert_measured(
+                    StockpileKind::Triples,
                     p_base,
                     items_per_participant,
                     participant_list.clone(),
