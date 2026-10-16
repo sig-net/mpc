@@ -21,9 +21,9 @@ use mpc_primitives::{
     SignKind,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::RwLock;
 
 /// Max pending (unconfirmed) checkpoints per chain before stalling.
 pub const MAX_PENDING_CHECKPOINTS: usize = 32;
@@ -152,7 +152,7 @@ pub struct Backlog {
     /// Total number of pending requests across all chains, wrapped in Arc to make clonable
     total_pending: Arc<AtomicUsize>,
     /// Whether each chain's stream has caught up, read across streams
-    caught_up: Arc<EnumMap<Chain, watch::Sender<bool>>>,
+    caught_up: Arc<EnumMap<Chain, AtomicBool>>,
 }
 
 impl Default for Backlog {
@@ -179,17 +179,11 @@ impl Backlog {
 
     /// Whether `chain`'s stream has caught up.
     pub(crate) fn is_caught_up(&self, chain: Chain) -> bool {
-        *self.caught_up[chain].borrow()
+        self.caught_up[chain].load(Ordering::SeqCst)
     }
 
     pub(crate) fn set_caught_up(&self, chain: Chain, caught_up: bool) {
-        self.caught_up[chain].send_replace(caught_up);
-    }
-
-    /// Wait until `chain`'s stream has caught up.
-    pub(crate) async fn wait_caught_up(&self, chain: Chain) {
-        // The backlog holds the sender, so the channel never closes.
-        let _ = self.caught_up[chain].subscribe().wait_for(|c| *c).await;
+        self.caught_up[chain].store(caught_up, Ordering::SeqCst);
     }
 
     /// Get the pending requests for a specific chain.

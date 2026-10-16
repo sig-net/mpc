@@ -98,24 +98,28 @@ impl BacklogAwaiter {
 
 #[async_trait::async_trait]
 impl mpc_chain_midnight::ResponseAwaiter for BacklogAwaiter {
-    async fn still_awaited(&self, action: &PublishAction) -> bool {
+    async fn still_awaited(&self, action: &PublishAction) -> anyhow::Result<bool> {
         publish_still_awaited(&self.0, action).await
     }
 }
 
 /// Whether this node's backlog still waits for the response `action` carries.
 /// An entry that left the backlog was answered on chain or pruned by consensus.
-/// Either way there is nothing left to publish.
-async fn publish_still_awaited(backlog: &Backlog, action: &PublishAction) -> bool {
+/// Either way there is nothing left to publish. Errs, for a retry, on a second leg
+/// whose source chain is behind: the backlog may still hold it after it was answered.
+async fn publish_still_awaited(backlog: &Backlog, action: &PublishAction) -> anyhow::Result<bool> {
     let request = &action.request;
-    // Behind on the source chain, the backlog may still hold an answered second leg.
-    if request.request_kind() == RequestKind::RespondBidirectional {
-        backlog.wait_caught_up(request.chain).await;
-    }
-    backlog
+    let awaited = backlog
         .get(request.chain, &request.id)
         .await
-        .is_some_and(|entry| PublishKind::of(&request.kind).awaited_in(entry.status()))
+        .is_some_and(|entry| PublishKind::of(&request.kind).awaited_in(entry.status()));
+    if awaited
+        && request.request_kind() == RequestKind::RespondBidirectional
+        && !backlog.is_caught_up(request.chain)
+    {
+        anyhow::bail!("{} is not caught up", request.chain);
+    }
+    Ok(awaited)
 }
 
 /// Checkpoint votes admitted by the dispatch loop: each digest maps to the
@@ -742,7 +746,7 @@ pub async fn execute_publish(
         // Try to publish the signature
         {
             if let Some(backlog) = &backlog {
-                if !publish_still_awaited(backlog, &action).await {
+                if !publish_still_awaited(backlog, &action).await? {
                     tracing::info!(
                         ?sign_id,
                         ?chain,
@@ -1291,9 +1295,9 @@ mod tests {
         let backlog = Backlog::new();
         let sign_id = SignId::new([3u8; 32]);
         let sign = publish_action_for(&mock_sign_request(sign_id, Chain::Solana));
-        assert!(!publish_still_awaited(&backlog, &sign).await);
+        assert!(!publish_still_awaited(&backlog, &sign).await.unwrap());
         backlog.insert_mock_sign(sign_id, Chain::Solana).await;
-        assert!(publish_still_awaited(&backlog, &sign).await);
+        assert!(publish_still_awaited(&backlog, &sign).await.unwrap());
 
         let tx = mock_bidirectional_tx(SignId::new([4u8; 32]), Chain::Midnight);
         let first_leg = publish_action_for(&mock_bidi_request(tx.sign_id(), tx.source_chain));
@@ -1301,23 +1305,26 @@ mod tests {
         backlog
             .insert_mock_bidirectional(tx.sign_id(), tx.source_chain)
             .await;
-        assert!(publish_still_awaited(&backlog, &first_leg).await);
-        assert!(!publish_still_awaited(&backlog, &second_leg).await);
+        assert!(publish_still_awaited(&backlog, &first_leg).await.unwrap());
+        assert!(!publish_still_awaited(&backlog, &second_leg).await.unwrap());
 
         backlog.remove(tx.source_chain, &tx.sign_id()).await;
         let executing = backlog.insert_mock_executing(&tx).await;
-        assert!(!publish_still_awaited(&backlog, &first_leg).await);
-        assert!(!publish_still_awaited(&backlog, &second_leg).await);
+        assert!(!publish_still_awaited(&backlog, &first_leg).await.unwrap());
+        assert!(!publish_still_awaited(&backlog, &second_leg).await.unwrap());
 
         executing.park().await.unwrap();
         assert!(backlog.get(tx.source_chain, &tx.sign_id()).await.is_some());
-        assert!(!publish_still_awaited(&backlog, &first_leg).await);
-        assert!(!publish_still_awaited(&backlog, &second_leg).await);
+        assert!(!publish_still_awaited(&backlog, &first_leg).await.unwrap());
+        assert!(!publish_still_awaited(&backlog, &second_leg).await.unwrap());
 
         backlog.remove(tx.source_chain, &tx.sign_id()).await;
         backlog.insert_mock_final(&tx).await;
-        assert!(!publish_still_awaited(&backlog, &first_leg).await);
-        assert!(publish_still_awaited(&backlog, &second_leg).await);
+        assert!(!publish_still_awaited(&backlog, &first_leg).await.unwrap());
+        // Behind on the source chain, the awaited second leg is retried, not published.
+        assert!(publish_still_awaited(&backlog, &second_leg).await.is_err());
+        backlog.set_caught_up(tx.source_chain, true);
+        assert!(publish_still_awaited(&backlog, &second_leg).await.unwrap());
     }
 
     /// The Midnight publisher's re-check reads the backlog's own answer.
@@ -1331,9 +1338,9 @@ mod tests {
         let awaiter = BacklogAwaiter::new(backlog.clone());
 
         backlog.insert_mock_sign(sign_id, Chain::Midnight).await;
-        assert!(awaiter.still_awaited(&action).await);
+        assert!(awaiter.still_awaited(&action).await.unwrap());
         backlog.remove(Chain::Midnight, &sign_id).await;
-        assert!(!awaiter.still_awaited(&action).await);
+        assert!(!awaiter.still_awaited(&action).await.unwrap());
     }
 
     #[tokio::test(start_paused = true)]
