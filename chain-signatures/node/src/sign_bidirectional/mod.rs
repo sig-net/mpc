@@ -117,8 +117,13 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         self.epsilon().context("cannot derive epsilon")?;
         // TODO(tron): once the record carries structured params, admission
         // must enforce §6.1's expiration bound (future, ≤ 24 h past the request's
-        // Midnight timestamp) and set `owner_address` by construction; raw bytes
-        // cannot check either.
+        // Midnight timestamp), set `owner_address` by construction, and reject a
+        // second live request whose txID already has a watch: the id is sha256
+        // of the raw bytes — key- and signature-independent — so identical bytes
+        // collide and `ExecutionWatchers::insert` silently replaces the first
+        // watch (execution then reports to one of them, the other stays
+        // Executing). The expiry→Unviable scan must therefore cover backlog
+        // entries, not just watchers. Raw bytes cannot check any of this.
         let calldata = validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         match calldata {
