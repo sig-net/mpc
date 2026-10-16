@@ -5,7 +5,7 @@ use crate::protocol::Chain;
 use k256::elliptic_curve::point::AffineCoordinates as _;
 use k256::elliptic_curve::scalar::IsHigh as _;
 use mpc_chain_tron::pb::RawTransaction;
-use mpc_primitives::Signature;
+use mpc_primitives::{BidirectionalTxId, Signature};
 use rlp::Rlp;
 
 use super::eth_tx::{sign_and_hash_eip1559_from_unsigned, sign_and_hash_legacy_from_unsigned};
@@ -26,6 +26,22 @@ pub(crate) fn validate_unsigned_transaction(
         // admission requires them empty (see `validate`).
         Chain::Tron => RawTransaction::parse(unsigned).map(|_| None),
         _ => anyhow::bail!("unsupported target chain {target}"),
+    }
+}
+
+/// The destination id before signing, when the target defines one without
+/// the signature: Tron's txID is sha256 of the raw bytes, flat across
+/// requests with identical bytes; Ethereum's id hashes the signed
+/// transaction, so there is nothing to compare until a signature exists.
+pub(crate) fn pending_destination_id(
+    target: Chain,
+    unsigned: &[u8],
+) -> anyhow::Result<Option<BidirectionalTxId>> {
+    match target {
+        Chain::Tron => Ok(Some(BidirectionalTxId(
+            RawTransaction::parse(unsigned)?.txid(),
+        ))),
+        _ => Ok(None),
     }
 }
 

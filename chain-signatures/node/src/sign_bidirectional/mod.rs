@@ -17,8 +17,8 @@ pub use mpc_primitives::{
 pub use eth_tx::{derive_user_address, public_key_to_address};
 pub use progress::{BidirectionalProgress, SignProgress, SignStatus};
 pub use signing::sign_and_hash_transaction;
-pub(crate) use signing::transaction_chain_id;
 use signing::validate_unsigned_transaction;
+pub(crate) use signing::{pending_destination_id, transaction_chain_id};
 
 /// The requester's chain-local identity string: Midnight and Canton senders
 /// are 32-byte addresses whose canonical form is the lowercase hex of those
@@ -67,6 +67,11 @@ pub trait SignBidirectionalEventExt {
     fn sender_string(&self) -> anyhow::Result<String>;
     fn epsilon(&self) -> anyhow::Result<Scalar>;
     fn target_chain(&self) -> Result<Chain, ChainFromError>;
+    /// The destination id before signing, when the target defines one without
+    /// the signature: Tron's txID is sha256 of the raw bytes, flat across
+    /// requests with identical bytes. `None` for Ethereum and any target whose
+    /// id covers the signature — there is nothing to compare pre-signing.
+    fn flat_destination_id(&self) -> Option<BidirectionalTxId>;
 
     /// The deterministic derivations respond processing runs for every bidirectional
     /// request, and the schema checks output extraction applies to whatever the
@@ -102,6 +107,13 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         Chain::from_caip2_chain_id(&self.caip2_id)
     }
 
+    fn flat_destination_id(&self) -> Option<BidirectionalTxId> {
+        let target = self.target_chain().ok()?;
+        pending_destination_id(target, &self.serialized_transaction)
+            .ok()
+            .flatten()
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.serialized_transaction.is_empty(),
@@ -117,13 +129,10 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         self.epsilon().context("cannot derive epsilon")?;
         // TODO(tron): once the record carries structured params, admission
         // must enforce §6.1's expiration bound (future, ≤ 24 h past the request's
-        // Midnight timestamp), set `owner_address` by construction, and reject a
-        // second live request with an already-pending destination id: the id is
-        // sha256 of the raw bytes — key- and signature-independent — so identical
-        // bytes collide and `ExecutionWatchers::insert` silently replaces the first
-        // watch (execution then reports to one of them, the other stays
-        // Executing). The expiry→Unviable scan must therefore cover backlog
-        // entries, not just watchers. Raw bytes cannot check any of this.
+        // Midnight timestamp) and set `owner_address` by construction; raw bytes
+        // cannot check either. Duplicate destination ids are already rejected at
+        // ingestion (stream ops, `pending_destination_id`); the expiry→Unviable
+        // scan must cover backlog entries, not just watchers.
         let calldata = validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         match calldata {
@@ -240,9 +249,8 @@ mod tests {
         assert!(event(Chain::Solana).validate().is_err());
     }
 
-    #[test]
-    fn validate_rejects_bytes_that_are_not_tron_raw() {
-        let event = |bytes: Vec<u8>| SignBidirectionalEvent {
+    fn tron_event(bytes: Vec<u8>) -> SignBidirectionalEvent {
+        SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: bytes,
             dest: String::new(),
@@ -256,34 +264,23 @@ mod tests {
             chain_ctx: None,
             output_deserialization_schema: vec![],
             respond_serialization_schema: vec![],
-        };
+        }
+    }
 
+    #[test]
+    fn validate_rejects_bytes_that_are_not_tron_raw() {
         // Ethereum RLP routed to a Tron target.
-        assert!(event(legacy_tx(1)).validate().is_err());
+        assert!(tron_event(legacy_tx(1)).validate().is_err());
 
         // Truncated Tron raw bytes.
-        assert!(event(vec![0x0a, 0x02, 0xdb]).validate().is_err());
+        assert!(tron_event(vec![0x0a, 0x02, 0xdb]).validate().is_err());
     }
 
     #[test]
     fn validate_and_sign_accept_a_tron_target() {
         let unsigned = hex::decode(RAW_HEX).unwrap();
 
-        let event = SignBidirectionalEvent {
-            sender: Default::default(),
-            serialized_transaction: unsigned.clone(),
-            dest: String::new(),
-            caip2_id: Chain::Tron.caip2_chain_id().to_string(),
-            key_version: 0,
-            deposit: 0,
-            path: "m/0".to_string(),
-            algo: "ECDSA".to_string(),
-            params: "{}".to_string(),
-            chain: Chain::Midnight,
-            chain_ctx: None,
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
-        };
+        let event = tron_event(unsigned.clone());
         assert!(event.validate().is_ok());
 
         // The txID is sha256(raw_data): independent of the signature, so any
@@ -306,6 +303,32 @@ mod tests {
     }
 
     #[test]
+    fn pending_destination_id_is_flat_only_for_tron() {
+        let raw = hex::decode(RAW_HEX).unwrap();
+        let id = super::pending_destination_id(Chain::Tron, &raw)
+            .unwrap()
+            .expect("tron ids exist before signing");
+        assert_eq!(hex::encode(id.0), TXID_HEX);
+        // Ethereum's id hashes the signed transaction: nothing to compare
+        // pre-signing.
+        assert!(super::pending_destination_id(Chain::Ethereum, &raw)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn flat_destination_id_reads_the_event() {
+        let mut event = tron_event(hex::decode(RAW_HEX).unwrap());
+        assert_eq!(
+            hex::encode(event.flat_destination_id().unwrap().0),
+            TXID_HEX
+        );
+        event.dest = Chain::Ethereum.to_string();
+        event.caip2_id = Chain::Ethereum.caip2_chain_id().to_string();
+        assert!(event.flat_destination_id().is_none());
+    }
+
+    #[test]
     fn to_bidirectional_tx_pins_the_tron_placeholder() {
         const FROM_ADDRESS_HEX: &str = "e8f25ab4ae5101ae4de86bdeafc113bff28b4a68";
 
@@ -316,17 +339,7 @@ mod tests {
         let event = SignBidirectionalEvent {
             sender: [0u8; 32],
             serialized_transaction: hex::decode(RAW_HEX).unwrap(),
-            dest: String::new(),
-            caip2_id: Chain::Tron.caip2_chain_id().to_string(),
-            key_version: 0,
-            deposit: 0,
-            path: "m/0".to_string(),
-            algo: "ECDSA".to_string(),
-            params: "{}".to_string(),
-            chain: Chain::Midnight,
-            chain_ctx: None,
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            ..tron_event(Vec::new())
         };
         let sig = Signature::new(
             k256::ProjectivePoint::GENERATOR.to_affine(),

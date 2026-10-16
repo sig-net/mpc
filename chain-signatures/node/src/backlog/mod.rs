@@ -254,6 +254,18 @@ impl Backlog {
             .set(len as i64);
     }
 
+    /// Requests pending on a chain in any state — for admission checks that
+    /// must consider everything not yet final (duplicate destination ids).
+    pub async fn pending_requests(&self, chain: Chain) -> Vec<Arc<IndexedSignRequest>> {
+        self.pending(&chain)
+            .read()
+            .await
+            .requests
+            .values()
+            .map(|entry| Arc::clone(&entry.request))
+            .collect()
+    }
+
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
     pub async fn requeueable_requests(&self, chain: Chain) -> Vec<SignEntry<Generating>> {
