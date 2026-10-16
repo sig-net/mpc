@@ -3,7 +3,7 @@
 //!
 //! The bytes the multichain API carries are the bare `raw` message;
 //! nodes assemble them from structured request parameters (§6.1 of
-//! `doc/bidirectional_calls.md`), so this crate ships no assembler.
+//! `doc/bidirectional-calls.md`), so this crate ships no assembler.
 //! Derivations are pinned by recorded mainnet fixtures (`tests/fixtures`):
 //! txID = sha256(raw_data), ref-block fields, and the 65-byte
 //! `[r ‖ s ‖ v]` signature with v ∈ {0,1}.
