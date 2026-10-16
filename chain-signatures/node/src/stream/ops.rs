@@ -534,10 +534,9 @@ pub async fn process_execution_confirmed(
             awaiting_execution,
         );
     }
-    // Execution confirmations are observed on the target chain, but the follow-up
-    // request belongs to the source chain. Do not let the target chain's catchup
-    // barrier strand that follow-up work.
-    if ctx.caught_up || chain != target_chain {
+    // The follow-up request belongs to the source chain: a node behind on it may
+    // hold a request it has already answered. The requeue at its catchup sends it.
+    if ctx.backlog.is_caught_up(chain) {
         ctx.sign_tx
             .send(SignCommand::Request(entry.into()))
             .await

@@ -116,6 +116,14 @@ pub fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>
     (RpcChannel { tx }, rx)
 }
 
+/// Mark the stream, and every chain in its backlog, caught up or not.
+fn set_caught_up(ctx: &mut StreamContext, caught_up: bool) {
+    ctx.caught_up = caught_up;
+    for chain in Chain::iter() {
+        ctx.backlog.set_caught_up(chain, caught_up);
+    }
+}
+
 /// Build a test [`StreamContext`] and return the checkpoint / mesh watch
 /// senders so callers can drive them. `threshold` is the contract-watcher's
 /// signing threshold.
@@ -147,7 +155,7 @@ pub fn make_test_stream_context(
         node_client,
         cp_rx,
     );
-    ctx.caught_up = caught_up;
+    set_caught_up(&mut ctx, caught_up);
     (ctx, cp_tx, mesh_tx, rpc_rx)
 }
 
@@ -173,7 +181,7 @@ pub fn make_test_stream_context_with_rpc(
         node_client,
         cp_rx,
     );
-    ctx.caught_up = caught_up;
+    set_caught_up(&mut ctx, caught_up);
     (ctx, rpc_rx)
 }
 
