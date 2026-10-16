@@ -305,8 +305,8 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 }
             }
         };
-        // Cleared before draining and backoff, which can take minutes, or shutdown.
-        ctx.caught_up = false;
+        // Other streams and publishes read it: clear it before draining and backoff,
+        // which can take minutes, and before a shutdown.
         ctx.backlog.set_caught_up(chain, false);
 
         if !run_finished {
