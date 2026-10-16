@@ -528,6 +528,69 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
     }
 }
 
+/// Recorded mainnet USDT transfer (chain-tron fixture `usdt-transfer-1.json`),
+/// the same bytes the `sign_bidirectional` tests pin.
+const TRON_RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a154120eb85916a10d2c6542613e4c9517b5e99b2dee9121541a614f803b6fd780986a42c78ec9c7f77e6ded13c2244a9059cbb000000000000000000000000d9e02baf48ed306afc63cfa816a2b6be8442036a0000000000000000000000000000000000000000000000000000000008f428f870bad8e2a49134900180e1eb17";
+
+fn tron_bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEvent {
+    SignBidirectionalEvent {
+        caip2_id: Chain::Tron.caip2_chain_id().to_string(),
+        dest: Chain::Tron.to_string(),
+        output_deserialization_schema: vec![],
+        respond_serialization_schema: vec![],
+        ..bidirectional_event(serialized_transaction)
+    }
+}
+
+/// Tron's txID covers neither signature nor derived key, so identical raw
+/// bytes from two distinct requests name one destination transaction: the
+/// second must be rejected while the first is pending, or its watch
+/// silently replaces the first's and neither request can resolve cleanly.
+#[tokio::test]
+async fn process_sign_request_rejects_a_duplicate_tron_destination_id() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+
+    // Create a closure to generate test requests with a given seed.
+    let request = |seed: u8| {
+        Arc::new(IndexedSignRequest::sign_bidirectional(
+            SignId::new([seed; 32]),
+            test_sign_args(seed),
+            Chain::Solana,
+            current_unix_timestamp(),
+            tron_bidirectional_event(hex::decode(TRON_RAW_HEX).unwrap()),
+        ))
+    };
+
+    // Process the first request to ensure it is admitted and pending.
+    process_sign_request(request(19), &ctx)
+        .await
+        .expect("the first Tron request is admitted");
+
+    assert!(backlog
+        .get(Chain::Solana, &SignId::new([19; 32]))
+        .await
+        .is_some());
+
+    // Process the second request, which should be rejected due to a duplicate Tron destination ID.
+    let err = process_sign_request(request(20), &ctx)
+        .await
+        .expect_err("identical bytes must be rejected while the first is pending");
+
+    // Check that the error message indicates the request was rejected due to a duplicate Tron destination ID.
+    assert!(
+        format!("{err:#}").contains("already pending"),
+        "unexpected error: {err:#}"
+    );
+
+    // Ensure that the second request is not present in the backlog.
+    assert!(backlog
+        .get(Chain::Solana, &SignId::new([20; 32]))
+        .await
+        .is_none());
+}
+
 /// An unsigned legacy contract call on `chain_id`.
 fn legacy_contract_call(chain_id: u64) -> Vec<u8> {
     let mut rlp = rlp::RlpStream::new_list(9);
@@ -1967,6 +2030,72 @@ async fn midnight_unobserved_entries_keep_responses_they_cannot_bind() {
         );
         assert!(sign_rx.try_recv().is_err(), "{case}");
     }
+}
+
+#[test]
+fn network_mismatch_reports_only_foreign_chains() {
+    let foreign = bidirectional_event(legacy_contract_call(11_155_111));
+    assert_eq!(
+        network_mismatch(&foreign, Some(1)),
+        Some((11_155_111, 1)),
+        "a foreign chain id is evidence"
+    );
+
+    let local = bidirectional_event(legacy_contract_call(1));
+    assert_eq!(network_mismatch(&local, Some(1)), None);
+    assert_eq!(
+        network_mismatch(&foreign, None),
+        None,
+        "unconfigured: no check"
+    );
+
+    let tron = tron_bidirectional_event(hex::decode(TRON_RAW_HEX).unwrap());
+    assert_eq!(
+        network_mismatch(&tron, Some(1)),
+        None,
+        "the chain id check is Ethereum-only"
+    );
+}
+
+/// `duplicate_destination` names the pending flat id, so identical Tron bytes
+/// collide and differing bytes never do.
+#[tokio::test]
+async fn duplicate_destination_keys_on_the_flat_id() {
+    let mut different = hex::decode(TRON_RAW_HEX).unwrap();
+    different[5] ^= 1; // inside ref_block_hash: still canonical, different txID
+    let first = tron_bidirectional_event(hex::decode(TRON_RAW_HEX).unwrap());
+    let second = tron_bidirectional_event(hex::decode(TRON_RAW_HEX).unwrap());
+    let other = tron_bidirectional_event(different);
+
+    let backlog = Backlog::new();
+    assert_eq!(
+        duplicate_destination(&first, &backlog).await,
+        None,
+        "an empty backlog has nothing to collide with"
+    );
+
+    let request = |event, seed: u8| {
+        Arc::new(IndexedSignRequest::sign_bidirectional(
+            SignId::new([seed; 32]),
+            test_sign_args(seed),
+            Chain::Solana,
+            current_unix_timestamp(),
+            event,
+        ))
+    };
+    let expected = second.flat_destination_id();
+    backlog.insert(request(second, 1)).await;
+
+    assert_eq!(
+        duplicate_destination(&first, &backlog).await,
+        expected,
+        "identical raw bytes parse to one destination id"
+    );
+    assert_eq!(
+        duplicate_destination(&other, &backlog).await,
+        None,
+        "different bytes never collide"
+    );
 }
 
 /// On other source chains a Failed response's digest follows from the request alone, so a node

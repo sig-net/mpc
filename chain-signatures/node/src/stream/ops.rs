@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
-use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign, SignEntry};
+use crate::backlog::{
+    AnyProgress, Backlog, Bidirectional, Executing, Final, Initial, Sign, SignEntry,
+};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
@@ -10,7 +12,8 @@ use crate::respond_bidirectional::{
     CompletedTx,
 };
 use crate::sign_bidirectional::{
-    transaction_chain_id, BidirectionalProgress, SignBidirectionalEventExt, SignStatus,
+    transaction_chain_id, BidirectionalProgress, BidirectionalTxId, SignBidirectionalEventExt,
+    SignStatus,
 };
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -18,7 +21,7 @@ use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, RequestKind,
-    RespondBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
+    RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
 };
 use mpc_utils::time::unix_elapsed_checked;
 
@@ -53,14 +56,17 @@ pub(crate) async fn process_sign_request(
             event.validate().with_context(|| {
                 format!("rejecting bidirectional sign request {:?}", sign_request.id)
             })?;
-            // Here rather than in `validate`, so quarantine stays a function of the event.
-            let ethereum_target = matches!(event.target_chain(), Ok(Chain::Ethereum));
-            if let Some(expected) = ctx.ethereum_chain_id.filter(|_| ethereum_target) {
-                let chain_id = transaction_chain_id(&event.serialized_transaction);
-                anyhow::ensure!(
-                    chain_id == Some(expected),
-                    "rejecting bidirectional sign request {:?}: chain id {chain_id:?}, \
+            if let Some((actual, expected)) = network_mismatch(event, ctx.ethereum_chain_id) {
+                anyhow::bail!(
+                    "rejecting bidirectional sign request {:?}: chain id {actual:?}, \
                      but this node executes on {expected}",
+                    sign_request.id
+                );
+            }
+            if let Some(id) = duplicate_destination(event, &ctx.backlog).await {
+                anyhow::bail!(
+                    "rejecting bidirectional sign request {:?}: \
+                     destination transaction {id:?} already pending",
                     sign_request.id
                 );
             }
@@ -86,6 +92,40 @@ pub(crate) async fn process_sign_request(
     ctx.try_enqueue(SignCommand::Request(entry)).await?;
 
     Ok(true)
+}
+
+/// An Ethereum transaction names its network by chain id: signed for another
+/// network, it never executes here. Here rather than in `validate`, so
+/// quarantine stays a function of the event — this reads node config.
+fn network_mismatch(event: &SignBidirectionalEvent, expected: Option<u64>) -> Option<(u64, u64)> {
+    let expected = expected?;
+    if event.target_chain() != Ok(Chain::Ethereum) {
+        return None;
+    }
+    let actual = transaction_chain_id(&event.serialized_transaction)?;
+    (actual != expected).then_some((actual, expected))
+}
+
+/// A flat destination id (Tron's txID covers neither signature nor derived
+/// key) names one transaction per set of raw bytes: a second request with
+/// the same bytes must be rejected while the first is pending, or its watch
+/// silently replaces the first's. Reads only checkpointed pending state, so
+/// the verdict is deterministic across nodes.
+async fn duplicate_destination(
+    event: &SignBidirectionalEvent,
+    backlog: &Backlog,
+) -> Option<BidirectionalTxId> {
+    let id = event.flat_destination_id()?;
+    let duplicate = backlog
+        .pending_requests(event.chain)
+        .await
+        .iter()
+        .filter_map(|pending| match &pending.kind {
+            SignKind::SignBidirectional(other) => Some(other),
+            _ => None,
+        })
+        .any(|other| other.flat_destination_id() == Some(id));
+    duplicate.then_some(id)
 }
 
 pub(crate) async fn requeue_pending_sign_requests(
