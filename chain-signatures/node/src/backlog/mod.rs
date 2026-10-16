@@ -178,7 +178,7 @@ impl Backlog {
     }
 
     /// Whether `chain`'s stream has caught up.
-    pub fn is_caught_up(&self, chain: Chain) -> bool {
+    pub(crate) fn is_caught_up(&self, chain: Chain) -> bool {
         self.caught_up[chain].load(Ordering::SeqCst)
     }
 
