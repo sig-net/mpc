@@ -13,7 +13,7 @@ use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
-use mpc_primitives::{IndexedSignRequest, RequestKind, SignId};
+use mpc_primitives::{IndexedSignRequest, SignId};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -312,13 +312,7 @@ impl SignGenerator {
 
                     if is_proposer {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
-                        // Behind on the source chain, a second leg may already be
-                        // answered; the publish resumed at its catchup sends it.
-                        if entry.request().request_kind() != RequestKind::RespondBidirectional
-                            || entry.backlog.is_caught_up(entry.chain)
-                        {
-                            ctx.rpc.publish(entry);
-                        }
+                        ctx.rpc.publish(entry);
                     }
 
                     break Ok(());

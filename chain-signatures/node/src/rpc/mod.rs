@@ -23,7 +23,7 @@ use mpc_chain_integration_core::{
     ChainPublisher, PublishAction,
 };
 pub use mpc_contract::primitives::{Read, View};
-use mpc_primitives::{CheckpointDigest, SignId, SignKind, Signature};
+use mpc_primitives::{CheckpointDigest, RequestKind, SignId, SignKind, Signature};
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -108,6 +108,10 @@ impl mpc_chain_midnight::ResponseAwaiter for BacklogAwaiter {
 /// Either way there is nothing left to publish.
 async fn publish_still_awaited(backlog: &Backlog, action: &PublishAction) -> bool {
     let request = &action.request;
+    // Behind on the source chain, the backlog may still hold an answered second leg.
+    if request.request_kind() == RequestKind::RespondBidirectional {
+        backlog.wait_caught_up(request.chain).await;
+    }
     backlog
         .get(request.chain, &request.id)
         .await

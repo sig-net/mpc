@@ -195,7 +195,6 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
         // Cleared before recovery, not after: checkpoint creation and publish
         // failover must not act on a backlog being recovered or replayed into.
         ctx.caught_up = false;
-        ctx.backlog.set_caught_up(chain, false);
         let recovered = async {
             recover_backlog(
                 chain,
@@ -306,6 +305,9 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 }
             }
         };
+        // Cleared before draining and backoff, which can take minutes, or shutdown.
+        ctx.caught_up = false;
+        ctx.backlog.set_caught_up(chain, false);
 
         if !run_finished {
             cancel.cancel();
