@@ -2102,7 +2102,7 @@ fn network_mismatch_reports_only_foreign_chains() {
 #[tokio::test]
 async fn duplicate_destination_keys_on_the_flat_id() {
     let mut different = hex::decode(TRON_RAW_HEX).unwrap();
-    different[0] ^= 1; // any byte changes the txID, parse stays valid
+    different[5] ^= 1; // inside ref_block_hash: still canonical, different txID
     let first = tron_bidirectional_event(hex::decode(TRON_RAW_HEX).unwrap());
     let second = tron_bidirectional_event(hex::decode(TRON_RAW_HEX).unwrap());
     let other = tron_bidirectional_event(different);

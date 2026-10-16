@@ -19,9 +19,16 @@ impl RawTransaction {
 
     /// Parses and validates the bytes the multichain API carries for Tron
     /// targets: the bare `raw` message, unsigned by construction. The MPC's
-    /// payload is `sha256` of exactly these bytes — the same hash as txID.
+    /// payload is `sha256` of exactly these bytes — the same hash as txID —
+    /// which holds only when the bytes are canonical: unknown or duplicated
+    /// fields would make the re-encoded transaction a different one than the
+    /// payload signed, so non-canonical input is rejected here.
     pub fn parse(bytes: &[u8]) -> anyhow::Result<Self> {
         let raw = RawTransaction::decode(bytes)?;
+        anyhow::ensure!(
+            raw.encode_to_vec() == bytes,
+            "not the canonical encoding: unknown, duplicated, or non-minimal fields"
+        );
         anyhow::ensure!(raw.contract.len() == 1, "expected exactly one contract");
         anyhow::ensure!(
             raw.contract[0].r#type == ContractType::TriggerSmartContract as i32,

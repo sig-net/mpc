@@ -206,6 +206,27 @@ fn parse_accepts_and_rejects() {
     assert!(RawTransaction::parse(&typed.encode_to_vec()).is_err());
 }
 
+/// parse admits only the canonical encoding: anything that decodes but
+/// re-encodes differently would desync the payload preimage (the submitted
+/// bytes) from the txID preimage (the re-encoded transaction).
+#[test]
+fn parse_requires_the_canonical_encoding() {
+    let tx = tx_fixture();
+
+    // An unknown field (30) decodes but re-encodes away.
+    let mut memo = hex::decode(tx["raw_data_hex"].as_str().unwrap()).unwrap();
+    memo.extend_from_slice(&[0xf0, 0x01]);
+    assert!(RawTransaction::parse(&memo).is_err());
+
+    // A non-minimal length varint (`88 00` = 8) names the same field but
+    // re-encodes minimally.
+    let mut padded = hex::decode(tx["raw_data_hex"].as_str().unwrap()).unwrap();
+    assert_eq!(&padded[4..6], &[0x22, 0x08], "field 4, length 8");
+    padded[5] = 0x88;
+    padded.insert(6, 0x00);
+    assert!(RawTransaction::parse(&padded).is_err());
+}
+
 #[test]
 fn signature_recovers_to_owner_address() {
     let tx = tx_fixture();
