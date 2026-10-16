@@ -95,7 +95,7 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     repeats: usize,
 
-    /// Number of storm/batch rounds for Scenarios 3, 6, and 8 (default: adaptive ceil(100 / participants), e.g. 9 for 12 nodes, 25 for 4 nodes)
+    /// Number of storm/batch rounds for Scenarios 3, 6, 8, and 13 (default: adaptive ceil(100 / participants) for storms, 10 for Scenario 13)
     #[arg(long)]
     rounds: Option<usize>,
 
@@ -384,7 +384,8 @@ async fn main() -> anyhow::Result<()> {
                     (args.items * 10).max(5000)
                 }
             });
-            let rounds = args.rounds.unwrap_or(3).max(1);
+            let default_rounds = 20usize.div_ceil(args.participants.min(2));
+            let rounds = args.rounds.unwrap_or(default_rounds).max(1);
             let keep_count = (batch_size / 25).max(10);
             let prune_count = batch_size - keep_count;
             println!(
