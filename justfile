@@ -96,7 +96,7 @@ alias ts := test-seq
 # `just build eth` = EVM artifacts, `just build contract` = NEAR contract wasm,
 # `just build midnight` = midnight-publisher-ts fixtures,
 # `just build tests` = integration test binaries without running them,
-# `just build compat` = historical prod-compat node binaries
+# `just build compat` = latest release node binary for the compat test
 # Usage: just build [target] (target="" | eth | contract | midnight | tests | compat)
 build target="":
     @if [ "{{target}}" = "eth" ]; then \
@@ -141,6 +141,6 @@ test-midnight-seam:
 test-canton filter="canton_stream": (setup "")
     cargo test -p integration-tests --test lib -- {{filter}} --ignored --nocapture --test-threads 1
 
-# Prod-compat suite (needs `just build compat` output)
+# Release compatibility test (needs `just build compat` output)
 test-compat:
     ./scripts/test-prod-compat.sh

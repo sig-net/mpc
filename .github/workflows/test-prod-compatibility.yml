@@ -1,14 +1,15 @@
 name: Prod Compatibility Tests
 
+# Informational, PR-only and not a required check: a failure means the next
+# deploy must upgrade all nodes at once. Not run on develop on purpose, so it
+# never colours the default branch status.
 on:
   workflow_dispatch:
-  # Temporarily disabled until finalized
-  # push:
-  #   branches:
-  #     - develop
-  #   paths:
-  #     - chain-signatures/**
-  # pull_request:
+    inputs:
+      tag:
+        description: "release tag to test against (default: latest release)"
+        required: false
+  pull_request:
 
 env:
   RUSTFLAGS: -D warnings
@@ -80,19 +81,18 @@ jobs:
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
-      - name: Build governance contract
-        run: just build contract
+      - name: Build governance contract and node (test features)
+        run: just setup
 
-      - name: Build node with stable toolchain
-        run: cargo build-node
-
-      - name: Build compatibility binaries from tags
+      - name: Build latest release binary from tag
         run: just build compat
+        env:
+          COMPAT_TAG: ${{ github.event.inputs.tag }}
 
       - name: Build integration tests
         run: just build tests
 
-      - name: Run production compatibility tests
+      - name: Run release compatibility test
         run: just test-compat
         env:
           RUST_LOG: info,workspaces=warn
