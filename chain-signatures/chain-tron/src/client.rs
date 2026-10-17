@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcast_duplicate_is_accepted_without_retry() {
+    async fn broadcast_duplicate_is_already_known_without_retry() {
         let (mut server, client) = test_client(fast_retry()).await;
         let mock = server
             .mock("POST", "/wallet/broadcasthex")
