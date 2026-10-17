@@ -70,8 +70,9 @@ the same `parse`/`sign_and_hash` path the nodes use. Three probes:
 2. **duplicate** — re-broadcasting the identical signed bytes must be
    rejected as `DUP_TRANSACTION_ERROR`: replay protection keyed by txID,
    which never covers the signature.
-3. **codeless** — a call to an address with no code; recorded mainnet
-   classification is `CONTRACT_VALIDATE_ERROR`.
+3. **codeless** — a call to an address with no code must be rejected as
+   `CONTRACT_VALIDATE_ERROR`, the classification recorded on both Nile and
+   mainnet.
 
 Facts pinned on Nile: solidification ~60 s after broadcast (2/3 of
 the 27 SRs at 3 s blocks), `REVERT` receipts carry

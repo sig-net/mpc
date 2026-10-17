@@ -90,14 +90,20 @@ fn sign(key: &SigningKey, raw_bytes: &[u8]) -> anyhow::Result<(Vec<u8>, [u8; 32]
 }
 
 impl Gate {
-    /// Runs the sequence, returning the codeless-address probe outcome:
-    /// the mock pins `CONTRACT_VALIDATE_ERROR`, a live run prints whatever
-    /// comes back.
-    async fn run(&self) -> anyhow::Result<BroadcastOutcome> {
+    /// Runs the sequence: acceptance, duplicate, then the codeless probe —
+    /// which must come back `CONTRACT_VALIDATE_ERROR`, the classification
+    /// recorded on Nile and mainnet.
+    async fn run(&self) -> anyhow::Result<()> {
         println!("[gate] owner {} -> contract {}", self.owner, self.contract);
         let accepted = self.acceptance().await?;
         self.duplicate(&accepted.signed).await?;
-        self.codeless(&accepted.reference, accepted.now_ms).await
+        let probe = self.codeless(&accepted.reference, accepted.now_ms).await?;
+        anyhow::ensure!(
+            matches!(&probe, BroadcastOutcome::Rejected { code, .. }
+                if code == "CONTRACT_VALIDATE_ERROR"),
+            "codeless address: expected CONTRACT_VALIDATE_ERROR, got {probe:?}"
+        );
+        Ok(())
     }
 
     /// Acceptance probe: broadcast a USDT transfer, settle it, and check
@@ -351,11 +357,7 @@ async fn relay_sequence_runs_against_a_mocked_endpoint() {
         poll: Duration::from_millis(10),
         deadline: Duration::from_secs(2),
     };
-    let probe = gate.run().await.unwrap();
-    assert!(
-        matches!(&probe, BroadcastOutcome::Rejected { code, .. } if code == "CONTRACT_VALIDATE_ERROR"),
-        "codeless address: {probe:?}"
-    );
+    gate.run().await.unwrap();
 }
 
 #[tokio::test]
@@ -401,5 +403,5 @@ async fn live_gate() -> anyhow::Result<()> {
         poll,
         deadline,
     };
-    gate.run().await.map(|_| ())
+    gate.run().await
 }
