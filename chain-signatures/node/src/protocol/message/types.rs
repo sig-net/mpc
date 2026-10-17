@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash as _};
 
 use cait_sith::protocol::{MessageData, Participant};
 use serde::{Deserialize, Serialize};
@@ -10,16 +9,6 @@ use crate::protocol::triple::TripleId;
 use crate::types::Epoch;
 use mpc_keys::hpke;
 use mpc_primitives::{RequestKind, SignId};
-
-#[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Protocols {
-    Generating,
-    Resharing,
-    Ready,
-    Triple,
-    Presignature,
-    Signature,
-}
 
 pub type Round = usize;
 
@@ -248,70 +237,4 @@ pub enum MessageError {
     Verification(&'static str),
     #[error("idempotent check failed")]
     Idempotent,
-}
-
-pub trait ProtocolType {
-    const PROTOCOL: Protocols;
-}
-
-impl ProtocolType for GeneratingMessage {
-    const PROTOCOL: Protocols = Protocols::Generating;
-}
-
-impl ProtocolType for ResharingMessage {
-    const PROTOCOL: Protocols = Protocols::Resharing;
-}
-
-impl ProtocolType for ReadyMessage {
-    const PROTOCOL: Protocols = Protocols::Ready;
-}
-
-impl ProtocolType for TripleMessage {
-    const PROTOCOL: Protocols = Protocols::Triple;
-}
-
-impl ProtocolType for PresignatureMessage {
-    const PROTOCOL: Protocols = Protocols::Presignature;
-}
-
-impl ProtocolType for SignatureMessage {
-    const PROTOCOL: Protocols = Protocols::Signature;
-}
-
-impl ProtocolType for (SignId, PresignatureId) {
-    const PROTOCOL: Protocols = Protocols::Signature;
-}
-
-pub trait MessageFilterId: ProtocolType {
-    fn id(&self) -> u64;
-}
-
-impl MessageFilterId for TripleMessage {
-    fn id(&self) -> u64 {
-        self.id
-    }
-}
-
-impl MessageFilterId for PresignatureMessage {
-    fn id(&self) -> u64 {
-        self.id
-    }
-}
-
-impl MessageFilterId for SignatureMessage {
-    fn id(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.id.hash(&mut hasher);
-        self.presignature_id.hash(&mut hasher);
-        std::hash::Hasher::finish(&hasher)
-    }
-}
-
-impl MessageFilterId for (SignId, PresignatureId) {
-    fn id(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.0.hash(&mut hasher);
-        self.1.hash(&mut hasher);
-        std::hash::Hasher::finish(&hasher)
-    }
 }

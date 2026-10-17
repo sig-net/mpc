@@ -348,7 +348,6 @@ impl Drop for SignGenerator {
         let presignature_id = self.dropper.id;
         tokio::spawn(async move {
             msg.unsubscribe_signature(sign_id, presignature_id).await;
-            msg.filter_sign(sign_id, presignature_id).await;
         });
     }
 }
