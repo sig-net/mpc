@@ -18,10 +18,10 @@ use crate::web::error::Result;
 
 use anyhow::Context;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Query};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderName, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
@@ -31,8 +31,15 @@ use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tracing::Instrument;
+
+const MAX_CONCURRENT_CHECKPOINT_REQUESTS: usize = 8;
+const CHECKPOINT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Each peer keeps at most one `/sync` in flight to us, so this leaves
+/// headroom above the participant count while bounding unauthenticated work.
+const MAX_CONCURRENT_SYNC_REQUESTS: usize = 16;
 
 struct AxumState {
     node: NodeStateWatcher,
@@ -47,6 +54,9 @@ struct AxumState {
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     my_account_id: AccountId,
     backlog: Backlog,
+    /// Bounds concurrent `/checkpoint` lookups so the endpoint cannot starve
+    /// the Redis pool the protocol shares.
+    checkpoint_permits: Semaphore,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -69,12 +79,19 @@ pub async fn run(
         sync_channel,
         my_account_id,
         backlog,
+        checkpoint_permits: Semaphore::new(MAX_CONCURRENT_CHECKPOINT_REQUESTS),
     };
 
     // Sync can be a large payload, so we set a higher limit for payload.
+    // The concurrency limit runs before the body is read, so rejected
+    // requests never buffer their payload.
     let sync = Router::new()
         .route("/sync", post(sync))
-        .layer(DefaultBodyLimit::max(20 * 1024 * 1024));
+        .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
+        .layer(middleware::from_fn_with_state(
+            Arc::new(Semaphore::new(MAX_CONCURRENT_SYNC_REQUESTS)),
+            limit_concurrency,
+        ));
 
     let mut router = Router::new()
         // healthcheck endpoint
@@ -113,6 +130,19 @@ pub async fn run(
     if let Err(err) = axum::serve(listener, app).await {
         tracing::error!(?addr, ?err, "web server exited with an error");
     }
+}
+
+/// Rejects the request with 503 when all `permits` are taken, holding one
+/// for the whole request otherwise.
+async fn limit_concurrency(
+    State(permits): State<Arc<Semaphore>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let Ok(_permit) = permits.try_acquire() else {
+        return Error::Busy.into_response();
+    };
+    next.run(req).await
 }
 
 async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response {
@@ -267,6 +297,13 @@ impl CheckpointQuery {
             let chain = chain_part.parse::<Chain>().map_err(|e| {
                 Error::InvalidParameters(format!("Invalid chain '{}': {}", chain_part, e))
             })?;
+            // One storage lookup per entry: cap the work a single request can trigger.
+            if selections.iter().any(|(selected, _)| *selected == chain) {
+                return Err(Error::InvalidParameters(format!(
+                    "chain '{}' appears more than once",
+                    chain_part
+                )));
+            }
 
             let digest = match parts.next() {
                 Some(suffix) => {
@@ -310,29 +347,39 @@ async fn checkpoint(
 ) -> Result<Cbor<CheckpointResponse>> {
     let start = Instant::now();
 
-    let mut resp = HashMap::new();
     let selections = query.parse()?;
+    let _permit = state
+        .checkpoint_permits
+        .try_acquire()
+        .map_err(|_| Error::Busy)?;
 
-    for (chain, digest) in selections {
-        let checkpoint = if let Some(digest) = digest {
-            state.backlog.checkpoints().find(chain, digest).await
-        } else {
-            state
-                .backlog
-                .checkpoints()
-                .latest(chain)
-                .await
-                .ok()
-                .flatten()
-        };
+    let lookups = async {
+        let mut resp = HashMap::new();
+        for (chain, digest) in selections {
+            let checkpoint = if let Some(digest) = digest {
+                state.backlog.checkpoints().find(chain, digest).await
+            } else {
+                state
+                    .backlog
+                    .checkpoints()
+                    .latest(chain)
+                    .await
+                    .ok()
+                    .flatten()
+            };
 
-        let Some(checkpoint) = checkpoint else {
-            tracing::debug!(?chain, ?digest, "unable to find checkpoint");
-            continue;
-        };
+            let Some(checkpoint) = checkpoint else {
+                tracing::debug!(?chain, ?digest, "unable to find checkpoint");
+                continue;
+            };
 
-        resp.insert(chain, checkpoint);
-    }
+            resp.insert(chain, checkpoint);
+        }
+        resp
+    };
+    let resp = tokio::time::timeout(CHECKPOINT_REQUEST_TIMEOUT, lookups)
+        .await
+        .map_err(|_| Error::Busy)?;
 
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["checkpoint"])
@@ -348,5 +395,65 @@ async fn checkpoint(
 mod debug {
     pub async fn page() -> axum::response::Html<String> {
         "<html><body>Debug page disabled. Compile the node with --features=debug-page to show useful information here.</bod></html>".to_string().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(query: &str) -> Result<Vec<ChainAndDigest>, Error> {
+        CheckpointQuery {
+            query: Some(query.to_string()),
+        }
+        .parse()
+    }
+
+    #[test]
+    fn checkpoint_query_rejects_repeated_chain() {
+        assert!(parse("Ethereum,Solana").is_ok());
+        assert!(parse("Ethereum,Ethereum").is_err());
+        let digest = format!("0x{}", "00".repeat(32));
+        assert!(parse(&format!("Solana:{digest},Solana")).is_err());
+    }
+
+    #[tokio::test]
+    async fn limit_concurrency_rejects_over_limit() {
+        use tokio::sync::Notify;
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let handler = {
+            let (started, release) = (started.clone(), release.clone());
+            move || async move {
+                started.notify_one();
+                release.notified().await;
+            }
+        };
+        let app = Router::new()
+            .route("/", post(handler))
+            .layer(middleware::from_fn_with_state(
+                Arc::new(Semaphore::new(1)),
+                limit_concurrency,
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+
+        // The first request takes the only permit and blocks in the handler.
+        let first = tokio::spawn(client.post(&url).send());
+        started.notified().await;
+
+        let resp = client.post(&url).send().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        release.notify_one();
+        assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+
+        // The permit is returned once the first request completes.
+        release.notify_one();
+        let resp = client.post(&url).send().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
