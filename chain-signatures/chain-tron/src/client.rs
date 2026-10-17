@@ -61,9 +61,9 @@ impl TronHttp {
     }
 
     /// `POST /wallet/broadcasthex` with the raw (protobuf-serialized)
-    /// transaction. Congestion errors (`TooManyTransactions`,
-    /// `CONNECTION_CLOSED`) become `Err` so the gate rebroadcasts identical
-    /// bytes. Other rejections are terminal.
+    /// transaction. Congestion errors (`SERVER_BUSY`, `NO_CONNECTION`,
+    /// `NOT_ENOUGH_EFFECTIVE_CONNECTION`) become `Err` so the gate retries
+    /// identical bytes. Other rejections are terminal.
     pub async fn broadcast_transaction(&self, raw_tx: &[u8]) -> anyhow::Result<BroadcastOutcome> {
         retry_rpc!(
             self.request_timeout,
