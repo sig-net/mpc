@@ -140,7 +140,10 @@ pub async fn wait_threshold_active(mesh_state: &mut watch::Receiver<MeshState>, 
         if mesh_state.borrow().active().len() >= threshold {
             return;
         }
-        let _ = mesh_state.changed().await;
+        if mesh_state.changed().await.is_err() {
+            // The mesh task is gone and nothing will change any more.
+            std::future::pending::<()>().await;
+        }
     }
 }
 
