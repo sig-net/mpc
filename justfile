@@ -18,7 +18,7 @@ setup mode="" scope="":
     @if [ "{{mode}}" = "act" ]; then \
       ./scripts/setup-deps.sh --install-act; \
     else \
-      ./scripts/setup-deps.sh --install {{scope}} && ./setup.sh; \
+      ./scripts/setup-deps.sh --install {{scope}} && ./build-contract.sh && cargo build -p mpc-node --release --features test-feature,debug-page; \
     fi
 alias s := setup
 
@@ -102,7 +102,7 @@ build target="":
     @if [ "{{target}}" = "eth" ]; then \
       cd chain-signatures/contract-eth && npm ci && npx hardhat compile; \
     elif [ "{{target}}" = "contract" ]; then \
-      ./build-contract.sh && mkdir -p target/wasm32-unknown-unknown/release && cp target/near/mpc_contract/mpc_contract.wasm target/wasm32-unknown-unknown/release/mpc_contract.wasm; \
+      ./build-contract.sh; \
     elif [ "{{target}}" = "midnight" ]; then \
       cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-caller && npm run typecheck:real-stack; \
     elif [ "{{target}}" = "tests" ]; then \
