@@ -417,6 +417,62 @@ async fn test_resharing_possible_with_kicked_node_offline() -> anyhow::Result<()
     Ok(())
 }
 
+#[test(tokio::test)]
+async fn test_resharing_possible_with_multiple_kicked_nodes_offline() -> anyhow::Result<()> {
+    set_resharing_running_timeout(Duration::from_secs(20));
+
+    // Spawn 5-node cluster with threshold 3.
+    // With threshold 3, the 3 online nodes meet threshold 3 to batch-kick both offline nodes.
+    let mut nodes = cluster::spawn()
+        .nodes(5)
+        .threshold(3)
+        .disable_prestockpile()
+        .await?;
+    nodes.wait().signable().await?;
+    let initial_state = nodes.expect_running().await?;
+    assert_eq!(initial_state.participants.len(), 5);
+    assert_eq!(initial_state.threshold, 3);
+
+    let kick_1 = nodes.account_id(1).clone();
+    let kick_2 = nodes.account_id(2).clone();
+
+    // Kill both nodes simultaneously while they are still participants.
+    let _ = nodes.kill_node(&kick_1).await;
+    let _ = nodes.kill_node(&kick_2).await;
+
+    // The remaining 3 online participants vote to kick both offline nodes in one batch.
+    // This transitions directly to Resharing with new_participants excluding both dead nodes,
+    // avoiding the deadlock where a remaining offline node prevents readiness completion.
+    nodes
+        .kick_participants(&[kick_1.clone(), kick_2.clone()])
+        .await?;
+
+    // Wait for cluster to reach Running state on next epoch
+    let final_state = nodes
+        .wait()
+        .running_on_epoch(initial_state.epoch + 1)
+        .await?;
+
+    assert_eq!(
+        final_state.participants.len(),
+        3,
+        "should have 3 participants remaining"
+    );
+    assert_eq!(
+        final_state.threshold,
+        mpc_contract::utils::compute_threshold(3),
+        "threshold should be recomputed for 3 participants"
+    );
+    assert!(!final_state.participants.contains_key(&kick_1));
+    assert!(!final_state.participants.contains_key(&kick_2));
+
+    // Sign to ensure the reshared 3-node network is fully functional
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
 async fn wait_for_resharing_phase(
     nodes: &cluster::Cluster,
     account_id: &near_workspaces::AccountId,

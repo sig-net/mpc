@@ -4,7 +4,9 @@ use borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, PublicKey};
 
-use crate::primitives::{Candidates, CandidatesView, Participants, PkVotes, ThresholdVotes, Votes};
+use crate::primitives::{
+    Candidates, CandidatesView, Participants, PkVotes, ReshareVotes, ThresholdVotes, Votes,
+};
 
 #[derive(BorshDeserialize, BorshSerialize, Debug)]
 pub struct InitializingContractState {
@@ -20,13 +22,12 @@ pub struct RunningContractState {
     pub threshold: usize,
     pub public_key: PublicKey,
     pub candidates: Candidates,
-    pub join_votes: Votes,
-    pub leave_votes: Votes,
     /// Active votes to change the running threshold without otherwise
     /// modifying the participant set. Once one proposed threshold reaches the
     /// current `threshold`, the contract transitions into `Resharing` with the
     /// same participants but the new threshold.
     pub threshold_votes: ThresholdVotes,
+    pub reshare_votes: ReshareVotes,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
@@ -73,8 +74,12 @@ pub struct RunningContractStateView {
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
+    /// TODO: Remove in a version or two once all nodes and clients have upgraded.
+    #[serde(default)]
     pub leave_votes: Votes,
     pub threshold_votes: ThresholdVotes,
+    #[serde(default)]
+    pub reshare_votes: ReshareVotes,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
@@ -101,8 +106,9 @@ impl From<&RunningContractState> for RunningContractStateView {
             participants: state.participants.clone(),
             threshold: state.threshold,
             public_key: state.public_key.clone(),
-            leave_votes: state.leave_votes.clone(),
+            leave_votes: Votes::new(),
             threshold_votes: state.threshold_votes.clone(),
+            reshare_votes: state.reshare_votes.clone(),
         }
     }
 }

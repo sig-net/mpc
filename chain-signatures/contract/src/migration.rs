@@ -1,8 +1,7 @@
 use crate::config::Config;
 use crate::errors::{Error, InvalidState};
 use crate::primitives::{
-    CandidateInfo, Candidates, CheckpointVotes, Participants, PendingRequest, PkVotes, StorageKey,
-    ThresholdVotes, Votes,
+    Candidates, CheckpointVotes, Participants, PendingRequest, ReshareVotes, ThresholdVotes, Votes,
 };
 use crate::state::{
     InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
@@ -10,137 +9,66 @@ use crate::state::{
 use crate::update::ProposedUpdates;
 use crate::MpcContract;
 
-use borsh::BorshDeserialize;
+use borsh::{BorshDeserialize, BorshSerialize};
 use mpc_primitives::{Chain, CheckpointDigest, SignId};
 use near_sdk::store::IterableMap;
-use near_sdk::{AccountId, PublicKey};
-use std::collections::BTreeMap;
+use near_sdk::PublicKey;
 
-#[derive(BorshDeserialize)]
-pub struct LegacyCandidates {
-    pub candidates: BTreeMap<AccountId, CandidateInfo>,
-}
-
-fn migrate_candidates(candidates: LegacyCandidates) -> Candidates {
-    let mut migrated = Candidates::new();
-    for (account_id, info) in candidates.candidates {
-        migrated.insert(account_id, info);
-    }
-    migrated
-}
-
-#[derive(BorshDeserialize)]
-pub struct LegacyInitializingContractState {
-    pub candidates: LegacyCandidates,
-    pub threshold: usize,
-    pub pk_votes: PkVotes,
-}
-
-fn migrate_initializing(state: LegacyInitializingContractState) -> InitializingContractState {
-    InitializingContractState {
-        candidates: migrate_candidates(state.candidates),
-        threshold: state.threshold,
-        pk_votes: state.pk_votes,
-    }
-}
-
-#[derive(BorshDeserialize)]
-pub struct OldRunningContractState {
+#[derive(BorshDeserialize, BorshSerialize)]
+#[allow(dead_code)]
+pub struct PreviousRunningContractState {
     pub epoch: u64,
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
-    pub candidates: LegacyCandidates,
-    pub join_votes: Votes,
-    pub leave_votes: Votes,
-}
-
-#[derive(BorshDeserialize)]
-pub enum OldProtocolContractState {
-    NotInitialized,
-    Initializing(LegacyInitializingContractState),
-    Running(OldRunningContractState),
-    Resharing(ResharingContractState),
-}
-
-fn upgrade_protocol_state(old: OldProtocolContractState) -> ProtocolContractState {
-    match old {
-        OldProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
-        OldProtocolContractState::Initializing(state) => {
-            ProtocolContractState::Initializing(migrate_initializing(state))
-        }
-        OldProtocolContractState::Running(state) => {
-            ProtocolContractState::Running(RunningContractState {
-                epoch: state.epoch,
-                participants: state.participants,
-                threshold: state.threshold,
-                public_key: state.public_key,
-                candidates: migrate_candidates(state.candidates),
-                join_votes: state.join_votes,
-                leave_votes: state.leave_votes,
-                threshold_votes: ThresholdVotes::new(),
-            })
-        }
-        OldProtocolContractState::Resharing(state) => ProtocolContractState::Resharing(state),
-    }
-}
-
-#[derive(BorshDeserialize)]
-struct DevnetRunningContractState {
-    pub epoch: u64,
-    pub participants: Participants,
-    pub threshold: usize,
-    pub public_key: PublicKey,
-    pub candidates: LegacyCandidates,
+    pub candidates: Candidates,
     pub join_votes: Votes,
     pub leave_votes: Votes,
     pub threshold_votes: ThresholdVotes,
 }
 
-#[derive(BorshDeserialize)]
-enum DevnetProtocolContractState {
+#[derive(BorshDeserialize, BorshSerialize)]
+pub enum PreviousProtocolContractState {
     NotInitialized,
-    Initializing(LegacyInitializingContractState),
-    Running(DevnetRunningContractState),
+    Initializing(InitializingContractState),
+    Running(PreviousRunningContractState),
     Resharing(ResharingContractState),
 }
 
-fn upgrade_devnet_protocol_state(old: DevnetProtocolContractState) -> ProtocolContractState {
-    match old {
-        DevnetProtocolContractState::NotInitialized => ProtocolContractState::NotInitialized,
-        DevnetProtocolContractState::Initializing(state) => {
-            ProtocolContractState::Initializing(migrate_initializing(state))
+impl PreviousProtocolContractState {
+    fn upgrade(self) -> ProtocolContractState {
+        match self {
+            Self::NotInitialized => ProtocolContractState::NotInitialized,
+            Self::Initializing(s) => ProtocolContractState::Initializing(s),
+            Self::Running(s) => ProtocolContractState::Running(RunningContractState {
+                epoch: s.epoch,
+                participants: s.participants,
+                threshold: s.threshold,
+                public_key: s.public_key,
+                candidates: s.candidates,
+                threshold_votes: s.threshold_votes,
+                reshare_votes: ReshareVotes::new(),
+            }),
+            Self::Resharing(s) => ProtocolContractState::Resharing(s),
         }
-        DevnetProtocolContractState::Running(state) => {
-            ProtocolContractState::Running(RunningContractState {
-                epoch: state.epoch,
-                participants: state.participants,
-                threshold: state.threshold,
-                public_key: state.public_key,
-                candidates: migrate_candidates(state.candidates),
-                join_votes: state.join_votes,
-                leave_votes: state.leave_votes,
-                threshold_votes: state.threshold_votes,
-            })
-        }
-        DevnetProtocolContractState::Resharing(state) => ProtocolContractState::Resharing(state),
     }
 }
 
-#[derive(BorshDeserialize)]
+/// The state currently deployed on devnet (`dev.sig-net.testnet`).
+#[derive(BorshDeserialize, BorshSerialize)]
 pub(crate) struct PreviousDevnet {
-    protocol_state: DevnetProtocolContractState,
-    pending_requests: IterableMap<SignId, PendingRequest>,
-    proposed_updates: ProposedUpdates,
-    config: Config,
-    latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
-    checkpoint_votes: CheckpointVotes,
+    pub protocol_state: PreviousProtocolContractState,
+    pub pending_requests: IterableMap<SignId, PendingRequest>,
+    pub proposed_updates: ProposedUpdates,
+    pub config: Config,
+    pub latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
+    pub checkpoint_votes: CheckpointVotes,
 }
 
 impl PreviousDevnet {
     fn upgrade(self) -> MpcContract {
         MpcContract {
-            protocol_state: upgrade_devnet_protocol_state(self.protocol_state),
+            protocol_state: self.protocol_state.upgrade(),
             pending_requests: self.pending_requests,
             proposed_updates: self.proposed_updates,
             config: self.config,
@@ -150,98 +78,66 @@ impl PreviousDevnet {
     }
 }
 
-#[derive(BorshDeserialize)]
+/// The state currently deployed on testnet (`v1.sig-net.testnet`).
+#[derive(BorshDeserialize, BorshSerialize)]
 pub(crate) struct PreviousTestnet {
-    protocol_state: OldProtocolContractState,
-    pending_requests: IterableMap<SignId, PendingRequest>,
-    proposed_updates: ProposedUpdates,
-    config: Config,
+    pub protocol_state: PreviousProtocolContractState,
+    pub pending_requests: IterableMap<SignId, PendingRequest>,
+    pub proposed_updates: ProposedUpdates,
+    pub config: Config,
+    pub latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
+    pub checkpoint_votes: CheckpointVotes,
 }
 
 impl PreviousTestnet {
     fn upgrade(self) -> MpcContract {
-        let Self {
-            protocol_state,
-            pending_requests,
-            proposed_updates,
-            config,
-        } = self;
         MpcContract {
-            protocol_state: upgrade_protocol_state(protocol_state),
-            pending_requests,
-            proposed_updates,
-            config,
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
-            checkpoint_votes: CheckpointVotes::new(),
+            protocol_state: self.protocol_state.upgrade(),
+            pending_requests: self.pending_requests,
+            proposed_updates: self.proposed_updates,
+            config: self.config,
+            latest_checkpoints: self.latest_checkpoints,
+            checkpoint_votes: self.checkpoint_votes,
         }
     }
 }
 
-#[derive(BorshDeserialize)]
+/// The state currently deployed on mainnet (`v1.sig-net.near`).
+#[derive(BorshDeserialize, BorshSerialize)]
 pub(crate) struct PreviousMainnet {
-    protocol_state: OldProtocolContractState,
-    pending_requests: IterableMap<SignId, PendingRequest>,
-    proposed_updates: ProposedUpdates,
-    config: Config,
+    pub protocol_state: PreviousProtocolContractState,
+    pub pending_requests: IterableMap<SignId, PendingRequest>,
+    pub proposed_updates: ProposedUpdates,
+    pub config: Config,
+    pub latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
+    pub checkpoint_votes: CheckpointVotes,
 }
 
 impl PreviousMainnet {
     fn upgrade(self) -> MpcContract {
-        let Self {
-            protocol_state,
-            pending_requests,
-            proposed_updates,
-            config,
-        } = self;
         MpcContract {
-            protocol_state: upgrade_protocol_state(protocol_state),
-            pending_requests,
-            proposed_updates,
-            config,
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
-            checkpoint_votes: CheckpointVotes::new(),
+            protocol_state: self.protocol_state.upgrade(),
+            pending_requests: self.pending_requests,
+            proposed_updates: self.proposed_updates,
+            config: self.config,
+            latest_checkpoints: self.latest_checkpoints,
+            checkpoint_votes: self.checkpoint_votes,
         }
     }
 }
 
-#[derive(BorshDeserialize)]
-enum VersionedPreviousDevnet {
-    V0(PreviousDevnet),
-}
-
-#[derive(BorshDeserialize)]
-enum VersionedPreviousTestnet {
-    V0(PreviousTestnet),
-}
-
-/// The previously deployed state shape: a single-variant version enum
-/// wrapping the contract state. Kept only so old state bytes remain
-/// migratable.
-#[derive(BorshDeserialize)]
-enum VersionedPreviousState {
-    V0(MpcContract),
-}
-
 pub(crate) fn migrate(state_bytes: &[u8]) -> Result<MpcContract, Error> {
     if let Ok(current) = MpcContract::try_from_slice(state_bytes) {
-        return Ok(current);
+        if borsh::to_vec(&current).is_ok_and(|bytes| bytes == state_bytes) {
+            return Ok(current);
+        }
     }
 
-    if let Ok(VersionedPreviousState::V0(previous)) =
-        VersionedPreviousState::try_from_slice(state_bytes)
-    {
-        return Ok(previous);
-    }
-
-    if let Ok(VersionedPreviousDevnet::V0(previous)) =
-        VersionedPreviousDevnet::try_from_slice(state_bytes)
-    {
+    if let Ok(previous) = PreviousDevnet::try_from_slice(state_bytes) {
         return Ok(previous.upgrade());
     }
 
-    if let Ok(VersionedPreviousTestnet::V0(previous)) =
-        VersionedPreviousTestnet::try_from_slice(state_bytes)
-    {
+    if let Ok(previous) = PreviousTestnet::try_from_slice(state_bytes) {
         return Ok(previous.upgrade());
     }
 
@@ -255,12 +151,14 @@ pub(crate) fn migrate(state_bytes: &[u8]) -> Result<MpcContract, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primitives::{CandidateInfo, StorageKey};
     use near_sdk::test_utils::VMContextBuilder;
     use near_sdk::testing_env;
+    use near_sdk::AccountId;
     use std::str::FromStr;
 
     #[test]
-    fn migrating_devnet_initializing_state_preserves_candidates_and_pk_votes() {
+    fn migrating_previous_running_state_preserves_candidates_and_threshold_votes() {
         testing_env!(VMContextBuilder::new().build());
 
         let candidate_id: AccountId = "candidate.near".parse().unwrap();
@@ -271,38 +169,81 @@ mod tests {
             sign_pk: PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae")
                 .unwrap(),
         };
-        let mut pk_votes = PkVotes::new();
-        pk_votes
-            .entry(candidate.sign_pk.clone())
-            .insert(candidate_id.clone());
+        let mut candidates = Candidates::new();
+        candidates.insert(candidate_id.clone(), candidate.clone());
 
-        let migrated = upgrade_devnet_protocol_state(DevnetProtocolContractState::Initializing(
-            LegacyInitializingContractState {
-                candidates: LegacyCandidates {
-                    candidates: [(candidate_id.clone(), candidate.clone())].into(),
-                },
-                threshold: 2,
-                pk_votes,
-            },
-        ));
+        let mut threshold_votes = ThresholdVotes::new();
+        threshold_votes.votes.insert(candidate_id.clone(), 3);
 
-        let ProtocolContractState::Initializing(initializing) = migrated else {
-            panic!("expected initializing state");
+        let previous = PreviousProtocolContractState::Running(PreviousRunningContractState {
+            epoch: 5,
+            participants: Participants::new(),
+            threshold: 2,
+            public_key: candidate.sign_pk.clone(),
+            candidates,
+            join_votes: Votes::new(),
+            leave_votes: Votes::new(),
+            threshold_votes: threshold_votes.clone(),
+        });
+
+        let upgraded = previous.upgrade();
+        let ProtocolContractState::Running(running) = upgraded else {
+            panic!("expected running state");
         };
-        assert_eq!(initializing.candidates.get(&candidate_id), Some(&candidate));
-        assert!(initializing
-            .pk_votes
-            .votes
-            .get(&candidate.sign_pk)
-            .is_some_and(|votes| votes.contains(&candidate_id)));
+        assert_eq!(running.epoch, 5);
+        assert_eq!(running.threshold, 2);
+        assert_eq!(running.candidates.get(&candidate_id), Some(&candidate));
+        assert_eq!(running.threshold_votes, threshold_votes);
+        assert!(running.reshare_votes.is_empty());
     }
 
     #[test]
-    fn migrating_devnet_running_state_preserves_candidates_and_join_votes() {
+    fn migrating_previous_devnet_state() {
+        testing_env!(VMContextBuilder::new().build());
+
+        let devnet = PreviousDevnet {
+            protocol_state: PreviousProtocolContractState::NotInitialized,
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        };
+
+        let bytes = borsh::to_vec(&devnet).unwrap();
+        let migrated = migrate(&bytes).expect("migration should succeed");
+        assert!(matches!(
+            migrated.protocol_state,
+            ProtocolContractState::NotInitialized
+        ));
+    }
+
+    #[test]
+    fn migrate_is_idempotent_on_current_state() {
+        testing_env!(VMContextBuilder::new().build());
+
+        let current = MpcContract {
+            protocol_state: ProtocolContractState::NotInitialized,
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        };
+
+        let bytes = borsh::to_vec(&current).unwrap();
+        let migrated = migrate(&bytes).expect("migration should succeed");
+        assert!(matches!(
+            migrated.protocol_state,
+            ProtocolContractState::NotInitialized
+        ));
+    }
+
+    #[test]
+    fn migrate_is_idempotent_on_current_running_state() {
         testing_env!(VMContextBuilder::new().build());
 
         let candidate_id: AccountId = "candidate.near".parse().unwrap();
-        let voter_id: AccountId = "voter.near".parse().unwrap();
         let candidate = CandidateInfo {
             account_id: candidate_id.clone(),
             url: "https://candidate.example".to_owned(),
@@ -310,35 +251,42 @@ mod tests {
             sign_pk: PublicKey::from_str("ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae")
                 .unwrap(),
         };
-        let candidates = LegacyCandidates {
-            candidates: [(candidate_id.clone(), candidate.clone())].into(),
-        };
-        let mut join_votes = Votes::new();
-        join_votes
-            .entry(candidate_id.clone())
-            .insert(voter_id.clone());
+        let mut candidates = Candidates::new();
+        candidates.insert(candidate_id.clone(), candidate.clone());
 
-        let migrated = upgrade_devnet_protocol_state(DevnetProtocolContractState::Running(
-            DevnetRunningContractState {
-                epoch: 3,
+        let mut reshare_votes = ReshareVotes::new();
+        reshare_votes.vote(
+            crate::primitives::ReshareProposal {
+                joins: [candidate_id.clone()].into(),
+                kicks: std::collections::BTreeSet::new(),
+            },
+            candidate_id.clone(),
+        );
+
+        let current = MpcContract {
+            protocol_state: ProtocolContractState::Running(RunningContractState {
+                epoch: 5,
                 participants: Participants::new(),
                 threshold: 2,
                 public_key: candidate.sign_pk.clone(),
                 candidates,
-                join_votes,
-                leave_votes: Votes::new(),
                 threshold_votes: ThresholdVotes::new(),
-            },
-        ));
+                reshare_votes: reshare_votes.clone(),
+            }),
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
+            checkpoint_votes: CheckpointVotes::new(),
+        };
 
-        let ProtocolContractState::Running(running) = migrated else {
+        let bytes = borsh::to_vec(&current).unwrap();
+        let migrated = migrate(&bytes).expect("migration should succeed");
+        let ProtocolContractState::Running(running) = migrated.protocol_state else {
             panic!("expected running state");
         };
-        assert_eq!(running.candidates.get(&candidate_id), Some(&candidate));
-        assert!(running
-            .join_votes
-            .votes
-            .get(&candidate_id)
-            .is_some_and(|votes| votes.contains(&voter_id)));
+        assert_eq!(running.epoch, 5);
+        assert_eq!(running.threshold, 2);
+        assert_eq!(running.reshare_votes, reshare_votes);
     }
 }
