@@ -329,7 +329,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                     None, // No GCP service for tests
                     &storage_options,
                     account.id(),
-                );
+                )?;
 
                 let persistent_data = mpc_node::protocol::state::PersistentNodeData {
                     epoch: 0,
