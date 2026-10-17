@@ -65,8 +65,8 @@ the same `parse`/`sign_and_hash` path the nodes use. Three probes:
    solidity router; asserts the txID equals `sha256(raw_data)` computed
    before signing and the receipt id equals it after execution. The
    execution itself classifies either way: `SUCCESS` asserts the
-   `Transfer` log, while a token-side guard reverts (Nile USDT reverts
-   self-transfers even with balance) — both are valid settled receipts.
+   `Transfer` log, while a key holding TRX but no tokens reverts on the
+   balance check — both are valid settled receipts.
 2. **duplicate** — re-broadcasting the identical signed bytes must be
    rejected as `DUP_TRANSACTION_ERROR`: replay protection keyed by txID,
    which never covers the signature.

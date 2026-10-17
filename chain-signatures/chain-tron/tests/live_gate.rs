@@ -23,7 +23,8 @@ use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 use url::Url;
 
-use alloy::primitives::{Address, B256};
+use alloy::primitives::{Address, B256, U256};
+use alloy::sol_types::SolCall;
 
 fn env_secs(name: &str, default: u64) -> anyhow::Result<Duration> {
     Ok(Duration::from_secs(match std::env::var(name) {
@@ -37,14 +38,20 @@ fn env_secs(name: &str, default: u64) -> anyhow::Result<Duration> {
 /// Nile USDT; verified by `triggerconstantcontract name()` = "Tether USD".
 const DEFAULT_CONTRACT: &str = "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf";
 
+alloy::sol! {
+    interface Trc20 {
+        function transfer(address to, uint256 amount) external returns (bool);
+    }
+}
+
 /// `transfer(address,uint256)` calldata: selector plus two padded words —
 /// the exact shape of the recorded mainnet USDT transfers.
 fn usdt_transfer_calldata(to: &TronAddress, amount: u64) -> Vec<u8> {
-    let mut data = alloy::primitives::keccak256(b"transfer(address,uint256)")[..4].to_vec();
-    data.extend_from_slice(&[0u8; 12]);
-    data.extend_from_slice(&to.as_bytes()[1..]);
-    data.extend_from_slice(&amount.to_be_bytes());
-    data
+    Trc20::transferCall {
+        to: Address::from_slice(&to.as_bytes()[1..]),
+        amount: U256::from(amount),
+    }
+    .abi_encode()
 }
 
 fn transfer_topic() -> B256 {
@@ -259,10 +266,19 @@ async fn relay_sequence_runs_against_a_mocked_endpoint() {
         number: 1000,
         timestamp: 1_730_000_000_000,
     };
+    let calldata = usdt_transfer_calldata(&owner, 1);
+    // The amount must land as a full 32-byte word: a truncated one
+    // zero-pads on load and decodes as amount · 2^192 — always reverting.
+    assert_eq!(calldata.len(), 4 + 32 + 32);
+    assert_eq!(
+        calldata[..4],
+        alloy::primitives::keccak256(b"transfer(address,uint256)")[..4]
+    );
+
     let raw = build_raw(
         &owner,
         &contract,
-        &usdt_transfer_calldata(&owner, 1),
+        &calldata,
         &reference,
         reference.timestamp as i64,
     );
