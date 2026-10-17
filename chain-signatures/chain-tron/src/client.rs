@@ -101,8 +101,6 @@ impl TronHttp {
                         fee: response.fee,
                         contract_ret: response.contract_ret,
                         res_message: response.res_message.as_deref().map(decode_hex_ascii),
-                        energy_usage: response.receipt.energy_usage,
-                        net_usage: response.receipt.net_usage,
                         receipt_result: response.receipt.result,
                         logs: response.log,
                     })),
@@ -267,13 +265,11 @@ struct TransactionInfoResponse {
     log: Vec<TronLog>,
 }
 
-/// Response structure for the usage information in a transaction receipt.
+/// Receipt `result` classification; recorded Nile receipts carry the
+/// outcome here (no `contractRet` field) alongside usage counters the
+/// parser leaves unread (`energy_usage_total`, `net_fee`, …).
 #[derive(Deserialize, Default)]
 struct ReceiptUsage {
-    #[serde(default, rename = "energy_usage")]
-    energy_usage: u64,
-    #[serde(default, rename = "net_usage")]
-    net_usage: u64,
     #[serde(default)]
     result: Option<String>,
 }
@@ -443,7 +439,7 @@ mod tests {
             ))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{ "result": true, "txid": "aa11…22" }"#)
+            .with_body(include_str!("../tests/fixtures/nile/broadcast-accept.json"))
             .create_async()
             .await;
 
@@ -463,7 +459,7 @@ mod tests {
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{ "result": false, "code": "DUP_TRANSACTION_ERROR", "message": "" }"#)
+            .with_body(include_str!("../tests/fixtures/nile/broadcast-dup.json"))
             .create_async()
             .await;
 
@@ -481,10 +477,9 @@ mod tests {
             .expect(1)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(
-                r#"{ "result": false, "code": "CONTRACT_VALIDATE_ERROR",
-                      "message": "Contract validate error : No contract!" }"#,
-            )
+            .with_body(include_str!(
+                "../tests/fixtures/nile/broadcast-codeless.json"
+            ))
             .create_async()
             .await;
 
@@ -493,7 +488,7 @@ mod tests {
             outcome,
             BroadcastOutcome::Rejected {
                 code: "CONTRACT_VALIDATE_ERROR".into(),
-                message: "Contract validate error : No contract!".into()
+                message: "Contract validate error : No contract or not a smart contract".into()
             }
         );
         mock.assert_async().await;
@@ -558,37 +553,69 @@ mod tests {
     #[tokio::test]
     async fn solidity_receipt_parses() {
         let (mut server, client) = test_client(fast_retry()).await;
+        // The recorded nile receipt, verbatim; its id is this test's hash.
+        let tx_id: B256 = "24157817b0db1a156e7244d4417cbd7303f32b06449fcbad739f124b6b8e4c82"
+            .parse()
+            .unwrap();
+        server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!("../tests/fixtures/nile/receipt-success.json"))
+            .create_async()
+            .await;
+
+        let receipt = client
+            .get_transaction_info_solidity(&tx_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.id, tx_id);
+        assert_eq!(receipt.block_number, 71896097);
+        assert_eq!(receipt.fee, 472800);
+        // Recorded receipts carry the outcome in receipt.result only.
+        assert_eq!(receipt.contract_ret, None);
+        assert_eq!(receipt.receipt_result.as_deref(), Some("SUCCESS"));
+        assert_eq!(receipt.res_message, None);
+
+        let usdt = address!("eca9bc828a3005b9a3b909f2cc5c2a54794de05f");
+        let holder = "000000000000000000000000bdf81069827deba7d39729eb387eda8827e5525c";
+        let topics = [
+            "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            holder,
+            holder,
+        ]
+        .iter()
+        .map(|t| t.parse::<B256>().unwrap())
+        .collect::<Vec<_>>();
+        let expected_log = Log::new(
+            usdt,
+            topics,
+            Bytes::from(
+                hex::decode("0000000000000000000000000000000000000000000000000000000000000001")
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(receipt.logs, vec![expected_log]);
+    }
+
+    #[tokio::test]
+    async fn receipt_tolerates_prefixed_addresses_and_hex_messages() {
+        // Deliberate parser leniencies, not node shapes: a 0x41-prefixed
+        // log address and a hex-ASCII resMessage (plain text is the other
+        // live encoding).
+        let (mut server, client) = test_client(fast_retry()).await;
         let tx_id = test_hash(9);
-        let usdt_topic = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-        let data_hex = "00000000000000000000000000000000000000000000000000000000001e8480";
-        // Log address is the 20-byte EVM form.
-        // The 21-byte 0x41-prefixed form stays tolerated.
         server
             .mock("POST", "/walletsolidity/gettransactioninfobyid")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(format!(
-                r#"{{
-                    "id": "{tx_id}",
-                    "fee": 2765000,
-                    "blockNumber": 3035010,
-                    "blockTimeStamp": 1730000031000,
-                    "contractRet": "SUCCESS",
-                    "resMessage": "53554343455353",
-                    "receipt": {{ "energy_usage": 262, "net_usage": 343, "result": "SUCCESS" }},
-                    "log": [
-                        {{
-                            "address": "41a614f803b6fd780986a42c78ec9c7f77e6ded13c",
-                            "topics": ["{usdt_topic}"],
-                            "data": "{data_hex}"
-                        }},
-                        {{
-                            "address": "a614f803b6fd780986a42c78ec9c7f77e6ded13c",
-                            "topics": ["{usdt_topic}"],
-                            "data": "{data_hex}"
-                        }}
-                    ]
-                }}"#
+                r#"{{ "id": "{tx_id}", "resMessage": "53554343455353",
+                     "log": [{{ "address": "41eca9bc828a3005b9a3b909f2cc5c2a54794de05f",
+                                "topics": ["ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"],
+                                "data": "" }}] }}"#
             ))
             .create_async()
             .await;
@@ -599,20 +626,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(receipt.id, tx_id);
-        assert_eq!(receipt.block_number, 3035010);
-        assert_eq!(receipt.fee, 2765000);
-        assert_eq!(receipt.contract_ret.as_deref(), Some("SUCCESS"));
-        assert_eq!(receipt.receipt_result.as_deref(), Some("SUCCESS"));
         assert_eq!(receipt.res_message.as_deref(), Some("SUCCESS"));
-        assert_eq!(receipt.energy_usage, 262);
-        assert_eq!(receipt.net_usage, 343);
-
-        let expected_log = Log::new(
-            address!("a614f803b6fd780986a42c78ec9c7f77e6ded13c"),
-            vec![usdt_topic.parse::<B256>().unwrap()],
-            Bytes::from(hex::decode(data_hex).unwrap()),
-        )
-        .unwrap();
-        assert_eq!(receipt.logs, vec![expected_log.clone(), expected_log]);
+        assert_eq!(
+            receipt.logs.first().unwrap().address,
+            address!("eca9bc828a3005b9a3b909f2cc5c2a54794de05f")
+        );
     }
 }

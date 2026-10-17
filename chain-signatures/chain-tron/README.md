@@ -33,11 +33,11 @@ Core pieces:
 
 ## Live gate
 
-`tests/live_gate.rs` verifies the transaction path — parsing, signing,
-broadcast, and receipt settlement — against a real network, currently
-[Nile](https://nileex.io) keyless via `https://nile.trongrid.io`.
-A mock-backed sequence of the same code runs in CI; the live run is
-opt-in:
+`tests/live_gate.rs` exercises the full path — assembly, signing,
+broadcast, settlement — against a real network (default Nile via
+TronGrid). The same sequence runs in CI against the recorded responses
+in `tests/fixtures/nile/`, served verbatim except for the receipt `id`
+(the recording's txid belongs to the recording's key).
 
 ```sh
 TRON_ENDPOINT=https://nile.trongrid.io \
@@ -45,43 +45,25 @@ TRON_PRIVATE_KEY=$(openssl rand -hex 32) \
 cargo test -p mpc-chain-tron --test live_gate -- --ignored --nocapture
 ```
 
-A key with no TRX stops the run after printing its address — fund it at
-the [Nile faucet](https://nileex.io/join/getJoinPage) and re-run.
+A key with no TRX stops after printing its address — fund it at the
+[Nile faucet](https://nileex.io/join/getJoinPage) and re-run.
 
 | env | required | notes |
 |---|---|---|
 | `TRON_ENDPOINT` | yes | wallet/solidity base URL |
-| `TRON_PRIVATE_KEY` | yes | 32-byte hex; TRX only, it pays the fees — no token balance is expected |
-| `TRON_CONTRACT` | no | call target; default Nile USDT (`TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf`, verified on-chain via `name()`) |
-| `TRON_API_KEY` | no | `TRON-PRO-API-KEY` header, for TronGrid rate limits |
-| `TRON_POLL_SECS` | no | settle poll interval, default 3 |
-| `TRON_DEADLINE_SECS` | no | solidification deadline, default 180 |
+| `TRON_PRIVATE_KEY` | yes | 32-byte hex; pays the fees, no token balance expected |
+| `TRON_CONTRACT` | no | call target; default Nile USDT |
+| `TRON_API_KEY` | no | `TRON-PRO-API-KEY` for TronGrid rate limits |
+| `TRON_POLL_SECS`, `TRON_DEADLINE_SECS` | no | settle poll (3) and deadline (180) |
 
-The gate is a single-key relayer simulation — the ECDSA part is real
-(k256 over the sha256 prehash), and the transaction assembly goes through
-the same `parse`/`sign_and_hash` path the nodes use. Three probes:
-
-1. **acceptance** — assemble a USDT `transfer`, broadcast, settle on the
-   solidity router; asserts the txID equals `sha256(raw_data)` computed
-   before signing and the receipt id equals it after execution. The
-   execution itself classifies either way: `SUCCESS` asserts the
-   `Transfer` log, while a key holding TRX but no tokens reverts on the
-   balance check — both are valid settled receipts.
-2. **duplicate** — re-broadcasting the identical signed bytes must be
-   rejected as `DUP_TRANSACTION_ERROR`: replay protection keyed by txID,
-   which never covers the signature.
-3. **codeless** — a call to an address with no code must be rejected as
-   `CONTRACT_VALIDATE_ERROR`, the classification recorded on both Nile and
-   mainnet.
-
-Facts pinned on Nile: solidification ~60 s after broadcast (2/3 of
-the 27 SRs at 3 s blocks), `REVERT` receipts carry
-`resMessage "REVERT opcode executed"` with zero fee, and all four
-endpoints above behave identically on `api.trongrid.io`.
+Probes: a USDT `transfer` must settle with a txID-matching receipt
+(`SUCCESS` asserts the `Transfer` log; a token-less key reverts — both
+classify); re-broadcasting the identical bytes must DUP-reject; a call
+to a codeless address must come back `CONTRACT_VALIDATE_ERROR`.
 
 ## Tests
 
-- Unit tests live with the code; `tests/golden.rs` replays recorded
-  mainnet USDT transfers (`tests/fixtures/`): proto round-trip is
-  byte-identical, ref-block derivation, assembly, signing, and txID all
-  reproduce the recorded transactions.
+Unit tests live with the code. `tests/golden.rs` replays recorded
+mainnet USDT transfers; `tests/live_gate.rs` replays the recorded Nile
+responses above (the client's receipt unit test embeds the same
+recording).

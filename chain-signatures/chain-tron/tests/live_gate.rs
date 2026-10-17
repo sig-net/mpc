@@ -250,25 +250,36 @@ fn mock_config(endpoint: Url) -> TronConfig {
     }
 }
 
+/// A raw response body recorded from nile.trongrid.io; the mock below
+/// serves these verbatim.
+fn fixture(name: &str) -> String {
+    std::fs::read_to_string(format!("tests/fixtures/nile/{name}.json"))
+        .unwrap_or_else(|err| panic!("fixture {name}: {err}"))
+}
+
 #[tokio::test]
-async fn relay_sequence_runs_against_a_mocked_endpoint() {
+async fn relay_sequence_runs_against_recorded_nile_responses() {
+    // Reference block from the recorded now block, so the signed bytes
+    // answer to the recorded responses.
+    let nowblock = fixture("nowblock");
+    let now: serde_json::Value = serde_json::from_str(&nowblock).unwrap();
+    let reference = NowBlock {
+        block_id: now["blockID"].as_str().unwrap().parse().unwrap(),
+        number: now["block_header"]["raw_data"]["number"].as_u64().unwrap(),
+        timestamp: now["block_header"]["raw_data"]["timestamp"]
+            .as_u64()
+            .unwrap(),
+    };
+
     let mut key_bytes = [0u8; 32];
     key_bytes[31] = 1;
     let key = SigningKey::from_bytes(&k256::FieldBytes::from(key_bytes)).unwrap();
     let owner = TronAddress::from_evm(derive_address(&key));
-    let contract = TronAddress::from_evm(Address::repeat_byte(0x22));
+    let contract = DEFAULT_CONTRACT.parse().expect("pinned default contract");
 
-    // Deterministic reference: the mocked now block must match what the
-    // gate will fetch, so the signed bytes below are exactly what the
-    // mocks must answer to.
-    let reference = NowBlock {
-        block_id: B256::repeat_byte(7),
-        number: 1000,
-        timestamp: 1_730_000_000_000,
-    };
     let calldata = usdt_transfer_calldata(&owner, 1);
-    // The amount must land as a full 32-byte word: a truncated one
-    // zero-pads on load and decodes as amount · 2^192 — always reverting.
+    // A truncated amount word zero-pads on load to amount·2¹⁹² — always
+    // reverting.
     assert_eq!(calldata.len(), 4 + 32 + 32);
     assert_eq!(
         calldata[..4],
@@ -293,75 +304,69 @@ async fn relay_sequence_runs_against_a_mocked_endpoint() {
     );
     let (void_signed, _) = sign(&key, &void.encode_to_vec()).unwrap();
 
+    // Patch the recorded receipt to match the txid of the signed transaction.
+    let receipt = fixture("receipt-success");
+    let recorded_id = serde_json::from_str::<serde_json::Value>(&receipt).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let receipt = receipt.replace(&recorded_id, &hex::encode(txid));
+
     let mut server = mockito::Server::new_async().await;
     let endpoint: Url = server.url().parse().unwrap();
-
-    // Mockito picks the first matching mock (creation order) that still
-    // misses its expectation, else the last match: the accept mock's
-    // `expect(1)` answers the first broadcast, then the dup mock takes over.
+    // Mockito answers the first stub whose expectation is still unmet:
+    // accept's `expect(1)` hands the second identical broadcast to dup,
+    // and the pending `{}` stub hands the first poll to the receipt.
     server
         .mock("POST", "/wallet/getnowblock")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(format!(
-            r#"{{ "blockID": "{}",
-                 "block_header": {{ "raw_data": {{ "number": {}, "timestamp": {} }} }} }}"#,
-            hex::encode(reference.block_id),
-            reference.number,
-            reference.timestamp
-        ))
+        .with_body(nowblock)
         .create_async()
         .await;
+
     server
         .mock("POST", "/wallet/broadcasthex")
         .match_body(mockito::Matcher::Json(serde_json::json!({
             "transaction": hex::encode(&void_signed)
         })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(r#"{ "result": false, "code": "CONTRACT_VALIDATE_ERROR" }"#)
+        .with_body(fixture("broadcast-codeless"))
         .create_async()
         .await;
+
     server
         .mock("POST", "/wallet/broadcasthex")
         .match_body(mockito::Matcher::Json(serde_json::json!({
             "transaction": hex::encode(&signed)
         })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(format!(
-            r#"{{ "result": true, "txid": "{}" }}"#,
-            hex::encode(txid)
-        ))
+        .with_body(fixture("broadcast-accept"))
         .expect(1)
         .create_async()
         .await;
+
     server
         .mock("POST", "/wallet/broadcasthex")
         .match_body(mockito::Matcher::Json(serde_json::json!({
             "transaction": hex::encode(&signed)
         })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(r#"{ "result": false, "code": "DUP_TRANSACTION_ERROR" }"#)
+        .with_body(fixture("broadcast-dup"))
         .create_async()
         .await;
+
     server
         .mock("POST", "/walletsolidity/gettransactioninfobyid")
         .match_body(mockito::Matcher::PartialJson(serde_json::json!({
             "value": hex::encode(txid)
         })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(format!(
-            r#"{{ "id": "{}", "blockNumber": 1001, "blockTimeStamp": 1730000003000,
-                 "fee": 27000, "contractRet": "SUCCESS",
-                 "receipt": {{ "result": "SUCCESS", "energy_usage": 1000, "net_usage": 345 }},
-                 "log": [{{ "address": "{}", "topics": ["{}"], "data": "" }}] }}"#,
-            hex::encode(txid),
-            contract.to_hex(),
-            hex::encode(transfer_topic())
-        ))
+        .with_body(fixture("receipt-pending"))
+        .expect(1)
+        .create_async()
+        .await;
+
+    server
+        .mock("POST", "/walletsolidity/gettransactioninfobyid")
+        .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+            "value": hex::encode(txid)
+        })))
+        .with_body(receipt)
         .create_async()
         .await;
 

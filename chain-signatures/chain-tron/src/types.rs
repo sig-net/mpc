@@ -52,8 +52,6 @@ pub struct TronReceipt {
     pub receipt_result: Option<String>,
     /// Revert reason, hex-decoded when present.
     pub res_message: Option<String>,
-    pub energy_usage: u64,
-    pub net_usage: u64,
     pub logs: Vec<TronLog>,
 }
 
