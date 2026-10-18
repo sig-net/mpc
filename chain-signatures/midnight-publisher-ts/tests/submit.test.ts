@@ -241,7 +241,11 @@ describe("handleSubmit: the flow", () => {
         ) as Promise<Landed>,
     });
 
-    expect((await refused(9)).code).toBe("state_conflict");
+    const refusal = await refused(9);
+
+    expect(refusal.code).toBe("state_conflict");
+    // The node's reason, not just the constant wrapper text, so the logs say why.
+    expect(refusal.message).toContain("1002: Verification Error");
   });
 });
 
