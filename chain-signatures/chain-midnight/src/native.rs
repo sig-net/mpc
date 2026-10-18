@@ -246,6 +246,10 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         let head_number = self.chain.block_number(&head).await.map_err(internal)?;
         let head_time = self.chain.block_time(&head).await.map_err(internal)?;
         let indexed_time = self.wallet.indexed_time().await?;
+        // Events indexed up to `indexed_time` may still be on their way to the replay.
+        self.wallet
+            .ready_by(deadline.checked_sub(WORK_RESERVE).unwrap_or(deadline))
+            .await?;
         let ctime = fee_ctime(head_time, indexed_time, self.wallet.sync_time());
 
         let wall = mpc_utils::time::current_unix_timestamp();
@@ -429,10 +433,11 @@ where
 }
 
 /// The fee's `ctime`. The spend proves against the replayed state's DUST roots,
-/// which the chain looks up by `ctime`, so it must name a time the replay has fully
-/// seen: no later than the newest block the indexer has indexed (the replay has
-/// caught up with it) nor the finalized head, and no earlier than the newest
-/// replayed event.
+/// which the chain looks up by `ctime`, so it names a time the replay has seen: no
+/// later than the finalized head or the newest block the indexer has indexed, and
+/// no earlier than the newest replayed event. The replay is checked caught up after
+/// the indexer answers, but an event the subscription has not delivered yet still
+/// leaves the roots stale; the node then refuses the spend and the publish retries.
 fn fee_ctime(head_time: Timestamp, indexed_time: Timestamp, sync_time: Timestamp) -> Timestamp {
     head_time.min(indexed_time).max(sync_time)
 }

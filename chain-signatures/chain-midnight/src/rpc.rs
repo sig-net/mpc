@@ -501,8 +501,9 @@ impl MidnightRpc {
 pub(crate) struct MidnightPublisherRpc {
     rpc: RpcClient,
     legacy: LegacyRpcMethods<SubstrateConfig>,
-    /// Encodes the submit extrinsic and decodes block events against the node's metadata.
-    client: OnlineClient<SubstrateConfig>,
+    /// Encodes the submit extrinsic and decodes block events against the node's
+    /// metadata; replaced when the runtime upgrades.
+    client: std::sync::RwLock<OnlineClient<SubstrateConfig>>,
     network_id: String,
 }
 
@@ -524,13 +525,42 @@ impl MidnightPublisherRpc {
         Ok(Self {
             rpc,
             legacy,
-            client,
+            client: std::sync::RwLock::new(client),
             network_id,
         })
     }
 
     pub fn network_id(&self) -> &str {
         &self.network_id
+    }
+
+    /// The subxt client for the node's current runtime: a metadata fetched before a
+    /// runtime upgrade would mis-encode the submit and mis-decode the events after it.
+    async fn current_client(&self) -> anyhow::Result<OnlineClient<SubstrateConfig>> {
+        let client = self
+            .client
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let running = self
+            .legacy
+            .state_get_runtime_version(None)
+            .await
+            .context("failed to fetch the midnight runtime version")?;
+        let known = client.runtime_version();
+        if running.spec_version == known.spec_version
+            && running.transaction_version == known.transaction_version
+        {
+            return Ok(client);
+        }
+        let fresh = OnlineClient::<SubstrateConfig>::from_rpc_client(self.rpc.clone())
+            .await
+            .context("failed to reload the midnight subxt client after a runtime upgrade")?;
+        *self
+            .client
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh.clone();
+        Ok(fresh)
     }
 }
 
@@ -651,7 +681,8 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         at_hash_0x: &str,
     ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
         let key = self
-            .client
+            .current_client()
+            .await?
             .storage()
             .address_bytes(&subxt::dynamic::storage(
                 "Timestamp",
@@ -673,8 +704,11 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
     }
 
     async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal> {
-        let extrinsic = self
-            .client
+        let client = self
+            .current_client()
+            .await
+            .map_err(|error| SubmitRefusal::Refused(format!("nothing was sent: {error:#}")))?;
+        let extrinsic = client
             .tx()
             .create_unsigned(&subxt::dynamic::tx(
                 "Midnight",
@@ -700,7 +734,8 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         tx_hash: [u8; 32],
     ) -> anyhow::Result<Option<Landing>> {
         let events = self
-            .client
+            .current_client()
+            .await?
             .blocks()
             .at(parse_block_hash(at_hash_0x)?)
             .await
@@ -2269,6 +2304,66 @@ mod tests {
             err.to_string()
                 .contains("runtime api Ok payload is not a SCALE Vec<u8>"),
             "the decoder boundary must identify the malformed payload: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_publisher_reloads_its_metadata_only_after_a_runtime_upgrade() {
+        let metadata = subxt::Metadata::decode_all(
+            &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
+        )
+        .unwrap();
+        let running = Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let config = http_config(server.local_addr().unwrap());
+        let transport = connect_http(&config).unwrap();
+        let mut module = RpcModule::new(());
+        let spec = running.clone();
+        module
+            .register_method("state_getRuntimeVersion", move |_, _, _| {
+                json!({
+                    "specName": "midnight",
+                    "implName": "midnight",
+                    "authoringVersion": 1,
+                    "specVersion": spec.load(std::sync::atomic::Ordering::SeqCst),
+                    "implVersion": 0,
+                    "apis": [],
+                    "transactionVersion": 1,
+                    "stateVersion": 1
+                })
+            })
+            .unwrap();
+        let _handle = server.start(module);
+        let client = OnlineClient::<SubstrateConfig>::from_rpc_client_with(
+            H256([0x11; 32]),
+            subxt::client::RuntimeVersion {
+                spec_version: 1,
+                transaction_version: 1,
+            },
+            metadata,
+            transport.clone(),
+        )
+        .unwrap();
+        let rpc = MidnightPublisherRpc {
+            rpc: transport.clone(),
+            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+            client: std::sync::RwLock::new(client),
+            network_id: "undeployed".to_string(),
+        };
+
+        let same = rpc.current_client().await.unwrap();
+        assert_eq!(
+            same.runtime_version().spec_version,
+            1,
+            "no upgrade, no reload"
+        );
+
+        // The stub serves no metadata, so a reload can only be seen failing.
+        running.store(2, std::sync::atomic::Ordering::SeqCst);
+        let error = rpc.current_client().await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("after a runtime upgrade"),
+            "{error:#}"
         );
     }
 
