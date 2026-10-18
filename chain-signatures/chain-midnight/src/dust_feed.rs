@@ -7,6 +7,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use futures_util::{SinkExt as _, StreamExt as _};
+use midnight_base_crypto::time::Timestamp;
 use mpc_utils::task::AbortOnDrop;
 use serde::Deserialize;
 use serde_json::json;
@@ -39,6 +40,9 @@ pub(crate) trait DustEventSource: Send + Sync + 'static {
         &self,
         from: Option<u64>,
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>>;
+
+    /// The block time of the newest block the source has indexed.
+    async fn indexed_time(&self) -> anyhow::Result<Timestamp>;
 }
 
 pub(crate) struct IndexerDustEvents {
@@ -65,51 +69,7 @@ impl DustEventSource for IndexerDustEvents {
         &self,
         from: Option<u64>,
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
-        let mut request = self
-            .url
-            .as_str()
-            .into_client_request()
-            .context("the indexer subscription URL is not a websocket URL")?;
-        request.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            HeaderValue::from_static("graphql-transport-ws"),
-        );
-        let connect = tokio_tungstenite::connect_async_tls_with_config(
-            request,
-            None,
-            false,
-            Some(tokio_tungstenite::Connector::Rustls(tls()?)),
-        );
-        let (mut socket, _) = tokio::time::timeout(KEEPALIVE, connect)
-            .await
-            .context("timed out connecting to the indexer subscription")?
-            .context("connecting to the indexer subscription")?;
-        socket
-            .send(Message::text(
-                json!({ "type": "connection_init" }).to_string(),
-            ))
-            .await
-            .context("opening the indexer subscription")?;
-        loop {
-            let frame = tokio::time::timeout(KEEPALIVE, socket.next())
-                .await
-                .context("the indexer did not acknowledge the subscription")?
-                .context("the indexer closed the subscription before acknowledging it")?
-                .context("reading the indexer's acknowledgement")?;
-            if let Message::Text(text) = frame {
-                let message: serde_json::Value = serde_json::from_str(&text)
-                    .context("the indexer sent a message that is not JSON")?;
-                match message["type"].as_str() {
-                    Some("connection_ack") => break,
-                    Some("ping") => {
-                        socket
-                            .send(Message::text(json!({ "type": "pong" }).to_string()))
-                            .await?;
-                    }
-                    _ => anyhow::bail!("the indexer refused the subscription: {text}"),
-                }
-            }
-        }
+        let mut socket = open(&self.url).await?;
         socket
             .send(Message::text(
                 json!({
@@ -135,6 +95,102 @@ impl DustEventSource for IndexerDustEvents {
             .boxed(),
         )
     }
+
+    async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+        let query = async {
+            let mut socket = open(&self.url).await?;
+            socket
+                .send(Message::text(
+                    json!({
+                        "id": "1",
+                        "type": "subscribe",
+                        "payload": { "query": "query { block { timestamp } }" },
+                    })
+                    .to_string(),
+                ))
+                .await
+                .context("asking the indexer for its newest block")?;
+            loop {
+                let frame = socket
+                    .next()
+                    .await
+                    .context("the indexer closed the connection before answering")?
+                    .context("reading the indexer's newest block")?;
+                let Message::Text(text) = frame else {
+                    continue;
+                };
+                let message: serde_json::Value = serde_json::from_str(&text)
+                    .context("the indexer sent a message that is not JSON")?;
+                match message["type"].as_str() {
+                    Some("next") => {
+                        let millis = message["payload"]["data"]["block"]["timestamp"]
+                            .as_u64()
+                            .with_context(|| {
+                                format!("the indexer's newest block has no time: {text}")
+                            })?;
+                        return anyhow::Ok(Timestamp::from_secs(millis / 1000));
+                    }
+                    Some("ping") => {
+                        socket
+                            .send(Message::text(json!({ "type": "pong" }).to_string()))
+                            .await?;
+                    }
+                    _ => anyhow::bail!("the indexer did not answer with its newest block: {text}"),
+                }
+            }
+        };
+        tokio::time::timeout(KEEPALIVE, query)
+            .await
+            .context("timed out asking the indexer for its newest block")?
+    }
+}
+
+/// A `graphql-transport-ws` connection, past its acknowledgement.
+async fn open(url: &str) -> anyhow::Result<Socket> {
+    let mut request = url
+        .into_client_request()
+        .context("the indexer subscription URL is not a websocket URL")?;
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        HeaderValue::from_static("graphql-transport-ws"),
+    );
+    let connect = tokio_tungstenite::connect_async_tls_with_config(
+        request,
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(tls()?)),
+    );
+    let (mut socket, _) = tokio::time::timeout(KEEPALIVE, connect)
+        .await
+        .context("timed out connecting to the indexer subscription")?
+        .context("connecting to the indexer subscription")?;
+    socket
+        .send(Message::text(
+            json!({ "type": "connection_init" }).to_string(),
+        ))
+        .await
+        .context("opening the indexer subscription")?;
+    loop {
+        let frame = tokio::time::timeout(KEEPALIVE, socket.next())
+            .await
+            .context("the indexer did not acknowledge the subscription")?
+            .context("the indexer closed the subscription before acknowledging it")?
+            .context("reading the indexer's acknowledgement")?;
+        if let Message::Text(text) = frame {
+            let message: serde_json::Value = serde_json::from_str(&text)
+                .context("the indexer sent a message that is not JSON")?;
+            match message["type"].as_str() {
+                Some("connection_ack") => break,
+                Some("ping") => {
+                    socket
+                        .send(Message::text(json!({ "type": "pong" }).to_string()))
+                        .await?;
+                }
+                _ => anyhow::bail!("the indexer refused the subscription: {text}"),
+            }
+        }
+    }
+    Ok(socket)
 }
 
 fn tls() -> anyhow::Result<std::sync::Arc<rustls::ClientConfig>> {

@@ -602,6 +602,29 @@ pub(crate) enum SubmitRefusal {
 /// The pool's "already imported" answer: the transaction is in it.
 const ALREADY_IMPORTED: i32 = 1013;
 
+/// A JSON-RPC error is the node's own refusal, so nothing entered its pool; a
+/// transport failure leaves the transaction possibly in it.
+fn classify_submit_reply(
+    reply: Result<serde_json::Value, RawRpcError>,
+) -> Result<(), SubmitRefusal> {
+    match reply {
+        Ok(_) => Ok(()),
+        Err(RawRpcError::User(reply)) if reply.code == ALREADY_IMPORTED => Ok(()),
+        Err(RawRpcError::User(reply)) => Err(SubmitRefusal::Refused(format!(
+            "{}: {}{}",
+            reply.code,
+            reply.message,
+            reply
+                .data
+                .map(|data| format!(" ({})", data.get()))
+                .unwrap_or_default()
+        ))),
+        Err(error) => Err(SubmitRefusal::Unanswered(
+            anyhow::Error::new(error).context("author_submitExtrinsic failed"),
+        )),
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::native::SubmitChain for MidnightPublisherRpc {
     async fn block_number(&self, at_hash_0x: &str) -> anyhow::Result<u64> {
@@ -664,26 +687,11 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
                 ))
             })?;
         let encoded = format!("0x{}", hex::encode(extrinsic.encoded()));
-        match self
-            .rpc
-            .request::<serde_json::Value>("author_submitExtrinsic", rpc_params![encoded])
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(RawRpcError::User(reply)) if reply.code == ALREADY_IMPORTED => Ok(()),
-            Err(RawRpcError::User(reply)) => Err(SubmitRefusal::Refused(format!(
-                "{}: {}{}",
-                reply.code,
-                reply.message,
-                reply
-                    .data
-                    .map(|data| format!(" ({})", data.get()))
-                    .unwrap_or_default()
-            ))),
-            Err(error) => Err(SubmitRefusal::Unanswered(
-                anyhow::Error::new(error).context("author_submitExtrinsic failed"),
-            )),
-        }
+        classify_submit_reply(
+            self.rpc
+                .request::<serde_json::Value>("author_submitExtrinsic", rpc_params![encoded])
+                .await,
+        )
     }
 
     async fn landing(
@@ -2262,5 +2270,33 @@ mod tests {
                 .contains("runtime api Ok payload is not a SCALE Vec<u8>"),
             "the decoder boundary must identify the malformed payload: {err:#}"
         );
+    }
+
+    #[test]
+    fn a_submit_reply_is_a_refusal_only_when_the_node_answered_one() {
+        let user = |code: i32, message: &str| {
+            Err(RawRpcError::User(UserError {
+                code,
+                message: message.to_string(),
+                data: Some(serde_json::value::to_raw_value("root not in arena").unwrap()),
+            }))
+        };
+        assert!(classify_submit_reply(Ok(serde_json::json!("0x00"))).is_ok());
+        assert!(
+            classify_submit_reply(user(ALREADY_IMPORTED, "Transaction Already Imported")).is_ok(),
+            "an already-imported transaction is in the pool"
+        );
+        match classify_submit_reply(user(1002, "Verification Error")) {
+            Err(SubmitRefusal::Refused(reason)) => {
+                assert_eq!(reason, "1002: Verification Error (\"root not in arena\")")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(matches!(
+            classify_submit_reply(Err(RawRpcError::Client(Box::new(std::io::Error::other(
+                "connection reset"
+            ))))),
+            Err(SubmitRefusal::Unanswered(_))
+        ));
     }
 }

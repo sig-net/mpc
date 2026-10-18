@@ -245,19 +245,17 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         })?;
         let head_number = self.chain.block_number(&head).await.map_err(internal)?;
         let head_time = self.chain.block_time(&head).await.map_err(internal)?;
-        // The fee proves against the DUST roots of the replayed state, which the chain
-        // looks up by `ctime`: it may not precede the newest replayed event.
-        let ctime = head_time.max(self.wallet.sync_time());
+        let indexed_time = self.wallet.indexed_time().await?;
+        let ctime = fee_ctime(head_time, indexed_time, self.wallet.sync_time());
 
         let wall = mpc_utils::time::current_unix_timestamp();
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let fee_ttl = FEE_TTL.min(remaining.saturating_sub(FINALITY_SLACK));
-        if fee_ttl < MIN_FEE_TTL {
-            return Err(SubmitError::ProvingTimeout(format!(
+        let fee_ttl = fee_ttl(remaining).ok_or_else(|| {
+            SubmitError::ProvingTimeout(format!(
                 "{remaining:?} of the submit budget is left, too little to land a transaction; \
                  nothing was posted"
-            )));
-        }
+            ))
+        })?;
         let ttl = Timestamp::from_secs(wall + fee_ttl.as_secs());
 
         let plan = self.wallet.plan(
@@ -337,21 +335,35 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             }
         }
         let landing = self.await_landing(tx_hash, after, ttl, deadline).await;
-        if matches!(landing, Err(SubmitError::StateConflict(_))) {
-            self.wallet.release(spent);
+        match landing {
+            Ok(Landing::Applied) => Ok(hex::encode(tx_hash)),
+            // The DUST spends sit in the guaranteed segment, so they were applied:
+            // the reservation ends when the replay sees them spent.
+            Ok(Landing::PartialSuccess) => Err(SubmitError::StateConflict(format!(
+                "transaction {} landed with a failed segment, which readers skip",
+                hex::encode(tx_hash)
+            ))),
+            Ok(Landing::Expired) => {
+                self.wallet.release(spent);
+                Err(SubmitError::StateConflict(format!(
+                    "transaction {} expired without landing; nothing was posted",
+                    hex::encode(tx_hash)
+                )))
+            }
+            Err(error) => Err(error),
         }
-        landing
     }
 
     /// Scans each finalized block after `after` for `tx_hash` until it lands, until a
-    /// finalized block is past `ttl` without it, or until `deadline`.
+    /// finalized block is past `ttl` without it (`Landing::Expired`), or until
+    /// `deadline`, when the outcome is unknown.
     async fn await_landing(
         &self,
         tx_hash: [u8; 32],
         after: u64,
         ttl: Timestamp,
         deadline: Instant,
-    ) -> Result<String, SubmitError> {
+    ) -> Result<Landing, SubmitError> {
         let mut scanned = after;
         loop {
             let scan = async {
@@ -375,19 +387,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
                 Ok(None)
             };
             match tokio::time::timeout_at(deadline, scan).await {
-                Ok(Ok(Some(Landing::Applied))) => return Ok(hex::encode(tx_hash)),
-                Ok(Ok(Some(Landing::PartialSuccess))) => {
-                    return Err(SubmitError::StateConflict(format!(
-                        "transaction {} landed with a failed segment, which readers skip",
-                        hex::encode(tx_hash)
-                    )))
-                }
-                Ok(Ok(Some(Landing::Expired))) => {
-                    return Err(SubmitError::StateConflict(format!(
-                        "transaction {} expired without landing; nothing was posted",
-                        hex::encode(tx_hash)
-                    )))
-                }
+                Ok(Ok(Some(landing))) => return Ok(landing),
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
                     tracing::warn!(
@@ -426,6 +426,21 @@ where
             .await
             .map_err(SubmitError::into_anyhow)
     }
+}
+
+/// The fee's `ctime`. The spend proves against the replayed state's DUST roots,
+/// which the chain looks up by `ctime`, so it must name a time the replay has fully
+/// seen: no later than the newest block the indexer has indexed (the replay has
+/// caught up with it) nor the finalized head, and no earlier than the newest
+/// replayed event.
+fn fee_ctime(head_time: Timestamp, indexed_time: Timestamp, sync_time: Timestamp) -> Timestamp {
+    head_time.min(indexed_time).max(sync_time)
+}
+
+/// How long the fee intent stays includable with `remaining` of the budget left:
+/// enough of it must remain to see the transaction finalized past its TTL.
+fn fee_ttl(remaining: Duration) -> Option<Duration> {
+    Some(FEE_TTL.min(remaining.saturating_sub(FINALITY_SLACK))).filter(|ttl| *ttl >= MIN_FEE_TTL)
 }
 
 /// Runs a proof on the blocking pool: proving holds a core for seconds, and the
@@ -549,6 +564,10 @@ mod tests {
 
         fn sync_time(&self) -> Timestamp {
             Timestamp::from_secs(0)
+        }
+
+        async fn indexed_time(&self) -> Result<Timestamp, SubmitError> {
+            Ok(Timestamp::from_secs(0))
         }
 
         fn plan(
@@ -1045,6 +1064,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert!(
+            client.wallet.released.lock().unwrap().is_empty(),
+            "the guaranteed segment spent the DUST; the replay ends the reservation"
+        );
+    }
+
+    #[test]
+    fn the_fee_ctime_is_a_time_the_replay_has_fully_seen() {
+        let at = Timestamp::from_secs;
+        // The indexer behind the finalized head: its newest block bounds ctime.
+        assert_eq!(fee_ctime(at(100), at(90), at(80)), at(90));
+        // The indexer ahead of finality: the finalized head bounds it.
+        assert_eq!(fee_ctime(at(100), at(110), at(80)), at(100));
+        // The replay holds an event past both: ctime may not precede it.
+        assert_eq!(fee_ctime(at(100), at(110), at(105)), at(105));
+    }
+
+    #[test]
+    fn the_fee_ttl_leaves_the_landing_its_finality_slack() {
+        let secs = Duration::from_secs;
+        assert_eq!(fee_ttl(secs(420)), Some(FEE_TTL));
+        assert_eq!(fee_ttl(secs(100)), Some(secs(40)));
+        assert_eq!(fee_ttl(secs(90)), Some(MIN_FEE_TTL));
+        assert_eq!(fee_ttl(secs(89)), None);
+        assert_eq!(fee_ttl(secs(0)), None);
     }
 
     #[tokio::test(start_paused = true)]

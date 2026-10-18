@@ -1,5 +1,5 @@
-//! One respond call as the publisher hands it to the intent client, and the one
-//! failure class its retry logic tells apart from the rest.
+//! One respond call as the publisher hands it to the intent client, and the marker
+//! on an error whose transaction may still land.
 
 /// A submit whose outcome is unknown: the transaction may still land.
 #[derive(Debug)]

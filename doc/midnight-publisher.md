@@ -22,9 +22,9 @@ The node posts every finished Midnight response itself: one transaction per sign
 
 The wallet's DUST key is account 0, index 0 of the funding seed, derived the way the Midnight wallet SDK derives it: BIP-32 `m/44'/2400'/0'/2/0`, then the ledger's `DustSecretKey::derive_secret_key`. Spendable DUST is derived by replaying every DUST ledger event into a `DustLocalState`, and only the indexer serves those events (`dustLedgerEvents` over `graphql-transport-ws`). The state is in memory: the node replays from the first event when the publisher starts, resubscribes from the newest applied event after a dropped connection, and starts over from the first event if an event does not apply. The wallet is ready once it has applied the newest event the indexer reports.
 
-A DUST spend proves against the DUST commitment and generation roots, which the chain looks up by the spend's `ctime`. The fee's `ctime` is the finalized head's block time, or the newest replayed event's time when the indexer is ahead of finality.
+A DUST spend proves against the DUST commitment and generation roots, which the chain looks up by the spend's `ctime`, so the fee names a time the replay has fully seen: the earlier of the finalized head's and the indexer's newest block's time, or the newest replayed event's time when that is later.
 
-A submitted transaction reserves the UTXOs it spends. The reservation ends when the chain spends them, when the node refuses the transaction, or one minute after the fee intent's three-minute TTL, when the transaction can no longer land. A publish finding every UTXO reserved fails as `wallet_busy` and the publish loop retries it.
+A submitted transaction reserves the UTXOs it spends. The reservation ends when the chain spends them, when the node refuses the transaction, or one minute after the fee intent's TTL (three minutes, less when the budget is short), when the transaction can no longer land. A publish finding every UTXO reserved fails as `wallet_busy` and the publish loop retries it.
 
 The indexer is trusted for liveness only. A replay that disagrees with the chain produces spends whose proofs or nullifiers the node rejects, so a lying indexer can stop the node from paying, not make it post something else.
 
@@ -48,7 +48,7 @@ A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for 
 
 The operator configures the node URL, the singleton address, the funding seed and the indexer subscription URL (`--midnight-indexer-ws-url`). The node image carries what proving reads, at the paths `PublisherConfig` defaults to:
 
-- `/usr/local/share/midnight/signet-contract`: `keys/` and `zkir/` from `@sig-net/midnight-contract`'s `dist/managed`.
+- `/usr/local/share/midnight/signet-contract`: the `respond` and `respondBidirectional` keys and IR from `@sig-net/midnight-contract`'s `dist/managed`.
 - `/usr/local/share/midnight/zk-params`: the KZG parameters for k = 13 and k = 16 and the DUST spend keys, laid out as the ledger's parameter cache. A missing file is fetched from `srs.midnight.network` and checked against the hash the ledger pins.
 
 Every download in the image is pinned by its SHA-256. Test builds take `--midnight-contract-artifacts-dir` and `--midnight-zk-params-dir` instead.

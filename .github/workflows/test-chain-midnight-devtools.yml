@@ -15,7 +15,8 @@ concurrency:
 
 jobs:
   test:
-    name: Midnight Devtools Checks
+    # The branch rulesets require this check by its original name.
+    name: Midnight Publisher TS Tests
     runs-on: ubuntu-latest
     defaults:
       run:

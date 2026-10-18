@@ -106,7 +106,7 @@ pub struct PublisherConfig {
     /// The KZG parameters and DUST spend keys. A missing file is fetched into it from
     /// Midnight's parameter store and checked against the ledger's pinned hash.
     pub zk_params_dir: PathBuf,
-    /// Ceiling on one build.
+    /// The build's share of a respond intent's TTL, which `submit_timeout` completes.
     pub request_timeout: Duration,
     /// Ceiling on one submit, from the DUST wait to the finalized landing.
     pub submit_timeout: Duration,
@@ -250,7 +250,7 @@ fn validate_funding_seed(value: &str) -> anyhow::Result<()> {
 pub(crate) fn validate_publisher_network_id(value: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         PUBLISHER_NETWORK_IDS.contains(&value),
-        "midnight config: network_id is not supported by the publisher SDK"
+        "midnight config: network_id is not supported by the publisher"
     );
     Ok(())
 }

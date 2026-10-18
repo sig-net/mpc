@@ -86,6 +86,11 @@ pub(crate) trait FeePayer: Send + Sync {
     /// The block time of the newest replayed event: the earliest `ctime` whose DUST
     /// roots are the ones the replayed state proves against.
     fn sync_time(&self) -> Timestamp;
+    /// The block time of the newest block the event source has indexed: past it,
+    /// the chain may hold DUST events the replay has not seen.
+    fn indexed_time(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Timestamp, SubmitError>> + Send;
     /// A fee transaction paying for `base` at `ctime`, expiring at `ttl`, and the
     /// UTXOs it spends.
     fn plan(
@@ -160,6 +165,7 @@ impl Shared {
 /// The funding wallet, kept in sync in the background for as long as it lives.
 pub(crate) struct FundingWallet {
     shared: Arc<Shared>,
+    source: Arc<dyn DustEventSource>,
     _sync: AbortOnDrop,
 }
 
@@ -173,9 +179,10 @@ impl FundingWallet {
             state: Mutex::new(Synced::fresh()),
             progress,
         });
-        let sync = AbortOnDrop(tokio::spawn(follow(shared.clone(), source)));
+        let sync = AbortOnDrop(tokio::spawn(follow(shared.clone(), source.clone())));
         Self {
             shared,
+            source,
             _sync: sync,
         }
     }
@@ -186,9 +193,10 @@ impl FundingWallet {
 /// the replayed state can no longer absorb what the indexer sends.
 async fn follow(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) {
     loop {
-        // Its own task, so a panic below ends one subscription rather than the wallet.
-        let attempt = tokio::spawn(subscribe_once(shared.clone(), source.clone())).await;
-        if let Err(error) = attempt {
+        // Its own task, so a panic below ends one subscription rather than the
+        // wallet; held so that dropping the wallet aborts it too.
+        let mut attempt = AbortOnDrop(tokio::spawn(subscribe_once(shared.clone(), source.clone())));
+        if let Err(error) = (&mut attempt.0).await {
             tracing::error!(
                 ?error,
                 "midnight funding wallet: DUST event subscription panicked"
@@ -309,6 +317,14 @@ impl FeePayer for FundingWallet {
 
     fn sync_time(&self) -> Timestamp {
         self.shared.state().local.sync_time
+    }
+
+    async fn indexed_time(&self) -> Result<Timestamp, SubmitError> {
+        self.source.indexed_time().await.map_err(|error| {
+            SubmitError::WalletUnsynced(format!(
+                "the indexer did not report its newest block: {error:#}; nothing was posted"
+            ))
+        })
     }
 
     fn plan(
@@ -718,6 +734,10 @@ mod tests {
                 .chain(futures_util::stream::pending())
                 .boxed())
         }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            Ok(replayed().sync_time)
+        }
     }
 
     #[tokio::test]
@@ -744,6 +764,10 @@ mod tests {
             }
             OnceSource(self.1.clone()).subscribe(from).await
         }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -754,6 +778,87 @@ mod tests {
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
             .unwrap();
+    }
+
+    /// A subscription that never ends, holding `alive` while it is open.
+    struct Held(Arc<()>);
+
+    #[async_trait]
+    impl DustEventSource for Held {
+        async fn subscribe(
+            &self,
+            _from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            let alive = self.0.clone();
+            Ok(futures_util::stream::pending()
+                .map(move |update| {
+                    let _ = &alive;
+                    update
+                })
+                .boxed())
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_the_wallet_ends_its_subscription() {
+        let alive = Arc::new(());
+        let wallet = FundingWallet::start(funded_key(), Arc::new(Held(alive.clone())));
+        while Arc::strong_count(&alive) < 3 {
+            tokio::task::yield_now().await;
+        }
+        drop(wallet);
+        for _ in 0..100 {
+            if Arc::strong_count(&alive) == 1 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("the subscription outlived its wallet");
+    }
+
+    #[tokio::test]
+    async fn a_reservation_holds_until_its_utxos_are_spent_released_or_expired() {
+        let wallet = FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())));
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
+        let local = replayed();
+        let key = funded_key();
+        let all: Vec<DustNullifier> = local.utxos().map(|utxo| utxo.nullifier(&key)).collect();
+        let ctime = local.sync_time;
+        let ttl = Timestamp::from_secs(ctime.to_secs() + 180);
+        let mut rng = StdRng::seed_from_u64(4);
+        let base = base(&mut rng, ttl);
+        let plan = |rng: &mut StdRng| {
+            wallet.plan(&base, &INITIAL_PARAMETERS, ctime, ttl, "undeployed", rng)
+        };
+        let forever = Timestamp::from_secs(u64::MAX / 2);
+
+        wallet.reserve(&all, forever);
+        assert!(matches!(plan(&mut rng), Err(SubmitError::WalletBusy(_))));
+        wallet.release(&all[..1]);
+        assert!(
+            plan(&mut rng).is_ok(),
+            "a released reservation frees its UTXOs"
+        );
+
+        wallet.reserve(&all, Timestamp::from_secs(1));
+        assert!(plan(&mut rng).is_ok(), "a reservation past its time ends");
+
+        let spent_elsewhere = vec![DustNullifier(midnight_transient_crypto::curve::Fr::from(
+            9u64,
+        ))];
+        wallet.reserve(&spent_elsewhere, forever);
+        plan(&mut rng).unwrap();
+        assert!(
+            wallet.shared.state().reservations.is_empty(),
+            "a reservation whose UTXOs the chain spent ends"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -823,7 +928,9 @@ mod live {
             .ready_by(Instant::now() + std::time::Duration::from_secs(1800))
             .await
             .unwrap();
+        let indexed = wallet.indexed_time().await.unwrap();
         let state = wallet.shared.state();
+        println!("the indexer's newest block is at {indexed:?}");
         println!(
             "replayed to event {:?} of {} in {:?}; synced to {:?}",
             state.applied,

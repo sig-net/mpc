@@ -17,8 +17,11 @@ RUN curl -fsSL --retry 4 -o contract.tgz \
       https://registry.npmjs.org/@sig-net/midnight-contract/-/midnight-contract-0.25.0.tgz \
     && echo "c965f4033897dd09d7fc8eaf4b1a0913e7992401f8b5c206aa9a9f9f177fb928  contract.tgz" | sha256sum -c \
     && tar -xzf contract.tgz \
-    && mkdir -p /out/signet-contract /out/zk-params/dust/9 \
-    && cp -R package/dist/managed/keys package/dist/managed/zkir /out/signet-contract/ \
+    && mkdir -p /out/signet-contract/keys /out/signet-contract/zkir /out/zk-params/dust/9 \
+    && for circuit in respond respondBidirectional; do \
+         cp "package/dist/managed/keys/$circuit.prover" "package/dist/managed/keys/$circuit.verifier" /out/signet-contract/keys/ \
+         && cp "package/dist/managed/zkir/$circuit.bzkir" /out/signet-contract/zkir/; \
+       done \
     && for file in bls_midnight_2p13 bls_midnight_2p16 dust/9/spend.prover dust/9/spend.verifier dust/9/spend.bzkir; do \
          curl -fsSL --retry 4 -o "/out/zk-params/$file" "https://srs.midnight.network/$file"; \
        done \

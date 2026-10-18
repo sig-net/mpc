@@ -108,6 +108,11 @@ impl MidnightPublisher {
         )?
         .map(|store| Arc::new(store) as Arc<dyn OutputStore>);
         validate_publisher_network_id(rpc.network_id())?;
+        // Before the wallet starts: a failed connect leaves nothing replaying.
+        let provers = Arc::new(Provers::new(
+            &config.publisher.contract_artifacts_dir,
+            &config.publisher.zk_params_dir,
+        )?);
         let key = dust_secret_key(&parse_seed(&config.publisher.funding_seed)?)?;
         let wallet = FundingWallet::start(
             key,
@@ -115,10 +120,6 @@ impl MidnightPublisher {
                 config.publisher.indexer_ws_url.clone(),
             )),
         );
-        let provers = Arc::new(Provers::new(
-            &config.publisher.contract_artifacts_dir,
-            &config.publisher.zk_params_dir,
-        )?);
         let client = Arc::new(NativeIntentClient::new(
             rpc.clone(),
             wallet,
