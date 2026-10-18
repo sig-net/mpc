@@ -6994,6 +6994,7 @@ dependencies = [
  "midnight-storage",
  "midnight-transient-crypto 2.2.0",
  "midnight-transient-crypto 3.0.0",
+ "midnight-zkir",
  "midnight-zswap",
  "rand 0.8.8",
  "rayon",
@@ -7340,6 +7341,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "midnight-zkir-v3"
+version = "3.0.0"
+source = "git+https://github.com/midnightntwrk/midnight-ledger?tag=zkir-v3-3.0.0-rc.1#9c54da5569a10e76d78b6239998ebb6f33e50111"
+dependencies = [
+ "anyhow",
+ "const-hex",
+ "group",
+ "hex",
+ "midnight-base-crypto",
+ "midnight-circuits 7.2.3",
+ "midnight-curves 0.3.1",
+ "midnight-proofs 0.8.2",
+ "midnight-serialize",
+ "midnight-transient-crypto 3.0.0",
+ "midnight-zk-stdlib 2.3.4",
+ "num-bigint 0.4.6",
+ "num-traits",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "serde_repr",
+ "sha2 0.11.0",
+ "sha3 0.11.0",
+ "tracing",
+]
+
+[[package]]
 name = "midnight-zswap"
 version = "9.0.0"
 source = "git+https://github.com/midnightntwrk/midnight-ledger?tag=zswap-9.0.0-rc.3#d495446e618ea92577d920bfdf01f3eb1118a322"
@@ -7396,6 +7426,28 @@ checksum = "3be647b768db090acb35d5ec5db2b0e1f1de11133ca123b9eacf5137868f892a"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "minocrab-publisher"
+version = "0.1.0"
+source = "git+https://github.com/sig-net/minocrab?rev=68b319b01da84c9074eec7e2bbdc8f2006f6a536#68b319b01da84c9074eec7e2bbdc8f2006f6a536"
+dependencies = [
+ "anyhow",
+ "midnight-base-crypto",
+ "midnight-coin-structure",
+ "midnight-ledger-v9",
+ "midnight-onchain-runtime",
+ "midnight-onchain-state",
+ "midnight-onchain-vm",
+ "midnight-serialize",
+ "midnight-storage",
+ "midnight-transient-crypto 3.0.0",
+ "midnight-zkir-v3",
+ "rand 0.8.8",
+ "serde_json",
+ "signet-protocol",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -7536,7 +7588,9 @@ dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
+ "bip32",
  "bytes",
+ "futures-util",
  "google-cloud-auth",
  "google-cloud-storage",
  "hex",
@@ -7544,26 +7598,34 @@ dependencies = [
  "k256",
  "memchr",
  "midnight-base-crypto",
+ "midnight-coin-structure",
  "midnight-ledger-v9",
  "midnight-onchain-runtime",
  "midnight-onchain-state",
  "midnight-serialize",
  "midnight-storage",
  "midnight-transient-crypto 3.0.0",
+ "midnight-zkir",
+ "minocrab-publisher",
  "mockito",
  "mpc-chain-integration-core",
  "mpc-compact-hashing",
  "mpc-crypto",
  "mpc-primitives",
  "mpc-utils",
+ "rand 0.8.8",
+ "rustls",
  "serde",
  "serde_json",
  "subxt",
+ "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite 0.29.0",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
  "url",
+ "webpki-roots 0.26.9",
 ]
 
 [[package]]
@@ -11444,6 +11506,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "signet-protocol"
+version = "0.1.0"
+source = "git+https://github.com/sig-net/minocrab?rev=68b319b01da84c9074eec7e2bbdc8f2006f6a536#68b319b01da84c9074eec7e2bbdc8f2006f6a536"
+dependencies = [
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14630,7 +14700,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.2",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -15416,7 +15486,7 @@ version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
- "cfg-if 0.1.10",
+ "cfg-if 1.0.4",
  "digest 0.10.7",
  "rand 0.8.8",
  "static_assertions",

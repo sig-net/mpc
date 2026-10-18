@@ -11,6 +11,10 @@
 
 - [Account derivation](account-derivation.md): how per-chain accounts and keys are derived from the root key.
 
+## Chains
+
+- [Midnight publisher](midnight-publisher.md): how the node builds, proves, pays for and posts its Midnight responses, and which events the reader supports.
+
 ## Operations
 
 - [Secret management](secret-management.md): how secret material is represented, passed around, logged and stored in the node.

@@ -46,3 +46,10 @@ The checkpoint regression test inserts `Ckpt` markers before, between and after 
 Both tests exercise the production reader with modified copies of the captured transaction. They do not reseal the intent, pay changed fees or establish node acceptance. The checked-in capture files remain unchanged.
 
 To recapture, run the real vault integration suite, record the node block hash, block body, metadata and `System.Events` at the selected hash, decode `Midnight.send_mn_transaction` using that metadata, and save the argument bytes without reserialization. Confirm the node event status, ledger transaction hash, singleton address, native call ordinal, physical segment and payload against the same capture. These files contain neither GRANDPA finality proofs nor storage read proofs.
+
+## Publisher fixtures
+
+`initial-singleton-state.mn` is the singleton's synthesized initial state, never a chain capture: the empty ledger plus the three verifier keys of the `@sig-net/midnight-contract` package `midnight-devtools` installs, written by its `npm run gen:initial-state`. The native publisher's build tests read it as the deployed contract.
+
+`dust-events-undeployed.json` is every `dustLedgerEvents` item (`id`, `maxId`, `raw`) a local `undeployed` stack served at finalized block `0x03684af0efbb73e8cd0f6f108f037165cacb380c2022d862cf798581d1ea488e`, on `midnightntwrk/midnight-node:2.0.0-rc.4` and the indexer image `integration-tests` pins. The stack's genesis wallet funded and registered the wallet of seed `04` × 32, which then paid three respond fees. The funding wallet's tests replay it.
+

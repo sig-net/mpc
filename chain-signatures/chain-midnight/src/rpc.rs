@@ -1,4 +1,4 @@
-//! Midnight node RPC: the read transport everything in the read path goes through.
+//! Midnight node RPC: the transport every read and the publisher's submissions go through.
 
 use std::time::Duration;
 
@@ -497,27 +497,34 @@ impl MidnightRpc {
     }
 }
 
-/// Finalized request-only reads for the Midnight publisher.
+/// Finalized reads and transaction submission for the Midnight publisher.
 pub(crate) struct MidnightPublisherRpc {
     rpc: RpcClient,
     legacy: LegacyRpcMethods<SubstrateConfig>,
+    /// Encodes the submit extrinsic and decodes block events against the node's metadata.
+    client: OnlineClient<SubstrateConfig>,
     network_id: String,
 }
 
 impl MidnightPublisherRpc {
     pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
-        let (rpc, legacy, network_id) = tokio::time::timeout(config.rpc.connect_timeout, async {
-            let rpc = connect_http(config)?;
-            let legacy = LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone());
-            let network_id = network_id(&legacy).await?;
-            anyhow::Ok((rpc, legacy, network_id))
-        })
-        .await
-        .context("timed out fetching the midnight network id")??;
+        let (rpc, legacy, client, network_id) =
+            tokio::time::timeout(config.rpc.connect_timeout, async {
+                let rpc = connect_http(config)?;
+                let legacy = LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone());
+                let network_id = network_id(&legacy).await?;
+                let client = OnlineClient::<SubstrateConfig>::from_rpc_client(rpc.clone())
+                    .await
+                    .context("failed to initialise the midnight subxt client")?;
+                anyhow::Ok((rpc, legacy, client, network_id))
+            })
+            .await
+            .context("timed out connecting the midnight publisher to the node")??;
 
         Ok(Self {
             rpc,
             legacy,
+            client,
             network_id,
         })
     }
@@ -570,6 +577,143 @@ impl PinnedReads for MidnightPublisherRpc {
             .context("failed to fetch midnight ledger parameters")?;
         unwrap_runtime_api_result(&answer)?
             .with_context(|| format!("midnight node has no ledger parameters at {at_hash_0x}"))
+    }
+}
+
+/// Where a submitted ledger transaction ended up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Landing {
+    Applied,
+    /// Applied but for a fallible segment; readers skip every event it carries.
+    PartialSuccess,
+    /// A finalized block is past the transaction's TTL, so it can no longer land.
+    Expired,
+}
+
+/// Why `author_submitExtrinsic` did not take a transaction.
+#[derive(Debug)]
+pub(crate) enum SubmitRefusal {
+    /// The node answered with a refusal: nothing entered its pool.
+    Refused(String),
+    /// No answer arrived; the transaction may be in the pool.
+    Unanswered(anyhow::Error),
+}
+
+/// The pool's "already imported" answer: the transaction is in it.
+const ALREADY_IMPORTED: i32 = 1013;
+
+#[async_trait::async_trait]
+impl crate::native::SubmitChain for MidnightPublisherRpc {
+    async fn block_number(&self, at_hash_0x: &str) -> anyhow::Result<u64> {
+        let header = self
+            .legacy
+            .chain_get_header(Some(parse_block_hash(at_hash_0x)?))
+            .await
+            .context("failed to fetch a midnight block header")?
+            .with_context(|| format!("midnight node has no header for {at_hash_0x}"))?;
+        Ok(u64::from(header.number))
+    }
+
+    async fn block_hash_at(&self, number: u64) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .legacy
+            .chain_get_block_hash(Some(NumberOrHex::Number(number)))
+            .await
+            .context("failed to fetch a midnight block hash by number")?
+            .map(hex_0x))
+    }
+
+    async fn block_time(
+        &self,
+        at_hash_0x: &str,
+    ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
+        let key = self
+            .client
+            .storage()
+            .address_bytes(&subxt::dynamic::storage(
+                "Timestamp",
+                "Now",
+                Vec::<subxt::dynamic::Value>::new(),
+            ))
+            .context("the midnight runtime has no Timestamp::Now")?;
+        let raw = self
+            .legacy
+            .state_get_storage(&key, Some(parse_block_hash(at_hash_0x)?))
+            .await
+            .context("failed to fetch the midnight block time")?
+            .with_context(|| format!("midnight node has no block time at {at_hash_0x}"))?;
+        let millis =
+            u64::decode_all(&mut &raw[..]).context("the midnight block time is not a u64")?;
+        Ok(midnight_base_crypto::time::Timestamp::from_secs(
+            millis / 1000,
+        ))
+    }
+
+    async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal> {
+        let extrinsic = self
+            .client
+            .tx()
+            .create_unsigned(&subxt::dynamic::tx(
+                "Midnight",
+                "send_mn_transaction",
+                vec![subxt::dynamic::Value::from_bytes(transaction)],
+            ))
+            .map_err(|error| {
+                SubmitRefusal::Refused(format!(
+                    "send_mn_transaction did not match metadata: {error}"
+                ))
+            })?;
+        let encoded = format!("0x{}", hex::encode(extrinsic.encoded()));
+        match self
+            .rpc
+            .request::<serde_json::Value>("author_submitExtrinsic", rpc_params![encoded])
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(RawRpcError::User(reply)) if reply.code == ALREADY_IMPORTED => Ok(()),
+            Err(RawRpcError::User(reply)) => Err(SubmitRefusal::Refused(format!(
+                "{}: {}{}",
+                reply.code,
+                reply.message,
+                reply
+                    .data
+                    .map(|data| format!(" ({})", data.get()))
+                    .unwrap_or_default()
+            ))),
+            Err(error) => Err(SubmitRefusal::Unanswered(
+                anyhow::Error::new(error).context("author_submitExtrinsic failed"),
+            )),
+        }
+    }
+
+    async fn landing(
+        &self,
+        at_hash_0x: &str,
+        tx_hash: [u8; 32],
+    ) -> anyhow::Result<Option<Landing>> {
+        let events = self
+            .client
+            .blocks()
+            .at(parse_block_hash(at_hash_0x)?)
+            .await
+            .context("failed to fetch a midnight block")?
+            .events()
+            .await
+            .context("failed to fetch midnight block events")?;
+        for event in events.iter() {
+            let event = event.context("Midnight block events did not match metadata")?;
+            if let Some(TxApplied(details)) = event.as_event::<TxApplied>()? {
+                if details.tx_hash == tx_hash {
+                    return Ok(Some(Landing::Applied));
+                }
+            }
+            if let Some(TxPartialSuccess(details)) = event.as_event::<TxPartialSuccess>()? {
+                if details.tx_hash == tx_hash {
+                    return Ok(Some(Landing::PartialSuccess));
+                }
+            }
+        }
+        Ok(None)
     }
 }
 

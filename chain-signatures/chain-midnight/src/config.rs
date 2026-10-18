@@ -3,7 +3,7 @@
 use anyhow::Context as _;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::fmt;
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
@@ -89,49 +89,40 @@ impl OutputStorageConfig {
     }
 }
 
-/// Runs the out-of-process intent builder, the piece that stays TypeScript for its proving stack.
+/// Builds, proves, pays for and posts respond transactions in process.
 #[derive(Clone, PartialEq)]
 pub struct PublisherConfig {
     /// Optional output cache. Runtime storage failures warn and do not prevent on-chain responses.
     /// Initialization retries in the background with backoff until the cache is available.
     pub output_storage: Option<OutputStorageConfig>,
-    /// argv of the builder, program first: a list so no operator path is word-split.
-    pub intent_gen_command: Vec<String>,
     /// Funds respond transactions.
     pub funding_seed: String,
-    /// These contracts are zkir-v3, which cannot be proven in process.
-    pub proof_server_url: String,
-    /// Spendable DUST derives only from the ledger events the indexer serves.
-    pub indexer_url: String,
+    /// The indexer's GraphQL subscription URL: spendable DUST derives only from the
+    /// ledger events it serves.
     pub indexer_ws_url: String,
+    /// The singleton's packaged proving artifacts, `@sig-net/midnight-contract`'s
+    /// `dist/managed`: `keys/<circuit>.{prover,verifier}` and `zkir/<circuit>.bzkir`.
+    pub contract_artifacts_dir: PathBuf,
+    /// The KZG parameters and DUST spend keys. A missing file is fetched into it from
+    /// Midnight's parameter store and checked against the ledger's pinned hash.
+    pub zk_params_dir: PathBuf,
     /// Ceiling on one build.
     pub request_timeout: Duration,
-    /// Ceiling on getting a built intent accepted by the node.
+    /// Ceiling on one submit, from the DUST wait to the finalized landing.
     pub submit_timeout: Duration,
-    /// Budget for bringing the builder back up after it dies.
-    pub restart_backoff: RetryConfig,
 }
 
 impl Default for PublisherConfig {
     fn default() -> Self {
         Self {
             output_storage: None,
-            // The `bin` name the TypeScript package installs, resolved on the fixed child PATH.
-            intent_gen_command: vec!["midnight-publisher".to_string()],
             funding_seed: String::new(),
-            proof_server_url: String::new(),
-            indexer_url: String::new(),
             indexer_ws_url: String::new(),
+            // Where the node image installs them.
+            contract_artifacts_dir: PathBuf::from("/usr/local/share/midnight/signet-contract"),
+            zk_params_dir: PathBuf::from("/usr/local/share/midnight/zk-params"),
             request_timeout: Duration::from_secs(120),
-            // The child owns the 360 second submit deadline. Rust is only its looser
-            // process-supervision backstop, checked against the child's ready reply.
             submit_timeout: Duration::from_secs(420),
-            restart_backoff: RetryConfig {
-                min_delay: Duration::from_millis(500),
-                max_delay: Duration::from_secs(10),
-                max_times: 5,
-                jitter: true,
-            },
         }
     }
 }
@@ -142,14 +133,12 @@ impl fmt::Debug for PublisherConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PublisherConfig")
             .field("output_storage", &self.output_storage)
-            .field("intent_gen_command", &self.intent_gen_command)
             .field("funding_seed", &"<redacted>")
-            .field("proof_server_url", &self.proof_server_url)
-            .field("indexer_url", &self.indexer_url)
             .field("indexer_ws_url", &self.indexer_ws_url)
+            .field("contract_artifacts_dir", &self.contract_artifacts_dir)
+            .field("zk_params_dir", &self.zk_params_dir)
             .field("request_timeout", &self.request_timeout)
             .field("submit_timeout", &self.submit_timeout)
-            .field("restart_backoff", &self.restart_backoff)
             .finish()
     }
 }
@@ -216,35 +205,23 @@ impl PublisherConfig {
 
     fn validate(&self) -> anyhow::Result<()> {
         self.validate_output_storage()?;
-        let program = self
-            .intent_gen_command
-            .first()
-            .map(String::as_str)
-            .unwrap_or_default();
-        anyhow::ensure!(
-            !program.is_empty(),
-            "midnight config: publisher.intent_gen_command must name a program"
-        );
-        let path = Path::new(program);
-        anyhow::ensure!(
-            path.is_absolute()
-                || path
-                    .file_name()
-                    .is_some_and(|name| name == path.as_os_str()),
-            "midnight config: publisher.intent_gen_command program must be a bare name or an \
-             absolute path"
-        );
         validate_funding_seed(&self.funding_seed)?;
-        validate_url(
-            "publisher.proof_server_url",
-            &self.proof_server_url,
-            &["http", "https"],
-        )?;
-        validate_url(
-            "publisher.indexer_url",
-            &self.indexer_url,
-            &["http", "https"],
-        )?;
+        for (field, dir) in [
+            (
+                "publisher.contract_artifacts_dir",
+                &self.contract_artifacts_dir,
+            ),
+            ("publisher.zk_params_dir", &self.zk_params_dir),
+        ] {
+            anyhow::ensure!(
+                dir.is_absolute(),
+                "midnight config: {field} must be an absolute path"
+            );
+        }
+        anyhow::ensure!(
+            !self.submit_timeout.is_zero(),
+            "midnight config: publisher.submit_timeout must be greater than zero"
+        );
         validate_url(
             "publisher.indexer_ws_url",
             &self.indexer_ws_url,
@@ -335,8 +312,6 @@ mod tests {
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
-                proof_server_url: "http://127.0.0.1:6300".to_string(),
-                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
                 ..Default::default()
             },
@@ -454,22 +429,24 @@ mod tests {
     }
 
     #[test]
-    fn publisher_command_is_a_bare_name_or_an_absolute_path() {
-        for program in ["midnight-publisher", "/opt/midnight-publisher"] {
-            let mut config = valid_config();
-            config.publisher.intent_gen_command[0] = program.to_string();
-            config
-                .validate()
-                .expect("the command shape is deterministic");
-        }
-
-        for program in ["./publisher", "tools/publisher"] {
+    fn artifact_directories_must_be_absolute() {
+        for (field, apply) in [
+            (
+                "contract_artifacts_dir",
+                (|config: &mut PublisherConfig| {
+                    config.contract_artifacts_dir = PathBuf::from("managed");
+                }) as fn(&mut PublisherConfig),
+            ),
+            ("zk_params_dir", |config: &mut PublisherConfig| {
+                config.zk_params_dir = PathBuf::from("./zk-params");
+            }),
+        ] {
             let mut relative = valid_config();
-            relative.publisher.intent_gen_command[0] = program.to_string();
+            apply(&mut relative.publisher);
             let error = relative.validate().unwrap_err().to_string();
             assert!(
-                error.contains("intent_gen_command"),
-                "unexpected error: {error}"
+                error.contains(field),
+                "unexpected error for {field}: {error}"
             );
         }
     }
@@ -486,14 +463,6 @@ mod tests {
         let err = zero_poll.validate().unwrap_err().to_string();
         assert!(err.contains("poll_interval"), "unexpected error: {err}");
 
-        let mut empty_command = valid_config();
-        empty_command.publisher.intent_gen_command.clear();
-        let err = empty_command.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("intent_gen_command"),
-            "unexpected error: {err}"
-        );
-
         for (field, apply) in [
             (
                 "funding_seed",
@@ -501,11 +470,8 @@ mod tests {
                     config.publisher.funding_seed = "not hex".to_string();
                 }) as fn(&mut MidnightConfig),
             ),
-            ("proof_server_url", |config: &mut MidnightConfig| {
-                config.publisher.proof_server_url = "ws://127.0.0.1:6300".to_string();
-            }),
-            ("indexer_url", |config: &mut MidnightConfig| {
-                config.publisher.indexer_url = "not a URL".to_string();
+            ("submit_timeout", |config: &mut MidnightConfig| {
+                config.publisher.submit_timeout = Duration::ZERO;
             }),
             ("indexer_ws_url", |config: &mut MidnightConfig| {
                 config.publisher.indexer_ws_url = "http://127.0.0.1:8088".to_string();

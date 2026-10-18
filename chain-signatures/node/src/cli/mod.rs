@@ -1263,9 +1263,6 @@ mod tests {
             "MPC_MIDNIGHT_NODE_URL",
             "MPC_MIDNIGHT_CENTRAL_ADDRESS",
             "MPC_MIDNIGHT_FUNDING_SEED",
-            "MPC_MIDNIGHT_INTENT_GEN_COMMAND",
-            "MPC_MIDNIGHT_PROOF_SERVER_URL",
-            "MPC_MIDNIGHT_INDEXER_URL",
             "MPC_MIDNIGHT_INDEXER_WS_URL",
             "MPC_MIDNIGHT_OUTPUT_STORAGE_BUCKET",
             "MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX",
@@ -1291,7 +1288,6 @@ mod tests {
         let sign_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign").to_string();
         let central_address = "ab".repeat(32);
         let funding_seed = "0f".repeat(32);
-        let intent_gen_command = r#"["midnight-publisher"]"#;
         let argv = [
             "mpc-node",
             "start",
@@ -1315,12 +1311,6 @@ mod tests {
             &central_address,
             "--midnight-funding-seed",
             &funding_seed,
-            "--midnight-intent-gen-command",
-            intent_gen_command,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
             "--midnight-output-storage-bucket",
@@ -1339,12 +1329,6 @@ mod tests {
             central_address.as_str(),
             "--midnight-funding-seed",
             funding_seed.as_str(),
-            "--midnight-intent-gen-command",
-            intent_gen_command,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
             "--midnight-output-storage-bucket",
@@ -1414,8 +1398,6 @@ mod tests {
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
                     funding_seed: "ab".repeat(32),
-                    proof_server_url: "http://127.0.0.1:1".to_string(),
-                    indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
                     indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
                     ..Default::default()
                 },
