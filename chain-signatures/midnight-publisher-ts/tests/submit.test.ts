@@ -215,6 +215,34 @@ describe("handleSubmit: the flow", () => {
     expect(refusal.code).toBe("state_conflict");
     expect(refusal.message).toContain("Transaction submission error");
   });
+
+  it("treats a node that cannot validate the transaction as a refusal, not an ambiguous submit", async () => {
+    // The shape a stagenet node with a corrupt ledger store produced: the RPC rejects
+    // `submitAndWatchExtrinsic` before the pool admits the transaction, the node client
+    // wraps that rejection, and the submission service wraps the node client's error.
+    class SubmissionError extends Data.TaggedError("SubmissionError")<{
+      message: string;
+      cause?: unknown;
+    }> {}
+    primeStub({
+      submitTx: () =>
+        Effect.runPromise(
+          Effect.fail(
+            new SubmissionError({
+              message: "Transaction submission error",
+              cause: new SubmissionError({
+                message: "Transaction submission failed",
+                cause: new Error(
+                  "1002: Verification Error: Runtime error: Execution failed: Execution aborted due to trap: host code panicked while being called by the runtime: root should be in the arena",
+                ),
+              }),
+            }),
+          ),
+        ) as Promise<Landed>,
+    });
+
+    expect((await refused(9)).code).toBe("state_conflict");
+  });
 });
 
 describe("handleSubmit: publisher preflight", () => {
