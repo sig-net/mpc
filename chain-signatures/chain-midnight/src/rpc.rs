@@ -501,67 +501,125 @@ impl MidnightRpc {
 pub(crate) struct MidnightPublisherRpc {
     rpc: RpcClient,
     legacy: LegacyRpcMethods<SubstrateConfig>,
-    /// Encodes the submit extrinsic and decodes block events against the node's
-    /// metadata; replaced when the runtime upgrades.
-    client: std::sync::RwLock<OnlineClient<SubstrateConfig>>,
+    genesis_hash: H256,
+    /// One subxt client per runtime version met, each with the metadata read at a
+    /// block of that runtime.
+    clients: std::sync::Mutex<
+        std::collections::HashMap<RuntimeVersionKey, OnlineClient<SubstrateConfig>>,
+    >,
     network_id: String,
 }
 
+/// `(spec_version, transaction_version)`.
+type RuntimeVersionKey = (u32, u32);
+
 impl MidnightPublisherRpc {
     pub async fn connect(config: &MidnightConfig) -> anyhow::Result<Self> {
-        let (rpc, legacy, client, network_id) =
-            tokio::time::timeout(config.rpc.connect_timeout, async {
-                let rpc = connect_http(config)?;
-                let legacy = LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone());
-                let network_id = network_id(&legacy).await?;
-                let client = OnlineClient::<SubstrateConfig>::from_rpc_client(rpc.clone())
-                    .await
-                    .context("failed to initialise the midnight subxt client")?;
-                anyhow::Ok((rpc, legacy, client, network_id))
-            })
-            .await
-            .context("timed out connecting the midnight publisher to the node")??;
-
-        Ok(Self {
-            rpc,
-            legacy,
-            client: std::sync::RwLock::new(client),
-            network_id,
+        tokio::time::timeout(config.rpc.connect_timeout, async {
+            let rpc = connect_http(config)?;
+            let legacy = LegacyRpcMethods::<SubstrateConfig>::new(rpc.clone());
+            let network_id = network_id(&legacy).await?;
+            let genesis_hash = legacy
+                .genesis_hash()
+                .await
+                .context("failed to fetch the midnight genesis hash")?;
+            let publisher = Self {
+                rpc,
+                legacy,
+                genesis_hash,
+                clients: Default::default(),
+                network_id,
+            };
+            publisher
+                .client_at(None)
+                .await
+                .context("failed to initialise the midnight subxt client")?;
+            anyhow::Ok(publisher)
         })
+        .await
+        .context("timed out connecting the midnight publisher to the node")?
     }
 
     pub fn network_id(&self) -> &str {
         &self.network_id
     }
 
-    /// The subxt client for the node's current runtime: a metadata fetched before a
-    /// runtime upgrade would mis-encode the submit and mis-decode the events after it.
-    async fn current_client(&self) -> anyhow::Result<OnlineClient<SubstrateConfig>> {
-        let client = self
-            .client
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let running = self
+    /// The subxt client for the runtime in `at`'s state, or the best block's when
+    /// `None`: the runtime the node's pool validates a submit against. Version and
+    /// metadata are read at the same block, so an upgrade not yet finalized cannot
+    /// pair new metadata with an old version or the reverse.
+    async fn client_at(&self, at: Option<H256>) -> anyhow::Result<OnlineClient<SubstrateConfig>> {
+        let at = match at {
+            Some(at) => at,
+            None => self
+                .legacy
+                .chain_get_block_hash(None)
+                .await
+                .context("failed to fetch the midnight best block")?
+                .context("midnight node has no best block")?,
+        };
+        let version = self
             .legacy
-            .state_get_runtime_version(None)
+            .state_get_runtime_version(Some(at))
             .await
             .context("failed to fetch the midnight runtime version")?;
-        let known = client.runtime_version();
-        if running.spec_version == known.spec_version
-            && running.transaction_version == known.transaction_version
-        {
-            return Ok(client);
+        let key = (version.spec_version, version.transaction_version);
+        if let Some(client) = self.clients().get(&key) {
+            return Ok(client.clone());
         }
-        let fresh = OnlineClient::<SubstrateConfig>::from_rpc_client(self.rpc.clone())
-            .await
-            .context("failed to reload the midnight subxt client after a runtime upgrade")?;
-        *self
-            .client
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh.clone();
-        Ok(fresh)
+        let metadata = metadata_at(&self.rpc, at).await?;
+        let client = OnlineClient::<SubstrateConfig>::from_rpc_client_with(
+            self.genesis_hash,
+            subxt::client::RuntimeVersion {
+                spec_version: key.0,
+                transaction_version: key.1,
+            },
+            metadata,
+            self.rpc.clone(),
+        )
+        .context("failed to build the midnight subxt client")?;
+        Ok(self.clients().entry(key).or_insert(client).clone())
     }
+
+    /// The subxt client for the runtime that executed block `hash`: its parent's.
+    async fn client_for_block(&self, hash: H256) -> anyhow::Result<OnlineClient<SubstrateConfig>> {
+        let header = self
+            .legacy
+            .chain_get_header(Some(hash))
+            .await
+            .context("failed to fetch a midnight block header")?
+            .with_context(|| format!("midnight node has no header for {}", hex_0x(hash)))?;
+        self.client_at(Some(header.parent_hash)).await
+    }
+
+    fn clients(
+        &self,
+    ) -> std::sync::MutexGuard<
+        '_,
+        std::collections::HashMap<RuntimeVersionKey, OnlineClient<SubstrateConfig>>,
+    > {
+        self.clients
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// The newest metadata version subxt reads that the runtime in `at`'s state serves,
+/// tried the way `OnlineClient::from_rpc_client` tries them.
+async fn metadata_at(rpc: &RpcClient, at: H256) -> anyhow::Result<subxt::Metadata> {
+    use subxt::backend::BackendExt as _;
+
+    let backend =
+        subxt::backend::legacy::LegacyBackend::<SubstrateConfig>::builder().build(rpc.clone());
+    for version in subxt::metadata::types::SUPPORTED_METADATA_VERSIONS {
+        if let Ok(metadata) = backend.metadata_at_version(version, at).await {
+            return Ok(metadata);
+        }
+    }
+    backend
+        .legacy_metadata(at)
+        .await
+        .context("failed to fetch the midnight runtime metadata")
 }
 
 /// Finalized reads used by the publisher and its in-process tests. Every read is
@@ -680,8 +738,9 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         &self,
         at_hash_0x: &str,
     ) -> anyhow::Result<midnight_base_crypto::time::Timestamp> {
+        let at = parse_block_hash(at_hash_0x)?;
         let key = self
-            .current_client()
+            .client_for_block(at)
             .await?
             .storage()
             .address_bytes(&subxt::dynamic::storage(
@@ -692,7 +751,7 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
             .context("the midnight runtime has no Timestamp::Now")?;
         let raw = self
             .legacy
-            .state_get_storage(&key, Some(parse_block_hash(at_hash_0x)?))
+            .state_get_storage(&key, Some(at))
             .await
             .context("failed to fetch the midnight block time")?
             .with_context(|| format!("midnight node has no block time at {at_hash_0x}"))?;
@@ -705,7 +764,7 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
 
     async fn submit(&self, transaction: &[u8]) -> Result<(), SubmitRefusal> {
         let client = self
-            .current_client()
+            .client_at(None)
             .await
             .map_err(|error| SubmitRefusal::Refused(format!("nothing was sent: {error:#}")))?;
         let extrinsic = client
@@ -733,11 +792,12 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         at_hash_0x: &str,
         tx_hash: [u8; 32],
     ) -> anyhow::Result<Option<Landing>> {
+        let at = parse_block_hash(at_hash_0x)?;
         let events = self
-            .current_client()
+            .client_for_block(at)
             .await?
             .blocks()
-            .at(parse_block_hash(at_hash_0x)?)
+            .at(at)
             .await
             .context("failed to fetch a midnight block")?
             .events()
@@ -2307,63 +2367,93 @@ mod tests {
         );
     }
 
+    /// Block `0x0b` is the best block and the first under spec 2, so its parent
+    /// `0x0a` still runs spec 1 and `0x0c`'s parent is `0x0b`. Each runtime's
+    /// metadata must be read at a block of that runtime, once.
     #[tokio::test]
-    async fn the_publisher_reloads_its_metadata_only_after_a_runtime_upgrade() {
-        let metadata = subxt::Metadata::decode_all(
-            &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
-        )
-        .unwrap();
-        let running = Arc::new(std::sync::atomic::AtomicU32::new(1));
+    async fn the_publisher_reads_each_runtime_at_a_block_of_that_runtime() {
+        let raw_metadata = include_bytes!("../fixtures/fallible-block-432-metadata.scale");
+        let opaque = format!("0x{}", hex::encode(raw_metadata.to_vec().encode()));
+        let metadata_reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
         let config = http_config(server.local_addr().unwrap());
         let transport = connect_http(&config).unwrap();
         let mut module = RpcModule::new(());
-        let spec = running.clone();
         module
-            .register_method("state_getRuntimeVersion", move |_, _, _| {
+            .register_method("chain_getBlockHash", |params, _, _| {
+                let asked = params.parse::<Vec<Option<u64>>>().unwrap_or_default();
+                assert!(asked.iter().all(Option::is_none), "{asked:?}");
+                hash_of_byte(0x0b)
+            })
+            .unwrap();
+        module
+            .register_method("chain_getHeader", |params, _, _| {
+                let [hash] = params.parse::<[String; 1]>().unwrap();
+                let parent = match hash.as_str() {
+                    hash if hash == hash_of_byte(0x0b) => hash_of_byte(0x0a),
+                    hash if hash == hash_of_byte(0x0c) => hash_of_byte(0x0b),
+                    other => panic!("no header for {other}"),
+                };
+                json!({
+                    "parentHash": parent,
+                    "number": "0x2a",
+                    "stateRoot": hash_of_byte(0x66),
+                    "extrinsicsRoot": hash_of_byte(0x77),
+                    "digest": { "logs": [] }
+                })
+            })
+            .unwrap();
+        module
+            .register_method("state_getRuntimeVersion", |params, _, _| {
+                let [hash] = params.parse::<[String; 1]>().unwrap();
+                let spec = if hash == hash_of_byte(0x0a) { 1 } else { 2 };
                 json!({
                     "specName": "midnight",
                     "implName": "midnight",
                     "authoringVersion": 1,
-                    "specVersion": spec.load(std::sync::atomic::Ordering::SeqCst),
+                    "specVersion": spec,
                     "implVersion": 0,
                     "apis": [],
-                    "transactionVersion": 1,
+                    "transactionVersion": spec,
                     "stateVersion": 1
                 })
             })
             .unwrap();
+        let reads = metadata_reads.clone();
+        module
+            .register_method("state_call", move |params, _, _| {
+                let (method, _data, at) = params.parse::<(String, String, String)>().unwrap();
+                match method.as_str() {
+                    "Metadata_metadata_at_version" => "0x00".to_string(),
+                    "Metadata_metadata" => {
+                        reads.lock().unwrap().push(at);
+                        opaque.clone()
+                    }
+                    other => panic!("unexpected runtime call {other}"),
+                }
+            })
+            .unwrap();
         let _handle = server.start(module);
-        let client = OnlineClient::<SubstrateConfig>::from_rpc_client_with(
-            H256([0x11; 32]),
-            subxt::client::RuntimeVersion {
-                spec_version: 1,
-                transaction_version: 1,
-            },
-            metadata,
-            transport.clone(),
-        )
-        .unwrap();
         let rpc = MidnightPublisherRpc {
             rpc: transport.clone(),
             legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
-            client: std::sync::RwLock::new(client),
+            genesis_hash: H256([0x11; 32]),
+            clients: Default::default(),
             network_id: "undeployed".to_string(),
         };
 
-        let same = rpc.current_client().await.unwrap();
-        assert_eq!(
-            same.runtime_version().spec_version,
-            1,
-            "no upgrade, no reload"
-        );
+        let submit = rpc.client_at(None).await.unwrap();
+        assert_eq!(submit.runtime_version().spec_version, 2);
+        let upgrade_block = rpc.client_for_block(H256([0x0b; 32])).await.unwrap();
+        assert_eq!(upgrade_block.runtime_version().spec_version, 1);
+        let after = rpc.client_for_block(H256([0x0c; 32])).await.unwrap();
+        assert_eq!(after.runtime_version().spec_version, 2);
+        assert_eq!(after.runtime_version().transaction_version, 2);
 
-        // The stub serves no metadata, so a reload can only be seen failing.
-        running.store(2, std::sync::atomic::Ordering::SeqCst);
-        let error = rpc.current_client().await.unwrap_err();
-        assert!(
-            format!("{error:#}").contains("after a runtime upgrade"),
-            "{error:#}"
+        assert_eq!(
+            *metadata_reads.lock().unwrap(),
+            [hash_of_byte(0x0b), hash_of_byte(0x0a)],
+            "each runtime's metadata is read once, at a block running it"
         );
     }
 
