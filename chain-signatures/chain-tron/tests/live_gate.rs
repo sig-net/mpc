@@ -1,14 +1,8 @@
 //! Live-network gate for the wire layer: assemble, sign, broadcast, and
 //! settle a `TriggerSmartContract` transaction against a configured
 //! endpoint, plus duplicate-broadcast and codeless-address probes.
-//!
-//! The mock-backed sequence below runs in CI. The live legs need
-//! `cargo test --test live_gate -- --ignored --nocapture` with
-//! `TRON_ENDPOINT`, `TRON_PRIVATE_KEY` (32-byte hex, e.g.
-//! `openssl rand -hex 32`), and optional `TRON_CONTRACT` (hex address;
-//! default is Nile USDT, pinned on-chain by `name()` = "Tether USD"),
-//! `TRON_API_KEY`, `TRON_POLL_SECS`, `TRON_DEADLINE_SECS`. A key with no
-//! TRX stops the run after printing its address to fund at the faucet.
+//! The recorded-response replay runs in CI; live legs are opt-in via
+//! env vars (see README).
 
 mod common;
 
@@ -61,6 +55,7 @@ fn transfer_topic() -> B256 {
 /// One gate run: connection, signer, and timing.
 struct Gate {
     client: TronHttp,
+    endpoint: Url,
     key: SigningKey,
     owner: TronAddress,
     contract: TronAddress,
@@ -72,7 +67,17 @@ struct Gate {
 struct Broadcast {
     signed: Vec<u8>,
     reference: NowBlock,
-    now_ms: i64,
+}
+
+/// The node's `deploycontract` build: unsigned raw bytes, their txID,
+/// and the pre-computed contract address.
+#[derive(serde::Deserialize)]
+struct DeployBuild {
+    #[serde(rename = "raw_data_hex")]
+    raw_data_hex: String,
+    #[serde(rename = "txID")]
+    tx_id: String,
+    contract_address: String,
 }
 
 /// keccak256 of the uncompressed public key, last 20 bytes — the EVM
@@ -86,31 +91,152 @@ fn derive_address(key: &SigningKey) -> Address {
 /// Signs the raw bytes: sha256 prehash, 65-byte `[r ‖ s ‖ v]` with the
 /// recovery-id parity, returning the signed transaction and its txID.
 fn sign(key: &SigningKey, raw_bytes: &[u8]) -> anyhow::Result<(Vec<u8>, [u8; 32])> {
-    let digest = Sha256::digest(raw_bytes);
+    sign_raw(key, RawTransaction::parse(raw_bytes)?)
+}
+
+/// For `CreateSmartContract` raw data which the admission-pinned `parse` rejects by design.
+fn sign_unchecked(key: &SigningKey, raw_bytes: &[u8]) -> anyhow::Result<(Vec<u8>, [u8; 32])> {
+    let raw = RawTransaction::decode(raw_bytes).context("decoding raw transaction")?;
+    sign_raw(key, raw)
+}
+
+/// sha256-prehash ECDSA, 65-byte `[r ‖ s ‖ v]`, wrapped in a
+/// `Transaction` envelope.
+fn sign_raw(key: &SigningKey, raw: RawTransaction) -> anyhow::Result<(Vec<u8>, [u8; 32])> {
+    let digest = Sha256::digest(raw.encode_to_vec());
     let (signature, recovery) = key.sign_prehash_recoverable(&digest)?;
     let (r, s) = signature.split_bytes();
     let r: [u8; 32] = r.into();
     let s: [u8; 32] = s.into();
-    let (signed, txid) =
-        RawTransaction::parse(raw_bytes)?.sign_and_hash(&r, &s, u8::from(recovery.is_y_odd()))?;
-    Ok((signed, txid))
+    raw.sign_and_hash(&r, &s, u8::from(recovery.is_y_odd()))
 }
 
 impl Gate {
-    /// Runs the sequence: acceptance, duplicate, then the codeless probe —
-    /// which must come back `CONTRACT_VALIDATE_ERROR`, the classification
-    /// recorded on Nile and mainnet.
+    /// Assembles the live gate from env vars (see README); a key with no
+    /// TRX stops the run with its address to fund at the faucet.
+    async fn from_env() -> anyhow::Result<Self> {
+        let endpoint: Url = std::env::var("TRON_ENDPOINT")
+            .context("TRON_ENDPOINT")?
+            .parse()
+            .context("TRON_ENDPOINT must be a url")?;
+        let key_hex = std::env::var("TRON_PRIVATE_KEY").context("TRON_PRIVATE_KEY")?;
+        let key_bytes: [u8; 32] = hex::decode(key_hex.trim_start_matches("0x"))?
+            .try_into()
+            .map_err(|bytes: Vec<u8>| {
+                anyhow::anyhow!("TRON_PRIVATE_KEY: {} bytes, want 32", bytes.len())
+            })?;
+        let key = SigningKey::from_bytes(&k256::FieldBytes::from(key_bytes))?;
+        let contract = match std::env::var("TRON_CONTRACT") {
+            Ok(value) => value
+                .parse()
+                .or_else(|_| parse_hex(&value).map(TronAddress::from_evm))
+                .context("TRON_CONTRACT must be a base58 or hex address")?,
+            Err(_) => DEFAULT_CONTRACT.parse().expect("pinned default contract"),
+        };
+
+        let poll = env_secs("TRON_POLL_SECS", 3)?;
+        let deadline = env_secs("TRON_DEADLINE_SECS", 180)?;
+        let config = TronConfig {
+            endpoint: endpoint.clone(),
+            api_key: std::env::var("TRON_API_KEY").ok(),
+            poll_interval: poll,
+            ..Default::default()
+        };
+        let owner = TronAddress::from_evm(derive_address(&key));
+        let client = TronHttp::new(&config)?;
+        anyhow::ensure!(
+            client.get_account_balance(&owner).await? > 0,
+            "owner {owner} holds no TRX — fund it at the testnet faucet \
+             (Nile: https://nileex.io), then re-run"
+        );
+        let gate = Self {
+            client,
+            endpoint,
+            key,
+            owner,
+            contract,
+            poll,
+            deadline,
+        };
+        match std::env::var("TRON_TOKEN_ARTIFACT") {
+            Ok(artifact) => gate.with_deployed_token(&artifact).await,
+            Err(_) => Ok(gate),
+        }
+    }
+
+    /// Returns a gate targeting a token freshly deployed from the
+    /// artifact via the node's `deploycontract` builder (raw bytes +
+    /// pre-computed address), settled like any other broadcast.
+    async fn with_deployed_token(self, artifact: &str) -> anyhow::Result<Self> {
+        let artifact = std::fs::read_to_string(artifact)
+            .with_context(|| format!("token artifact {artifact}"))?;
+        let artifact: serde_json::Value = serde_json::from_str(&artifact)?;
+        let name = artifact["name"].as_str().context("artifact name")?;
+        let abi = serde_json::to_string(artifact["abi"].as_array().context("artifact abi")?)?;
+
+        let build: DeployBuild = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .context("deploy http client")?
+            .post(
+                self.endpoint
+                    .join("wallet/deploycontract")
+                    .context("joining deploy path")?,
+            )
+            .json(&serde_json::json!({
+                "owner_address": self.owner.to_hex(),
+                "name": name,
+                "abi": abi,
+                "bytecode": artifact["bytecode"].as_str().context("artifact bytecode")?,
+                "parameter": "",
+                "call_value": 0,
+                "fee_limit": 1_000_000_000,
+                "consume_user_resource_percent": 100,
+                "origin_energy_limit": 10_000_000,
+                "visible": false
+            }))
+            .send()
+            .await
+            .context("deploycontract request")?
+            .error_for_status()
+            .context("deploycontract status")?
+            .json()
+            .await
+            .context("deploycontract response")?;
+        let raw_bytes = hex::decode(&build.raw_data_hex).context("decoding raw_data_hex")?;
+        let build_txid: [u8; 32] = build.tx_id.parse::<B256>().context("deploy txID")?.into();
+        let deployed = TronAddress::from_evm(
+            parse_hex(&build.contract_address).context("deploy contract_address")?,
+        );
+
+        let (signed, txid) = sign_unchecked(&self.key, &raw_bytes)?;
+        anyhow::ensure!(
+            txid == build_txid,
+            "deploy txID must be sha256 of the raw bytes"
+        );
+        match self.client.broadcast_transaction(&signed).await? {
+            BroadcastOutcome::Accepted => {}
+            other => bail!("[deploy] {other:?}"),
+        }
+        let receipt = self.settle(&txid).await?;
+        let result = receipt
+            .contract_ret
+            .as_deref()
+            .or(receipt.receipt_result.as_deref());
+        anyhow::ensure!(result == Some("SUCCESS"), "deploy executed {result:?}");
+        println!("[deploy] {name} at {deployed}");
+        Ok(Self {
+            contract: deployed,
+            ..self
+        })
+    }
+
+    /// Runs the sequence: acceptance, duplicate, codeless.
     async fn run(&self) -> anyhow::Result<()> {
         println!("[gate] owner {} -> contract {}", self.owner, self.contract);
         let accepted = self.acceptance().await?;
         self.duplicate(&accepted.signed).await?;
-        let probe = self.codeless(&accepted.reference, accepted.now_ms).await?;
-        anyhow::ensure!(
-            matches!(&probe, BroadcastOutcome::Rejected { code, .. }
-                if code == "CONTRACT_VALIDATE_ERROR"),
-            "codeless address: expected CONTRACT_VALIDATE_ERROR, got {probe:?}"
-        );
-        Ok(())
+        self.codeless(&accepted).await
     }
 
     /// Acceptance probe: broadcast a USDT transfer, settle it, and check
@@ -174,11 +300,7 @@ impl Gate {
                 receipt.fee, receipt.res_message
             );
         }
-        Ok(Broadcast {
-            signed,
-            reference,
-            now_ms,
-        })
+        Ok(Broadcast { signed, reference })
     }
 
     /// Duplicate probe: the identical signed bytes again, rejected by
@@ -194,15 +316,18 @@ impl Gate {
         Ok(())
     }
 
-    /// Codeless-address probe: a call to an address with no code —
-    /// recorded mainnet classification is CONTRACT_VALIDATE_ERROR.
-    async fn codeless(
-        &self,
-        reference: &NowBlock,
-        now_ms: i64,
-    ) -> anyhow::Result<BroadcastOutcome> {
+    /// Codeless-address probe: a call to an address with no code must
+    /// come back `CONTRACT_VALIDATE_ERROR` — the classification recorded
+    /// on Nile and mainnet.
+    async fn codeless(&self, accepted: &Broadcast) -> anyhow::Result<()> {
         let codeless = TronAddress::from_evm(Address::repeat_byte(0x33));
-        let void = build_raw(&self.owner, &codeless, &[0u8; 4], reference, now_ms);
+        let void = build_raw(
+            &self.owner,
+            &codeless,
+            &[0u8; 4],
+            &accepted.reference,
+            accepted.reference.timestamp as i64,
+        );
         let (void_signed, _) = sign(&self.key, &void.encode_to_vec())?;
         let probe = self.client.broadcast_transaction(&void_signed).await?;
         match &probe {
@@ -211,7 +336,12 @@ impl Gate {
             }
             other => println!("[codeless] probe outcome: {other:?}"),
         }
-        Ok(probe)
+        anyhow::ensure!(
+            matches!(&probe, BroadcastOutcome::Rejected { code, .. }
+                if code == "CONTRACT_VALIDATE_ERROR"),
+            "codeless address: expected CONTRACT_VALIDATE_ERROR, got {probe:?}"
+        );
+        Ok(())
     }
 
     /// Polls the solidity router until the receipt appears (solidified);
@@ -257,12 +387,11 @@ fn fixture(name: &str) -> String {
         .unwrap_or_else(|err| panic!("fixture {name}: {err}"))
 }
 
-#[tokio::test]
-async fn relay_sequence_runs_against_recorded_nile_responses() {
-    // Reference block from the recorded now block, so the signed bytes
-    // answer to the recorded responses.
-    let nowblock = fixture("nowblock");
-    let now: serde_json::Value = serde_json::from_str(&nowblock).unwrap();
+/// The recorded now block, as body to serve and reference to build
+/// against — the signed bytes answer to the recorded responses.
+fn recorded_nowblock() -> (String, NowBlock) {
+    let body = fixture("nowblock");
+    let now: serde_json::Value = serde_json::from_str(&body).unwrap();
     let reference = NowBlock {
         block_id: now["blockID"].as_str().unwrap().parse().unwrap(),
         number: now["block_header"]["raw_data"]["number"].as_u64().unwrap(),
@@ -270,6 +399,23 @@ async fn relay_sequence_runs_against_recorded_nile_responses() {
             .as_u64()
             .unwrap(),
     };
+    (body, reference)
+}
+
+/// The recorded success receipt with its id patched to this run's txid
+/// — the recording's key differs from the replay key.
+fn patched_receipt(txid: &[u8; 32]) -> String {
+    let body = fixture("receipt-success");
+    let recorded_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    body.replace(&recorded_id, &hex::encode(txid))
+}
+
+#[tokio::test]
+async fn relay_sequence_runs_against_recorded_nile_responses() {
+    let (nowblock, reference) = recorded_nowblock();
 
     let mut key_bytes = [0u8; 32];
     key_bytes[31] = 1;
@@ -303,14 +449,6 @@ async fn relay_sequence_runs_against_recorded_nile_responses() {
         reference.timestamp as i64,
     );
     let (void_signed, _) = sign(&key, &void.encode_to_vec()).unwrap();
-
-    // Patch the recorded receipt to match the txid of the signed transaction.
-    let receipt = fixture("receipt-success");
-    let recorded_id = serde_json::from_str::<serde_json::Value>(&receipt).unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let receipt = receipt.replace(&recorded_id, &hex::encode(txid));
 
     let mut server = mockito::Server::new_async().await;
     let endpoint: Url = server.url().parse().unwrap();
@@ -366,12 +504,13 @@ async fn relay_sequence_runs_against_recorded_nile_responses() {
         .match_body(mockito::Matcher::PartialJson(serde_json::json!({
             "value": hex::encode(txid)
         })))
-        .with_body(receipt)
+        .with_body(patched_receipt(&txid))
         .create_async()
         .await;
 
     let gate = Gate {
-        client: TronHttp::new(&mock_config(endpoint)).unwrap(),
+        client: TronHttp::new(&mock_config(endpoint.clone())).unwrap(),
+        endpoint,
         key,
         owner,
         contract,
@@ -384,45 +523,5 @@ async fn relay_sequence_runs_against_recorded_nile_responses() {
 #[tokio::test]
 #[ignore = "live network: TRON_ENDPOINT, TRON_PRIVATE_KEY"]
 async fn live_gate() -> anyhow::Result<()> {
-    let endpoint: Url = std::env::var("TRON_ENDPOINT")?
-        .parse()
-        .context("TRON_ENDPOINT must be a url")?;
-    let key_hex = std::env::var("TRON_PRIVATE_KEY").context("TRON_PRIVATE_KEY")?;
-    let key_bytes: [u8; 32] = hex::decode(key_hex.trim_start_matches("0x"))?
-        .try_into()
-        .map_err(|bytes: Vec<u8>| {
-            anyhow::anyhow!("TRON_PRIVATE_KEY: {} bytes, want 32", bytes.len())
-        })?;
-    let key = SigningKey::from_bytes(&k256::FieldBytes::from(key_bytes))?;
-    let contract = match std::env::var("TRON_CONTRACT") {
-        Ok(value) => TronAddress::from_evm(parse_hex(&value).context("TRON_CONTRACT")?),
-        Err(_) => DEFAULT_CONTRACT
-            .parse()
-            .expect("pinned default contract parses"),
-    };
-
-    let poll = env_secs("TRON_POLL_SECS", 3)?;
-    let deadline = env_secs("TRON_DEADLINE_SECS", 180)?;
-    let config = TronConfig {
-        endpoint,
-        api_key: std::env::var("TRON_API_KEY").ok(),
-        poll_interval: poll,
-        ..Default::default()
-    };
-    let owner = TronAddress::from_evm(derive_address(&key));
-    let client = TronHttp::new(&config)?;
-    anyhow::ensure!(
-        client.get_account_balance(&owner).await? > 0,
-        "owner {owner} holds no TRX — fund it at the testnet faucet \
-         (Nile: https://nileex.io), then re-run"
-    );
-    let gate = Gate {
-        client,
-        key,
-        owner,
-        contract,
-        poll,
-        deadline,
-    };
-    gate.run().await
+    Gate::from_env().await?.run().await
 }

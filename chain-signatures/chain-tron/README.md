@@ -52,7 +52,8 @@ A key with no TRX stops after printing its address — fund it at the
 |---|---|---|
 | `TRON_ENDPOINT` | yes | wallet/solidity base URL |
 | `TRON_PRIVATE_KEY` | yes | 32-byte hex; pays the fees, no token balance expected |
-| `TRON_CONTRACT` | no | call target; default Nile USDT |
+| `TRON_CONTRACT` | no | call target (base58 or hex); default Nile USDT |
+| `TRON_TOKEN_ARTIFACT` | no | artifact to deploy via `deploycontract` and target (TRE leg) |
 | `TRON_API_KEY` | no | `TRON-PRO-API-KEY` for TronGrid rate limits |
 | `TRON_POLL_SECS`, `TRON_DEADLINE_SECS` | no | settle poll (3) and deadline (180) |
 
@@ -60,6 +61,16 @@ Probes: a USDT `transfer` must settle with a txID-matching receipt
 (`SUCCESS` asserts the `Transfer` log; a token-less key reverts — both
 classify); re-broadcasting the identical bytes must DUP-reject; a call
 to a codeless address must come back `CONTRACT_VALIDATE_ERROR`.
+
+### TRE (CI)
+
+`just test-tron-tre` runs the same gate against [TRE](https://hub.docker.com/r/tronbox/tre),
+the dockerized single-node java-tron dev chain: pinned `2.0.0`,
+deterministic key `0x00…01`, `GateToken` deployed from
+`tests/fixtures/tre/` via the node's `deploycontract` API. Rejection
+classifications match Nile byte-for-byte and solidification is instant.
+`tests/fixtures/nile/` pins the wire shapes; the TRE run covers the
+rest: mempool admission, signature checks, execution.
 
 ## Tests
 
