@@ -1,5 +1,4 @@
-# Generated output and installed runtime dependencies.
-dist/
+# Installed dependencies.
 node_modules/
 
 # Generated/binary fixtures and dependency locks are not formatting inputs.

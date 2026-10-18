@@ -7,10 +7,13 @@
 mod attestation;
 mod config;
 mod convert;
+mod dust_feed;
 pub mod emissions;
+mod funding;
 mod hashing;
 mod indexer;
-mod intent_gen;
+mod intent;
+mod native;
 mod output_storage;
 mod publisher;
 mod reader;
@@ -18,6 +21,7 @@ pub mod records;
 mod rpc;
 mod source;
 mod state;
+mod submit_error;
 #[cfg(test)]
 mod test_utils;
 mod tx;
@@ -27,7 +31,7 @@ pub use config::{
     IndexerConfig, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig, RpcConfig,
 };
 pub use indexer::MidnightIndexer;
-pub use intent_gen::{IntentGen, IntentRequest, WireAttestation, WirePoint, WireSignature};
+pub use intent::{IntentRequest, WireAttestation, WirePoint, WireSignature};
 pub use publisher::{RecoveringMidnightPublisher, ResponseAwaiter};
 #[cfg(feature = "sandbox")]
 pub use rpc::probe_network_id;

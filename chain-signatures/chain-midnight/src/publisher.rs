@@ -1,5 +1,5 @@
-//! Publishes finished MPC signatures to the Midnight central contract through opaque
-//! intents built and submitted by the companion process.
+//! Publishes finished MPC signatures to the Midnight central contract: one respond
+//! intent per signature, built, proven, paid for and posted in process.
 
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
@@ -14,8 +14,13 @@ use mpc_utils::task::AbortOnDrop;
 use mpc_utils::time::current_unix_timestamp;
 
 use crate::attestation::validate_attestation_response;
-use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
-use crate::intent_gen::{IntentGen, IntentRequest, WireAttestation, WirePoint, WireSignature};
+use crate::config::{
+    validate_publisher_network_id, MidnightAddress, MidnightConfig, PublisherConfig,
+};
+use crate::dust_feed::IndexerDustEvents;
+use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
+use crate::intent::{IntentRequest, WireAttestation, WirePoint, WireSignature};
+use crate::native::{NativeIntentClient, Provers};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
 
@@ -31,26 +36,13 @@ pub(crate) struct PinnedState {
     pub ledger_parameters: Vec<u8>,
 }
 
-/// What builds a respond intent and turns it into a transaction the node has accepted:
-/// the companion process in production, a stand-in in the in-process tests. `submit`
-/// takes the bytes `build` wrote: re-serializing a decoded intent would stake the
-/// transaction on a round trip nothing checks. The returned string names the
-/// transaction, opaque here.
+/// What builds a respond intent and turns it into a finalized transaction: the native
+/// client in production, a stand-in in the in-process tests. `submit` takes the bytes
+/// `build` wrote. The returned string names the transaction, opaque here.
 #[async_trait]
 pub(crate) trait IntentClient: Send + Sync {
     async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>>;
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<String>;
-}
-
-#[async_trait]
-impl IntentClient for IntentGen {
-    async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
-        IntentGen::build(self, request).await
-    }
-
-    async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
-        IntentGen::submit(self, intent).await
-    }
 }
 
 /// Whether this node still waits for the response an action carries. A publish waits
@@ -100,8 +92,8 @@ pub struct MidnightPublisher {
 }
 
 impl MidnightPublisher {
-    /// Dials the node, spawns the intent builder on the node's network id, and wires
-    /// both. The order is the invariant: the builder validates the id the node reports.
+    /// Dials the node, starts the funding wallet's DUST replay, and loads the provers.
+    /// The network id the node reports is the one every transaction is built for.
     pub async fn connect(
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
@@ -115,12 +107,31 @@ impl MidnightPublisher {
             config.central_address,
         )?
         .map(|store| Arc::new(store) as Arc<dyn OutputStore>);
-        let intent_gen = Arc::new(IntentGen::spawn(config, rpc.network_id()).await?);
+        validate_publisher_network_id(rpc.network_id())?;
+        // Before the wallet starts: a failed connect leaves nothing replaying.
+        let provers = Arc::new(Provers::new(
+            &config.publisher.contract_artifacts_dir,
+            &config.publisher.zk_params_dir,
+        )?);
+        let key = dust_secret_key(&parse_seed(&config.publisher.funding_seed)?)?;
+        let wallet = FundingWallet::start(
+            key,
+            Arc::new(IndexerDustEvents::new(
+                config.publisher.indexer_ws_url.clone(),
+            )),
+        );
+        let client = Arc::new(NativeIntentClient::new(
+            rpc.clone(),
+            wallet,
+            provers,
+            rpc.network_id(),
+            config.publisher.submit_timeout,
+        ));
         Ok(Self::new(
             &config.publisher,
             config.central_address,
             rpc,
-            intent_gen,
+            client,
             output_store,
             telemetry,
             awaiter,
@@ -247,7 +258,7 @@ impl ChainPublisher for MidnightPublisher {
             return Ok(());
         }
 
-        // Both proofs run inside submit, so its time includes the proof server's queue.
+        // Both proofs and the wait for finality run inside submit.
         let submitting = Instant::now();
         let receipt = self.client.submit(&bytes).await.with_context(|| {
             format!(
@@ -273,8 +284,8 @@ impl ChainPublisher for MidnightPublisher {
     }
 }
 
-/// Keeps Midnight publishing recoverable when the node or the intent builder is
-/// unavailable at startup: a background task connects with backoff, and until it has,
+/// Keeps Midnight publishing recoverable when the node is unreachable or the provers
+/// cannot load at startup: a background task connects with backoff, and until it has,
 /// each publish fails retryably instead of the chain going unpublished until a restart.
 pub struct RecoveringMidnightPublisher {
     ready: Arc<OnceLock<MidnightPublisher>>,
@@ -431,7 +442,7 @@ fn ttl_seconds(config: &PublisherConfig, now: u64) -> u64 {
 mod tests {
     use super::*;
 
-    use crate::intent_gen::{is_ambiguous_submit, AmbiguousSubmit};
+    use crate::intent::{is_ambiguous_submit, AmbiguousSubmit};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -451,8 +462,7 @@ mod tests {
     const HEAD_TWO: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
 
     /// Distinct per read, so a test can tell which read produced which bytes.
-    const CONTRACT_STATE: &[u8] =
-        include_bytes!("../../midnight-publisher-ts/tests/fixtures/initial-singleton-state.mn");
+    const CONTRACT_STATE: &[u8] = include_bytes!("../fixtures/initial-singleton-state.mn");
     const LEDGER_PARAMETERS: &[u8] = b"ledger-parameters";
 
     /// One read the publisher made: which surface, and at which hash.
@@ -532,12 +542,11 @@ mod tests {
     /// pass-through property every stub client asserts.
     const GRANTED_INTENT: &[u8] = &[0xde, 0xad, 0xbe, 0xef];
 
-    /// A refused build, in the child's own words: the way a managed dir pointed at the
-    /// wrong build refuses.
+    /// A refused build, the way packaged artifacts from the wrong build refuse.
     const BUILD_REFUSAL: &str =
-        "midnight intent builder refused the request [contract_mismatch]: exposes no operation";
+        "[contract_mismatch] the deployed respond operation has another verifier key";
 
-    /// An in-process child. Grants every build with `GRANTED_INTENT` and keeps the
+    /// An in-process client. Grants every build with `GRANTED_INTENT` and keeps the
     /// request for assertions on the marshalling; counting submits is the only mark a
     /// proving run leaves.
     #[derive(Default)]
@@ -545,7 +554,7 @@ mod tests {
         built: Mutex<Vec<IntentRequest>>,
         refuse_build: bool,
         submitted: std::sync::atomic::AtomicUsize,
-        /// What `submit` refuses with, standing in for the child's own verdict.
+        /// What `submit` refuses with.
         submit_failure: Option<&'static str>,
     }
 
@@ -614,7 +623,7 @@ mod tests {
         async fn submit(&self, _intent: &[u8]) -> anyhow::Result<String> {
             self.attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err(anyhow::anyhow!("stdout closed after submit").context(AmbiguousSubmit))
+            Err(anyhow::anyhow!("the transaction was not seen finalized").context(AmbiguousSubmit))
         }
     }
 
@@ -644,7 +653,7 @@ mod tests {
     }
 
     /// The two budgets the publisher spends, pinned because `ttl_seconds` is their sum
-    /// and a test reading a default would test the default. The rest is the child's.
+    /// and a test reading a default would test the default.
     fn config() -> PublisherConfig {
         PublisherConfig {
             request_timeout: Duration::from_secs(5),
@@ -1481,9 +1490,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_build_request_is_marshalled_from_the_pinned_reads_and_the_action() {
-        // The publisher package pins the same wire from its own TypeScript input, so
-        // only this side can see a field filled from the wrong read or a transposed
-        // coordinate. The JSON encoding of the request is pinned in `intent_gen`.
+        // Only this side can see a field filled from the wrong read or a transposed
+        // coordinate; the native client's own tests pin how it reads each field.
         let client = StubClient::new();
         let reads = StubReads::new();
         let publisher = publisher(reads.clone(), client.clone());
@@ -1610,8 +1618,6 @@ mod tests {
                 .expect("CENTRAL is a 32-byte hex address"),
             publisher: PublisherConfig {
                 funding_seed: "ab".repeat(32),
-                proof_server_url: "http://127.0.0.1:1".to_string(),
-                indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
                 indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
                 ..Default::default()
             },

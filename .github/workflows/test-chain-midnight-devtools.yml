@@ -1,0 +1,49 @@
+# The Midnight test tooling's gate: the TypeScript devtools that deploy the
+# real-stack fixtures and generate the cross-language fixtures, and the pinned
+# artifacts the node image proves with. The live end-to-end path runs in the
+# Midnight Real-Stack Tests job.
+name: Midnight Devtools Tests
+
+on:
+  pull_request:
+  merge_group:
+
+# Cancel superseded runs of the same PR. Merge-queue and develop runs keep going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    # The branch rulesets require this check by its original name.
+    name: Midnight Publisher TS Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: chain-signatures/midnight-devtools
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/midnight-devtools/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint TypeScript
+        run: npm run lint
+
+      - name: Typecheck TypeScript
+        run: npm run typecheck
+
+      # The image's artifact stage checks every pinned hash it downloads.
+      - name: Midnight artifacts image smoke
+        working-directory: .
+        run: docker build --target midnight-artifacts .

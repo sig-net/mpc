@@ -119,18 +119,19 @@ impl MidnightContext {
             }))
             .await
             .context("initialising the Midnight caller with the MPC response key")?;
-        let publisher_entrypoint = publisher_package_dir()?.join("dist/main.js");
+        let contract_artifacts =
+            devtools_package_dir()?.join("node_modules/@sig-net/midnight-contract/dist/managed");
         anyhow::ensure!(
-            publisher_entrypoint.is_file(),
-            "Midnight publisher entry point {} is missing; run npm run build in {}",
-            publisher_entrypoint.display(),
-            publisher_package_dir()?.display()
+            contract_artifacts.join("keys/respond.prover").is_file(),
+            "Midnight contract artifacts {} are missing; run npm ci in {}",
+            contract_artifacts.display(),
+            devtools_package_dir()?.display()
         );
         let config = responder_config(
             &stack.endpoints,
             &bootstrap,
-            node_executable()?,
-            publisher_entrypoint,
+            contract_artifacts,
+            zk_params_dir()?,
             Some(OutputStorageConfig {
                 bucket: output_storage.bucket.clone(),
                 prefix: format!("integration-tests/{}", uuid::Uuid::new_v4()),
@@ -263,8 +264,8 @@ impl<'a> DriverConfig<'a> {
 fn responder_config(
     endpoints: &MidnightEndpoints,
     bootstrap: &BootstrapResult,
-    node_executable: String,
-    publisher_entrypoint: PathBuf,
+    contract_artifacts_dir: PathBuf,
+    zk_params_dir: PathBuf,
     output_storage: Option<OutputStorageConfig>,
 ) -> anyhow::Result<MidnightConfig> {
     Ok(MidnightConfig {
@@ -273,14 +274,10 @@ fn responder_config(
             .context("decoding Midnight central address")?,
         publisher: PublisherConfig {
             output_storage,
-            intent_gen_command: vec![
-                node_executable,
-                publisher_entrypoint.to_string_lossy().into_owned(),
-            ],
             funding_seed: bootstrap.publisher_seed.clone(),
-            proof_server_url: endpoints.proof_server_url.clone(),
-            indexer_url: endpoints.indexer_url.clone(),
             indexer_ws_url: endpoints.indexer_ws_url.clone(),
+            contract_artifacts_dir,
+            zk_params_dir,
             ..Default::default()
         },
         rpc: Default::default(),
@@ -288,23 +285,13 @@ fn responder_config(
     })
 }
 
-fn node_executable() -> anyhow::Result<String> {
-    let output = std::process::Command::new("node")
-        .args(["--print", "process.execPath"])
-        .output()
-        .context("resolving the Node executable for the Midnight publisher")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "resolving the Node executable failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let path = String::from_utf8(output.stdout).context("Node's executable path is not UTF-8")?;
-    let path = path.trim();
-    anyhow::ensure!(
-        Path::new(path).is_absolute(),
-        "Node returned a non-absolute executable path: {path}"
-    );
-    Ok(path.to_string())
+/// The ledger's own parameter cache, so runs share what earlier ones fetched.
+fn zk_params_dir() -> anyhow::Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("MIDNIGHT_PP") {
+        return Ok(PathBuf::from(dir));
+    }
+    let home = std::env::var_os("HOME").context("HOME is unset, so there is no zk-params cache")?;
+    Ok(PathBuf::from(home).join(".cache/midnight/zk-params"))
 }
 
 struct MidnightDriver {
@@ -315,7 +302,7 @@ struct MidnightDriver {
 
 impl MidnightDriver {
     async fn spawn(artifact_dir: &Path) -> anyhow::Result<Self> {
-        let package_dir = publisher_package_dir()?;
+        let package_dir = devtools_package_dir()?;
         let executable = package_dir.join("node_modules/.bin/tsx");
         let source = package_dir.join("devtools/real-stack/driver.ts");
         anyhow::ensure!(
@@ -378,11 +365,11 @@ impl MidnightDriver {
     }
 }
 
-fn publisher_package_dir() -> anyhow::Result<PathBuf> {
+fn devtools_package_dir() -> anyhow::Result<PathBuf> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
-        .map(|root| root.join("chain-signatures/midnight-publisher-ts"))
+        .map(|root| root.join("chain-signatures/midnight-devtools"))
         .context("integration-tests manifest has no repository parent")
 }
 

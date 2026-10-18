@@ -97,6 +97,8 @@ midnight-onchain-state = "4.0.0"
 midnight-serialize = "1.2.0"
 midnight-storage = "2.0.1"
 midnight-transient-crypto = "3.0.0"
+# The respond-intent builder and in-process prover for the Signet singleton.
+minocrab-publisher = { git = "https://github.com/sig-net/minocrab", rev = "a63d2a0df6f2f50969c983a6ce69e8c92f0ea4ad" }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
@@ -138,6 +140,8 @@ midnight-zswap                = { git = "https://github.com/midnightntwrk/midnig
 midnight-onchain-vm           = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "onchain-vm-4.0.0-rc.2" }
 midnight-onchain-runtime      = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "onchain-runtime-4.0.0-rc.2" }
 midnight-zkir                 = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "zkir-2.2.0-rc.3" }
+# The zkir-v3 tag the ledger cut beside these: it proves the contract's v3 circuits.
+midnight-zkir-v3              = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "zkir-v3-3.0.0-rc.1" }
 
 
 # big optimization even in test builds for math heavy crates
