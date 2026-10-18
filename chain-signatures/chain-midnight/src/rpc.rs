@@ -113,9 +113,16 @@ impl HttpRpcClient {
             .current
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if current.0 == failed {
-            *current = (current.0 + 1, client);
+        if current.0 != failed {
+            return;
         }
+        let generation = current.0 + 1;
+        *current = (generation, client);
+        drop(current);
+        tracing::info!(
+            generation,
+            "replaced the midnight HTTP RPC client after a failed request"
+        );
     }
 }
 
@@ -1679,6 +1686,23 @@ mod tests {
             2,
             "a failure must open one new connection and a success must keep it"
         );
+    }
+
+    #[tokio::test]
+    async fn a_retried_read_recovers_from_the_backend_its_connection_reached() {
+        let (address, connections, server) = stale_first_backend_server().await;
+        let reads = Reads::new(
+            connect_http(&http_config(address)).expect("build request-only client"),
+            Duration::from_secs(1),
+            attempts(2),
+        );
+
+        let head = reads.finalized_head().await;
+        server.abort();
+
+        let head = head.expect("the retry reached the stale backend again");
+        assert_eq!(hex_0x(head), hash_of_byte(0x22));
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
     }
 
     #[test]
