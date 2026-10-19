@@ -4,7 +4,7 @@ use test_log::test;
 /// Test that the latest release binary can cooperate with our latest code.
 /// Ensures backward compatibility during rolling deployments.
 #[test(tokio::test)]
-#[ignore = "needs the release binary from scripts/build-compat-binaries.sh; run via scripts/test-prod-compat.sh"]
+#[ignore = "needs the release binary from `just build compat`; run via `just test-compat`"]
 async fn test_latest_release_compatibility() -> anyhow::Result<()> {
     // Spawn a cluster with 1 latest release node and 1 current code node.
     // Threshold is 2, so both nodes must work together to sign.

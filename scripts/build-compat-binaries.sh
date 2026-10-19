@@ -33,7 +33,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Fetching tagged releases..."
-git fetch --tags --force >/dev/null 2>&1
+git fetch --tags --force >/dev/null
 
 if [[ -n "${COMPAT_TAG:-}" ]]; then
   tag="$COMPAT_TAG"

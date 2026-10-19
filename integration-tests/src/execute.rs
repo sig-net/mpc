@@ -6,7 +6,7 @@ use std::path::PathBuf;
 pub(crate) const PACKAGE_MULTICHAIN: &str = "mpc-node";
 
 /// Returns the mpc-node binary of the latest release tag, built by
-/// scripts/build-compat-binaries.sh under target/compat/latest/release/mpc-node.
+/// `just build compat` under target/compat/latest/release/mpc-node.
 pub fn latest_release_binary() -> anyhow::Result<PathBuf> {
     let target_dir = target_dir().ok_or_else(|| {
         anyhow::anyhow!("could not locate target directory for compatibility binary")
@@ -20,7 +20,7 @@ pub fn latest_release_binary() -> anyhow::Result<PathBuf> {
 
     if !binary_path.exists() {
         anyhow::bail!(
-            "latest release binary not found at {}. Run scripts/build-compat-binaries.sh to build it.",
+            "latest release binary not found at {}. Run `just build compat` to build it.",
             binary_path.display()
         );
     }
