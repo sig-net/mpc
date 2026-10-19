@@ -77,10 +77,9 @@ impl RpcFailure {
         self.terminal
     }
 
-    /// Reconstructs the carrier classifying `e` — its verdict carrier if one
-    /// is present, otherwise the first typed HTTP status — for fan-out sites
-    /// that must hand the same failure to many receivers without sharing the
-    /// error value. `None` when `e` carries no typed signal.
+    /// Carrier reproducing `e`'s classification — its verdict carrier, or the
+    /// first typed HTTP status — for fan-outs that can't share the error
+    /// value. `None` when `e` has no typed signal.
     pub fn from_chain(e: &anyhow::Error) -> Option<Self> {
         let (failure, status) = typed_signals(e);
         if let Some(failure) = failure {
@@ -102,11 +101,10 @@ fn typed_signals(e: &anyhow::Error) -> (Option<&RpcFailure>, Option<StatusCode>)
     })
 }
 
-/// HTTP status carried by a single error cause, if any.
-/// Beside the direct `RpcError` downcast, a bare `HttpError` is accepted:
-/// `#[error(transparent)]` forwards `source()` through the field, so wrapper
-/// enums (e.g. alloy-contract's `Error`) collapse the chain straight onto
-/// the `HttpError`, hiding the `RpcError` level.
+/// HTTP status carried by a single error cause, if any. A bare `HttpError`
+/// is accepted too: `#[error(transparent)]` forwards `source()` through the
+/// field, so wrapper enums (alloy-contract's `Error`) collapse onto the
+/// `HttpError`, hiding the `RpcError` level.
 fn cause_status(cause: &(dyn std::error::Error + 'static)) -> Option<StatusCode> {
     if let Some(failure) = cause.downcast_ref::<RpcFailure>() {
         return failure.status;
@@ -124,9 +122,15 @@ fn cause_status(cause: &(dyn std::error::Error + 'static)) -> Option<StatusCode>
 /// Returns true if the error looks like the provider throttling us: HTTP 429
 /// (rate limited) or 402 (payment required, e.g. exhausted credits).
 pub(super) fn is_provider_throttled(e: &anyhow::Error) -> bool {
+    let (failure, status) = typed_signals(e);
     // Typed status is authoritative over body text (if present).
-    if let Some(status) = typed_signals(e).1 {
+    if let Some(status) = status {
         return status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::PAYMENT_REQUIRED;
+    }
+    // A carrier is a typed boundary's deliberate verdict: no status means no
+    // throttle, regardless of embedded text.
+    if failure.is_some() {
+        return false;
     }
     // TODO: last-resort fallback for chains surfacing statuses only as text;
     // Delete once every chain client attaches typed statuses.
@@ -295,6 +299,11 @@ mod tests {
         assert!(is_retryable(&explicit_retryable));
         // no status → no throttle signal
         assert!(!is_provider_throttled(&explicit_retryable));
+        // ... not even from embedded text: a standalone "429" in an id must
+        // not engage the gate
+        let id_tripwire: anyhow::Error =
+            RpcFailure::retryable("route to upstream node-429 reset".into()).into();
+        assert!(!is_provider_throttled(&id_tripwire));
     }
 
     #[test]

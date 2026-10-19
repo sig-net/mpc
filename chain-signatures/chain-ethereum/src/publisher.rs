@@ -399,15 +399,13 @@ impl BatchPublisher {
     }
 }
 
-/// Rebuilds the batch failure for one waiter with its typed classification
-/// intact: `anyhow::Error` can cross only one oneshot, so rebuild the carrier
-/// (`RpcFailure::from_chain` covers verdict carriers and typed statuses
-/// alike) — the full chain is logged above.
+/// Rebuilds the batch failure for one waiter: `anyhow::Error` can cross only
+/// one oneshot, so each gets a fresh carrier — `from_chain`'s classification,
+/// defaulting to retryable — with the full render as diagnostics.
 fn batch_publish_error(err: &anyhow::Error) -> anyhow::Error {
-    match RpcFailure::from_chain(err) {
-        Some(failure) => anyhow::Error::new(failure).context("eth batch publish failed"),
-        None => anyhow::anyhow!("{err:#}"),
-    }
+    let failure =
+        RpcFailure::from_chain(err).unwrap_or_else(|| RpcFailure::retryable(format!("{err:#}")));
+    anyhow::Error::new(failure).context("eth batch publish failed")
 }
 
 /// JSON-RPC message and HTTP status from an RPC error, regardless of
@@ -844,6 +842,14 @@ mod tests {
         let out = batch_publish_error(&err);
         assert!(is_retryable(&out), "{err:#}");
         assert!(SharedBackoff::new().engage_if_throttled(&out).is_some());
+
+        // signal-less errors: explicit retryable verdict — a standalone "429"
+        // in an id must not engage the gate
+        let err = anyhow::anyhow!("route to upstream node-429 reset")
+            .context("exhausted after 3 attempts");
+        let out = batch_publish_error(&err);
+        assert!(is_retryable(&out), "{err:#}");
+        assert!(SharedBackoff::new().engage_if_throttled(&out).is_none());
     }
 
     #[tokio::test]
@@ -1299,7 +1305,7 @@ mod tests {
         tx.send(queued).await.unwrap();
 
         let err = result.await.unwrap().expect_err("batch publish must fail");
-        assert!(err.to_string().contains("mock error"), "got: {err}");
+        assert!(format!("{err:#}").contains("mock error"), "got: {err:#}");
     }
 
     #[tokio::test]
