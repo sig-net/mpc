@@ -2,6 +2,7 @@ use crate::abi::ChainSignatures;
 use crate::config::{GasConfig, PublisherConfig};
 use crate::EthConfig;
 use alloy::network::EthereumWallet;
+use alloy::contract::Error as ContractError;
 use alloy::primitives::{B256, U256};
 use alloy::providers::{
     fillers::{
@@ -10,6 +11,10 @@ use alloy::providers::{
     Provider, ProviderBuilder, RootProvider, WalletProvider,
 };
 use alloy::rpc::types::TransactionReceipt;
+use alloy::transports::{
+    RpcError as AlloyRpcError, TransportError as AlloyTransportError, TransportErrorKind,
+};
+use http::StatusCode;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
     utils::retry::{retry_rpc, RpcFailure, SharedBackoff},
@@ -261,7 +266,7 @@ impl BatchPublisher {
                         Ok(receipt)
                     }
                     Ok(None) => Err(anyhow::anyhow!("Receipt not ready yet")),
-                    Err(e) => Err(anyhow::anyhow!("RPC Error: {e}")),
+                    Err(e) => Err(anyhow::Error::new(e)),
                 }
             }
         )
@@ -296,7 +301,7 @@ impl BatchPublisher {
                     .get_transaction_count(self.contract.provider().default_signer_address())
                     .pending()
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to fetch nonce: {e}"))?;
+                    .map_err(|e| anyhow::Error::new(e).context("Failed to fetch nonce"))?;
 
                 tracing::info!(
                     nonce,
@@ -311,7 +316,7 @@ impl BatchPublisher {
                     .send()
                     .await
                     .map(|pending| *pending.tx_hash())
-                    .map_err(|e| anyhow::anyhow!("RPC Error: {e}"))
+                    .map_err(send_error)
             }
         )
     }
@@ -404,6 +409,49 @@ fn batch_publish_error(err: &anyhow::Error) -> anyhow::Error {
         Some(failure) => anyhow::Error::new(failure.clone()).context("eth batch publish failed"),
         None => anyhow::anyhow!("{err:#}"),
     }
+}
+
+/// JSON-RPC message and HTTP status from an RPC error, regardless of
+/// packaging: `ErrorResp` on HTTP 200, or a 4xx envelope (alloy keeps only
+/// the raw body string — alloy-transport-http `reqwest_transport`).
+fn rpc_error_parts(err: &AlloyTransportError) -> (Option<u16>, String) {
+    match err {
+        AlloyRpcError::ErrorResp(payload) => (None, payload.message.to_string()),
+        AlloyRpcError::Transport(TransportErrorKind::HttpError(http)) => {
+            let message = serde_json::from_str::<serde_json::Value>(&http.body)
+                .ok()
+                .and_then(|body| {
+                    body.get("error")?
+                        .get("message")?
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| http.body.clone());
+            (Some(http.status), message)
+        }
+        _ => (None, err.to_string()),
+    }
+}
+
+/// Mempool rejections (`nonce too low`, `replacement transaction
+/// underpriced`) are recoverable — the retry refetches the nonce — so the
+/// payload verdict overrides any 4xx envelope; other errors stay typed.
+// TODO: `already known` maps to Ok once the tx lifecycle pins the tx hash.
+fn send_error(err: ContractError) -> anyhow::Error {
+    if let ContractError::TransportError(rpc) = &err {
+        let (status, message) = rpc_error_parts(rpc);
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("nonce too low") || lower.contains("replacement transaction underpriced")
+        {
+            return match status.and_then(|status| StatusCode::from_u16(status).ok()) {
+                Some(status) => {
+                    RpcFailure::with_verdict(status, false, format!("RPC Error: {message}")).into()
+                }
+                None => RpcFailure::retryable(format!("RPC Error: {message}")).into(),
+            };
+        }
+    }
+    anyhow::Error::new(err)
 }
 
 #[async_trait::async_trait]
@@ -755,6 +803,92 @@ mod tests {
         // Assert that `eth_getTransactionCount` was called multiple times.
         nonce_mock.assert_async().await;
         send_mock.assert_async().await;
+    }
+
+    fn http_wrapped_send_error(status: u16, message: &str) -> anyhow::Error {
+        let body = json!({"error": {"code": -32000, "message": message}}).to_string();
+        send_error(ContractError::TransportError(
+            AlloyRpcError::Transport(TransportErrorKind::HttpError(alloy::transports::HttpError {
+                status,
+                body,
+            })),
+        ))
+    }
+
+    #[test]
+    fn mempool_rejections_override_their_4xx_envelope() {
+        for status in [400u16, 429] {
+            for message in ["nonce too low", "replacement transaction underpriced"] {
+                let err = http_wrapped_send_error(status, message);
+                assert!(is_retryable(&err), "{message} on {status}: {err:#}");
+            }
+        }
+    }
+
+    #[test]
+    fn unrecognized_4xx_send_payloads_stay_terminal() {
+        let err = http_wrapped_send_error(400, "invalid sender");
+        assert!(!is_retryable(&err), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn send_retries_nonce_too_low_regardless_of_envelope() {
+        // Some providers wrap JSON-RPC errors in a 4xx instead of 200 —
+        // the payload decides, not the envelope.
+        for (case, status) in [("4xx envelope", 400u16), ("200 error body", 200)] {
+            let mut server = Server::new_async().await;
+            mock_alloy_background_rpcs(&mut server).await;
+
+            // refetched per send attempt
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(
+                    json!({"method": "eth_getTransactionCount"}),
+                ))
+                .with_status(200)
+                .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+                .expect_at_least(2)
+                .create_async()
+                .await;
+
+            let tx_hash = B256::repeat_byte(0x31);
+            // rejection first (mockito prefers the first mock still missing hits)
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(
+                    json!({"method": "eth_sendRawTransaction"}),
+                ))
+                .with_status(status as usize)
+                .with_body(
+                    json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "error": {"code": -32000, "message": "nonce too low"}
+                    })
+                    .to_string(),
+                )
+                .expect(1)
+                .create_async()
+                .await;
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(
+                    json!({"method": "eth_sendRawTransaction"}),
+                ))
+                .with_status(200)
+                .with_body(
+                    json!({"jsonrpc": "2.0", "id": 1, "result": format!("{tx_hash:#x}")}).to_string(),
+                )
+                .expect(1)
+                .create_async()
+                .await;
+
+            let publisher = test_publisher(&server.url());
+            let hash = publisher
+                .send_responses(vec![], 21000, &[SignId::new([9u8; 32])])
+                .await
+                .unwrap_or_else(|err| panic!("{case}: {err:#}"));
+            assert_eq!(hash, tx_hash, "{case}");
+        }
     }
 
     #[tokio::test]

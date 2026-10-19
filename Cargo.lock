@@ -7469,6 +7469,7 @@ dependencies = [
  "borsh",
  "futures-util",
  "hex",
+ "http 1.5.0",
  "k256",
  "mockito",
  "mpc-chain-integration-core",
