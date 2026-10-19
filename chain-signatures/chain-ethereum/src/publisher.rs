@@ -214,7 +214,7 @@ impl BatchPublisher {
         );
 
         if let Err(err) = &res {
-            tracing::error!(%err, "batch publish failed");
+            tracing::error!(error = %format_args!("{err:#}"), "batch publish failed");
         }
 
         for queued in actions.drain(..) {
@@ -357,7 +357,7 @@ impl BatchPublisher {
             Ok(Ok(est)) => self.gas.clamp_estimate(est),
             Ok(Err(e)) => {
                 tracing::warn!(
-                    error = %e,
+                    error = %format_args!("{e:#}"),
                     num_requests,
                     "dynamic gas estimation failed, falling back to static heuristic"
                 );

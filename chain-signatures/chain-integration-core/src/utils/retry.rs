@@ -139,7 +139,7 @@ where
             if let Some(cooldown) = gate.engage_if_throttled(&err) {
                 tracing::warn!(
                     operation,
-                    error = %err,
+                    error = %format_args!("{err:#}"),
                     ?cooldown,
                     "provider throttled (429/402), engaging shared cooldown"
                 );
@@ -401,7 +401,7 @@ pub fn is_retryable(e: &anyhow::Error) -> bool {
 ///     self.retry_strategy,
 ///     "get_block",
 ///     |attempt, err, sleep| {
-///         tracing::error!(attempt, error = %err, retry_in = ?sleep, "get_block failed");
+///         tracing::error!(attempt, error = %format_args!("{err:#}"), retry_in = ?sleep, "get_block failed");
 ///     },
 ///     {
 ///         client.get_block(block_id).await
@@ -431,7 +431,7 @@ macro_rules! retry_op {
                 tracing::warn!(
                     operation = $op_name,
                     attempt = attempt_counter,
-                    error = %err,
+                    error = %format_args!("{err:#}"),
                     retry_in = ?sleep,
                     "call failed, retrying"
                 );
@@ -508,7 +508,7 @@ macro_rules! retry_rpc {
                 tracing::warn!(
                     operation = $op_name,
                     attempt = attempt_counter,
-                    error = %err,
+                    error = %format_args!("{err:#}"),
                     retry_in = ?sleep,
                     "RPC call failed, retrying"
                 );

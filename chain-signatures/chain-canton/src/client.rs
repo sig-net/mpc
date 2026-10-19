@@ -241,7 +241,7 @@ impl CantonClient {
                     context,
                     attempt,
                     max_attempts,
-                    error = %err,
+                    error = %format_args!("{err:#}"),
                     retry_in = ?sleep,
                     "canton submit_and_wait failed, retrying"
                 );
@@ -395,7 +395,7 @@ impl ChainPublisher for CantonClient {
                     ?sign_id,
                     choice,
                     request_id = %request_id_hex,
-                    error = %err,
+                    error = %format_args!("{err:#}"),
                     "canton: failed to publish signature"
                 );
             })?;
