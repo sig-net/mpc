@@ -8,7 +8,6 @@ mod gate;
 pub use crate::{retry_op, retry_rpc};
 
 pub use classify::{http_status_retryable, is_retryable, RpcFailure};
-#[doc(hidden)]
 pub use gate::exhausted;
 pub use gate::{run_gated, SharedBackoff};
 
