@@ -13,6 +13,7 @@ import {
 import { deriveAccountKeys } from "@sig-net/midnight-contract-deploy";
 
 import type { Config } from "../src/config.js";
+import { PublisherError } from "../src/errors.js";
 import type { BuildIntentInput } from "../src/intent.js";
 import { primePublisher, type Publisher } from "../src/submit.js";
 import type { FundingWallet, Landed } from "../src/wallet.js";
@@ -79,6 +80,8 @@ export interface StubEdges {
   readonly balanceTx?: (tx: unknown) => Promise<unknown>;
   readonly finalizeTx?: (recipe: unknown) => Promise<unknown>;
   readonly submitTx?: (tx: unknown) => Promise<Landed>;
+  readonly snapshot?: () => Promise<string>;
+  readonly describe?: () => Promise<string>;
 }
 
 // Identity by default, so a sentinel passed in at one edge is observable at the next.
@@ -91,6 +94,12 @@ export function primeStub(edges: StubEdges = {}): void {
         balanceTx: edges.balanceTx ?? (async (tx: unknown) => tx),
         finalizeTx: edges.finalizeTx ?? (async (recipe: unknown) => recipe),
         submitTx: edges.submitTx ?? (async () => ({ txId: STUB_TX_ID })),
+        snapshot:
+          edges.snapshot ??
+          (async () => {
+            throw new PublisherError("wallet_unsynced", "the stub wallet never syncs");
+          }),
+        describe: edges.describe ?? (async () => "stub wallet state"),
         close: async () => undefined,
       } as unknown as FundingWallet,
     } as unknown as Publisher),

@@ -18,6 +18,7 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
 use crate::config::{validate_publisher_network_id, MidnightConfig, PublisherConfig};
+use crate::wallet_snapshot::{Snapshots, WalletSnapshotStore};
 
 #[derive(Debug)]
 pub(crate) struct AmbiguousSubmit;
@@ -33,8 +34,41 @@ impl std::fmt::Display for AmbiguousSubmit {
 
 impl std::error::Error for AmbiguousSubmit {}
 
+#[cfg(test)]
 pub(crate) fn is_ambiguous_submit(error: &anyhow::Error) -> bool {
     error.downcast_ref::<AmbiguousSubmit>().is_some()
+}
+
+/// A request the child answered without carrying out, under its `protocol.ts` code.
+#[derive(Debug)]
+struct Refusal {
+    code: String,
+    message: String,
+    /// The child's account of its funding wallet, logged but kept out of the error text:
+    /// retry and throttle detection scan that text for status codes, which counts can mimic.
+    wallet_state: Option<String>,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "midnight intent builder refused the request [{}]: {}",
+            self.code, self.message
+        )
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// A refused submit costs its child whatever the reason: one restored from the latest
+/// wallet snapshot is cheap, so no refusal is diagnosed in place. The exception is a
+/// wallet still syncing, which a fresh child would only start syncing over.
+fn retires_child(operation: Operation, error: &anyhow::Error) -> bool {
+    operation == Operation::Submit
+        && error
+            .downcast_ref::<Refusal>()
+            .is_none_or(|refusal| refusal.code != "wallet_unsynced")
 }
 
 /// One respond call, in the shape the child validates. Every byte field is bare
@@ -90,12 +124,17 @@ struct SubmitRequest {
     intent: String,
 }
 
+/// Asks the child for its funding wallet's snapshot; it carries no fields.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct SnapshotRequest {}
+
 /// What the child is being asked to do. A build's lost answer can simply be asked for
 /// again; a submit's may be on chain, and asking again races the single dust UTXO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     BuildIntent,
     Submit,
+    Snapshot,
 }
 
 /// The wire `op` of the readiness handshake, which runs its own exchange in
@@ -108,12 +147,13 @@ impl Operation {
     /// during the readiness exchange.
     fn deadline(self, config: &PublisherConfig) -> Duration {
         match self {
-            Self::BuildIntent => config.request_timeout,
+            Self::BuildIntent | Self::Snapshot => config.request_timeout,
             Self::Submit => config.submit_timeout,
         }
     }
 
-    /// Whether an answer lost in transit may simply be asked for again.
+    /// Whether an answer lost in transit may simply be asked for again. A snapshot could
+    /// be, but a fresh child has nothing synced to snapshot.
     fn is_repeatable(self) -> bool {
         matches!(self, Self::BuildIntent)
     }
@@ -123,6 +163,7 @@ impl Operation {
         match self {
             Self::BuildIntent => "build",
             Self::Submit => "submit",
+            Self::Snapshot => "snapshot",
         }
     }
 
@@ -130,6 +171,7 @@ impl Operation {
         match self {
             Self::BuildIntent => "intent build",
             Self::Submit => "submit",
+            Self::Snapshot => "wallet snapshot",
         }
     }
 }
@@ -141,17 +183,31 @@ pub struct IntentGen {
     /// Two interleaved requests on one pipe have no correct reading, so the lock is the
     /// concurrency story: callers queue.
     session: Mutex<Option<Session>>,
+    /// Every child starts from the latest of these.
+    snapshots: Snapshots,
 }
 
 impl IntentGen {
     /// Starts the builder eagerly: a command that cannot run fails here, not on the first signature.
     pub async fn spawn(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Self> {
+        Self::spawn_with_snapshots(config, network_id, None).await
+    }
+
+    /// [`Self::spawn`], with the funding wallet resuming from and saving to `store`.
+    pub async fn spawn_with_snapshots(
+        config: &MidnightConfig,
+        network_id: &str,
+        store: Option<Arc<dyn WalletSnapshotStore>>,
+    ) -> anyhow::Result<Self> {
         config.validate()?;
         validate_publisher_network_id(network_id)?;
+        let snapshots = Snapshots::load(store).await;
+        let session = spawn_session(config, network_id, snapshots.latest().as_deref()).await?;
         Ok(Self {
             config: config.clone(),
             network_id: network_id.to_string(),
-            session: Mutex::new(Some(spawn_session(config, network_id).await?)),
+            session: Mutex::new(Some(session)),
+            snapshots,
         })
     }
 
@@ -170,10 +226,47 @@ impl IntentGen {
         let request = SubmitRequest {
             intent: hex::encode(intent),
         };
-        let reply = self.dispatch(&request, Operation::Submit).await?;
-        reply
+        self.dispatch(&request, Operation::Submit)
+            .await?
             .tx_id
             .context("midnight intent builder posted a transaction without naming it")
+    }
+
+    /// Keeps the child's wallet snapshot when one is due. Called between publishes, where no
+    /// intent's TTL is running, and never spawns a child only to ask.
+    pub async fn refresh_snapshot(&self) {
+        if !self.snapshots.due() {
+            return;
+        }
+        let outcome = {
+            let mut session = self.session.lock().await;
+            if session.is_none() {
+                return;
+            }
+            self.attempt(&mut session, &SnapshotRequest {}, Operation::Snapshot)
+                .await
+        };
+        self.keep_snapshot(outcome).await;
+    }
+
+    /// Keeps what a snapshot request returned. The child hands one over only while its
+    /// wallet is synced with nothing in flight, the state a fresh sync reaches.
+    async fn keep_snapshot(&self, outcome: Exchange) {
+        match outcome {
+            Exchange::Answered(Ok(reply)) => {
+                if let Some(snapshot) = reply.wallet_snapshot {
+                    tracing::info!(bytes = snapshot.len(), "kept a midnight wallet snapshot");
+                    self.snapshots.keep(snapshot).await;
+                }
+            }
+            // Still syncing, or a submit or an in-flight coin still owns the wallet.
+            Exchange::Answered(Err(error)) => {
+                tracing::info!("midnight wallet snapshot not taken: {error:#}");
+            }
+            Exchange::Broken { error, .. } => {
+                tracing::warn!(?error, "midnight wallet snapshot failed");
+            }
+        }
     }
 
     /// One operation, start to finish; budget and reissue policy come from
@@ -185,7 +278,7 @@ impl IntentGen {
     ) -> anyhow::Result<WireReply> {
         let mut session = self.session.lock().await;
         let (error, retry) = match self.attempt(&mut session, request, operation).await {
-            Exchange::Answered(result) => return result,
+            Exchange::Answered(result) => return result.map(|reply| *reply),
             Exchange::Broken { error, retry } => (error, retry),
         };
         if !retry {
@@ -197,7 +290,7 @@ impl IntentGen {
             "midnight intent builder failed: {error:#}; retrying once on a fresh child"
         );
         match self.attempt(&mut session, request, operation).await {
-            Exchange::Answered(result) => result,
+            Exchange::Answered(result) => result.map(|reply| *reply),
             Exchange::Broken { error, .. } => Err(self.blame_the_command(error)),
         }
     }
@@ -210,8 +303,8 @@ impl IntentGen {
         ))
     }
 
-    /// One pass. A broken exchange or ambiguous submit empties the slot, killing the
-    /// child: nothing later reads its pipe.
+    /// One pass. A broken exchange or a refused submit, unless refused for a wallet still
+    /// syncing, empties the slot, killing the child: nothing later reads its pipe.
     async fn attempt<T: Serialize>(
         &self,
         session: &mut Option<Session>,
@@ -219,7 +312,8 @@ impl IntentGen {
         operation: Operation,
     ) -> Exchange {
         if session.is_none() {
-            match spawn_session(&self.config, &self.network_id).await {
+            let snapshot = self.snapshots.latest();
+            match spawn_session(&self.config, &self.network_id, snapshot.as_deref()).await {
                 Ok(fresh) => *session = Some(fresh),
                 // The restart budget was already spent inside the spawn; a second pass
                 // would only spend it again.
@@ -230,14 +324,36 @@ impl IntentGen {
             .as_mut()
             .expect("the slot was just filled or was already full");
         let outcome = exchange(live, request, operation, &self.config.publisher).await;
-        if matches!(
-            &outcome,
-            Exchange::Answered(Err(error)) if is_ambiguous_submit(error)
-        ) {
-            // The wallet work may still be running after its answer times out, so no
-            // later request may reuse this child.
-            *session = None;
-            return outcome;
+        if let Exchange::Answered(Err(error)) = &outcome {
+            let wallet = error
+                .downcast_ref::<Refusal>()
+                .and_then(|refusal| refusal.wallet_state.as_deref());
+            if retires_child(operation, error) {
+                tracing::warn!(
+                    wallet,
+                    "retiring the midnight intent builder after a refused submit; the next \
+                     request starts one from the latest wallet snapshot: {error:#}"
+                );
+                // Its last chance to hand over a snapshot: a settled wallet restores as well
+                // as any, and a long refusal otherwise retires every child before one is due.
+                if self.snapshots.due() {
+                    let last = exchange(
+                        live,
+                        &SnapshotRequest {},
+                        Operation::Snapshot,
+                        &self.config.publisher,
+                    )
+                    .await;
+                    self.keep_snapshot(last).await;
+                }
+                // An ambiguous submit's wallet work may also still be running, so no later
+                // request may reuse this child either way.
+                *session = None;
+                return outcome;
+            }
+            if wallet.is_some() {
+                tracing::info!(wallet, "midnight submit refused: {error:#}");
+            }
         }
         let Exchange::Broken { error, retry } = outcome else {
             return outcome;
@@ -313,8 +429,9 @@ impl StderrTail {
 
 /// What a pass at the child produced.
 enum Exchange {
-    /// A reply that answers this request, whether it granted it or refused it.
-    Answered(anyhow::Result<WireReply>),
+    /// A reply that answers this request, whether it granted it or refused it. Boxed:
+    /// a reply is ten times the size of a fault.
+    Answered(anyhow::Result<Box<WireReply>>),
     /// The child is replaced either way; only a transport fault is worth a second try.
     Broken { error: anyhow::Error, retry: bool },
 }
@@ -343,7 +460,7 @@ impl Exchange {
 fn unanswered(error: anyhow::Error, operation: Operation) -> anyhow::Error {
     match operation {
         Operation::Submit => error.context(AmbiguousSubmit),
-        Operation::BuildIntent => error,
+        Operation::BuildIntent | Operation::Snapshot => error,
     }
 }
 
@@ -362,32 +479,43 @@ fn take_wire_id(next_id: &mut u64) -> u64 {
     id
 }
 
-/// Starts the builder under the restart budget.
-async fn spawn_session(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Session> {
+/// Starts the builder under the restart budget, its wallet resuming from `snapshot`.
+async fn spawn_session(
+    config: &MidnightConfig,
+    network_id: &str,
+    snapshot: Option<&str>,
+) -> anyhow::Result<Session> {
     retry_op!(
         config.publisher.request_timeout,
         config.publisher.restart_backoff,
         "midnight_intent_gen_spawn",
         {
             let session = spawn_child(config, network_id)?;
-            verify_ready(session, &config.publisher).await
+            verify_ready(session, &config.publisher, snapshot).await
         }
     )
 }
 
-const PUBLISHER_PROTOCOL_VERSION: u64 = 2;
+const PUBLISHER_PROTOCOL_VERSION: u64 = 3;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ReadyRequest {
+struct ReadyRequest<'a> {
     protocol_version: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wallet_snapshot: Option<&'a str>,
 }
 
-async fn verify_ready(mut session: Session, config: &PublisherConfig) -> anyhow::Result<Session> {
+async fn verify_ready(
+    mut session: Session,
+    config: &PublisherConfig,
+    snapshot: Option<&str>,
+) -> anyhow::Result<Session> {
     let id = take_wire_id(&mut session.next_id);
     let line = encode_request(
         &ReadyRequest {
             protocol_version: PUBLISHER_PROTOCOL_VERSION,
+            wallet_snapshot: snapshot,
         },
         id,
         READY_OP,
@@ -601,18 +729,19 @@ fn decode_reply(line: &str, id: u64) -> Exchange {
         }
         _ => {}
     }
-    Exchange::Answered(granted(reply))
+    Exchange::Answered(granted(reply).map(Box::new))
 }
 
 fn granted(reply: WireReply) -> anyhow::Result<WireReply> {
     if !reply.ok {
-        let code = reply.code.as_deref().unwrap_or("no code");
-        let error = anyhow::anyhow!(
-            "midnight intent builder refused the request [{}]: {}",
-            code,
-            reply.message.as_deref().unwrap_or("no message")
-        );
-        return Err(if code == "ambiguous_submit" {
+        let refusal = Refusal {
+            code: reply.code.unwrap_or_else(|| "no code".to_string()),
+            message: reply.message.unwrap_or_else(|| "no message".to_string()),
+            wallet_state: reply.wallet_state,
+        };
+        let ambiguous = refusal.code == "ambiguous_submit";
+        let error = anyhow::Error::new(refusal);
+        return Err(if ambiguous {
             error.context(AmbiguousSubmit)
         } else {
             error
@@ -650,8 +779,12 @@ struct WireReply {
     intent: Option<String>,
     /// What names a posted transaction on chain. The submit arm's own payload.
     tx_id: Option<String>,
+    /// The snapshot arm's own payload, opaque here.
+    wallet_snapshot: Option<String>,
     code: Option<String>,
     message: Option<String>,
+    /// A refused submit's account of the funding wallet.
+    wallet_state: Option<String>,
 }
 
 #[cfg(test)]
@@ -670,7 +803,7 @@ mod tests {
     /// must pin its own, or it silently tests the default.
     fn stub_config(script: &str) -> MidnightConfig {
         let script = format!(
-            r#"read -r ready; ready_id=$(printf "%s" "$ready" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{{"id":%s,"ok":true,"ready":true,"protocolVersion":2,"submitTimeoutMs":2,"recipeTtlMs":1}}\n' "$ready_id"; {script}"#
+            r#"read -r ready; ready_id=$(printf "%s" "$ready" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{{"id":%s,"ok":true,"ready":true,"protocolVersion":3,"submitTimeoutMs":2,"recipeTtlMs":1}}\n' "$ready_id"; {script}"#
         );
         MidnightConfig {
             node_url: NODE_URL.to_string(),
@@ -1301,15 +1434,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_sends_and_requires_protocol_generation_two() {
-        let script = r#"read -r ready; if [ "$ready" = '{"id":0,"op":"ready","protocolVersion":2}' ]; then printf '{"id":0,"ok":true,"ready":true,"protocolVersion":2,"submitTimeoutMs":2,"recipeTtlMs":1}\n'; else printf '{"id":0,"ok":false,"code":"bad_request","message":"wrong ready request"}\n'; fi; sleep 30"#;
+    async fn readiness_sends_and_requires_protocol_generation_three() {
+        let script = r#"read -r ready; if [ "$ready" = '{"id":0,"op":"ready","protocolVersion":3}' ]; then printf '{"id":0,"ok":true,"ready":true,"protocolVersion":3,"submitTimeoutMs":2,"recipeTtlMs":1}\n'; else printf '{"id":0,"ok":false,"code":"bad_request","message":"wrong ready request"}\n'; fi; sleep 30"#;
         let mut config = stub_config("unreachable");
         config.publisher.intent_gen_command =
             vec!["sh".to_string(), "-c".to_string(), script.to_string()];
 
         IntentGen::spawn(&config, NETWORK_ID)
             .await
-            .expect("generation 2 readiness succeeds");
+            .expect("generation 3 readiness without a snapshot succeeds");
     }
 
     #[tokio::test]
@@ -1317,11 +1450,11 @@ mod tests {
         let invalid_replies = [
             (
                 "missing ready field",
-                r#"{"id":0,"ok":true,"protocolVersion":2,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
+                r#"{"id":0,"ok":true,"protocolVersion":3,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
                 "false ready field",
-                r#"{"id":0,"ok":true,"ready":false,"protocolVersion":2,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
+                r#"{"id":0,"ok":true,"ready":false,"protocolVersion":3,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
                 "missing protocol version",
@@ -1329,15 +1462,15 @@ mod tests {
             ),
             (
                 "older protocol version",
-                r#"{"id":0,"ok":true,"ready":true,"protocolVersion":1,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
+                r#"{"id":0,"ok":true,"ready":true,"protocolVersion":2,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
                 "newer protocol version",
-                r#"{"id":0,"ok":true,"ready":true,"protocolVersion":3,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
+                r#"{"id":0,"ok":true,"ready":true,"protocolVersion":4,"submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
                 "wrongly typed protocol version",
-                r#"{"id":0,"ok":true,"ready":true,"protocolVersion":"1","submitTimeoutMs":2,"recipeTtlMs":1}"#,
+                r#"{"id":0,"ok":true,"ready":true,"protocolVersion":"3","submitTimeoutMs":2,"recipeTtlMs":1}"#,
             ),
             (
                 "null protocol version",
@@ -1387,6 +1520,349 @@ mod tests {
             serde_json::json!({ "id": 4, "op": "submit", "intent": "deadbeef" }),
             "the pinned reads that built the intent have no reader on the other side, \
          and the child balances against a wallet it syncs itself"
+        );
+    }
+
+    /// A store whose contents a test sets and reads back.
+    #[derive(Default)]
+    struct MemoryStore {
+        stored: std::sync::Mutex<Option<String>>,
+        saves: std::sync::atomic::AtomicUsize,
+        fail_load: bool,
+    }
+
+    impl MemoryStore {
+        fn holding(snapshot: &str) -> Arc<Self> {
+            let store = Self::default();
+            *store.stored.lock().unwrap() = Some(snapshot.to_string());
+            Arc::new(store)
+        }
+
+        fn stored(&self) -> Option<String> {
+            self.stored.lock().unwrap().clone()
+        }
+
+        fn saves(&self) -> usize {
+            self.saves.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WalletSnapshotStore for MemoryStore {
+        async fn load(&self) -> anyhow::Result<Option<String>> {
+            anyhow::ensure!(!self.fail_load, "redis is down");
+            Ok(self.stored())
+        }
+
+        async fn save(&self, snapshot: &str) -> anyhow::Result<()> {
+            *self.stored.lock().unwrap() = Some(snapshot.to_string());
+            self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A scratch file a stub appends lines to, removed up front and on drop.
+    struct StubLog(PathBuf);
+
+    impl StubLog {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "mpc-midnight-intent-gen-{name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            Self(path)
+        }
+
+        fn lines(&self) -> Vec<String> {
+            std::fs::read_to_string(&self.0)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    impl Drop for StubLog {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// A child that logs its ready line to `readies` and every snapshot request to
+    /// `asked`, answering each snapshot request with `snapshot_replies` in turn (the last
+    /// repeating) and each submit with `submit_reply`. Replies are the fields after `id`.
+    fn snapshot_stub(
+        readies: &StubLog,
+        asked: &StubLog,
+        snapshot_replies: &[&str],
+        submit_reply: &str,
+    ) -> MidnightConfig {
+        let mut config = stub_config("unreachable");
+        let (readies, asked) = (readies.0.display(), asked.0.display());
+        let replies = snapshot_replies
+            .iter()
+            .enumerate()
+            .map(|(index, reply)| format!("{}) body='{reply}' ;;", index + 1))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let last = snapshot_replies
+            .last()
+            .expect("at least one snapshot reply");
+        config.publisher.intent_gen_command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                r#"read -r ready; printf '%s\n' "$ready" >> {readies}; printf '{{"id":0,"ok":true,"ready":true,"protocolVersion":3,"submitTimeoutMs":2,"recipeTtlMs":1}}\n'; n=0; while read -r line; do id=$(printf "%s" "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); case "$line" in *'"op":"snapshot"'*) printf '%s\n' "$line" >> {asked}; n=$((n+1)); case "$n" in {replies} *) body='{last}' ;; esac ;; *) body='{submit_reply}' ;; esac; printf '{{"id":%s,%s}}\n' "$id" "$body"; done"#
+            ),
+        ];
+        config
+    }
+
+    const LANDED: &str = r#""ok":true,"txId":"ab""#;
+    const FRESH: &str = r#""ok":true,"walletSnapshot":"fresh""#;
+
+    async fn spawn_with(config: &MidnightConfig, store: Arc<MemoryStore>) -> IntentGen {
+        IntentGen::spawn_with_snapshots(config, NETWORK_ID, Some(store))
+            .await
+            .expect("the stub spawns")
+    }
+
+    #[tokio::test]
+    async fn a_child_resumes_from_the_stored_snapshot_and_a_refresh_stores_a_fresh_one() {
+        let (readies, asked) = (StubLog::new("snap-ready"), StubLog::new("snap-asked"));
+        let store = MemoryStore::holding("stored");
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[FRESH], LANDED),
+            store.clone(),
+        )
+        .await;
+
+        builder.refresh_snapshot().await;
+
+        assert_eq!(
+            readies.lines(),
+            [r#"{"id":0,"op":"ready","protocolVersion":3,"walletSnapshot":"stored"}"#]
+        );
+        assert_eq!(asked.lines(), [r#"{"id":0,"op":"snapshot"}"#]);
+        assert_eq!(store.stored().as_deref(), Some("fresh"));
+        assert_eq!(builder.snapshots.latest().as_deref(), Some("fresh"));
+    }
+
+    #[tokio::test]
+    async fn a_kept_snapshot_is_not_asked_for_again_within_the_interval() {
+        let (readies, asked) = (
+            StubLog::new("snap-interval-ready"),
+            StubLog::new("snap-interval-asked"),
+        );
+        let store = Arc::new(MemoryStore::default());
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[FRESH], LANDED),
+            store.clone(),
+        )
+        .await;
+
+        builder.refresh_snapshot().await;
+        builder.refresh_snapshot().await;
+
+        assert_eq!(asked.lines().len(), 1);
+        assert_eq!(store.saves(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_snapshot_is_asked_for_again_on_the_next_refresh() {
+        let (readies, asked) = (
+            StubLog::new("snap-refused-ready"),
+            StubLog::new("snap-refused-asked"),
+        );
+        let unsynced = r#""ok":false,"code":"wallet_unsynced","message":"still syncing""#;
+        let store = Arc::new(MemoryStore::default());
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[unsynced, FRESH], LANDED),
+            store.clone(),
+        )
+        .await;
+
+        builder.refresh_snapshot().await;
+        assert_eq!(store.saves(), 0, "a refusal keeps nothing");
+        builder.refresh_snapshot().await;
+
+        assert_eq!(asked.lines().len(), 2);
+        assert_eq!(store.stored().as_deref(), Some("fresh"));
+    }
+
+    #[tokio::test]
+    async fn a_respawned_child_resumes_from_the_snapshot_kept_in_memory() {
+        let (readies, asked) = (
+            StubLog::new("snap-respawn-ready"),
+            StubLog::new("snap-respawn-asked"),
+        );
+        let ambiguous = r#""ok":false,"code":"ambiguous_submit","message":"may still land""#;
+        let store = Arc::new(MemoryStore::default());
+        let builder =
+            spawn_with(&snapshot_stub(&readies, &asked, &[FRESH], ambiguous), store).await;
+        builder.snapshots.keep("kept".to_string()).await;
+
+        let error = builder.submit(&[0x0a]).await.unwrap_err();
+        assert!(is_ambiguous_submit(&error), "{error:#}");
+        builder.refresh_snapshot().await;
+        assert_eq!(
+            readies.lines().len(),
+            1,
+            "no child is spawned only to snapshot it"
+        );
+        assert!(asked.lines().is_empty());
+        let _ = builder.build(&sample_request()).await;
+
+        assert_eq!(readies.lines().len(), 2);
+        assert_eq!(
+            readies.lines()[1],
+            r#"{"id":0,"op":"ready","protocolVersion":3,"walletSnapshot":"kept"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retired_child_hands_over_its_settled_wallet_first() {
+        let (readies, asked) = (
+            StubLog::new("snap-last-ready"),
+            StubLog::new("snap-last-asked"),
+        );
+        let unfunded = r#""ok":false,"code":"wallet_unfunded","message":"could not balance dust""#;
+        let store = Arc::new(MemoryStore::default());
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[FRESH], unfunded),
+            store.clone(),
+        )
+        .await;
+
+        builder.submit(&[0x0a]).await.unwrap_err();
+
+        assert!(builder.session.lock().await.is_none());
+        assert_eq!(asked.lines().len(), 1);
+        assert_eq!(store.stored().as_deref(), Some("fresh"));
+        let _ = builder.build(&sample_request()).await;
+        assert_eq!(
+            readies.lines()[1],
+            r#"{"id":0,"op":"ready","protocolVersion":3,"walletSnapshot":"fresh"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retired_child_s_unsettled_wallet_replaces_no_snapshot() {
+        let (readies, asked) = (
+            StubLog::new("snap-unsettled-ready"),
+            StubLog::new("snap-unsettled-asked"),
+        );
+        let unfunded = r#""ok":false,"code":"wallet_unfunded","message":"could not balance dust""#;
+        let busy = r#""ok":false,"code":"wallet_busy","message":"coins in flight""#;
+        let store = Arc::new(MemoryStore::default());
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[busy], unfunded),
+            store.clone(),
+        )
+        .await;
+
+        builder.submit(&[0x0a]).await.unwrap_err();
+
+        assert!(builder.session.lock().await.is_none());
+        assert_eq!(asked.lines().len(), 1);
+        assert_eq!(store.saves(), 0);
+        assert_eq!(builder.snapshots.latest(), None);
+    }
+
+    #[tokio::test]
+    async fn a_refused_submit_retires_its_child_for_one_restored_from_the_kept_snapshot() {
+        let (readies, asked) = (
+            StubLog::new("snap-retire-ready"),
+            StubLog::new("snap-retire-asked"),
+        );
+        let conflict =
+            r#""ok":false,"code":"state_conflict","message":"1010: Invalid Transaction""#;
+        let store = Arc::new(MemoryStore::default());
+        let builder = spawn_with(&snapshot_stub(&readies, &asked, &[FRESH], conflict), store).await;
+        builder.snapshots.keep("kept".to_string()).await;
+
+        let error = builder.submit(&[0x0a]).await.unwrap_err();
+        assert!(format!("{error:#}").contains("state_conflict"), "{error:#}");
+        assert!(!is_ambiguous_submit(&error), "{error:#}");
+        assert!(
+            builder.session.lock().await.is_none(),
+            "a refused submit must retire its child"
+        );
+        let _ = builder.build(&sample_request()).await;
+
+        assert_eq!(
+            readies.lines(),
+            [
+                r#"{"id":0,"op":"ready","protocolVersion":3}"#,
+                r#"{"id":0,"op":"ready","protocolVersion":3,"walletSnapshot":"kept"}"#,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_submit_refused_while_the_wallet_syncs_keeps_its_child_syncing() {
+        let (readies, asked) = (
+            StubLog::new("snap-syncing-ready"),
+            StubLog::new("snap-syncing-asked"),
+        );
+        let unsynced = r#""ok":false,"code":"wallet_unsynced","message":"still syncing""#;
+        let store = Arc::new(MemoryStore::default());
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[unsynced], unsynced),
+            store,
+        )
+        .await;
+
+        builder.submit(&[0x0a]).await.unwrap_err();
+        builder.submit(&[0x0a]).await.unwrap_err();
+
+        assert!(builder.session.lock().await.is_some());
+        assert_eq!(
+            readies.lines().len(),
+            1,
+            "a restart would only start the sync over"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_s_wallet_state_stays_out_of_the_error_text() {
+        // Status-code detection scans the error text, and a count like 429 would trip it.
+        let (readies, asked) = (
+            StubLog::new("snap-state-ready"),
+            StubLog::new("snap-state-asked"),
+        );
+        let unsynced = r#""ok":false,"code":"wallet_unsynced","message":"still syncing","walletState":"applied=429/1000""#;
+        let store = Arc::new(MemoryStore::default());
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[unsynced], unsynced),
+            store,
+        )
+        .await;
+
+        let error = builder.submit(&[0x0a]).await.unwrap_err();
+
+        assert!(format!("{error:#}").contains("still syncing"), "{error:#}");
+        assert!(!format!("{error:#}").contains("429"), "{error:#}");
+        let refusal = error.downcast_ref::<Refusal>().expect("a typed refusal");
+        assert_eq!(refusal.wallet_state.as_deref(), Some("applied=429/1000"));
+    }
+
+    #[tokio::test]
+    async fn a_store_that_fails_to_load_starts_the_child_without_a_snapshot() {
+        let (readies, asked) = (
+            StubLog::new("snap-noload-ready"),
+            StubLog::new("snap-noload-asked"),
+        );
+        let store = Arc::new(MemoryStore {
+            fail_load: true,
+            ..Default::default()
+        });
+        spawn_with(&snapshot_stub(&readies, &asked, &[FRESH], LANDED), store).await;
+
+        assert_eq!(
+            readies.lines(),
+            [r#"{"id":0,"op":"ready","protocolVersion":3}"#]
         );
     }
 }
