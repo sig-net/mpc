@@ -64,8 +64,75 @@ impl ToRpcParams for Params {
 }
 
 /// Request-only jsonrpsee HTTP transport behind Subxt's raw client seam.
-#[derive(Clone)]
-struct HttpRpcClient(HttpClient);
+///
+/// A load balancer keeps one keep-alive connection on one node, so a node that has
+/// fallen out of sync would fail every request for as long as the connection lives. A
+/// failed request therefore replaces the client and its connection pool, and the next
+/// request dials afresh.
+struct HttpRpcClient {
+    node_url: String,
+    config: RpcConfig,
+    /// The client plus a generation, so concurrent failures replace it once.
+    current: std::sync::RwLock<(u64, HttpClient)>,
+}
+
+impl HttpRpcClient {
+    fn new(node_url: &str, config: &RpcConfig) -> anyhow::Result<Self> {
+        Ok(Self {
+            current: std::sync::RwLock::new((0, build_http_client(node_url, config)?)),
+            node_url: node_url.to_owned(),
+            config: config.clone(),
+        })
+    }
+
+    fn current(&self) -> (u64, HttpClient) {
+        self.current
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Replaces the client generation `failed` unless another failure already has. The
+    /// build loads TLS roots, so it runs outside the lock every request takes. A client
+    /// that cannot be rebuilt is kept: it is no worse than before the failure.
+    fn replace(&self, failed: u64) {
+        if self.current().0 != failed {
+            return;
+        }
+        let client = match build_http_client(&self.node_url, &self.config) {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "keeping the midnight HTTP RPC client after a failed request"
+                );
+                return;
+            }
+        };
+        let mut current = self
+            .current
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if current.0 != failed {
+            return;
+        }
+        let generation = current.0 + 1;
+        *current = (generation, client);
+        drop(current);
+        tracing::info!(
+            generation,
+            "replaced the midnight HTTP RPC client after a failed request"
+        );
+    }
+}
+
+fn build_http_client(node_url: &str, config: &RpcConfig) -> anyhow::Result<HttpClient> {
+    HttpClientBuilder::default()
+        .max_response_size(config.max_response_size)
+        .request_timeout(config.request_timeout)
+        .build(node_url)
+        .context("failed to build the midnight HTTP RPC client")
+}
 
 impl RpcClientT for HttpRpcClient {
     fn request_raw<'a>(
@@ -74,17 +141,19 @@ impl RpcClientT for HttpRpcClient {
         params: Option<Box<RawValue>>,
     ) -> RawRpcFuture<'a, Box<RawValue>> {
         Box::pin(async move {
-            self.0
-                .request(method, Params(params))
-                .await
-                .map_err(|error| match error {
-                    JsonrpseeClientError::Call(error) => RawRpcError::User(UserError {
-                        code: error.code(),
-                        message: error.message().to_owned(),
-                        data: error.data().map(ToOwned::to_owned),
-                    }),
-                    error => RawRpcError::Client(Box::new(error)),
-                })
+            let (generation, client) = self.current();
+            let result = client.request(method, Params(params)).await;
+            if result.is_err() {
+                self.replace(generation);
+            }
+            result.map_err(|error| match error {
+                JsonrpseeClientError::Call(error) => RawRpcError::User(UserError {
+                    code: error.code(),
+                    message: error.message().to_owned(),
+                    data: error.data().map(ToOwned::to_owned),
+                }),
+                error => RawRpcError::Client(Box::new(error)),
+            })
         })
     }
 
@@ -211,12 +280,7 @@ fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
 }
 
 fn connect_http_endpoint(node_url: &str, config: &RpcConfig) -> anyhow::Result<RpcClient> {
-    let client = HttpClientBuilder::default()
-        .max_response_size(config.max_response_size)
-        .request_timeout(config.request_timeout)
-        .build(node_url)
-        .context("failed to build the midnight HTTP RPC client")?;
-    Ok(RpcClient::new(HttpRpcClient(client)))
+    Ok(RpcClient::new(HttpRpcClient::new(node_url, config)?))
 }
 
 pub(crate) struct MidnightRpc {
@@ -1519,6 +1583,137 @@ mod tests {
                 "HTTP {status} used the wrong retry policy"
             );
         }
+    }
+
+    /// A keep-alive HTTP server whose first connection reaches a node that has fallen
+    /// out of sync: every request on that connection fails as such a node fails, and
+    /// every later connection answers like a healthy node. A load balancer keeps one
+    /// connection on one backend, as this server does.
+    async fn stale_first_backend_server(
+    ) -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind keep-alive HTTP server");
+        let address = listener
+            .local_addr()
+            .expect("keep-alive HTTP server address");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let accepted = connections.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept HTTP connection");
+                let stale = accepted.fetch_add(1, Ordering::SeqCst) == 0;
+                tokio::spawn(serve_keep_alive(stream, stale));
+            }
+        });
+        (address, connections, server)
+    }
+
+    async fn serve_keep_alive(mut stream: tokio::net::TcpStream, stale: bool) {
+        let mut buffer = Vec::new();
+        loop {
+            let body_start = loop {
+                if let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break end + 4;
+                }
+                let mut chunk = [0; 1024];
+                match stream.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                }
+            };
+            let headers = String::from_utf8_lossy(&buffer[..body_start]).to_ascii_lowercase();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map(|value| value.trim().parse().expect("numeric content-length"))
+                .unwrap_or(0);
+            while buffer.len() < body_start + length {
+                let mut chunk = [0; 1024];
+                match stream.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let request: serde_json::Value =
+                serde_json::from_slice(&buffer[body_start..body_start + length])
+                    .expect("JSON-RPC request body");
+            buffer.drain(..body_start + length);
+            let reply = if stale {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "error": {
+                        "code": INVALID_PARAMS_CODE,
+                        "message": "Unable to get requested contract state",
+                    },
+                })
+            } else {
+                json!({"jsonrpc": "2.0", "id": request["id"], "result": hash_of_byte(0x22)})
+            }
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}",
+                reply.len()
+            );
+            if stream.write_all(response.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_moves_off_the_backend_its_connection_reached() {
+        let (address, connections, server) = stale_first_backend_server().await;
+        let reads = Reads::new(
+            connect_http(&http_config(address)).expect("build request-only client"),
+            Duration::from_secs(1),
+            attempts(0),
+        );
+
+        let stale = reads.finalized_head().await;
+        let recovered = reads.finalized_head().await;
+        let kept = reads.finalized_head().await;
+        server.abort();
+
+        stale.expect_err("the first connection reaches the stale backend");
+        for read in [recovered, kept] {
+            let head = read.expect("a request after the failure reached the stale backend again");
+            assert_eq!(hex_0x(head), hash_of_byte(0x22));
+        }
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            2,
+            "a failure must open one new connection and a success must keep it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retried_read_recovers_from_the_backend_its_connection_reached() {
+        let (address, connections, server) = stale_first_backend_server().await;
+        let reads = Reads::new(
+            connect_http(&http_config(address)).expect("build request-only client"),
+            Duration::from_secs(1),
+            attempts(2),
+        );
+
+        let head = reads.finalized_head().await;
+        server.abort();
+
+        let head = head.expect("the retry reached the stale backend again");
+        assert_eq!(hex_0x(head), hash_of_byte(0x22));
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_late_failure_does_not_replace_the_client_that_replaced_its_own() {
+        let client = HttpRpcClient::new("http://127.0.0.1:1", &RpcConfig::default())
+            .expect("build request-only client");
+
+        client.replace(0);
+        client.replace(0);
+
+        assert_eq!(client.current().0, 1);
     }
 
     #[tokio::test]
