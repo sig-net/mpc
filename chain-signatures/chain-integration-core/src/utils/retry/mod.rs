@@ -99,34 +99,17 @@ impl RetryConfig {
 #[macro_export]
 macro_rules! retry_op {
     // Standard form: op_name string, default structured logging
-    ($timeout:expr, $strategy:expr, $op_name:literal, { $($code:tt)* }) => {{
-        let mut attempt_counter: u32 = 0;
-        let op = || async {
-            let fut = async { $($code)* };
-            match tokio::time::timeout($timeout, fut).await {
-                Ok(Ok(res)) => Ok(res),
-                Ok(Err(e)) => Err(e),
-                Err(_) => Err(anyhow::anyhow!("Operation timed out after {:?}", $timeout)),
-            }
-        };
-        use $crate::backon::Retryable as _;
-        op.retry(&$strategy.build())
-            // Retry only if the error is retryable (e.g., not a 4xx client error)
-            .when(|e: &anyhow::Error| $crate::utils::retry::is_retryable(e))
-            // Log each retry attempt with structured tracing
-            .notify(|err: &anyhow::Error, sleep: std::time::Duration| {
-                attempt_counter += 1;
-                tracing::warn!(
-                    operation = $op_name,
-                    attempt = attempt_counter,
-                    error = %format_args!("{err:#}"),
-                    retry_in = ?sleep,
-                    "call failed, retrying"
-                );
-            })
-            .await
-            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter))
-    }};
+    ($timeout:expr, $strategy:expr, $op_name:literal, { $($code:tt)* }) => {
+        $crate::retry_op!($timeout, $strategy, $op_name, |attempt, err, sleep| {
+            tracing::warn!(
+                operation = $op_name,
+                attempt,
+                error = %format_args!("{err:#}"),
+                retry_in = ?sleep,
+                "call failed, retrying"
+            )
+        }, { $($code)* })
+    };
 
     // Full form: op_name string, custom notify closure
     ($timeout:expr, $strategy:expr, $op_name:literal, |$attempt:ident, $err:ident, $sleep:ident| $notify:block, { $($code:tt)* }) => {{
@@ -177,33 +160,17 @@ macro_rules! retry_op {
 #[macro_export]
 macro_rules! retry_rpc {
     // Standard form: op_name string, default structured logging
-    ($timeout:expr, $strategy:expr, $shared:expr, $op_name:literal, { $($code:tt)* }) => {{
-        let shared = &$shared;
-        let mut attempt_counter: u32 = 0;
-        let op = || async {
-            $crate::utils::retry::run_gated(shared, $op_name, async {
-                tokio::time::timeout($timeout, async { $($code)* })
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Operation timed out after {:?}", $timeout))?
-            })
-            .await
-        };
-        use $crate::backon::Retryable as _;
-        op.retry(&$strategy.build())
-            .when(|e: &anyhow::Error| $crate::utils::retry::is_retryable(e))
-            .notify(|err: &anyhow::Error, sleep: std::time::Duration| {
-                attempt_counter += 1;
-                tracing::warn!(
-                    operation = $op_name,
-                    attempt = attempt_counter,
-                    error = %format_args!("{err:#}"),
-                    retry_in = ?sleep,
-                    "RPC call failed, retrying"
-                );
-            })
-            .await
-            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter))
-    }};
+    ($timeout:expr, $strategy:expr, $shared:expr, $op_name:literal, { $($code:tt)* }) => {
+        $crate::retry_rpc!($timeout, $strategy, $shared, $op_name, |attempt, err, sleep| {
+            tracing::warn!(
+                operation = $op_name,
+                attempt,
+                error = %format_args!("{err:#}"),
+                retry_in = ?sleep,
+                "RPC call failed, retrying"
+            )
+        }, { $($code)* })
+    };
 
     // Full form: op_name string, custom notify closure
     ($timeout:expr, $strategy:expr, $shared:expr, $op_name:literal, |$attempt:ident, $err:ident, $sleep:ident| $notify:block, { $($code:tt)* }) => {{
