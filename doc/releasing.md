@@ -2,10 +2,25 @@
 
 ## Branches
 
-[GitLab flow](https://about.gitlab.com/topics/version-control/what-is-gitlab-flow/) with environment branches and upstream-first hotfixes:
+[GitLab flow](https://about.gitlab.com/topics/version-control/what-is-gitlab-flow/) with environment branches and upstream-first hotfixes. A release is cut on `develop` and promoted to `testnet`, then to `mainnet`:
 
-```
-feature/* ──PR──► develop ──► testnet ──► mainnet
+```mermaid
+%%{init: {'gitGraph': {'mainBranchName': 'develop'}}}%%
+gitGraph
+    commit id: "chore: release 1.20.0" tag: "1.20.0"
+    branch testnet
+    commit id: "release 1.20.0 to testnet"
+    branch mainnet
+    commit id: "release 1.20.0 to mainnet"
+    checkout develop
+    commit id: "feat: a"
+    commit id: "chore: release 1.21.0" tag: "1.21.0"
+    checkout testnet
+    merge develop id: "release 1.21.0 to testnet"
+    checkout develop
+    commit id: "feat: b"
+    checkout mainnet
+    merge testnet id: "release 1.21.0 to mainnet"
 ```
 
 | Branch    | Contains                         |
@@ -82,7 +97,24 @@ Out-of-schedule releases to `testnet` are possible but discouraged. If a feature
 
 ## Hotfixes
 
-Fixes land on `develop` first, then get cherry-picked downstream, so `develop` never loses a fix. The only exception is a bug that no longer exists on `develop` (see below). Each hotfix bumps the patch version of the release it fixes; `develop` never gets patch bumps.
+Fixes land on `develop` first, then get cherry-picked downstream, so `develop` never loses a fix. The only exception is a bug that no longer exists on `develop` (see below). Each hotfix bumps the patch version of the release it fixes; `develop` never gets patch bumps. For example, a hotfix for 1.21.0 on `testnet`:
+
+```mermaid
+%%{init: {'gitGraph': {'mainBranchName': 'develop'}}}%%
+gitGraph
+    commit id: "chore: release 1.21.0" tag: "1.21.0"
+    branch testnet
+    commit id: "release 1.21.0 to testnet"
+    checkout develop
+    commit id: "feat: a"
+    commit id: "fix: b"
+    checkout testnet
+    branch hotfix/1.21.1
+    cherry-pick id: "fix: b"
+    commit id: "fix: release 1.21.1"
+    checkout testnet
+    merge hotfix/1.21.1 tag: "1.21.1"
+```
 
 ### Bug on testnet
 
