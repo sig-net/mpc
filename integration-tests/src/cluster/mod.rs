@@ -337,7 +337,7 @@ impl Cluster {
                         Err(e) => {
                             // Once threshold is reached by another voter, remaining votes may race
                             // and fail with `Update not found` even though update succeeded.
-                            if e.to_string().contains("Update not found") {
+                            if format!("{e:#}").contains("Update not found") {
                                 success += 1;
                                 voted = true;
                                 break;

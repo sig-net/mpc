@@ -90,14 +90,16 @@ export async function shutdownPublisher(): Promise<void> {
 
 // The only place this process matches on dependency error text. Both wallet_unfunded
 // spellings mean back off. A node refusal carries no ledger reason on this side, only the
-// SDK's `TransactionInvalidError` or the RPC's `Invalid Transaction` text: nothing was
-// posted, rebuild against fresh state. `spend` treats any unclassified submit failure as
-// ambiguous because the transaction may already have left this process.
+// SDK's `TransactionInvalidError`, the RPC's `Invalid Transaction` text, or its `1002`
+// when the node fails to validate the transaction at all: nothing was posted, rebuild
+// against fresh state. `spend` treats any unclassified submit failure as ambiguous
+// because the transaction may already have left this process.
 const REFINEMENTS: readonly (readonly [pattern: string, code: ErrorCode])[] = [
   ["Wallet.InsufficientFunds", "wallet_unfunded"],
   ["could not balance dust", "wallet_unfunded"],
   ["TransactionInvalidError", "state_conflict"],
   ["Invalid Transaction", "state_conflict"],
+  ["1002: Verification Error", "state_conflict"],
 ];
 
 function asPublisherError(error: unknown): PublisherError {

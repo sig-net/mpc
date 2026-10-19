@@ -857,7 +857,10 @@ impl CantonTestClient {
 }
 
 fn is_package_not_ready(e: &anyhow::Error) -> bool {
-    let msg = e.to_string();
+    // Full chain render: the submit retry macro wraps the final error in an
+    // `exhausted after N attempts` context, so the Canton body text only
+    // survives in the source chain.
+    let msg = format!("{e:#}");
     msg.contains("PACKAGE_SELECTION_FAILED")
         || msg.contains("JSON_API_PACKAGE_SELECTION_FAILED")
         || msg.contains("PACKAGE_NAMES_NOT_FOUND")

@@ -1,3 +1,5 @@
+import { Cause, Runtime } from "effect";
+
 export type ErrorCode =
   | "bad_request"
   | "contract_mismatch"
@@ -37,6 +39,15 @@ function describeOne(value: unknown): string {
   }
 }
 
+// Effect's `FiberFailure` keeps its failure on a Symbol rather than in `cause`, and that
+// failure carries the dependency's own reason (a node's RPC error, say) further down.
+function causeOf(value: unknown): unknown {
+  if (Runtime.isFiberFailure(value)) return Cause.squash(value[Runtime.FiberFailureCauseId]);
+  return typeof value === "object" && value !== null
+    ? (value as { cause?: unknown }).cause
+    : undefined;
+}
+
 // `message` alone is not enough: Effect's `FiberFailure` keeps the failing class in `name`.
 export function describeFailure(error: unknown): string {
   const parts: string[] = [];
@@ -48,7 +59,7 @@ export function describeFailure(error: unknown): string {
   ) {
     const text = describeOne(current);
     if (text.length > 0 && !parts.some((part) => part.includes(text))) parts.push(text);
-    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
+    current = causeOf(current);
   }
   return parts.join(": ") || String(error);
 }
