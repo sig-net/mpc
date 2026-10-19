@@ -85,9 +85,6 @@ jobs:
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
-      - name: Build governance contract and node (test features)
-        run: just setup
-
       - name: Build latest release binary from tag
         run: just build compat
         env:

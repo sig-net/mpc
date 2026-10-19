@@ -113,13 +113,13 @@ To run it locally:
 
 1. Build the latest release binary (only needed once per tag):
     ```bash
-    ./scripts/build-compat-binaries.sh
+    just build compat
     ```
     Set `COMPAT_TAG=<tag>` to build another tag and `FORCE_REBUILD=1` to
     rebuild an existing binary.
-2. Execute the test:
+2. Execute the test (builds the contract and the current node first):
     ```bash
-    ./scripts/test-prod-compat.sh
+    just test-compat
     ```
 
 The build script generates the binary under `target/compat/<tag>` and points

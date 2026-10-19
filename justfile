@@ -142,5 +142,5 @@ test-canton filter="canton_stream": (setup "")
     cargo test -p integration-tests --test lib -- {{filter}} --ignored --nocapture --test-threads 1
 
 # Release compatibility test (needs `just build compat` output)
-test-compat:
+test-compat: (setup "")
     ./scripts/test-prod-compat.sh
