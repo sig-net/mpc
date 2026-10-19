@@ -752,7 +752,7 @@ where
             tracing::warn!(
                 operation,
                 attempt = retry_count,
-                error = %error,
+                error = %format_args!("{error:#}"),
                 ?retry_in,
                 "RPC call failed, retrying"
             );

@@ -34,6 +34,7 @@ async-trait = "0.1"
 backon = "0.4"
 borsh = { version = "1.6.1", features = ["derive"] }
 enum-map = "2.7.3"
+http = "1.5"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 ciborium = "0.2.2"
 clap = { version = "4.5.4", features = ["derive", "env"] }
