@@ -119,9 +119,9 @@ const DESCRIBE_TIMEOUT_MS = 1_000;
 
 const seconds = (sinceMs: number): string => `${((Date.now() - sinceMs) / 1_000).toFixed(1)}s`;
 
-// Whether a snapshot restores to what a fresh sync would reach: the "settled" test of the
-// Midnight DUST guide, over every sub-wallet's coins and without its spendable-DUST clause,
-// which says when to build next rather than whether the state is the chain's.
+// Whether a snapshot holds no coin booked by a transaction still in flight: the "settled"
+// test of the Midnight DUST guide, over every sub-wallet's coins and without its
+// spendable-DUST clause, which says when to build next rather than what may be kept.
 function isSettled(state: FacadeState): boolean {
   return (
     state.isSynced &&

@@ -250,7 +250,7 @@ impl IntentGen {
     }
 
     /// Keeps what a snapshot request returned. The child hands one over only while its
-    /// wallet is synced with nothing in flight, the state a fresh sync reaches.
+    /// wallet is synced with nothing in flight.
     async fn keep_snapshot(&self, outcome: Exchange) {
         match outcome {
             Exchange::Answered(Ok(reply)) => {
@@ -324,19 +324,37 @@ impl IntentGen {
             .as_mut()
             .expect("the slot was just filled or was already full");
         let outcome = exchange(live, request, operation, &self.config.publisher).await;
+        if operation == Operation::Submit && matches!(outcome, Exchange::Answered(Ok(_))) {
+            self.snapshots.proved();
+        }
         if let Exchange::Answered(Err(error)) = &outcome {
-            let wallet = error
-                .downcast_ref::<Refusal>()
-                .and_then(|refusal| refusal.wallet_state.as_deref());
+            let refusal = error.downcast_ref::<Refusal>();
+            let wallet = refusal.and_then(|refusal| refusal.wallet_state.as_deref());
+            let unfunded = refusal.is_some_and(|refusal| refusal.code == "wallet_unfunded");
             if retires_child(operation, error) {
                 tracing::warn!(
                     wallet,
                     "retiring the midnight intent builder after a refused submit; the next \
                      request starts one from the latest wallet snapshot: {error:#}"
                 );
+                // A restored wallet that cannot pay, or restored wallets that keep being
+                // refused without one submit landing, may have brought a fault back with the
+                // snapshot, and every later restore would too, so the next child syncs from
+                // the start. Snapshots this child kept descend from the same restore.
+                let discard = live.restored && (unfunded || self.snapshots.strike());
+                if discard {
+                    tracing::warn!(
+                        unfunded,
+                        "discarding the midnight wallet snapshot after its restored wallets \
+                         failed to land a submit; the next builder syncs from the start"
+                    );
+                    self.snapshots.forget().await;
+                }
                 // Its last chance to hand over a snapshot: a settled wallet restores as well
                 // as any, and a long refusal otherwise retires every child before one is due.
-                if self.snapshots.due() {
+                // A wallet that cannot pay, or whose snapshot was just discarded, is not kept
+                // even when it looks settled.
+                if !unfunded && !discard && self.snapshots.due() {
                     let last = exchange(
                         live,
                         &SnapshotRequest {},
@@ -375,6 +393,8 @@ struct Session {
     stdout: BufReader<ChildStdout>,
     /// Per session: a fresh pipe cannot deliver a previous child's reply.
     next_id: u64,
+    /// Whether its wallet resumed from a snapshot rather than syncing from the start.
+    restored: bool,
     /// What the drain below has heard, for the error that reports this child's death.
     stderr: StderrTail,
     /// Held for `kill_on_drop`; dropped after `stdin`, so a child that exits on
@@ -556,6 +576,7 @@ async fn verify_ready(
     // Readiness is a session bootstrap, not an application request. Reusing id zero
     // keeps the application protocol independent of whether the bootstrap grows.
     session.next_id = 0;
+    session.restored = snapshot.is_some();
     Ok(session)
 }
 
@@ -585,6 +606,7 @@ fn spawn_child(config: &MidnightConfig, network_id: &str) -> anyhow::Result<Sess
         stdin,
         stdout: BufReader::new(stdout),
         next_id: 0,
+        restored: false,
         stderr: tail.clone(),
         _child: child,
         stderr_drain: AbortOnDrop(tokio::spawn(drain_stderr(stderr, tail))),
@@ -792,6 +814,7 @@ mod tests {
     use super::*;
 
     use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
+    use crate::wallet_snapshot::RESTORE_STRIKES;
     use mpc_chain_integration_core::utils::retry::RetryConfig;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -1528,6 +1551,7 @@ mod tests {
     struct MemoryStore {
         stored: std::sync::Mutex<Option<String>>,
         saves: std::sync::atomic::AtomicUsize,
+        clears: std::sync::atomic::AtomicUsize,
         fail_load: bool,
     }
 
@@ -1545,6 +1569,10 @@ mod tests {
         fn saves(&self) -> usize {
             self.saves.load(std::sync::atomic::Ordering::SeqCst)
         }
+
+        fn clears(&self) -> usize {
+            self.clears.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     #[async_trait::async_trait]
@@ -1557,6 +1585,13 @@ mod tests {
         async fn save(&self, snapshot: &str) -> anyhow::Result<()> {
             *self.stored.lock().unwrap() = Some(snapshot.to_string());
             self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn clear(&self) -> anyhow::Result<()> {
+            *self.stored.lock().unwrap() = None;
+            self.clears
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
     }
@@ -1721,16 +1756,20 @@ mod tests {
         );
     }
 
+    const UNFUNDED: &str =
+        r#""ok":false,"code":"wallet_unfunded","message":"could not balance dust""#;
+    const CONFLICT: &str =
+        r#""ok":false,"code":"state_conflict","message":"1010: Invalid Transaction""#;
+
     #[tokio::test]
     async fn a_retired_child_hands_over_its_settled_wallet_first() {
         let (readies, asked) = (
             StubLog::new("snap-last-ready"),
             StubLog::new("snap-last-asked"),
         );
-        let unfunded = r#""ok":false,"code":"wallet_unfunded","message":"could not balance dust""#;
         let store = Arc::new(MemoryStore::default());
         let builder = spawn_with(
-            &snapshot_stub(&readies, &asked, &[FRESH], unfunded),
+            &snapshot_stub(&readies, &asked, &[FRESH], CONFLICT),
             store.clone(),
         )
         .await;
@@ -1753,11 +1792,10 @@ mod tests {
             StubLog::new("snap-unsettled-ready"),
             StubLog::new("snap-unsettled-asked"),
         );
-        let unfunded = r#""ok":false,"code":"wallet_unfunded","message":"could not balance dust""#;
         let busy = r#""ok":false,"code":"wallet_busy","message":"coins in flight""#;
         let store = Arc::new(MemoryStore::default());
         let builder = spawn_with(
-            &snapshot_stub(&readies, &asked, &[busy], unfunded),
+            &snapshot_stub(&readies, &asked, &[busy], CONFLICT),
             store.clone(),
         )
         .await;
@@ -1768,6 +1806,202 @@ mod tests {
         assert_eq!(asked.lines().len(), 1);
         assert_eq!(store.saves(), 0);
         assert_eq!(builder.snapshots.latest(), None);
+    }
+
+    #[tokio::test]
+    async fn an_unfunded_child_hands_over_no_snapshot() {
+        let (readies, asked) = (
+            StubLog::new("snap-unfunded-ready"),
+            StubLog::new("snap-unfunded-asked"),
+        );
+        let store = Arc::new(MemoryStore::default());
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[FRESH], UNFUNDED),
+            store.clone(),
+        )
+        .await;
+
+        builder.submit(&[0x0a]).await.unwrap_err();
+
+        assert!(builder.session.lock().await.is_none());
+        assert!(
+            asked.lines().is_empty(),
+            "a wallet that cannot pay is not asked"
+        );
+        assert_eq!(store.saves(), 0);
+        assert_eq!(builder.snapshots.latest(), None);
+    }
+
+    #[tokio::test]
+    async fn a_restored_child_unfunded_again_discards_the_snapshot_for_a_full_sync() {
+        let (readies, asked) = (
+            StubLog::new("snap-discard-ready"),
+            StubLog::new("snap-discard-asked"),
+        );
+        let store = Arc::new(MemoryStore::default());
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[FRESH], UNFUNDED),
+            store.clone(),
+        )
+        .await;
+        builder.snapshots.keep("kept".to_string()).await;
+
+        // The first child synced from the start, so its refusal says nothing of the snapshot.
+        builder.submit(&[0x0a]).await.unwrap_err();
+        assert_eq!(builder.snapshots.latest().as_deref(), Some("kept"));
+        assert_eq!(store.clears(), 0);
+
+        builder.submit(&[0x0a]).await.unwrap_err();
+        assert_eq!(builder.snapshots.latest(), None);
+        assert_eq!(store.clears(), 1);
+        assert_eq!(store.stored(), None);
+        let _ = builder.build(&sample_request()).await;
+
+        assert_eq!(
+            readies.lines(),
+            [
+                r#"{"id":0,"op":"ready","protocolVersion":3}"#,
+                r#"{"id":0,"op":"ready","protocolVersion":3,"walletSnapshot":"kept"}"#,
+                r#"{"id":0,"op":"ready","protocolVersion":3}"#,
+            ]
+        );
+        assert!(asked.lines().is_empty());
+
+        // The child that synced from the start is asked at once, not an interval later.
+        builder.refresh_snapshot().await;
+        assert_eq!(store.stored().as_deref(), Some("fresh"));
+    }
+
+    #[tokio::test]
+    async fn a_restored_child_refused_once_otherwise_keeps_the_snapshot() {
+        let (readies, asked) = (
+            StubLog::new("snap-keep-ready"),
+            StubLog::new("snap-keep-asked"),
+        );
+        let store = MemoryStore::holding("stored");
+        let busy = r#""ok":false,"code":"wallet_busy","message":"coins in flight""#;
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[busy], CONFLICT),
+            store.clone(),
+        )
+        .await;
+
+        builder.submit(&[0x0a]).await.unwrap_err();
+
+        assert_eq!(builder.snapshots.latest().as_deref(), Some("stored"));
+        assert_eq!(store.clears(), 0);
+    }
+
+    #[tokio::test]
+    async fn restored_children_refused_in_a_row_discard_the_snapshot_for_a_full_sync() {
+        let (readies, asked) = (
+            StubLog::new("snap-strikes-ready"),
+            StubLog::new("snap-strikes-asked"),
+        );
+        let store = MemoryStore::holding("stored");
+        let busy = r#""ok":false,"code":"wallet_busy","message":"coins in flight""#;
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[busy], CONFLICT),
+            store.clone(),
+        )
+        .await;
+
+        for _ in 1..RESTORE_STRIKES {
+            builder.submit(&[0x0a]).await.unwrap_err();
+        }
+        assert_eq!(builder.snapshots.latest().as_deref(), Some("stored"));
+        builder.submit(&[0x0a]).await.unwrap_err();
+        assert_eq!(builder.snapshots.latest(), None);
+        assert_eq!(store.clears(), 1);
+        let _ = builder.build(&sample_request()).await;
+
+        let readies = readies.lines();
+        let restored = r#"{"id":0,"op":"ready","protocolVersion":3,"walletSnapshot":"stored"}"#;
+        assert_eq!(readies.len(), RESTORE_STRIKES as usize + 1);
+        assert!(readies[..RESTORE_STRIKES as usize]
+            .iter()
+            .all(|ready| ready == restored));
+        assert_eq!(
+            readies[RESTORE_STRIKES as usize],
+            r#"{"id":0,"op":"ready","protocolVersion":3}"#
+        );
+        assert_eq!(
+            asked.lines().len(),
+            RESTORE_STRIKES as usize - 1,
+            "the child whose snapshot is discarded is not asked for another"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_landed_submit_starts_the_restored_refusals_over() {
+        let (readies, asked) = (
+            StubLog::new("snap-proved-ready"),
+            StubLog::new("snap-proved-asked"),
+        );
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[FRESH], LANDED),
+            MemoryStore::holding("stored"),
+        )
+        .await;
+        for _ in 1..RESTORE_STRIKES {
+            builder.snapshots.strike();
+        }
+
+        builder.submit(&[0x0a]).await.unwrap();
+
+        assert!(
+            !builder.snapshots.strike(),
+            "a landed submit starts the count over"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_a_landed_submit_or_a_discard_starts_the_restored_refusals_over() {
+        let (readies, asked) = (
+            StubLog::new("snap-count-ready"),
+            StubLog::new("snap-count-asked"),
+        );
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[FRESH], LANDED),
+            Arc::new(MemoryStore::default()),
+        )
+        .await;
+        for _ in 1..RESTORE_STRIKES {
+            builder.snapshots.strike();
+        }
+
+        builder.refresh_snapshot().await;
+        assert_eq!(builder.snapshots.latest().as_deref(), Some("fresh"));
+        assert!(builder.snapshots.strike(), "a kept snapshot proves nothing");
+
+        builder.snapshots.forget().await;
+        assert!(
+            !builder.snapshots.strike(),
+            "a discard starts the count over"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_that_synced_from_the_start_strikes_nothing_against_the_snapshot() {
+        let (readies, asked) = (
+            StubLog::new("snap-unrestored-ready"),
+            StubLog::new("snap-unrestored-asked"),
+        );
+        let store = Arc::new(MemoryStore::default());
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[FRESH], CONFLICT),
+            store.clone(),
+        )
+        .await;
+
+        // The first child syncs from the start and hands over its snapshot; the restored
+        // ones after it stop one short of a discard.
+        for _ in 0..RESTORE_STRIKES {
+            builder.submit(&[0x0a]).await.unwrap_err();
+        }
+
+        assert_eq!(builder.snapshots.latest().as_deref(), Some("fresh"));
+        assert_eq!(store.clears(), 0);
     }
 
     #[tokio::test]

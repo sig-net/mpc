@@ -12,6 +12,7 @@ use async_trait::async_trait;
 pub trait WalletSnapshotStore: Send + Sync {
     async fn load(&self) -> anyhow::Result<Option<String>>;
     async fn save(&self, snapshot: &str) -> anyhow::Result<()>;
+    async fn clear(&self) -> anyhow::Result<()>;
 }
 
 /// The least time between two kept snapshots. A restored wallet replays only what came
@@ -19,12 +20,17 @@ pub trait WalletSnapshotStore: Send + Sync {
 /// replays from its last settled publish.
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// Restored children retired in a row, with no submit landing in between, before their
+/// snapshot is dropped. Above one, because a healthy wallet is also refused at times.
+pub(crate) const RESTORE_STRIKES: u32 = 3;
+
 /// The latest snapshot in memory, which outlives any one child, and in the store, which
 /// outlives the node process.
 pub(crate) struct Snapshots {
     store: Option<Arc<dyn WalletSnapshotStore>>,
     latest: Mutex<Option<Arc<str>>>,
     kept_at: Mutex<Option<Instant>>,
+    strikes: Mutex<u32>,
 }
 
 /// Never panics on a poisoned lock: nothing inside these locks can panic.
@@ -54,6 +60,7 @@ impl Snapshots {
             store,
             latest: Mutex::new(latest),
             kept_at: Mutex::new(None),
+            strikes: Mutex::new(0),
         }
     }
 
@@ -72,6 +79,35 @@ impl Snapshots {
         if let Some(store) = &self.store {
             if let Err(error) = store.save(&snapshot).await {
                 tracing::warn!(?error, "failed to store the midnight wallet snapshot");
+            }
+        }
+    }
+
+    /// A submit landed, so the wallet in use can pay whatever it was restored from.
+    pub(crate) fn proved(&self) {
+        *locked(&self.strikes) = 0;
+    }
+
+    /// Counts a restored child retired since the last landed submit; true once
+    /// `RESTORE_STRIKES` have been retired in a row.
+    pub(crate) fn strike(&self) -> bool {
+        let mut strikes = locked(&self.strikes);
+        *strikes += 1;
+        *strikes >= RESTORE_STRIKES
+    }
+
+    /// Drops the snapshot everywhere, so the next child syncs from the start, and lets the
+    /// first settled wallet after that be kept at once.
+    pub(crate) async fn forget(&self) {
+        *locked(&self.latest) = None;
+        *locked(&self.kept_at) = None;
+        *locked(&self.strikes) = 0;
+        if let Some(store) = &self.store {
+            if let Err(error) = store.clear().await {
+                tracing::warn!(
+                    ?error,
+                    "failed to clear the stored midnight wallet snapshot"
+                );
             }
         }
     }
