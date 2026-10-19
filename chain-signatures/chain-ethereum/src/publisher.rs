@@ -1,8 +1,8 @@
 use crate::abi::ChainSignatures;
 use crate::config::{GasConfig, PublisherConfig};
 use crate::EthConfig;
-use alloy::network::EthereumWallet;
 use alloy::contract::Error as ContractError;
+use alloy::network::EthereumWallet;
 use alloy::primitives::{B256, U256};
 use alloy::providers::{
     fillers::{
@@ -807,12 +807,9 @@ mod tests {
 
     fn http_wrapped_send_error(status: u16, message: &str) -> anyhow::Error {
         let body = json!({"error": {"code": -32000, "message": message}}).to_string();
-        send_error(ContractError::TransportError(
-            AlloyRpcError::Transport(TransportErrorKind::HttpError(alloy::transports::HttpError {
-                status,
-                body,
-            })),
-        ))
+        send_error(ContractError::TransportError(AlloyRpcError::Transport(
+            TransportErrorKind::HttpError(alloy::transports::HttpError { status, body }),
+        )))
     }
 
     #[test]
@@ -876,7 +873,8 @@ mod tests {
                 ))
                 .with_status(200)
                 .with_body(
-                    json!({"jsonrpc": "2.0", "id": 1, "result": format!("{tx_hash:#x}")}).to_string(),
+                    json!({"jsonrpc": "2.0", "id": 1, "result": format!("{tx_hash:#x}")})
+                        .to_string(),
                 )
                 .expect(1)
                 .create_async()
@@ -1009,10 +1007,7 @@ mod tests {
         let (queued, result) = queue(mock_publish_action(7));
         tx.send(queued).await.unwrap();
 
-        let err = result
-            .await
-            .unwrap()
-            .expect_err("reverted batch must fail");
+        let err = result.await.unwrap().expect_err("reverted batch must fail");
         // The verdict crosses the oneshot intact, so the node's publish loop
         // stops instead of retrying forever.
         assert!(!is_retryable(&err), "revoked-tx must be terminal: {err:#}");

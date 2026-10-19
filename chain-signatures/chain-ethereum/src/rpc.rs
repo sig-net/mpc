@@ -641,7 +641,10 @@ mod tests {
         assert!(msg.contains("execution reverted"));
         assert!(msg.contains("InsufficientBalance"));
         // deterministic failure — terminal
-        assert!(!is_retryable(&err), "trace revert must be terminal: {err:#}");
+        assert!(
+            !is_retryable(&err),
+            "trace revert must be terminal: {err:#}"
+        );
     }
 
     #[test]
