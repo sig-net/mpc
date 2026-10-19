@@ -76,6 +76,18 @@ impl RpcFailure {
     pub fn is_terminal(&self) -> bool {
         self.terminal
     }
+
+    /// Reconstructs the carrier classifying `e` — its verdict carrier if one
+    /// is present, otherwise the first typed HTTP status — for fan-out sites
+    /// that must hand the same failure to many receivers without sharing the
+    /// error value. `None` when `e` carries no typed signal.
+    pub fn from_chain(e: &anyhow::Error) -> Option<Self> {
+        let (failure, status) = typed_signals(e);
+        if let Some(failure) = failure {
+            return Some(failure.clone());
+        }
+        status.map(|status| Self::with_status(status, format!("{e:#}")))
+    }
 }
 
 /// Typed signals from one walk of the anyhow chain: the first [`RpcFailure`]`/
@@ -91,9 +103,16 @@ fn typed_signals(e: &anyhow::Error) -> (Option<&RpcFailure>, Option<StatusCode>)
 }
 
 /// HTTP status carried by a single error cause, if any.
+/// Beside the direct `RpcError` downcast, a bare `HttpError` is accepted:
+/// `#[error(transparent)]` forwards `source()` through the field, so wrapper
+/// enums (e.g. alloy-contract's `Error`) collapse the chain straight onto
+/// the `HttpError`, hiding the `RpcError` level.
 fn cause_status(cause: &(dyn std::error::Error + 'static)) -> Option<StatusCode> {
     if let Some(failure) = cause.downcast_ref::<RpcFailure>() {
         return failure.status;
+    }
+    if let Some(http) = cause.downcast_ref::<alloy::transports::HttpError>() {
+        return StatusCode::from_u16(http.status).ok();
     }
     let err = cause.downcast_ref::<AlloyTransportError>()?;
     let AlloyRpcError::Transport(TransportErrorKind::HttpError(http)) = err else {
@@ -291,6 +310,37 @@ mod tests {
     }
 
     #[test]
+    fn from_chain_reproduces_the_effective_classification() {
+        // carrier present: clone keeps its verdict
+        let err = anyhow::Error::new(RpcFailure::terminal("already accepted".into()))
+            .context("exhausted after 3 attempts");
+        let rebuilt = RpcFailure::from_chain(&err).unwrap();
+        assert!(rebuilt.is_terminal());
+        assert!(!is_retryable(
+            &anyhow::Error::new(rebuilt).context("fan-out")
+        ));
+
+        // no carrier, but a typed status: verdict derives from the status
+        let err: anyhow::Error = {
+            let err: AlloyTransportError = AlloyRpcError::Transport(TransportErrorKind::HttpError(
+                alloy::transports::HttpError {
+                    status: 409,
+                    body: String::new(),
+                },
+            ));
+            anyhow::Error::new(err)
+        };
+        let err = err.context("exhausted after 1 attempts");
+        let rebuilt = RpcFailure::from_chain(&err).unwrap();
+        assert!(!is_retryable(
+            &anyhow::Error::new(rebuilt).context("fan-out")
+        ));
+
+        // no typed signal at all
+        assert!(RpcFailure::from_chain(&anyhow::anyhow!("plain failure")).is_none());
+    }
+
+    #[test]
     fn alloy_http_error_classifies_typed() {
         // simulate alloy HTTP errors and check their classification
         let alloy_http_error = |status: u16| {
@@ -310,5 +360,27 @@ mod tests {
         // a synthetic invalid status cannot become a StatusCode, so the typed
         // path yields no status and the default (retryable) applies
         assert!(is_retryable(&alloy_http_error(0)));
+    }
+
+    #[test]
+    fn transparent_wrappers_collapse_onto_the_http_error_and_still_classify() {
+        // thiserror `#[error(transparent)]` forwards source() through the
+        // field, so wrapper enums hide the RpcError level (alloy-contract's
+        // Error does exactly this) — the bare HttpError must still classify
+        #[derive(Debug, thiserror::Error)]
+        #[error(transparent)]
+        struct Wrapper(AlloyTransportError);
+
+        let wrapped = |status: u16| {
+            let kind = TransportErrorKind::HttpError(alloy::transports::HttpError {
+                status,
+                body: String::new(),
+            });
+            anyhow::Error::new(Wrapper(AlloyRpcError::Transport(kind)))
+        };
+        assert_eq!(wrapped(409).chain().count(), 2, "fixture must collapse");
+        assert!(!is_retryable(&wrapped(409)));
+        assert!(is_retryable(&wrapped(429)));
+        assert!(is_provider_throttled(&wrapped(429)));
     }
 }

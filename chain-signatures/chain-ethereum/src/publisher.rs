@@ -399,14 +399,13 @@ impl BatchPublisher {
     }
 }
 
-/// Rebuilds the batch failure for one waiter: `anyhow::Error` can cross only
-/// one oneshot, so clone the verdict carrier — the full chain is logged above.
+/// Rebuilds the batch failure for one waiter with its typed classification
+/// intact: `anyhow::Error` can cross only one oneshot, so rebuild the carrier
+/// (`RpcFailure::from_chain` covers verdict carriers and typed statuses
+/// alike) — the full chain is logged above.
 fn batch_publish_error(err: &anyhow::Error) -> anyhow::Error {
-    match err
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<RpcFailure>())
-    {
-        Some(failure) => anyhow::Error::new(failure.clone()).context("eth batch publish failed"),
+    match RpcFailure::from_chain(err) {
+        Some(failure) => anyhow::Error::new(failure).context("eth batch publish failed"),
         None => anyhow::anyhow!("{err:#}"),
     }
 }
@@ -824,8 +823,27 @@ mod tests {
 
     #[test]
     fn unrecognized_4xx_send_payloads_stay_terminal() {
-        let err = http_wrapped_send_error(400, "invalid sender");
-        assert!(!is_retryable(&err), "{err:#}");
+        // 400 is in the string fallback's terminal list; the others would
+        // silently default to retryable if the typed status were lost
+        for status in [400u16, 409, 410, 413, 422] {
+            let err = http_wrapped_send_error(status, "invalid sender");
+            assert!(!is_retryable(&err), "{status}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn batch_publish_error_preserves_typed_statuses_across_the_oneshot() {
+        // A typed 4xx with no `RpcFailure` carrier (e.g. an unrecognized
+        // 409 send rejection) must stay terminal after the fan-out — the
+        // node's unbounded publish loop reads exactly this error.
+        let err = http_wrapped_send_error(409, "conflict").context("exhausted after 1 attempts");
+        assert!(!is_retryable(&batch_publish_error(&err)), "{err:#}");
+
+        // throttles keep engaging the gate through the fan-out
+        let err = http_wrapped_send_error(429, "slow down").context("exhausted after 3 attempts");
+        let out = batch_publish_error(&err);
+        assert!(is_retryable(&out), "{err:#}");
+        assert!(SharedBackoff::new().engage_if_throttled(&out).is_some());
     }
 
     #[tokio::test]
