@@ -12,7 +12,7 @@ use alloy::providers::{
 use alloy::rpc::types::TransactionReceipt;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, SharedBackoff},
+    utils::retry::{retry_rpc, RpcFailure, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{SignId, Signature};
@@ -221,10 +221,7 @@ impl BatchPublisher {
             if res.is_ok() {
                 self.telemetry.record_publish_metrics(&queued.action);
             }
-            let result = res
-                .as_ref()
-                .map_err(|err| anyhow::anyhow!("{err:#}"))
-                .map(|_| ());
+            let result = res.as_ref().map_err(batch_publish_error).map(|_| ());
             let _ = queued.done.send(result);
         }
     }
@@ -331,7 +328,10 @@ impl BatchPublisher {
 
         if !receipt.status() {
             tracing::error!(?sign_ids, ?tx_hash, "ethereum transaction failed");
-            anyhow::bail!("Ethereum transaction reverted");
+            // deterministic rejection: the same batch would revert again
+            return Err(anyhow::Error::new(RpcFailure::terminal(format!(
+                "Ethereum transaction {tx_hash:#x} reverted"
+            ))));
         }
 
         tracing::info!(
@@ -394,6 +394,18 @@ impl BatchPublisher {
     }
 }
 
+/// Rebuilds the batch failure for one waiter: `anyhow::Error` can cross only
+/// one oneshot, so clone the verdict carrier — the full chain is logged above.
+fn batch_publish_error(err: &anyhow::Error) -> anyhow::Error {
+    match err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<RpcFailure>())
+    {
+        Some(failure) => anyhow::Error::new(failure.clone()).context("eth batch publish failed"),
+        None => anyhow::anyhow!("{err:#}"),
+    }
+}
+
 #[async_trait::async_trait]
 impl ChainPublisher for EthClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
@@ -417,7 +429,7 @@ mod tests {
     use alloy::primitives::{Address, B256, U256};
     use k256::{AffinePoint, Scalar};
     use mockito::{Matcher, Mock, Server};
-    use mpc_chain_integration_core::utils::retry::RetryConfig;
+    use mpc_chain_integration_core::utils::retry::{is_retryable, RetryConfig};
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{Chain, SignKind};
@@ -800,6 +812,78 @@ mod tests {
 
         // It should return Err(()) because the receipt status was 0x0
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn reverted_batch_is_terminal_and_not_retried() {
+        let mut server = Server::new_async().await;
+        let tx_hash = B256::repeat_byte(0x25);
+        mock_alloy_background_rpcs(&mut server).await;
+
+        // Nonce, send, and receipt each hit exactly once: the batch retry
+        // budget must not re-send a deterministically reverting tx.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let send_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({"jsonrpc": "2.0", "id": 1, "result": format!("{tx_hash:#x}")}).to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": mock_receipt_json(tx_hash, "0x0")
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut batcher = test_publisher(&server.url());
+        batcher.config.max_batch_size = 1;
+        batcher.config.batch_publish_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            max_times: 2,
+            jitter: false,
+        };
+
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(batcher.run_batch_respond(rx));
+        let (queued, result) = queue(mock_publish_action(7));
+        tx.send(queued).await.unwrap();
+
+        let err = result
+            .await
+            .unwrap()
+            .expect_err("reverted batch must fail");
+        // The verdict crosses the oneshot intact, so the node's publish loop
+        // stops instead of retrying forever.
+        assert!(!is_retryable(&err), "revoked-tx must be terminal: {err:#}");
+        assert!(format!("{err:#}").contains("reverted"));
+        send_mock.assert_async().await;
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ use alloy::rpc::types::{Block, BlockId, Log, Transaction, TransactionReceipt};
 use serde_json::json;
 
 use anyhow::Context as _;
+use mpc_chain_integration_core::utils::retry::RpcFailure;
 
 #[cfg(feature = "bench")]
 use crate::bench;
@@ -314,17 +315,16 @@ fn trace_output_to_bytes(
             .and_then(serde_json::Value::as_str)
             .filter(|r| !r.is_empty());
         match revert_reason {
-            Some(reason) => anyhow::bail!(
-                "debug_traceTransaction reports transaction {:#x} reverted: {} ({})",
-                tx_hash,
-                error,
-                reason
-            ),
-            None => anyhow::bail!(
-                "debug_traceTransaction reports transaction {:#x} errored: {}",
-                tx_hash,
-                error
-            ),
+            Some(reason) => {
+                return Err(anyhow::Error::new(RpcFailure::terminal(format!(
+                    "debug_traceTransaction reports transaction {tx_hash:#x} reverted: {error} ({reason})"
+                ))))
+            }
+            None => {
+                return Err(anyhow::Error::new(RpcFailure::terminal(format!(
+                    "debug_traceTransaction reports transaction {tx_hash:#x} errored: {error}"
+                ))))
+            }
         }
     }
 
@@ -347,6 +347,7 @@ mod tests {
     use alloy::primitives::B256;
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
+    use mpc_chain_integration_core::utils::retry::is_retryable;
     use serde_json::json;
 
     #[tokio::test]
@@ -639,6 +640,20 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("execution reverted"));
         assert!(msg.contains("InsufficientBalance"));
+        // deterministic failure — terminal
+        assert!(!is_retryable(&err), "trace revert must be terminal: {err:#}");
+    }
+
+    #[test]
+    fn bails_terminal_on_errored_frame_without_reason() {
+        let frame = json!({
+            "type": "CALL",
+            "error": "out of gas: intrinsic gas too low",
+        });
+        let err = trace_output_to_bytes(B256::ZERO, &frame).expect_err("should bail");
+        let msg = format!("{err}");
+        assert!(msg.contains("out of gas"));
+        assert!(!is_retryable(&err), "trace error must be terminal: {err:#}");
     }
 
     #[test]

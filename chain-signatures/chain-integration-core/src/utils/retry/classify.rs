@@ -21,7 +21,7 @@ pub fn http_status_retryable(status: StatusCode) -> bool {
 /// Typed RPC failure chain for classifying errors in the retry logic.
 // TODO: once every chain client attaches typed failures, the string-matching
 // fallbacks in `is_retryable`/`is_provider_throttled` get deleted.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[error("{message}")]
 pub struct RpcFailure {
     /// Human-readable error message.
