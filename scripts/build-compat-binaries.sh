@@ -60,7 +60,8 @@ else
   mkdir -p "$target_dir"
   (
     cd "$worktree_dir"
-    CARGO_TARGET_DIR="$target_dir" cargo build -p mpc-node --release --locked --features test-feature
+    # Old code must not fail on lints added by a newer toolchain.
+    CARGO_TARGET_DIR="$target_dir" env -u RUSTFLAGS cargo build -p mpc-node --release --locked --features test-feature
   )
 
   git worktree remove "$worktree_dir" --force >/dev/null
