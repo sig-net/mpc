@@ -1040,6 +1040,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exhausted_throttle_stays_retryable_at_the_waiter() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        // persistent 429: the send loop exhausts, the batch budget is spent
+        let send_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(429)
+            .with_body("Too Many Requests")
+            .expect(3)
+            .create_async()
+            .await;
+
+        let mut cfg = mock_config(&server.url());
+        cfg.publisher.send_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 2,
+            jitter: false,
+        };
+        cfg.publisher.batch_publish_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 0,
+            jitter: false,
+        };
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(50), Duration::from_millis(200));
+        let mut batcher = BatchPublisher::new(&cfg, Arc::new(NoopPublisherTelemetry), gate.clone());
+        batcher.config.max_batch_size = 1;
+
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(batcher.run_batch_respond(rx));
+        let (queued, result) = queue(mock_publish_action(8));
+        tx.send(queued).await.unwrap();
+
+        let err = result
+            .await
+            .unwrap()
+            .expect_err("throttled batch must fail");
+        // liveness at the node loop: an exhausted throttle stays retryable
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(gate.remaining() > Duration::ZERO, "gate must engage");
+        send_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn typed_409_send_rejection_is_terminal_through_the_pipeline() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        // a 4xx with no mempool payload: terminal by status, no carrier
+        let send_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(409)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32000, "message": "conflict"}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        // generous budgets: expect(1) pins terminality, not budget exhaustion
+        let fast = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 2,
+            jitter: false,
+        };
+        let mut batcher = test_publisher(&server.url());
+        batcher.config.max_batch_size = 1;
+        batcher.config.send_retry = fast;
+        batcher.config.batch_publish_retry = fast;
+
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(batcher.run_batch_respond(rx));
+        let (queued, result) = queue(mock_publish_action(9));
+        tx.send(queued).await.unwrap();
+
+        let err = result
+            .await
+            .unwrap()
+            .expect_err("conflicted batch must fail");
+        assert!(!is_retryable(&err), "409 must stay terminal: {err:#}");
+        send_mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn test_execute_publish_success() {
         let mut server = Server::new_async().await;
         let tx_hash = B256::repeat_byte(0x77);
