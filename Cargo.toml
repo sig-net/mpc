@@ -98,7 +98,7 @@ midnight-serialize = "1.2.0"
 midnight-storage = "2.0.1"
 midnight-transient-crypto = "3.0.0"
 # The respond-intent builder and in-process prover for the Signet singleton.
-minocrab-publisher = { git = "https://github.com/sig-net/minocrab", rev = "a63d2a0df6f2f50969c983a6ce69e8c92f0ea4ad" }
+minocrab-publisher = { git = "https://github.com/sig-net/minocrab", rev = "f3b8589fe9f08fc81eb8c3f51689f3bae1d3cb01" }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
@@ -127,7 +127,10 @@ signet-program = { path = "./chain-signatures/contract-sol" }
 # branch: the graph carries two lines of midnight-transient-crypto at once, and
 # a single branch can only supply one of them, so each entry pins the tag its
 # line asks for. Only entries the crate graph resolves are kept; cargo warns on
-# every unused patch.
+# every unused patch. Cargo.lock holds the registry proving crates at the
+# node's lockfile versions, except midnight-proofs 0.8.2, -circuits 7.2.4 and
+# -zk-stdlib 2.3.3: zkir-v3 needs that line above the node's, and minocrab is
+# tested on the same set. A broad `cargo update` moves them.
 midnight-coin-structure       = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "coin-structure-3.0.0-rc.1" }
 midnight-base-crypto          = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "base-crypto-1.1.0-rc.2" }
 midnight-base-crypto-derive   = { git = "https://github.com/midnightntwrk/midnight-ledger", tag = "base-crypto-derive-1.1.0-rc.2" }
