@@ -382,6 +382,15 @@ impl IntentGen {
             Some(said) => error.context(format!("the midnight intent builder said: {said}")),
             None => error,
         };
+        // A restored child that dies or wedges, rather than refusing, may equally have
+        // brought its fault back with the snapshot.
+        if live.restored && self.snapshots.strike() {
+            tracing::warn!(
+                "discarding the midnight wallet snapshot after its restored builders kept \
+                 failing; the next builder syncs from the start"
+            );
+            self.snapshots.forget().await;
+        }
         *session = None;
         Exchange::Broken { error, retry }
     }
@@ -1929,6 +1938,61 @@ mod tests {
             asked.lines().len(),
             RESTORE_STRIKES as usize - 1,
             "the child whose snapshot is discarded is not asked for another"
+        );
+    }
+
+    /// A child that logs its ready line to `readies`, then dies on its first request.
+    fn dying_stub(readies: &StubLog) -> MidnightConfig {
+        let mut config = stub_config("unreachable");
+        config.publisher.intent_gen_command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                r#"read -r ready; printf '%s\n' "$ready" >> {}; printf '{{"id":0,"ok":true,"ready":true,"protocolVersion":3,"submitTimeoutMs":2,"recipeTtlMs":1}}\n'; read -r line; exit 1"#,
+                readies.0.display()
+            ),
+        ];
+        config
+    }
+
+    #[tokio::test]
+    async fn restored_children_that_keep_dying_discard_the_snapshot_for_a_full_sync() {
+        let readies = StubLog::new("snap-dying-ready");
+        let store = MemoryStore::holding("stored");
+        let builder = spawn_with(&dying_stub(&readies), store.clone()).await;
+
+        for _ in 1..RESTORE_STRIKES {
+            builder.submit(&[0x0a]).await.unwrap_err();
+        }
+        assert_eq!(builder.snapshots.latest().as_deref(), Some("stored"));
+        builder.submit(&[0x0a]).await.unwrap_err();
+        assert_eq!(builder.snapshots.latest(), None);
+        assert_eq!(store.clears(), 1);
+        let _ = builder.build(&sample_request()).await;
+
+        let readies = readies.lines();
+        let restored = r#"{"id":0,"op":"ready","protocolVersion":3,"walletSnapshot":"stored"}"#;
+        assert!(readies[..RESTORE_STRIKES as usize]
+            .iter()
+            .all(|ready| ready == restored));
+        assert_eq!(
+            readies[RESTORE_STRIKES as usize],
+            r#"{"id":0,"op":"ready","protocolVersion":3}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dying_child_that_synced_from_the_start_strikes_nothing() {
+        let readies = StubLog::new("snap-dying-fresh-ready");
+        let builder = spawn_with(&dying_stub(&readies), Arc::new(MemoryStore::default())).await;
+
+        for _ in 1..RESTORE_STRIKES {
+            builder.submit(&[0x0a]).await.unwrap_err();
+        }
+
+        assert!(
+            !builder.snapshots.strike(),
+            "no child was restored from a snapshot, so this is the first strike"
         );
     }
 
