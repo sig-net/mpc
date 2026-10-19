@@ -528,7 +528,7 @@ fn fee_transaction(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use async_trait::async_trait;
     use futures_util::stream::BoxStream;
@@ -552,11 +552,11 @@ mod tests {
             .collect()
     }
 
-    fn funded_key() -> DustSecretKey {
+    pub(crate) fn funded_key() -> DustSecretKey {
         dust_secret_key(&parse_seed(FUNDED_SEED).unwrap()).unwrap()
     }
 
-    fn replayed() -> DustLocalState<DefaultDB> {
+    pub(crate) fn replayed() -> DustLocalState<DefaultDB> {
         let events: Vec<Event<DefaultDB>> = fixture_updates()
             .iter()
             .map(|update| midnight_serialize::tagged_deserialize(&mut &update.raw[..]).unwrap())

@@ -31,7 +31,7 @@ use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
 use tokio::time::Instant;
 
-use crate::funding::{dust_deficit, FeePayer, SealedTx};
+use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
 use crate::intent::{IntentRequest, WireAttestation, WireSignature};
 use crate::publisher::IntentClient;
 use crate::rpc::{Landing, PinnedReads, SubmitRefusal};
@@ -212,25 +212,15 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
                 SubmitError::BadRequest(format!("the intent did not decode: {error}"))
             })?;
 
+        let started = Instant::now();
         self.wallet
             .ready_by(deadline.checked_sub(WORK_RESERVE).unwrap_or(deadline))
             .await?;
+        let wallet_wait = started.elapsed();
 
-        let respond = preimage_tx(&self.network_id, RESPOND_SEGMENT, intent);
-        let provers = self.provers.clone();
-        let proven = prove_blocking(deadline, move || {
-            let provers = provers;
-            async move {
-                let prover = InProcessProver {
-                    rng: StdRng::from_entropy(),
-                    resolver: &provers.contract,
-                    params: &provers.params,
-                };
-                respond.prove(prover, &INITIAL_COST_MODEL).await
-            }
-        })
-        .await?;
-        let base: SealedTx = proven.seal(StdRng::from_entropy());
+        let stage = Instant::now();
+        let base = self.prove_respond(intent, deadline).await?;
+        let prove_respond = stage.elapsed();
 
         let head = self.chain.finalized_head().await.map_err(internal)?;
         let parameters: LedgerParameters = midnight_serialize::tagged_deserialize(
@@ -262,6 +252,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         })?;
         let ttl = Timestamp::from_secs(wall + fee_ttl.as_secs());
 
+        let stage = Instant::now();
         let plan = self.wallet.plan(
             &base,
             &parameters,
@@ -270,22 +261,13 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             &self.network_id,
             &mut StdRng::from_entropy(),
         )?;
+        let price_fee = stage.elapsed();
         let fee_tx = plan.tx;
-        let provers = self.provers.clone();
-        let fee_proven = prove_blocking(deadline, move || {
-            let provers = provers;
-            async move {
-                let prover = midnight_zkir::LocalProvingProvider {
-                    rng: StdRng::from_entropy(),
-                    resolver: &provers.dust,
-                    params: &provers.params,
-                };
-                fee_tx.prove(prover, &INITIAL_COST_MODEL).await
-            }
-        })
-        .await?;
+        let stage = Instant::now();
+        let fee_sealed = self.prove_fee(fee_tx, deadline).await?;
+        let prove_fee = stage.elapsed();
         let transaction = base
-            .merge(&fee_proven.seal(StdRng::from_entropy()))
+            .merge(&fee_sealed)
             .map_err(|error| SubmitError::Internal(format!("merging the fee: {error:?}")))?;
         let fee = transaction.fees(&parameters, false).map_err(|error| {
             SubmitError::Internal(format!("pricing the transaction: {error:?}"))
@@ -302,9 +284,63 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             SubmitError::Internal(format!("serializing the transaction: {error}"))
         })?;
 
-        tracing::debug!(fee = plan.fee, tx_hash = %hex::encode(tx_hash), "midnight: posting respond");
+        tracing::info!(
+            fee = plan.fee,
+            tx_hash = %hex::encode(tx_hash),
+            ?wallet_wait,
+            ?prove_respond,
+            ?price_fee,
+            ?prove_fee,
+            before_post = ?started.elapsed(),
+            "midnight: posting respond"
+        );
         self.post(&bytes, tx_hash, &plan.spent, head_number, ttl, deadline)
             .await
+    }
+
+    /// The respond call proven under the packaged contract keys (zkir v3).
+    async fn prove_respond(
+        &self,
+        intent: PreimageIntent<DefaultDB>,
+        deadline: Instant,
+    ) -> Result<SealedTx, SubmitError> {
+        let respond = preimage_tx(&self.network_id, RESPOND_SEGMENT, intent);
+        let provers = self.provers.clone();
+        let proven = prove_blocking(deadline, move || {
+            let provers = provers;
+            async move {
+                let prover = InProcessProver {
+                    rng: StdRng::from_entropy(),
+                    resolver: &provers.contract,
+                    params: &provers.params,
+                };
+                respond.prove(prover, &INITIAL_COST_MODEL).await
+            }
+        })
+        .await?;
+        Ok(proven.seal(StdRng::from_entropy()))
+    }
+
+    /// The fee transaction's DUST spends proven under the ledger's spend keys (zkir v2).
+    async fn prove_fee(
+        &self,
+        fee_tx: UnprovenTx,
+        deadline: Instant,
+    ) -> Result<SealedTx, SubmitError> {
+        let provers = self.provers.clone();
+        let proven = prove_blocking(deadline, move || {
+            let provers = provers;
+            async move {
+                let prover = midnight_zkir::LocalProvingProvider {
+                    rng: StdRng::from_entropy(),
+                    resolver: &provers.dust,
+                    params: &provers.params,
+                };
+                fee_tx.prove(prover, &INITIAL_COST_MODEL).await
+            }
+        })
+        .await?;
+        Ok(proven.seal(StdRng::from_entropy()))
     }
 
     /// Posts a paid transaction and waits for it: the UTXOs it spends stay reserved
@@ -322,6 +358,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             spent,
             Timestamp::from_secs(ttl.to_secs() + FINALITY_SLACK.as_secs()),
         );
+        let started = Instant::now();
         match self.chain.submit(bytes).await {
             Ok(()) => {}
             Err(SubmitRefusal::Refused(reason)) => {
@@ -338,7 +375,15 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
                 );
             }
         }
+        let submitted = started.elapsed();
         let landing = self.await_landing(tx_hash, after, ttl, deadline).await;
+        tracing::info!(
+            tx_hash = %hex::encode(tx_hash),
+            ?submitted,
+            settled = ?started.elapsed(),
+            outcome = ?landing,
+            "midnight: respond settled"
+        );
         match landing {
             Ok(Landing::Applied) => Ok(hex::encode(tx_hash)),
             // The DUST spends sit in the guaranteed segment, so they were applied:
@@ -557,7 +602,7 @@ mod tests {
 
     /// A wallet that records reservations; the build and post paths never plan.
     #[derive(Default)]
-    struct RecordingWallet {
+    pub(super) struct RecordingWallet {
         reserved: Mutex<Vec<Vec<DustNullifier>>>,
         released: Mutex<Vec<Vec<DustNullifier>>>,
     }
@@ -598,7 +643,7 @@ mod tests {
 
     /// A chain whose finalized head moves one block per ask, from `head` up to `last`,
     /// with blocks six seconds apart from time 1000.
-    struct ScriptedChain {
+    pub(super) struct ScriptedChain {
         head: Mutex<u64>,
         last: u64,
         submit: Mutex<Option<SubmitRefusal>>,
@@ -607,7 +652,7 @@ mod tests {
     }
 
     impl ScriptedChain {
-        fn new(head: u64, last: u64, landing: Option<(u64, Landing)>) -> Self {
+        pub(super) fn new(head: u64, last: u64, landing: Option<(u64, Landing)>) -> Self {
             Self {
                 head: Mutex::new(head),
                 last,
@@ -740,7 +785,7 @@ mod tests {
         hex::encode(bytes)
     }
 
-    fn respond_request() -> IntentRequest {
+    pub(super) fn respond_request() -> IntentRequest {
         IntentRequest {
             circuit: "respond",
             contract_address: SINGLETON.to_string(),
@@ -757,6 +802,35 @@ mod tests {
             contract_state: hex::encode(SINGLETON_STATE),
             ledger_parameters: ledger_parameters(),
             ttl_seconds: TTL,
+        }
+    }
+
+    /// The compiled singleton's own `respondBidirectional` event, captured by
+    /// `midnight-devtools`' `gen:api-parity-vectors`, as a request.
+    pub(super) fn bidirectional_request() -> IntentRequest {
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/api-parity-vectors.json")).unwrap();
+        let event = &fixtures["responseEvent"];
+        let text = |value: &serde_json::Value| value.as_str().unwrap().to_string();
+        IntentRequest {
+            circuit: "respondBidirectional",
+            request_id: text(&event["requestId"]),
+            signature: WireSignature {
+                big_r: WirePoint {
+                    x: format!("{:0>64}", text(&event["signature"]["bigR"]["x"])),
+                    y: format!("{:0>64}", text(&event["signature"]["bigR"]["y"])),
+                },
+                s: format!("{:0>64}", text(&event["signature"]["s"])),
+                recovery_id: event["signature"]["recoveryId"].as_u64().unwrap() as u8,
+            },
+            attestation: Some(WireAttestation {
+                block_height: text(&event["blockHeight"]),
+                output_kind: event["outputKind"].as_u64().unwrap() as u8,
+                serialized_output_length: text(&event["serializedOutputLength"]),
+                output_hash: text(&event["outputHash"]),
+                digest: text(&event["digest"]),
+            }),
+            ..respond_request()
         }
     }
 
@@ -802,26 +876,7 @@ mod tests {
             serde_json::from_str(include_str!("../fixtures/api-parity-vectors.json")).unwrap();
         let event = &fixtures["responseEvent"];
         let text = |value: &serde_json::Value| value.as_str().unwrap().to_string();
-        let request = IntentRequest {
-            circuit: "respondBidirectional",
-            request_id: text(&event["requestId"]),
-            signature: WireSignature {
-                big_r: WirePoint {
-                    x: format!("{:0>64}", text(&event["signature"]["bigR"]["x"])),
-                    y: format!("{:0>64}", text(&event["signature"]["bigR"]["y"])),
-                },
-                s: format!("{:0>64}", text(&event["signature"]["s"])),
-                recovery_id: event["signature"]["recoveryId"].as_u64().unwrap() as u8,
-            },
-            attestation: Some(WireAttestation {
-                block_height: text(&event["blockHeight"]),
-                output_kind: event["outputKind"].as_u64().unwrap() as u8,
-                serialized_output_length: text(&event["serializedOutputLength"]),
-                output_hash: text(&event["outputHash"]),
-                digest: text(&event["digest"]),
-            }),
-            ..respond_request()
-        };
+        let request = bidirectional_request();
         let call = sole_call(&client().build_intent(&request).unwrap());
         assert_eq!(call.entry_point.0.as_slice(), b"respondBidirectional");
         let payload: [u8; MISC_PAYLOAD_LEN] = hex::decode(text(&event["payload"]))
@@ -1148,6 +1203,108 @@ mod tests {
         assert!(matches!(error, SubmitError::Ambiguous(_)), "{error}");
         assert!(client.wallet.released.lock().unwrap().is_empty());
         assert!(crate::intent::is_ambiguous_submit(&error.into_anyhow()));
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    //! What each proof costs in process. `MIDNIGHT_BENCH_ARTIFACTS` is the package's
+    //! `dist/managed`, `MIDNIGHT_BENCH_ZK_PARAMS` the parameter store, and
+    //! `MIDNIGHT_BENCH_RUNS` the samples per step (10). Prints one JSON line per
+    //! sample; proving wants `--release`.
+
+    use midnight_ledger_v9::structure::INITIAL_PARAMETERS;
+    use rand::SeedableRng as _;
+
+    use super::tests::{bidirectional_request, respond_request, RecordingWallet, ScriptedChain};
+    use super::*;
+    use crate::funding::plan_fee;
+    use crate::funding::tests::{funded_key, replayed};
+
+    fn env(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs MIDNIGHT_BENCH_ARTIFACTS and MIDNIGHT_BENCH_ZK_PARAMS"]
+    async fn proving_cost() {
+        let runs: usize = std::env::var("MIDNIGHT_BENCH_RUNS")
+            .map(|runs| runs.parse().unwrap())
+            .unwrap_or(10);
+        let client = NativeIntentClient::new(
+            Arc::new(ScriptedChain::new(0, 0, None)),
+            RecordingWallet::default(),
+            Arc::new(
+                Provers::new(
+                    env("MIDNIGHT_BENCH_ARTIFACTS"),
+                    env("MIDNIGHT_BENCH_ZK_PARAMS"),
+                )
+                .unwrap(),
+            ),
+            "undeployed",
+            Duration::from_secs(3600),
+        );
+        let deadline = Instant::now() + Duration::from_secs(3600);
+        let sample = |step: &str, run: usize, took: Duration, extra: serde_json::Value| {
+            println!(
+                "{}",
+                serde_json::json!({ "step": step, "run": run, "ms": took.as_secs_f64() * 1e3, "extra": extra })
+            );
+        };
+
+        let mut base = None;
+        for request in [respond_request(), bidirectional_request()] {
+            let intent = client.build_intent(&request).unwrap();
+            for run in 0..runs {
+                let preimage = midnight_serialize::tagged_deserialize(&mut &intent[..]).unwrap();
+                let started = Instant::now();
+                let sealed = client.prove_respond(preimage, deadline).await.unwrap();
+                sample(
+                    request.circuit,
+                    run,
+                    started.elapsed(),
+                    serde_json::Value::Null,
+                );
+                base.get_or_insert(sealed);
+            }
+        }
+
+        let base = base.unwrap();
+        let (key, local) = (funded_key(), replayed());
+        let ctime = local.sync_time;
+        let ttl = Timestamp::from_secs(ctime.to_secs() + 180);
+        let mut rng = StdRng::seed_from_u64(7);
+        for run in 0..runs {
+            let started = Instant::now();
+            let plan = plan_fee(
+                &key,
+                &local,
+                &[],
+                &base,
+                &INITIAL_PARAMETERS,
+                ctime,
+                ttl,
+                "undeployed",
+                &mut rng,
+            )
+            .unwrap();
+            sample(
+                "price_fee",
+                run,
+                started.elapsed(),
+                serde_json::json!({ "spends": plan.spent.len() }),
+            );
+            let started = Instant::now();
+            let fee = client.prove_fee(plan.tx, deadline).await.unwrap();
+            sample("prove_fee", run, started.elapsed(), serde_json::Value::Null);
+            let merged = base.merge(&fee).unwrap();
+            let owed = merged.fees(&INITIAL_PARAMETERS, false).unwrap();
+            assert_eq!(
+                dust_deficit(&merged, owed).unwrap(),
+                0,
+                "the proven fee pays"
+            );
+        }
     }
 }
 
