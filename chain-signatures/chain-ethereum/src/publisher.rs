@@ -222,11 +222,15 @@ impl BatchPublisher {
             tracing::error!(error = %format_args!("{err:#}"), "batch publish failed");
         }
 
+        let failure = res.as_ref().err().map(batch_failure);
         for queued in actions.drain(..) {
             if res.is_ok() {
                 self.telemetry.record_publish_metrics(&queued.action);
             }
-            let result = res.as_ref().map_err(batch_publish_error).map(|_| ());
+            let result = match failure.clone() {
+                Some(failure) => Err(batch_publish_error(failure)),
+                None => Ok(()),
+            };
             let _ = queued.done.send(result);
         }
     }
@@ -399,12 +403,14 @@ impl BatchPublisher {
     }
 }
 
-/// Rebuilds the batch failure for one waiter: `anyhow::Error` can cross only
-/// one oneshot, so each gets a fresh carrier — `from_chain`'s classification,
-/// defaulting to retryable — with the full render as diagnostics.
-fn batch_publish_error(err: &anyhow::Error) -> anyhow::Error {
-    let failure =
-        RpcFailure::from_chain(err).unwrap_or_else(|| RpcFailure::retryable(format!("{err:#}")));
+/// The batch failure's carrier, built once per batch: `anyhow::Error` can
+/// cross only one oneshot, so each waiter gets a clone.
+fn batch_failure(err: &anyhow::Error) -> RpcFailure {
+    RpcFailure::from_chain(err).unwrap_or_else(|| RpcFailure::retryable(format!("{err:#}")))
+}
+
+/// One waiter's copy of the failed batch result.
+fn batch_publish_error(failure: RpcFailure) -> anyhow::Error {
     anyhow::Error::new(failure).context("eth batch publish failed")
 }
 
@@ -835,11 +841,14 @@ mod tests {
         // 409 send rejection) must stay terminal after the fan-out — the
         // node's unbounded publish loop reads exactly this error.
         let err = http_wrapped_send_error(409, "conflict").context("exhausted after 1 attempts");
-        assert!(!is_retryable(&batch_publish_error(&err)), "{err:#}");
+        assert!(
+            !is_retryable(&batch_publish_error(batch_failure(&err))),
+            "{err:#}"
+        );
 
         // throttles keep engaging the gate through the fan-out
         let err = http_wrapped_send_error(429, "slow down").context("exhausted after 3 attempts");
-        let out = batch_publish_error(&err);
+        let out = batch_publish_error(batch_failure(&err));
         assert!(is_retryable(&out), "{err:#}");
         assert!(SharedBackoff::new().engage_if_throttled(&out).is_some());
 
@@ -847,7 +856,7 @@ mod tests {
         // in an id must not engage the gate
         let err = anyhow::anyhow!("route to upstream node-429 reset")
             .context("exhausted after 3 attempts");
-        let out = batch_publish_error(&err);
+        let out = batch_publish_error(batch_failure(&err));
         assert!(is_retryable(&out), "{err:#}");
         assert!(SharedBackoff::new().engage_if_throttled(&out).is_none());
     }
