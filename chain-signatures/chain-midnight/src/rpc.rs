@@ -8,7 +8,9 @@ use jsonrpsee::core::client::{ClientT as _, Error as JsonrpseeClientError};
 use jsonrpsee::core::traits::ToRpcParams;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
-use mpc_chain_integration_core::utils::retry::{http_status_retryable, is_retryable, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{
+    exhausted, http_status_retryable, is_retryable, RetryConfig,
+};
 use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClient, RpcClientT};
@@ -760,7 +762,7 @@ where
             );
         })
         .await
-        .map_err(|error| error.context(format!("exhausted after {} attempts", retry_count + 1)))
+        .map_err(|error| exhausted(error, retry_count))
 }
 
 impl Reads {

@@ -125,7 +125,7 @@ macro_rules! retry_op {
                 );
             })
             .await
-            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter))
     }};
 
     // Full form: op_name string, custom notify closure
@@ -150,7 +150,7 @@ macro_rules! retry_op {
                 $notify
             })
             .await
-            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter))
     }};
 }
 
@@ -202,7 +202,7 @@ macro_rules! retry_rpc {
                 );
             })
             .await
-            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter))
     }};
 
     // Full form: op_name string, custom notify closure
@@ -226,7 +226,7 @@ macro_rules! retry_rpc {
                 $notify
             })
             .await
-            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter))
     }};
 }
 
@@ -243,6 +243,37 @@ mod tests {
             max_times: 2,
             jitter: false,
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_aborts_do_not_claim_exhaustion() {
+        // a terminal error returns before notify fires: no retries, no context
+        let err: anyhow::Result<()> =
+            retry_op!(Duration::from_secs(5), gated_test_config(), "test_op", {
+                Err(anyhow::Error::new(RpcFailure::terminal("nope".into())))
+            });
+        let err = err.unwrap_err();
+        assert!(!format!("{err:#}").contains("exhausted"), "{err:#}");
+
+        // retryable exhaustion keeps the accurate count (1 initial + 2 retries)
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(1), Duration::from_millis(2));
+        let err: anyhow::Result<()> = retry_rpc!(
+            Duration::from_secs(5),
+            gated_test_config(),
+            gate,
+            "test_op",
+            {
+                Err(anyhow::anyhow!(
+                    "HTTP status client error (429 Too Many Requests)"
+                ))
+            }
+        );
+        let err = err.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("exhausted after 3 attempts"),
+            "{err:#}"
+        );
     }
 
     #[tokio::test]

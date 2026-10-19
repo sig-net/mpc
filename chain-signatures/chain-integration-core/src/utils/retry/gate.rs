@@ -144,9 +144,14 @@ where
 
 /// Attaches the exhaustion context to a failed retry chain without
 /// re-stringifying the error, so typed causes survive for outer gates.
+/// `retries` counts fired notify callbacks: a terminal abort returns before
+/// any, so 0 means the budget was not spent and the error passes through.
 #[doc(hidden)]
-pub fn exhausted(e: anyhow::Error, attempts: u32) -> anyhow::Error {
-    e.context(format!("exhausted after {} attempts", attempts))
+pub fn exhausted(e: anyhow::Error, retries: u32) -> anyhow::Error {
+    if retries == 0 {
+        return e;
+    }
+    e.context(format!("exhausted after {} attempts", retries + 1))
 }
 
 fn now_ms() -> u64 {
