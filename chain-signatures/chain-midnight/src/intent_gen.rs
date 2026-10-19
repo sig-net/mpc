@@ -350,22 +350,10 @@ impl IntentGen {
                     );
                     self.snapshots.forget().await;
                 }
-                // Its last chance to hand over a snapshot: a settled wallet restores as well
-                // as any, and a long refusal otherwise retires every child before one is due.
-                // A wallet that cannot pay, or whose snapshot was just discarded, is not kept
-                // even when it looks settled.
-                if !unfunded && !discard && self.snapshots.due() {
-                    let last = exchange(
-                        live,
-                        &SnapshotRequest {},
-                        Operation::Snapshot,
-                        &self.config.publisher,
-                    )
-                    .await;
-                    self.keep_snapshot(last).await;
-                }
-                // An ambiguous submit's wallet work may also still be running, so no later
-                // request may reuse this child either way.
+                // Nothing is snapshotted from this child: a refused submit can leave the SDK's
+                // wallet state wrong while it still looks settled, so the next child restores
+                // from before the refusal. An ambiguous submit's wallet work may also still be
+                // running, so no later request may reuse this child either way.
                 *session = None;
                 return outcome;
             }
@@ -1771,74 +1759,26 @@ mod tests {
         r#""ok":false,"code":"state_conflict","message":"1010: Invalid Transaction""#;
 
     #[tokio::test]
-    async fn a_retired_child_hands_over_its_settled_wallet_first() {
-        let (readies, asked) = (
-            StubLog::new("snap-last-ready"),
-            StubLog::new("snap-last-asked"),
-        );
-        let store = Arc::new(MemoryStore::default());
-        let builder = spawn_with(
-            &snapshot_stub(&readies, &asked, &[FRESH], CONFLICT),
-            store.clone(),
-        )
-        .await;
+    async fn a_refused_child_hands_over_no_snapshot_even_when_settled() {
+        for (name, refusal) in [("conflict", CONFLICT), ("unfunded", UNFUNDED)] {
+            let (readies, asked) = (
+                StubLog::new(&format!("snap-refused-{name}-ready")),
+                StubLog::new(&format!("snap-refused-{name}-asked")),
+            );
+            let store = Arc::new(MemoryStore::default());
+            let builder = spawn_with(
+                &snapshot_stub(&readies, &asked, &[FRESH], refusal),
+                store.clone(),
+            )
+            .await;
 
-        builder.submit(&[0x0a]).await.unwrap_err();
+            builder.submit(&[0x0a]).await.unwrap_err();
 
-        assert!(builder.session.lock().await.is_none());
-        assert_eq!(asked.lines().len(), 1);
-        assert_eq!(store.stored().as_deref(), Some("fresh"));
-        let _ = builder.build(&sample_request()).await;
-        assert_eq!(
-            readies.lines()[1],
-            r#"{"id":0,"op":"ready","protocolVersion":3,"walletSnapshot":"fresh"}"#
-        );
-    }
-
-    #[tokio::test]
-    async fn a_retired_child_s_unsettled_wallet_replaces_no_snapshot() {
-        let (readies, asked) = (
-            StubLog::new("snap-unsettled-ready"),
-            StubLog::new("snap-unsettled-asked"),
-        );
-        let busy = r#""ok":false,"code":"wallet_busy","message":"coins in flight""#;
-        let store = Arc::new(MemoryStore::default());
-        let builder = spawn_with(
-            &snapshot_stub(&readies, &asked, &[busy], CONFLICT),
-            store.clone(),
-        )
-        .await;
-
-        builder.submit(&[0x0a]).await.unwrap_err();
-
-        assert!(builder.session.lock().await.is_none());
-        assert_eq!(asked.lines().len(), 1);
-        assert_eq!(store.saves(), 0);
-        assert_eq!(builder.snapshots.latest(), None);
-    }
-
-    #[tokio::test]
-    async fn an_unfunded_child_hands_over_no_snapshot() {
-        let (readies, asked) = (
-            StubLog::new("snap-unfunded-ready"),
-            StubLog::new("snap-unfunded-asked"),
-        );
-        let store = Arc::new(MemoryStore::default());
-        let builder = spawn_with(
-            &snapshot_stub(&readies, &asked, &[FRESH], UNFUNDED),
-            store.clone(),
-        )
-        .await;
-
-        builder.submit(&[0x0a]).await.unwrap_err();
-
-        assert!(builder.session.lock().await.is_none());
-        assert!(
-            asked.lines().is_empty(),
-            "a wallet that cannot pay is not asked"
-        );
-        assert_eq!(store.saves(), 0);
-        assert_eq!(builder.snapshots.latest(), None);
+            assert!(builder.session.lock().await.is_none(), "{name}");
+            assert!(asked.lines().is_empty(), "{name}: a refused child is asked");
+            assert_eq!(store.saves(), 0, "{name}");
+            assert_eq!(builder.snapshots.latest(), None, "{name}");
+        }
     }
 
     #[tokio::test]
@@ -1934,11 +1874,7 @@ mod tests {
             readies[RESTORE_STRIKES as usize],
             r#"{"id":0,"op":"ready","protocolVersion":3}"#
         );
-        assert_eq!(
-            asked.lines().len(),
-            RESTORE_STRIKES as usize - 1,
-            "the child whose snapshot is discarded is not asked for another"
-        );
+        assert!(asked.lines().is_empty());
     }
 
     /// A child that logs its ready line to `readies`, then dies on its first request.
@@ -2046,26 +1982,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_child_that_synced_from_the_start_strikes_nothing_against_the_snapshot() {
+    async fn a_refused_child_that_synced_from_the_start_strikes_nothing() {
         let (readies, asked) = (
             StubLog::new("snap-unrestored-ready"),
             StubLog::new("snap-unrestored-asked"),
         );
-        let store = Arc::new(MemoryStore::default());
         let builder = spawn_with(
             &snapshot_stub(&readies, &asked, &[FRESH], CONFLICT),
-            store.clone(),
+            Arc::new(MemoryStore::default()),
         )
         .await;
 
-        // The first child syncs from the start and hands over its snapshot; the restored
-        // ones after it stop one short of a discard.
-        for _ in 0..RESTORE_STRIKES {
+        for _ in 1..RESTORE_STRIKES {
             builder.submit(&[0x0a]).await.unwrap_err();
         }
 
-        assert_eq!(builder.snapshots.latest().as_deref(), Some("fresh"));
-        assert_eq!(store.clears(), 0);
+        assert!(
+            !builder.snapshots.strike(),
+            "no child was restored from a snapshot, so this is the first strike"
+        );
     }
 
     #[tokio::test]
