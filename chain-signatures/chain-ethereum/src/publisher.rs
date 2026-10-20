@@ -212,7 +212,7 @@ impl BatchPublisher {
             |attempt, err, sleep| {
                 tracing::warn!(
                     num_requests = actions.len(),
-                    "batch publish failed (attempt {attempt}/{max_attempts}): {err}, retrying in {sleep:?}"
+                    "batch publish failed (attempt {attempt}/{max_attempts}): {err:#}, retrying in {sleep:?}"
                 );
             },
             { self.batch_publish_signatures(&actions).await }
@@ -251,7 +251,7 @@ impl BatchPublisher {
                 tracing::error!(
                     ?sign_ids,
                     attempt,
-                    "failed to get eth signature respond transaction receipt: {err}, retrying in {sleep:?}"
+                    "failed to get eth signature respond transaction receipt: {err:#}, retrying in {sleep:?}"
                 );
             },
             // Try to get the transaction receipt
@@ -291,7 +291,7 @@ impl BatchPublisher {
                 tracing::warn!(
                     ?sign_ids,
                     attempt,
-                    "send eth tx failed: {err}, retrying in {sleep:?}"
+                    "send eth tx failed: {err:#}, retrying in {sleep:?}"
                 );
             },
             {
