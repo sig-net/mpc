@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 import { deriveAccountKeys, type WalletFacade } from "@sig-net/midnight-contract-deploy";
-import { of, Subject } from "rxjs";
+import { concat, of, Subject } from "rxjs";
 
 const sdk = vi.hoisted(() => {
   // Every restored sub-wallet's `stop`, in restore order.
@@ -346,6 +346,26 @@ describe("openFundingWallet with a snapshot", () => {
       ).rejects.toMatchObject({ code: "wallet_busy" });
       expect(busy.dust.serializeState, unsettled).not.toHaveBeenCalled();
     }
+  });
+
+  it("waits a few seconds for the transaction a submit just returned for to settle", async () => {
+    vi.useFakeTimers();
+    const inFlight = facadeState(true);
+    inFlight.pending.all = [{ tx: "submitted" }];
+    const confirmed = new Subject<ReturnType<typeof facadeState>>();
+    const facade = stubFacade(new Subject(), true);
+    vi.mocked(facade.state).mockImplementation(() => concat(of(inFlight), confirmed) as never);
+    sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
+    const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
+
+    const snapshot = wallet.snapshot();
+    await vi.advanceTimersByTimeAsync(4_000);
+    confirmed.next(facadeState(true));
+    expect(JSON.parse((await snapshot)!)).toMatchObject({ dust: "dust-state" });
+
+    const stuck = wallet.snapshot().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await stuck).toMatchObject({ code: "wallet_busy" });
   });
 
   it("summarises the wallet's coins and sync on one line, or why it cannot", async () => {

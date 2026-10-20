@@ -19,7 +19,7 @@ import {
 } from "@midnightntwrk/wallet-sdk-facade";
 import { ShieldedWallet } from "@midnightntwrk/wallet-sdk-shielded";
 import { UnshieldedWallet } from "@midnightntwrk/wallet-sdk-unshielded-wallet";
-import { filter, firstValueFrom, throwError, timeout } from "rxjs";
+import { filter, firstValueFrom, of, throwError, timeout } from "rxjs";
 
 import type { Endpoints } from "./config.js";
 import { describeFailure, PublisherError } from "./errors.js";
@@ -116,6 +116,9 @@ async function startFacade(
 const RESTORED_SYNC_TIMEOUT_MS = 10 * 60 * 1000;
 
 const DESCRIBE_TIMEOUT_MS = 1_000;
+// A submit returns before the wallet's own sync has seen its transaction confirmed, about a
+// second later; a node publishing back to back is only ever asked inside that second.
+const SNAPSHOT_SETTLE_MS = 5_000;
 
 const seconds = (sinceMs: number): string => `${((Date.now() - sinceMs) / 1_000).toFixed(1)}s`;
 
@@ -261,10 +264,22 @@ async function openFacade(
       }
       // A restored wallet keeps an in-flight coin unspendable until its transaction settles or
       // expires, so a snapshot holding one would carry the stall into every restart.
-      if (!isSettled(state)) {
+      const settled = isSettled(state)
+        ? state
+        : await firstValueFrom(
+            facade
+              .state()
+              .pipe(
+                filter(isSettled),
+                timeout({ first: SNAPSHOT_SETTLE_MS, with: () => of(undefined) }),
+              ),
+            { defaultValue: undefined },
+          );
+      if (settled === undefined) {
         throw new PublisherError(
           "wallet_busy",
-          `the funding wallet has a submission in flight: ${describeState(state)}`,
+          `the funding wallet still had a submission in flight after ${SNAPSHOT_SETTLE_MS} ms: ` +
+            describeState(state),
         );
       }
       return encodeSnapshot(
