@@ -25,7 +25,13 @@ export type Response =
       readonly recipeTtlMs: number;
     }
   | { readonly id: number; readonly ok: true; readonly intent: string }
-  | { readonly id: number; readonly ok: true; readonly txId: string }
+  | {
+      readonly id: number;
+      readonly ok: true;
+      readonly txId: string;
+      /** Decimal SPECK, read before the spend; absent if the wallet could not say. */
+      readonly dustBalance?: string;
+    }
   | {
       readonly id: number | null;
       readonly ok: false;
@@ -140,7 +146,12 @@ async function answer(config: Config, body: Record<string, unknown>): Promise<Re
       if (!parsed.success) throw toBadRequest(parsed.error);
       const request: SubmitRequest = parsed.data;
       const landed = await handleSubmit(config, request.id, Buffer.from(request.intent, "hex"));
-      return { id: request.id, ok: true, txId: landed.txId };
+      return {
+        id: request.id,
+        ok: true,
+        txId: landed.txId,
+        dustBalance: landed.dustBalance?.toString(),
+      };
     }
     default:
       throw new PublisherError("bad_request", `invalid request: \`op\` ${MUST_BE_AN_OP}`);

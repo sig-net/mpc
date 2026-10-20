@@ -79,6 +79,7 @@ export interface StubEdges {
   readonly balanceTx?: (tx: unknown) => Promise<unknown>;
   readonly finalizeTx?: (recipe: unknown) => Promise<unknown>;
   readonly submitTx?: (tx: unknown) => Promise<Landed>;
+  readonly dustBalance?: () => Promise<bigint | undefined>;
 }
 
 // Identity by default, so a sentinel passed in at one edge is observable at the next.
@@ -88,6 +89,7 @@ export function primeStub(edges: StubEdges = {}): void {
       proveTx: edges.proveTx ?? (async (tx: unknown, _proofBudgetMs: number) => tx),
       wallet: {
         requireReady: edges.requireReady ?? (async () => undefined),
+        dustBalance: edges.dustBalance ?? (async () => undefined),
         balanceTx: edges.balanceTx ?? (async (tx: unknown) => tx),
         finalizeTx: edges.finalizeTx ?? (async (recipe: unknown) => recipe),
         submitTx: edges.submitTx ?? (async () => ({ txId: STUB_TX_ID })),

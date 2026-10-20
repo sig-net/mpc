@@ -37,6 +37,40 @@ pub(crate) fn is_ambiguous_submit(error: &anyhow::Error) -> bool {
     error.downcast_ref::<AmbiguousSubmit>().is_some()
 }
 
+/// A request the child answered with an error code; the code survives for metrics.
+#[derive(Debug)]
+pub(crate) struct Refused {
+    pub(crate) code: String,
+    pub(crate) message: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "midnight intent builder refused the request [{}]: {}",
+            self.code, self.message
+        )
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// The child's code for a refused request, if `error` is one.
+pub(crate) fn refusal_code(error: &anyhow::Error) -> Option<&str> {
+    error
+        .downcast_ref::<Refused>()
+        .map(|refused| refused.code.as_str())
+}
+
+/// A posted transaction and the funding wallet's DUST before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submitted {
+    pub tx_id: String,
+    /// Spendable DUST in SPECK; `None` when unreadable or malformed.
+    pub dust_balance: Option<u128>,
+}
+
 /// One respond call, in the shape the child validates. Every byte field is bare
 /// lowercase hex with no `0x`; the child converts nothing and rejects anything else.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -164,16 +198,30 @@ impl IntentGen {
         hex::decode(&intent).context("decoding the intent the builder granted")
     }
 
-    /// Balances, proves and posts `intent`, answering with what names it on chain.
+    /// Balances, proves and posts `intent`, answering with what names it on chain and
+    /// the funding wallet's DUST before it.
     /// Attempted exactly once.
-    pub async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
+    pub async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
         let request = SubmitRequest {
             intent: hex::encode(intent),
         };
         let reply = self.dispatch(&request, Operation::Submit).await?;
-        reply
+        let tx_id = reply
             .tx_id
-            .context("midnight intent builder posted a transaction without naming it")
+            .context("midnight intent builder posted a transaction without naming it")?;
+        // The transaction has landed: a malformed balance only loses the reading.
+        let dust_balance = reply.dust_balance.and_then(|balance| {
+            balance
+                .parse()
+                .inspect_err(|_| {
+                    tracing::warn!(%balance, "midnight intent builder sent a malformed DUST balance")
+                })
+                .ok()
+        });
+        Ok(Submitted {
+            tx_id,
+            dust_balance,
+        })
     }
 
     /// One operation, start to finish; budget and reissue policy come from
@@ -606,13 +654,13 @@ fn decode_reply(line: &str, id: u64) -> Exchange {
 
 fn granted(reply: WireReply) -> anyhow::Result<WireReply> {
     if !reply.ok {
-        let code = reply.code.as_deref().unwrap_or("no code");
-        let error = anyhow::anyhow!(
-            "midnight intent builder refused the request [{}]: {}",
-            code,
-            reply.message.as_deref().unwrap_or("no message")
-        );
-        return Err(if code == "ambiguous_submit" {
+        let refused = Refused {
+            code: reply.code.unwrap_or_else(|| "no code".to_string()),
+            message: reply.message.unwrap_or_else(|| "no message".to_string()),
+        };
+        let ambiguous = refused.code == "ambiguous_submit";
+        let error = anyhow::Error::new(refused);
+        return Err(if ambiguous {
             error.context(AmbiguousSubmit)
         } else {
             error
@@ -650,6 +698,8 @@ struct WireReply {
     intent: Option<String>,
     /// What names a posted transaction on chain. The submit arm's own payload.
     tx_id: Option<String>,
+    /// The submit arm's DUST balance before the spend, as decimal SPECK.
+    dust_balance: Option<String>,
     code: Option<String>,
     message: Option<String>,
 }
@@ -878,8 +928,35 @@ mod tests {
         r#"read -r line; case "$line" in *'"op":"submit"'*) intent=$(printf "%s" "$line" | sed -n 's/.*"intent":"\([0-9a-f]*\)".*/\1/p'); printf '{"id":0,"ok":true,"txId":"%s","blockHash":"cd"}\n' "$intent" ;; *) printf '{"id":0,"ok":false,"code":"bad_request","message":"this line carries no submit op"}\n' ;; esac"#,
     ))
     .await;
-        let tx_id = builder.submit(SAMPLE_INTENT).await.unwrap();
-        assert_eq!(tx_id, hex::encode(SAMPLE_INTENT));
+        let submitted = builder.submit(SAMPLE_INTENT).await.unwrap();
+        assert_eq!(
+            submitted,
+            Submitted {
+                tx_id: hex::encode(SAMPLE_INTENT),
+                dust_balance: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_submit_carries_the_dust_balance_the_child_reports() {
+        let builder = spawn_stub(&stub_config(
+            r#"read -r line; printf '{"id":0,"ok":true,"txId":"ab","dustBalance":"4210000000000000"}\n'"#,
+        ))
+        .await;
+        let submitted = builder.submit(SAMPLE_INTENT).await.unwrap();
+        assert_eq!(submitted.dust_balance, Some(4_210_000_000_000_000));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_dust_balance_does_not_fail_a_landed_submit() {
+        let builder = spawn_stub(&stub_config(
+            r#"read -r line; printf '{"id":0,"ok":true,"txId":"ab","dustBalance":"0x10"}\n'"#,
+        ))
+        .await;
+        let submitted = builder.submit(SAMPLE_INTENT).await.unwrap();
+        assert_eq!(submitted.tx_id, "ab");
+        assert_eq!(submitted.dust_balance, None);
     }
 
     #[tokio::test]
@@ -986,6 +1063,7 @@ mod tests {
             !is_ambiguous_submit(&err),
             "a refusal spent nothing: {err:#}"
         );
+        assert_eq!(refusal_code(&err), Some("wallet_unfunded"));
     }
 
     #[tokio::test]
@@ -1001,6 +1079,7 @@ mod tests {
             .expect_err("an ambiguous child answer is not a receipt");
 
         assert!(is_ambiguous_submit(&error), "unexpected error: {error:#}");
+        assert_eq!(refusal_code(&error), Some("ambiguous_submit"));
         assert!(format!("{error:#}").contains("may still land"));
         assert!(
             builder.session.lock().await.is_none(),

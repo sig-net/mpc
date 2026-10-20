@@ -180,6 +180,9 @@ export async function handleSubmit(
   } catch (error) {
     throw asPublisherError(error);
   }
+  // Before the spend: once balanced, the wallet's single coin reads as spent until the
+  // change confirms.
+  const dustBalance = await ready.wallet.dustBalance();
 
   const provingTimeout = new PublisherError(
     "proving_timeout",
@@ -214,5 +217,5 @@ export async function handleSubmit(
   const timeout = ambiguousSubmit(`submit exceeded the ${SUBMIT_TIMEOUT_MS} ms deadline`);
   const answerBudgetMs = remaining();
   if (answerBudgetMs <= 0) throw timeout;
-  return withDeadline(work, answerBudgetMs, timeout);
+  return withDeadline(work, answerBudgetMs, timeout).then((landed) => ({ ...landed, dustBalance }));
 }

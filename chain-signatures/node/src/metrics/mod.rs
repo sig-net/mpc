@@ -11,6 +11,7 @@ pub mod indexers;
 pub mod messaging;
 pub mod nodes;
 pub mod protocols;
+pub mod publishers;
 pub mod requests;
 pub mod storage;
 pub mod telemetry;
@@ -90,6 +91,19 @@ pub fn try_create_int_gauge_vec_with_node_account_id(
     let mut opts = Opts::new(name, help);
     opts = opts.const_label("node_account_id".to_string(), node_account_id().to_string());
     let gauge = prometheus::IntGaugeVec::new(opts, labels)?;
+    prometheus::register(Box::new(gauge.clone()))?;
+    Ok(gauge)
+}
+
+pub fn try_create_gauge_vec_with_node_account_id(
+    name: &str,
+    help: &str,
+    labels: &[&str],
+) -> Result<prometheus::GaugeVec> {
+    check_metric_multichain_prefix(name)?;
+    let mut opts = Opts::new(name, help);
+    opts = opts.const_label("node_account_id".to_string(), node_account_id().to_string());
+    let gauge = prometheus::GaugeVec::new(opts, labels)?;
     prometheus::register(Box::new(gauge.clone()))?;
     Ok(gauge)
 }

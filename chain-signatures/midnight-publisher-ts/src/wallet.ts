@@ -8,7 +8,7 @@ import {
   type WalletFacade,
 } from "@sig-net/midnight-contract-deploy";
 import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
-import { filter, firstValueFrom, throwError, timeout } from "rxjs";
+import { filter, firstValueFrom, of, throwError, timeout } from "rxjs";
 
 import type { Endpoints } from "./config.js";
 import { PublisherError } from "./errors.js";
@@ -19,10 +19,13 @@ export type BalancingRecipe = Awaited<ReturnType<WalletFacade["signRecipe"]>>;
 
 export interface Landed {
   readonly txId: string;
+  /** Spendable DUST in SPECK, read before the spend; absent if the wallet could not say. */
+  readonly dustBalance?: bigint;
 }
 
 export interface FundingWallet {
   requireReady(timeoutMs: number): Promise<void>;
+  dustBalance(): Promise<bigint | undefined>;
   balanceTx(tx: UnboundTransaction): Promise<BalancingRecipe>;
   finalizeTx(recipe: BalancingRecipe): Promise<FinalizedTransaction>;
   submitTx(tx: FinalizedTransaction): Promise<Landed>;
@@ -33,6 +36,21 @@ export interface FundingWallet {
 export const RECIPE_TTL_MS = 5 * 60 * 1000;
 
 class DustReadinessTimeoutError extends Error {}
+
+// Short: the figure only feeds the node's metric.
+const DUST_BALANCE_READ_MS = 1_000;
+
+// Never throws: a post must not fail over its balance.
+async function readDustBalance(facade: WalletFacade): Promise<bigint | undefined> {
+  try {
+    const state = await firstValueFrom(
+      facade.dust.state.pipe(timeout({ first: DUST_BALANCE_READ_MS, with: () => of(undefined) })),
+    );
+    return state?.progress.isStrictlyComplete() ? state.balance(new Date()) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promise<FundingWallet> {
   const facade = await initialiseWalletFacade(keys, config);
@@ -65,6 +83,7 @@ async function openFacade(keys: AccountKeys, config: MidnightNodeConfig): Promis
         );
       }
     },
+    dustBalance: () => readDustBalance(facade),
     async balanceTx(tx) {
       const secretKeys = {
         shieldedSecretKeys: keys.shieldedSecretKeys,

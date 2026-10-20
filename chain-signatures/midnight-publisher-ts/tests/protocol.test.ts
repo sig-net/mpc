@@ -192,6 +192,15 @@ describe("handleLine: the operation discriminator", () => {
     expect(reply).toEqual({ id: 21, ok: true, txId: STUB_TX_ID });
   });
 
+  it("carries the DUST balance read before the spend as decimal SPECK", async () => {
+    primeStub({ dustBalance: async () => 4_210_000_000_000_000n });
+    const built = await answer(request());
+
+    const reply = await answer(JSON.stringify({ id: 22, op: "submit", intent: built.intent }));
+
+    expect(reply).toEqual({ id: 22, ok: true, txId: STUB_TX_ID, dustBalance: "4210000000000000" });
+  });
+
   it("names `intent` when it is not the hex the wire admits, or not an intent at all", async () => {
     const cases = ["", "abc", "ZZ", "AB".repeat(32), null, 7, "00".repeat(64)];
 
