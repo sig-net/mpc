@@ -129,6 +129,15 @@ fn cause_status(cause: &(dyn std::error::Error + 'static)) -> Option<StatusCode>
     if let Some(http) = cause.downcast_ref::<alloy::transports::HttpError>() {
         return StatusCode::from_u16(http.status).ok();
     }
+    // `status()` is Some only for error_for_status() products (reqwest 0.12.28
+    // error.rs:174) — the shape solana's HttpSender surfaces for non-2xx
+    // (solana-rpc-client 3.1.14 http_sender.rs:185).
+    if let Some(status) = cause
+        .downcast_ref::<reqwest::Error>()
+        .and_then(|e| e.status())
+    {
+        return Some(status);
+    }
     let err = cause.downcast_ref::<AlloyTransportError>()?;
     let AlloyRpcError::Transport(TransportErrorKind::HttpError(http)) = err else {
         return None;
@@ -423,5 +432,57 @@ mod tests {
         assert!(!is_retryable(&wrapped(409)));
         assert!(is_retryable(&wrapped(429)));
         assert!(is_provider_throttled(&wrapped(429)));
+    }
+
+    #[tokio::test]
+    async fn reqwest_status_errors_classify_by_status() {
+        // real transport round trip: only error_for_status() errors carry a status
+        let mut server = mockito::Server::new_async().await;
+        let client = reqwest::Client::new();
+
+        let throttled = server
+            .mock("GET", "/")
+            .with_status(429)
+            .create_async()
+            .await;
+        let err = anyhow::Error::new(
+            client
+                .get(server.url())
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap_err(),
+        )
+        .context("getSlot");
+        assert!(is_retryable(&err));
+        assert!(is_provider_throttled(&err));
+        throttled.assert();
+
+        let conflict = server
+            .mock("GET", "/")
+            .with_status(409)
+            .create_async()
+            .await;
+        let err = anyhow::Error::new(
+            client
+                .get(server.url())
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap_err(),
+        )
+        .context("getSlot");
+        assert!(!is_retryable(&err));
+        conflict.assert();
+
+        // no status seen (connection refused): no typed signal, no gate
+        let err = anyhow::Error::new(client.get("http://127.0.0.1:1").send().await.unwrap_err());
+        assert!(err
+            .downcast_ref::<reqwest::Error>()
+            .and_then(|e| e.status())
+            .is_none());
+        assert!(!is_provider_throttled(&err));
     }
 }
