@@ -18,6 +18,19 @@ pub fn http_status_retryable(status: StatusCode) -> bool {
     status.is_server_error()
 }
 
+/// Reads counterpart: only classic client errors are terminal — reads are
+/// cheap and a retry can land on a healthy LB backend.
+pub fn http_status_read_retryable(status: StatusCode) -> bool {
+    !matches!(
+        status,
+        StatusCode::BAD_REQUEST
+            | StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::NOT_FOUND
+            | StatusCode::METHOD_NOT_ALLOWED
+    )
+}
+
 /// Typed RPC failure chain for classifying errors in the retry logic.
 // TODO: once every chain client attaches typed failures, the string-matching
 // fallbacks in `is_retryable`/`is_provider_throttled` get deleted.
@@ -267,6 +280,20 @@ mod tests {
         // 5xx default to retryable
         for n in [500, 502, 503, 504, 599] {
             assert!(http_status_retryable(status(n)), "{n} should be retryable");
+        }
+    }
+
+    #[test]
+    fn http_status_read_retryable_table() {
+        let status = |n: u16| StatusCode::from_u16(n).unwrap();
+        // classic client errors are properties of the request: terminal
+        for n in [400, 401, 403, 404, 405] {
+            assert!(!http_status_read_retryable(status(n)), "{n}");
+        }
+        // everything else — including table-terminal 409/410/redirects — gets
+        // another cheap read attempt
+        for n in [402, 408, 409, 410, 422, 429, 301, 500] {
+            assert!(http_status_read_retryable(status(n)), "{n}");
         }
     }
 

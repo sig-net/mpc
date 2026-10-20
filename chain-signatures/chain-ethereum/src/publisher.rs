@@ -17,7 +17,7 @@ use alloy::transports::{
 use http::StatusCode;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, RpcFailure, SharedBackoff},
+    utils::retry::{http_status_read_retryable, retry_rpc, RpcFailure, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{SignId, Signature};
@@ -270,7 +270,7 @@ impl BatchPublisher {
                         Ok(receipt)
                     }
                     Ok(None) => Err(anyhow::anyhow!("Receipt not ready yet")),
-                    Err(e) => Err(anyhow::Error::new(e)),
+                    Err(e) => Err(receipt_poll_error(e)),
                 }
             }
         )
@@ -455,6 +455,22 @@ fn send_error(err: ContractError) -> anyhow::Error {
         }
     }
     anyhow::Error::new(err)
+}
+
+/// Receipt polling is a read post-broadcast: non-classic statuses stay
+/// retryable so a live tx isn't abandoned to failover; the duplicate-resend
+/// risk on long polls belongs to the tx-lifecycle TODO.
+fn receipt_poll_error(err: AlloyTransportError) -> anyhow::Error {
+    let (status, message) = rpc_error_parts(&err);
+    match status.and_then(|status| StatusCode::from_u16(status).ok()) {
+        Some(status) => RpcFailure::with_verdict(
+            status,
+            !http_status_read_retryable(status),
+            format!("RPC Error: {message}"),
+        )
+        .into(),
+        None => anyhow::Error::new(err),
+    }
 }
 
 #[async_trait::async_trait]
@@ -765,6 +781,102 @@ mod tests {
 
         // Assert it fetched successfully and caught the reverted status
         assert!(!receipt.status());
+    }
+
+    #[tokio::test]
+    async fn receipt_poll_transient_4xx_is_retried() {
+        let mut server = Server::new_async().await;
+        let tx_hash = B256::repeat_byte(0xcd);
+
+        // a live tx must survive a transient poll quirk
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(409)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32000, "message": "conflict"}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": mock_receipt_json(tx_hash, "0x1")
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut publisher = test_publisher(&server.url());
+        publisher.config.receipt_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            max_times: 2,
+            jitter: false,
+        };
+
+        let receipt = publisher
+            .wait_for_transaction_receipt(tx_hash, &[SignId::new([5u8; 32])])
+            .await
+            .unwrap_or_else(|err| {
+                panic!("transient 409 must not abandon the receipt poll: {err:#}")
+            });
+        assert!(receipt.status());
+    }
+
+    #[tokio::test]
+    async fn nonce_fetch_409_fails_fast() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+
+        // pre-broadcast: terminal is intended, failover covers delivery
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(409)
+            .with_body("conflict")
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .expect(0)
+            .create_async()
+            .await;
+
+        let mut publisher = test_publisher(&server.url());
+        publisher.config.send_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            max_times: 2,
+            jitter: false,
+        };
+
+        let err = publisher
+            .send_responses(vec![], 21000, &[SignId::new([6u8; 32])])
+            .await
+            .expect_err("nonce fetch must fail");
+        assert!(!is_retryable(&err), "{err:#}");
     }
 
     #[tokio::test]

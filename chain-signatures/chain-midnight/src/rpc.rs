@@ -8,7 +8,9 @@ use jsonrpsee::core::client::{ClientT as _, Error as JsonrpseeClientError};
 use jsonrpsee::core::traits::ToRpcParams;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
-use mpc_chain_integration_core::utils::retry::{exhausted, is_retryable, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{
+    exhausted, http_status_read_retryable, is_retryable, RetryConfig,
+};
 use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClient, RpcClientT};
@@ -713,16 +715,7 @@ fn is_read_retryable(error: &anyhow::Error) -> bool {
     if let Some(status) = rejected_http_status(error) {
         // reads stay conservative: a retry reconnects onto a healthy LB
         // backend (#1469), so only classic client errors are terminal
-        return StatusCode::from_u16(status).map_or(true, |s| {
-            !matches!(
-                s,
-                StatusCode::BAD_REQUEST
-                    | StatusCode::UNAUTHORIZED
-                    | StatusCode::FORBIDDEN
-                    | StatusCode::NOT_FOUND
-                    | StatusCode::METHOD_NOT_ALLOWED
-            )
-        });
+        return StatusCode::from_u16(status).map_or(true, http_status_read_retryable);
     }
     if error.chain().any(|cause| {
         matches!(
