@@ -13,6 +13,7 @@ vi.mock("../src/submit.js", async (importOriginal) => ({
   warmupPublisher: submitMocks.warmupPublisher,
 }));
 
+import { PublisherError } from "../src/errors.js";
 import { handleLine } from "../src/protocol.js";
 import { closePublisher } from "../src/submit.js";
 import {
@@ -148,20 +149,44 @@ describe("handleLine", () => {
 describe("handleLine: the operation discriminator", () => {
   it("reports timing and starts publisher warmup at readiness", async () => {
     await expect(
-      answer(JSON.stringify({ id: 6, op: "ready", protocolVersion: 2 })),
+      answer(JSON.stringify({ id: 6, op: "ready", protocolVersion: 3 })),
     ).resolves.toEqual({
       id: 6,
       ok: true,
       ready: true,
-      protocolVersion: 2,
+      protocolVersion: 3,
       submitTimeoutMs: 6 * 60 * 1_000,
       recipeTtlMs: 5 * 60 * 1_000,
     });
-    expect(submitMocks.warmupPublisher).toHaveBeenCalledExactlyOnceWith(CONFIG);
+    expect(submitMocks.warmupPublisher).toHaveBeenCalledExactlyOnceWith(CONFIG, undefined);
+  });
+
+  it("hands a wallet snapshot from ready to the publisher warmup", async () => {
+    const reply = await answer(
+      JSON.stringify({ id: 6, op: "ready", protocolVersion: 3, walletSnapshot: "{}" }),
+    );
+
+    expect(reply).toMatchObject({ id: 6, ok: true, ready: true });
+    expect(submitMocks.warmupPublisher).toHaveBeenCalledExactlyOnceWith(CONFIG, "{}");
+  });
+
+  it("names `walletSnapshot` when it is not a string", async () => {
+    for (const walletSnapshot of [7, null, {}]) {
+      const reply = await answer(
+        JSON.stringify({ id: 6, op: "ready", protocolVersion: 3, walletSnapshot }),
+      );
+      expect(reply, String(walletSnapshot)).toMatchObject({
+        id: 6,
+        ok: false,
+        code: "bad_request",
+      });
+      expect(reply.message).toContain("`walletSnapshot`");
+    }
+    expect(submitMocks.warmupPublisher).not.toHaveBeenCalled();
   });
 
   it("requires the exact protocol version on ready", async () => {
-    for (const protocolVersion of [undefined, 0, 1, 3, "2", null]) {
+    for (const protocolVersion of [undefined, 0, 2, 4, "3", null]) {
       const reply = await answer(JSON.stringify({ id: 6, op: "ready", protocolVersion }));
 
       expect(reply, String(protocolVersion)).toMatchObject({
@@ -190,6 +215,79 @@ describe("handleLine: the operation discriminator", () => {
     const reply = await answer(JSON.stringify({ id: 21, op: "submit", intent: built.intent }));
 
     expect(reply).toEqual({ id: 21, ok: true, txId: STUB_TX_ID });
+  });
+
+  it("carries a refused submit's wallet state beside the message, not in it", async () => {
+    primeStub({
+      balanceTx: async () => {
+        throw new Error("Wallet.InsufficientFunds");
+      },
+      describe: async () => "dust(spendable=0 inFlight=5)",
+    });
+    const built = await answer(request());
+
+    const reply = await answer(JSON.stringify({ id: 27, op: "submit", intent: built.intent }));
+
+    expect(reply).toEqual({
+      id: 27,
+      ok: false,
+      code: "wallet_unfunded",
+      message: "Wallet.InsufficientFunds",
+      walletState: "dust(spendable=0 inFlight=5)",
+      walletUsed: true,
+    });
+  });
+
+  it("leaves `walletUsed` off a submit refused before the wallet was used", async () => {
+    primeStub({
+      proveTx: async () => {
+        throw new Error("proof server /prove request failed: ECONNREFUSED");
+      },
+    });
+    const built = await answer(request());
+
+    const reply = await answer(JSON.stringify({ id: 28, op: "submit", intent: built.intent }));
+
+    expect(reply).toMatchObject({ id: 28, ok: false, code: "internal" });
+    expect(reply).not.toHaveProperty("walletUsed");
+  });
+
+  it("answers a snapshot with the opened wallet's snapshot", async () => {
+    primeStub({ snapshot: async () => "snapshot-bytes" });
+    await Promise.resolve();
+
+    const reply = await answer(JSON.stringify({ id: 23, op: "snapshot" }));
+
+    expect(reply).toEqual({ id: 23, ok: true, walletSnapshot: "snapshot-bytes" });
+  });
+
+  it("refuses a snapshot until the wallet has synced, and while its coins are in flight", async () => {
+    expect(await answer(JSON.stringify({ id: 24, op: "snapshot" }))).toMatchObject({
+      id: 24,
+      ok: false,
+      code: "wallet_unsynced",
+    });
+
+    primeStub();
+    await Promise.resolve();
+    expect(await answer(JSON.stringify({ id: 25, op: "snapshot" }))).toMatchObject({
+      id: 25,
+      ok: false,
+      code: "wallet_unsynced",
+    });
+
+    await closePublisher();
+    primeStub({
+      snapshot: async () => {
+        throw new PublisherError("wallet_busy", "the funding wallet has coins in flight");
+      },
+    });
+    await Promise.resolve();
+    expect(await answer(JSON.stringify({ id: 26, op: "snapshot" }))).toMatchObject({
+      id: 26,
+      ok: false,
+      code: "wallet_busy",
+    });
   });
 
   it("names `intent` when it is not the hex the wire admits, or not an intent at all", async () => {
