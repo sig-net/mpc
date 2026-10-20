@@ -90,13 +90,17 @@ impl RpcFailure {
         self.terminal
     }
 
-    /// Carrier reproducing `e`'s classification — its verdict carrier, or the
-    /// first typed HTTP status — for fan-outs that can't share the error
-    /// value. `None` when `e` has no typed signal.
+    /// Carrier reproducing `e`'s classification — verdict carrier or first
+    /// typed status — with the full chain render as its message, so fan-out
+    /// copies keep outer contexts. `None` when `e` has no typed signal.
     pub fn from_chain(e: &anyhow::Error) -> Option<Self> {
         let (failure, status) = typed_signals(e);
         if let Some(failure) = failure {
-            return Some(failure.clone());
+            return Some(Self {
+                message: format!("{e:#}"),
+                status: failure.status,
+                terminal: failure.terminal,
+            });
         }
         status.map(|status| Self::with_status(status, format!("{e:#}")))
     }
@@ -347,14 +351,15 @@ mod tests {
 
     #[test]
     fn from_chain_reproduces_the_effective_classification() {
-        // carrier present: clone keeps its verdict
+        // carrier present: verdict kept, outer contexts survive the rebuild
         let err = anyhow::Error::new(RpcFailure::terminal("already accepted".into()))
             .context("exhausted after 3 attempts");
         let rebuilt = RpcFailure::from_chain(&err).unwrap();
         assert!(rebuilt.is_terminal());
         assert!(!is_retryable(
-            &anyhow::Error::new(rebuilt).context("fan-out")
+            &anyhow::Error::new(rebuilt.clone()).context("fan-out")
         ));
+        assert!(rebuilt.to_string().contains("exhausted after 3 attempts"));
 
         // no carrier, but a typed status: verdict derives from the status
         let err: anyhow::Error = {
