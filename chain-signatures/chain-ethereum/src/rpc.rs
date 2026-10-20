@@ -315,13 +315,15 @@ fn trace_output_to_bytes(
             .and_then(serde_json::Value::as_str)
             .filter(|r| !r.is_empty());
         match revert_reason {
+            // tracer-side inconsistency (the receipt succeeded): retryable
+            // verdict matching the watcher's never-resolve-from-one policy
             Some(reason) => {
-                return Err(anyhow::Error::new(RpcFailure::terminal(format!(
+                return Err(anyhow::Error::new(RpcFailure::retryable(format!(
                     "debug_traceTransaction reports transaction {tx_hash:#x} reverted: {error} ({reason})"
                 ))))
             }
             None => {
-                return Err(anyhow::Error::new(RpcFailure::terminal(format!(
+                return Err(anyhow::Error::new(RpcFailure::retryable(format!(
                     "debug_traceTransaction reports transaction {tx_hash:#x} errored: {error}"
                 ))))
             }
@@ -640,15 +642,15 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("execution reverted"));
         assert!(msg.contains("InsufficientBalance"));
-        // deterministic failure — terminal
+        // tracer-side inconsistency: retryable by policy
         assert!(
-            !is_retryable(&err),
-            "trace revert must be terminal: {err:#}"
+            is_retryable(&err),
+            "trace revert must stay retryable: {err:#}"
         );
     }
 
     #[test]
-    fn bails_terminal_on_errored_frame_without_reason() {
+    fn bails_retryable_on_errored_frame_without_reason() {
         let frame = json!({
             "type": "CALL",
             "error": "out of gas: intrinsic gas too low",
@@ -656,7 +658,10 @@ mod tests {
         let err = trace_output_to_bytes(B256::ZERO, &frame).expect_err("should bail");
         let msg = format!("{err}");
         assert!(msg.contains("out of gas"));
-        assert!(!is_retryable(&err), "trace error must be terminal: {err:#}");
+        assert!(
+            is_retryable(&err),
+            "trace error must stay retryable: {err:#}"
+        );
     }
 
     #[test]
