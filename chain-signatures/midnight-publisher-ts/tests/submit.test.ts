@@ -200,6 +200,21 @@ describe("handleSubmit: the flow", () => {
     expect(failure.walletState).toBe("dust(spendable=0 inFlight=5)");
   });
 
+  it("says whether the wallet was used, which only balance, finalize and submit do", async () => {
+    for (const [edges, walletUsed] of [
+      [{ requireReady: failing("DUST indexing is still catching up") }, false],
+      [{ proveTx: failing("proof server /prove request failed: ECONNREFUSED") }, false],
+      [{ balanceTx: failing("Wallet.InsufficientFunds") }, true],
+      [{ finalizeTx: failing("proof server /prove request failed: ECONNREFUSED") }, true],
+      [{ submitTx: failing("1010: Invalid Transaction: Custom error: 170") }, true],
+    ] as const) {
+      await closePublisher();
+      primeStub(edges);
+
+      expect((await refused(8)).walletUsed, Object.keys(edges)[0]).toBe(walletUsed);
+    }
+  });
+
   it("finds the cause Effect hides on a Symbol, which is where the classification lives", async () => {
     // Every node error is wrapped in a constant-message SubmissionError; matching only
     // the rendered message would classify every rejection as a plain `internal`.

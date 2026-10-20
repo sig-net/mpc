@@ -207,6 +207,16 @@ async function withWalletState(error: unknown): Promise<PublisherError> {
   return new PublisherError(failure.code, failure.message, {
     cause: failure.cause,
     walletState: await wallet.describe(),
+    walletUsed: failure.walletUsed,
+  });
+}
+
+// Only a failure from here on can say anything about the wallet a snapshot restored.
+function walletFailure(error: unknown): PublisherError {
+  const failure = asPublisherError(error);
+  return new PublisherError(failure.code, failure.message, {
+    cause: failure.cause,
+    walletUsed: true,
   });
 }
 
@@ -275,6 +285,10 @@ async function submitOnce(config: Config, id: number, intent: Uint8Array): Promi
   // spending; the caller has to learn its post may land anyway.
   const timeout = ambiguousSubmit(`submit exceeded the ${SUBMIT_TIMEOUT_MS} ms deadline`);
   const answerBudgetMs = remaining();
-  if (answerBudgetMs <= 0) throw timeout;
-  return withDeadline(work, answerBudgetMs, timeout);
+  try {
+    if (answerBudgetMs <= 0) throw timeout;
+    return await withDeadline(work, answerBudgetMs, timeout);
+  } catch (error) {
+    throw walletFailure(error);
+  }
 }

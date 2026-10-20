@@ -112,8 +112,8 @@ async function startFacade(
 }
 
 // A restored wallet only replays what happened since its snapshot, which takes seconds; one
-// still behind after a full sync's worth of time is not going to catch up.
-const RESTORED_SYNC_TIMEOUT_MS = 10 * 60 * 1000;
+// still behind after this long falls back to a full sync rather than holding the publisher.
+const RESTORED_SYNC_TIMEOUT_MS = 3 * 60 * 1000;
 
 const DESCRIBE_TIMEOUT_MS = 1_000;
 // A submit returns before the wallet's own sync has seen its transaction confirmed, about a

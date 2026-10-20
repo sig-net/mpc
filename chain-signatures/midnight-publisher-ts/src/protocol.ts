@@ -180,6 +180,8 @@ export async function handleLine(config: Config, line: string): Promise<string> 
       code,
       message: named ? error.message : describeFailure(error),
       walletState,
+      // Present only when true: the parent counts only these against a restored wallet.
+      walletUsed: named && error.walletUsed ? true : undefined,
     });
   }
 }

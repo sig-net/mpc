@@ -234,7 +234,22 @@ describe("handleLine: the operation discriminator", () => {
       code: "wallet_unfunded",
       message: "Wallet.InsufficientFunds",
       walletState: "dust(spendable=0 inFlight=5)",
+      walletUsed: true,
     });
+  });
+
+  it("leaves `walletUsed` off a submit refused before the wallet was used", async () => {
+    primeStub({
+      proveTx: async () => {
+        throw new Error("proof server /prove request failed: ECONNREFUSED");
+      },
+    });
+    const built = await answer(request());
+
+    const reply = await answer(JSON.stringify({ id: 28, op: "submit", intent: built.intent }));
+
+    expect(reply).toMatchObject({ id: 28, ok: false, code: "internal" });
+    expect(reply).not.toHaveProperty("walletUsed");
   });
 
   it("answers a snapshot with the opened wallet's snapshot", async () => {

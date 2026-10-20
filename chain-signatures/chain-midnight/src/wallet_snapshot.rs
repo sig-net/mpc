@@ -20,7 +20,7 @@ pub trait WalletSnapshotStore: Send + Sync {
 /// replays from its last settled publish.
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// Restored children retired in a row, with no submit landing in between, before their
+/// Restored children that fail in a row, with no submit landing in between, before their
 /// snapshot is dropped. Above one, because a healthy wallet is also refused at times.
 pub(crate) const RESTORE_STRIKES: u32 = 3;
 
@@ -88,8 +88,8 @@ impl Snapshots {
         *locked(&self.strikes) = 0;
     }
 
-    /// Counts a restored child retired since the last landed submit; true once
-    /// `RESTORE_STRIKES` have been retired in a row.
+    /// Counts a restored child that died, or was refused after using its wallet, since the
+    /// last landed submit; true once `RESTORE_STRIKES` have failed in a row.
     pub(crate) fn strike(&self) -> bool {
         let mut strikes = locked(&self.strikes);
         *strikes += 1;

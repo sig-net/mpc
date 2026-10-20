@@ -294,16 +294,23 @@ describe("openFundingWallet with a snapshot", () => {
     expect(fresh.stop).not.toHaveBeenCalled();
   });
 
-  it("syncs from the start when the restored wallet does not catch up in time", async () => {
+  it("syncs from the start when the restored wallet does not catch up within three minutes", async () => {
     vi.useFakeTimers();
     const stuck = stubFacade();
-    vi.mocked(stuck.state).mockReturnValue(new Subject() as never);
+    const behind = new Subject<ReturnType<typeof facadeState>>();
+    vi.mocked(stuck.state).mockReturnValue(behind as never);
     sdk.init.mockResolvedValueOnce(stuck);
     const fresh = stubFacade();
     sdk.initialiseWalletFacade.mockResolvedValueOnce(fresh);
 
     const opening = openFundingWallet(KEYS, "undeployed", ENDPOINTS, SNAPSHOT);
-    await vi.advanceTimersByTimeAsync(10 * 60 * 1_000);
+    // A stuck restore still reports progress, just never a synced state.
+    for (let second = 0; second < 179; second += 1) {
+      behind.next(facadeState(false));
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(stuck.stop).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
     await opening;
 
     expect(stuck.stop).toHaveBeenCalledOnce();

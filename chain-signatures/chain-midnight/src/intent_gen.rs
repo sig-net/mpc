@@ -47,6 +47,9 @@ struct Refusal {
     /// The child's account of its funding wallet, logged but kept out of the error text:
     /// retry and throttle detection scan that text for status codes, which counts can mimic.
     wallet_state: Option<String>,
+    /// Whether the submit had started balancing with the funding wallet: only such a
+    /// refusal can implicate the wallet a snapshot restored.
+    wallet_used: bool,
 }
 
 impl std::fmt::Display for Refusal {
@@ -339,27 +342,15 @@ impl IntentGen {
                 // Restored wallets that keep being refused without one submit landing may
                 // have brought a fault back with the snapshot, and every later restore would
                 // too, so the next child syncs from the start. Snapshots this child kept
-                // descend from the same restore.
-                let discard = live.restored && self.snapshots.strike();
-                if discard {
+                // descend from the same restore. A refusal from before the wallet was used,
+                // such as a proof server that is down, says nothing about the snapshot.
+                let wallet_used = refusal.is_some_and(|refusal| refusal.wallet_used);
+                if live.restored && wallet_used && self.snapshots.strike() {
                     tracing::warn!(
                         "discarding the midnight wallet snapshot after its restored wallets \
                          failed to land a submit; the next builder syncs from the start"
                     );
                     self.snapshots.forget().await;
-                }
-                // Its last chance to hand over a snapshot: a settled wallet restores as well
-                // as any, and a long refusal otherwise retires every child before one is due.
-                // A wallet whose snapshot was just discarded is not kept.
-                if !discard && self.snapshots.due() {
-                    let last = exchange(
-                        live,
-                        &SnapshotRequest {},
-                        Operation::Snapshot,
-                        &self.config.publisher,
-                    )
-                    .await;
-                    self.keep_snapshot(last).await;
                 }
                 // An ambiguous submit's wallet work may also still be running, so no later
                 // request may reuse this child either way.
@@ -766,6 +757,7 @@ fn granted(reply: WireReply) -> anyhow::Result<WireReply> {
             code: reply.code.unwrap_or_else(|| "no code".to_string()),
             message: reply.message.unwrap_or_else(|| "no message".to_string()),
             wallet_state: reply.wallet_state,
+            wallet_used: reply.wallet_used.unwrap_or(false),
         };
         let ambiguous = refusal.code == "ambiguous_submit";
         let error = anyhow::Error::new(refusal);
@@ -813,6 +805,8 @@ struct WireReply {
     message: Option<String>,
     /// A refused submit's account of the funding wallet.
     wallet_state: Option<String>,
+    /// Set on a refused submit that had started using the funding wallet.
+    wallet_used: Option<bool>,
 }
 
 #[cfg(test)]
@@ -1762,13 +1756,11 @@ mod tests {
         );
     }
 
-    const UNFUNDED: &str =
-        r#""ok":false,"code":"wallet_unfunded","message":"could not balance dust""#;
-    const CONFLICT: &str =
-        r#""ok":false,"code":"state_conflict","message":"1010: Invalid Transaction""#;
+    const UNFUNDED: &str = r#""ok":false,"code":"wallet_unfunded","message":"could not balance dust","walletUsed":true"#;
+    const CONFLICT: &str = r#""ok":false,"code":"state_conflict","message":"1010: Invalid Transaction","walletUsed":true"#;
 
     #[tokio::test]
-    async fn a_retired_child_hands_over_its_settled_wallet_first() {
+    async fn a_retired_child_is_not_asked_for_a_snapshot() {
         let (readies, asked) = (
             StubLog::new("snap-last-ready"),
             StubLog::new("snap-last-asked"),
@@ -1783,35 +1775,16 @@ mod tests {
         builder.submit(&[0x0a]).await.unwrap_err();
 
         assert!(builder.session.lock().await.is_none());
-        assert_eq!(asked.lines().len(), 1);
-        assert_eq!(store.stored().as_deref(), Some("fresh"));
+        assert!(
+            asked.lines().is_empty(),
+            "a refused wallet's state is not kept"
+        );
+        assert_eq!(store.saves(), 0);
         let _ = builder.build(&sample_request()).await;
         assert_eq!(
             readies.lines()[1],
-            r#"{"id":0,"op":"ready","protocolVersion":3,"walletSnapshot":"fresh"}"#
+            r#"{"id":0,"op":"ready","protocolVersion":3}"#
         );
-    }
-
-    #[tokio::test]
-    async fn a_retired_child_s_unsettled_wallet_replaces_no_snapshot() {
-        let (readies, asked) = (
-            StubLog::new("snap-unsettled-ready"),
-            StubLog::new("snap-unsettled-asked"),
-        );
-        let busy = r#""ok":false,"code":"wallet_busy","message":"coins in flight""#;
-        let store = Arc::new(MemoryStore::default());
-        let builder = spawn_with(
-            &snapshot_stub(&readies, &asked, &[busy], CONFLICT),
-            store.clone(),
-        )
-        .await;
-
-        builder.submit(&[0x0a]).await.unwrap_err();
-
-        assert!(builder.session.lock().await.is_none());
-        assert_eq!(asked.lines().len(), 1);
-        assert_eq!(store.saves(), 0);
-        assert_eq!(builder.snapshots.latest(), None);
     }
 
     #[tokio::test]
@@ -1909,11 +1882,34 @@ mod tests {
             readies[RESTORE_STRIKES as usize],
             r#"{"id":0,"op":"ready","protocolVersion":3}"#
         );
-        assert_eq!(
-            asked.lines().len(),
-            RESTORE_STRIKES as usize - 1,
-            "the child whose snapshot is discarded is not asked for another"
+        assert!(
+            asked.lines().is_empty(),
+            "no retiring child is asked for a snapshot"
         );
+    }
+
+    #[tokio::test]
+    async fn restored_children_refused_before_using_the_wallet_keep_the_snapshot() {
+        let (readies, asked) = (
+            StubLog::new("snap-prewallet-ready"),
+            StubLog::new("snap-prewallet-asked"),
+        );
+        let store = MemoryStore::holding("stored");
+        let proving =
+            r#""ok":false,"code":"internal","message":"proof server /prove request failed""#;
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[FRESH], proving),
+            store.clone(),
+        )
+        .await;
+
+        for _ in 0..=RESTORE_STRIKES {
+            builder.submit(&[0x0a]).await.unwrap_err();
+            assert!(builder.session.lock().await.is_none());
+        }
+
+        assert_eq!(builder.snapshots.latest().as_deref(), Some("stored"));
+        assert_eq!(store.clears(), 0);
     }
 
     /// A child that logs its ready line to `readies`, then dies on its first request.
@@ -2033,8 +2029,9 @@ mod tests {
         )
         .await;
 
-        // The first child syncs from the start and hands over its snapshot; the restored
-        // ones after it stop one short of a discard.
+        // The first child syncs from the start and keeps its snapshot; the restored ones
+        // after it stop one short of a discard.
+        builder.refresh_snapshot().await;
         for _ in 0..RESTORE_STRIKES {
             builder.submit(&[0x0a]).await.unwrap_err();
         }
