@@ -3,11 +3,14 @@
 use std::time::Duration;
 
 use anyhow::Context as _;
+use http::StatusCode;
 use jsonrpsee::core::client::{ClientT as _, Error as JsonrpseeClientError};
 use jsonrpsee::core::traits::ToRpcParams;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
-use mpc_chain_integration_core::utils::retry::{is_retryable, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{
+    exhausted, http_status_read_retryable, is_retryable, RetryConfig,
+};
 use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClient, RpcClientT};
@@ -710,7 +713,9 @@ fn is_read_retryable(error: &anyhow::Error) -> bool {
         return false;
     }
     if let Some(status) = rejected_http_status(error) {
-        return is_retryable(&anyhow::anyhow!("HTTP status {status}"));
+        // reads stay conservative: a retry reconnects onto a healthy LB
+        // backend (#1469), so only classic client errors are terminal
+        return StatusCode::from_u16(status).map_or(true, http_status_read_retryable);
     }
     if error.chain().any(|cause| {
         matches!(
@@ -758,7 +763,7 @@ where
             );
         })
         .await
-        .map_err(|error| error.context(format!("exhausted after {} attempts", retry_count + 1)))
+        .map_err(|error| exhausted(error, retry_count))
 }
 
 impl Reads {
@@ -1551,10 +1556,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_http_statuses_follow_the_shared_retry_partition() {
+    async fn real_http_statuses_follow_the_read_partition() {
+        // 409 retries on purpose: another LB backend may serve the read fine
         for (status, reason, expected_attempts) in [
             (403, "Forbidden", 1),
+            (409, "Conflict", 3),
             (429, "Too Many Requests", 3),
+            (402, "Payment Required", 3),
             (500, "Internal Server Error", 3),
         ] {
             let (address, calls, server) = http_status_server(status, reason).await;

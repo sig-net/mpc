@@ -14,6 +14,7 @@ async-trait.workspace = true
 borsh.workspace = true
 futures-util.workspace = true
 hex.workspace = true
+http.workspace = true
 k256.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
