@@ -1,5 +1,5 @@
 use cait_sith::protocol::Participant;
-use mpc_primitives::SignId;
+use mpc_primitives::{RequestKind, SignId};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::metrics::messaging::{
@@ -34,16 +34,27 @@ pub enum SubscribeId {
     Signature(SignId, PresignatureId),
 }
 
+pub type TriplePosit = (TripleId, Participant, PositAction);
+pub type PresignaturePosit = (FullPresignatureId, Participant, PositAction);
+pub type SignaturePosit = (
+    SignId,
+    RequestKind,
+    PresignatureId,
+    Round,
+    Participant,
+    PositAction,
+);
+
 pub enum SubscribeResponse {
     Generating(mpsc::Receiver<GeneratingMessage>),
     Resharing(mpsc::Receiver<ResharingMessage>),
     Ready(mpsc::Receiver<ReadyMessage>),
     Triple(mpsc::Receiver<TripleMessage>),
-    TriplePosit(mpsc::Receiver<(TripleId, Participant, PositAction)>),
+    TriplePosit(mpsc::Receiver<TriplePosit>),
     Presignature(mpsc::Receiver<PresignatureMessage>),
-    PresignaturePosit(mpsc::Receiver<(FullPresignatureId, Participant, PositAction)>),
+    PresignaturePosit(mpsc::Receiver<PresignaturePosit>),
     Signature(mpsc::Receiver<SignatureMessage>),
-    SignaturePosit(mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)>),
+    SignaturePosit(mpsc::Receiver<SignaturePosit>),
 }
 
 /// Ties a message type to the `SubscribeResponse` variant carrying its receiver.
@@ -69,11 +80,11 @@ impl_subscription_message! {
     ResharingMessage => Resharing,
     ReadyMessage => Ready,
     TripleMessage => Triple,
-    (TripleId, Participant, PositAction) => TriplePosit,
+    TriplePosit => TriplePosit,
     PresignatureMessage => Presignature,
-    (FullPresignatureId, Participant, PositAction) => PresignaturePosit,
+    PresignaturePosit => PresignaturePosit,
     SignatureMessage => Signature,
-    (SignId, PresignatureId, Round, Participant, PositAction) => SignaturePosit,
+    SignaturePosit => SignaturePosit,
 }
 
 pub enum SubscribeRequestAction {

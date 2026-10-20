@@ -11,7 +11,7 @@ use crate::{
     signing::der_encode_signature,
     CantonChainCtx,
 };
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, RpcFailure, SharedBackoff};
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind};
 use std::{sync::Arc, time::Duration};
@@ -44,6 +44,7 @@ pub struct CantonClient {
     auth_provider: CantonAuthProvider,
     telemetry: Arc<dyn PublisherTelemetry>,
     retry_strategy: RetryConfig,
+    shared_backoff: SharedBackoff,
 }
 
 impl std::fmt::Debug for CantonClient {
@@ -59,6 +60,7 @@ impl CantonClient {
     pub async fn new(
         config: &CantonConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
+        shared_backoff: SharedBackoff,
     ) -> anyhow::Result<Self> {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -80,6 +82,7 @@ impl CantonClient {
             default_canton_rpc_retry_strategy(),
             http_client,
             auth_provider,
+            shared_backoff,
         ))
     }
 
@@ -99,6 +102,7 @@ impl CantonClient {
         retry_strategy: RetryConfig,
         http_client: reqwest::Client,
         auth_provider: CantonAuthProvider,
+        shared_backoff: SharedBackoff,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -106,6 +110,7 @@ impl CantonClient {
             auth_provider,
             telemetry,
             retry_strategy,
+            shared_backoff,
         }
     }
 
@@ -130,7 +135,6 @@ impl CantonClient {
             .bearer_auth(token))
     }
 
-    // TODO: this method is only used in integration tests, cosider hiding it behind a feature flag
     async fn auth_get(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
         let token = self.bearer_token().await?;
         Ok(self
@@ -143,6 +147,7 @@ impl CantonClient {
         retry_rpc!(
             CANTON_RPC_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
             "fetch_ledger_end",
             {
                 let resp = self.auth_get("/v2/state/ledger-end").await?.send().await?;
@@ -191,6 +196,7 @@ impl CantonClient {
         retry_rpc!(
             CANTON_RPC_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
             "fetch_active_contracts",
             {
                 let resp = self
@@ -228,12 +234,14 @@ impl CantonClient {
         retry_rpc!(
             CANTON_RPC_TIMEOUT,
             self.retry_strategy,
+            self.shared_backoff,
+            "submit command",
             |attempt, err, sleep| {
                 tracing::warn!(
                     context,
                     attempt,
                     max_attempts,
-                    error = %err,
+                    error = %format_args!("{err:#}"),
                     retry_in = ?sleep,
                     "canton submit_and_wait failed, retrying"
                 );
@@ -257,7 +265,20 @@ impl CantonClient {
                         // Acceptance ends submission retries; verified ledger events still settle the request.
                         return Ok(SubmissionOutcome::AlreadyAccepted);
                     }
-                    anyhow::bail!("{context} failed: {status} {body}");
+                    // SUBMISSION_ALREADY_IN_FLIGHT is another submission racing
+                    // us — retryable despite the 409; other failures classify
+                    // by their HTTP status
+                    let code = serde_json::from_str::<JsCantonError>(&body)
+                        .ok()
+                        .map(|error| error.code);
+                    let in_flight = code.as_deref() == Some("SUBMISSION_ALREADY_IN_FLIGHT");
+                    let message = format!("{context} failed: {status} {body}");
+                    let failure = if in_flight {
+                        RpcFailure::with_verdict(status, false, message)
+                    } else {
+                        RpcFailure::with_status(status, message)
+                    };
+                    return Err(anyhow::Error::new(failure));
                 }
                 Ok(SubmissionOutcome::Transaction(resp.json().await?))
             }
@@ -295,7 +316,10 @@ async fn check_response(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("{context} failed: {status} {text}");
+        // typed carrier: classification reads the status, not the hex-laden body
+        // TODO: fold reads into the same code-aware classification as the submit path
+        let failure = RpcFailure::with_status(status, format!("{context} failed: {status} {text}"));
+        return Err(anyhow::Error::new(failure));
     }
     Ok(resp)
 }
@@ -371,7 +395,7 @@ impl ChainPublisher for CantonClient {
                     ?sign_id,
                     choice,
                     request_id = %request_id_hex,
-                    error = %err,
+                    error = %format_args!("{err:#}"),
                     "canton: failed to publish signature"
                 );
             })?;
@@ -404,6 +428,7 @@ mod tests {
     use super::*;
     use crate::config::{CantonAuthConfig, CantonConfig};
     use mockito::{Matcher, Server, ServerGuard};
+    use mpc_chain_integration_core::utils::retry::{is_retryable, retry_op};
     use mpc_chain_integration_core::{utils::test::make_publish_action, NoopPublisherTelemetry};
     use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignId, SignKind};
     use serde_json::json;
@@ -467,6 +492,7 @@ mod tests {
         make_publish_action(
             Chain::Canton,
             SignKind::RespondBidirectional(RespondBidirectionalTx {
+                attestation: None,
                 tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
                 output: vec![1, 2, 3],
                 origin_indexed_at: None,
@@ -533,10 +559,14 @@ mod tests {
                 .create_async()
                 .await;
             let telemetry = Arc::new(PublishCounter::default());
-            let client = CantonClient::new(&mock_canton_config(&server.url()), telemetry.clone())
-                .await
-                .unwrap()
-                .with_retry_strategy(fast_retry_strategy());
+            let client = CantonClient::new(
+                &mock_canton_config(&server.url()),
+                telemetry.clone(),
+                SharedBackoff::new(),
+            )
+            .await
+            .unwrap()
+            .with_retry_strategy(fast_retry_strategy());
 
             let result = client.publish_signature(&action).await;
 
@@ -597,13 +627,17 @@ mod tests {
             .create_async()
             .await;
         let telemetry = Arc::new(PublishCounter::default());
-        let client = CantonClient::new(&mock_canton_config(&server.url()), telemetry.clone())
-            .await
-            .unwrap()
-            .with_retry_strategy(fast_retry_strategy());
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            telemetry.clone(),
+            SharedBackoff::new(),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
         let action = final_response_action();
 
-        let result = retry_rpc!(Duration::MAX, fast_retry_strategy(), "publish", {
+        let result = retry_op!(Duration::MAX, fast_retry_strategy(), "publish", {
             client.publish_signature(&action).await
         });
         drop(release);
@@ -641,6 +675,7 @@ mod tests {
             let client = CantonClient::new(
                 &mock_canton_config(&server.url()),
                 Arc::new(NoopPublisherTelemetry),
+                SharedBackoff::new(),
             )
             .await
             .unwrap()
@@ -661,6 +696,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_submit_conflict_verdict_depends_on_canton_code() {
+        // fast_retry_strategy allows 2 retries (3 attempts): in-flight races get
+        // retried, other conflicts fail fast on the terminal verdict
+        for (body, attempts) in [
+            (r#"{"code":"SUBMISSION_ALREADY_IN_FLIGHT"}"#, 3),
+            (r#"{"code":"DUPLICATE_CONTRACT_KEY"}"#, 1),
+        ] {
+            let mut server = setup_mock_server_with_auth().await;
+            let mock = server
+                .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+                .with_status(409)
+                .with_body(body)
+                .expect(attempts)
+                .create_async()
+                .await;
+            let client = CantonClient::new(
+                &mock_canton_config(&server.url()),
+                Arc::new(NoopPublisherTelemetry),
+                SharedBackoff::new(),
+            )
+            .await
+            .unwrap()
+            .with_retry_strategy(fast_retry_strategy());
+
+            let err = client
+                .publish_signature(&final_response_action())
+                .await
+                .unwrap_err();
+            let retryable = mpc_chain_integration_core::utils::retry::is_retryable(&err);
+            assert_eq!(retryable, attempts > 1, "body {body}");
+            mock.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
     async fn test_submit_and_wait_duplicate_cannot_fabricate_transaction() {
         let mut server = setup_mock_server_with_auth().await;
         let response = server
@@ -673,6 +743,7 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
@@ -708,10 +779,14 @@ mod tests {
             .await;
 
         let telemetry = Arc::new(PublishCounter::default());
-        let client = CantonClient::new(&mock_canton_config(&server.url()), telemetry.clone())
-            .await
-            .unwrap()
-            .with_retry_strategy(fast_retry_strategy());
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            telemetry.clone(),
+            SharedBackoff::new(),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
         let chain_ctx = borsh::to_vec(&CantonChainCtx {
             sign_event_contract_id: "cid".to_string(),
         })
@@ -758,6 +833,7 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
@@ -768,6 +844,7 @@ mod tests {
         .unwrap();
 
         let tx = RespondBidirectionalTx {
+            attestation: None,
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![1, 2, 3],
             origin_indexed_at: None,
@@ -789,12 +866,14 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
         .with_retry_strategy(fast_retry_strategy());
 
         let tx = RespondBidirectionalTx {
+            attestation: None,
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
             origin_indexed_at: None,
@@ -825,6 +904,7 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
@@ -834,6 +914,7 @@ mod tests {
         })
         .unwrap();
         let tx = RespondBidirectionalTx {
+            attestation: None,
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
             origin_indexed_at: None,
@@ -846,15 +927,18 @@ mod tests {
         );
 
         let err = client.publish_signature(&action).await.unwrap_err();
-        assert!(err.to_string().contains("500"));
-        assert!(err.to_string().contains("exhausted"));
+
+        // Check that the error contains the HTTP status code and indicates that retries were exhausted.
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("500"));
+        assert!(rendered.contains("exhausted"));
         submit_mock.assert_async().await;
     }
 
     #[tokio::test]
     async fn test_publish_canton_retries_on_500_then_succeeds() {
         let mut server = setup_mock_server_with_auth().await;
-        // First submit attempt → 500, second → success. The retry_rpc! wrapper
+        // First submit attempt → 500, second → success. The retry_op! wrapper
         // should transparently retry the failing call and recover.
         let _fail = server
             .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
@@ -874,6 +958,7 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
@@ -883,6 +968,7 @@ mod tests {
         })
         .unwrap();
         let tx = RespondBidirectionalTx {
+            attestation: None,
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
             origin_indexed_at: None,
@@ -913,6 +999,7 @@ mod tests {
         let client = CantonClient::new(
             &mock_canton_config(&server.url()),
             Arc::new(NoopPublisherTelemetry),
+            SharedBackoff::new(),
         )
         .await
         .unwrap()
@@ -922,6 +1009,7 @@ mod tests {
         })
         .unwrap();
         let tx = RespondBidirectionalTx {
+            attestation: None,
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
             output: vec![],
             origin_indexed_at: None,
@@ -934,7 +1022,137 @@ mod tests {
         );
 
         let err = client.publish_signature(&action).await.unwrap_err();
-        assert!(err.to_string().contains("400"));
+        assert!(format!("{err:#}").contains("400"));
         submit_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_gate_cooldown_engages_on_throttled_response() {
+        for status in [429, 402] {
+            let mut server = setup_mock_server_with_auth().await;
+            server
+                .mock("GET", "/v2/state/ledger-end")
+                .with_status(status)
+                .expect(1)
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/v2/state/ledger-end")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(json!({"offset": 42}).to_string())
+                .expect(1)
+                .create_async()
+                .await;
+
+            // base cooldown well above backon's 1-10ms delays, so the gate wait is observable
+            let gate = SharedBackoff::with_cooldowns(
+                Duration::from_millis(300),
+                Duration::from_millis(600),
+            );
+            let client = CantonClient::new(
+                &mock_canton_config(&server.url()),
+                Arc::new(NoopPublisherTelemetry),
+                gate,
+            )
+            .await
+            .unwrap()
+            .with_retry_strategy(fast_retry_strategy());
+
+            let start = std::time::Instant::now();
+            assert_eq!(client.fetch_ledger_end().await.unwrap(), 42);
+            // the gated second attempt waits out the window; the ungated macro
+            // would finish in backon-delay time (~ms)
+            assert!(
+                start.elapsed() >= Duration::from_millis(250),
+                "gated retry must wait out the {status} cooldown, took {:?}",
+                start.elapsed()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rpc_gate_spans_clients_sharing_one_backoff() {
+        let mut server = setup_mock_server_with_auth().await;
+        server
+            .mock("GET", "/v2/state/ledger-end")
+            .with_status(429)
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/v2/state/ledger-end")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({"offset": 7}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // One-shot strategy: the throttled client fails after a single attempt,
+        // so it never waits out the window it opened.
+        let one_shot = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_times: 0,
+            jitter: false,
+        };
+
+        // one gate for both clients — production wiring shares
+        // stack.gate(Chain::Canton) between publisher and indexer clients
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(400), Duration::from_millis(800));
+        let config = mock_canton_config(&server.url());
+        let throttled = CantonClient::new(&config, Arc::new(NoopPublisherTelemetry), gate.clone())
+            .await
+            .unwrap()
+            .with_retry_strategy(one_shot);
+        let healthy = CantonClient::new(&config, Arc::new(NoopPublisherTelemetry), gate)
+            .await
+            .unwrap()
+            .with_retry_strategy(fast_retry_strategy());
+
+        assert!(throttled.fetch_ledger_end().await.is_err());
+
+        let start = std::time::Instant::now();
+        assert_eq!(healthy.fetch_ledger_end().await.unwrap(), 7);
+        assert!(
+            start.elapsed() >= Duration::from_millis(300),
+            "healthy client must wait out the cooldown opened by the throttled one, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_4xx_fails_fast_and_hex_bodies_do_not_engage_the_gate() {
+        let mut server = setup_mock_server_with_auth().await;
+        let mock = server
+            .mock("GET", "/v2/state/ledger-end")
+            .with_status(409)
+            // hex ids in the body must not read as status codes
+            .with_body("conflict over party 0xa429f and command c402e58")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let gate = SharedBackoff::new();
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+            gate.clone(),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
+
+        let err = client.fetch_ledger_end().await.unwrap_err();
+
+        // Check_response wraps the response in RpcFailure with the typed status:
+        // 409 is terminal, so the retry loop stops after the single attempt
+        assert!(!is_retryable(&err), "409 must classify as terminal");
+
+        // The gate should not have engaged because the 409 response is terminal and not a throttle.
+        assert_eq!(gate.remaining(), Duration::ZERO);
+        mock.assert_async().await;
     }
 }

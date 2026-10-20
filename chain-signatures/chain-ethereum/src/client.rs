@@ -4,14 +4,11 @@ use alloy::rpc::types::{Block, BlockId, Log, TransactionReceipt};
 use futures_util::{stream, Stream, StreamExt};
 
 use crate::config::RpcConfig;
-use crate::indexer_eth_direct_rpc;
+use crate::rpc::RpcEthereumClient;
 use crate::EthConfig;
 #[cfg(test)]
 use mpc_chain_integration_core::utils::retry::RetryConfig;
-use mpc_chain_integration_core::utils::retry::{retry_rpc_gated, SharedBackoff};
-
-#[cfg(feature = "helios")]
-use super::indexer_eth_helios;
+use mpc_chain_integration_core::utils::retry::{retry_rpc, SharedBackoff};
 
 /// Block number alias shared by the client and indexer.
 pub type BlockNumber = u64;
@@ -145,17 +142,10 @@ async fn fetch_catchup_batch(
 
 #[derive(Clone)]
 pub struct EthereumClient {
-    inner: EthereumClientInner,
+    rpc_client: RpcEthereumClient,
     rpc: RpcConfig,
     /// Global 429 cooldown gate shared by all RPC calls through this client
     shared_backoff: SharedBackoff,
-}
-
-#[derive(Clone)]
-pub enum EthereumClientInner {
-    #[cfg(feature = "helios")]
-    Helios(indexer_eth_helios::HeliosEthereumClient),
-    DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient),
 }
 
 impl EthereumClient {
@@ -163,23 +153,8 @@ impl EthereumClient {
         eth: EthConfig,
         shared_backoff: SharedBackoff,
     ) -> anyhow::Result<EthereumClient> {
-        // Without the `helios` feature the CLI already forces `light_client`
-        // to false (with a warning), so only the direct-RPC client exists.
-        #[cfg(feature = "helios")]
-        let inner = if eth.light_client {
-            EthereumClientInner::Helios(indexer_eth_helios::build_client(eth.clone()).await?)
-        } else {
-            EthereumClientInner::DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient::new(
-                eth.execution_rpc_http_url,
-            ))
-        };
-        #[cfg(not(feature = "helios"))]
-        let inner = EthereumClientInner::DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient::new(
-            eth.execution_rpc_http_url,
-        ));
-
         Ok(Self {
-            inner,
+            rpc_client: RpcEthereumClient::new(eth.execution_rpc_http_url),
             rpc: eth.rpc.clone(),
             shared_backoff,
         })
@@ -197,35 +172,21 @@ impl EthereumClient {
         Ok(client)
     }
 
-    fn client_name(&self) -> &str {
-        match &self.inner {
-            #[cfg(feature = "helios")]
-            EthereumClientInner::Helios(_) => "Helios",
-            EthereumClientInner::DirectRpc(_) => "DirectRpc",
-        }
-    }
-
     /// Retrieves a block by its ID. Returns `Ok(Some(Block))` if the block is found,
     /// `Ok(None)` if the block is not found, or an error if the request fails.
     pub async fn get_block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
         let max_attempts = self.rpc.retry.max_times;
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
+            "get_block",
             |attempt, err, sleep| {
                 tracing::warn!(
-                    client = self.client_name(),
                     "get_block failed (attempt {attempt}/{max_attempts}) for {block_id:?}: {err:#}; retrying in {sleep:?}"
                 );
             },
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => client.get_block(block_id).await,
-                    EthereumClientInner::DirectRpc(client) => client.get_block(block_id).await,
-                }
-            }
+            { self.rpc_client.get_block(block_id).await }
         )
     }
 
@@ -237,34 +198,24 @@ impl EthereumClient {
         let max_attempts = self.rpc.retry.max_times;
         let num_blocks = block_ids.len();
 
-        let res = retry_rpc_gated!(
+        let res = retry_rpc!(
             self.rpc.batch_timeout,
             self.rpc.retry,
             self.shared_backoff,
+            "get_blocks",
             |attempt, err, sleep| {
                 tracing::warn!(
-                    client = self.client_name(),
                     num_blocks,
                     "get_blocks failed (attempt {attempt}/{max_attempts}): {err:#}; retrying in {sleep:?}"
                 );
             },
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => client.get_blocks(block_ids).await,
-                    EthereumClientInner::DirectRpc(client) => client.get_blocks(block_ids).await,
-                }
-            }
+            { self.rpc_client.get_blocks(block_ids).await }
         );
 
         match res {
             Ok(blocks) => blocks,
             Err(err) => {
-                tracing::warn!(
-                    client = self.client_name(),
-                    num_blocks,
-                    "get_blocks failed: {err:#}"
-                );
+                tracing::warn!(num_blocks, "get_blocks failed: {err:#}");
                 block_ids.iter().copied().map(MaybeBlock::Missing).collect()
             }
         }
@@ -277,42 +228,24 @@ impl EthereumClient {
         &self,
         tx_hash: B256,
     ) -> anyhow::Result<Option<TransactionReceipt>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
             "get_transaction_receipt",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => {
-                        client.get_transaction_receipt(tx_hash).await
-                    }
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.get_transaction_receipt(tx_hash).await
-                    }
-                }
-            }
+            { self.rpc_client.get_transaction_receipt(tx_hash).await }
         )
     }
 
     /// Fetch all logs emitted by `address` within `block_id` via a single
     /// server-filtered `eth_getLogs`.
     pub async fn get_logs(&self, address: Address, block_id: BlockId) -> anyhow::Result<Vec<Log>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
             "get_logs",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => client.get_logs(address, block_id).await,
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.get_logs(address, block_id).await
-                    }
-                }
-            }
+            { self.rpc_client.get_logs(address, block_id).await }
         )
     }
 
@@ -324,22 +257,12 @@ impl EthereumClient {
         address: Address,
         block_ids: &[BlockId],
     ) -> anyhow::Result<Vec<Vec<Log>>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.batch_timeout,
             self.rpc.retry,
             self.shared_backoff,
             "get_logs_batch",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => {
-                        client.get_logs_batch(address, block_ids).await
-                    }
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.get_logs_batch(address, block_ids).await
-                    }
-                }
-            }
+            { self.rpc_client.get_logs_batch(address, block_ids).await }
         )
     }
 
@@ -380,22 +303,12 @@ impl EthereumClient {
     }
 
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
             "get_nonce",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => {
-                        client.get_nonce(address, block_id).await
-                    }
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.get_nonce(address, block_id).await
-                    }
-                }
-            }
+            { self.rpc_client.get_nonce(address, block_id).await }
         )
     }
 
@@ -403,22 +316,12 @@ impl EthereumClient {
         &self,
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.timeout,
             self.rpc.retry,
             self.shared_backoff,
             "get_transaction_by_hash",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => {
-                        client.get_transaction_by_hash(tx_hash).await
-                    }
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.get_transaction_by_hash(tx_hash).await
-                    }
-                }
-            }
+            { self.rpc_client.get_transaction_by_hash(tx_hash).await }
         )
     }
 
@@ -426,22 +329,12 @@ impl EthereumClient {
         &self,
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Option<alloy::primitives::Bytes>> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.rpc.trace_timeout,
             self.rpc.retry,
             self.shared_backoff,
             "trace_transaction_output",
-            {
-                match &self.inner {
-                    #[cfg(feature = "helios")]
-                    EthereumClientInner::Helios(client) => {
-                        client.trace_transaction_output(tx_hash).await
-                    }
-                    EthereumClientInner::DirectRpc(client) => {
-                        client.trace_transaction_output(tx_hash).await
-                    }
-                }
-            }
+            { self.rpc_client.trace_transaction_output(tx_hash).await }
         )
     }
 
@@ -450,11 +343,7 @@ impl EthereumClient {
         requested_start: u64,
         anchor_height: BlockNumber,
     ) -> BlockNumber {
-        let max_catchup_blocks = match &self.inner {
-            #[cfg(feature = "helios")]
-            EthereumClientInner::Helios(_) => indexer_eth_helios::MAX_CATCHUP_BLOCKS,
-            EthereumClientInner::DirectRpc(_) => indexer_eth_direct_rpc::MAX_CATCHUP_BLOCKS,
-        };
+        let max_catchup_blocks = crate::rpc::MAX_CATCHUP_BLOCKS;
         Self::clamp_oldest_supported_with(requested_start, anchor_height, max_catchup_blocks)
     }
 
@@ -488,10 +377,9 @@ mod tests {
     use alloy::primitives::Bloom;
     use futures_util::StreamExt;
     use mockito::{Matcher, Server};
+    use mpc_chain_integration_core::utils::retry::is_retryable;
     use serde_json::json;
     use std::time::Duration;
-
-    // TODO: add more tests for non HTTP-related functionality, e.g. clamp_oldest_supported_with
 
     #[test]
     fn catchup_start_is_clamped_to_supported_window() {
@@ -504,6 +392,28 @@ mod tests {
             EthereumClient::clamp_oldest_supported_with(1, anchor_height, max_catchup_blocks),
             expected_oldest,
         );
+    }
+
+    #[test]
+    fn catchup_start_inside_supported_window_is_kept() {
+        let max_catchup_blocks = 8191;
+        let anchor_height = 10_000;
+        let oldest_supported = anchor_height - 1 - max_catchup_blocks;
+        let clamp = |start| {
+            EthereumClient::clamp_oldest_supported_with(start, anchor_height, max_catchup_blocks)
+        };
+
+        // Exact boundary passes through unchanged.
+        assert_eq!(clamp(oldest_supported), oldest_supported);
+        // Anything newer, up to and past the anchor, passes through too.
+        assert_eq!(clamp(oldest_supported + 1), oldest_supported + 1);
+        assert_eq!(clamp(anchor_height + 5), anchor_height + 5);
+        // A window wider than the chain saturates at genesis instead of underflowing.
+        assert_eq!(
+            EthereumClient::clamp_oldest_supported_with(0, 100, u64::MAX),
+            0
+        );
+        assert_eq!(EthereumClient::clamp_oldest_supported_with(7, 0, 10), 7);
     }
 
     #[tokio::test]
@@ -532,12 +442,75 @@ mod tests {
             client.get_logs(Address::ZERO, BlockId::Number(BlockNumberOrTag::Number(2))),
         );
 
-        // HTTP status surfaces in the error (retry classification relies on
-        // this string match) and retries are exhausted.
+        // Retries exhausted, the 429 lives under the exhaustion context
         assert!(r1.is_err() && r2.is_err());
-        assert!(r1.unwrap_err().to_string().contains("429"));
+        assert!(format!("{:#}", r1.unwrap_err()).contains("429"));
         // The gate forces retries into separate >= 50ms cooldown windows.
         assert!(start.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn typed_client_error_410_fails_fast() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/")
+            .with_status(410)
+            .with_body(
+                r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"network goerli not supported"}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client_with_catchup(
+            &server.url(),
+            Default::default(),
+            SharedBackoff::new(),
+        )
+        .await;
+
+        let err = client
+            .get_logs(Address::ZERO, BlockId::Number(BlockNumberOrTag::Number(1)))
+            .await
+            .unwrap_err();
+
+        // Exactly one attempt (expect(1) above) and a terminal verdict
+        assert!(!is_retryable(&err), "err: {err:#}");
+        assert!(format!("{err:#}").contains("410"));
+    }
+
+    #[tokio::test]
+    async fn exhausted_throttle_survives_the_retry_macro_for_outer_gates() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/")
+            // provider-style rate limit: 429 with a JSON-RPC error body —
+            // the status, not the body text, must drive the verdict
+            .with_status(429)
+            .with_body(
+                r#"{"jsonrpc":"2.0","error":{"code":429,"message":"compute unit capacity exceeded, try again later"}}"#,
+            )
+            // 1 initial + max_times(2) retries: the throttle exhausts the strategy
+            .expect(3)
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client_with_catchup(
+            &server.url(),
+            Default::default(),
+            SharedBackoff::new(),
+        )
+        .await;
+
+        let err = client
+            .get_logs(Address::ZERO, BlockId::Number(BlockNumberOrTag::Number(1)))
+            .await
+            .unwrap_err();
+
+        // Exhaustion note is added as context, not a re-wrap
+        assert!(format!("{err:#}").contains("exhausted"));
+        // The outer gate should still recognize the throttled error.
+        assert!(SharedBackoff::new().engage_if_throttled(&err).is_some());
     }
 
     #[tokio::test]

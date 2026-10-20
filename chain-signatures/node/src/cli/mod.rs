@@ -1,6 +1,6 @@
 mod args;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
@@ -29,17 +29,18 @@ pub use args::{
 };
 
 use clap::Parser;
-use deadpool_redis::Runtime;
+use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
-use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
-use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, MidnightPublisher};
+use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher, GatedPublisher};
+use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher};
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
+use mpc_chain_tron::TronConfig;
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
@@ -222,6 +223,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &account_id,
                 env!("CARGO_PKG_VERSION"),
                 option_env!("GIT_COMMIT_HASH"),
+                option_env!("BUILD_TIMESTAMP"),
             );
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
@@ -299,6 +301,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &mpc_contract_id,
                 signer,
                 &stack,
+                backlog.clone(),
             )
             .await;
 
@@ -309,6 +312,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 contract_watcher.clone(),
                 sync_report_tx.clone(),
+                network.clone(),
             );
 
             log_startup(
@@ -348,7 +352,12 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync_task.run());
-            tokio::spawn(rpc_executor.run(contract_state_tx, config_tx.clone(), checkpoints_tx));
+            tokio::spawn(rpc_executor.run(
+                backlog.clone(),
+                contract_state_tx,
+                config_tx.clone(),
+                checkpoints_tx,
+            ));
 
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics().await;
@@ -467,6 +476,7 @@ struct ChainConfigs {
     hydration: Option<HydrationConfig>,
     canton: Option<CantonConfig>,
     midnight: Option<MidnightConfig>,
+    tron: Option<TronConfig>,
 }
 
 impl ChainConfigs {
@@ -483,6 +493,7 @@ impl ChainConfigs {
             hydration: hydration.into_config(),
             canton: canton.into_config(),
             midnight: midnight.into_config()?,
+            tron: None, // Tron is a target-only chain with no indexer
         })
     }
 }
@@ -507,10 +518,30 @@ impl ChainStack {
         self.gates[chain].clone()
     }
 
+    /// Wraps an internally-ungated publisher in [`GatedPublisher`] bound to
+    /// this stack's gate for `chain` (Solana, Midnight and Hydration are
+    /// externally gated — their clients don't gate publishes themselves).
+    /// `operation` labels the adapter's throttle warn per chain.
+    ///
+    /// TODO: deleted once those clients gate publishes internally
+    fn gated_publisher<P: ChainPublisher>(
+        &self,
+        chain: Chain,
+        operation: &'static str,
+        publisher: P,
+    ) -> Arc<dyn ChainPublisher> {
+        Arc::new(GatedPublisher::new(publisher, self.gate(chain), operation))
+    }
+
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
     /// each other chain is added only when configured. A client that fails to build is
     /// logged and skipped rather than aborting startup.
-    async fn publishers(&self, near: NearClient) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
+    /// `backlog` lets publishers that queue (Midnight) re-check a response before spending on it.
+    async fn publishers(
+        &self,
+        near: NearClient,
+        backlog: Backlog,
+    ) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
@@ -525,21 +556,27 @@ impl ChainStack {
         }
         if let Some(sol) = &self.configs.sol {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Solana));
-            let client = Arc::new(SolanaClient::from_config(sol, telemetry));
-            publishers.insert(Chain::Solana, client);
+            let client = SolanaClient::from_config(sol, telemetry);
+            publishers.insert(
+                Chain::Solana,
+                self.gated_publisher(Chain::Solana, "solana publish", client),
+            );
         }
         if let Some(hydration) = &self.configs.hydration {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
             match rpc::HydrationClient::new(hydration, telemetry).await {
                 Ok(client) => {
-                    publishers.insert(Chain::Hydration, Arc::new(client));
+                    publishers.insert(
+                        Chain::Hydration,
+                        self.gated_publisher(Chain::Hydration, "hydration publish", client),
+                    );
                 }
                 Err(e) => tracing::error!(%e, "failed to create hydration client"),
             }
         }
         if let Some(canton) = &self.configs.canton {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
-            match CantonClient::new(canton, telemetry).await {
+            match CantonClient::new(canton, telemetry, self.gate(Chain::Canton)).await {
                 Ok(client) => {
                     publishers.insert(Chain::Canton, Arc::new(client));
                 }
@@ -548,9 +585,13 @@ impl ChainStack {
         }
         if let Some(midnight) = &self.configs.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
-            match MidnightPublisher::connect(midnight, telemetry).await {
+            let awaiter = Arc::new(rpc::BacklogAwaiter::new(backlog));
+            match RecoveringMidnightPublisher::start(midnight, telemetry, awaiter) {
                 Ok(client) => {
-                    publishers.insert(Chain::Midnight, Arc::new(client));
+                    publishers.insert(
+                        Chain::Midnight,
+                        self.gated_publisher(Chain::Midnight, "midnight publish", client),
+                    );
                 }
                 Err(e) => tracing::error!(%e, "failed to create midnight publisher"),
             }
@@ -585,6 +626,7 @@ fn log_startup(
         cipher_pk_hex = %cipher_pk_hex,
         version = %crate::metrics::version(),
         git_commit_hash = %crate::metrics::git_commit_hash(),
+        build_timestamp = %crate::metrics::build_timestamp(),
         sign_pk = %network.sign_sk.public_key(),
         near_rpc_url = %near_client.rpc_addr(),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
@@ -596,6 +638,7 @@ fn log_startup(
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
         midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
+        tron_endpoint = %chains.tron.as_ref().map(|c| c.endpoint.as_str()).unwrap_or("None"),
         "starting node",
     );
 }
@@ -646,6 +689,7 @@ impl RpcHandles {
         mpc_contract_id: &AccountId,
         signer: InMemorySigner,
         stack: &ChainStack,
+        backlog: Backlog,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         let near_rpc = near_fetch::Client::new(near_rpc_url);
@@ -668,7 +712,7 @@ impl RpcHandles {
             signer,
             near_gates,
         );
-        let publishers = stack.publishers(near_client.clone()).await;
+        let publishers = stack.publishers(near_client.clone(), backlog).await;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
         Self {
@@ -687,6 +731,23 @@ struct StorageHandles {
     backlog: Backlog,
 }
 
+const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A Redis pool whose waits, connects and commands all fail after [`REDIS_TIMEOUT`].
+fn redis_pool(url: Url) -> anyhow::Result<deadpool_redis::Pool> {
+    Ok(deadpool_redis::Config::from_url(url)
+        .builder()?
+        .runtime(Runtime::Tokio1)
+        .wait_timeout(Some(REDIS_TIMEOUT))
+        .create_timeout(Some(REDIS_TIMEOUT))
+        .recycle_timeout(Some(REDIS_TIMEOUT))
+        .post_create(Hook::sync_fn(|conn, _| {
+            conn.set_response_timeout(REDIS_TIMEOUT);
+            Ok(())
+        }))
+        .build()?)
+}
+
 impl StorageHandles {
     async fn new(
         account_id: &AccountId,
@@ -695,9 +756,7 @@ impl StorageHandles {
         let gcp_service = GcpService::init(storage_options).await?;
         let key_storage =
             storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
-        let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
-        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-        let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
@@ -808,6 +867,7 @@ async fn spawn_indexers(
         hydration,
         canton,
         midnight,
+        tron,
     } = configs;
 
     tracing::info!(
@@ -816,8 +876,19 @@ async fn spawn_indexers(
         hydration = hydration.is_some(),
         canton = canton.is_some(),
         midnight = midnight.is_some(),
+        tron = tron.is_some(),
         "spawning chain indexers"
     );
+
+    // Every source chain's stream admits bidirectional requests targeting Ethereum.
+    // Admission must match across nodes, so they all need the same Ethereum network.
+    let ethereum_chain_id = eth.as_ref().and_then(EthConfig::chain_id);
+    if ethereum_chain_id.is_none() {
+        tracing::warn!(
+            "ethereum not configured: Ethereum-targeted requests are admitted without the \
+             chain id check that nodes with ethereum configured apply"
+        );
+    }
 
     if let Some(eth_config) = eth {
         let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
@@ -841,7 +912,8 @@ async fn spawn_indexers(
                         mesh_state.clone(),
                         node_client.clone(),
                         checkpoints_rx[Chain::Ethereum].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     eth_telemetry,
                 ));
             }
@@ -853,7 +925,12 @@ async fn spawn_indexers(
 
     if let Some(sol_config) = sol {
         let sol_telemetry = NodeTelemetry::new(Chain::Solana);
-        match SolanaIndexer::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
+        match SolanaIndexer::new(
+            sol_config,
+            backlog.clone(),
+            sol_telemetry.clone(),
+            gates[Chain::Solana].clone(),
+        ) {
             Ok(sol_indexer) => {
                 tracing::info!("solana indexer created successfully");
                 tokio::spawn(run_supervised(
@@ -866,7 +943,8 @@ async fn spawn_indexers(
                         mesh_state.clone(),
                         node_client.clone(),
                         checkpoints_rx[Chain::Solana].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     sol_telemetry,
                 ));
             }
@@ -878,6 +956,8 @@ async fn spawn_indexers(
 
     if let Some(hydration_config) = hydration {
         let hydration_telemetry = NodeTelemetry::new(Chain::Hydration);
+        // TODO: read-side gating - this indexer's reads don't share the
+        // chain's cooldown gate yet
         let hydration_indexer =
             HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
         tracing::info!("hydration indexer created successfully");
@@ -891,14 +971,22 @@ async fn spawn_indexers(
                 mesh_state.clone(),
                 node_client.clone(),
                 checkpoints_rx[Chain::Hydration].clone(),
-            ),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
             hydration_telemetry,
         ));
     }
 
     if let Some(canton_config) = canton {
         let canton_telemetry = NodeTelemetry::new(Chain::Canton);
-        match CantonIndexer::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
+        match CantonIndexer::new(
+            canton_config,
+            backlog.clone(),
+            canton_telemetry.clone(),
+            gates[Chain::Canton].clone(),
+        )
+        .await
+        {
             Ok(canton_indexer) => {
                 tracing::info!("canton indexer created successfully");
                 tokio::spawn(run_supervised(
@@ -911,7 +999,8 @@ async fn spawn_indexers(
                         mesh_state.clone(),
                         node_client.clone(),
                         checkpoints_rx[Chain::Canton].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     canton_telemetry,
                 ));
             }
@@ -923,6 +1012,8 @@ async fn spawn_indexers(
 
     if let Some(midnight_config) = midnight {
         let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
+        // TODO: read-side gating - this indexer's reads don't share the
+        // chain's cooldown gate yet
         match MidnightIndexer::new(midnight_config, backlog.clone(), midnight_telemetry.clone())
             .await
         {
@@ -938,7 +1029,8 @@ async fn spawn_indexers(
                         mesh_state,
                         node_client,
                         checkpoints_rx[Chain::Midnight].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     midnight_telemetry,
                 ));
             }
@@ -951,11 +1043,32 @@ async fn spawn_indexers(
 
 #[cfg(test)]
 mod tests {
+    use mpc_chain_integration_core::utils::test::make_publish_action;
+    use mpc_primitives::{SignId, SignKind};
     use std::str::FromStr;
+    use std::time::Duration;
 
     use super::*;
 
     const ETH_CONTRACT_ADDRESS: &str = "f8bdC0612361a1E49a8E01423d4C0cFc5dF4791A";
+
+    /// A listener that never replies stands in for a stalled Redis.
+    #[tokio::test]
+    async fn redis_pool_fails_instead_of_hanging_on_a_stalled_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("redis://{}", listener.local_addr().unwrap())).unwrap();
+        let pool = redis_pool(url).unwrap();
+        let result = tokio::time::timeout(3 * REDIS_TIMEOUT, async {
+            let mut conn = pool.get().await?;
+            let value: Option<String> = redis::AsyncCommands::get(&mut *conn, "key").await?;
+            anyhow::Ok(value)
+        })
+        .await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "expected a timeout error, got {result:?}"
+        );
+    }
 
     #[test]
     fn test_digest_staking() {
@@ -1270,24 +1383,9 @@ mod tests {
             "empty MidnightArgs must not produce a MidnightConfig"
         );
 
-        let account_id = AccountId::from_str("test.near").unwrap();
-        let signer = match InMemorySigner::from_secret_key(
-            account_id.clone(),
-            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
-        ) {
-            near_crypto::Signer::InMemory(signer) => signer,
-            _ => unreachable!(),
-        };
-        // Never dialed: publishers() only stores the client in the registry.
-        let near = near_fetch::Client::new("http://127.0.0.1:1");
-        let near = NearClient::new(
-            near,
-            &account_id,
-            signer,
-            NearRpcGates::new(SharedBackoff::new()),
-            Arc::new(NodeTelemetry::new(Chain::NEAR)),
-        );
-        let publishers = ChainStack::new(chains).publishers(near).await;
+        let publishers = ChainStack::new(chains)
+            .publishers(undialed_near_client(), Backlog::new())
+            .await;
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),
@@ -1299,5 +1397,108 @@ mod tests {
             "with no chain configured, only the NEAR publisher must exist"
         );
         assert!(publishers.contains_key(&Chain::NEAR));
+    }
+
+    /// A Midnight node that is unreachable at startup must not leave the node without a
+    /// Midnight publisher for its lifetime: the publisher registers and connects later.
+    #[tokio::test]
+    async fn midnight_publisher_registers_while_its_node_is_unreachable() {
+        let chains = ChainConfigs {
+            eth: None,
+            sol: None,
+            hydration: None,
+            canton: None,
+            midnight: Some(MidnightConfig {
+                // Nothing listens on port 1, so the startup dial is refused.
+                node_url: "http://127.0.0.1:1".to_string(),
+                central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
+                publisher: mpc_chain_midnight::PublisherConfig {
+                    funding_seed: "ab".repeat(32),
+                    proof_server_url: "http://127.0.0.1:1".to_string(),
+                    indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
+                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                    ..Default::default()
+                },
+                rpc: Default::default(),
+                indexer: Default::default(),
+            }),
+            tron: None,
+        };
+
+        let publishers = ChainStack::new(chains)
+            .publishers(undialed_near_client(), Backlog::new())
+            .await;
+
+        assert!(publishers.contains_key(&Chain::Midnight));
+    }
+
+    /// A NEAR client that is never dialed: publishers() only stores it in the registry.
+    fn undialed_near_client() -> NearClient {
+        let account_id = AccountId::from_str("test.near").unwrap();
+        let signer = match InMemorySigner::from_secret_key(
+            account_id.clone(),
+            SecretKey::from_seed(near_crypto::KeyType::ED25519, "test"),
+        ) {
+            near_crypto::Signer::InMemory(signer) => signer,
+            _ => unreachable!(),
+        };
+        let near = near_fetch::Client::new("http://127.0.0.1:1");
+        NearClient::new(
+            near,
+            &account_id,
+            signer,
+            NearRpcGates::new(SharedBackoff::new()),
+            Arc::new(NodeTelemetry::new(Chain::NEAR)),
+        )
+    }
+
+    fn sol_config_with_bogus_rpc() -> SolConfig {
+        SolConfig {
+            account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
+            rpc_http_url: "http://127.0.0.1:1".into(),
+            program_address: mpc_chain_solana::Pubkey::new_unique().to_string(),
+            indexer: Default::default(),
+        }
+    }
+    #[tokio::test]
+    async fn solana_publisher_shares_the_stacks_cooldown_gate() {
+        let stack = ChainStack::new(ChainConfigs {
+            eth: None,
+            sol: Some(sol_config_with_bogus_rpc()),
+            hydration: None,
+            canton: None,
+            midnight: None,
+            tron: None,
+        });
+
+        let publishers = stack
+            .publishers(undialed_near_client(), Backlog::new())
+            .await;
+        let publisher = publishers
+            .get(&Chain::Solana)
+            .expect("solana publisher must be wired when configured");
+
+        // engage the stack's own gate and check the publisher parks on it
+        stack.gate(Chain::Solana).extend_cooldown();
+
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            publisher.publish_signature(&make_publish_action(
+                Chain::Solana,
+                SignKind::Sign,
+                SignId::new([0u8; 32]),
+            )),
+        )
+        .await
+        .expect("publish must not hang on an engaged gate");
+
+        // the bogus endpoint rejects the send itself; only the park matters
+        assert!(outcome.is_err());
+        assert!(
+            start.elapsed() >= Duration::from_millis(700),
+            "publish must wait out the stack gate's engaged window (base cooldown), took {:?}",
+            start.elapsed()
+        );
     }
 }

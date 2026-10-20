@@ -7,12 +7,15 @@ use crate::mpc_fixture::mock_chain::MockChain;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
+use mpc_keys::hpke::{self, Ciphered};
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
+use mpc_node::protocol::contract::primitives::ParticipantInfo;
+use mpc_node::protocol::message::{MessageError, SignedMessage};
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
-use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
+use mpc_node::protocol::sync::{open_reply_for_test, SyncChannel, SyncError, SyncUpdate};
 use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_node::types::SignCommand;
@@ -397,24 +400,55 @@ impl MpcFixtureNode {
 
     /// Simulate a /sync call between this node (as receiver) and a peer (as owner).
     ///
-    /// `from` is the owner node sending the sync update.
+    /// `from` is the owner node sending the sync update; it signs the update
+    /// and encrypts it to this node, as a real caller would.
     /// `triples` and `presignatures` are the lists of IDs the owner claims to hold.
     /// Returns the SyncUpdate response (IDs missing on this node).
     pub async fn sync(
         &self,
-        from: Participant,
+        from: &MpcFixtureNode,
         triples: Vec<u64>,
         presignatures: Vec<u64>,
     ) -> SyncUpdate {
         let update = SyncUpdate {
-            from,
             triples,
             presignatures,
         };
-        self.sync_channel
-            .request_update(update)
+        let network = from.config.borrow().local.network.clone();
+        let reply = self
+            .try_sync(from.me, &network.sign_sk, &update)
             .await
-            .expect("sync_channel request_update failed")
+            .expect("sync_channel request_update failed");
+        self.open_reply(&reply, &network.cipher_sk)
+            .expect("failed to open sync reply")
+    }
+
+    /// Open a sync reply from this node, as the caller holding `cipher_sk`.
+    pub fn open_reply(
+        &self,
+        reply: &Ciphered,
+        cipher_sk: &hpke::SecretKey,
+    ) -> Result<SyncUpdate, MessageError> {
+        // Only the signing key is checked.
+        let info = ParticipantInfo {
+            sign_pk: self.config.borrow().local.network.sign_sk.public_key(),
+            ..ParticipantInfo::new(self.me.into())
+        };
+        open_reply_for_test(reply, cipher_sk, self.me, &info)
+    }
+
+    /// Deliver `update` to this node as a sync request that claims to come
+    /// from `claimed` and is signed with `sign_sk`, so tests can forge either.
+    pub async fn try_sync(
+        &self,
+        claimed: Participant,
+        sign_sk: &near_crypto::SecretKey,
+        update: &SyncUpdate,
+    ) -> Result<Ciphered, SyncError> {
+        let cipher_pk = self.config.borrow().local.network.cipher_sk.public_key();
+        let encrypted = SignedMessage::encrypt(update, claimed, sign_sk, &cipher_pk)
+            .expect("failed to encrypt sync update");
+        self.sync_channel.request_update(encrypted).await
     }
 
     /// Get the list of triple IDs this node owns in storage (sorted).

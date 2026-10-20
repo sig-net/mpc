@@ -39,7 +39,7 @@ any `Cargo.toml`, `.cargo/**`, `rust-toolchain*`, `.github/workflows/*`).
   from develop and upload nothing; dep-bump PRs keep a branch copy so their
   later pushes stay warm.
 - **push (develop) / workflow_dispatch**: always save — this seeds the
-  develop-scope entries. `midnight.yml` (full) and `unit.yml` (dev) trigger on
+  develop-scope entries. `test-chain-midnight.yml` (full) and `test-unit.yml` (dev) trigger on
   `push: develop` when dependency files or their own workflow file change.
 
 After a develop merge that changes `Cargo.lock`, PRs may run cold until the

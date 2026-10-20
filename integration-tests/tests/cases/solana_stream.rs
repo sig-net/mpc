@@ -3,8 +3,8 @@ use cait_sith::protocol::Participant;
 use integration_tests::containers::Solana;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{
-    utils::test::ChainIndexerStream, ChainPublisher, NoopChainTelemetry, NoopPublisherTelemetry,
-    PublishAction, StateManager,
+    utils::{retry::SharedBackoff, test::ChainIndexerStream},
+    ChainPublisher, NoopChainTelemetry, NoopPublisherTelemetry, PublishAction, StateManager,
 };
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_node::backlog::mock::{mock_bidi_response_request, mock_signature_output, BacklogTestExt};
@@ -58,7 +58,7 @@ async fn run_solana_indexer_with_backlog(
     config: SolConfig,
     backlog: Backlog,
 ) -> Result<ChainIndexerStream> {
-    let indexer = SolanaIndexer::new(config, backlog, NoopChainTelemetry)
+    let indexer = SolanaIndexer::new(config, backlog, NoopChainTelemetry, SharedBackoff::new())
         .context("failed to create SolanaIndexer")?;
     ChainIndexerStream::start(indexer, Duration::from_secs(30)).await
 }
@@ -105,8 +105,13 @@ async fn spawn_supervised_stream(
     config: SolConfig,
     backlog: Backlog,
 ) -> Result<(tokio::task::JoinHandle<()>, mpsc::Receiver<SignCommand>)> {
-    let indexer = SolanaIndexer::new(config, backlog.clone(), NoopChainTelemetry)
-        .context("failed to create SolanaIndexer")?;
+    let indexer = SolanaIndexer::new(
+        config,
+        backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .context("failed to create SolanaIndexer")?;
 
     let (sign_tx, sign_rx) = mpsc::channel::<SignCommand>(16);
     let (rpc_tx, _rpc_rx) = mpsc::channel::<RpcAction>(16);
@@ -537,8 +542,13 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     ));
 
     let recovered_backlog = Backlog::persisted(storage);
-    let indexer = SolanaIndexer::new(config, recovered_backlog.clone(), NoopChainTelemetry)
-        .context("failed to create SolanaIndexer")?;
+    let indexer = SolanaIndexer::new(
+        config,
+        recovered_backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .context("failed to create SolanaIndexer")?;
 
     let (sign_tx, mut sign_rx) = mpsc::channel::<SignCommand>(4);
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(4);

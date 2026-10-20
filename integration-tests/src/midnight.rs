@@ -106,7 +106,7 @@ impl MidnightContext {
             mpc_primitives::LATEST_MPC_KEY_VERSION,
             &hex::encode(caller_bytes),
             mpc_node::respond_bidirectional::MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH,
-        );
+        )?;
         let response_public_key = mpc_crypto::derive_key(root_public_key, epsilon);
         let response_public_key = format!(
             "0x{}",
@@ -162,6 +162,19 @@ impl MidnightContext {
                 "target": hex::encode(target),
                 "argument": hex::encode(argument),
                 "outputType": output_type,
+            }))
+            .await?;
+        Ok(())
+    }
+
+    /// Have a second caller contract notify the central Signet contract naming the real
+    /// caller's request.
+    pub async fn notify_as_caller(&self, request_id: [u8; 32]) -> anyhow::Result<()> {
+        let mut driver = self.driver.lock().await;
+        let _: serde_json::Value = driver
+            .request(&serde_json::json!({
+                "op": "notifyAsCaller",
+                "requestId": format!("0x{}", hex::encode(request_id)),
             }))
             .await?;
         Ok(())

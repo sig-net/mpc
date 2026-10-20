@@ -7,8 +7,8 @@ use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
 use crate::emissions::{EmissionKind, SingletonCallEmissions};
 use crate::reader::{
-    decode_notification, decode_response_payload, resolve_verified_record,
-    signet_field_node_by_path, unpack_notification_v1, Resolved,
+    decode_bidirectional_response_payload, decode_notification, decode_response_payload,
+    resolve_verified_record, signet_field_node_by_path, unpack_notification_v1, Resolved,
 };
 use crate::records::SignBidirectionalEventNotification;
 use crate::rpc::{is_oversized_contract_state, BlockRef};
@@ -23,14 +23,13 @@ use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
-use mpc_utils::{
-    task::{retry_until_some, CancellationTokenExt as _},
-    time::current_unix_timestamp,
-};
+use mpc_utils::{task::CancellationTokenExt as _, time::current_unix_timestamp};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const RETRY_DELAY: Duration = Duration::from_millis(500);
+/// Per-block processing retry budget before the run fails with the cause.
+const RETRY_BUDGET: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub(crate) struct BlockHold {
@@ -137,6 +136,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 call_index,
                 physical_segment,
                 phase,
+                caller,
                 emissions,
             } in candidate.calls
             {
@@ -161,6 +161,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 .process_entry(
                                     source,
                                     notification,
+                                    caller,
                                     &block.hash,
                                     block.number,
                                     indexed_ts,
@@ -223,15 +224,16 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                             }
                         }
                         EmissionKind::RespondBidirectional => {
-                            let decoded = decode_response_payload(&emission.payload);
-                            match decoded.signature {
-                                Ok(signature) => events.push(ChainEvent::RespondBidirectional(
-                                    RespondBidirectionalEvent {
+                            let decoded = decode_bidirectional_response_payload(&emission.payload);
+                            match decoded.response {
+                                Ok((attestation, signature)) => events.push(
+                                    ChainEvent::RespondBidirectional(RespondBidirectionalEvent {
+                                        attestation: Some(attestation),
                                         request_id: decoded.request_id,
                                         signature,
                                         chain: Chain::Midnight,
-                                    },
-                                )),
+                                    }),
+                                ),
                                 Err(err) => {
                                     drop_entry::<()>(
                                         "response-signature-invalid",
@@ -256,6 +258,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         &self,
         source: &C,
         notification: SignBidirectionalEventNotification,
+        caller: Option<[u8; 32]>,
         at_hash: &str,
         height: u64,
         indexed_ts: u64,
@@ -283,17 +286,32 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         };
         let caller_hex = hex::encode(unpacked.caller_address);
 
-        // TODO: decide whether `caller_address` must be checked against the
-        // cross-contract-call initiator of the transaction that filed this notification.
-        // It is producer-supplied, so any contract can notify naming another, which
-        // triggers a signature over a record that contract filed. What that record says
-        // is already authenticated below: `resolve_verified_record` recomputes the
-        // request id and `generate_sign_request` requires `sender` to equal the address the
-        // record was read from. The exposure is therefore third-party triggering, not
-        // forgery, and the open question is whether that is worth gating. Gating it
-        // means joining each notification to the central call it came from through the
-        // claimed communication commitment, which the ledger validates for uniqueness
-        // and for corresponding to a real call.
+        // `caller_address` is producer-supplied, since a Midnight callee cannot see its caller.
+        // Bind it to the ledger-recorded direct caller so no contract can notify as another.
+        match caller {
+            Some(caller) if caller == unpacked.caller_address => {}
+            Some(caller) => {
+                return Ok(drop_entry(
+                    "caller-mismatch",
+                    height,
+                    Some(rid),
+                    &format!(
+                        "notification names {caller_hex}, direct caller is {}",
+                        hex::encode(caller)
+                    ),
+                ));
+            }
+            None => {
+                return Ok(drop_entry(
+                    "caller-absent",
+                    height,
+                    Some(rid),
+                    &format!(
+                        "notification names {caller_hex}, singleton call has no direct caller"
+                    ),
+                ));
+            }
+        }
 
         // Authority: the caller's own ledger at the SAME finalized hash the
         // notification was read at.
@@ -374,13 +392,16 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     }
 
     /// [`process_block`](Self::process_block) under the per-block retry policy.
-    /// Permanent scanner failures escape immediately; transport failures retry here.
+    /// Permanent failures (BlockHold) escape immediately; transient failures
+    /// retry for [`RETRY_BUDGET`], then fail the run with the last error so
+    /// the supervised restart carries the cause.
     async fn process_block_retrying<C: ChainSource>(
         &self,
         source: &C,
         block: &BlockRef,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Option<Vec<ChainEvent>>> {
+        let deadline = tokio::time::Instant::now() + RETRY_BUDGET;
         loop {
             let result = tokio::select! {
                 _ = cancel.cancelled() => return Ok(None),
@@ -397,6 +418,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                             "midnight block processing held"
                         );
                         return Err(err);
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(err.context(format!(
+                            "midnight block {} still failing after {RETRY_BUDGET:?}",
+                            block.number
+                        )));
                     }
                     tracing::warn!(
                         reason = "retrying",
@@ -420,13 +447,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         number: u64,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Indexed> {
-        let Some(block) =
-            retry_until_some(cancel, RETRY_DELAY, "midnight block lookup", || async {
-                source.block_at(number).await.map(Some)
-            })
-            .await
-        else {
-            return Ok(Indexed::Cancelled);
+        let block = tokio::select! {
+            _ = cancel.cancelled() => return Ok(Indexed::Cancelled),
+            result = source.block_at(number) => result
+                .with_context(|| format!("failed to resolve midnight block {number}"))?,
         };
         self.index_block(source, events_tx, &block, cancel).await
     }
@@ -486,13 +510,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .get_processed_block(Chain::Midnight)
             .await
             .unwrap_or(0);
-        let Some(anchor) =
-            retry_until_some(&cancel, RETRY_DELAY, "midnight anchor sampling", || async {
-                source.finalized_head().await.map(Some)
-            })
-            .await
-        else {
-            return Ok(());
+        let anchor = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = source.finalized_head() => result
+                .context("failed to sample the midnight anchor")?,
         };
 
         let mut last_processed = checkpoint;
@@ -529,7 +550,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .await
             .context("failed to send midnight catchup completed event")?;
 
-        let mut last_progress = tokio::time::Instant::now();
         loop {
             if cancel
                 .cancelled_within(self.config.indexer.poll_interval)
@@ -545,12 +565,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             };
 
             if block.number <= last_processed {
-                if last_progress.elapsed() >= self.config.indexer.stall_timeout {
-                    anyhow::bail!(
-                        "midnight finalized head made no progress for {:?}",
-                        self.config.indexer.stall_timeout
-                    );
-                }
                 continue;
             }
             for number in last_processed.saturating_add(1)..block.number {
@@ -566,10 +580,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 .index_block(source, &events_tx, &block, &cancel)
                 .await?
             {
-                Indexed::Done => {
-                    last_processed = block.number;
-                    last_progress = tokio::time::Instant::now();
-                }
+                Indexed::Done => last_processed = block.number,
                 Indexed::Cancelled => return Ok(()),
             }
         }
@@ -725,6 +736,7 @@ mod tests {
             phase: crate::emissions::TranscriptPhase::Guaranteed,
             physical_segment: 1,
             call_index: 1,
+            caller: Some(CALLER),
             emissions: vec![Emission { kind, payload }],
         }]
     }
@@ -735,10 +747,8 @@ mod tests {
 
     fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
         let mut record = sample_record();
-        record.request_nonce = nonce;
-        let rid = crate::hashing::compute_request_id(
-            &crate::test_utils::aligned_value_from_record(&record),
-        );
+        record.tx_params.nonce = nonce;
+        let rid = crate::hashing::compute_request_id(&record).unwrap();
         (record, rid)
     }
 
@@ -773,6 +783,7 @@ mod tests {
         oversized_states: HashSet<(String, String)>,
         undecodable_states: HashMap<(String, String), String>,
         transient_head_errors: Mutex<usize>,
+        block_errors: HashSet<u64>,
         live: tokio::sync::Mutex<Option<mpsc::Receiver<BlockRef>>>,
         park_at: Option<u64>,
         reached: Option<mpsc::Sender<String>>,
@@ -849,6 +860,9 @@ mod tests {
         async fn block_at(&self, number: u64) -> anyhow::Result<BlockRef> {
             if self.park_at == Some(number) {
                 self.park(format!("block_at:{number}")).await;
+            }
+            if self.block_errors.contains(&number) {
+                anyhow::bail!("fixture block lookup failed: connection reset by peer");
             }
             Ok(block_ref(number))
         }
@@ -1049,39 +1063,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn nonadvancing_heads_share_one_stall_budget() {
-        let mut config = test_config();
-        config.indexer.poll_interval = Duration::from_secs(1);
-        config.indexer.stall_timeout = Duration::from_secs(2);
-        let source = FixtureSource {
-            head: 8,
-            sampled_heads: Mutex::new(VecDeque::from([
-                HeadSample::Block(block_ref(8)),
-                HeadSample::Block(block_ref(7)),
-            ])),
-            ..Default::default()
-        };
-        let mut harness =
-            RunFixture::spawn_with_config(source, MockStateManager::new(), config).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        assert!(harness.events_rx.try_recv().is_err());
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        let err = harness
-            .handle
-            .await
-            .expect("run task")
-            .expect_err("regressed and equal samples share the stall budget");
-        assert!(err.to_string().contains("no progress"), "{err:#}");
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn cancellation_is_prompt_during_a_finalized_head_read() {
         let (reached_tx, mut reached_rx) = mpsc::channel(1);
         let source = FixtureSource {
@@ -1115,6 +1096,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1155,6 +1137,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1181,6 +1164,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_notification_not_from_its_named_caller_is_dropped() {
+        let (record, rid) = named_record_and_rid(7);
+        for caller in [Some([0x99; 32]), None] {
+            let mut source = FixtureSource::default();
+            let mut calls = one_call(EmissionKind::SignBidirectional, notification(rid));
+            calls[0].caller = caller;
+            source.set_emissions(9, calls);
+            source.set_state(CALLER, 9, caller_state(&record, rid));
+
+            let events = direct_indexer()
+                .await
+                .process_block(&source, &block_ref(9))
+                .await
+                .expect("a caller mismatch is a per-entry drop, not a block failure");
+
+            assert!(
+                events.is_empty(),
+                "a record {CALLER:?} filed must not be signed when the direct caller is {caller:?}"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn successful_request_logs_ledger_hash_and_sign_id_together() {
         let (record, rid) = named_record_and_rid(7);
@@ -1194,6 +1200,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1275,7 +1282,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn captured_cell_decodes_resolves_and_converts_under_transient_id() {
+    async fn captured_legacy_request_remains_rejected_even_after_rehashing() {
         let tx: DecodedTransaction =
             midnight_serialize::tagged_deserialize(&mut &CAPTURE_NOTIFY_TX[..])
                 .expect("captured notify transaction decodes");
@@ -1291,6 +1298,11 @@ mod tests {
             );
         };
         assert_eq!(emission.kind, EmissionKind::SignBidirectional);
+        assert_eq!(
+            call.caller,
+            Some(hex_32(CAPTURE_CALLER)),
+            "the captured integrator is the ledger-recorded direct caller of the singleton"
+        );
         let mut notification = decode_notification(&emission.payload);
 
         let caller_tree = crate::state::decode_contract_state(CAPTURE_CALLER_STATE)
@@ -1307,6 +1319,7 @@ mod tests {
             .process_entry(
                 &source,
                 notification.clone(),
+                call.caller,
                 CAPTURE_BLOCK_HASH,
                 CAPTURE_HEIGHT,
                 0,
@@ -1315,7 +1328,7 @@ mod tests {
             .expect("captured entry processing does not hold");
         assert!(
             legacy_request.is_none(),
-            "the pre-transient captured ID must not bypass the request-ID gate"
+            "the old nonce-bearing record must not bypass the request decoder"
         );
 
         let captured_tree = source
@@ -1336,7 +1349,19 @@ mod tests {
         let StateValue::Cell(cell) = &*entry else {
             panic!("captured request entry is not a cell");
         };
-        let request_id = crate::hashing::compute_request_id(cell);
+        // Reproduce a positional rehash without validating the legacy layout:
+        // changing the map key must not let an undecodable record reach signing.
+        use midnight_transient_crypto::fab::AlignedValueExt as _;
+        use midnight_transient_crypto::hash::{transient_hash, upgrade_from_transient};
+        let mut identity = (**cell).clone();
+        let identity_atoms = identity.value.0.len() - 2;
+        identity.value.0.truncate(identity_atoms);
+        identity.alignment.0.truncate(identity_atoms);
+        identity.value.0.drain(4..6);
+        identity.alignment.0.drain(4..6);
+        let mut preimage = Vec::new();
+        identity.value_only_field_repr(&mut preimage);
+        let request_id = upgrade_from_transient(transient_hash(&preimage)).0;
         notification.request_id = request_id;
         source.states.insert(
             (hex::encode(caller), CAPTURE_BLOCK_HASH.to_string()),
@@ -1351,16 +1376,19 @@ mod tests {
 
         let request = direct_indexer()
             .await
-            .process_entry(&source, notification, CAPTURE_BLOCK_HASH, CAPTURE_HEIGHT, 0)
+            .process_entry(
+                &source,
+                notification,
+                call.caller,
+                CAPTURE_BLOCK_HASH,
+                CAPTURE_HEIGHT,
+                0,
+            )
             .await
-            .expect("captured entry processing does not hold")
-            .expect("captured entry produces a request");
-
-        assert_eq!(request.id, SignId::new(request_id));
-        assert_eq!(request.args.key_version, 1);
-        assert_eq!(
-            request.args.path,
-            "63616c6c65722d70617468000000000000000000000000000000000000000000"
+            .expect("legacy entry processing does not hold");
+        assert!(
+            request.is_none(),
+            "rehashing cannot migrate a legacy record"
         );
     }
 
@@ -1384,6 +1412,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 4,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignatureResponded,
@@ -1391,7 +1420,20 @@ mod tests {
                     },
                     Emission {
                         kind: EmissionKind::RespondBidirectional,
-                        payload: response_payload(bidirectional_rid, x, y, s2, 1),
+                        payload: crate::test_utils::bidirectional_response_payload(
+                            bidirectional_rid,
+                            mpc_primitives::PublishedAttestation {
+                                block_height: 0x0102030405060708,
+                                outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
+                                serialized_output_length: 32,
+                                output_hash: [0x53; 32],
+                                digest: [0x54; 32],
+                            },
+                            x,
+                            y,
+                            s2,
+                            1,
+                        ),
                     },
                 ],
             }],
@@ -1413,6 +1455,18 @@ mod tests {
         };
         assert_eq!(respond.request_id, bidirectional_rid);
         assert_eq!(respond.signature.s, k256::Scalar::from(10u64));
+        let attestation = respond
+            .attestation
+            .as_ref()
+            .expect("Midnight response metadata");
+        assert_eq!(attestation.block_height, 0x0102030405060708);
+        assert_eq!(
+            attestation.outcome_kind,
+            mpc_primitives::AttestationOutcomeKind::Executed
+        );
+        assert_eq!(attestation.serialized_output_length, 32);
+        assert_eq!(attestation.output_hash, [0x53; 32]);
+        assert_eq!(attestation.digest, [0x54; 32]);
     }
 
     #[tokio::test]
@@ -1433,10 +1487,28 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignatureResponded,
                         payload: response_payload([0x43; 32], [0xff; 32], [0xff; 32], s, 0),
+                    },
+                    Emission {
+                        kind: EmissionKind::RespondBidirectional,
+                        payload: crate::test_utils::bidirectional_response_payload(
+                            [0x45; 32],
+                            mpc_primitives::PublishedAttestation {
+                                block_height: 42,
+                                outcome_kind: mpc_primitives::AttestationOutcomeKind::Executed,
+                                serialized_output_length: 32,
+                                output_hash: [0x53; 32],
+                                digest: [0x54; 32],
+                            },
+                            x,
+                            y,
+                            s,
+                            2,
+                        ),
                     },
                     Emission {
                         kind: EmissionKind::SignatureResponded,
@@ -1518,6 +1590,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,
@@ -1587,6 +1660,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 6,
+                caller: Some(CALLER),
                 emissions: Vec::new(),
             }],
         );
@@ -1709,16 +1783,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_retries_a_transient_anchor_read() {
-        let (mut source, live_tx) = with_live(8);
-        source.transient_head_errors = Mutex::new(2);
-        let mut harness = RunFixture::spawn(source, 8).await;
-        assert!(matches!(
-            harness.next_event().await,
-            ChainEvent::CatchupCompleted
-        ));
-        harness.cancel_and_join().await;
-        drop(live_tx);
+    async fn a_transient_anchor_error_fails_the_run() {
+        let source = FixtureSource {
+            head: 8,
+            transient_head_errors: Mutex::new(1),
+            ..Default::default()
+        };
+        let harness = RunFixture::spawn(source, 8).await;
+        let err = harness
+            .handle
+            .await
+            .expect("run task")
+            .expect_err("anchor read errors fail the run for a supervised restart");
+        assert!(err.to_string().contains("anchor"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_block_lookup_error_fails_the_run() {
+        let source = FixtureSource {
+            head: 10,
+            block_errors: HashSet::from([9]),
+            ..Default::default()
+        };
+        let harness = RunFixture::spawn(source, 8).await;
+        let err = harness
+            .handle
+            .await
+            .expect("run task")
+            .expect_err("block lookup errors fail the run for a supervised restart");
+        assert!(err.to_string().contains("block 9"), "{err:#}");
     }
 
     #[tokio::test]
@@ -1741,6 +1834,33 @@ mod tests {
         assert_request(harness.next_event().await, rid);
         assert_block(harness.next_event().await, 9);
         harness.cancel_and_join().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_persistent_block_error_fails_the_run_after_the_retry_budget() {
+        let (_record, rid) = named_record_and_rid(7);
+        let (mut source, live_tx) = with_live(8);
+        source.set_emissions(
+            9,
+            one_call(EmissionKind::SignBidirectional, notification(rid)),
+        );
+        source.set_state_error(CALLER, 9, "connection reset by peer");
+
+        let mut harness = RunFixture::spawn(source, 8).await;
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
+        live_tx.send(block_ref(9)).await.expect("send live block");
+        let err = harness
+            .handle
+            .await
+            .expect("run task")
+            .expect_err("persistent block errors exhaust the retry budget");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("still failing after"), "{rendered}");
+        assert!(rendered.contains("connection reset by peer"), "{rendered}");
+        drop(live_tx);
     }
 
     #[tokio::test]
@@ -1795,11 +1915,9 @@ mod tests {
     async fn path_walk_and_conversion_failures_drop_only_the_affected_entry() {
         let (good_record, good_rid) = named_record_and_rid(7);
         let mut bad_record = sample_record();
-        bad_record.request_nonce = 8;
+        bad_record.tx_params.nonce = 8;
         bad_record.algo = 1;
-        let bad_rid = crate::hashing::compute_request_id(
-            &crate::test_utils::aligned_value_from_record(&bad_record),
-        );
+        let bad_rid = crate::hashing::compute_request_id(&bad_record).unwrap();
         let mut source = FixtureSource::default();
         source.set_emissions(
             9,
@@ -1807,6 +1925,7 @@ mod tests {
                 phase: crate::emissions::TranscriptPhase::Guaranteed,
                 physical_segment: 1,
                 call_index: 1,
+                caller: Some(CALLER),
                 emissions: vec![
                     Emission {
                         kind: EmissionKind::SignBidirectional,

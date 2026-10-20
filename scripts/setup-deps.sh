@@ -65,9 +65,7 @@ check_core() {
     if have curl; then ok "curl"; else miss "curl"; fi
     if have pkg-config; then ok "pkg-config"; else miss "pkg-config"; fi
     if pkg-config --exists openssl 2>/dev/null || have openssl; then ok "openssl"; else miss "openssl (system libssl)"; fi
-    if have protoc; then ok "protoc"; else miss "protoc"; fi
     if have clang || have cc; then ok "clang ($({ command -v clang || command -v cc; } 2>/dev/null))"; else miss "clang"; fi
-    if [ "$OS" = "Darwin" ] && [ ! -x "/opt/homebrew/opt/llvm/bin/clang" ]; then miss "homebrew llvm clang (wasm builds)"; hint "brew install llvm"; fi
     if have docker && docker info >/dev/null 2>&1; then ok "docker"; else miss "docker daemon"; hint "rerun just setup to install Docker (Desktop on macOS, docker.io on Linux), then launch/start it"; fi
     if have docker && docker info >/dev/null 2>&1; then
         if docker images -q "$REDIS_IMAGE" 2>/dev/null | grep -q .; then ok "${REDIS_IMAGE} image"; else printf 'note - %s image not cached; testcontainers pulls it on first run\n' "$REDIS_IMAGE"; fi
@@ -87,7 +85,7 @@ check_extended() {
     if have anchor && anchor --version 2>/dev/null | grep -q "$ANCHOR_VERSION"; then ok "anchor $(anchor --version)"; else miss "anchor ${ANCHOR_VERSION}"; hint "cargo install --git https://github.com/coral-xyz/anchor avm --locked && avm install ${ANCHOR_VERSION}"; fi
     if java -version 2>&1 | grep -q "21"; then ok "java 21"; else miss "java 21 (temurin)"; fi
     if have dpm; then ok "dpm $(dpm --version 2>/dev/null | head -n 1)"; else miss "dpm (Canton SDK ${CANTON_SDK})"; hint "curl -fsSL https://get.digitalasset.com/install/install.sh | sh && dpm install ${CANTON_SDK}"; fi
-    if have compact; then ok "compact"; else miss "compact launcher 0.5.1 + compactc ${COMPACT_RC}"; hint "see .github/workflows/midnight.yml (Linux pins)"; fi
+    if have compact; then ok "compact"; else miss "compact launcher 0.5.1 + compactc ${COMPACT_RC}"; hint "see .github/workflows/test-chain-midnight.yml (Linux pins)"; fi
 }
 
 apt_install() {
@@ -96,7 +94,6 @@ apt_install() {
     have git || PKGS="$PKGS git"
     have pkg-config || PKGS="$PKGS pkg-config"
     pkg-config --exists openssl 2>/dev/null || PKGS="$PKGS libssl-dev"
-    have protoc || PKGS="$PKGS protobuf-compiler"
     if ! have clang && ! have cc; then PKGS="$PKGS clang"; fi
     if [ -z "$PKGS" ]; then return 0; fi
     # shellcheck disable=SC2086
@@ -107,8 +104,6 @@ brew_install() {
     have brew || { miss "homebrew"; hint "/bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""; return 1; }
     have pkg-config || brew install pkg-config
     pkg-config --exists openssl 2>/dev/null || brew install openssl@3
-    have protoc || brew install protobuf
-    if [ ! -x "/opt/homebrew/opt/llvm/bin/clang" ]; then brew install llvm; fi
 }
 
 ensure_rust() {

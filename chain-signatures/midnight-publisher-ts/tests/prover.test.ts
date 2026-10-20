@@ -7,6 +7,8 @@ import {
   type UnprovenTransaction,
 } from "@midnightntwrk/ledger-v9";
 import { expectedVk, type SignetContractCircuitId } from "@sig-net/midnight-contract";
+import { createServer } from "node:http";
+import type { AddressInfo, Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildIntent } from "../src/intent.js";
@@ -114,7 +116,7 @@ describe("the proving provider", () => {
     const live = provingProvider("http://proof.invalid", new AbortController().signal);
     const request = await proofRequest();
     await expect(live.check(request.preimage, request.keyLocation)).rejects.toThrow(
-      "proof server answered 503 to /check: warming up",
+      /^proof server answered 503 to \/check after \d+\.\ds: warming up$/,
     );
     await expect(live.prove(request.preimage, request.keyLocation, 4n)).resolves.toEqual(
       Uint8Array.of(7, 8, 9),
@@ -127,6 +129,95 @@ describe("the proving provider", () => {
     );
     expect(body.length).toBe(expectedBody.length);
     expect(Buffer.compare(body, expectedBody)).toBe(0);
+  });
+
+  it("names the request, its wait and undici's cause when a proof-server fetch fails", async () => {
+    const headersTimeout = Object.assign(new Error("Headers Timeout Error"), {
+      name: "HeadersTimeoutError",
+      code: "UND_ERR_HEADERS_TIMEOUT",
+    });
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new TypeError("fetch failed", { cause: headersTimeout }),
+    );
+
+    const error = await proveTransaction(
+      "http://proof.invalid",
+      await unprovenTransaction(),
+      60_000,
+    ).then(
+      () => new Error("proving unexpectedly succeeded"),
+      (rejection: unknown) => rejection,
+    );
+
+    expect(String(error)).toMatch(
+      /proof server \/(check|prove) request failed after \d+\.\ds: TypeError: fetch failed: HeadersTimeoutError: Headers Timeout Error \(UND_ERR_HEADERS_TIMEOUT\)/,
+    );
+  });
+
+  it("names undici's cause when the proof server drops the connection mid-response", async () => {
+    const server = createServer((request, response) => {
+      request.resume().on("end", () => {
+        response.writeHead(200, { "content-length": "1024" });
+        response.write(Uint8Array.of(1), () => response.socket?.destroy());
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const live = provingProvider(`http://127.0.0.1:${port}`, new AbortController().signal);
+      const request = await proofRequest();
+
+      await expect(live.prove(request.preimage, request.keyLocation, 4n)).rejects.toThrow(
+        /^proof server \/prove request failed after \d+\.\ds: TypeError: terminated: ResponseContentLengthMismatchError: Response body length does not match content-length header \(UND_ERR_RES_CONTENT_LENGTH_MISMATCH\)$/,
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("keeps the status and undici's cause when an error response is cut off", async () => {
+    const server = createServer((request, response) => {
+      request.resume().on("end", () => {
+        response.writeHead(503, { "content-length": "1024" });
+        response.write("w", () => response.socket?.destroy());
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const live = provingProvider(`http://127.0.0.1:${port}`, new AbortController().signal);
+      const request = await proofRequest();
+
+      await expect(live.prove(request.preimage, request.keyLocation, 4n)).rejects.toThrow(
+        /^proof server answered 503 to \/prove after \d+\.\ds: <body unreadable: TypeError: terminated: ResponseContentLengthMismatchError: Response body length does not match content-length header \(UND_ERR_RES_CONTENT_LENGTH_MISMATCH\)>$/,
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("opens a fresh connection for every proof-server request", async () => {
+    const sockets = new Set<Socket>();
+    const server = createServer((request, response) => {
+      sockets.add(request.socket);
+      request.resume().on("end", () => response.end(Uint8Array.of(1)));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const live = provingProvider(`http://127.0.0.1:${port}`, new AbortController().signal);
+      const request = await proofRequest();
+
+      // A built-in key location sends no contract key material, keeping each upload small.
+      for (let i = 0; i < 3; i++) await live.prove(request.preimage, "midnight/zswap/spend", 4n);
+
+      expect(sockets.size).toBe(3);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it("enforces the aggregate proving budget when proof work ignores the provider and resolves late", async () => {

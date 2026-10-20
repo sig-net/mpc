@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -5,8 +6,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use backon::ExponentialBuilder;
 use rand::Rng;
 
+use alloy::transports::{
+    RpcError as AlloyRpcError, TransportError as AlloyTransportError, TransportErrorKind,
+};
+use http::StatusCode;
+
 // Re-export the retry macros
-pub use crate::{retry_rpc, retry_rpc_gated};
+pub use crate::{retry_op, retry_rpc};
 
 const RATE_LIMIT_BASE_COOLDOWN: Duration = Duration::from_secs(1);
 const RATE_LIMIT_MAX_COOLDOWN: Duration = Duration::from_secs(60);
@@ -68,9 +74,19 @@ impl SharedBackoff {
         cooldown
     }
 
-    /// Resets the penalty level after a successful call.
+    /// Resets the penalty level once the cooldown window has fully elapsed
     pub fn report_success(&self) {
+        if self.remaining() > Duration::ZERO {
+            return;
+        }
         self.inner.penalty_level.store(0, Ordering::Relaxed);
+    }
+
+    /// Extends the cooldown if `err` looks like provider throttling (429/402).
+    /// Returns the applied cooldown, or `None` when the error is not a
+    /// throttle
+    pub fn engage_if_throttled(&self, err: &anyhow::Error) -> Option<Duration> {
+        is_provider_throttled(err).then(|| self.extend_cooldown())
     }
 
     /// Sleeps until the global cooldown window has elapsed, plus random jitter
@@ -102,6 +118,44 @@ impl SharedBackoff {
     }
 }
 
+/// Runs a single call under `gate`: waits out any engaged cooldown, resets the
+/// penalty level on success, and extends the window when the error looks like
+/// provider throttling (429/402). Single attempt — the caller owns retries.
+pub async fn run_gated<T, F>(
+    gate: &SharedBackoff,
+    operation: &'static str,
+    call: F,
+) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    gate.wait().await;
+    match call.await {
+        Ok(value) => {
+            gate.report_success();
+            Ok(value)
+        }
+        Err(err) => {
+            if let Some(cooldown) = gate.engage_if_throttled(&err) {
+                tracing::warn!(
+                    operation,
+                    error = %format_args!("{err:#}"),
+                    ?cooldown,
+                    "provider throttled (429/402), engaging shared cooldown"
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Attaches the exhaustion context to a failed retry chain without
+/// re-stringifying the error, so typed causes survive for outer gates.
+#[doc(hidden)]
+pub fn exhausted(e: anyhow::Error, attempts: u32) -> anyhow::Error {
+    e.context(format!("exhausted after {} attempts", attempts))
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -109,10 +163,116 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Whether an HTTP status makes an RPC call worth retrying: 408/429 are
+/// transient, 402 stays retryable (pairs with the cooldown gate — providers
+/// refill credits on their own schedule), 5xx are the server's fault, and
+/// everything else — other 4xx, but also redirects — is terminal. A redirect
+/// loop never fixes itself by retrying, so it must not be retried to exhaustion.
+pub fn http_status_retryable(status: StatusCode) -> bool {
+    if matches!(
+        status,
+        StatusCode::PAYMENT_REQUIRED | StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+    ) {
+        return true;
+    }
+    status.is_server_error()
+}
+
+/// Typed RPC failure chain for classifying errors in the retry logic.
+// TODO: once every chain client attaches typed failures, the string-matching
+// fallbacks in `is_retryable`/`is_provider_throttled` get deleted.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct RpcFailure {
+    /// Human-readable error message.
+    message: String,
+    /// HTTP status code associated with the failure, if any.
+    status: Option<StatusCode>,
+    /// Whether this failure is considered terminal.
+    terminal: bool,
+}
+
+impl RpcFailure {
+    /// Constructs a new `RpcFailure` with the given HTTP status and message.
+    /// The verdict is derived from the status via [`http_status_retryable`].
+    pub fn with_status(status: StatusCode, message: String) -> Self {
+        Self::with_verdict(status, !http_status_retryable(status), message)
+    }
+
+    /// Constructs a new `RpcFailure` with an explicit verdict, for cases where
+    /// a chain error code overrules the status (e.g. a concurrent-submission
+    /// 409 that is worth retrying). Throttle detection still reads the status.
+    pub fn with_verdict(status: StatusCode, terminal: bool, message: String) -> Self {
+        Self {
+            message,
+            status: Some(status),
+            terminal,
+        }
+    }
+
+    /// Constructs a new terminal `RpcFailure` with the given message.
+    pub fn terminal(message: String) -> Self {
+        Self {
+            message,
+            status: None,
+            terminal: true,
+        }
+    }
+
+    /// Constructs a new retryable `RpcFailure` with the given message.
+    pub fn retryable(message: String) -> Self {
+        Self {
+            message,
+            status: None,
+            terminal: false,
+        }
+    }
+
+    /// Returns the HTTP status code associated with this failure, if any.
+    pub fn status(&self) -> Option<StatusCode> {
+        self.status
+    }
+    /// Returns true if this failure is considered terminal.
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+}
+
+/// Typed signals from one walk of the anyhow chain: the first [`RpcFailure`]`/
+/// its verdict, and the first typed HTTP status (on a [`RpcFailure`] or an
+/// alloy transport error wrapping an HTTP response).
+fn typed_signals(e: &anyhow::Error) -> (Option<&RpcFailure>, Option<StatusCode>) {
+    e.chain().fold((None, None), |(failure, status), cause| {
+        (
+            failure.or_else(|| cause.downcast_ref::<RpcFailure>()),
+            status.or_else(|| cause_status(cause)),
+        )
+    })
+}
+
+/// HTTP status carried by a single error cause, if any.
+fn cause_status(cause: &(dyn std::error::Error + 'static)) -> Option<StatusCode> {
+    if let Some(failure) = cause.downcast_ref::<RpcFailure>() {
+        return failure.status;
+    }
+    let err = cause.downcast_ref::<AlloyTransportError>()?;
+    let AlloyRpcError::Transport(TransportErrorKind::HttpError(http)) = err else {
+        return None;
+    };
+    StatusCode::from_u16(http.status).ok()
+}
+
 /// Returns true if the error looks like the provider throttling us: HTTP 429
 /// (rate limited) or 402 (payment required, e.g. exhausted credits).
-pub fn is_provider_throttled(e: &anyhow::Error) -> bool {
-    let s = e.to_string();
+fn is_provider_throttled(e: &anyhow::Error) -> bool {
+    // Typed status is authoritative over body text (if present).
+    if let Some(status) = typed_signals(e).1 {
+        return status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::PAYMENT_REQUIRED;
+    }
+    // TODO: last-resort fallback for chains surfacing statuses only as text;
+    // Delete once every chain client attaches typed statuses.
+    // `{:#}` renders the full context chain — a 429 can sit under `with_context`
+    let s = format!("{e:#}");
     contains_status_code(&s, "429") || contains_status_code(&s, "402")
 }
 
@@ -148,8 +308,9 @@ fn contains_status_code(s: &str, code: &str) -> bool {
     while let Some(pos) = s[start..].find(code) {
         let i = start + pos;
         let end = i + code.len();
-        let before_ok = i == 0 || !bytes[i - 1].is_ascii_digit();
-        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_digit();
+        // alphanumeric boundaries: hex/base58 runs (…a429f…) must not read as status codes
+        let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
         if before_ok && after_ok {
             return true;
         }
@@ -161,6 +322,18 @@ fn contains_status_code(s: &str, code: &str) -> bool {
 /// Helper to identify whether an RPC error should be retried.
 /// Protects against endlessly retrying terminal client errors (4xx).
 pub fn is_retryable(e: &anyhow::Error) -> bool {
+    // Explicit typed verdict wins over any message text; otherwise the first
+    // typed HTTP status decides.
+    let (failure, status) = typed_signals(e);
+    if let Some(f) = failure {
+        return !f.terminal;
+    }
+    if let Some(status) = status {
+        return http_status_retryable(status);
+    }
+
+    // TODO: last-resort fallback for chains surfacing statuses only as text;
+    // Delete once every chain client attaches typed statuses.
     let s = e.to_string();
     // 408 Request Timeout and 429 Too Many Requests are retryable.
     if contains_status_code(&s, "408") || contains_status_code(&s, "429") {
@@ -178,18 +351,20 @@ pub fn is_retryable(e: &anyhow::Error) -> bool {
     true
 }
 
-/// Wraps an async RPC call with a timeout and [`backon`] exponential-backoff retry strategy.
+/// Wraps an async call with a timeout and [`backon`] exponential-backoff retry strategy.
+/// Use for retries that are not RPC-shaped (RPC calls should prefer [`retry_rpc!`],
+/// which gates on the shared per-chain cooldown).
 ///
 /// # Forms
 ///
 /// ## 1. Standard — named operation, structured [`tracing::warn`] on every retry
 /// ```ignore
-/// retry_rpc!(timeout, strategy, "op_name", { code })
+/// retry_op!(timeout, strategy, "op_name", { code })
 /// ```
 ///
 /// ## 2. Full — named operation, custom notify closure
 /// ```ignore
-/// retry_rpc!(timeout, strategy, "op_name", |attempt, err, sleep| { notify }, { code })
+/// retry_op!(timeout, strategy, "op_name", |attempt, err, sleep| { notify }, { code })
 /// ```
 ///
 /// # Parameters
@@ -214,19 +389,19 @@ pub fn is_retryable(e: &anyhow::Error) -> bool {
 /// ## Standard form (most common)
 /// ```ignore
 /// // Retries up to strategy.max_times, logs each failure via tracing::warn!
-/// let slot: u64 = retry_rpc!(SOL_RPC_TIMEOUT, self.retry_strategy, "get_slot", {
+/// let slot: u64 = retry_op!(SOL_RPC_TIMEOUT, self.retry_strategy, "get_slot", {
 ///     self.rpc_client.get_slot().await.map_err(anyhow::Error::from)
 /// })?;
 /// ```
 ///
 /// ## Full form (custom retry logging)
 /// ```ignore
-/// let block = retry_rpc!(
+/// let block = retry_op!(
 ///     RPC_TIMEOUT,
 ///     self.retry_strategy,
 ///     "get_block",
 ///     |attempt, err, sleep| {
-///         tracing::error!(attempt, error = %err, retry_in = ?sleep, "get_block failed");
+///         tracing::error!(attempt, error = %format_args!("{err:#}"), retry_in = ?sleep, "get_block failed");
 ///     },
 ///     {
 ///         client.get_block(block_id).await
@@ -234,7 +409,7 @@ pub fn is_retryable(e: &anyhow::Error) -> bool {
 /// )?;
 /// ```
 #[macro_export]
-macro_rules! retry_rpc {
+macro_rules! retry_op {
     // Standard form: op_name string, default structured logging
     ($timeout:expr, $strategy:expr, $op_name:literal, { $($code:tt)* }) => {{
         let mut attempt_counter: u32 = 0;
@@ -256,17 +431,17 @@ macro_rules! retry_rpc {
                 tracing::warn!(
                     operation = $op_name,
                     attempt = attempt_counter,
-                    error = %err,
+                    error = %format_args!("{err:#}"),
                     retry_in = ?sleep,
-                    "RPC call failed, retrying"
+                    "call failed, retrying"
                 );
             })
             .await
-            .map_err(|e| anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
     }};
 
-    // Full form: custom notify closure, no op_name
-    ($timeout:expr, $strategy:expr, |$attempt:ident, $err:ident, $sleep:ident| $notify:block, { $($code:tt)* }) => {{
+    // Full form: op_name string, custom notify closure
+    ($timeout:expr, $strategy:expr, $op_name:literal, |$attempt:ident, $err:ident, $sleep:ident| $notify:block, { $($code:tt)* }) => {{
         let mut attempt_counter: u32 = 0;
         let op = || async {
             let fut = async { $($code)* };
@@ -287,11 +462,11 @@ macro_rules! retry_rpc {
                 $notify
             })
             .await
-            .map_err(|e| anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
     }};
 }
 
-/// Like [`retry_rpc!`], but gates every attempt on a shared cooldown
+/// Like [`retry_op!`], but gates every attempt on a shared cooldown
 /// ([`SharedBackoff`]): each attempt waits out the global cooldown before
 /// firing, a 429 or 402 extends the shared window, and a success resets the
 /// penalty. Prevents retry storms when an endpoint starts rate-limiting or runs
@@ -301,43 +476,29 @@ macro_rules! retry_rpc {
 ///
 /// ## 1. Standard — named operation, structured [`tracing::warn`] on every retry
 /// ```ignore
-/// retry_rpc_gated!(timeout, strategy, shared, "op_name", { code })
+/// retry_rpc!(timeout, strategy, shared, "op_name", { code })
 /// ```
 ///
-/// ## 2. Full — custom notify closure
+/// ## 2. Full — named operation, custom notify closure
 /// ```ignore
-/// retry_rpc_gated!(timeout, strategy, shared, |attempt, err, sleep| { notify }, { code })
+/// retry_rpc!(timeout, strategy, shared, "op_name", |attempt, err, sleep| { notify }, { code })
 /// ```
 ///
-/// See [`retry_rpc!`] for the other parameters; `shared` is a [`SharedBackoff`]
+/// See [`retry_op!`] for the other parameters; `shared` is a [`SharedBackoff`]
 /// handle cloned across all call sites hitting the same endpoint.
 #[macro_export]
-macro_rules! retry_rpc_gated {
+macro_rules! retry_rpc {
     // Standard form: op_name string, default structured logging
     ($timeout:expr, $strategy:expr, $shared:expr, $op_name:literal, { $($code:tt)* }) => {{
         let shared = &$shared;
         let mut attempt_counter: u32 = 0;
         let op = || async {
-            shared.wait().await;
-            let fut = async { $($code)* };
-            match tokio::time::timeout($timeout, fut).await {
-                Ok(Ok(res)) => {
-                    shared.report_success();
-                    Ok(res)
-                }
-                Ok(Err(e)) => {
-                    if $crate::utils::retry::is_provider_throttled(&e) {
-                        let cooldown = shared.extend_cooldown();
-                        tracing::warn!(
-                            operation = $op_name,
-                            ?cooldown,
-                            "provider throttled (429/402), engaging global cooldown"
-                        );
-                    }
-                    Err(e)
-                }
-                Err(_) => Err(anyhow::anyhow!("Operation timed out after {:?}", $timeout)),
-            }
+            $crate::utils::retry::run_gated(shared, $op_name, async {
+                tokio::time::timeout($timeout, async { $($code)* })
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Operation timed out after {:?}", $timeout))?
+            })
+            .await
         };
         use $crate::backon::Retryable as _;
         op.retry(&$strategy.build())
@@ -347,36 +508,26 @@ macro_rules! retry_rpc_gated {
                 tracing::warn!(
                     operation = $op_name,
                     attempt = attempt_counter,
-                    error = %err,
+                    error = %format_args!("{err:#}"),
                     retry_in = ?sleep,
                     "RPC call failed, retrying"
                 );
             })
             .await
-            .map_err(|e| anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
     }};
 
-    // Full form: custom notify closure
-    ($timeout:expr, $strategy:expr, $shared:expr, |$attempt:ident, $err:ident, $sleep:ident| $notify:block, { $($code:tt)* }) => {{
+    // Full form: op_name string, custom notify closure
+    ($timeout:expr, $strategy:expr, $shared:expr, $op_name:literal, |$attempt:ident, $err:ident, $sleep:ident| $notify:block, { $($code:tt)* }) => {{
         let shared = &$shared;
         let mut attempt_counter: u32 = 0;
         let op = || async {
-            shared.wait().await;
-            let fut = async { $($code)* };
-            match tokio::time::timeout($timeout, fut).await {
-                Ok(Ok(res)) => {
-                    shared.report_success();
-                    Ok(res)
-                }
-                Ok(Err(e)) => {
-                    if $crate::utils::retry::is_provider_throttled(&e) {
-                        let cooldown = shared.extend_cooldown();
-                        tracing::warn!(?cooldown, "provider throttled (429/402), engaging global cooldown");
-                    }
-                    Err(e)
-                }
-                Err(_) => Err(anyhow::anyhow!("Operation timed out after {:?}", $timeout)),
-            }
+            $crate::utils::retry::run_gated(shared, $op_name, async {
+                tokio::time::timeout($timeout, async { $($code)* })
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Operation timed out after {:?}", $timeout))?
+            })
+            .await
         };
         use $crate::backon::Retryable as _;
         op.retry(&$strategy.build())
@@ -387,13 +538,45 @@ macro_rules! retry_rpc_gated {
                 $notify
             })
             .await
-            .map_err(|e| anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1))
+            .map_err(|e| $crate::utils::retry::exhausted(e, attempt_counter + 1))
     }};
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_success_keeps_escalation_while_window_active() {
+        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(1), Duration::from_secs(60));
+        let base = gate.extend_cooldown();
+
+        gate.report_success();
+
+        // a success landing inside the active window must not de-escalate
+        assert_eq!(
+            gate.extend_cooldown(),
+            base * 2,
+            "success during an active window must keep the penalty level"
+        );
+    }
+
+    #[test]
+    fn report_success_resets_escalation_after_window_elapses() {
+        let gate = SharedBackoff::with_cooldowns(Duration::from_secs(1), Duration::from_secs(60));
+        let base = gate.extend_cooldown();
+        gate.extend_cooldown();
+
+        // simulate the window having elapsed
+        gate.inner.limited_until_ms.store(0, Ordering::Relaxed);
+        gate.report_success();
+
+        assert_eq!(
+            gate.extend_cooldown(),
+            base,
+            "success after the window elapsed must reset escalation"
+        );
+    }
 
     #[test]
     fn client_errors_are_not_retryable() {
@@ -420,19 +603,11 @@ mod tests {
         let sb = SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
         sb.extend_cooldown();
         let long = sb.extend_cooldown();
-        sb.report_success();
+        // simulate the level having been reset
+        sb.inner.penalty_level.store(0, Ordering::Relaxed);
         let short = sb.extend_cooldown();
         assert!(short < long);
         assert!(sb.remaining() > short);
-    }
-
-    #[test]
-    fn shared_backoff_success_resets_penalty() {
-        let sb = SharedBackoff::with_cooldowns(Duration::from_millis(100), Duration::from_secs(60));
-        sb.extend_cooldown();
-        sb.extend_cooldown();
-        sb.report_success();
-        assert_eq!(sb.extend_cooldown(), Duration::from_millis(100));
     }
 
     #[test]
@@ -449,6 +624,20 @@ mod tests {
         )));
         assert!(!is_provider_throttled(&anyhow::anyhow!(
             "HTTP status client error (403 Forbidden)"
+        )));
+        // a 429 underneath `with_context` still engages (full chain scanned)
+        assert!(is_provider_throttled(
+            &anyhow::anyhow!(
+                "HTTP status client error (429 Too Many Requests) for url (http://x/)"
+            )
+            .context("submitting the midnight respond intent built over the chain at 0x9c1f")
+        ));
+        // hex fragments must not read as throttles (alphanumeric boundaries)
+        assert!(!is_provider_throttled(&anyhow::anyhow!(
+            "submitting the midnight respond intent built over the chain at 0xa429f"
+        )));
+        assert!(!is_provider_throttled(&anyhow::anyhow!(
+            "no spendable dust for transfer c402e5819d2b"
         )));
     }
 
@@ -488,7 +677,7 @@ mod tests {
             let calls = calls.clone();
             handles.push(tokio::spawn(async move {
                 let attempts = calls.clone();
-                let _: anyhow::Result<()> = retry_rpc_gated!(
+                let _: anyhow::Result<()> = retry_rpc!(
                     Duration::from_secs(5),
                     gated_test_config(),
                     shared,
@@ -516,7 +705,7 @@ mod tests {
     async fn macro_engages_global_cooldown_on_402() {
         let shared =
             SharedBackoff::with_cooldowns(Duration::from_millis(50), Duration::from_millis(200));
-        let _: anyhow::Result<()> = retry_rpc_gated!(
+        let _: anyhow::Result<()> = retry_rpc!(
             Duration::from_secs(5),
             RetryConfig {
                 max_times: 0,
@@ -542,7 +731,7 @@ mod tests {
         let start = std::time::Instant::now();
 
         // The first attempt returns a 429, the second attempt succeeds.
-        let res: anyhow::Result<u32> = retry_rpc_gated!(
+        let res: anyhow::Result<u32> = retry_rpc!(
             Duration::from_secs(5),
             gated_test_config(),
             shared,
@@ -577,5 +766,88 @@ mod tests {
         ] {
             assert!(is_retryable(&anyhow::anyhow!(msg)), "{msg:?} should be retryable");
         }
+    }
+
+    #[test]
+    fn http_status_retryable_table() {
+        let status = |n: u16| StatusCode::from_u16(n).unwrap();
+        // 402 pairs with the cooldown gate (credit refill), 408/429 are transient by definition
+        for n in [402, 408, 429] {
+            assert!(http_status_retryable(status(n)), "{n} should be retryable");
+        }
+        // every other 4xx is a client error another attempt cannot fix, and
+        // redirects (a redirect loop cannot be retried out of) are terminal too
+        for n in [400, 401, 403, 404, 405, 409, 410, 422, 499, 301, 308] {
+            assert!(!http_status_retryable(status(n)), "{n} should be terminal");
+        }
+        // 5xx default to retryable
+        for n in [500, 502, 503, 504, 599] {
+            assert!(http_status_retryable(status(n)), "{n} should be retryable");
+        }
+    }
+
+    #[test]
+    fn rpc_failure_verdict_is_authoritative_over_message_text() {
+        // with_status derives the verdict from the status, not the message
+        let throttled: anyhow::Error = RpcFailure::with_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "nothing suspicious in this text".into(),
+        )
+        .into();
+        assert!(is_retryable(&throttled));
+        assert!(is_provider_throttled(&throttled));
+
+        // 409 is terminal by status, even though the body text mentions 429
+        let terminal: anyhow::Error = RpcFailure::with_status(
+            StatusCode::CONFLICT,
+            "conflict; body says 429 retry now".into(),
+        )
+        .into();
+        assert!(!is_retryable(&terminal));
+        assert!(!is_provider_throttled(&terminal));
+
+        // status-less verdicts work in both directions
+        let explicit_terminal: anyhow::Error =
+            RpcFailure::terminal("already accepted".into()).into();
+        assert!(!is_retryable(&explicit_terminal));
+        let explicit_retryable: anyhow::Error =
+            RpcFailure::retryable("transient downstream hiccup".into()).into();
+        assert!(is_retryable(&explicit_retryable));
+        // no status → no throttle signal
+        assert!(!is_provider_throttled(&explicit_retryable));
+    }
+
+    #[test]
+    fn rpc_failure_under_context_still_classifies() {
+        // context wrappers must not hide the typed carrier
+        let err = anyhow::Error::new(RpcFailure::with_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate limited".into(),
+        ))
+        .context("submitting transaction");
+        assert!(is_retryable(&err));
+        assert!(is_provider_throttled(&err));
+    }
+
+    #[test]
+    fn alloy_http_error_classifies_typed() {
+        // simulate alloy HTTP errors and check their classification
+        let alloy_http_error = |status: u16| {
+            let kind = TransportErrorKind::HttpError(alloy::transports::HttpError {
+                status,
+                body: String::new(),
+            });
+            let err: AlloyTransportError = AlloyRpcError::Transport(kind);
+            anyhow::Error::new(err)
+        };
+        assert!(is_retryable(&alloy_http_error(429)));
+        assert!(is_provider_throttled(&alloy_http_error(429)));
+        assert!(!is_retryable(&alloy_http_error(404)));
+        assert!(!is_provider_throttled(&alloy_http_error(404)));
+        // 409 arrives typed from alloy transports and classifies as terminal
+        assert!(!is_retryable(&alloy_http_error(409)));
+        // a synthetic invalid status cannot become a StatusCode, so the typed
+        // path yields no status and the default (retryable) applies
+        assert!(is_retryable(&alloy_http_error(0)));
     }
 }

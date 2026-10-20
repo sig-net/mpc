@@ -60,7 +60,25 @@ pub struct SingletonCallEmissions {
     pub call_index: u32,
     pub physical_segment: u16,
     pub phase: TranscriptPhase,
+    /// The contract whose transcript claims this call (same segment, address, entry point,
+    /// commitment). `None` for a top-level call or more than one claimer.
+    pub caller: Option<[u8; 32]>,
     pub emissions: Vec<Emission>,
+}
+
+/// The unique call in `physical_segment` that claims `callee`. The ledger rejects duplicate
+/// claims, so a second claimer resolves to `None` rather than a pick.
+fn direct_caller(
+    all_calls: &[(u16, ContractCall<ProofMarker, DefaultDB>)],
+    physical_segment: u16,
+    callee: &ContractCall<ProofMarker, DefaultDB>,
+) -> Option<[u8; 32]> {
+    let mut claimers = all_calls
+        .iter()
+        .filter(|(segment, call)| *segment == physical_segment && call.calls(callee))
+        .map(|(_, call)| call.address.0 .0);
+    let caller = claimers.next()?;
+    claimers.next().is_none().then_some(caller)
 }
 
 fn log_items<P: ProofKind<DefaultDB>>(
@@ -193,13 +211,14 @@ pub fn emissions_in(
     tx: &DecodedTransaction,
     singleton: &[u8; 32],
 ) -> anyhow::Result<Vec<SingletonCallEmissions>> {
-    let mut calls = tx
-        .calls()
+    let all_calls: Vec<_> = tx.calls().collect();
+    let mut calls = all_calls
+        .iter()
         .enumerate()
         .filter(|(_, (_, call))| call.address.0 .0 == *singleton)
         .map(|(call_index, (physical_segment, call))| {
             Ok((
-                physical_segment,
+                *physical_segment,
                 u32::try_from(call_index)
                     .context("transaction contains more calls than a u32 locator can represent")?,
                 call,
@@ -229,6 +248,7 @@ pub fn emissions_in(
                 call_index: *call_index,
                 physical_segment: *physical_segment,
                 phase,
+                caller: direct_caller(&all_calls, *physical_segment, call),
                 emissions,
             });
         }
@@ -246,7 +266,7 @@ mod tests {
     use midnight_ledger_v9::structure::{
         ContractAction, ContractCall, Intent, ProofMarker, ProofVersioned, StandardTransaction,
     };
-    use midnight_onchain_runtime::context::Effects;
+    use midnight_onchain_runtime::context::{ClaimedContractCallsValue, Effects};
     use midnight_onchain_runtime::ops::{LogEventType, Op, VersionedLogItem};
     use midnight_onchain_runtime::result_mode::ResultModeVerify;
     use midnight_onchain_runtime::state::{EntryPointBuf, StateValue};
@@ -856,6 +876,7 @@ mod tests {
             emissions_in(&tx, &SINGLETON).unwrap(),
             vec![SingletonCallEmissions {
                 call_index: 1,
+                caller: None,
                 physical_segment: 1,
                 phase: TranscriptPhase::Guaranteed,
                 emissions: vec![Emission {
@@ -863,6 +884,76 @@ mod tests {
                     payload: FALLIBLE,
                 }],
             }]
+        );
+    }
+
+    fn claiming(
+        address: [u8; 32],
+        callee: &ContractCall<ProofMarker, DefaultDB>,
+    ) -> ContractCall<ProofMarker, DefaultDB> {
+        let mut caller = call(address, Some(Vec::new()), None);
+        let mut claimed = transcript(Vec::new());
+        claimed.effects.claimed_contract_calls =
+            claimed
+                .effects
+                .claimed_contract_calls
+                .insert(ClaimedContractCallsValue(
+                    0,
+                    callee.address,
+                    callee.entry_point.ep_hash(),
+                    callee.communication_commitment,
+                ));
+        caller.guaranteed_transcript = Some(Sp::new(claimed));
+        caller
+    }
+
+    fn caller_of_the_singleton(
+        calls: Vec<ContractCall<ProofMarker, DefaultDB>>,
+    ) -> Option<[u8; 32]> {
+        let decoded = emissions_in(&transaction(calls), &SINGLETON).unwrap();
+        let [singleton_call] = decoded.as_slice() else {
+            panic!("expected one singleton call, got {decoded:?}");
+        };
+        singleton_call.caller
+    }
+
+    #[test]
+    fn the_caller_is_the_contract_that_claims_the_singleton_call() {
+        let singleton = call(SINGLETON, None, None);
+        assert_eq!(
+            caller_of_the_singleton(vec![claiming(OTHER_CONTRACT, &singleton), singleton]),
+            Some(OTHER_CONTRACT)
+        );
+    }
+
+    #[test]
+    fn a_singleton_call_nobody_claims_has_no_caller() {
+        let singleton = call(SINGLETON, None, None);
+        let bystander = call(OTHER_CONTRACT, Some(Vec::new()), None);
+        assert_eq!(caller_of_the_singleton(vec![bystander, singleton]), None);
+    }
+
+    #[test]
+    fn a_claim_on_a_different_commitment_does_not_make_a_caller() {
+        let singleton = call(SINGLETON, None, None);
+        let mut other_instance = call(SINGLETON, None, None);
+        other_instance.communication_commitment = Fr::from(7u64);
+        assert_eq!(
+            caller_of_the_singleton(vec![claiming(OTHER_CONTRACT, &other_instance), singleton]),
+            None
+        );
+    }
+
+    #[test]
+    fn two_claimers_resolve_to_no_caller() {
+        let singleton = call(SINGLETON, None, None);
+        assert_eq!(
+            caller_of_the_singleton(vec![
+                claiming(OTHER_CONTRACT, &singleton),
+                claiming([0x56; 32], &singleton),
+                singleton,
+            ]),
+            None
         );
     }
 
@@ -874,6 +965,7 @@ mod tests {
             emissions_in(&tx, &SINGLETON).unwrap(),
             vec![SingletonCallEmissions {
                 call_index: 0,
+                caller: None,
                 physical_segment: 1,
                 phase: TranscriptPhase::Guaranteed,
                 emissions: Vec::new(),
