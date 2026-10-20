@@ -15,6 +15,7 @@
 
 - [Secret management](secret-management.md): how secret material is represented, passed around, logged and stored in the node.
 - [Logging](logging.md): log level policy, what each level means and how to log retries.
+- [Releasing](releasing.md): branches, versioning, the biweekly release flow through testnet to mainnet, and hotfixes.
 
 ## Build
 
