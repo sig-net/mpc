@@ -1,40 +1,25 @@
 use futures_util::StreamExt;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{
     utils::retry::{retry_rpc, RetryConfig, SharedBackoff},
-    ChainPublisher, PublishAction, PublisherTelemetry,
+    PublisherTelemetry,
 };
-use mpc_primitives::SignKind;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use signet_program::accounts::{
-    Respond as SolanaRespondAccount, RespondBidirectional as SolanaRespondBidirectionalAccount,
+use solana_client::{
+    nonblocking::rpc_client::RpcClient, rpc_client::GetConfirmedSignaturesForAddress2Config,
+    rpc_config::RpcBlockConfig, rpc_response::RpcConfirmedTransactionStatusWithSignature,
 };
-use signet_program::instruction::{
-    Respond as SolanaRespond, RespondBidirectional as SolanaRespondBidirectional,
-};
-use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
-use solana_client::rpc_config::RpcBlockConfig;
-use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_commitment_config::CommitmentConfig;
-use solana_sdk::signature::Signer as SolanaSigner;
-use solana_sdk::signer::keypair::Keypair;
-use solana_sdk::{pubkey::Pubkey, signature::Signature};
+use solana_sdk::{pubkey::Pubkey, signature::Signature, signer::keypair::Keypair};
 use solana_transaction_status::{TransactionDetails, UiConfirmedBlock, UiTransactionEncoding};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
-use crate::{config::SolConfig, utils::mpc_to_sol_signature};
-use anchor_client::ClientError as AnchorClientError;
-use mpc_chain_integration_core::utils::retry::RpcFailure;
-use solana_client::client_error::ClientErrorKind;
-use solana_client::rpc_request::{RpcError, RpcResponseErrorData};
-use solana_client::rpc_response::RpcSimulateTransactionResult;
-use solana_sdk::transaction::TransactionError;
-use std::error::Error as _;
+use crate::config::SolConfig;
 
 /// Shared upper bound for signature pages and globally ordered slot chunks.
 pub(crate) const CATCHUP_PAGE_SIZE: usize = 1_000;
@@ -473,205 +458,12 @@ impl SolanaClient {
     }
 }
 
-enum Verdict {
-    Terminal,
-    Retryable,
-    /// No carrier — the typed HTTP status reaches the core classifier.
-    Passthrough,
-}
-
-impl Verdict {
-    fn carrier(self, message: String) -> Option<RpcFailure> {
-        match self {
-            Verdict::Terminal => Some(RpcFailure::terminal(message)),
-            Verdict::Retryable => Some(RpcFailure::retryable(message)),
-            Verdict::Passthrough => None,
-        }
-    }
-}
-
-/// Publish verdict for an anchor error: program rejections and signer
-/// failures are terminal; HTTP-statused transport errors pass through for
-/// the core classifier; the rest carry a retryable verdict.
-fn publish_error(e: AnchorClientError) -> anyhow::Error {
-    let verdict = verdict(&e);
-    let err = anyhow::Error::new(e);
-    verdict
-        .carrier(format!("{err:#}"))
-        .map_or(err, anyhow::Error::new)
-}
-
-/// Determine the verdict for an anchor error.
-fn verdict(e: &AnchorClientError) -> Verdict {
-    match e {
-        AnchorClientError::ProgramError(_)
-        | AnchorClientError::AnchorError(_)
-        | AnchorClientError::AccountNotFound
-        | AnchorClientError::LogParseError(_)
-        | AnchorClientError::SignerError(_) => Verdict::Terminal,
-        AnchorClientError::SolanaClientError(sol) => kind_verdict(sol.kind()),
-        AnchorClientError::SolanaClientPubsubError(_) | AnchorClientError::IOError(_) => {
-            Verdict::Retryable
-        }
-    }
-}
-
-/// Determine the verdict for a solana client error kind.
-fn kind_verdict(kind: &ClientErrorKind) -> Verdict {
-    match kind {
-        ClientErrorKind::Reqwest(_) => Verdict::Passthrough,
-        ClientErrorKind::TransactionError(tx) => on_chain(tx),
-        ClientErrorKind::RpcError(rpc) => rpc_verdict(rpc),
-        // local key problem, matching the anchor-level SignerError verdict
-        ClientErrorKind::SigningError(_) => Verdict::Terminal,
-        ClientErrorKind::Io(_)
-        | ClientErrorKind::Middleware(_)
-        | ClientErrorKind::SerdeJson(_)
-        | ClientErrorKind::Custom(_) => Verdict::Retryable,
-    }
-}
-
-/// Determine the verdict for an RPC error.
-fn rpc_verdict(rpc: &RpcError) -> Verdict {
-    let RpcError::RpcResponseError {
-        data: RpcResponseErrorData::SendTransactionPreflightFailure(sim),
-        ..
-    } = rpc
-    else {
-        // anchor's confirm loop timed out: the next attempt sends a fresh blockhash
-        return Verdict::Retryable;
-    };
-    sim_tx_error(sim).map_or(Verdict::Retryable, on_chain)
-}
-
-/// `UiTransactionError.source()` is the inner `TransactionError`
-fn sim_tx_error(sim: &RpcSimulateTransactionResult) -> Option<&TransactionError> {
-    sim.err.as_ref()?.source()?.downcast_ref()
-}
-
-/// Determine the verdict for an on-chain transaction error.
-fn on_chain(tx: &TransactionError) -> Verdict {
-    match tx {
-        TransactionError::InstructionError(..) => Verdict::Terminal,
-        _ => Verdict::Retryable,
-    }
-}
-
-#[async_trait::async_trait]
-impl ChainPublisher for SolanaClient {
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let timestamp = action.timestamp;
-        let mpc_sig = &action.signature;
-        let program = self
-            .client
-            .program(self.program_id)
-            .map_err(publish_error)?;
-
-        let sign_id = action.request.id;
-        let request_ids = vec![action.request.id.request_id];
-        let big_r = mpc_sig.big_r.to_encoded_point(false);
-        let signature = mpc_to_sol_signature(mpc_sig, big_r);
-
-        tracing::debug!(
-            ?sign_id,
-            request_type = ?action.request.kind,
-            "Solana publish signature: dispatching request"
-        );
-
-        let (event_authority, _) =
-            Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
-
-        match &action.request.kind {
-            SignKind::Sign | SignKind::SignBidirectional(_) => {
-                let tx = program
-                    .request()
-                    .accounts(SolanaRespondAccount {
-                        responder: self.payer.pubkey(),
-                        event_authority,
-                        program: self.program_id,
-                    })
-                    .args(SolanaRespond {
-                        request_ids,
-                        signatures: vec![signature.clone()],
-                    })
-                    .send()
-                    .await
-                    .map_err(publish_error)
-                    .inspect_err(|err| {
-                        tracing::error!(
-                            sign_id = ?action.request.id,
-                            error = ?err,
-                            "failed to publish solana signature"
-                        );
-                    })?;
-
-                tracing::info!(
-                    ?sign_id,
-                    tx_hash = ?tx,
-                    elapsed = ?timestamp.elapsed(),
-                    "published solana signature successfully"
-                );
-            }
-            SignKind::RespondBidirectional(respond_bidirectional_tx) => {
-                tracing::debug!(
-                    ?sign_id,
-                    request_id = ?request_ids[0],
-                    serialized_output_len = respond_bidirectional_tx.output.len(),
-                    "Solana publish signature: entering RespondBidirectional arm"
-                );
-                let respond_bidirectional_serialized_output =
-                    respond_bidirectional_tx.output.clone();
-                let tx = program
-                    .request()
-                    .accounts(SolanaRespondBidirectionalAccount {
-                        responder: self.payer.pubkey(),
-                        event_authority,
-                        program: self.program_id,
-                    })
-                    .args(SolanaRespondBidirectional {
-                        request_id: request_ids[0],
-                        serialized_output: respond_bidirectional_serialized_output,
-                        signature: signature.clone(),
-                    })
-                    .send()
-                    .await
-                    .map_err(publish_error)
-                    .inspect_err(|err| {
-                        tracing::error!(
-                            ?sign_id,
-                            error = ?err,
-                            "Solana publish signature: failed to publish respond bidirectional solana signature"
-                        );
-                    })?;
-
-                tracing::info!(
-                    ?sign_id,
-                    tx_hash = ?tx,
-                    elapsed = ?timestamp.elapsed(),
-                    "published respond bidirectional solana signature successfully"
-                );
-            }
-        }
-
-        self.telemetry.record_publish_metrics(action);
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::{signature_entry, signatures_response};
-    use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
     use mpc_chain_integration_core::NoopPublisherTelemetry;
-    use serde_json::json;
-    use solana_client::client_error::ClientError as SolanaClientError;
-    use solana_client::rpc_response::RpcSimulateTransactionResult;
-    use solana_sdk::instruction::InstructionError;
-    use solana_sdk::pubkey::Pubkey;
-    use solana_sdk::signature::Signature;
-    use solana_sdk::transaction::TransactionError;
+    use solana_sdk::{pubkey::Pubkey, signature::Signature};
 
     /// Helper to create a SolanaClient for testing with mockito
     fn test_client(url: &str) -> SolanaClient {
@@ -1049,91 +841,5 @@ mod tests {
         assert_eq!(sigs.len(), 2);
         assert_eq!(sigs[0].slot, 200);
         assert_eq!(sigs[1].slot, 150);
-    }
-
-    /// Wrap a `ClientErrorKind` into an `anyhow::Error` using the anchor error wrapper.
-    fn anchor_wrapped(kind: ClientErrorKind) -> anyhow::Error {
-        publish_error(AnchorClientError::SolanaClientError(Box::new(
-            SolanaClientError::from(kind),
-        )))
-    }
-
-    #[test]
-    fn on_chain_instruction_failure_is_terminal() {
-        let err = anchor_wrapped(ClientErrorKind::TransactionError(
-            TransactionError::InstructionError(0, InstructionError::Custom(0)),
-        ));
-        assert!(!is_retryable(&err));
-    }
-
-    #[test]
-    fn on_chain_expiry_and_contention_stay_retryable() {
-        let err = anchor_wrapped(ClientErrorKind::TransactionError(
-            TransactionError::BlockhashNotFound,
-        ));
-        assert!(is_retryable(&err));
-    }
-
-    #[test]
-    fn confirm_timeout_for_user_stays_retryable() {
-        // anchor's confirm-loop shape
-        let err = anchor_wrapped(ClientErrorKind::RpcError(RpcError::ForUser(
-            "unable to confirm transaction. This can happen in situations such as transaction \
-             expiration and insufficient fee-payer funds"
-                .to_string(),
-        )));
-        assert!(is_retryable(&err));
-    }
-
-    #[test]
-    fn preflight_instruction_failure_is_terminal() {
-        // wire shape of -32002:
-        // every field is an Option, missing means None)
-        let sim: RpcSimulateTransactionResult =
-            serde_json::from_value(json!({"err": {"InstructionError": [0, {"Custom": 0}]}}))
-                .unwrap();
-        let err = anchor_wrapped(ClientErrorKind::RpcError(RpcError::RpcResponseError {
-            code: -32002,
-            message: "Transaction simulation failed".to_string(),
-            data: RpcResponseErrorData::SendTransactionPreflightFailure(sim),
-        }));
-        assert!(!is_retryable(&err));
-    }
-
-    #[test]
-    fn signer_errors_are_terminal() {
-        let err = publish_error(AnchorClientError::SignerError(
-            anchor_client::SignerError::KeypairPubkeyMismatch,
-        ));
-        assert!(!is_retryable(&err));
-        // solana-level signing errors agree with the anchor-level verdict
-        let err = anchor_wrapped(ClientErrorKind::SigningError(
-            anchor_client::SignerError::KeypairPubkeyMismatch,
-        ));
-        assert!(!is_retryable(&err));
-    }
-
-    #[tokio::test]
-    async fn http_status_passes_through_to_the_core_classifier() {
-        // real reqwest status error nested exactly as solana nests it:
-        // anchor ClientError → solana ClientError → ErrorKind::Reqwest
-        let mut server = mockito::Server::new_async().await;
-        let throttled = server
-            .mock("POST", "/")
-            .with_status(429)
-            .create_async()
-            .await;
-        let reqwest_err = reqwest::Client::new()
-            .post(server.url())
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap_err();
-        throttled.assert();
-
-        let err = anchor_wrapped(ClientErrorKind::Reqwest(reqwest_err));
-        assert!(is_retryable(&err));
-        assert!(is_provider_throttled(&err));
     }
 }
