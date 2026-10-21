@@ -8,7 +8,8 @@ use mpc_node::protocol::MessageChannel;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
 
-use super::helpers::{dummy_pair, dummy_presignature};
+use super::helpers::{dummy_backlog_entry, dummy_pair, dummy_presignature};
+use mpc_primitives::SignId;
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
@@ -106,9 +107,22 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_mine().await, 2);
     assert_eq!(triple_spawner.len_potential().await, 2);
 
-    // Take mine triple pairs and check that they are removed from the storage and marked as using
-    let _taken3 = triple_storage.take_mine().await.unwrap();
-    let _taken4 = triple_storage.take_mine().await.unwrap();
+    // Reserve and commit mine triple pairs and check that they are removed from
+    // the storage and marked as using
+    let _taken3 = triple_storage
+        .peek_mine(&[])
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
+    let _taken4 = triple_storage
+        .peek_mine(&[])
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
     assert!(!triple_spawner.contains(id3).await);
     assert!(!triple_spawner.contains(id4).await);
     assert!(!triple_spawner.contains_mine(id3).await);
@@ -248,8 +262,15 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_mine().await, 1);
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
-    // Take mine presignature and check that it is removed from the storage and marked as using
-    let _taken_ps2 = presignature_storage.take_mine().await.unwrap();
+    // Reserve and commit mine presignature and check that it is removed from
+    // the storage and marked as using
+    let _taken_ps2 = presignature_storage
+        .peek_mine(&[])
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
     assert!(!presignature_storage.contains(id2).await);
     assert!(!presignature_spawner.contains_mine(id2).await);
     assert_eq!(presignature_storage.len_generated().await, 0);
@@ -302,8 +323,9 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_checkpoint_persistence() -> anyhow::Result<()> {
+    use mpc_node::backlog::Checkpoint;
     use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-    use mpc_primitives::{Chain, Checkpoint};
+    use mpc_primitives::Chain;
     use near_account_id::AccountId;
 
     let spawner = ClusterSpawner::default()
@@ -314,71 +336,158 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     let redis = containers::Redis::run(&spawner).await;
     let pool = redis.pool();
     let account_id: AccountId = "party0.near".parse().unwrap();
+
     let storage = CheckpointStorage::Redis(pool.clone(), account_id);
 
-    // 1. Clean storage returns None / empty history
+    // 1. Clean storage returns None
     assert!(storage.load_latest(Chain::Solana).await?.is_none());
-    assert!(storage.load_history(Chain::Solana).await?.is_empty());
 
-    // 2. Persist first checkpoint
-    let tx1 = mpc_primitives::PendingTx {
-        sign_id: mpc_primitives::SignId::new([1u8; 32]),
-        transaction: vec![1, 2, 3],
-    };
+    fn cumulative_digest(status: [u8; 1]) -> [u8; 32] {
+        use sha3::Digest;
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(status);
+        hasher.finalize().into()
+    }
+
+    // 2. Persist first checkpoint (simulates consensus confirmation)
+    let tx1 = dummy_backlog_entry(1, Chain::Solana);
     let cp1 = Checkpoint {
         chain: Chain::Solana,
         block_height: 10,
         pending_requests: vec![tx1],
+        cumulative_digest: cumulative_digest([0]),
     };
     storage.persist(&cp1).await?;
 
-    // 3. Verify latest and history
+    // 3. Verify latest
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 10);
     assert_eq!(latest.pending_requests.len(), 1);
-    assert_eq!(latest.pending_requests[0].transaction, vec![1, 2, 3]);
-    let history = storage.load_history(Chain::Solana).await?;
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].block_height, 10);
-    assert_eq!(history[0].pending_requests.len(), 1);
+    assert_eq!(latest.pending_requests[0].sign_id(), SignId::new([1u8; 32]));
 
-    // 4. Persist second checkpoint at higher height
-    let tx2 = mpc_primitives::PendingTx {
-        sign_id: mpc_primitives::SignId::new([2u8; 32]),
-        transaction: vec![4, 5, 6],
-    };
+    // 4. Persist second checkpoint at higher height (newer consensus checkpoint)
+    let tx2 = dummy_backlog_entry(2, Chain::Solana);
     let cp2 = Checkpoint {
         chain: Chain::Solana,
         block_height: 20,
         pending_requests: vec![tx2],
+        cumulative_digest: cumulative_digest([0]),
     };
     storage.persist(&cp2).await?;
 
-    // 5. Verify latest is updated and history has both
+    // 5. Verify latest is updated
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 20);
     assert_eq!(latest.pending_requests.len(), 1);
-    assert_eq!(latest.pending_requests[0].transaction, vec![4, 5, 6]);
-    let history = storage.load_history(Chain::Solana).await?;
-    assert_eq!(history.len(), 2);
-    let mut heights: Vec<u64> = history.iter().map(|cp| cp.block_height).collect();
-    heights.sort();
-    assert_eq!(heights, vec![10, 20]);
+    assert_eq!(latest.pending_requests[0].sign_id(), SignId::new([2u8; 32]));
 
-    // 6. Test pruning: persist more checkpoints to exceed limit
-    for i in 1..=31 {
-        let cp = Checkpoint {
-            chain: Chain::Solana,
-            block_height: 20 + i * 10,
-            pending_requests: vec![],
-        };
-        storage.persist(&cp).await?;
-    }
+    Ok(())
+}
 
-    // 7. Verify oldest (height 10) is pruned, keeping MAX_RECENT_CHECKPOINTS (32)
-    let history = storage.load_history(Chain::Solana).await?;
-    assert_eq!(history.len(), 32);
-    assert_eq!(history[0].block_height, 20);
+#[test(tokio::test)]
+async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
+    use deadpool_redis::redis;
+    use mpc_node::backlog::Checkpoint;
+    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
+    use mpc_primitives::Chain;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-pending-checkpoint-persistence")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let pool = redis_container.pool();
+    let account_id = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(pool.clone(), account_id);
+    let checkpoint = |height| Checkpoint {
+        chain: Chain::Solana,
+        block_height: height,
+        pending_requests: vec![],
+        cumulative_digest: Checkpoint::empty_cumulative_digest(),
+    };
+
+    // Neither key exists yet.
+    assert!(!storage.has_checkpoint(Chain::Solana).await?);
+
+    let first = checkpoint(10);
+    let second = checkpoint(20);
+    storage.persist_pending(&first).await?;
+    storage.persist_pending(&second).await?;
+
+    // Pending-only: no confirmed key exists yet, so this case rests on a
+    // non-empty hash being visible to EXISTS.
+    assert!(storage.has_checkpoint(Chain::Solana).await?);
+
+    let restarted = storage.clone();
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![first.clone(), second.clone()]
+    );
+
+    assert_eq!(
+        restarted
+            .promote_pending(Chain::Solana, first.digest())
+            .await?,
+        Some(1)
+    );
+    assert_eq!(
+        restarted.load_latest(Chain::Solana).await?,
+        Some(first.clone())
+    );
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![second.clone()]
+    );
+
+    let mut conflicting = second.clone();
+    conflicting.cumulative_digest[0] = 1;
+    assert!(restarted.persist_pending(&conflicting).await.is_err());
+    assert!(restarted
+        .promote_pending(Chain::Solana, [99; 32])
+        .await?
+        .is_none());
+    assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(first));
+    assert_eq!(
+        restarted.load_pending(Chain::Solana).await?,
+        vec![second.clone()]
+    );
+    assert_eq!(
+        restarted
+            .promote_pending(Chain::Solana, second.digest())
+            .await?,
+        Some(0)
+    );
+    assert_eq!(restarted.load_latest(Chain::Solana).await?, Some(second));
+    assert!(restarted.load_pending(Chain::Solana).await?.is_empty());
+    // Pending drained, so its hash no longer exists in Redis; only the confirmed
+    // key is left and `has_checkpoint` must still track `latest`.
+    assert!(restarted.has_checkpoint(Chain::Solana).await?);
+
+    // The point of `has_checkpoint` is that it does not read the body. Corrupt
+    // the body: `latest` has to decode it and fails, `has_checkpoint` must not
+    // care. This is what fails if it is ever reimplemented in terms of `latest`.
+    let mut conn = pool.get().await?;
+    let (_, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+        .arg(0)
+        .arg("MATCH")
+        .arg("*:checkpoint:latest:*")
+        .arg("COUNT")
+        .arg(1000)
+        .query_async(&mut conn)
+        .await?;
+    assert_eq!(
+        keys.len(),
+        1,
+        "expected exactly one confirmed checkpoint key"
+    );
+    let _: () = redis::cmd("SET")
+        .arg(&keys[0])
+        .arg("not cbor")
+        .query_async(&mut conn)
+        .await?;
+
+    assert!(restarted.latest(Chain::Solana).await.is_err());
+    assert!(restarted.has_checkpoint(Chain::Solana).await?);
 
     Ok(())
 }

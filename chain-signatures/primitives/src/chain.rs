@@ -1,110 +1,43 @@
-use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Serialize};
-use std::{fmt, str::FromStr};
+use crate::Chain;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SerDeserFormat {
     Borsh,
     Abi,
+    Fab,
 }
 
-/// Supported blockchain networks for checkpoints.
-#[repr(u8)]
-#[derive(
-    BorshDeserialize,
-    BorshSerialize,
-    Serialize,
-    Deserialize,
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    enum_map::Enum,
-)]
-pub enum Chain {
-    NEAR,
-    Ethereum,
-    Solana,
-    Bitcoin,
-    Hydration,
-    Canton,
+/// Node-side per-chain configuration (intervals, finality expectations,
+/// response serialization). Kept out of `signet-primitives` on purpose:
+/// these are operational knobs of this node implementation, not part of the
+/// public interface.
+pub trait ChainConfig {
+    fn checkpoint_interval(&self) -> Option<u64>;
+    fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)>;
+    /// `ChainEvent::Block` silence budget before the supervisor restarts
+    /// the indexer. Env-overridable for indexed chains.
+    fn stall_timeout_secs(&self) -> u64;
+    /// Budget for the chain-local feed detector (Canton: WS silence;
+    /// Solana: frozen anchor). Env-overridable
+    fn feed_stall_timeout_secs(&self) -> u64;
+    fn expected_finality_time_secs(&self) -> u64;
+    /// From publishing a response until it is final on chain.
+    fn expected_observe_latency_secs(&self) -> u64;
+    fn expected_response_time_secs(&self) -> u64;
+    fn respond_serialization_format(&self) -> SerDeserFormat;
+    /// Whether bidirectional requests can target this chain.
+    fn has_execution_watcher(&self) -> bool;
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
-pub enum ChainFromError {
-    #[error("unknown CAIP-2 chain ID: {0}")]
-    UnknownCaip2Id(String),
-    #[error("unknown deprecated chain ID: {0}")]
-    UnknownDeprecatedId(String),
-}
-
-impl Chain {
-    pub const fn to_byte(self) -> u8 {
-        self as u8
-    }
-
-    pub const fn to_bytes(self) -> [u8; 1] {
-        [self.to_byte()]
-    }
-
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Chain::NEAR => "NEAR",
-            Chain::Ethereum => "Ethereum",
-            Chain::Solana => "Solana",
-            Chain::Bitcoin => "Bitcoin",
-            Chain::Hydration => "Hydration",
-            Chain::Canton => "Canton",
-        }
-    }
-
-    pub const fn iter() -> [Chain; 6] {
-        [
-            Chain::NEAR,
-            Chain::Ethereum,
-            Chain::Solana,
-            Chain::Bitcoin,
-            Chain::Hydration,
-            Chain::Canton,
-        ]
-    }
-
-    pub fn deprecated_chain_id(&self) -> &'static str {
-        match self {
-            Chain::NEAR => "0x18d",
-            Chain::Ethereum => "0x1",
-            Chain::Solana => "0x800001f5",
-            Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
-            Chain::Hydration => "polkadot:2034",
-            Chain::Canton => "canton:global",
-        }
-    }
-
-    pub fn caip2_chain_id(&self) -> &'static str {
-        match self {
-            Chain::NEAR => "near:mainnet",
-            Chain::Ethereum => "eip155:1",
-            Chain::Solana => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-            Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
-            Chain::Hydration => "polkadot:2034",
-            // Synthetic — Canton has no registered CAIP-2 namespace in
-            // ChainAgnostic/namespaces. "canton:global" follows the
-            // namespace:reference format as a project-local identifier.
-            Chain::Canton => "canton:global",
-        }
-    }
-
-    pub fn checkpoint_interval(&self) -> Option<u64> {
+impl ChainConfig for Chain {
+    fn checkpoint_interval(&self) -> Option<u64> {
         let (key, default) = match self {
-            Chain::NEAR | Chain::Bitcoin => return None,
+            Chain::NEAR | Chain::Bitcoin | Chain::Tron => return None,
             Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
-            Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
+            Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 1200),
             Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
             Chain::Canton => ("CHECKPOINT_INTERVAL_CANTON", 50),
+            Chain::Midnight => ("CHECKPOINT_INTERVAL_MIDNIGHT", 120),
         };
 
         let interval = std::env::var(key)
@@ -114,65 +47,122 @@ impl Chain {
         Some(interval)
     }
 
-    pub fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)> {
+    fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)> {
         vec![
             ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
             ("CHECKPOINT_INTERVAL_CANTON", "5"),
+            ("CHECKPOINT_INTERVAL_MIDNIGHT", "5"),
         ]
     }
 
-    pub fn expected_finality_time_secs(&self) -> u64 {
+    fn stall_timeout_secs(&self) -> u64 {
+        const FLOOR_SECS: u64 = 300;
+        const BUFFER_SECS: u64 = 300;
+        // Conservative default: finality cadence + buffer, floored. Streams
+        // that can legitimately go quiet (Canton) keep this; their feed
+        // detector is the fast path.
+        let derived = self
+            .expected_finality_time_secs()
+            .saturating_add(BUFFER_SECS)
+            .max(FLOOR_SECS);
+        let (key, default) = match self {
+            // ~20 missed blocks at ~6s cadence; headroom for slow catchup
+            // blocks (large contract-state reads).
+            Chain::Midnight => ("STALL_TIMEOUT_MIDNIGHT", 120),
+            // ~10x the 12s finality cadence.
+            Chain::Hydration => ("STALL_TIMEOUT_HYDRATION", 120),
+            Chain::Canton => ("STALL_TIMEOUT_CANTON", derived),
+            Chain::Ethereum => ("STALL_TIMEOUT_ETHEREUM", derived),
+            Chain::Solana => ("STALL_TIMEOUT_SOLANA", derived),
+            Chain::NEAR | Chain::Bitcoin | Chain::Tron => return derived,
+        };
+
+        std::env::var(key)
+            .map(|param| param.parse::<u64>().unwrap_or(default))
+            .unwrap_or(default)
+    }
+
+    fn feed_stall_timeout_secs(&self) -> u64 {
+        const DEFAULT_SECS: u64 = 60;
+        let (key, default) = match self {
+            Chain::Canton => ("FEED_STALL_TIMEOUT_CANTON", DEFAULT_SECS),
+            Chain::Solana => ("FEED_STALL_TIMEOUT_SOLANA", DEFAULT_SECS),
+            _ => return DEFAULT_SECS,
+        };
+
+        std::env::var(key)
+            .map(|param| param.parse::<u64>().unwrap_or(default))
+            .unwrap_or(default)
+    }
+
+    fn expected_finality_time_secs(&self) -> u64 {
         match self {
             Chain::NEAR => 3,
             Chain::Ethereum => 30 * 60,
-            Chain::Solana => 3,
+            // The indexer waits for finalized (supermajority-epoch) blocks: the
+            // finalized pointer advances in ~32-slot batches, trailing the tip
+            // by up to ~13s.
+            Chain::Solana => 15,
             Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
             Chain::Hydration => 12,
             Chain::Canton => 15,
+            Chain::Midnight => 15,
+            // Tron solidification: >=19 active SRs at/above a height, ~1 min
+            // on mainnet.
+            Chain::Tron => 60,
         }
     }
 
-    pub fn expected_response_time_secs(&self) -> u64 {
-        // finality time * 2 = finality time of sign/sign_bidirectional event + finality time of respond event
-        self.expected_finality_time_secs() * 2 + 5 // + Buffer time
+    fn expected_observe_latency_secs(&self) -> u64 {
+        match self {
+            // Proves twice before submitting, then waits for finality.
+            Chain::Midnight => 105,
+            _ => self.expected_finality_time_secs(),
+        }
     }
 
-    pub fn respond_serialization_format(&self) -> SerDeserFormat {
+    fn expected_response_time_secs(&self) -> u64 {
+        // Finality of the request event + observe latency of the response
+        self.expected_finality_time_secs() + self.expected_observe_latency_secs() + 5
+        // + Buffer time
+    }
+
+    fn respond_serialization_format(&self) -> SerDeserFormat {
         match self {
+            Chain::Midnight => SerDeserFormat::Fab,
             Chain::Canton => SerDeserFormat::Abi,
             // Solana and Hydration use Borsh for bidirectional responses.
             _ => SerDeserFormat::Borsh,
         }
     }
 
-    pub fn from_caip2_chain_id(chain_id: &str) -> Result<Self, ChainFromError> {
-        Self::iter()
-            .into_iter()
-            .find(|chain| chain.caip2_chain_id() == chain_id)
-            .ok_or_else(|| ChainFromError::UnknownCaip2Id(chain_id.to_string()))
+    fn has_execution_watcher(&self) -> bool {
+        matches!(self, Chain::Ethereum)
     }
 }
 
-impl fmt::Display for Chain {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the cadence-derived defaults
+    #[test]
+    fn stall_timeouts_track_block_cadence() {
+        assert_eq!(Chain::Midnight.stall_timeout_secs(), 120);
+        assert_eq!(Chain::Hydration.stall_timeout_secs(), 120);
+        assert_eq!(Chain::Canton.stall_timeout_secs(), 315);
+        assert_eq!(Chain::Solana.stall_timeout_secs(), 315);
+        assert_eq!(Chain::Ethereum.stall_timeout_secs(), 30 * 60 + 300);
+        // Finality-derived default for the non-indexed chains.
+        assert_eq!(Chain::NEAR.stall_timeout_secs(), 3 + 300);
+        assert_eq!(Chain::Tron.stall_timeout_secs(), 60 + 300);
     }
-}
 
-impl FromStr for Chain {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "near" => Ok(Chain::NEAR),
-            "ethereum" | "eth" => Ok(Chain::Ethereum),
-            "solana" | "sol" => Ok(Chain::Solana),
-            "bitcoin" | "btc" => Ok(Chain::Bitcoin),
-            "hydration" | "hyd" => Ok(Chain::Hydration),
-            "canton" | "ctn" => Ok(Chain::Canton),
-            other => Err(format!("unknown or unsupported chain {other}")),
-        }
+    #[test]
+    fn feed_stall_timeouts_pin_the_fast_signal_budgets() {
+        assert_eq!(Chain::Canton.feed_stall_timeout_secs(), 60);
+        assert_eq!(Chain::Solana.feed_stall_timeout_secs(), 60);
     }
 }

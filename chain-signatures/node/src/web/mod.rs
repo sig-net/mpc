@@ -9,8 +9,8 @@ pub mod debug;
 use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
-use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
-use crate::protocol::sync::{SyncChannel, SyncUpdate};
+use crate::protocol::state::{NodeStateWatcher, NodeStatus};
+use crate::protocol::sync::SyncChannel;
 use crate::protocol::{Chain, MessageChannel};
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
@@ -25,10 +25,8 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
-use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
 use near_account_id::AccountId;
-use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,11 +36,15 @@ use tracing::Instrument;
 
 struct AxumState {
     node: NodeStateWatcher,
+    /// Only used by the debug page.
+    #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     triple_storage: TripleStorage,
+    #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     msg_channel: MessageChannel,
-    #[allow(dead_code)] // used by debug-page
+    /// Only used to label the debug page.
+    #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     my_account_id: AccountId,
     backlog: Backlog,
 }
@@ -84,7 +86,6 @@ pub async fn run(
             }),
         )
         .route("/msg", post(msg))
-        .route("/state", get(state))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
         .route("/checkpoint", get(checkpoint))
@@ -150,95 +151,11 @@ async fn msg(
         .observe(start.elapsed().as_millis() as f64);
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum StateView {
-    Running {
-        participants: Vec<Participant>,
-        triple_count: usize,
-        triple_mine_count: usize,
-        triple_potential_count: usize,
-        presignature_count: usize,
-        presignature_mine_count: usize,
-        presignature_potential_count: usize,
-        latest_block_height: BlockHeight,
-    },
-    Resharing {
-        old_participants: Vec<Participant>,
-        new_participants: Vec<Participant>,
-        latest_block_height: BlockHeight,
-        phase: ResharingStatus,
-    },
-    Joining {
-        participants: Vec<Participant>,
-        latest_block_height: BlockHeight,
-    },
-    NotRunning,
-}
-
-#[tracing::instrument(level = "debug", skip_all)]
-async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateView>> {
-    let start = Instant::now();
-    tracing::debug!("fetching state");
-
-    // TODO: decide whether to keep latest_block_height in /state or not. We could use it for showing
-    // whatever block height our governance chain is on but with multiple chains, it doesn't have much
-    // of a use.
-    let latest_block_height = 0;
-
-    let result = match web.node.status() {
-        NodeStatus::Running {
-            me,
-            participants,
-            ongoing_triple_gen,
-            ongoing_presignature_gen,
-        } => {
-            let triple_count = web.triple_storage.len_generated().await;
-            let triple_mine_count = web.triple_storage.len_by_owner(me).await;
-            let triple_potential_count = triple_count + ongoing_triple_gen;
-            let presignature_count = web.presignature_storage.len_generated().await;
-            let presignature_mine_count = web.presignature_storage.len_by_owner(me).await;
-            let presignature_potential_count = presignature_count + ongoing_presignature_gen;
-
-            Ok(Json(StateView::Running {
-                participants: participants.clone(),
-                triple_count,
-                triple_mine_count,
-                triple_potential_count,
-                presignature_count,
-                presignature_mine_count,
-                presignature_potential_count,
-                latest_block_height,
-            }))
-        }
-        NodeStatus::Resharing {
-            old_participants,
-            new_participants,
-            phase,
-        } => Ok(Json(StateView::Resharing {
-            old_participants: old_participants.clone(),
-            new_participants: new_participants.clone(),
-            latest_block_height,
-            phase,
-        })),
-        NodeStatus::Joining { participants } => Ok(Json(StateView::Joining {
-            participants: participants.clone(),
-            latest_block_height,
-        })),
-        NodeStatus::Generating { .. }
-        | NodeStatus::WaitingForConsensus { .. }
-        | NodeStatus::Started
-        | NodeStatus::Starting => {
-            tracing::debug!("not running, state unavailable");
-            Ok(Json(StateView::NotRunning))
-        }
-    };
-    WEB_ENDPOINT_LATENCY
-        .with_label_values(&["state"])
-        .observe(start.elapsed().as_millis() as f64);
-    result
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointResponse {
+    #[serde(default)]
+    pub version: u64,
+    pub checkpoints: HashMap<Chain, Checkpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,8 +217,8 @@ async fn bench_metrics() -> Json<BenchMetrics> {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
-    WithRejection(Cbor(update), _): WithRejection<Cbor<SyncUpdate>, Error>,
-) -> Result<Cbor<SyncUpdate>> {
+    WithRejection(Cbor(update), _): WithRejection<Cbor<Ciphered>, Error>,
+) -> Result<Cbor<Ciphered>> {
     let start = Instant::now();
     let response = state.sync_channel.request_update(update).await?;
     WEB_ENDPOINT_LATENCY
@@ -390,7 +307,7 @@ impl CheckpointQuery {
 async fn checkpoint(
     Extension(state): Extension<Arc<AxumState>>,
     Query(query): Query<CheckpointQuery>,
-) -> Result<Cbor<HashMap<Chain, Checkpoint>>> {
+) -> Result<Cbor<CheckpointResponse>> {
     let start = Instant::now();
 
     let mut resp = HashMap::new();
@@ -398,9 +315,15 @@ async fn checkpoint(
 
     for (chain, digest) in selections {
         let checkpoint = if let Some(digest) = digest {
-            state.backlog.find_checkpoint_by_digest(chain, digest).await
+            state.backlog.checkpoints().find(chain, digest).await
         } else {
-            state.backlog.latest_checkpoint(chain).await
+            state
+                .backlog
+                .checkpoints()
+                .latest(chain)
+                .await
+                .ok()
+                .flatten()
         };
 
         let Some(checkpoint) = checkpoint else {
@@ -415,7 +338,10 @@ async fn checkpoint(
         .with_label_values(&["checkpoint"])
         .observe(start.elapsed().as_millis() as f64);
 
-    Ok(Cbor(resp))
+    Ok(Cbor(CheckpointResponse {
+        version: crate::CHECKPOINT_VERSION,
+        checkpoints: resp,
+    }))
 }
 
 #[cfg(not(feature = "debug-page"))]

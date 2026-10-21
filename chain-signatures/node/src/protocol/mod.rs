@@ -1,10 +1,11 @@
 pub mod consensus;
 pub mod contract;
 pub mod cryptography;
-pub mod error;
 pub mod message;
 pub mod posit;
 pub mod presignature;
+pub mod publish_failover;
+pub mod request;
 pub mod signature;
 pub mod state;
 pub mod sync;
@@ -15,12 +16,8 @@ pub mod test_setup;
 
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
-pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
-pub use mpc_primitives::{
-    Chain, ConsensusCheckpointDigest, IndexedSignRequest, RespondBidirectionalTx,
-};
-pub use signature::Sign;
+pub use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, RespondBidirectionalTx};
 pub use state::{Node, NodeState};
 
 use crate::config::Config;
@@ -28,7 +25,7 @@ use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
-use crate::protocol::signature::SignatureSpawnerTask;
+use crate::protocol::request::SignatureSpawnerTask;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
@@ -66,6 +63,14 @@ impl Drop for MpcSignProtocol {
 pub trait Governance {
     fn propose_join(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 
+    /// Returns candidate information and admission votes for `account_id`.
+    fn candidate_info(
+        &self,
+        account_id: &AccountId,
+    ) -> impl std::future::Future<
+        Output = anyhow::Result<Option<mpc_contract::primitives::CandidateEntry>>,
+    > + Send;
+
     fn vote_reshared(
         &self,
         epoch: u64,
@@ -74,6 +79,11 @@ pub trait Governance {
     fn vote_public_key(
         &self,
         public_key: &near_crypto::PublicKey,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+
+    fn vote_threshold(
+        &self,
+        new_threshold: usize,
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
 }
 

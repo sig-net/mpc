@@ -1,9 +1,4 @@
-use crate::{Chain, Signature};
-
-// Should wrap B256 from Alloy, currently adding Alloy as a dependency pulls `alloy-sol-macro-input`, which requires Rust 1.85+
-// TODO: Use B256 from Alloy once we can bump the minimum Rust version to 1.85+
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
-pub struct BidirectionalTxId(#[serde(with = "serde_bytes")] pub [u8; 32]);
+use crate::{BidirectionalTxId, Chain, SignId, Signature};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BidirectionalTx {
@@ -24,16 +19,29 @@ pub struct BidirectionalTx {
     pub output_deserialization_schema: Vec<u8>,
     pub respond_serialization_schema: Vec<u8>,
     pub request_id: [u8; 32],
-    // TODO: Same as comment above for BidirectionalTxId: Use Address from Alloy once we can bump the minimum Rust version to 1.85+
     #[serde(with = "serde_bytes")]
     pub from_address: [u8; 20],
     pub nonce: u64,
 }
 
+impl BidirectionalTx {
+    pub const fn sign_id(&self) -> SignId {
+        SignId::new(self.request_id)
+    }
+}
+
 #[derive(Hash, PartialEq, Eq, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RespondBidirectionalTx {
     pub tx_id: BidirectionalTxId,
-    pub output: RespondBidirectionalSerializedOutput,
+    pub output: crate::RespondBidirectionalSerializedOutput,
+    /// Absent in legacy checkpoints; Midnight publication requires explicit metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<crate::AttestationMetadata>,
+    /// Unix timestamp at which the initial request was indexed. This remains
+    /// distinct from the follow-up request's own indexing timestamp so queueing
+    /// and per-leg latency metrics retain their existing semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_indexed_at: Option<u64>,
     /// Opaque per-chain context blob. The producing indexer serializes its own
     /// struct (see e.g. `indexer_canton::CantonChainCtx`) into bytes; the
     /// consuming publisher deserializes it back. Backlog and protocol layers
@@ -42,13 +50,14 @@ pub struct RespondBidirectionalTx {
     pub chain_ctx: Option<Vec<u8>>,
 }
 
-pub type RespondBidirectionalSerializedOutput = Vec<u8>;
-
 #[derive(Clone, Debug)]
 pub struct RespondBidirectionalEvent {
     pub request_id: [u8; 32],
     pub signature: Signature,
     pub chain: Chain,
+    /// Midnight's published metadata is untrusted until matched to the signed response.
+    /// Legacy source-chain integrations omit it; Midnight requires it for completion.
+    pub attestation: Option<crate::PublishedAttestation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

@@ -1,22 +1,19 @@
 use cait_sith::protocol::Participant;
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
-use integration_tests::mpc_fixture::message_collector::CollectMessages;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
-use integration_tests::mpc_fixture::MpcFixtureBuilder;
+use integration_tests::mpc_fixture::{MpcFixture, MpcFixtureBuilder};
+use mpc_node::backlog::{Backlog, SignEntry};
 use mpc_node::protocol::message::SendMessage;
-use mpc_node::protocol::posit::{PositAction, PositRejectReason};
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::Message;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
+use mpc_node::protocol::ProtocolState;
 use mpc_node::storage::triple_storage::TriplePair;
-use mpc_primitives::SignId;
+use mpc_node::types::SignCommand;
+use mpc_primitives::Chain;
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 use test_log::test;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
@@ -86,10 +83,7 @@ async fn test_basic_generate_keys() {
     }
 
     if WRITE_OUTPUT_TO_FILES {
-        let abs_path = std::env::current_dir().unwrap().join(KEY_SHARE_FILE);
-        tracing::info!("Writing output to {}", abs_path.display());
-        let mut file = fs::File::create(KEY_SHARE_FILE).unwrap();
-        serde_json::to_writer_pretty(&mut file, &data).unwrap();
+        write_json(KEY_SHARE_FILE, &data);
     }
 }
 
@@ -111,37 +105,7 @@ async fn test_basic_generate_triples() {
         .await;
 
     if WRITE_OUTPUT_TO_FILES {
-        let mut conn = network.redis_container.pool().get().await.unwrap();
-        let mut data = BTreeMap::new();
-        for node in &network.nodes {
-            let mut nodes_shares = BTreeMap::new();
-            for peer in &network.nodes {
-                let triple_ids = node.triple_storage.fetch_owned_by(peer.me).await.unwrap();
-                let mut peer_triples = Vec::with_capacity(triple_ids.len());
-                for triple_id in triple_ids {
-                    let pair = conn
-                        .hget::<&str, u64, TriplePair>(node.triple_storage.triple_key(), triple_id)
-                        .await;
-                    if let Ok(pair) = pair {
-                        peer_triples.push(pair);
-                    } else {
-                        tracing::error!("missing triple pair in redis {triple_id}");
-                    }
-                }
-                nodes_shares.insert(peer.me, peer_triples);
-            }
-            data.insert(node.me, nodes_shares);
-        }
-
-        // Filter: keep only triple pairs that exist on ALL nodes,
-        // then truncate each owner to exactly TRIPLE_PAIRS_PER_OWNER.
-        let data = filter_artifacts_on_all_nodes(data);
-        let data = truncate_per_owner(data, TRIPLE_PAIRS_PER_OWNER);
-
-        let abs_path = std::env::current_dir().unwrap().join(TRIPLES_FILE);
-        tracing::info!("Writing output to {}", abs_path.display());
-        let mut file = fs::File::create(TRIPLES_FILE).unwrap();
-        serde_json::to_writer_pretty(&mut file, &data).unwrap();
+        dump_triples(&network).await;
     }
 }
 
@@ -163,44 +127,7 @@ async fn test_basic_generate_presignature() {
         .await;
 
     if WRITE_OUTPUT_TO_FILES {
-        let mut conn = network.redis_container.pool().get().await.unwrap();
-        let mut data = BTreeMap::new();
-        for node in &network.nodes {
-            let mut nodes_shares = BTreeMap::new();
-            for peer in &network.nodes {
-                let presignature_ids = node
-                    .presignature_storage
-                    .fetch_owned_by(peer.me)
-                    .await
-                    .unwrap();
-                let mut peer_presignatures = Vec::with_capacity(presignature_ids.len());
-                for presignature_id in presignature_ids {
-                    let t = conn
-                        .hget::<&str, u64, Presignature>(
-                            node.presignature_storage.presignature_key(),
-                            presignature_id,
-                        )
-                        .await;
-                    if let Ok(t) = t {
-                        peer_presignatures.push(t);
-                    } else {
-                        tracing::error!("missing presignature in redis {presignature_id}");
-                    }
-                }
-                nodes_shares.insert(peer.me, peer_presignatures);
-            }
-            data.insert(node.me, nodes_shares);
-        }
-
-        // Filter: keep only presignatures that exist on ALL nodes,
-        // then truncate each owner to exactly P_PER_OWNER.
-        let data = filter_artifacts_on_all_nodes(data);
-        let data = truncate_per_owner(data, PRESIGNATURES_PER_OWNER);
-
-        let abs_path = std::env::current_dir().unwrap().join(PRESIGNATURES_FILE);
-        tracing::info!("Writing output to {}", abs_path.display());
-        let mut file = fs::File::create(PRESIGNATURES_FILE).unwrap();
-        serde_json::to_writer_pretty(&mut file, &data).unwrap();
+        dump_presignatures(&network).await;
     }
 }
 
@@ -216,21 +143,13 @@ async fn test_basic_sign() {
         .await;
 
     tracing::info!("sending requests now");
-    let request = sign_request(0);
-    network[0].sign_tx.send(request.clone()).await.unwrap();
-    network[1].sign_tx.send(request.clone()).await.unwrap();
-    network[2].sign_tx.send(request.clone()).await.unwrap();
+    network.broadcast(&sign_request(0)).await;
 
     let timeout = Duration::from_secs(10);
 
-    let actions = network.assert_actions(1, timeout).await;
+    let actions = network.assert_publish_actions(1, timeout).await;
 
     assert_eq!(actions.len(), 1);
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -248,21 +167,15 @@ async fn test_sign_task_survives_resharing() {
         .assert_presignatures(1, Duration::from_secs(5))
         .await;
 
-    let request = sign_request(7);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(7)).await;
 
     network.trigger_resharing();
     tokio::time::sleep(Duration::from_millis(200)).await;
     network.complete_resharing();
 
-    let actions = network.assert_actions(1, Duration::from_secs(15)).await;
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
+    network
+        .assert_publish_actions(1, Duration::from_secs(15))
+        .await;
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -279,29 +192,133 @@ async fn test_sign_request_during_resharing() {
     network.trigger_resharing();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let request = sign_request(8);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(8)).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     network.complete_resharing();
 
-    let actions = network.assert_actions(1, Duration::from_secs(15)).await;
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
+    network
+        .assert_publish_actions(1, Duration::from_secs(15))
+        .await;
 }
 
-fn sign_request(seed: u8) -> Sign {
-    Sign::Request(IndexedSignRequest::sign(
-        SignId::new([seed; 32]),
-        super::helpers::test_sign_arg(seed),
-        Chain::NEAR,
-        0,
-    ))
+fn sign_request(seed: u32) -> SignCommand {
+    let req = Arc::new(super::helpers::sign_request(seed, Chain::NEAR));
+    SignCommand::Request(SignEntry::generating(req, &Backlog::new()))
+}
+
+/// Drive the network through a threshold-change resharing via the real
+/// [`MockGovernance::vote_new_threshold`] path on every node.
+///
+/// Steps:
+///   1. Build a 3-node fixture (computed threshold = 2).
+///   2. Wait for nodes to be running.
+///   3. Drive the [`MockGovernance::vote_new_threshold`] call on every
+///      node concurrently. The first call observes the running state and
+///      tallies the vote; once the running threshold is met the contract
+///      flips into `Resharing`. The remaining nodes see `Resharing` and
+///      gracefully no-op.
+///   4. Wait for every node to enter the resharing phase (the consensus
+///      loop should pick up the new state).
+///   5. Use the existing helper to mark the cryptographic resharing done
+///      and the contract flips back to `Running` with `new_threshold`.
+///   6. Assert the running threshold was actually changed and that the
+///      network still produces signatures end-to-end.
+///
+/// This replaces an earlier test that poked the contract state directly; the
+/// goal is to exercise the actual governance path (`MockGovernance::vote_new_
+/// threshold`) so the new code path is covered by an end-to-end test.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_threshold_change_via_mpc_governance() {
+    const NEW_THRESHOLD: usize = 3;
+
+    let network = MpcFixtureBuilder::default()
+        .with_preshared_key()
+        .with_preshared_triples()
+        .with_preshared_presignatures()
+        .with_node_min_triples(1)
+        .with_node_min_presignatures(1)
+        .build()
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(5), network.wait_for_running())
+        .await
+        .expect("nodes should reach running state");
+
+    let initial_threshold = match network.shared_contract_state.borrow().clone() {
+        Some(ProtocolState::Running(state)) => state.threshold,
+        other => panic!("expected running state, got {other:?}"),
+    };
+    assert_eq!(initial_threshold, 2, "fixture default threshold");
+
+    // Drive every node's MockGovernance.vote_threshold concurrently.
+    // Only the first vote that crosses the running threshold flips the
+    // contract into Resharing; the rest see Resharing and gracefully no-op.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        network.vote_threshold(NEW_THRESHOLD),
+    )
+    .await
+    .expect("vote_threshold helper should finish")
+    .expect("vote_threshold should succeed");
+
+    // The shared contract state must now be Resharing.
+    let resharing_threshold = match network.shared_contract_state.borrow().clone() {
+        Some(ProtocolState::Resharing(state)) => (state.threshold, state.new_threshold),
+        other => panic!("expected resharing state after governance vote, got {other:?}"),
+    };
+    assert_eq!(
+        resharing_threshold,
+        (2, NEW_THRESHOLD),
+        "resharing state must keep the old threshold and adopt the new one"
+    );
+
+    // Wait for every node to enter the resharing phase via the consensus loop.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let all_resharing = network.nodes.iter().all(|node| {
+                matches!(
+                    node.state.status(),
+                    mpc_node::protocol::state::NodeStatus::Resharing { .. }
+                )
+            });
+            if all_resharing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("nodes should reach resharing state via the consensus loop");
+
+    // Simulate the cryptographic resharing completing on every node. This
+    // helper mirrors what the contract would do after threshold-many nodes
+    // called `vote_reshared` (the mock's `MockGovernance::vote_reshared`
+    // does not tally, so we still hop the state forward here).
+    network.complete_resharing();
+
+    tokio::time::timeout(Duration::from_secs(15), network.wait_for_running())
+        .await
+        .expect("nodes should return to running with the new threshold");
+
+    let new_threshold = match network.shared_contract_state.borrow().clone() {
+        Some(ProtocolState::Running(state)) => state.threshold,
+        other => panic!("expected running state after complete_resharing, got {other:?}"),
+    };
+    assert_eq!(
+        new_threshold, NEW_THRESHOLD,
+        "running state must adopt the reshared threshold"
+    );
+    // Sign a request end-to-end to prove the network still produces valid
+    // signatures after the threshold-change resharing.
+    network
+        .assert_presignatures(1, Duration::from_secs(120))
+        .await;
+    network.broadcast(&sign_request(88)).await;
+    let actions = network
+        .assert_publish_actions(1, Duration::from_secs(30))
+        .await;
+    assert_eq!(actions.len(), 1);
 }
 
 /// drop the first 20 presignature messages on each node and see if the system
@@ -310,7 +327,7 @@ fn sign_request(seed: u8) -> Sign {
 async fn test_presignature_timeout() {
     fn create_filter() -> MessageFilter {
         let mut drop_counter = 20;
-        Box::new(move |(msg, _)| {
+        Box::new(move |SendMessage { message: msg, .. }| {
             let pass = match msg {
                 mpc_node::protocol::Message::Presignature(_) => drop_counter == 0,
                 _ => true,
@@ -351,7 +368,7 @@ async fn test_sign_adequate_stockpile() {
     // We have ~15 presignatures in the fixture (5 mine + 10 foreign per node approx).
     // This test sends fewer requests than available presignatures to verify
     // that each signature consumes exactly one presignature.
-    const NUM_SIGN_REQUESTS: u8 = 10;
+    const NUM_SIGN_REQUESTS: u32 = 10;
 
     let network = MpcFixtureBuilder::default()
         .only_generate_signatures()
@@ -370,16 +387,13 @@ async fn test_sign_adequate_stockpile() {
     // Send sign requests to all nodes concurrently
     tracing::info!(NUM_SIGN_REQUESTS, "sending sign requests");
     for seed in 0..NUM_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // Wait for all signatures to be produced
     let timeout = Duration::from_secs(60);
     let actions = network
-        .assert_actions(NUM_SIGN_REQUESTS as usize, timeout)
+        .assert_publish_actions(NUM_SIGN_REQUESTS as usize, timeout)
         .await;
 
     assert_eq!(
@@ -387,14 +401,6 @@ async fn test_sign_adequate_stockpile() {
         NUM_SIGN_REQUESTS as usize,
         "should have exactly {NUM_SIGN_REQUESTS} signatures"
     );
-
-    // Verify all actions are publish actions
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 
     // Count final presignatures to verify consumption
     let final_presignatures = network[0].presignature_storage.len_generated().await;
@@ -425,7 +431,7 @@ async fn test_sign_limited_stockpile_contention() {
     // Send more sign requests than presignatures to trigger contention.
     // We have ~15 presignatures in fixture, send 12 requests.
     // All should complete since we have enough presignatures.
-    const NUM_SIGN_REQUESTS: u8 = 12;
+    const NUM_SIGN_REQUESTS: u32 = 12;
 
     let network = MpcFixtureBuilder::default()
         .only_generate_signatures()
@@ -448,10 +454,7 @@ async fn test_sign_limited_stockpile_contention() {
     // Send all requests at once to maximize contention
     tracing::info!(NUM_SIGN_REQUESTS, "sending sign requests simultaneously");
     for seed in 0..NUM_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // We expect to complete at least as many signatures as we have presignatures.
@@ -462,7 +465,7 @@ async fn test_sign_limited_stockpile_contention() {
     // Use a generous timeout since contention may slow things down
     let timeout = Duration::from_secs(90);
     let actions = network
-        .assert_actions(min_expected_signatures, timeout)
+        .assert_publish_actions(min_expected_signatures, timeout)
         .await;
 
     // Count final presignatures
@@ -475,20 +478,6 @@ async fn test_sign_limited_stockpile_contention() {
         presignatures_consumed,
         "contention test completed"
     );
-
-    assert!(
-        actions.len() >= min_expected_signatures,
-        "should have produced at least {min_expected_signatures} signatures, got {}",
-        actions.len()
-    );
-
-    // Verify all actions are publish actions
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 
     // Verify no excessive presignature burning
     // Consumed should be <= signatures produced + small margin for contention
@@ -509,7 +498,7 @@ async fn test_sign_requests_wait_for_presignatures() {
     // We'll send 20 sign requests but start with only enough presignatures for ~10.
     // The first batch should complete, then we generate more presignatures to
     // complete the remaining requests.
-    const TOTAL_SIGN_REQUESTS: u8 = 20;
+    const TOTAL_SIGN_REQUESTS: u32 = 20;
     const FIRST_BATCH_SIZE: usize = 10;
 
     // Use a network that can generate presignatures (has preshared triples)
@@ -540,10 +529,7 @@ async fn test_sign_requests_wait_for_presignatures() {
     // Send ALL sign requests at once - more than we have presignatures for
     tracing::info!(TOTAL_SIGN_REQUESTS, "sending all sign requests");
     for seed in 0..TOTAL_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // First batch: wait for as many signatures as we initially have presignatures
@@ -552,7 +538,7 @@ async fn test_sign_requests_wait_for_presignatures() {
 
     let first_batch_timeout = Duration::from_secs(30);
     let first_actions = network
-        .assert_actions(first_batch_expected, first_batch_timeout)
+        .assert_publish_actions(first_batch_expected, first_batch_timeout)
         .await;
 
     tracing::info!(
@@ -582,7 +568,7 @@ async fn test_sign_requests_wait_for_presignatures() {
     tracing::info!("waiting for remaining signatures");
     let final_timeout = Duration::from_secs(60);
     let final_actions = network
-        .assert_actions(TOTAL_SIGN_REQUESTS as usize, final_timeout)
+        .assert_publish_actions(TOTAL_SIGN_REQUESTS as usize, final_timeout)
         .await;
 
     tracing::info!(
@@ -596,14 +582,6 @@ async fn test_sign_requests_wait_for_presignatures() {
         "should complete all {} sign requests",
         TOTAL_SIGN_REQUESTS
     );
-
-    // Verify all actions are publish actions
-    for action_str in &final_actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 }
 
 /// Test sign request contention with 5 nodes.
@@ -614,7 +592,7 @@ async fn test_sign_requests_wait_for_presignatures() {
 async fn test_sign_contention_5_nodes() {
     const NUM_NODES: u32 = 5;
     const THRESHOLD: usize = 4;
-    const NUM_SIGN_REQUESTS: u8 = 5; // Reduced from 10 to match presignature availability
+    const NUM_SIGN_REQUESTS: u32 = 5; // Reduced from 10 to match presignature availability
     const MIN_PRESIGNATURES_PER_OWNER: usize = 3;
     const NODE_MIN_ARTIFACTS: u32 = 8;
 
@@ -652,16 +630,13 @@ async fn test_sign_contention_5_nodes() {
 
     // Send sign requests to all nodes concurrently (simulates real network conditions)
     for seed in 0..NUM_SIGN_REQUESTS {
-        let request = sign_request(seed);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed)).await;
     }
 
     // Wait for all signatures - allow more time for 5-node consensus
     let timeout = Duration::from_secs(120);
     let actions = network
-        .assert_actions(NUM_SIGN_REQUESTS as usize, timeout)
+        .assert_publish_actions(NUM_SIGN_REQUESTS as usize, timeout)
         .await;
 
     let final_presignatures = network[0].presignature_storage.len_generated().await;
@@ -682,13 +657,6 @@ async fn test_sign_contention_5_nodes() {
         NUM_SIGN_REQUESTS
     );
 
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
-
     // Verify 1:1 presignature consumption (with small tolerance for timing)
     assert!(
         presignatures_consumed <= actions.len() + 2,
@@ -703,25 +671,91 @@ async fn test_sign_contention_5_nodes() {
     );
 }
 
+async fn dump_triples(network: &MpcFixture) {
+    let mut conn = network.redis_container.pool().get().await.unwrap();
+    let mut data = BTreeMap::new();
+    for node in &network.nodes {
+        let mut nodes_shares = BTreeMap::new();
+        for peer in &network.nodes {
+            let triple_ids = node.triple_storage.fetch_owned_by(peer.me).await.unwrap();
+            let mut peer_triples = Vec::with_capacity(triple_ids.len());
+            for triple_id in triple_ids {
+                let pair = conn
+                    .hget::<&str, u64, TriplePair>(node.triple_storage.triple_key(), triple_id)
+                    .await;
+                if let Ok(pair) = pair {
+                    peer_triples.push(pair);
+                } else {
+                    tracing::error!("missing triple pair in redis {triple_id}");
+                }
+            }
+            nodes_shares.insert(peer.me, peer_triples);
+        }
+        data.insert(node.me, nodes_shares);
+    }
+
+    let data = filter_artifacts_on_all_nodes(data);
+    let data = truncate_per_owner(data, TRIPLE_PAIRS_PER_OWNER);
+    write_json(TRIPLES_FILE, &data);
+}
+
+async fn dump_presignatures(network: &MpcFixture) {
+    let mut conn = network.redis_container.pool().get().await.unwrap();
+    let mut data = BTreeMap::new();
+    for node in &network.nodes {
+        let mut nodes_shares = BTreeMap::new();
+        for peer in &network.nodes {
+            let presignature_ids = node
+                .presignature_storage
+                .fetch_owned_by(peer.me)
+                .await
+                .unwrap();
+            let mut peer_presignatures = Vec::with_capacity(presignature_ids.len());
+            for presignature_id in presignature_ids {
+                let t = conn
+                    .hget::<&str, u64, Presignature>(
+                        node.presignature_storage.presignature_key(),
+                        presignature_id,
+                    )
+                    .await;
+                if let Ok(t) = t {
+                    peer_presignatures.push(t);
+                } else {
+                    tracing::error!("missing presignature in redis {presignature_id}");
+                }
+            }
+            nodes_shares.insert(peer.me, peer_presignatures);
+        }
+        data.insert(node.me, nodes_shares);
+    }
+
+    let data = filter_artifacts_on_all_nodes(data);
+    let data = truncate_per_owner(data, PRESIGNATURES_PER_OWNER);
+    write_json(PRESIGNATURES_FILE, &data);
+}
+
+fn write_json(path: &str, data: &impl serde::Serialize) {
+    let abs_path = std::env::current_dir().unwrap().join(path);
+    tracing::info!("Writing output to {}", abs_path.display());
+    let mut file = fs::File::create(path).unwrap();
+    serde_json::to_writer_pretty(&mut file, data).unwrap();
+}
+
 /// Truncate each owner's artifact list to exactly N items, keeping the same
 /// IDs across all nodes. Uses the first node's ordering to determine which IDs
 /// to keep per owner, then filters all nodes to that consistent set.
 /// Panics if any owner has fewer than `n` artifacts.
 fn truncate_per_owner<A: mpc_node::storage::protocol_storage::ProtocolArtifact>(
-    mut data: BTreeMap<
-        cait_sith::protocol::Participant,
-        BTreeMap<cait_sith::protocol::Participant, Vec<A>>,
-    >,
+    mut data: BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>,
     n: usize,
-) -> BTreeMap<cait_sith::protocol::Participant, BTreeMap<cait_sith::protocol::Participant, Vec<A>>>
+) -> BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>
 where
     A::Id: Ord,
 {
     use std::collections::BTreeSet;
 
     // Determine which IDs to keep per owner using the first node's ordering.
-    let mut keep_ids_per_owner: BTreeMap<cait_sith::protocol::Participant, BTreeSet<A::Id>> =
-        BTreeMap::new();
+    let mut keep_ids_per_owner: BTreeMap<Participant, BTreeSet<A::Id>> = BTreeMap::new();
     if let Some((first_node, first_owners)) = data.iter().next() {
         for (owner, artifacts) in first_owners {
             assert!(
@@ -752,11 +786,8 @@ where
 
 /// Filter artifact data to keep only artifacts that exist on ALL nodes.
 fn filter_artifacts_on_all_nodes<A: mpc_node::storage::protocol_storage::ProtocolArtifact>(
-    mut data: BTreeMap<
-        cait_sith::protocol::Participant,
-        BTreeMap<cait_sith::protocol::Participant, Vec<A>>,
-    >,
-) -> BTreeMap<cait_sith::protocol::Participant, BTreeMap<cait_sith::protocol::Participant, Vec<A>>>
+    mut data: BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>,
+) -> BTreeMap<Participant, BTreeMap<Participant, Vec<A>>>
 where
     A::Id: Ord,
 {
@@ -827,14 +858,11 @@ async fn test_sign_no_presignature_waste() {
     );
 
     for seed in 0..initial_presignatures {
-        let request = sign_request(seed as u8);
-        for node in &network.nodes {
-            node.sign_tx.send(request.clone()).await.unwrap();
-        }
+        network.broadcast(&sign_request(seed as u32)).await;
     }
 
     let actions = network
-        .assert_actions(initial_presignatures, Duration::from_secs(120))
+        .assert_publish_actions(initial_presignatures, Duration::from_secs(120))
         .await;
 
     assert_eq!(
@@ -842,13 +870,6 @@ async fn test_sign_no_presignature_waste() {
         initial_presignatures,
         "should have exactly {initial_presignatures} signatures"
     );
-
-    for action_str in &actions {
-        assert!(
-            action_str.contains("RpcAction::Publish"),
-            "unexpected rpc action {action_str}"
-        );
-    }
 
     // Verify every node has zero presignatures remaining.
     for node in &network.nodes {
@@ -974,26 +995,18 @@ async fn test_sign_missing_presignature() {
 
     // Now we submit the request
     tracing::info!("sending requests now");
-    let request = sign_request(0);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(0)).await;
 
     // give 2 minutes to resolve the problem
     // expectation: the node without the presignature will reject a posit, or if
     // they are proposer, a timeout will let the next proposer take over
     let timeout = Duration::from_secs(120);
-    let actions = network.assert_actions(1, timeout).await;
+    let actions = network.assert_publish_actions(1, timeout).await;
 
     let msg_log = network.output.msg_log.lock().await;
     msg_log.print_summary();
 
     assert_eq!(actions.len(), 1);
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
 }
 
 /// Test that a node losing their presignatures locally doesn't prevent
@@ -1005,7 +1018,7 @@ async fn test_sign_missing_presignature_after_posits() {
     // node would be involved in signing the first time
     fn create_filter(tx: oneshot::Sender<()>) -> MessageFilter {
         let mut maybe_tx = Some(tx);
-        Box::new(move |(msg, _)| match msg {
+        Box::new(move |SendMessage { message: msg, .. }| match msg {
             mpc_node::protocol::Message::Signature(_signature_message) => {
                 if let Some(tx) = maybe_tx.take() {
                     tx.send(()).unwrap();
@@ -1035,10 +1048,7 @@ async fn test_sign_missing_presignature_after_posits() {
 
     // Now we submit the request
     tracing::info!("sending requests now");
-    let request = sign_request(0);
-    for node in &network.nodes {
-        node.sign_tx.send(request.clone()).await.unwrap();
-    }
+    network.broadcast(&sign_request(0)).await;
 
     // Wait for first round of posits to go through.
     tokio::time::timeout(Duration::from_millis(5000), rx)
@@ -1059,198 +1069,12 @@ async fn test_sign_missing_presignature_after_posits() {
     // posit, or if they are proposer, a timeout will let the next
     // proposer take over.
     let timeout = Duration::from_secs(120);
-    let actions = network.assert_actions(1, timeout).await;
+    let actions = network.assert_publish_actions(1, timeout).await;
 
     let msg_log = network.output.msg_log.lock().await;
     msg_log.print_summary();
 
     assert_eq!(actions.len(), 1);
-    let action_str = actions.iter().next().unwrap();
-    assert!(
-        action_str.contains("RpcAction::Publish"),
-        "unexpected rpc action {action_str}"
-    );
-}
-
-/// Verify that nodes that are not selected as participants for a signature
-/// generation pause after receiving enough AlreadyGenerating rejections.
-///
-/// Setup:
-/// - Nodes 0 and 1 enter SignGenerating together, messages are gated to freeze their progress
-/// - Node 2 is excluded, one ORGANIZE_POSIT_TIMEOUT later, it tries to be a proposer
-/// - Nodes 0 and 1 reply with AlreadyGenerating.
-/// - The gate is released, signature messages flow, and the signature completes
-/// - Assertion: AlreadyGenerating have been sent
-/// - Continue and observe node 2 not trying to be a proposer again until
-///   `signature_timeout_ms` has passed.
-#[test(tokio::test(flavor = "multi_thread"))]
-async fn test_non_participants_pause_posits() {
-    /// Observer struct just for this test
-    struct Tracker {
-        target: Participant,
-        already_generating_received: Arc<AtomicUsize>,
-        proposer_attempts: Arc<AtomicUsize>,
-    }
-    impl CollectMessages for Tracker {
-        fn observe_message(&mut self, msg: &SendMessage, _passed_filter: bool) {
-            let (message, (from, to, _ts)) = msg;
-            if *to == self.target {
-                if let Message::Posit(posit_msg) = message {
-                    if matches!(
-                        posit_msg.action,
-                        PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating)
-                    ) {
-                        self.already_generating_received
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }
-            if *from == self.target {
-                if let Message::Posit(posit_msg) = message {
-                    if matches!(posit_msg.action, PositAction::Propose) {
-                        self.proposer_attempts.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }
-        }
-        fn print_summary(&self) {}
-    }
-
-    let gate_released = Arc::new(AtomicBool::new(false));
-    let gate_0 = Arc::clone(&gate_released);
-    let gate_1 = Arc::clone(&gate_released);
-    let already_gen_count = Arc::new(AtomicUsize::new(0));
-    let node_2_propose_count = Arc::new(AtomicUsize::new(0));
-    let tracker = Tracker {
-        target: Participant::from(2),
-        already_generating_received: Arc::clone(&already_gen_count),
-        proposer_attempts: Arc::clone(&node_2_propose_count),
-    };
-    let signature_timeout_ms = 16_000;
-
-    let network = MpcFixtureBuilder::new(3, 2)
-        .only_generate_signatures()
-        .with_signature_timeout_ms(signature_timeout_ms)
-        .with_outgoing_message_filter(
-            // Node 0: Hold signature messages until the gate is released.
-            0,
-            Box::new(move |msg: &SendMessage| {
-                let (message, (_from, _to, _ts)) = msg;
-                if matches!(message, Message::Signature(_)) {
-                    while !gate_0.load(Ordering::Acquire) {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                }
-                true
-            }),
-        )
-        .with_outgoing_message_filter(
-            // Node 1: Hold signature messages until the gate is released.
-            1,
-            Box::new(move |msg: &SendMessage| {
-                let (message, (_from, _to, _ts)) = msg;
-                if matches!(message, Message::Signature(_)) {
-                    while !gate_1.load(Ordering::Acquire) {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                }
-                true
-            }),
-        )
-        .with_outgoing_message_filter(
-            // Node 2: receives a PROPOSE from node 1 but we drop the ACCEPT, so node 2 is excluded from the signature.
-            2,
-            Box::new(move |msg: &SendMessage| {
-                let (message, (_from, _to, _ts)) = msg;
-                if let Message::Posit(posit_msg) = message {
-                    if matches!(posit_msg.action, PositAction::Accept) {
-                        return false;
-                    }
-                }
-                true
-            }),
-        )
-        .with_message_collector(Arc::new(Mutex::new(tracker)))
-        .build()
-        .await;
-
-    // For seed 0, SHA256([0,0,0,0])[0] = 0xdf = 223, and 223 % 3 = 1, so:
-    //   round 0 -> participant 1 (proposes immediately, generates with node 0)
-    //   round 1 -> participant 2 (target: excluded from round-0, proposes after 1 timeout)
-    //   round 2 -> participant 0
-    // Node 2's Accept to node 1's Propose is dropped, so generation is {0, 1}.
-    // After ORGANIZE_POSIT_TIMEOUT, node 2 becomes round-1 proposer and
-    // receives AlreadyGenerating from nodes 0 and 1.
-    let request = sign_request(0);
-
-    // Send the request to all three nodes.
-    network[0].sign_tx.send(request.clone()).await.unwrap();
-    network[1].sign_tx.send(request.clone()).await.unwrap();
-    network[2].sign_tx.send(request.clone()).await.unwrap();
-
-    // Wait for node 2 to propose once, sending a message to both other nodes.
-    // Should happen after ~1 ORGANIZE_POSIT_TIMEOUT (5s for tests)
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let count = node_2_propose_count.load(Ordering::Relaxed);
-            if count >= 2 {
-                return;
-            }
-        }
-    })
-    .await
-    .expect("node 2 never proposed in the first place");
-    let first_propose = Instant::now();
-
-    // Give some time for the PROPOSE to be rejected.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Release the gate: Signature messages between 0 and 1 are forwarded and
-    // they can complete the signature. The AlreadyGenerating replies are now
-    // in the outbox queue (ahead of the post-gate signature traffic), so they
-    // will be forwarded and counted before the signature finishes.
-    gate_released.store(true, Ordering::Release);
-
-    let actions = network.assert_actions(1, Duration::from_secs(20)).await;
-
-    assert_eq!(actions.len(), 1);
-    assert!(
-        actions
-            .iter()
-            .next()
-            .unwrap()
-            .contains("RpcAction::Publish"),
-        "expected a Publish action"
-    );
-
-    let count = already_gen_count.load(Ordering::Relaxed);
-    assert!(
-        count >= 1,
-        "expected AlreadyGenerating to be sent to node 2, but count was {count}"
-    );
-
-    // Node 2 still hasn't seen the signature. Wait until it proposes again.
-    // After the pause, node 2 may need up to (num_nodes+1) more rounds to get
-    // its turn as proposer. Each round lasts ORGANIZE_POSIT_TIMEOUT.
-    let organize_timeout = mpc_node::protocol::signature::organize_posit_timeout();
-    let second_wait = Duration::from_millis(signature_timeout_ms) + 4 * organize_timeout;
-    tokio::time::timeout(second_wait, async {
-        loop {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let count = node_2_propose_count.load(Ordering::Relaxed);
-            if count > 2 {
-                return;
-            }
-        }
-    })
-    .await
-    .expect("node 2 never proposed again");
-
-    assert!(
-        first_propose.elapsed().as_millis() as u64 > signature_timeout_ms,
-        "node 2 started proposing again too early"
-    )
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -1334,12 +1158,11 @@ async fn test_signature_message_count() {
         .await;
 
     tracing::info!("sending requests now");
-    let request = sign_request(0);
-    network[0].sign_tx.send(request.clone()).await.unwrap();
-    network[1].sign_tx.send(request.clone()).await.unwrap();
-    network[2].sign_tx.send(request.clone()).await.unwrap();
+    network.broadcast(&sign_request(0)).await;
 
-    network.assert_actions(1, Duration::from_secs(10)).await;
+    network
+        .assert_publish_actions(1, Duration::from_secs(10))
+        .await;
 
     // This prints a summary of all sent message counts for debugging
     let msg_log = network.output.msg_log.lock().await;

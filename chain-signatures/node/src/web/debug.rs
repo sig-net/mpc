@@ -2,7 +2,7 @@
 
 use crate::protocol::state::NodeStatus;
 use crate::web::AxumState;
-use alloy_primitives::map::HashMap;
+use alloy::primitives::map::HashMap;
 use axum::response::Html;
 use axum::Extension;
 use maud::{html, Markup, Render};

@@ -3,7 +3,6 @@ use http::StatusCode;
 
 use crate::protocol::message::MessageError;
 use crate::protocol::sync::SyncError;
-use crate::protocol::CryptographicError;
 use crate::web::cbor::CborRejection;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -16,8 +15,6 @@ pub enum Error {
     JsonExtractorRejection(#[from] JsonRejection),
     #[error(transparent)]
     CborExtractorRejection(#[from] CborRejection),
-    #[error(transparent)]
-    Cryptography(#[from] CryptographicError),
     #[error(transparent)]
     Message(#[from] MessageError),
     #[error(transparent)]
@@ -33,7 +30,6 @@ impl Error {
         match self {
             Error::JsonExtractorRejection(rejection) => rejection.status(),
             Error::CborExtractorRejection(rejection) => rejection.status(),
-            Error::Cryptography(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Message(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Rpc(_) => StatusCode::BAD_REQUEST,
             Error::InvalidParameters(_) => StatusCode::BAD_REQUEST,

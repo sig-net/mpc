@@ -6,25 +6,32 @@ use anyhow::{Context, Result};
 use cait_sith::protocol::Participant;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::EthereumSandbox;
-use integration_tests::eth::{self, ChainSignatures, SignRequest};
+use integration_tests::eth;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use k256::{AffinePoint, Scalar};
+use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
+use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
+use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
+use mpc_chain_integration_core::{
+    utils::{retry::SharedBackoff, test::ChainIndexerStream},
+    NoopChainTelemetry, StateManager,
+};
+use mpc_crypto::kdf::generate_signature;
+use mpc_node::backlog::mock::BacklogTestExt;
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign};
+use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
-use mpc_node::sign_bidirectional::{PublishState, SignStatus};
+
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{run_stream, ChainPipeline, ChainStream, ChainStreaming};
-use mpc_node::util::current_unix_timestamp;
+use mpc_node::stream::{supervisor::run_supervised, StreamContext};
+use mpc_node::types::SignCommand;
 use mpc_primitives::{
-    ChainEvent, ChainTelemetry, CheckpointDigest, NoopChainTelemetry, SignArgs,
-    SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind, StateManager,
-    LATEST_MPC_KEY_VERSION,
+    BidirectionalTx, Chain, ChainEvent, SignArgs, SignId, SignKind, LATEST_MPC_KEY_VERSION,
 };
+use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
@@ -38,7 +45,34 @@ fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<mpc_node::rpc:
     (RpcChannel { tx }, rx)
 }
 
-// Integration tests for EthereumStream
+fn test_eth_bidirectional_tx(
+    tx_id: mpc_primitives::BidirectionalTxId,
+    sign_id: SignId,
+    from_address: Address,
+    nonce: u64,
+) -> BidirectionalTx {
+    BidirectionalTx {
+        id: tx_id,
+        sender: [0u8; 32],
+        serialized_transaction: vec![],
+        source_chain: Chain::Solana,
+        target_chain: Chain::Ethereum,
+        caip2_id: "eip155:31337".to_string(),
+        key_version: LATEST_MPC_KEY_VERSION,
+        deposit: 0,
+        path: "m/44'/60'/0'/0/0".to_string(),
+        algo: "secp256k1".to_string(),
+        dest: Chain::Ethereum.to_string(),
+        params: "{}".to_string(),
+        output_deserialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
+        request_id: sign_id.request_id,
+        from_address: **from_address,
+        nonce,
+    }
+}
+
+// Integration tests for the Ethereum indexer
 //
 // These tests spin up Anvil, deploy the ChainSignatures contract, and exercise the
 // Ethereum indexer stream in isolation (no MPC cluster required).
@@ -135,8 +169,7 @@ impl EthereumTestEnvironment {
         });
 
         let contract_address =
-            eth::deploy_chain_signatures(signer.clone(), wallet, wallet, signature_deposit())
-                .await?;
+            deploy_chain_signatures(signer.clone(), wallet, wallet, signature_deposit()).await?;
 
         Ok(Self {
             _spawner: spawner,
@@ -150,15 +183,16 @@ impl EthereumTestEnvironment {
 
     fn config(&self, optimistic_requests: bool) -> EthConfig {
         EthConfig {
-            account_sk: self.sandbox.secret_key.clone(),
-            consensus_rpc_http_url: self.sandbox.external_http_endpoint.clone(),
-            execution_rpc_http_url: self.sandbox.external_http_endpoint.clone(),
-            contract_address: format!("{:x}", self.contract_address),
+            account_sk: self.sandbox.secret_key.parse().unwrap(),
+            execution_rpc_http_url: self.sandbox.external_http_endpoint.parse().unwrap(),
+            contract_address: self.contract_address,
             network: "sepolia".to_string(),
-            helios_data_path: "/tmp/helios".to_string(),
             refresh_finalized_interval: 500,
             optimistic_requests,
-            light_client: false,
+            gas: Default::default(),
+            indexer: Default::default(),
+            publisher: Default::default(),
+            rpc: Default::default(),
         }
     }
 
@@ -290,9 +324,9 @@ where
 }
 
 async fn next_sign_message_within(
-    rx: &mut mpsc::Receiver<Sign>,
+    rx: &mut mpsc::Receiver<SignCommand>,
     duration: Duration,
-) -> Result<Sign> {
+) -> Result<SignCommand> {
     timeout(duration, rx.recv())
         .await
         .context("timed out waiting for sign message")?
@@ -309,113 +343,18 @@ fn test_sign_args(seed: u8) -> SignArgs {
     }
 }
 
-use mpc_node::kdf::valid_signature;
-
-fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
-    let mut rlp_s = rlp::RlpStream::new_list(9);
-    rlp_s.append(&0u64);
-    rlp_s.append(&0u64);
-    rlp_s.append(&0u64);
-    rlp_s.append(&Vec::<u8>::new());
-    rlp_s.append(&0u64);
-    rlp_s.append(&Vec::<u8>::new());
-    rlp_s.append(&1u64);
-    rlp_s.append(&0u64);
-    rlp_s.append(&0u64);
-
-    NodeSignBidirectionalEvent {
-        sender: solana_sdk::pubkey::Pubkey::new_unique().to_bytes(),
-        serialized_transaction: rlp_s.out().to_vec(),
-        caip2_id: "eip155:31337".to_string(),
-        key_version: LATEST_MPC_KEY_VERSION,
-        deposit: 1,
-        path: "bidirectional-test-path".to_string(),
-        algo: "secp256k1".to_string(),
-        dest: Chain::Ethereum.to_string(),
-        params: "{}".to_string(),
-        chain: Chain::Solana,
-        chain_ctx: Some(solana_sdk::pubkey::Pubkey::new_unique().to_bytes().to_vec()),
-        output_deserialization_schema: vec![],
-        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-    }
-}
-
-struct StartedEthereumStream<S: StateManager, T: ChainTelemetry> {
-    stream: EthereumStream<S, T>,
-    _indexer_task: tokio::task::JoinHandle<()>,
-}
-
-impl<S: StateManager, T: ChainTelemetry> std::ops::Deref for StartedEthereumStream<S, T> {
-    type Target = EthereumStream<S, T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.stream
-    }
-}
-
-impl<S: StateManager, T: ChainTelemetry> std::ops::DerefMut for StartedEthereumStream<S, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.stream
-    }
-}
-
-async fn next_event_within<S: StateManager, T: ChainTelemetry>(
-    client: &mut StartedEthereumStream<S, T>,
-    duration: Duration,
-) -> Result<ChainEvent> {
-    timeout(duration, async {
-        loop {
-            if let Some(event) = client.next_event().await {
-                return event;
-            }
-        }
-    })
-    .await
-    .context("timed out waiting for chain event")
-}
-
-/// Helper for starting the ethereum stream, especially in cases where we do not want
-/// to call into run_stream where we want to directly call `next_event` on each test.
 async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
-) -> Result<StartedEthereumStream<impl StateManager, NoopChainTelemetry>> {
-    let mut stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
-    let indexer = stream.start().await?;
-    let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
-    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-    let node_client = NodeClient::new(&Default::default());
-    let (pipeline, mut state_rx) = ChainPipeline::new(
-        indexer,
-        cp_rx,
-        backlog,
-        mesh_rx,
-        node_client,
-        0,
-        "test.near".parse().unwrap(),
-    );
-    let indexer_task = tokio::spawn(pipeline.run());
-
-    // Wait until the pipeline is live so the subscription and anchor are established
-    // before callers begin submitting transactions.
-    timeout(Duration::from_secs(30), async {
-        loop {
-            if *state_rx.borrow() == ChainStreaming::Live {
-                return Ok(());
-            }
-            if state_rx.changed().await.is_err() {
-                anyhow::bail!("pipeline shut down before reaching Live state");
-            }
-        }
-    })
-    .await
-    .context("timed out waiting for pipeline to reach Live state")??;
-
-    Ok(StartedEthereumStream {
-        stream,
-        _indexer_task: indexer_task,
-    })
+) -> Result<ChainIndexerStream> {
+    let indexer = EthereumIndexer::new(
+        ctx.config(true),
+        backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .await?;
+    ChainIndexerStream::start(indexer, Duration::from_secs(30)).await
 }
 
 #[test_log::test(tokio::test)]
@@ -431,7 +370,14 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     seeded_backlog
         .set_processed_block(Chain::Ethereum, processed_height)
         .await;
-    seeded_backlog.checkpoint(Chain::Ethereum).await;
+    let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
+    assert!(matches!(
+        seeded_backlog
+            .checkpoints()
+            .confirm(Chain::Ethereum, checkpoint.digest())
+            .await,
+        Ok(true)
+    ));
 
     let mut expected_payload = [0x32; 32];
     loop {
@@ -445,8 +391,13 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     }
 
     let backlog = Backlog::persisted(storage);
-    let stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
+    let indexer = EthereumIndexer::new(
+        ctx.config(true),
+        backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -462,25 +413,27 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
-    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
-    let run_handle = tokio::spawn(run_stream(
-        stream,
-        sign_tx,
-        rpc,
-        backlog,
+    let (_cp_tx, checkpoints_rx) = watch::channel(None);
+    let run_handle = tokio::spawn(run_supervised(
+        indexer,
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc.clone(),
+            contract_watcher.clone(),
+            mesh_rx.clone(),
+            NodeClient::new(&Default::default()),
+            checkpoints_rx.clone(),
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_rx,
-        NodeClient::new(&Default::default()),
-        checkpoints_rx,
     ));
 
     let mut saw_replayed_payload = false;
     let mut saw_expected_payload = false;
     for _ in 0..12 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(10)).await? {
-            Sign::Request(req) => {
-                let payload: [u8; 32] = req.args.payload.to_bytes().into();
+            SignCommand::Request(req) => {
+                let payload: [u8; 32] = req.request().args.payload.to_bytes().into();
                 if payload == replayed_payload {
                     saw_replayed_payload = true;
                 }
@@ -532,79 +485,34 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let resolved_sign_id = SignId::new([0x11; 32]);
     let requeued_sign_id = SignId::new([0x22; 32]);
     seeded_backlog
-        .insert(mpc_node::protocol::IndexedSignRequest::sign(
+        .insert(Arc::new(mpc_node::protocol::IndexedSignRequest::sign(
             resolved_sign_id,
             test_sign_args(0x11),
             Chain::Ethereum,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     seeded_backlog
-        .insert(mpc_node::protocol::IndexedSignRequest::sign(
+        .insert(Arc::new(mpc_node::protocol::IndexedSignRequest::sign(
             requeued_sign_id,
             test_sign_args(0x22),
             Chain::Ethereum,
             current_unix_timestamp(),
-        ))
+        )))
         .await;
     seeded_backlog
         .set_processed_block(Chain::Ethereum, checkpoint_height)
         .await;
-    seeded_backlog.checkpoint(Chain::Ethereum).await;
+    let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
+    assert!(matches!(
+        seeded_backlog
+            .checkpoints()
+            .confirm(Chain::Ethereum, checkpoint.digest())
+            .await,
+        Ok(true)
+    ));
 
     let backlog = Backlog::persisted(storage.clone());
-
-    let execution_sign_id = SignId::new([0x33; 32]);
-    backlog
-        .insert(mpc_node::protocol::IndexedSignRequest::sign_bidirectional(
-            execution_sign_id,
-            test_sign_args(0x33),
-            Chain::Solana,
-            current_unix_timestamp(),
-            test_bidirectional_event(),
-        ))
-        .await;
-
-    let execution_tx = mpc_primitives::BidirectionalTx {
-        id: mpc_primitives::BidirectionalTxId(B256::from([0x44; 32]).0),
-        sender: [0u8; 32],
-        serialized_transaction: vec![],
-        source_chain: Chain::Solana,
-        target_chain: Chain::Ethereum,
-        caip2_id: "eip155:31337".to_string(),
-        key_version: LATEST_MPC_KEY_VERSION,
-        deposit: 1,
-        path: "bidirectional-test-path".to_string(),
-        algo: "secp256k1".to_string(),
-        dest: Chain::Ethereum.to_string(),
-        params: "{}".to_string(),
-        output_deserialization_schema: vec![],
-        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        request_id: execution_sign_id.request_id,
-        from_address: **ctx.wallet,
-        nonce: checkpoint_nonce,
-    };
-    backlog
-        .set_status(
-            execution_tx.source_chain,
-            &execution_sign_id,
-            SignStatus::PendingPublish {
-                publish: PublishState {
-                    signature: mpc_primitives::Signature::new(
-                        AffinePoint::GENERATOR,
-                        Scalar::ONE,
-                        0,
-                    ),
-                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                    is_proposer: true,
-                },
-            },
-        )
-        .await;
-    backlog
-        .advance(Chain::Solana, execution_sign_id, execution_tx)
-        .await
-        .context("failed to seed execution watcher")?;
 
     let responder_contract = ChainSignatures::new(ctx.contract_address, responder_signer.clone());
 
@@ -612,7 +520,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let root_pk = root_sk.public_key().to_projective().to_affine();
 
     let resolved_args = test_sign_args(0x11);
-    let resolved_sig = valid_signature(&root_sk, &resolved_args);
+    let resolved_sig = generate_signature(&root_sk, &resolved_args);
 
     submit_respond_for_request_id(
         responder_contract,
@@ -620,12 +528,26 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         resolved_sig,
     )
     .await?;
-    submit_eth_transfer(&ctx).await?;
+    // Watch the transfer that takes `checkpoint_nonce`: a nonce taken by a
+    // transaction the watcher does not know yields no outcome.
+    let execution_sign_id = SignId::new([0x33; 32]);
+    let execution_tx = test_eth_bidirectional_tx(
+        mpc_primitives::BidirectionalTxId(submit_eth_transfer(&ctx).await?.0),
+        execution_sign_id,
+        ctx.wallet,
+        checkpoint_nonce,
+    );
+    backlog.insert_mock_executing(&execution_tx).await;
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
 
-    let stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
+    let indexer = EthereumIndexer::new(
+        ctx.config(true),
+        backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -641,51 +563,65 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
-    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
-    let run_handle = tokio::spawn(run_stream(
-        stream,
-        sign_tx,
-        rpc,
-        backlog.clone(),
+    let (_cp_tx, checkpoints_rx) = watch::channel(None);
+    let run_handle = tokio::spawn(run_supervised(
+        indexer,
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc.clone(),
+            contract_watcher.clone(),
+            mesh_rx.clone(),
+            NodeClient::new(&Default::default()),
+            checkpoints_rx.clone(),
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_rx,
-        NodeClient::new(&Default::default()),
-        checkpoints_rx,
     ));
 
+    let mut saw_resolved_completion = false;
     let mut saw_execution_follow_up = false;
     let mut saw_catchup_request = false;
     let mut saw_requeued_request = false;
 
     for _ in 0..8 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await? {
-            Sign::Completion(sign_id) => {
-                assert_ne!(
-                    sign_id, resolved_sign_id,
-                    "pre-catchup resolved request should not emit a completion"
-                );
+            SignCommand::Completion(sign_id) if sign_id == resolved_sign_id => {
+                saw_resolved_completion = true;
             }
-            Sign::Request(req) if req.id == execution_sign_id => {
-                assert!(matches!(req.kind, SignKind::RespondBidirectional(_)));
-                assert_eq!(req.chain, Chain::Solana);
+            SignCommand::Request(req) if req.sign_id() == execution_sign_id => {
+                assert!(matches!(
+                    req.request().kind,
+                    SignKind::RespondBidirectional(_)
+                ));
+                assert_eq!(req.chain(), Chain::Solana);
                 saw_execution_follow_up = true;
             }
-            Sign::Request(req) if req.id == requeued_sign_id => {
+            SignCommand::Request(req) if req.sign_id() == requeued_sign_id => {
                 saw_requeued_request = true;
             }
-            Sign::Request(req) if req.chain == Chain::Ethereum => {
-                assert_eq!(req.args.payload.to_bytes(), catchup_payload.into());
+            SignCommand::Request(req) if req.chain() == Chain::Ethereum => {
+                assert_eq!(
+                    req.request().args.payload.to_bytes(),
+                    catchup_payload.into()
+                );
                 saw_catchup_request = true;
             }
             _ => {}
         }
 
-        if saw_execution_follow_up && saw_catchup_request && saw_requeued_request {
+        if saw_resolved_completion
+            && saw_execution_follow_up
+            && saw_catchup_request
+            && saw_requeued_request
+        {
             break;
         }
     }
 
+    assert!(
+        saw_resolved_completion,
+        "expected a completion for the request resolved during catchup"
+    );
     assert!(
         saw_execution_follow_up,
         "expected execution follow-up request after catchup"
@@ -715,8 +651,8 @@ async fn test_ethereum_stream_parse_sign_event() -> Result<()> {
     submit_sign_request(&ctx, payload, path).await?;
 
     let req = loop {
-        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
-            ChainEvent::SignRequest(req) => break req,
+        match stream.next_event_within(Duration::from_secs(10)).await? {
+            ChainEvent::SignRequest { request, .. } => break request,
             _ => continue,
         }
     };
@@ -737,7 +673,7 @@ async fn test_ethereum_stream_emits_blocks() -> Result<()> {
 
     let mut saw_block = false;
     for _ in 0..5 {
-        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
+        match stream.next_event_within(Duration::from_secs(10)).await? {
             ChainEvent::Block(_) => {
                 saw_block = true;
                 break;
@@ -751,70 +687,22 @@ async fn test_ethereum_stream_emits_blocks() -> Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
-    let ctx = EthereumTestEnvironment::new().await?;
-    let backlog = ctx.backlog();
-
-    // Register an execution watcher with an intentionally stale nonce to trigger the staleness path.
-    let tx = mpc_primitives::BidirectionalTx {
-        id: mpc_primitives::BidirectionalTxId(B256::from([9u8; 32]).0),
-        sender: [0u8; 32],
-        serialized_transaction: vec![],
-        source_chain: Chain::Solana,
-        target_chain: Chain::Ethereum,
-        caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-        key_version: LATEST_MPC_KEY_VERSION,
-        deposit: 0,
-        path: "m/44'/60'/0'/0/0".to_string(),
-        algo: "secp256k1".to_string(),
-        dest: "".to_string(),
-        params: "".to_string(),
-        output_deserialization_schema: vec![],
-        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        request_id: [7u8; 32],
-        from_address: **ctx.wallet,
-        nonce: 0,
-    };
-    let sign_id = SignId::new([7u8; 32]);
-    backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
-
-    let mut stream = stream_ethereum(&ctx, backlog.clone()).await?;
-
-    // Send a transaction from the watched address to bump nonce and trigger the staleness check.
-    submit_sign_request(&ctx, [4u8; 32], "execution-path").await?;
-
-    let mut saw_execution = false;
-    for _ in 0..8 {
-        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
-            ChainEvent::ExecutionConfirmed { sign_id: ev_id, .. } if ev_id == sign_id => {
-                saw_execution = true;
-                break;
-            }
-            _ => continue,
-        }
-    }
-
-    assert!(saw_execution, "did not observe ExecutionConfirmed event");
-    Ok(())
-}
-
-#[test_log::test(tokio::test)]
 async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
 
     let dummy_sign_id = SignId::new([0x66; 32]);
     backlog
-        .insert(IndexedSignRequest::sign(
-            dummy_sign_id,
-            test_sign_args(0x66),
-            Chain::Ethereum,
-            current_unix_timestamp(),
-        ))
+        .insert_mock_sign(dummy_sign_id, Chain::Ethereum)
         .await;
 
-    let stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
+    let indexer = EthereumIndexer::new(
+        ctx.config(true),
+        backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -830,23 +718,25 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
-    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
-    let run_handle = tokio::spawn(run_stream(
-        stream,
-        sign_tx,
-        rpc,
-        backlog.clone(),
+    let (_cp_tx, checkpoints_rx) = watch::channel(None);
+    let run_handle = tokio::spawn(run_supervised(
+        indexer,
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc.clone(),
+            contract_watcher.clone(),
+            mesh_rx.clone(),
+            NodeClient::new(&Default::default()),
+            checkpoints_rx.clone(),
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_rx,
-        NodeClient::new(&Default::default()),
-        checkpoints_rx,
     ));
 
     let mut saw_catchup_flush = false;
     for _ in 0..20 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(10)).await? {
-            Sign::Request(req) if req.id == dummy_sign_id => {
+            SignCommand::Request(req) if req.sign_id() == dummy_sign_id => {
                 saw_catchup_flush = true;
                 break;
             }
@@ -879,62 +769,15 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     // transaction is already in the past relative to the stream.
     let sign_id = SignId::new([0x88; 32]);
     let tx_id = mpc_primitives::BidirectionalTxId(tx_hash.0);
-    let tx = mpc_primitives::BidirectionalTx {
-        id: tx_id,
-        sender: [0u8; 32],
-        serialized_transaction: vec![],
-        source_chain: Chain::Solana,
-        target_chain: Chain::Ethereum,
-        caip2_id: "eip155:31337".to_string(),
-        key_version: LATEST_MPC_KEY_VERSION,
-        deposit: 0,
-        path: "m/44'/60'/0'/0/1".to_string(),
-        algo: "secp256k1".to_string(),
-        dest: Chain::Ethereum.to_string(),
-        params: "{}".to_string(),
-        output_deserialization_schema: vec![],
-        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        request_id: sign_id.request_id,
-        from_address: **ctx.wallet,
-        nonce: 0,
-    };
-    backlog
-        .insert(IndexedSignRequest::sign_bidirectional(
-            sign_id,
-            test_sign_args(0x88),
-            Chain::Solana,
-            current_unix_timestamp(),
-            test_bidirectional_event(),
-        ))
-        .await;
-    backlog
-        .set_status(
-            tx.source_chain,
-            &sign_id,
-            SignStatus::PendingPublish {
-                publish: PublishState {
-                    signature: mpc_primitives::Signature::new(
-                        AffinePoint::GENERATOR,
-                        Scalar::ONE,
-                        0,
-                    ),
-                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
-                    is_proposer: true,
-                },
-            },
-        )
-        .await;
-    backlog
-        .advance(Chain::Solana, sign_id, tx)
-        .await
-        .context("failed to seed late execution watcher")?;
+    let tx = test_eth_bidirectional_tx(tx_id, sign_id, ctx.wallet, 0);
+    backlog.insert_mock_executing(&tx).await;
 
     let msg = next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await?;
     match msg {
-        Sign::Request(req) => {
-            assert_eq!(req.id, sign_id);
-            assert_eq!(req.chain, Chain::Solana);
-            match req.kind {
+        SignCommand::Request(req) => {
+            assert_eq!(req.sign_id(), sign_id);
+            assert_eq!(req.chain(), Chain::Solana);
+            match &req.request().kind {
                 SignKind::RespondBidirectional(res) => {
                     assert_eq!(res.tx_id, tx_id);
                     assert!(
@@ -945,7 +788,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
                 other => panic!("expected RespondBidirectional request, got {other:?}"),
             }
         }
-        other => panic!("expected Sign::Request from late watcher backfill, got {other:?}"),
+        other => panic!("expected SignCommand::Request from late watcher backfill, got {other:?}"),
     }
 
     let watchers = backlog.get_execution_watchers(Chain::Ethereum).await;
@@ -961,6 +804,307 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     );
 
     run_handle.abort();
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_respond_tx_replacement_resolves_watcher() -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+
+    // Dedicated funded account
+    let responder_secret_key = random_secret_key();
+    let (responder, responder_address) = eth::client(
+        &ctx.sandbox.external_http_endpoint,
+        &responder_secret_key,
+        ctx.sandbox.chain_id,
+    )?;
+    let fund_tx = transfer_tx(responder_address, U256::from(1_000_000_000_000_000_000u64));
+    let pending_fund = ctx.signer.send_transaction(fund_tx).await?;
+    let _ = pending_fund
+        .get_receipt()
+        .await
+        .context("failed to mine responder funding transaction")?;
+    let nonce = responder.get_transaction_count(responder_address).await?;
+
+    // Pause interval mining so tx A can sit in the mempool
+    responder
+        .raw_request::<_, ()>("evm_setIntervalMining".into(), [0u64])
+        .await?;
+
+    // Respond tx A: enters the mempool but is never mined while mining is
+    // paused.
+    let dummy_response = ChainSignatures::Response {
+        requestId: [0x71; 32].into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::ONE,
+                y: U256::ONE,
+            },
+            s: U256::from(12345u64),
+            recoveryId: 0,
+        },
+    };
+    let respond_calldata = ChainSignatures::new(ctx.contract_address, responder.clone())
+        .respond(vec![dummy_response])
+        .calldata()
+        .clone();
+    let tx_a = TransactionRequest::default()
+        .from(responder_address)
+        .to(ctx.contract_address)
+        .nonce(nonce)
+        .max_fee_per_gas(10_000_000_000)
+        .max_priority_fee_per_gas(1_000_000_000)
+        .input(respond_calldata.into());
+    let tx_a_hash = *responder.send_transaction(tx_a).await?.tx_hash();
+
+    // Register the execution watcher
+    let sign_id = SignId::new([0x71; 32]);
+    let watched_tx_id = mpc_primitives::BidirectionalTxId(tx_a_hash.0);
+    let mut tx = test_eth_bidirectional_tx(watched_tx_id, sign_id, responder_address, nonce);
+    tx.serialized_transaction = vec![0x71];
+
+    backlog.insert_mock_executing(&tx).await;
+
+    // Replacement: same sender and nonce with a fee bump
+    let tx_b = TransactionRequest::default()
+        .from(responder_address)
+        .to(ctx.wallet)
+        .nonce(nonce)
+        .max_fee_per_gas(50_000_000_000) // bump the fee so it replaces tx A
+        .max_priority_fee_per_gas(25_000_000_000)
+        .value(U256::ZERO);
+    let pending_b = responder.send_transaction(tx_b).await?;
+    responder
+        .raw_request::<_, ()>("anvil_mine".into(), [U256::from(1u64)])
+        .await?;
+    let receipt_b = pending_b
+        .get_receipt()
+        .await
+        .context("replacement transaction was not mined")?;
+    let replaced_at = receipt_b
+        .block_number
+        .context("replacement receipt missing block number")?;
+
+    // Watch the replacement transaction
+    let replacement_sign_id = SignId::new([0x72; 32]);
+    let replacement_tx_id = mpc_primitives::BidirectionalTxId(receipt_b.transaction_hash.0);
+
+    let mut replacement_tx = test_eth_bidirectional_tx(
+        replacement_tx_id,
+        replacement_sign_id,
+        responder_address,
+        nonce,
+    );
+    replacement_tx.serialized_transaction = vec![0x72];
+    backlog.insert_mock_executing(&replacement_tx).await;
+
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
+
+    // Drive block production so the stream can observe the replacement transaction being mined and the original transaction being replaced.
+    for _ in 0..3 {
+        responder
+            .raw_request::<_, ()>("anvil_mine".into(), [U256::from(1u64)])
+            .await?;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+    }
+
+    // Both resolve at the replacement's block: the replaced tx as failed, since a watched tx
+    // with other unsigned bytes took its nonce, and the replacement with its real outcome.
+    let mut confirmations = Vec::new();
+    stream
+        .wait_for(
+            |event| {
+                if matches!(event, ChainEvent::ExecutionConfirmed { .. }) {
+                    confirmations.push(event.clone());
+                    let resolved = |id| {
+                        confirmations.iter().any(
+                            |event| matches!(event, ChainEvent::ExecutionConfirmed { tx_id, .. } if *tx_id == id),
+                        )
+                    };
+                    resolved(watched_tx_id) && resolved(replacement_tx_id)
+                } else {
+                    false
+                }
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .context("watchers never resolved both the replaced and the replacement tx")?;
+
+    assert_eq!(
+        confirmations.len(),
+        2,
+        "each watcher must resolve exactly once"
+    );
+    for event in confirmations {
+        let ChainEvent::ExecutionConfirmed {
+            tx_id,
+            sign_id: event_sign_id,
+            block_height,
+            result,
+            ..
+        } = event
+        else {
+            panic!("expected ExecutionConfirmed, got {event:?}")
+        };
+
+        if tx_id == watched_tx_id {
+            assert_eq!(event_sign_id, sign_id);
+            assert!(
+                matches!(result, mpc_primitives::ExecutionOutcome::Failed),
+                "a replaced respond tx must resolve as failed"
+            );
+            assert_eq!(
+                block_height, replaced_at,
+                "the replaced tx resolves at the replacement's mined block"
+            );
+        } else if tx_id == replacement_tx_id {
+            assert_eq!(event_sign_id, replacement_sign_id);
+            assert!(
+                matches!(result, mpc_primitives::ExecutionOutcome::Success { .. }),
+                "the mined replacement tx must resolve as succeeded"
+            );
+            assert_eq!(
+                block_height, replaced_at,
+                "the replacement resolves at its actual mined block"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// A node that indexes a replacement's signature only after processing the
+/// Ethereum block that mined it registers the replacement's watcher late. The
+/// displaced request must still resolve at the replacement's inclusion height,
+/// which a node that watched in time also attests: Unviable on Midnight, Failed
+/// on source chains that cannot encode Unviable yet.
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_late_replacement_watcher_resolves_displaced_request() -> Result<()> {
+    for source_chain in [Chain::Midnight, Chain::Solana] {
+        late_replacement_watcher_resolves_displaced_request(source_chain)
+            .await
+            .with_context(|| format!("source chain {source_chain}"))?;
+    }
+    Ok(())
+}
+
+async fn late_replacement_watcher_resolves_displaced_request(source_chain: Chain) -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+
+    let responder_secret_key = random_secret_key();
+    let (responder, responder_address) = eth::client(
+        &ctx.sandbox.external_http_endpoint,
+        &responder_secret_key,
+        ctx.sandbox.chain_id,
+    )?;
+    let fund_tx = transfer_tx(responder_address, U256::from(1_000_000_000_000_000_000u64));
+    let _ = ctx
+        .signer
+        .send_transaction(fund_tx)
+        .await?
+        .get_receipt()
+        .await
+        .context("failed to mine responder funding transaction")?;
+    let nonce = responder.get_transaction_count(responder_address).await?;
+
+    // A signed request whose transaction is never broadcast, watched before the
+    // replacement is mined.
+    let displaced_sign_id = SignId::new([0x73; 32]);
+    let displaced_tx_id = mpc_primitives::BidirectionalTxId([0x74; 32]);
+    let mut displaced =
+        test_eth_bidirectional_tx(displaced_tx_id, displaced_sign_id, responder_address, nonce);
+    displaced.source_chain = source_chain;
+    displaced.serialized_transaction = vec![0x74];
+    backlog.insert_mock_executing(&displaced).await;
+
+    let mut stream = stream_ethereum(&ctx, backlog.clone()).await?;
+    stream
+        .wait_for(
+            |event| matches!(event, ChainEvent::Block(_)),
+            Duration::from_secs(30),
+        )
+        .await
+        .context("the stream processed no block with the displaced watcher")?;
+
+    // The replacement consumes the nonce while this node does not watch it yet.
+    let receipt = responder
+        .send_transaction(transfer_tx(ctx.wallet, U256::ZERO).nonce(nonce))
+        .await?
+        .get_receipt()
+        .await
+        .context("replacement transaction was not mined")?;
+    let replaced_at = receipt
+        .block_number
+        .context("replacement receipt missing block number")?;
+    stream
+        .wait_for(
+            |event| matches!(event, ChainEvent::Block(height) if *height >= replaced_at),
+            Duration::from_secs(30),
+        )
+        .await
+        .context("the stream did not process the replacement's block")?;
+
+    let replacement_sign_id = SignId::new([0x75; 32]);
+    let replacement_tx_id = mpc_primitives::BidirectionalTxId(receipt.transaction_hash.0);
+    let mut replacement = test_eth_bidirectional_tx(
+        replacement_tx_id,
+        replacement_sign_id,
+        responder_address,
+        nonce,
+    );
+    replacement.source_chain = source_chain;
+    replacement.serialized_transaction = vec![0x75];
+    backlog.insert_mock_executing(&replacement).await;
+
+    let mut confirmations = std::collections::HashMap::new();
+    stream
+        .wait_for(
+            |event| {
+                if let ChainEvent::ExecutionConfirmed {
+                    tx_id,
+                    block_height,
+                    result,
+                    ..
+                } = event
+                {
+                    confirmations
+                        .entry(*tx_id)
+                        .or_insert_with(|| (*block_height, result.clone()));
+                }
+                confirmations.contains_key(&displaced_tx_id)
+                    && confirmations.contains_key(&replacement_tx_id)
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .context("the late replacement did not resolve both watchers")?;
+
+    let (height, result) = &confirmations[&replacement_tx_id];
+    assert_eq!(*height, replaced_at);
+    assert!(
+        matches!(result, mpc_primitives::ExecutionOutcome::Success { .. }),
+        "the replacement executed: {result:?}"
+    );
+    let (height, result) = &confirmations[&displaced_tx_id];
+    assert_eq!(
+        *height, replaced_at,
+        "the displaced request resolves at the replacement's inclusion height"
+    );
+    if source_chain == Chain::Midnight {
+        assert!(
+            matches!(result, mpc_primitives::ExecutionOutcome::Unviable),
+            "the displaced request is unviable: {result:?}"
+        );
+    } else {
+        assert!(
+            matches!(result, mpc_primitives::ExecutionOutcome::Failed),
+            "the displaced request failed: {result:?}"
+        );
+    }
+
     Ok(())
 }
 
@@ -984,10 +1128,10 @@ async fn test_ethereum_stream_concurrent_events() -> Result<()> {
 
     let mut received: Vec<[u8; 32]> = Vec::new();
     while received.len() < payloads.len() {
-        if let ChainEvent::SignRequest(req) =
-            next_event_within(&mut stream, Duration::from_secs(10)).await?
+        if let ChainEvent::SignRequest { request, .. } =
+            stream.next_event_within(Duration::from_secs(10)).await?
         {
-            let bytes: [u8; 32] = req.args.payload.to_bytes().into();
+            let bytes: [u8; 32] = request.args.payload.to_bytes().into();
             received.push(bytes);
         }
     }
@@ -1015,16 +1159,16 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                 break None;
             };
             match event {
-                ChainEvent::SignRequest(req) => {
+                ChainEvent::SignRequest { request, .. } => {
                     saw_sign_request = true;
 
                     // The production indexer loop inserts sign requests into the backlog.
                     // These integration tests consume `ChainEvent`s directly, so replicate
                     // that behavior here so checkpoints capture pending requests.
-                    if matches!(req.kind, SignKind::RespondBidirectional(_)) {
+                    if matches!(request.kind, SignKind::RespondBidirectional(_)) {
                         continue;
                     }
-                    backlog.insert(req.clone()).await;
+                    backlog.insert(request).await;
                 }
                 ChainEvent::Block(height) => {
                     tracing::info!(height, "observed block event");
@@ -1062,14 +1206,14 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
     let mut saw_new_event = false;
     let mut saw_new_checkpoint = false;
     for _ in 0..12 {
-        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
-            ChainEvent::SignRequest(req) => {
+        match stream.next_event_within(Duration::from_secs(10)).await? {
+            ChainEvent::SignRequest { request, .. } => {
                 saw_new_event = true;
 
-                if matches!(req.kind, SignKind::RespondBidirectional(_)) {
+                if matches!(request.kind, SignKind::RespondBidirectional(_)) {
                     continue;
                 }
-                backlog.insert(req.clone()).await;
+                backlog.insert(request).await;
 
                 if saw_new_checkpoint {
                     break;
@@ -1112,8 +1256,8 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     submit_sign_request(&ctx, payload, path).await?;
 
     let sign_req = loop {
-        match next_event_within(&mut stream, Duration::from_secs(30)).await? {
-            ChainEvent::SignRequest(req) => break req,
+        match stream.next_event_within(Duration::from_secs(30)).await? {
+            ChainEvent::SignRequest { request, .. } => break request,
             _ => continue,
         }
     };
@@ -1167,7 +1311,7 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     // Verify the indexer emits the Respond event with matching data.
     let mut saw_respond = false;
     for _ in 0..8 {
-        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
+        match stream.next_event_within(Duration::from_secs(10)).await? {
             ChainEvent::Respond(ev) => {
                 assert_eq!(ev.chain, mpc_primitives::Chain::Ethereum);
                 assert_eq!(ev.request_id, sign_req.id.request_id);
@@ -1182,5 +1326,160 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     }
 
     assert!(saw_respond, "did not receive SignatureResponded event");
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_respond_event_off_curve_point_skipped() -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
+
+    // Submit a respond with an off-curve bigR point
+    let malformed_id = [0xf1; 32];
+    let malformed = ChainSignatures::Response {
+        requestId: malformed_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::ZERO,
+                y: U256::ZERO,
+            },
+            s: U256::from(12345u64),
+            recoveryId: 0,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![malformed]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("malformed respond transaction execution failed")?;
+
+    // A valid respond followed by a later sign request must still flow:
+    // the malformed event is skipped (warn-and-drop), the pipeline survives.
+    let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
+    let valid_id = [0xf2; 32];
+    let valid = ChainSignatures::Response {
+        requestId: valid_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),
+                y: U256::from_be_slice(enc.y().expect("generator must have y coordinate")),
+            },
+            s: U256::from(12345u64),
+            recoveryId: 1,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![valid]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("valid respond transaction execution failed")?;
+
+    let later_payload = [0xee; 32];
+    submit_sign_request(&ctx, later_payload, "malformed-respond-path").await?;
+
+    // Block order (malformed → valid → later sign request, each receipt awaited
+    // before the next send) guarantees the respond set is complete once the
+    // later sign request is observed.
+    let mut respond_ids = Vec::new();
+    stream
+        .wait_for(
+            |event| match event {
+                ChainEvent::Respond(ev) => {
+                    respond_ids.push(ev.request_id);
+                    false
+                }
+                ChainEvent::SignRequest { request, .. } => {
+                    let payload: [u8; 32] = request.args.payload.to_bytes().into();
+                    payload == later_payload
+                }
+                _ => false,
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .context("stream stalled after the malformed respond event")?;
+
+    assert_eq!(
+        respond_ids,
+        vec![valid_id],
+        "the malformed respond event must be skipped, and the valid one emitted exactly once"
+    );
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_respond_event_scalar_out_of_range_skipped() -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
+
+    // s = U256::MAX ABI-decodes but exceeds the secp256k1 curve order.
+    let malformed_id = [0xf1; 32];
+    let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
+    let malformed = ChainSignatures::Response {
+        requestId: malformed_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),
+                y: U256::from_be_slice(enc.y().expect("generator must have y coordinate")),
+            },
+            s: U256::MAX,
+            recoveryId: 0,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![malformed]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("malformed respond transaction execution failed")?;
+
+    // A valid respond followed by a later sign request must still flow:
+    // the malformed event is skipped (warn-and-drop), the pipeline survives.
+    let valid_id = [0xf2; 32];
+    let valid = ChainSignatures::Response {
+        requestId: valid_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),
+                y: U256::from_be_slice(enc.y().expect("generator must have y coordinate")),
+            },
+            s: U256::from(12345u64),
+            recoveryId: 1,
+        },
+    };
+    let pending_tx = ctx.contract().respond(vec![valid]).send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("valid respond transaction execution failed")?;
+
+    let later_payload = [0xee; 32];
+    submit_sign_request(&ctx, later_payload, "malformed-respond-path").await?;
+
+    let mut respond_ids = Vec::new();
+    stream
+        .wait_for(
+            |event| match event {
+                ChainEvent::Respond(ev) => {
+                    respond_ids.push(ev.request_id);
+                    false
+                }
+                ChainEvent::SignRequest { request, .. } => {
+                    let payload: [u8; 32] = request.args.payload.to_bytes().into();
+                    payload == later_payload
+                }
+                _ => false,
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .context("stream stalled after the malformed respond event")?;
+
+    assert_eq!(
+        respond_ids,
+        vec![valid_id],
+        "the malformed respond event must be skipped, and the valid one emitted exactly once"
+    );
     Ok(())
 }

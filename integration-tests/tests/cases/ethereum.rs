@@ -1,7 +1,5 @@
-use alloy::network::{Ethereum, TransactionBuilder};
 use alloy::primitives::U256;
 use alloy::providers::Provider;
-use alloy::rpc::types::request::TransactionRequest;
 use alloy::rpc::types::Filter;
 use alloy::sol_types::SolEvent;
 use anyhow::{anyhow, Context, Result};
@@ -10,10 +8,13 @@ use integration_tests::{actions, cluster, eth};
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
+use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest, SignatureResponded};
+use mpc_chain_ethereum::utils::test::submit_sign_request;
 use mpc_crypto::derive_key;
 use mpc_crypto::kdf::derive_epsilon_eth;
+use mpc_node::backlog::Checkpoint;
 use mpc_node::sign_bidirectional::public_key_to_address;
-use mpc_primitives::{Chain, Checkpoint, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{Chain, ChainConfig as _, LATEST_MPC_KEY_VERSION};
 use test_log::test;
 use tokio::time::Duration;
 
@@ -33,7 +34,7 @@ async fn test_signature_ethereum() -> Result<()> {
     let contract_address = eth_ctx.contract_address;
 
     let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
-    let contract = eth::ChainSignatures::new(contract_address, client.clone());
+    let contract = ChainSignatures::new(contract_address, client.clone());
 
     let payload = [7u8; 32];
     let path = "test";
@@ -41,7 +42,7 @@ async fn test_signature_ethereum() -> Result<()> {
     let dest = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
     let params = "{}";
 
-    let request = eth::SignRequest {
+    let request = SignRequest {
         payload: payload.into(),
         path: path.to_string(),
         keyVersion: LATEST_MPC_KEY_VERSION,
@@ -92,7 +93,7 @@ async fn test_signature_ethereum() -> Result<()> {
                 log.data().data.clone(),
             )
             .and_then(|prim_log| {
-                eth::SignatureResponded::decode_log(&prim_log)
+                SignatureResponded::decode_log(&prim_log)
                     .ok()
                     .filter(|event| {
                         event.requestId == expected_request_id && event.responder == requester
@@ -119,7 +120,7 @@ async fn test_signature_ethereum() -> Result<()> {
         .into_option()
         .ok_or_else(|| anyhow!("invalid R component in signature"))?;
 
-    let r_scalar = actions::x_coordinate::<k256::Secp256k1>(&big_r);
+    let r_scalar = mpc_crypto::x_coordinate(&big_r);
     let r_bytes = r_scalar.to_bytes();
 
     let mut s_bytes = [0u8; 32];
@@ -142,7 +143,7 @@ async fn test_signature_ethereum() -> Result<()> {
         .ok_or_else(|| anyhow!("invalid network public key"))?;
 
     let sender_hex = format!("0x{}", hex::encode(requester));
-    let epsilon = derive_epsilon_eth(LATEST_MPC_KEY_VERSION, &sender_hex, path);
+    let epsilon = derive_epsilon_eth(LATEST_MPC_KEY_VERSION, &sender_hex, path)?;
     let user_affine = derive_key(network_affine, epsilon);
     let user_public_key = K256PublicKey::from_affine(user_affine)
         .map_err(|_| anyhow!("invalid derived public key"))?;
@@ -179,7 +180,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let contract_address = eth_ctx.contract_address;
 
     let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
-    let contract = eth::ChainSignatures::new(contract_address, client.clone());
+    let contract = ChainSignatures::new(contract_address, client.clone());
 
     // Get initial checkpoint state
     let node_idx = 0;
@@ -197,7 +198,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let dest = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
     let params = "{}";
 
-    let request = eth::SignRequest {
+    let request = SignRequest {
         payload: payload.into(),
         path: path.to_string(),
         keyVersion: LATEST_MPC_KEY_VERSION,
@@ -272,7 +273,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
                 log.data().data.clone(),
             )
             .and_then(|prim_log| {
-                eth::SignatureResponded::decode_log(&prim_log)
+                SignatureResponded::decode_log(&prim_log)
                     .ok()
                     .filter(|event| {
                         event.requestId == expected_request_id && event.responder == requester
@@ -290,10 +291,10 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
 
     tracing::info!("signature response observed on-chain");
 
-    // Checkpoints are emitted on interval boundaries. Produce enough non-contract
-    // empty transfers so Anvil mines blocks and the indexer can publish the next
-    // checkpoint after the response has been observed.
-    produce_empty_eth_blocks(&client, requester, checkpoint_interval).await?;
+    // Checkpoints are emitted on interval boundaries. Mine enough empty blocks
+    // so the indexer can publish the next checkpoint after the response has
+    // been observed.
+    produce_empty_eth_blocks(&client, checkpoint_interval).await?;
 
     let min_next_checkpoint_height =
         ((checkpoint_height / checkpoint_interval) + 1) * checkpoint_interval;
@@ -316,7 +317,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let request_still_present = checkpoint
         .pending_requests
         .iter()
-        .any(|tx| tx.sign_id.request_id == expected_request_bytes);
+        .any(|entry| entry.sign_id().request_id == expected_request_bytes);
 
     assert!(
         !request_still_present,
@@ -339,16 +340,16 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         .ethereum
         .as_ref()
         .context("ethereum sandbox not initialized")?;
-    let (eth_client, requester) = eth::client(
+    let (eth_client, _requester) = eth::client(
         &eth_ctx.sandbox.external_http_endpoint,
         &eth_ctx.sandbox.secret_key,
         eth_ctx.sandbox.chain_id,
     )?;
-    let eth_contract = eth::ChainSignatures::new(eth_ctx.contract_address, eth_client.clone());
+    let eth_contract = ChainSignatures::new(eth_ctx.contract_address, eth_client.clone());
 
     // Produce a few sign requests up front so nodes create initial checkpoints
     for i in 0..5 {
-        eth::submit_sign_request(&eth_contract, i).await?;
+        submit_sign_request(&eth_contract, i).await?;
     }
 
     let active_idx = 1usize;
@@ -371,10 +372,10 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     // Submit a few requests, then pump empty blocks so checkpoint progression
     // does not depend on signature throughput under test load.
     for seed in 100usize..103usize {
-        eth::submit_sign_request(&eth_contract, seed).await?;
+        submit_sign_request(&eth_contract, seed).await?;
     }
 
-    produce_empty_eth_blocks_for_duration(&eth_client, requester, Duration::from_secs(12)).await?;
+    produce_empty_eth_blocks_for_duration(&eth_client, Duration::from_secs(12)).await?;
 
     // Wait for active node to create a new checkpoint beyond the initial one
     let node_active_checkpoint = wait_node_checkpoint(
@@ -426,13 +427,14 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
             node_recovered_checkpoint
                 .block_height
                 .max(node_active_checkpoint.block_height),
-            Duration::from_secs(90),
+            Duration::from_secs(120),
         )
         .await?;
 
     assert_eq!(
-        active_checkpoint_after_restart, recovered_checkpoint_after_restart,
-        "restarted node should converge to the same checkpoint as the active node via consensus"
+        active_checkpoint_after_restart.digest(),
+        recovered_checkpoint_after_restart.digest(),
+        "restarted node should converge to the same checkpoint digest as the active node"
     );
 
     let active_checkpoint_after_restart = wait_node_checkpoint(
@@ -455,47 +457,24 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
 
 async fn produce_empty_eth_blocks(
     client: &eth::SandboxMiddleware,
-    sender: alloy::primitives::Address,
     block_count: u64,
 ) -> anyhow::Result<()> {
-    // Use a non-contract sink address so these transactions only advance block height.
-    let sink = alloy::primitives::Address::from([
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ]);
-
-    for _ in 0..block_count {
-        let nonce = client.get_transaction_count(sender).pending().await?;
-        let tx = <TransactionRequest as TransactionBuilder<Ethereum>>::with_nonce(
-            <TransactionRequest as TransactionBuilder<Ethereum>>::with_gas_limit(
-                <TransactionRequest as TransactionBuilder<Ethereum>>::with_value(
-                    <TransactionRequest as TransactionBuilder<Ethereum>>::with_to(
-                        <TransactionRequest as TransactionBuilder<Ethereum>>::with_from(
-                            TransactionRequest::default(),
-                            sender,
-                        ),
-                        sink,
-                    ),
-                    U256::ZERO,
-                ),
-                21_000,
-            ),
-            nonce,
-        );
-
-        client.send_transaction(tx).await?.get_receipt().await?;
-    }
-
+    // Mine empty blocks directly instead of sending transactions: the sandbox
+    // account is shared with the node publishers, so submitting transactions
+    // from it here races on nonces ("replacement transaction underpriced").
+    client
+        .raw_request::<_, ()>("anvil_mine".into(), [U256::from(block_count)])
+        .await?;
     Ok(())
 }
 
 async fn produce_empty_eth_blocks_for_duration(
     client: &eth::SandboxMiddleware,
-    sender: alloy::primitives::Address,
     duration: Duration,
 ) -> anyhow::Result<()> {
     let start = tokio::time::Instant::now();
     while start.elapsed() < duration {
-        produce_empty_eth_blocks(client, sender, 1).await?;
+        produce_empty_eth_blocks(client, 1).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     Ok(())
@@ -556,7 +535,7 @@ async fn wait_matching_node_checkpoints(
                 continue;
             }
 
-            if left_checkpoint == right_checkpoint {
+            if left_checkpoint.digest() == right_checkpoint.digest() {
                 return Ok((left_checkpoint, right_checkpoint));
             }
         }

@@ -1,5 +1,5 @@
 use cait_sith::protocol::Participant;
-use mpc_primitives::SignId;
+use mpc_primitives::{RequestKind, SignId};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::metrics::messaging::{
@@ -21,35 +21,70 @@ pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
 /// capacity to avoid backpressure or deadlock under high concurrency.
 pub const MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE: usize = 1 << 24;
 
-/// Small under test-feature so dead-letter inboxes fill quickly in clog tests.
-pub const POSIT_INBOX_CHANNEL_SIZE: usize = if cfg!(feature = "test-feature") {
-    4
-} else {
-    MAX_MESSAGE_SUB_CHANNEL_SIZE
-};
-
+#[derive(Debug, Clone, Copy)]
 pub enum SubscribeId {
     Generating,
     Resharing,
     Ready,
-    Triples,
-    Presignatures,
-    Signatures,
+    TriplePosit,
+    PresignaturePosit,
+    SignaturePosit,
     Triple(TripleId),
     Presignature(PresignatureId),
     Signature(SignId, PresignatureId),
 }
+
+pub type TriplePosit = (TripleId, Participant, PositAction);
+pub type PresignaturePosit = (FullPresignatureId, Participant, PositAction);
+pub type SignaturePosit = (
+    SignId,
+    RequestKind,
+    PresignatureId,
+    Round,
+    Participant,
+    PositAction,
+);
 
 pub enum SubscribeResponse {
     Generating(mpsc::Receiver<GeneratingMessage>),
     Resharing(mpsc::Receiver<ResharingMessage>),
     Ready(mpsc::Receiver<ReadyMessage>),
     Triple(mpsc::Receiver<TripleMessage>),
-    TriplePosit(mpsc::Receiver<(TripleId, Participant, PositAction)>),
+    TriplePosit(mpsc::Receiver<TriplePosit>),
     Presignature(mpsc::Receiver<PresignatureMessage>),
-    PresignaturePosit(mpsc::Receiver<(FullPresignatureId, Participant, PositAction)>),
+    PresignaturePosit(mpsc::Receiver<PresignaturePosit>),
     Signature(mpsc::Receiver<SignatureMessage>),
-    SignaturePosit(mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)>),
+    SignaturePosit(mpsc::Receiver<SignaturePosit>),
+}
+
+/// Ties a message type to the `SubscribeResponse` variant carrying its receiver.
+pub trait SubscriptionMessage: Sized {
+    fn receiver(resp: SubscribeResponse) -> Option<mpsc::Receiver<Self>>;
+}
+
+macro_rules! impl_subscription_message {
+    ($($ty:ty => $variant:ident,)*) => {$(
+        impl SubscriptionMessage for $ty {
+            fn receiver(resp: SubscribeResponse) -> Option<mpsc::Receiver<Self>> {
+                match resp {
+                    SubscribeResponse::$variant(rx) => Some(rx),
+                    _ => None,
+                }
+            }
+        }
+    )*};
+}
+
+impl_subscription_message! {
+    GeneratingMessage => Generating,
+    ResharingMessage => Resharing,
+    ReadyMessage => Ready,
+    TripleMessage => Triple,
+    TriplePosit => TriplePosit,
+    PresignatureMessage => Presignature,
+    PresignaturePosit => PresignaturePosit,
+    SignatureMessage => Signature,
+    SignaturePosit => SignaturePosit,
 }
 
 pub enum SubscribeRequestAction {

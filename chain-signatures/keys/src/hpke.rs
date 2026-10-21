@@ -1,6 +1,5 @@
-use std::{fmt, io};
+use std::fmt;
 
-use borsh::{self, BorshDeserialize, BorshSerialize};
 use hpke::{
     aead::{AeadTag, ChaCha20Poly1305},
     kdf::HkdfSha384,
@@ -40,11 +39,9 @@ pub struct SecretKey(<Kem as hpke::Kem>::PrivateKey);
 
 impl fmt::Debug for SecretKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let key = hex::encode(self.to_bytes());
-        let debug_key = format!("{}[..]", &key[..key.len() - 4]);
         f.debug_struct("SecretKey")
-            .field("key", &debug_key)
-            .finish()
+            .field("key", &"<hidden>")
+            .finish_non_exhaustive()
     }
 }
 
@@ -63,9 +60,11 @@ impl PublicKey {
         Ok(Self(hpke::Deserializable::from_bytes(bytes)?))
     }
 
-    /// Assumes the bytes are correctly formatted.
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self::try_from_bytes(bytes).expect("invalid bytes")
+    /// Infallible: the only way [`Self::try_from_bytes`] can fail is a length
+    /// mismatch, which the array type rules out. Use `try_from_bytes` for input
+    /// whose length isn't known at compile time.
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self::try_from_bytes(bytes).expect("32 bytes is always a valid X25519 public key")
     }
 
     pub fn encrypt(&self, msg: &[u8], associated_data: &[u8]) -> Result<Ciphered, hpke::HpkeError> {
@@ -91,29 +90,17 @@ impl PublicKey {
     }
 }
 
-impl BorshSerialize for PublicKey {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        BorshSerialize::serialize(&self.to_bytes(), writer)
-    }
-}
-
-impl BorshDeserialize for PublicKey {
-    fn deserialize_reader<R: io::Read>(reader: &mut R) -> io::Result<Self> {
-        <Vec<u8> as BorshDeserialize>::deserialize_reader(reader).and_then(|buf| {
-            Ok(Self::from_bytes(
-                &<Vec<u8> as BorshDeserialize>::deserialize(&mut buf.as_slice())?,
-            ))
-        })
-    }
-}
-
 impl SecretKey {
     pub fn to_bytes(&self) -> [u8; 32] {
         hpke::Serializable::to_bytes(&self.0).into()
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self(hpke::Deserializable::from_bytes(bytes).expect("invalid bytes"))
+    /// Infallible: see [`PublicKey::from_bytes`].
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self(
+            hpke::Deserializable::from_bytes(bytes)
+                .expect("32 bytes is always a valid X25519 secret key"),
+        )
     }
 
     pub fn try_from_bytes(bytes: &[u8]) -> Result<Self, hpke::HpkeError> {
