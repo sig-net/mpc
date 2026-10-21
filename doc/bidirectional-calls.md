@@ -130,9 +130,10 @@ How a request ends, as seen by the application contract:
   3.1). A response the library does not accept is dropped without a trace:
   there is no rejected ending, and the contract is not told.
 * *Unanswered*: no response is ever accepted, because none is ever
-  published (the transaction neither executes nor is displaced after the
-  request was made, its output does not decode, the transaction that
-  executes or displaces it carries a signature that is never published,
+  published (the transaction neither executes nor becomes unviable after
+  the request was made, its output does not decode, the transaction that
+  executes or uses up its replay protection carries a signature that is
+  never published,
   or the MPC did not admit the request) or because every published one is
   dropped.
 
