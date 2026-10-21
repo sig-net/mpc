@@ -48,6 +48,12 @@ impl fmt::Debug for SecretKey {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EncappedKey(<Kem as hpke::Kem>::EncappedKey);
 
+impl EncappedKey {
+    pub fn to_bytes(&self) -> [u8; 32] {
+        hpke::Serializable::to_bytes(&self.0).into()
+    }
+}
+
 // Series of bytes that have been previously encoded/encrypted.
 pub type CipherText = Vec<u8>;
 

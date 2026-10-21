@@ -78,9 +78,9 @@ impl SignedMessage {
             ));
         }
 
-        // Only after verifying: the caller dedups on this signature, so letting
-        // an unverified batch through would hand anyone able to reach us a way
-        // to fill or evict that cache with signatures of their choosing.
+        // Only after verifying: the caller dedups here, so letting an unverified
+        // batch through would hand anyone able to reach us a way to fill or
+        // evict that cache with entries of their choosing.
         check(&sig)?;
 
         Ok((from, cbor_from_bytes(&msg)?))

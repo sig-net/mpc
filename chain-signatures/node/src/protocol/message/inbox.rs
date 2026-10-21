@@ -20,7 +20,6 @@ use crate::protocol::message::types::{
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_primitives::SignId;
-use near_crypto::Signature;
 use tokio::sync::{mpsc, watch};
 
 use std::collections::HashMap;
@@ -33,9 +32,9 @@ const SIGNATURE_TASK_LABEL: &str = "sign_task";
 /// Receiving half of the message system: accepts encrypted messages from peers,
 /// decrypts and dedups them, and routes each to its subscriber channel.
 pub struct MessageInbox {
-    /// This idempotent checker is used to check that the same batch of messages does not make
-    /// it back in the system somehow. Uses the signature to make this check.
-    idempotent: lru::LruCache<Signature, ()>,
+    /// Drops resent ciphertexts (outbox retries). Keyed on the encapsulated key, fresh
+    /// per encryption, so a message sent again on purpose (a repeated PROPOSE) gets through.
+    idempotent: lru::LruCache<[u8; 32], ()>,
 
     /// Kill-list of finished protocol instances (fed by generator `Drop`s, on
     /// completion or abort). Late messages for these ids are dropped so they
@@ -191,8 +190,9 @@ impl MessageInbox {
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
     ) -> Option<(Participant, Vec<Message>)> {
-        let decrypted = SignedMessage::decrypt_with(encrypted, cipher_sk, participants, |sig| {
-            if self.idempotent.put(sig.clone(), ()).is_some() {
+        let key = encrypted.encapped_key.to_bytes();
+        let decrypted = SignedMessage::decrypt_with(encrypted, cipher_sk, participants, |_| {
+            if self.idempotent.put(key, ()).is_some() {
                 Err(MessageError::Idempotent)
             } else {
                 Ok(())
@@ -432,6 +432,7 @@ mod tests {
     use super::*;
     use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
     use crate::protocol::contract::primitives::Participants;
+    use crate::protocol::message::crypto::{cbor_from_bytes, cbor_to_bytes};
     use crate::protocol::message::{MessageChannel, SignedMessage};
     use crate::protocol::ParticipantInfo;
     use crate::rpc::ContractStateWatcher;
@@ -586,16 +587,15 @@ mod tests {
         setup.inbox.abort();
     }
 
-    /// Check idempotency. The same set of messages encrypted and signed again
-    /// should produce the same signature. Thus sending the same encrypted
-    /// message should be idempotent and no new messages should be received by
-    /// the subscribers.
+    /// A resent ciphertext (an outbox retry) is dropped, but the same messages
+    /// encrypted again (a repeated PROPOSE) are delivered.
     #[tokio::test]
     async fn test_inbox_idempotency() {
         let setup = inbox_setup();
         let batch = triple_batch(setup.epoch, setup.from);
         let encrypted =
             SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
+        let resent: Ciphered = cbor_from_bytes(&cbor_to_bytes(&encrypted).unwrap()).unwrap();
         setup.channel.send_inbox(encrypted).await;
 
         let mut recv1 = setup.channel.subscribe_triple(1).await;
@@ -607,41 +607,18 @@ mod tests {
             _ => panic!("failed to join on inbox"),
         }
 
-        setup.channel.unsubscribe_triple(1).await;
-        setup.channel.unsubscribe_triple(2).await;
-        setup.channel.unsubscribe_triple(3).await;
+        setup.channel.send_inbox(resent).await;
+        let result = tokio::time::timeout(Duration::from_millis(300), recv1.recv()).await;
+        assert!(result.is_err(), "resent ciphertext was delivered again");
 
-        // Encrypting the same batch again produces the same signature, so the
-        // inbox should drop it as a duplicate.
         let encrypted =
             SignedMessage::encrypt(&batch, setup.from, &setup.sign_sk, &setup.cipher_pk).unwrap();
         setup.channel.send_inbox(encrypted).await;
-        let mut recv1 = tokio::time::timeout(
-            Duration::from_millis(300),
-            setup.channel.subscribe_triple(1),
-        )
-        .await
-        .unwrap();
-        let mut recv2 = tokio::time::timeout(
-            Duration::from_millis(300),
-            setup.channel.subscribe_triple(2),
-        )
-        .await
-        .unwrap();
-        let mut recv3 = tokio::time::timeout(
-            Duration::from_millis(300),
-            setup.channel.subscribe_triple(3),
-        )
-        .await
-        .unwrap();
-
-        let result1 = tokio::time::timeout(Duration::from_millis(100), recv1.recv()).await;
-        let result2 = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
-        let result3 = tokio::time::timeout(Duration::from_millis(100), recv3.recv()).await;
-
-        assert!(result1.is_err());
-        assert!(result2.is_err());
-        assert!(result3.is_err());
+        let result = tokio::time::timeout(Duration::from_millis(300), recv1.recv()).await;
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "same messages encrypted again were dropped"
+        );
 
         setup.inbox.abort();
     }
@@ -710,10 +687,10 @@ mod tests {
         assert!(MessageInbox::verify_senders(batches, Some(me)).is_empty());
 
         // Wrong signing key: rejected at signature verification already, and it
-        // must not reach the dedup cache on the way out. That cache is keyed on
-        // the signature, and our cipher key is public, so anyone able to reach
-        // the node could otherwise flood it with signatures of their choosing
-        // and evict the entries that make real duplicates detectable.
+        // must not reach the dedup cache on the way out. Our cipher key is
+        // public, so anyone able to reach the node could otherwise flood that
+        // cache with entries of their choosing and evict the ones that make real
+        // duplicates detectable.
         let forged_envelope = triple_batch(3, peer);
         let encrypted =
             SignedMessage::encrypt(&forged_envelope, peer, &my_sign_sk, &cipher_pk).unwrap();
@@ -724,7 +701,7 @@ mod tests {
         assert_eq!(
             inbox.idempotent.len(),
             cached,
-            "unverified signature entered the dedup cache",
+            "unverified batch entered the dedup cache",
         );
 
         // Control: consistent sender passes through.
