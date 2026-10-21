@@ -108,7 +108,7 @@ To run benchmarks, simply run the `bench.sh` script in the root:
 
 The release compatibility test boots one node from the current code and one
 node from the latest release tag, with threshold 2, and signs. It is
-informational: a failure means the next deploy must upgrade all nodes at once.
+informational: a failure means investigate before a rolling deploy.
 To run it locally:
 
 1. Build the latest release binary (only needed once per tag):

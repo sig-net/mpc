@@ -38,7 +38,7 @@ git fetch --tags --force >/dev/null
 if [[ -n "${COMPAT_TAG:-}" ]]; then
   tag="$COMPAT_TAG"
 else
-  tag="$(git tag --sort=-v:refname --no-contains HEAD | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)"
+  tag="$(git tag --sort=-v:refname --no-contains HEAD | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
   if [[ -z "$tag" ]]; then
     echo "No release tag found." >&2
     exit 1

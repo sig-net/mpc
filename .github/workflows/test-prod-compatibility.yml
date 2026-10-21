@@ -1,7 +1,7 @@
 name: Prod Compatibility Tests
 
-# Informational, PR-only and not a required check: a failure means the next
-# deploy must upgrade all nodes at once. Not run on develop on purpose, so it
+# Informational, PR-only and not a required check: a failure means
+# investigate before a rolling deploy. Not run on develop on purpose, so it
 # never colours the default branch status.
 on:
   workflow_dispatch:
