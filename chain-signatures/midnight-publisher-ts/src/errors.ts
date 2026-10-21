@@ -12,13 +12,20 @@ export type ErrorCode =
   | "internal";
 
 export class PublisherError extends Error {
+  /** The funding wallet's coins and sync progress when it failed, kept off `message`. */
+  readonly walletState: string | undefined;
+  /** Whether the submit had started balancing with the funding wallet when it failed. */
+  readonly walletUsed: boolean;
+
   constructor(
     readonly code: ErrorCode,
     message: string,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { readonly walletState?: string; readonly walletUsed?: boolean },
   ) {
     super(message, options);
     this.name = "PublisherError";
+    this.walletState = options?.walletState;
+    this.walletUsed = options?.walletUsed ?? false;
   }
 }
 

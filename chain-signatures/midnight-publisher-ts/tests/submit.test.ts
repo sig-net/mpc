@@ -20,6 +20,7 @@ import {
   handleSubmit,
   primePublisher,
   shutdownPublisher,
+  snapshotWallet,
   SUBMIT_TIMEOUT_MS,
   type Publisher,
   warmupPublisher,
@@ -183,6 +184,34 @@ describe("handleSubmit: the flow", () => {
       primeStub({ balanceTx: failing(message) });
 
       expect((await refused(6)).code, message).toBe(code);
+    }
+  });
+
+  it("names the wallet's state in a failed submit, which outlives the process it retires", async () => {
+    primeStub({
+      balanceTx: failing("Wallet.InsufficientFunds"),
+      describe: async () => "dust(spendable=0 inFlight=5)",
+    });
+
+    const failure = await refused(7);
+
+    expect(failure.code).toBe("wallet_unfunded");
+    expect(failure.message).toBe("Wallet.InsufficientFunds");
+    expect(failure.walletState).toBe("dust(spendable=0 inFlight=5)");
+  });
+
+  it("says whether the wallet was used, which only balance, finalize and submit do", async () => {
+    for (const [edges, walletUsed] of [
+      [{ requireReady: failing("DUST indexing is still catching up") }, false],
+      [{ proveTx: failing("proof server /prove request failed: ECONNREFUSED") }, false],
+      [{ balanceTx: failing("Wallet.InsufficientFunds") }, true],
+      [{ finalizeTx: failing("proof server /prove request failed: ECONNREFUSED") }, true],
+      [{ submitTx: failing("1010: Invalid Transaction: Custom error: 170") }, true],
+    ] as const) {
+      await closePublisher();
+      primeStub(edges);
+
+      expect((await refused(8)).walletUsed, Object.keys(edges)[0]).toBe(walletUsed);
     }
   });
 
@@ -414,5 +443,53 @@ describe("handleSubmit: the busy gate", () => {
     const refusal = await refused(2);
     expect(refusal.code).toBe("wallet_busy");
     expect(refusal.message).toContain("request 1");
+  });
+});
+
+describe("snapshotWallet", () => {
+  it("refuses while a submit holds the wallet and snapshots once it settles", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const balancing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    primeStub({
+      balanceTx: async (tx) => {
+        entered();
+        await held;
+        return tx;
+      },
+      snapshot: async () => "snapshot-bytes",
+    });
+
+    const first = handleSubmit(CONFIG, 1, intent);
+    await balancing;
+    await expect(snapshotWallet()).rejects.toMatchObject({
+      code: "wallet_busy",
+      message: expect.stringContaining("request 1"),
+    });
+
+    release();
+    await first;
+    await expect(snapshotWallet()).resolves.toBe("snapshot-bytes");
+  });
+
+  it("restores the wallet it opens from the snapshot handed over at ready", async () => {
+    vi.mocked(openFundingWallet)
+      .mockClear()
+      .mockResolvedValueOnce({} as FundingWallet);
+
+    warmupPublisher(CONFIG, "snapshot-bytes");
+    await vi.waitFor(() => expect(openFundingWallet).toHaveBeenCalledOnce());
+
+    expect(openFundingWallet).toHaveBeenCalledWith(
+      CONFIG.accountKeys,
+      CONFIG.networkId,
+      CONFIG.endpoints,
+      "snapshot-bytes",
+    );
   });
 });
