@@ -1557,6 +1557,7 @@ async fn midnight_completion_requires_the_published_metadata_to_match_the_signat
         let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
         let signature = mpc_crypto::generate_signature(&root_sk, &entry.request().args);
         let mut event = RespondBidirectionalEvent {
+            output: None,
             request_id: tx.request_id,
             signature,
             chain: Chain::Midnight,
@@ -1801,6 +1802,7 @@ async fn published_midnight_response(
         panic!("the observed outcome must be signed");
     };
     let event = RespondBidirectionalEvent {
+        output: None,
         request_id: tx.request_id,
         signature: mpc_crypto::generate_signature(root_sk, &entry.request().args),
         chain: Chain::Midnight,
@@ -1969,23 +1971,41 @@ async fn midnight_unobserved_entries_keep_responses_they_cannot_bind() {
     }
 }
 
-/// On other source chains a Failed response's digest follows from the request alone, so a node
-/// that missed the outcome settles it with the nodes that attested it; any other response it keeps.
+/// A node that has not seen the execution yet removes the request when the response checks out.
 #[tokio::test]
-async fn failed_response_settles_entries_that_missed_the_outcome() {
+async fn unobserved_response_settles_when_it_verifies() {
     let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
-    for (source_chain, outcome, parked, settles) in [
-        (Chain::Solana, ExecutionOutcome::Failed, false, true),
-        (Chain::Hydration, ExecutionOutcome::Failed, false, true),
-        (Chain::Canton, ExecutionOutcome::Failed, true, true),
+    let success = || ExecutionOutcome::Success { output: vec![] };
+    for (source_chain, outcome, parked, published, settles) in [
         (
             Chain::Solana,
-            ExecutionOutcome::Success { output: vec![] },
+            ExecutionOutcome::Failed,
             false,
+            "none",
             false,
         ),
+        (Chain::Solana, success(), false, "none", false),
+        (
+            Chain::Solana,
+            ExecutionOutcome::Failed,
+            false,
+            "signed",
+            true,
+        ),
+        (
+            Chain::Canton,
+            ExecutionOutcome::Failed,
+            true,
+            "signed",
+            true,
+        ),
+        (Chain::Solana, success(), false, "signed", true),
+        (Chain::Solana, success(), true, "signed", true),
+        (Chain::Hydration, success(), false, "signed", true),
+        (Chain::Canton, success(), false, "signed", true),
+        (Chain::Solana, success(), false, "altered", false),
     ] {
-        let case = format!("{source_chain} {outcome:?}, parked: {parked}");
+        let case = format!("{source_chain} {outcome:?}, parked: {parked}, output: {published}");
         let tx = test_bidirectional_tx(105, source_chain, Chain::Ethereum);
 
         let attested = Backlog::new();
@@ -1998,7 +2018,17 @@ async fn failed_response_settles_entries_that_missed_the_outcome() {
         let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
             panic!("{case}: the observed outcome must be signed");
         };
+        let SignKind::RespondBidirectional(response) = &entry.request().kind else {
+            panic!("{case}: the outcome is signed as a response");
+        };
+        let output = match published {
+            "none" => None,
+            "signed" => Some(response.output.clone()),
+            "altered" => Some([response.output.as_slice(), &[1]].concat()),
+            _ => unreachable!(),
+        };
         let event = RespondBidirectionalEvent {
+            output,
             attestation: None,
             request_id: tx.request_id,
             signature: mpc_crypto::generate_signature(&root_sk, &entry.request().args),
@@ -2039,6 +2069,64 @@ async fn failed_response_settles_entries_that_missed_the_outcome() {
             matches!(sign_rx.try_recv(), Ok(SignCommand::Completion(id)) if id == tx.sign_id()),
             settles,
             "{case}"
+        );
+    }
+}
+
+/// A node that computed a different output than the network signed settles on the published
+/// one, so it removes the request at the same event as the others.
+#[tokio::test]
+async fn final_response_settles_on_the_published_output() {
+    let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
+    for (published, settles) in [("same", true), ("signed", true), ("unsigned", false)] {
+        let tx = test_bidirectional_tx(106, Chain::Solana, Chain::Ethereum);
+        let backlog = Backlog::new();
+        backlog.insert_mock_executing(&tx).await;
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+        let outcome = ExecutionOutcome::Success { output: vec![] };
+        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
+            .await
+            .unwrap();
+        let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
+            panic!("{published}: the observed outcome must be signed");
+        };
+
+        let SignKind::RespondBidirectional(own) = &entry.request().kind else {
+            panic!("{published}: the outcome is signed as a response");
+        };
+        let output = if published == "same" {
+            own.output.clone()
+        } else {
+            vec![7]
+        };
+        let mut args = entry.request().args.clone();
+        if published == "signed" {
+            args.payload = crate::respond_bidirectional::published_output_payload(
+                Chain::Solana,
+                &tx.request_id,
+                &output,
+            )
+            .unwrap();
+        }
+        let event = RespondBidirectionalEvent {
+            output: Some(output),
+            attestation: None,
+            request_id: tx.request_id,
+            signature: mpc_crypto::generate_signature(&root_sk, &args),
+            chain: Chain::Solana,
+        };
+        let result =
+            process_respond_bidirectional_event(event, &ctx, root_sk.public_key().into()).await;
+
+        assert_eq!(result.is_ok(), settles, "{published}");
+        assert_eq!(
+            ctx.backlog
+                .get(Chain::Solana, &tx.sign_id())
+                .await
+                .is_none(),
+            settles,
+            "{published}"
         );
     }
 }

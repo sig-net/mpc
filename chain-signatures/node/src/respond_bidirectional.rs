@@ -16,8 +16,13 @@ const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 pub(crate) fn is_failed_execution_response(response: &RespondBidirectionalTx) -> bool {
     match response.attestation {
         Some(metadata) => metadata.outcome_kind != AttestationOutcomeKind::Executed,
-        None => response.output.starts_with(&MAGIC_ERROR_PREFIX),
+        None => is_failed_output(&response.output),
     }
+}
+
+/// Whether a non-Midnight response output reports a failed execution.
+pub(crate) fn is_failed_output(output: &[u8]) -> bool {
+    output.starts_with(&MAGIC_ERROR_PREFIX)
 }
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
@@ -171,7 +176,7 @@ impl CompletedTx {
             block_height: self.block_height,
             outcome_kind,
         });
-        let message = calculate_respond_bidirectional_hash_message_for_chain(
+        let payload = response_payload(
             source_chain,
             &request_id_bytes,
             &serialized_output,
@@ -179,15 +184,10 @@ impl CompletedTx {
         )?;
         tracing::info!(
             "Respond bidirectional message hash: {:?}",
-            hex::encode(message)
+            hex::encode(payload.to_bytes())
         );
-        let Some(payload) = Scalar::from_bytes(message) else {
-            anyhow::bail!("Failed to convert respond bidirectional message to scalar: {message:?}");
-        };
-        let path = respond_bidirectional_path(source_chain)
-            .ok_or_else(|| anyhow::anyhow!("Unsupported chain: {}", source_chain))?
-            .to_string();
-        let epsilon = self.tx.epsilon(&path)?;
+        let (path, epsilon) = response_key(&self.tx)?;
+        let path = path.to_string();
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest::respond_bidirectional(
             SignId::new(request_id_bytes),
@@ -209,6 +209,53 @@ impl CompletedTx {
             },
         ))
     }
+}
+
+/// The payload a response with `output` is signed with.
+fn response_payload(
+    chain: Chain,
+    request_id: &[u8; 32],
+    output: &[u8],
+    attestation: Option<&AttestationMetadata>,
+) -> anyhow::Result<Scalar> {
+    let message = calculate_respond_bidirectional_hash_message_for_chain(
+        chain,
+        request_id,
+        output,
+        attestation,
+    )?;
+    Scalar::from_bytes(message).ok_or_else(|| {
+        anyhow::anyhow!("Failed to convert respond bidirectional message to scalar: {message:?}")
+    })
+}
+
+/// The path and epsilon a response for `tx` is signed with.
+fn response_key(tx: &BidirectionalTx) -> anyhow::Result<(&'static str, Scalar)> {
+    let path = respond_bidirectional_path(tx.source_chain)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported chain: {}", tx.source_chain))?;
+    Ok((path, tx.epsilon(path)?))
+}
+
+/// The payload a response with `output` is signed with, on source chains other than Midnight.
+/// This won't be necessary once those chains sign the Section 7 digest of
+/// bidirectional-calls.md and no request signed the old way is left.
+pub(crate) fn published_output_payload(
+    chain: Chain,
+    request_id: &[u8; 32],
+    output: &[u8],
+) -> anyhow::Result<Scalar> {
+    response_payload(chain, request_id, output, None)
+}
+
+/// The epsilon and payload a response for `tx` with `output` is signed with, on source
+/// chains other than Midnight.
+pub(crate) fn published_output_signing_args(
+    tx: &BidirectionalTx,
+    output: &[u8],
+) -> anyhow::Result<(Scalar, Scalar)> {
+    let (_, epsilon) = response_key(tx)?;
+    let payload = published_output_payload(tx.source_chain, &tx.request_id, output)?;
+    Ok((epsilon, payload))
 }
 
 pub fn calculate_respond_bidirectional_hash_message(

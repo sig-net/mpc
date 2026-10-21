@@ -6,8 +6,8 @@ use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
-    claims_attestation_key, is_failed_execution_response, published_midnight_signing_args,
-    CompletedTx,
+    claims_attestation_key, is_failed_execution_response, is_failed_output,
+    published_midnight_signing_args, published_output_payload, published_output_signing_args,
 };
 use crate::sign_bidirectional::{
     transaction_chain_id, BidirectionalProgress, SignBidirectionalEventExt, SignStatus,
@@ -296,7 +296,7 @@ pub(crate) async fn process_respond_bidirectional_event(
             return settle_unobserved_midnight_response(entry, &event, ctx, root_pk).await;
         }
         Err(entry) => {
-            return settle_unobserved_failed_response(entry, &event, ctx, root_pk).await;
+            return settle_unobserved_response(entry, &event, ctx, root_pk).await;
         }
     };
 
@@ -307,7 +307,20 @@ pub(crate) async fn process_respond_bidirectional_event(
             "Midnight event metadata differs from the signed response",
         );
     }
-    entry.verify_signature(root_pk, &event.signature)?;
+    match (&event.output, &entry.request().kind) {
+        // Check the response against the output in the event, not this node's own: then every
+        // node removes the request on this event, even one that computed a different output.
+        (Some(output), SignKind::RespondBidirectional(own))
+            if source_chain != Chain::Midnight && *output != own.output =>
+        {
+            tracing::warn!(?sign_id, "published output differs from this node's");
+            let payload = published_output_payload(source_chain, &event.request_id, output)?;
+            let epsilon = entry.request().args.epsilon;
+            mpc_crypto::verify_signature(root_pk, epsilon, payload, &event.signature)
+                .context("respond event carried invalid signature")?;
+        }
+        _ => entry.verify_signature(root_pk, &event.signature)?,
+    }
 
     // The whole round trip, measured against when the initial request was
     // indexed. The origin travels with the final-response request so checkpoint
@@ -317,13 +330,18 @@ pub(crate) async fn process_respond_bidirectional_event(
     if let SignKind::RespondBidirectional(response) = &entry.request.kind {
         if let Some(origin_indexed_at) = response.origin_indexed_at {
             match unix_elapsed_checked(origin_indexed_at) {
-                Some(elapsed) => record_request_latency(
-                    source_chain,
-                    SignRequestStep::BidirectionalTotal,
-                    execution_status(is_failed_execution_response(response)),
-                    RequestKind::RespondBidirectional,
-                    elapsed,
-                ),
+                Some(elapsed) => {
+                    record_request_latency(
+                        source_chain,
+                        SignRequestStep::BidirectionalTotal,
+                        execution_status(event.output.as_deref().map_or_else(
+                            || is_failed_execution_response(response),
+                            is_failed_output,
+                        )),
+                        RequestKind::RespondBidirectional,
+                        elapsed,
+                    )
+                }
                 None => tracing::warn!(
                     ?sign_id,
                     origin_indexed_at,
@@ -370,9 +388,10 @@ async fn settle_unobserved_midnight_response(
     settle_unobserved(entry, &tx, ctx).await
 }
 
-/// Settle a request on another source chain whose outcome this node has not observed, if the
-/// response is Failed: its digest covers only the request id and a fixed output.
-async fn settle_unobserved_failed_response(
+/// Settle a request whose execution this node has not seen yet, on a source chain other than
+/// Midnight. The response is signed over the request id and the output, and the event carries
+/// the output, so the node can check the signature without having seen the execution.
+async fn settle_unobserved_response(
     entry: SignEntry,
     event: &RespondBidirectionalEvent,
     ctx: &StreamContext,
@@ -382,21 +401,17 @@ async fn settle_unobserved_failed_response(
     let Some(tx) = unobserved_tx(&entry) else {
         return Ok(());
     };
-    // The height is not part of these digests.
-    let request = CompletedTx::new(Arc::clone(&tx), None, None, 0)
-        .create_failed_sign_request()
-        .await?;
-    let verified = mpc_crypto::verify_signature(
-        root_pk,
-        request.args.epsilon,
-        request.args.payload,
-        &event.signature,
-    );
-    if verified.is_err() {
+    let Some(output) = &event.output else {
         tracing::warn!(
             ?sign_id,
-            "response is not a Failed one this node can check; keeping the request"
+            "response carries no output to check; keeping the request"
         );
+        return Ok(());
+    };
+    let (epsilon, payload) = published_output_signing_args(&tx, output)?;
+    let verified = mpc_crypto::verify_signature(root_pk, epsilon, payload, &event.signature);
+    if verified.is_err() {
+        tracing::warn!(?sign_id, "response does not verify; keeping the request");
         return Ok(());
     }
 

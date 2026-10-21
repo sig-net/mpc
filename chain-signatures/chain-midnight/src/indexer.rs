@@ -229,6 +229,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 Ok((attestation, signature)) => events.push(
                                     ChainEvent::RespondBidirectional(RespondBidirectionalEvent {
                                         attestation: Some(attestation),
+                                        output: None,
                                         request_id: decoded.request_id,
                                         signature,
                                         chain: Chain::Midnight,
