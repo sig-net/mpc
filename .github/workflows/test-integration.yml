@@ -276,3 +276,31 @@ jobs:
 
       - name: Test
         run: just test-eth
+
+  # TRE-backed Tron gate: dockerized java-tron + gate-deployed GateToken
+  tre-integration-test:
+    name: TRE Integration Tests
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install Rust (1.93.0)
+        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
+
+      # Cache policy: doc/ci-caching.md — restore only; unit/anvil jobs
+      # maintain the shared workspace-dev key.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: workspace-dev
+          cache-targets: true
+          save-if: false
+
+      - name: Test
+        run: just test-tron-tre
