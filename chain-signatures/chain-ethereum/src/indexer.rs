@@ -847,7 +847,7 @@ mod tests {
 
         assert!(events_rx.try_recv().is_err());
         // The underlying RPC error propagates
-        assert!(err.to_string().contains("error sending request"));
+        assert!(format!("{err:#}").contains("error sending request"));
     }
 
     #[tokio::test]

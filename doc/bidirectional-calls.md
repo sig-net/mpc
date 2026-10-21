@@ -54,12 +54,14 @@ Happy path:
 
 * *Transaction*: the bytes of an unsigned target chain transaction.
 * *Transaction ID*: the identifier under which the target chain records
-  a submitted transaction, computable from the transaction and the signature
-  in the encoding that chain accepts. One transaction can be signed more
-  than once, for instance by two signing rounds for one request, and each
-  signature gives a different transaction ID. Replay
-  protection (Section 3.3) lets at most one of them execute, and all of
-  them belong to the same request.
+  a submitted transaction, computable from the transaction, and on some
+  chains its signature, in the encoding that chain accepts. One
+  transaction can be signed more than once, e.g., after a restart. Where
+  the transaction ID covers the signature (EVM, Solana), each signature
+  gives a different transaction ID; where it covers only the unsigned
+  bytes (Tron, Zcash from version 5), signatures don't affect the
+  transaction ID. Replay protection (Section 3.3) lets at most one of
+  them execute, and all of them belong to the same request.
 * *Request*: what the contract asks for, the tuple (tx, target, key, schema):
   the transaction, its target chain, the key parameters to sign it with
   (a derivation path, key version and signing scheme), and the schema of its
@@ -85,14 +87,13 @@ Happy path:
   |---|---|---|
   | Executed | included in a final target chain block, succeeded, and its return data decodes against req.schema | the decoded return data |
   | Failed | included in a final target chain block and reverted | empty |
-  | Unviable | can never be included, because a transaction whose unsigned bytes are not req.tx, from the same key, has already used up req.tx's replay protection (Section 3.3) | empty |
+  | Unviable | can never be included, because a transaction whose unsigned bytes are not req.tx, from the same key, has already used up req.tx's replay protection, or because req.tx's validity window has closed | empty |
 
   Empty data is a zero-length field; the kind is the whole information.
-  Every outcome is final: once req.tx has executed or its replay protection is
-  used up, no later block changes that. A transaction can become unviable in
-  other ways on some chains, an expiry height or a timebound; the MPC reports
-  only the replay-protection case.
-  An expired transaction goes unanswered, as does one nobody broadcasts.
+  Every outcome is final: once req.tx has executed, its replay protection
+  is used up or its validity window has closed, no later block changes
+  that. A transaction nobody broadcasts is answered only once its window
+  closes, and on chains without one it goes unanswered.
 
   A transaction that succeeded but whose return data does not decode
   against req.schema, because the schema is wrong or the target
@@ -106,14 +107,15 @@ Happy path:
 * *Attestation*: a statement (rid, height, outcome) signed with the
   attestation key of rid's contract at the request's key version. The MPC
   nodes sign `attestationDigest(rid, att)` as defined in
-  [Section 7.4.2.1](#7421-attestation-digest), where
+  [Section 7.5.2.1](#7521-attestation-digest), where
   `att = (height, outcome.kind, outcome.data)`. The digest commits to its
   domain tag and the output length, so no signed statement can be read as
   two different outcomes. `height` is the height, in the target
   chain's own numbering (a slot on Solana),
   of the final block that holds the transaction the outcome describes:
   req.tx for Executed and Failed, the transaction that used up its replay
-  protection for Unviable.
+  protection for Unviable, or for an expired req.tx the first final block
+  past its expiry.
 * *Response*: an attestation delivered to the contract that made rid's
   request.
 
@@ -205,13 +207,16 @@ G1 to G3 are safety, G4 and G5 are liveness. G2 and G4 together give
   response handler fails, or (iii) the transaction's ID depends on its
   signature and that signature is never published.
 * G5 Unviable. If another of your requests takes this one's place and is
-  answered, you are told that this one can never run. Precisely: suppose
-  the transaction of another request has the same replay protection as
-  req.tx on the same target chain, the same account and nonce on EVM
-  for instance. If it is included after req was made and that request is
-  answered Executed or Failed, a response to req saying Unviable is
-  eventually accepted, unless the response handler fails or that answer
-  cannot be checked (Section 6).
+  answered, or your transaction's validity window closes before it runs,
+  you are told that it can never run. Precisely: suppose either
+  (a) the transaction of another request has the same replay protection
+  as req.tx on the same target chain, the same account and nonce on EVM
+  for instance, is included after req was made, and that request is
+  answered Executed or Failed; or (b) req.tx has an expiry, no block up
+  to the first final target block past it includes req.tx, and that
+  block became final after req was made. Then a response to req saying
+  Unviable is eventually accepted, unless the response handler fails or,
+  in case (a), that answer cannot be checked (Section 6).
 
 G4's exceptions (i) and (ii) are in the application's hands: a schema that
 does not match what the target contract returns, and a handler that
@@ -230,8 +235,9 @@ before the contract upgraded to this library.
 
 ### 3.3 Assumptions
 
-* Finality. A block the MPC treats as final stays in the chain. The MPC
-  reads requests and attests outcomes only from such blocks.
+* Finality. A block the MPC treats as final (on Tron, solidified) stays
+  in the chain. The MPC reads requests and attests outcomes only from
+  such blocks.
 * Replay protection. Executing a transaction uses up its replay protection:
   the account nonce on EVM, the spent output on a UTXO chain,
   the durable nonce on Solana. Each can be used up only once, and a
@@ -239,7 +245,9 @@ before the contract upgraded to this library.
   same bytes, however often they are signed, execute at most once, and a
   different transaction using the same nonce or output blocks ours for
   good. A Solana transaction with a recent blockhash has no such
-  protection; see Section 6.
+  protection; see Section 6. Tron rejects a transaction whose ID is already
+  on chain, and accepts one only while its `expiration` is ahead of the head
+  block and its reference block is on the chain.
 * Progress. All source and target chains keep producing final blocks.
   An outage delays delivery and changes nothing else. A correct node
   processes final blocks faster than the chains produce them, so it
@@ -382,8 +390,11 @@ processable(req): bool
       source chain, path not the attestation key's
     req.tx is non-empty, parses as an unsigned transaction in target's
       format, commits to the network this MPC watches for target (EVM:
-      carries that network's chain id), and attaching any signature
-      yields a well-formed signed transaction
+      carries that network's chain id; not required on Tron, which has
+      none), and
+      attaching any signature yields a well-formed signed transaction
+    req.tx's expiry, where target has one, is after the source block's
+      time and at most target's cap past it (Tron: `expiration`, 24 h)
     req.schema is well formed: it is empty, or it parses and names only
       types the MPC can decode from target and encode for the source chain
 
@@ -395,8 +406,11 @@ on Signature { rid, signature } finalised on the source chain:
 
 on target chain block at height h finalised on chain target:
     for (rid, e) in backlog for target and no local[rid].outcome:
-        ours = { txid(s, e.req.tx)
-                 for s in e.signatures + local[rid].issued }
+        if txid ignores the signature on target:
+            ours = { txid(e.req.tx) }
+        else:
+            ours = { txid(s, e.req.tx)
+                     for s in e.signatures + local[rid].issued }
         if some id in ours has receipt r in a final block at height h':  // M3
             for (rid', e') in backlog for target, other than rid, with e's
               account and e.req.tx's replay protection, and no
@@ -406,6 +420,10 @@ on target chain block at height h finalised on chain target:
                 attest(rid, (h', kind, data))
             else:
                 local[rid].outcome = Parked, log why        // M3
+        else if txid ignores the signature on target
+          and block h is past e.req.tx's expiry:            // M6
+            h_exp = lowest final height past e.req.tx's expiry
+            attest(rid, (h_exp, Unviable, empty))
 
 attest(rid, att):
     e = backlog[rid]
@@ -442,7 +460,8 @@ The MPC looks for a request's execution by transaction ID, under every
 signature it holds for the request, in any final block, so a node that
 starts looking late still finds it. A node holds the signatures published
 for the request and those it took part in producing. An execution under a
-signature it does not hold is not found (see Section 6 for alternatives).
+signature it does not hold is not found (see Section 6 for alternatives),
+except where the transaction ID ignores the signature: there it needs none.
 
 When the transaction of one request is included, every other request
 waiting on the same account and replay protection can never execute, and
@@ -477,13 +496,17 @@ Properties:
   that account. If the transaction succeeded but its return data does not
   decode, the MPC attests nothing, and the entry stays in the backlog,
   parked and unwatched.
-* M4 The MPC attests Unviable for a request only when another request's
-  transaction, from the same account, on the same target chain and
-  with the same replay protection, was included in a final block: a node
-  finds that execution itself, or reads a `Response` saying Executed or
-  Failed. It attests at that block's height.
+* M4 The MPC attests Unviable for a replay-protection conflict only when
+  another request's transaction, from the same account, on the same
+  target chain and with the same replay protection, was included in a
+  final block: a node finds that execution itself, or reads a `Response`
+  saying Executed or Failed. It attests at that block's height.
 * M5 An attestation binds rid, height, kind and data, with data's length
   in the hash, and describes only target chain state final at that height.
+* M6 The MPC attests Unviable for an expired request only where the
+  transaction ID does not depend on the signature, and only if no block
+  up to the first final block past the expiry includes req.tx. It
+  attests at that block's height.
 
 ## 5. Why the guarantees hold (sketch)
 
@@ -569,7 +592,10 @@ a path from B48 through A15; the first at A12 has none.
   attests only when another transaction from req.tx's account with the
   same replay protection was included in a final block. The node saw it
   itself, or a response reported it, and that response is true by M3.
-  Such a transaction blocks req.tx for good (Section 3.3).
+  Such a transaction blocks req.tx for good (Section 3.3). For an expired
+  req.tx, M6 attests only when no block up to the first one past the
+  expiry includes it, which a node can check without a signature, and no
+  later block can include it.
 
 * G4, in three steps.
   1. The execution is above e.known: e.known is a height some accepted
@@ -585,17 +611,24 @@ a path from B48 through A15; the first at A12 has none.
      response for the rid of req was accepted first, and any such response
      reports this execution too, since at most one signature executes and
      an execution and an Unviable exclude each other (replay protection,
-     Section 3.3),
+     Section 3.3, or M6 for expiry),
      and M3 attests only that receipt. So a response reporting the
      execution passes C3 and is accepted.
 
-* G5: the other request's `Response` is final on the source chain, so
-  every correct node reads it, and can check it by G5's premise. Req is
+* G5 (a): the other request's `Response` is final on the source chain,
+  so every correct node reads it, and can check it by G5's premise. Req is
   still in each node's backlog unless it was answered before. Each node
   attests Unviable for req at the height in that response (M4), and they
   agree. The other transaction was included after req was made, so that
   height is above e.known, as in step 1 of G4, and the library accepts
   the response (C3).
+
+  G5 (b): every correct node sees, without a signature (M6), that no
+  block up to the first one past the expiry includes req.tx, and attests
+  Unviable at that block's height, so they agree. That block became
+  final after req was made, so the library accepts the response (C3).
+  The premise needs the chains' clocks roughly in step: admission only
+  places the expiry after the source block's time.
 
 ## 6. Notes
 
@@ -642,34 +675,15 @@ a path from B48 through A15; the first at A12 has none.
   never produces one. A cancel transaction that uses up the replay
   protection, itself requested through `sign_bidirectional`, ends both
   entries (G5), so an application has a way out, but nothing bounds the
-  entries nobody clears.
-
-
-### 6.1 Tron targets
-
-Request format. The request's `txParams` (`txParamType` `tron`) carries
-the transaction's fields — the ref-block fields (`ref_block_bytes`,
-`ref_block_hash`), `timestamp`, `expiration` and `fee_limit`, the target
-contract, call value and call data — the way `evmType2` carries chain id
-and nonce. Nodes assemble the protobuf `raw` message from them, fixing
-the contract type to `TriggerSmartContract` and setting `owner_address`
-from the request's derived key; they neither fill nor refresh any field
-and read nothing from Tron. Admission accepts an `expiration` only if it
-is in the future and at most 24 h past the request's Midnight timestamp
-(java-tron's cap): with no nonce, expiry is the only way a Tron request
-ends, so an unbounded one would be watched forever.
-
-Digest and identity. The signed digest is sha256 of those bytes, and one
-value serves as the MPC payload, the transaction ID and the replay key:
-the signature sits outside the digest's preimage, so a differently
-signed copy of the same bytes names the same transaction ID and the
-chain rejects it as a duplicate. A node therefore needs no signature to
-find an execution (the note above).
-
-Outcomes. No `Unviable` outcome arises: there is no nonce-like sequence
-to use up, and same-key bytes that differ are a different request. A
-transaction whose `expiration` passes unexecuted goes unanswered by
-Section 2's expiry rule, and nodes stop watching it at expiry.
+  entries nobody clears. A Tron request does not add to this: it is
+  answered at its expiration at the latest (G5), which admission caps.
+* A Tron transaction carries no chain id, so it commits to no network.
+  Its reference block is a validity condition, like the EVM nonce, and
+  the MPC signs without reading either. A transaction whose reference
+  block is not on the watched network never executes there and is
+  answered Unviable at expiry, but it can execute on a network that
+  holds that block. This is harmless: every MPC deployment has its own
+  root key, so the derived address holds nothing elsewhere.
 
 ## 7. Canonical Protocol Structures
 
@@ -735,7 +749,7 @@ stay out.
 | `path` | `bytes(32)` | yes | key derivation path; the reserved response-key path is refused |
 | `algo` | `enum MPCSignatureAlgorithm` | yes | signing scheme |
 | `txParamType` | `enum TxParamType` | yes | which transaction structure `txParams` holds |
-| `txParams` | per `txParamType` (7.3) | as its digest | the transaction |
+| `txParams` | per `txParamType` (7.3, 7.4) | as its digest | the transaction |
 | `executionDest` | `bytes(64)` | yes | CAIP-2 id of the target chain family, matched exactly; one fixed id per family, `eip155:1` for every Ethereum network. Which network the MPC executes on is set per deployment |
 | `signatureDest` | `enum MPCDestination` | no | reserved, request construction refuses any value except `unused` |
 | `params` | `bytes(64)` | no | reserved, request construction refuses any non-zero byte |
@@ -743,7 +757,7 @@ stay out.
 | `respondSerializationSchema` | `bytes` | no | no longer used where the MPC derives the response encoding from `outputDeserializationSchema` and the source chain's types; integrations not yet migrated still read it |
 
 Enums: `MPCSignatureAlgorithm { ecdsa, reserved }`,
-`MPCDestination { unused, reserved }`, `TxParamType { evmType2, reserved }`.
+`MPCDestination { unused, reserved }`, `TxParamType { evmType2, tron }`.
 
 `RequestId` is `bytes(32)`. `Signature` is the MPC's ECDSA signature:
 `bigR`, an affine point `{ x: bytes(32), y: bytes(32) }`, `s: bytes(32)`
@@ -853,11 +867,26 @@ The request id of an EVM type 2 request is 7.2 with
 `txParams`, so a request whose `txParams` is an `EvmType2TxParams` must have
 `txParamType = evmType2`, and is refused otherwise.
 
-### 7.4 Responses
+### 7.4 Tron transaction
+
+The request's `txParams` for Tron carries the transaction's fields: the
+reference block fields (`ref_block_bytes`, `ref_block_hash`),
+`timestamp`, `expiration` and `fee_limit`, the target contract, call
+value and call data, the way `evmType2` carries chain id and nonce.
+Nodes assemble the protobuf `raw` message from them, fixing the contract
+type to `TriggerSmartContract` and setting `owner_address` from the
+request's derived key. They neither fill nor refresh any field and read
+nothing from Tron. The signed digest is sha256 of those bytes, which is
+also the transaction ID (Section 2).
+
+`txParamType` is `tron`. Not yet specified: the field types and the
+digest `D_tron`.
+
+### 7.5 Responses
 
 The MPC publishes these responses to a `SignBidirectionalEventV1` request.
 
-#### 7.4.1 Signature Responded Event
+#### 7.5.1 Signature Responded Event
 
 `SignatureRespondedEventV1`, the signature a request asked for:
 
@@ -866,13 +895,14 @@ The MPC publishes these responses to a `SignBidirectionalEventV1` request.
 | `requestId` | `RequestId` | the request it answers |
 | `signature` | `Signature` | over the transaction the request describes, by the request's key |
 
-#### 7.4.2 Respond Bidirectional Event
+#### 7.5.2 Respond Bidirectional Event
 
 `RespondBidirectionalEventV1` attests the requested transaction's outcome:
 `executed`, `failed` or `unviable`. The first two
 attest execution of the transaction signed in `SignatureRespondedEventV1`.
 An `unviable` outcome attests that a different transaction used up the
-requested transaction's replay protection.
+requested transaction's replay protection, or that the transaction expired
+without being included (M6).
 
 The event carries:
 
@@ -882,10 +912,10 @@ The event carries:
 | `blockHeight` | `u64` | height of the final target chain block, in that chain's numbering |
 | `outputKind` | `enum OutputKind { executed, failed, unviable }` | the outcome's kind |
 | `serializedOutputLength` | `u64` | byte width of the serialised output |
-| `digest` | `bytes(32)` | the [attestation digest](#7421-attestation-digest) |
+| `digest` | `bytes(32)` | the [attestation digest](#7521-attestation-digest) |
 | `signature` | `Signature` | over `digest`, by the attestation key of `requestId`'s contract at the request's key version |
 
-##### 7.4.2.1 Attestation Digest
+##### 7.5.2.1 Attestation Digest
 
 The attestation digest, over the serialised output the request's schema
 produced (empty for `failed` and `unviable`):
@@ -901,7 +931,7 @@ digest = bytes32(H(E[
 ]))
 ```
 
-##### 7.4.2.2 Output Recovery
+##### 7.5.2.2 Output Recovery
 
 The output itself travels off chain. Clients are responsible for recovering
 it from the target chain so they can deliver the exact serialised

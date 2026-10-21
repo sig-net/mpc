@@ -26,6 +26,8 @@ ignore = [
     { id = "RUSTSEC-2026-0359", reason = "wasmtime 45 stack overflow dropping a long chain of recursive types; same dev-only chain as RUSTSEC-2026-0222 (near-sdk unit-testing, wasmtime ^45 pinned by near-vm-runner 0.37.x); no patched 45.x release (fixed in 48.0.6+)" },
     { id = "RUSTSEC-2026-0362", reason = "wasmtime 45 may not enforce async-entrypoint requirement; near-vm-runner 0.37.x uses the sync API only (no async entrypoints); same dev-only chain; no patched 45.x release (fixed in 48.0.6+)" },
     { id = "RUSTSEC-2026-0363", reason = "wasmtime 45 component-model handle tables capped only per instance; component model disabled in near-vm-runner 0.37.x (component_model=false, core wasm only), same dev-only chain; no patched 45.x release (fixed in 48.0.6+)" },
+    { id = "RUSTSEC-2026-0379", reason = "wasmtime 45 Cranelift aarch64 can jump to the wrong target on a large br_table; same dev-only chain as RUSTSEC-2026-0222 (near-sdk unit-testing, wasmtime ^45 pinned by near-vm-runner 0.37.x); no patched 45.x release (fixed in 48.0.7+)" },
+    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.103.13 accepts certificate paths through distrusted emSign intermediates; fix 0.103.16 requires aws-lc-rs ^1.18, blocked by near-crypto 0.37.x aws-lc-rs =1.16.2 pin (same chain as RUSTSEC-2026-0285); bundled root stores are emSign-free (webpki-roots/webpki-root-certs 1.0.10 and 0.26.11), platform-verifier paths bypass webpki; residual exposure only via OS trust stores still carrying emSign roots" },
 ]
 
 [licenses]

@@ -127,7 +127,7 @@ impl NearGovernanceClient {
                 return Ok(CheckpointVoteOutcome::Conflicting);
             }
             Err(err) => {
-                tracing::warn!(%err, ?checkpoint, "failed to vote for checkpoint");
+                tracing::warn!(error = %format_args!("{err:#}"), ?checkpoint, "failed to vote for checkpoint");
                 return Err(err);
             }
         };
@@ -232,7 +232,7 @@ impl Governance for NearGovernanceClient {
                         .transact(call)
                         .await
                         .inspect_err(|err| {
-                            tracing::warn!(%err, "failed to vote for reshared");
+                            tracing::warn!(error = %format_args!("{err:#}"), "failed to vote for reshared");
                         })?
                         .json()?;
                     Ok(result)
@@ -265,7 +265,7 @@ impl Governance for NearGovernanceClient {
                         .transact(call)
                         .await
                         .inspect_err(|err| {
-                            tracing::warn!(%err, "failed to vote for public key");
+                            tracing::warn!(error = %format_args!("{err:#}"), "failed to vote for public key");
                         })?
                         .json()?;
                     Ok(result)
@@ -302,7 +302,7 @@ impl Governance for NearGovernanceClient {
                         .transact(call)
                         .await
                         .inspect_err(|err| {
-                            tracing::warn!(%err, "failed to vote for new threshold");
+                            tracing::warn!(error = %format_args!("{err:#}"), "failed to vote for new threshold");
                         })?
                         .json()?;
                     Ok(result)
