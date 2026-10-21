@@ -1,9 +1,9 @@
-# Posit state machine
+# Posit state machines
 
-Describes the current implementation in
-`chain-signatures/node/src/protocol/request/` (`task.rs`, `organize.rs`,
-`posit.rs`, `state.rs`, `mailbox.rs`, `mod.rs`) plus the generation tail in `protocol/signature.rs`. The
-cait-sith signing math and the presignature/triple pipelines are not depicted here.
+Describes the current implementation of the signature posit (Sections 1 to 8,
+`chain-signatures/node/src/protocol/request/`) and of the presignature and
+triple posits (Section 9, `protocol/posit.rs`). The cait-sith math is not
+described here.
 
 The top level state machine matches the `SignPhase` enum. Each
 phase then gets its own diagram showing what happens inside it and where it can
@@ -374,3 +374,34 @@ because the round timeout ran out.
    machine.
 6. **`Waiting for participants` is unbounded**, and whatever time it spends is
    subtracted from the round that follows.
+
+## 9. Triple and presignature posits
+
+Generations are agreed on by a simpler posit: no rounds, no rotating proposer.
+Each of the two pipelines runs its posits in one serial loop (`triple.rs`,
+`presignature.rs`) that handles incoming posit messages, a 100 ms stockpile tick
+and a 1 s expiry tick. On the stockpile tick, the owner of the new artifact
+proposes at most one generation, while it owns fewer than
+`min_triples` or `min_presignatures`. A triple is proposed to all active nodes. A
+presignature uses a triple pair the owner holds, reserved in memory, and is
+proposed to the pair's active holders; its id is the pair's hash, so a retry of
+the same pair reuses the id.
+
+- **Owner.** Starts once every node it proposed to has replied and at least t
+  accepted, or at the first expiry tick after 10 s if at least t accepted;
+  otherwise it aborts silently and the pair returns to the pool. To start, it
+  takes the pair from storage (presignatures) and sends `START` listing the
+  nodes that accepted.
+- **Deliberator.** On `PROPOSE` records an entry and replies `ACCEPT`; a
+  repeated `PROPOSE` from the same owner is accepted again and restarts the
+  entry's clock. The entry is dropped 12 s after the latest `PROPOSE`. `START`
+  from the owner of a live entry starts the generation; without one it is
+  answered with a `REJECT`, which the owner, already generating, cannot act on.
+- **Checks.** Every message, whatever its action, is first checked against
+  storage (already generating or stored; for presignatures also the id and
+  whether the pair is held), and a failed check is answered with a `REJECT`.
+
+Every node listed in `START` must contribute. If one does not, the generation runs
+to its timeout (10 min for triples, 45 s for presignatures) and its inputs are
+consumed. A node refuses to start a generation for an id that is already running
+or stored, and the pair is taken from storage atomically when the generation starts.
