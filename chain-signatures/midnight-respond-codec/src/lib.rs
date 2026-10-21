@@ -137,6 +137,14 @@ pub fn executed_output(
     encode(&fields, &return_data)
 }
 
+/// Refuse what [`executed_output`] refuses whatever the call returns, by running it on
+/// all-zero return data, canonical for every supported type.
+pub fn validate_output_schema(is_contract_call: bool, output_schema: &[u8]) -> anyhow::Result<()> {
+    let words = parse_output_schema(output_schema)?.len();
+    let zeros = TracedReturn::Returned(vec![0; ABI_WORD_BYTES * words].into());
+    executed_output(is_contract_call, output_schema, zeros).map(drop)
+}
+
 /// Check that the return data is canonical ABI for the declared fields, then append each
 /// field's Borsh encoding in schema order. Words past the declared fields are not checked.
 fn encode(fields: &[OutputField], return_data: &[u8]) -> anyhow::Result<Vec<u8>> {

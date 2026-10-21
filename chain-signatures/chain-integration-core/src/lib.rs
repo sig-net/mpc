@@ -14,6 +14,6 @@ pub use telemetry::{
     PublisherTelemetry,
 };
 
-// Re-export backon because `retry_rpc!` uses `Retryable` trait internally
+// Re-export backon because `retry_op!`/`retry_rpc!` use the `Retryable` trait internally
 #[doc(hidden)]
 pub use ::backon;

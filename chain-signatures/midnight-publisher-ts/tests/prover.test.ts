@@ -8,7 +8,7 @@ import {
 } from "@midnightntwrk/ledger-v9";
 import { expectedVk, type SignetContractCircuitId } from "@sig-net/midnight-contract";
 import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildIntent } from "../src/intent.js";
@@ -168,7 +168,7 @@ describe("the proving provider", () => {
       const request = await proofRequest();
 
       await expect(live.prove(request.preimage, request.keyLocation, 4n)).rejects.toThrow(
-        /^proof server \/prove request failed after \d+\.\ds: TypeError: terminated: SocketError: other side closed \(UND_ERR_SOCKET\)$/,
+        /^proof server \/prove request failed after \d+\.\ds: TypeError: terminated: ResponseContentLengthMismatchError: Response body length does not match content-length header \(UND_ERR_RES_CONTENT_LENGTH_MISMATCH\)$/,
       );
     } finally {
       server.closeAllConnections();
@@ -190,8 +190,30 @@ describe("the proving provider", () => {
       const request = await proofRequest();
 
       await expect(live.prove(request.preimage, request.keyLocation, 4n)).rejects.toThrow(
-        /^proof server answered 503 to \/prove after \d+\.\ds: <body unreadable: TypeError: terminated: SocketError: other side closed \(UND_ERR_SOCKET\)>$/,
+        /^proof server answered 503 to \/prove after \d+\.\ds: <body unreadable: TypeError: terminated: ResponseContentLengthMismatchError: Response body length does not match content-length header \(UND_ERR_RES_CONTENT_LENGTH_MISMATCH\)>$/,
       );
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("opens a fresh connection for every proof-server request", async () => {
+    const sockets = new Set<Socket>();
+    const server = createServer((request, response) => {
+      sockets.add(request.socket);
+      request.resume().on("end", () => response.end(Uint8Array.of(1)));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const live = provingProvider(`http://127.0.0.1:${port}`, new AbortController().signal);
+      const request = await proofRequest();
+
+      // A built-in key location sends no contract key material, keeping each upload small.
+      for (let i = 0; i < 3; i++) await live.prove(request.preimage, "midnight/zswap/spend", 4n);
+
+      expect(sockets.size).toBe(3);
     } finally {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
