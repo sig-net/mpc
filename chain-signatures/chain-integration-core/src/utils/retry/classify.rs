@@ -147,7 +147,7 @@ fn cause_status(cause: &(dyn std::error::Error + 'static)) -> Option<StatusCode>
 
 /// Returns true if the error looks like the provider throttling us: HTTP 429
 /// (rate limited) or 402 (payment required, e.g. exhausted credits).
-pub(super) fn is_provider_throttled(e: &anyhow::Error) -> bool {
+pub fn is_provider_throttled(e: &anyhow::Error) -> bool {
     let (failure, status) = typed_signals(e);
     // Typed status is authoritative over body text (if present).
     if let Some(status) = status {
