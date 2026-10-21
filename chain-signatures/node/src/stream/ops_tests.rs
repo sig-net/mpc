@@ -1538,9 +1538,11 @@ async fn midnight_execution_response_binds_receipt_height_and_outcome() {
     }
 }
 
+/// A node that already computed its response settles on the published attestation, even one
+/// that differs from its own, as long as the signature covers it under this request's key.
 #[tokio::test]
 async fn midnight_completion_requires_the_published_metadata_to_match_the_signature() {
-    for case in 0..7 {
+    for case in 0..9 {
         let backlog = Backlog::new();
         let tx = test_bidirectional_tx(94, Chain::Midnight, Chain::Ethereum);
         let entry = backlog.insert_mock_final(&tx).await;
@@ -1580,21 +1582,46 @@ async fn midnight_completion_requires_the_published_metadata_to_match_the_signat
             4 => event.attestation.as_mut().unwrap().digest[0] ^= 1,
             5 => {}
             6 => event.attestation.as_mut().unwrap().output_hash[0] ^= 1,
+            7 => {
+                let published = event.attestation.as_mut().unwrap();
+                published.block_height += 1;
+                let signed = mpc_primitives::AttestationMetadata {
+                    block_height: published.block_height,
+                    ..metadata
+                };
+                published.digest = mpc_compact_hashing::compute_attestation_digest(
+                    &tx.request_id,
+                    &signed,
+                    published.serialized_output_length,
+                    &published.output_hash,
+                );
+                let mut args = entry.request().args.clone();
+                args.payload =
+                    <Scalar as mpc_primitives::ScalarExt>::from_bytes(published.digest).unwrap();
+                event.signature = mpc_crypto::generate_signature(&root_sk, &args);
+            }
+            8 => {
+                let mut args = entry.request().args.clone();
+                args.epsilon += Scalar::ONE;
+                event.signature = mpc_crypto::generate_signature(&root_sk, &args);
+            }
             _ => unreachable!(),
         }
+        let settles = case == 5 || case == 7;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
         let result =
             process_respond_bidirectional_event(event, &ctx, root_sk.public_key().into()).await;
-        assert_eq!(result.is_ok(), case == 5, "case {case}");
+        assert_eq!(result.is_ok(), settles, "case {case}");
         assert_eq!(
             ctx.backlog
                 .get(Chain::Midnight, &tx.sign_id())
                 .await
                 .is_none(),
-            case == 5
+            settles,
+            "case {case}"
         );
-        assert_eq!(sign_rx.try_recv().is_ok(), case == 5);
+        assert_eq!(sign_rx.try_recv().is_ok(), settles, "case {case}");
     }
 }
 
@@ -1814,8 +1841,9 @@ async fn published_midnight_response(
 }
 
 /// The event carries the output's length and hash, so a response's digest follows from
-/// the request and the event alone: a node that never observed the outcome settles it at
-/// the same source event as the nodes that attested it, and their checkpoints agree.
+/// the request and the event alone: a node that never observed the outcome, or attested
+/// another one, settles it at the same source event as the nodes that attested it, and their
+/// checkpoints agree.
 #[tokio::test]
 async fn midnight_response_settles_entries_that_missed_the_outcome() {
     let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
@@ -1836,6 +1864,9 @@ async fn midnight_response_settles_entries_that_missed_the_outcome() {
         let case = format!("{outcome:?}, parked: {parked}");
         let tx = test_bidirectional_tx(101, Chain::Midnight, Chain::Ethereum);
         let (attested, event) = published_midnight_response(&tx, outcome, 7123, &root_sk).await;
+        // A node that computed another outcome, at another height.
+        let (disagreeing, _) =
+            published_midnight_response(&tx, ExecutionOutcome::Failed, 7124, &root_sk).await;
 
         let lagging = Backlog::new();
         lagging.insert_mock_executing(&tx).await;
@@ -1853,7 +1884,11 @@ async fn midnight_response_settles_entries_that_missed_the_outcome() {
             .await;
 
         let mut digests = Vec::new();
-        for (node, backlog) in [("attested", attested), ("lagging", lagging)] {
+        for (node, backlog) in [
+            ("attested", attested),
+            ("disagreeing", disagreeing),
+            ("lagging", lagging),
+        ] {
             let (sign_tx, mut sign_rx) = mpsc::channel(4);
             let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
             process_respond_bidirectional_event(event.clone(), &ctx, root_sk.public_key().into())
