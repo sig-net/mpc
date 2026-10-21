@@ -4,6 +4,7 @@ use anchor_client::ClientError as AnchorClientError;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{utils::retry::RpcFailure, ChainPublisher, PublishAction};
 use mpc_primitives::SignKind;
+use reqwest::StatusCode;
 use signet_program::accounts::{
     Respond as SolanaRespondAccount, RespondBidirectional as SolanaRespondBidirectionalAccount,
 };
@@ -23,8 +24,9 @@ use crate::utils::mpc_to_sol_signature;
 enum Verdict {
     Terminal,
     Retryable,
-    /// No carrier — the typed HTTP status reaches the core classifier.
-    Passthrough,
+    /// HTTP-statused transport failure; core derives the verdict from the
+    /// carried status.
+    Status(StatusCode),
 }
 
 impl Verdict {
@@ -32,14 +34,14 @@ impl Verdict {
         match self {
             Verdict::Terminal => Some(RpcFailure::terminal(message)),
             Verdict::Retryable => Some(RpcFailure::retryable(message)),
-            Verdict::Passthrough => None,
+            Verdict::Status(status) => Some(RpcFailure::with_status(status, message)),
         }
     }
 }
 
 /// Publish verdict for an anchor error: program rejections and signer
-/// failures are terminal; HTTP-statused transport errors pass through for
-/// the core classifier; the rest carry a retryable verdict.
+/// failures are terminal; HTTP-statused transport errors carry their status
+/// for the core classifier; the rest carry a retryable verdict.
 fn publish_error(e: AnchorClientError) -> anyhow::Error {
     let verdict = verdict(&e);
     let err = anyhow::Error::new(e);
@@ -66,7 +68,10 @@ fn verdict(e: &AnchorClientError) -> Verdict {
 /// Determine the verdict for a solana client error kind.
 fn kind_verdict(kind: &ClientErrorKind) -> Verdict {
     match kind {
-        ClientErrorKind::Reqwest(_) => Verdict::Passthrough,
+        // Read the status here: solana's `#[source] Box<ErrorKind>` nesting
+        // hides the inner reqwest error from chain walks. Statusless
+        // (connection) failures carry an explicit retryable verdict.
+        ClientErrorKind::Reqwest(e) => e.status().map_or(Verdict::Retryable, Verdict::Status),
         ClientErrorKind::TransactionError(tx) => on_chain(tx),
         ClientErrorKind::RpcError(rpc) => rpc_verdict(rpc),
         // local key problem, matching the anchor-level SignerError verdict
@@ -277,16 +282,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_status_passes_through_to_the_core_classifier() {
-        // real reqwest status error nested exactly as solana nests it:
+    async fn http_status_errors_classify_by_carried_status() {
+        // real reqwest status errors nested exactly as solana nests them:
         // anchor ClientError → solana ClientError → ErrorKind::Reqwest
         let mut server = mockito::Server::new_async().await;
+        let client = reqwest::Client::new();
+
         let throttled = server
             .mock("POST", "/")
             .with_status(429)
             .create_async()
             .await;
-        let reqwest_err = reqwest::Client::new()
+        let reqwest_err = client
             .post(server.url())
             .send()
             .await
@@ -298,5 +305,35 @@ mod tests {
         let err = anchor_wrapped(ClientErrorKind::Reqwest(reqwest_err));
         assert!(is_retryable(&err));
         assert!(is_provider_throttled(&err));
+
+        // 409 diverges from the string fallback: terminal proves the verdict is the carried status.
+        let conflict = server
+            .mock("POST", "/")
+            .with_status(409)
+            .create_async()
+            .await;
+        let reqwest_err = client
+            .post(server.url())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap_err();
+        conflict.assert();
+
+        let err = anchor_wrapped(ClientErrorKind::Reqwest(reqwest_err));
+        assert!(!is_retryable(&err));
+        assert!(!is_provider_throttled(&err));
+
+        // no status (connection refused): the retryable carrier keeps the
+        // string fallback away from the rendered ":429" port
+        let reqwest_err = client
+            .post("http://127.0.0.1:429")
+            .send()
+            .await
+            .unwrap_err();
+        let err = anchor_wrapped(ClientErrorKind::Reqwest(reqwest_err));
+        assert!(is_retryable(&err));
+        assert!(!is_provider_throttled(&err));
     }
 }

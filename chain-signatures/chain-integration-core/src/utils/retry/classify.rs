@@ -130,8 +130,9 @@ fn cause_status(cause: &(dyn std::error::Error + 'static)) -> Option<StatusCode>
         return StatusCode::from_u16(http.status).ok();
     }
     // `status()` is Some only for error_for_status() products (reqwest 0.12.28
-    // error.rs:174) — the shape solana's HttpSender surfaces for non-2xx
-    // (solana-rpc-client 3.1.14 http_sender.rs:185).
+    // error.rs:174). Only bare reqwest causes reach this: solana's
+    // `Box<ErrorKind>` nesting hides the inner error from the walk, so its
+    // publisher carries the status explicitly.
     if let Some(status) = cause
         .downcast_ref::<reqwest::Error>()
         .and_then(|e| e.status())
