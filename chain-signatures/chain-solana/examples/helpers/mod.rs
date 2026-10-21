@@ -2,7 +2,8 @@
 
 use anyhow::anyhow;
 use mpc_chain_integration_core::{
-    utils::stream::chain_event_channel, MockStateManager, NoopChainTelemetry,
+    utils::retry::SharedBackoff, utils::stream::chain_event_channel, MockStateManager,
+    NoopChainTelemetry,
 };
 use mpc_chain_solana::{SolConfig, SolanaIndexer};
 
@@ -65,7 +66,12 @@ pub async fn run_catchup(
     end: u64,
     label: &'static str,
 ) -> anyhow::Result<()> {
-    let indexer = SolanaIndexer::new(config, MockStateManager::new(), NoopChainTelemetry)?;
+    let indexer = SolanaIndexer::new(
+        config,
+        MockStateManager::new(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )?;
     let (events_tx, mut events_rx) = chain_event_channel();
 
     tracing::info!(start, end, "{label}: starting catchup");

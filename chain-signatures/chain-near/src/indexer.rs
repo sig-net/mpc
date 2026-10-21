@@ -223,7 +223,7 @@ pub fn run<S: StateManager>(
         loop {
             interval.tick().await;
             if let Err(err) = poll_pending_requests(&mut context).await {
-                tracing::error!(%err, "failed to poll pending requests");
+                tracing::error!(error = %format_args!("{err:#}"), "failed to poll pending requests");
             }
         }
     }))

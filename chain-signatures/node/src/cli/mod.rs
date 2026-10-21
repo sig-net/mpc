@@ -17,6 +17,7 @@ use crate::protocol::sync::{SyncReportSender, SyncTask};
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::storage::midnight_wallet_storage::MidnightWalletStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
@@ -36,8 +37,10 @@ use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
-use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher};
-use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher};
+use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher, GatedPublisher};
+use mpc_chain_midnight::{
+    MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher, WalletSnapshotStore,
+};
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_chain_tron::TronConfig;
@@ -249,6 +252,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage,
                 presignature_storage,
                 backlog,
+                midnight_wallet,
             } = StorageHandles::new(&account_id, &storage_options).await?;
 
             let my_address = my_address.unwrap_or_else(|| {
@@ -282,7 +286,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let stack = ChainStack::new(ChainConfigs::from_args(
                 eth, sol, hydration, canton, midnight,
-            )?);
+            )?)
+            .with_midnight_wallet(midnight_wallet);
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
                 near_crypto::Signer::InMemory(s) => s,
@@ -301,6 +306,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &mpc_contract_id,
                 signer,
                 &stack,
+                backlog.clone(),
             )
             .await;
 
@@ -503,6 +509,8 @@ struct ChainStack {
     /// One 429 cooldown gate per chain, shared by that chain's indexer and
     /// publisher (they hit the same RPC endpoint).
     gates: EnumMap<Chain, SharedBackoff>,
+    /// Where the Midnight publisher's funding wallet resumes from across restarts.
+    midnight_wallet: Option<Arc<dyn WalletSnapshotStore>>,
 }
 
 impl ChainStack {
@@ -510,17 +518,43 @@ impl ChainStack {
         Self {
             configs,
             gates: EnumMap::from_fn(|_| SharedBackoff::new()),
+            midnight_wallet: None,
         }
+    }
+
+    fn with_midnight_wallet(mut self, store: Arc<dyn WalletSnapshotStore>) -> Self {
+        self.midnight_wallet = Some(store);
+        self
     }
 
     fn gate(&self, chain: Chain) -> SharedBackoff {
         self.gates[chain].clone()
     }
 
+    /// Wraps an internally-ungated publisher in [`GatedPublisher`] bound to
+    /// this stack's gate for `chain` (Solana, Midnight and Hydration are
+    /// externally gated — their clients don't gate publishes themselves).
+    /// `operation` labels the adapter's throttle warn per chain.
+    ///
+    /// TODO: deleted once those clients gate publishes internally
+    fn gated_publisher<P: ChainPublisher>(
+        &self,
+        chain: Chain,
+        operation: &'static str,
+        publisher: P,
+    ) -> Arc<dyn ChainPublisher> {
+        Arc::new(GatedPublisher::new(publisher, self.gate(chain), operation))
+    }
+
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
     /// each other chain is added only when configured. A client that fails to build is
     /// logged and skipped rather than aborting startup.
-    async fn publishers(&self, near: NearClient) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
+    /// `backlog` lets publishers that queue (Midnight) re-check a response before spending on it.
+    async fn publishers(
+        &self,
+        near: NearClient,
+        backlog: Backlog,
+    ) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
@@ -535,14 +569,20 @@ impl ChainStack {
         }
         if let Some(sol) = &self.configs.sol {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Solana));
-            let client = Arc::new(SolanaClient::from_config(sol, telemetry));
-            publishers.insert(Chain::Solana, client);
+            let client = SolanaClient::from_config(sol, telemetry);
+            publishers.insert(
+                Chain::Solana,
+                self.gated_publisher(Chain::Solana, "solana publish", client),
+            );
         }
         if let Some(hydration) = &self.configs.hydration {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
             match rpc::HydrationClient::new(hydration, telemetry).await {
                 Ok(client) => {
-                    publishers.insert(Chain::Hydration, Arc::new(client));
+                    publishers.insert(
+                        Chain::Hydration,
+                        self.gated_publisher(Chain::Hydration, "hydration publish", client),
+                    );
                 }
                 Err(e) => tracing::error!(%e, "failed to create hydration client"),
             }
@@ -558,9 +598,18 @@ impl ChainStack {
         }
         if let Some(midnight) = &self.configs.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
-            match RecoveringMidnightPublisher::start(midnight, telemetry) {
+            let awaiter = Arc::new(rpc::BacklogAwaiter::new(backlog));
+            match RecoveringMidnightPublisher::start(
+                midnight,
+                telemetry,
+                awaiter,
+                self.midnight_wallet.clone(),
+            ) {
                 Ok(client) => {
-                    publishers.insert(Chain::Midnight, Arc::new(client));
+                    publishers.insert(
+                        Chain::Midnight,
+                        self.gated_publisher(Chain::Midnight, "midnight publish", client),
+                    );
                 }
                 Err(e) => tracing::error!(%e, "failed to create midnight publisher"),
             }
@@ -658,6 +707,7 @@ impl RpcHandles {
         mpc_contract_id: &AccountId,
         signer: InMemorySigner,
         stack: &ChainStack,
+        backlog: Backlog,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         let near_rpc = near_fetch::Client::new(near_rpc_url);
@@ -680,7 +730,7 @@ impl RpcHandles {
             signer,
             near_gates,
         );
-        let publishers = stack.publishers(near_client.clone()).await;
+        let publishers = stack.publishers(near_client.clone(), backlog).await;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
         Self {
@@ -697,6 +747,7 @@ struct StorageHandles {
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     backlog: Backlog,
+    midnight_wallet: Arc<dyn WalletSnapshotStore>,
 }
 
 const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -731,11 +782,13 @@ impl StorageHandles {
             redis_pool.clone(),
             account_id.clone(),
         ));
+        let midnight_wallet = Arc::new(MidnightWalletStorage::new(redis_pool, account_id));
         Ok(Self {
             key_storage,
             triple_storage,
             presignature_storage,
             backlog,
+            midnight_wallet,
         })
     }
 }
@@ -828,7 +881,7 @@ async fn spawn_indexers(
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
 ) {
-    let ChainStack { configs, gates } = stack;
+    let ChainStack { configs, gates, .. } = stack;
     let ChainConfigs {
         eth,
         sol,
@@ -847,6 +900,16 @@ async fn spawn_indexers(
         tron = tron.is_some(),
         "spawning chain indexers"
     );
+
+    // Every source chain's stream admits bidirectional requests targeting Ethereum.
+    // Admission must match across nodes, so they all need the same Ethereum network.
+    let ethereum_chain_id = eth.as_ref().and_then(EthConfig::chain_id);
+    if ethereum_chain_id.is_none() {
+        tracing::warn!(
+            "ethereum not configured: Ethereum-targeted requests are admitted without the \
+             chain id check that nodes with ethereum configured apply"
+        );
+    }
 
     if let Some(eth_config) = eth {
         let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
@@ -870,7 +933,8 @@ async fn spawn_indexers(
                         mesh_state.clone(),
                         node_client.clone(),
                         checkpoints_rx[Chain::Ethereum].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     eth_telemetry,
                 ));
             }
@@ -882,7 +946,12 @@ async fn spawn_indexers(
 
     if let Some(sol_config) = sol {
         let sol_telemetry = NodeTelemetry::new(Chain::Solana);
-        match SolanaIndexer::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
+        match SolanaIndexer::new(
+            sol_config,
+            backlog.clone(),
+            sol_telemetry.clone(),
+            gates[Chain::Solana].clone(),
+        ) {
             Ok(sol_indexer) => {
                 tracing::info!("solana indexer created successfully");
                 tokio::spawn(run_supervised(
@@ -895,7 +964,8 @@ async fn spawn_indexers(
                         mesh_state.clone(),
                         node_client.clone(),
                         checkpoints_rx[Chain::Solana].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     sol_telemetry,
                 ));
             }
@@ -907,6 +977,8 @@ async fn spawn_indexers(
 
     if let Some(hydration_config) = hydration {
         let hydration_telemetry = NodeTelemetry::new(Chain::Hydration);
+        // TODO: read-side gating - this indexer's reads don't share the
+        // chain's cooldown gate yet
         let hydration_indexer =
             HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
         tracing::info!("hydration indexer created successfully");
@@ -920,7 +992,8 @@ async fn spawn_indexers(
                 mesh_state.clone(),
                 node_client.clone(),
                 checkpoints_rx[Chain::Hydration].clone(),
-            ),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
             hydration_telemetry,
         ));
     }
@@ -947,7 +1020,8 @@ async fn spawn_indexers(
                         mesh_state.clone(),
                         node_client.clone(),
                         checkpoints_rx[Chain::Canton].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     canton_telemetry,
                 ));
             }
@@ -959,6 +1033,8 @@ async fn spawn_indexers(
 
     if let Some(midnight_config) = midnight {
         let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
+        // TODO: read-side gating - this indexer's reads don't share the
+        // chain's cooldown gate yet
         match MidnightIndexer::new(midnight_config, backlog.clone(), midnight_telemetry.clone())
             .await
         {
@@ -974,7 +1050,8 @@ async fn spawn_indexers(
                         mesh_state,
                         node_client,
                         checkpoints_rx[Chain::Midnight].clone(),
-                    ),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
                     midnight_telemetry,
                 ));
             }
@@ -987,7 +1064,10 @@ async fn spawn_indexers(
 
 #[cfg(test)]
 mod tests {
+    use mpc_chain_integration_core::utils::test::make_publish_action;
+    use mpc_primitives::{SignId, SignKind};
     use std::str::FromStr;
+    use std::time::Duration;
 
     use super::*;
 
@@ -1325,7 +1405,7 @@ mod tests {
         );
 
         let publishers = ChainStack::new(chains)
-            .publishers(undialed_near_client())
+            .publishers(undialed_near_client(), Backlog::new())
             .await;
 
         assert!(
@@ -1367,7 +1447,7 @@ mod tests {
         };
 
         let publishers = ChainStack::new(chains)
-            .publishers(undialed_near_client())
+            .publishers(undialed_near_client(), Backlog::new())
             .await;
 
         assert!(publishers.contains_key(&Chain::Midnight));
@@ -1391,5 +1471,55 @@ mod tests {
             NearRpcGates::new(SharedBackoff::new()),
             Arc::new(NodeTelemetry::new(Chain::NEAR)),
         )
+    }
+
+    fn sol_config_with_bogus_rpc() -> SolConfig {
+        SolConfig {
+            account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
+            rpc_http_url: "http://127.0.0.1:1".into(),
+            program_address: mpc_chain_solana::Pubkey::new_unique().to_string(),
+            indexer: Default::default(),
+        }
+    }
+    #[tokio::test]
+    async fn solana_publisher_shares_the_stacks_cooldown_gate() {
+        let stack = ChainStack::new(ChainConfigs {
+            eth: None,
+            sol: Some(sol_config_with_bogus_rpc()),
+            hydration: None,
+            canton: None,
+            midnight: None,
+            tron: None,
+        });
+
+        let publishers = stack
+            .publishers(undialed_near_client(), Backlog::new())
+            .await;
+        let publisher = publishers
+            .get(&Chain::Solana)
+            .expect("solana publisher must be wired when configured");
+
+        // engage the stack's own gate and check the publisher parks on it
+        stack.gate(Chain::Solana).extend_cooldown();
+
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            publisher.publish_signature(&make_publish_action(
+                Chain::Solana,
+                SignKind::Sign,
+                SignId::new([0u8; 32]),
+            )),
+        )
+        .await
+        .expect("publish must not hang on an engaged gate");
+
+        // the bogus endpoint rejects the send itself; only the park matters
+        assert!(outcome.is_err());
+        assert!(
+            start.elapsed() >= Duration::from_millis(700),
+            "publish must wait out the stack gate's engaged window (base cooldown), took {:?}",
+            start.elapsed()
+        );
     }
 }
