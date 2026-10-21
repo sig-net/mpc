@@ -14,7 +14,7 @@ A node that has run as far ahead of its base as it may stops and waits for a set
 
 ## 1. Background
 
-The model, n nodes of which at most f are faulty, crash-recovery, and the signing threshold t, is that of [protocol_properties.md](protocol_properties.md).
+The model, n nodes of which at most f are faulty, crash-recovery, and the signing threshold t, is that of [protocol-properties.md](protocol-properties.md).
 This doc relies on f < t ≤ n - f: fewer than t nodes cannot sign, and the correct nodes alone can.
 Protocol upgrades, committee and threshold changes are out of scope of this doc.
 
@@ -25,7 +25,7 @@ The governance chain is assumed live and readable throughout.
 A correct node's durable storage survives a crash.
 A node that lost it, but not its key share, starts again from a settled checkpoint fetched from a peer (S4) and has lost only its node-local records.
 
-Requests, signatures, executions, attestations and the source and destination chains are those of [bidirectional_calls.md](bidirectional_calls.md).
+Requests, signatures, executions, attestations and the source and destination chains are those of [bidirectional-calls.md](bidirectional-calls.md).
 
 Vocabulary, per node per source chain:
 
@@ -36,20 +36,20 @@ Vocabulary, per node per source chain:
   The indexer reports every height in order, with all of its events, including heights where nothing happened.
   Apart from the indexer, only a re-index (see Base) moves it, back or forward.
 
-* **Caught up**: the node has finished processing every block up to the chain's finalised head, the newest block its provider reports as finalised, as in [bidirectional_calls.md](bidirectional_calls.md) (Section 4.3).
+* **Caught up**: the node has finished processing every block up to the chain's finalised head, the newest block its provider reports as finalised, as in [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3).
   Acting waits for it, so that a node behind the head does not spend presignatures, posit rounds and peer messages on requests the chain has already answered.
 
 * **Backlog**: one *entry* per request admitted and not *finished*, that is, not yet removed by a finalised source-chain event.
   An entry holds the request id (rid) as its key, the request as the chain gave it, the contract that made it, and, for a bidirectional request, `signatures`: the signatures for it published in finalised blocks on the source chain.
   A plain sign request is finished by its first published signature, so it won't have signatures in its entry.
-  * Only finalised source-chain events change the backlog: for a bidirectional request, the handlers of [bidirectional_calls.md](bidirectional_calls.md) (Section 4.3); for a plain sign request, its admission and its first published signature.
+  * Only finalised source-chain events change the backlog: for a bidirectional request, the handlers of [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3); for a plain sign request, its admission and its first published signature.
   * Nothing read from a destination chain changes the backlog, and neither does anything the node produced itself.
   * Everything else a node keeps about a request is *node-local*. A node stores in `local` the signatures and attestations it took part in producing and what it read on the destination chain. `local` is persisted and does not go into checkpoints.
 
 * **Acting**: for each entry in the backlog, doing whatever it still needs: signing, looking for the execution, attesting, publishing.
   These are steps, not states of the entry; how far a node got is node-local.
   Taking part in a signing that a peer started is acting too.
-  It covers what [bidirectional_calls.md](bidirectional_calls.md) (Section 4.3) does on admission, on a destination block and on a `Response`.
+  It covers what [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3) does on admission, on a destination block and on a `Response`.
 
 * **Checkpoint**: a height and a snapshot of the backlog at that height.
   Its *digest* binds the chain, the height and the entries over a canonical encoding (Section 2).
@@ -83,7 +83,7 @@ digest(height, backlog) = H(
 
 The request goes in whole because the rid does not cover all of it, e.g., the schema.
 `signatures` goes in because a node rebased onto a checkpoint never reads the `Signature` events below its height again.
-A peer that served a checkpoint without one of them would leave that node looking for too few executions: each signature fixes one transaction ID to look for, and a request can have several, one per signing round whose signature was published ([bidirectional_calls.md](bidirectional_calls.md), Section 2).
+A peer that served a checkpoint without one of them would leave that node looking for too few executions: each signature fixes one transaction ID to look for, and a request can have several, one per signing round whose signature was published ([bidirectional-calls.md](bidirectional-calls.md), Section 2).
 
 The encoding of the entry must be canonical, one byte string per entry; the request has variable-length fields, so each gets its length before it.
 The order must be fixed too: entries go in rid order, and an entry's signatures in the order of their bytes.
@@ -169,7 +169,7 @@ persistent:
     pending   {Height -> Checkpoint}   // the checkpoints we created above base,
                                        // one per boundary
     local     RequestId -> Local       // node-local, as in
-                                       // bidirectional_calls.md
+                                       // bidirectional-calls.md
 
 in memory:
     backlog           RequestId -> Entry
@@ -227,12 +227,12 @@ on receiving a peer's reply c to what we asked for:
 Handlers run one at a time on the state above.
 What a handler starts, a contract call, a signing round, a request to a peer, need not finish inside the handler.
 Acting waits until the node is caught up because behind the head its backlog may still hold requests the chain has answered.
-What the node already produced is in its node-local records, so it repeats nothing ([bidirectional_calls.md](bidirectional_calls.md), Section 4.3).
+What the node already produced is in its node-local records, so it repeats nothing ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3).
 
-[bidirectional_calls.md](bidirectional_calls.md) (Section 4.3, the `Response` handler) deletes a node-local record when the node processes the `Response` for its request.
+[bidirectional-calls.md](bidirectional-calls.md) (Section 4.3, the `Response` handler) deletes a node-local record when the node processes the `Response` for its request.
 A node that rebases forward skips those Responses, so a caught-up node also deletes the records of requests that are not in its backlog.
 A node that is behind does not, since it may hold a record for a request above its processed height.
-If the node takes a stale head for the real head, it deletes the record of a request it has not reached yet, and later signs or sends for that request a second time, which [bidirectional_calls.md](bidirectional_calls.md) makes harmless (C3a, replay protection).
+If the node takes a stale head for the real head, it deletes the record of a request it has not reached yet, and later signs or sends for that request a second time, which [bidirectional-calls.md](bidirectional-calls.md) makes harmless (C3a, replay protection).
 
 ### Rebase and re-index
 
@@ -279,7 +279,7 @@ What it rests on is the blocks being the same, and a node whose provider gave it
 It also needs every node to reach the same verdict on an event from the event alone, which a `Response` does not yet allow (Section 6).
 
 Effects sit outside that argument.
-Acting ahead of agreement can publish a signature or send a transaction twice, and [bidirectional_calls.md](bidirectional_calls.md) makes both harmless (C3a, replay protection).
+Acting ahead of agreement can publish a signature or send a transaction twice, and [bidirectional-calls.md](bidirectional-calls.md) makes both harmless (C3a, replay protection).
 
 ### *S2, a settled digest is created by a correct node, chained from genesis.*
 A settled digest has votes from t nodes.
@@ -302,9 +302,9 @@ Each thing a node does for a request reads the entry and nothing older than the 
 Signing and joining a round read the request and the contract, which give the key and the bytes to sign, and `signatures`, whose being empty says that no signature is final yet.
 Finding an execution reads `signatures`, which give the transaction IDs, and attesting reads the request's schema.
 Voting reads the backlog, which the node builds from the checkpoint and the blocks after it (S1).
-Attesting Unviable is the exception: it follows from the execution or the `Response` of another request ([bidirectional_calls.md](bidirectional_calls.md), Section 4.3), and once that request has left the backlog the checkpoint holds no trace of it.
+Attesting Unviable is the exception: it follows from the execution or the `Response` of another request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3), and once that request has left the backlog the checkpoint holds no trace of it.
 What the checkpoint cannot give back is node-local: a node that lost its storage has lost the signatures it issued and not yet seen published.
-They are not lost to the network where another correct node was in the round, which keeps and publishes its own ([bidirectional_calls.md](bidirectional_calls.md), Section 6).
+They are not lost to the network where another correct node was in the round, which keeps and publishes its own ([bidirectional-calls.md](bidirectional-calls.md), Section 6).
 
 ### *L1, checkpoints keep settling.*
 Correct nodes agree (S1), so what is left is how many are up:
