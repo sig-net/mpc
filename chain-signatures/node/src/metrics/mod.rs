@@ -88,7 +88,7 @@ pub fn try_create_int_gauge_vec_with_node_account_id(
     labels: &[&str],
 ) -> Result<prometheus::IntGaugeVec> {
     register(prometheus::IntGaugeVec::new(
-        node_opts(name, help, false)?,
+        node_opts(name, help)?,
         labels,
     )?)
 }
@@ -98,10 +98,7 @@ pub fn try_create_gauge_vec_with_node_account_id(
     help: &str,
     labels: &[&str],
 ) -> Result<prometheus::GaugeVec> {
-    register(prometheus::GaugeVec::new(
-        node_opts(name, help, false)?,
-        labels,
-    )?)
+    register(prometheus::GaugeVec::new(node_opts(name, help)?, labels)?)
 }
 
 pub fn try_create_counter_vec_with_node_and_version(
@@ -110,7 +107,7 @@ pub fn try_create_counter_vec_with_node_and_version(
     labels: &[&str],
 ) -> Result<prometheus::CounterVec> {
     register(prometheus::CounterVec::new(
-        node_opts(name, help, true)?,
+        node_build_opts(name, help)?,
         labels,
     )?)
 }
@@ -120,10 +117,7 @@ pub fn try_create_counter_vec_with_node_account_id(
     help: &str,
     labels: &[&str],
 ) -> Result<prometheus::CounterVec> {
-    register(prometheus::CounterVec::new(
-        node_opts(name, help, false)?,
-        labels,
-    )?)
+    register(prometheus::CounterVec::new(node_opts(name, help)?, labels)?)
 }
 
 pub fn try_create_histogram_vec_with_node_account_id(
@@ -133,7 +127,7 @@ pub fn try_create_histogram_vec_with_node_account_id(
     buckets: Option<Vec<f64>>,
 ) -> Result<HistogramVec> {
     register(HistogramVec::new(
-        histogram_opts(node_opts(name, help, false)?, buckets),
+        histogram_opts(node_opts(name, help)?, buckets),
         labels,
     )?)
 }
@@ -145,24 +139,24 @@ pub fn try_create_histogram_vec_with_node_and_version(
     buckets: Option<Vec<f64>>,
 ) -> Result<HistogramVec> {
     register(HistogramVec::new(
-        histogram_opts(node_opts(name, help, true)?, buckets),
+        histogram_opts(node_build_opts(name, help)?, buckets),
         labels,
     )?)
 }
 
-/// `name`'s options with the node's account id and, if `with_version`, its build as
-/// const labels.
-fn node_opts(name: &str, help: &str, with_version: bool) -> Result<Opts> {
+/// `name`'s options with the node's account id as a const label.
+fn node_opts(name: &str, help: &str) -> Result<Opts> {
     check_metric_multichain_prefix(name)?;
-    let opts = Opts::new(name, help)
-        .const_label("node_account_id".to_string(), node_account_id().to_string());
-    Ok(if with_version {
-        opts.const_label("version".to_string(), version().to_string())
-            .const_label("git_commit_hash".to_string(), git_commit_hash().to_string())
-            .const_label("build_timestamp".to_string(), build_timestamp().to_string())
-    } else {
-        opts
-    })
+    Ok(Opts::new(name, help)
+        .const_label("node_account_id".to_string(), node_account_id().to_string()))
+}
+
+/// [`node_opts`] plus the node's build as const labels.
+fn node_build_opts(name: &str, help: &str) -> Result<Opts> {
+    Ok(node_opts(name, help)?
+        .const_label("version".to_string(), version().to_string())
+        .const_label("git_commit_hash".to_string(), git_commit_hash().to_string())
+        .const_label("build_timestamp".to_string(), build_timestamp().to_string()))
 }
 
 fn histogram_opts(opts: Opts, buckets: Option<Vec<f64>>) -> HistogramOpts {
