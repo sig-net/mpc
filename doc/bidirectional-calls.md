@@ -1016,8 +1016,12 @@ the bytes by request ID from the endpoint advertised for their deployment
 and retry while they are not yet available. Providing a cache is optional.
 
 For `failed` and `unviable`, the serialised output is empty. It is also
-empty for an `executed` transaction that returns nothing, a plain transfer
-or a call without a return value, which requires an empty output schema.
+empty for an `executed` call without a return value, which requires an
+empty output schema. For a plain transfer it depends on the source chain's
+format: Midnight requires an empty output schema and gets an empty output;
+ABI and Borsh encode a default per schema field, `true` for a `bool` and
+`"non_function_call_success"` for a `string`, and refuse any other field
+type.
 Whichever route supplies the bytes, they remain untrusted until the
 application contract's library recomputes the attestation digest and
 verifies the signature against the attestation key (Section 4.1). Incorrect
