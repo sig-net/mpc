@@ -8,6 +8,7 @@ use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction};
+use crate::sign_bidirectional::derive_user_address;
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
@@ -22,6 +23,8 @@ use cait_sith::protocol::Participant;
 use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
+use mpc_chain_tron::pb::{Message as _, RawTransaction, TriggerSmartContract};
+use mpc_chain_tron::TronAddress;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ChainConfig as _, IndexedSignRequest, SignArgs,
     SignBidirectionalEvent, SignKind, Signature,
@@ -32,6 +35,28 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
+
+/// Returns a test root public key derived from a fixed secret key.
+fn test_root_pk() -> mpc_primitives::PublicKey {
+    k256::SecretKey::from_slice(&[1; 32])
+        .unwrap()
+        .public_key()
+        .into()
+}
+
+/// TRON_RAW_HEX with `owner_address` set to the event's derived key.
+fn owned_tron_bytes(root_pk: mpc_primitives::PublicKey, event: &SignBidirectionalEvent) -> Vec<u8> {
+    let owner = TronAddress::from_evm(derive_user_address(
+        root_pk,
+        event.epsilon().expect("a valid event derives its epsilon"),
+    ));
+    let mut raw = RawTransaction::parse(&hex::decode(TRON_RAW_HEX).unwrap()).unwrap();
+    let any = raw.contract[0].parameter.as_mut().unwrap();
+    let mut trigger = TriggerSmartContract::decode(any.value.as_slice()).unwrap();
+    trigger.owner_address = owner.as_bytes().to_vec();
+    any.value = trigger.encode_to_vec();
+    raw.encode_to_vec()
+}
 
 #[test]
 fn signature_respond_event_conversion() {
@@ -466,7 +491,7 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-    let err = process_sign_request(request, &ctx)
+    let err = process_sign_request(request, &ctx, test_root_pk())
         .await
         .expect_err("RespondBidirectional should be rejected from the sign queue path");
     assert!(err.to_string().contains("Unexpected sign request kind"));
@@ -552,19 +577,22 @@ async fn process_sign_request_rejects_a_duplicate_tron_destination_id() {
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
 
-    // Create a closure to generate test requests with a given seed.
+    // Create a closure to generate test requests with a given seed; both
+    // carry the request's derived key as owner.
+    let root_pk = test_root_pk();
+    let bytes = owned_tron_bytes(root_pk, &tron_bidirectional_event(Vec::new()));
     let request = |seed: u8| {
         Arc::new(IndexedSignRequest::sign_bidirectional(
             SignId::new([seed; 32]),
             test_sign_args(seed),
             Chain::Solana,
             current_unix_timestamp(),
-            tron_bidirectional_event(hex::decode(TRON_RAW_HEX).unwrap()),
+            tron_bidirectional_event(bytes.clone()),
         ))
     };
 
     // Process the first request to ensure it is admitted and pending.
-    process_sign_request(request(19), &ctx)
+    process_sign_request(request(19), &ctx, root_pk)
         .await
         .expect("the first Tron request is admitted");
 
@@ -574,7 +602,7 @@ async fn process_sign_request_rejects_a_duplicate_tron_destination_id() {
         .is_some());
 
     // Process the second request, which should be rejected due to a duplicate Tron destination ID.
-    let err = process_sign_request(request(20), &ctx)
+    let err = process_sign_request(request(20), &ctx, root_pk)
         .await
         .expect_err("identical bytes must be rejected while the first is pending");
 
@@ -589,6 +617,64 @@ async fn process_sign_request_rejects_a_duplicate_tron_destination_id() {
         .get(Chain::Solana, &SignId::new([20; 32]))
         .await
         .is_none());
+}
+
+/// A Tron request must name its own derived key as owner - copied or misbuilt
+/// bytes are rejected before they can collide with another requester's
+/// pending transaction.
+#[tokio::test]
+async fn process_sign_request_rejects_unowned_tron_bytes() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+    let root_pk = test_root_pk();
+    let request = |seed: u8, event| {
+        Arc::new(IndexedSignRequest::sign_bidirectional(
+            SignId::new([seed; 32]),
+            test_sign_args(seed),
+            Chain::Solana,
+            current_unix_timestamp(),
+            event,
+        ))
+    };
+
+    let unowned = tron_bidirectional_event(hex::decode(TRON_RAW_HEX).unwrap());
+    let err = process_sign_request(request(21, unowned.clone()), &ctx, root_pk)
+        .await
+        .expect_err("bytes naming a foreign owner must be rejected");
+    assert!(format!("{err:#}").contains("owner_address"));
+    assert!(backlog
+        .get(Chain::Solana, &SignId::new([21; 32]))
+        .await
+        .is_none());
+
+    let owned = tron_bidirectional_event(owned_tron_bytes(root_pk, &unowned));
+    process_sign_request(request(22, owned), &ctx, root_pk)
+        .await
+        .expect("bytes naming the request's own derived key are admitted");
+    assert!(backlog
+        .get(Chain::Solana, &SignId::new([22; 32]))
+        .await
+        .is_some());
+}
+
+#[test]
+fn owned_by_requester_binds_only_tron_targets() {
+    let root_pk = test_root_pk();
+    let unowned = tron_bidirectional_event(hex::decode(TRON_RAW_HEX).unwrap());
+    assert!(
+        !owned_by_requester(&unowned, root_pk),
+        "recorded mainnet bytes name a foreign owner"
+    );
+
+    let owned = tron_bidirectional_event(owned_tron_bytes(root_pk, &unowned));
+    assert!(owned_by_requester(&owned, root_pk));
+
+    let ethereum = bidirectional_event(legacy_contract_call(1));
+    assert!(
+        owned_by_requester(&ethereum, root_pk),
+        "ethereum recovers the sender from the signature"
+    );
 }
 
 /// An unsigned legacy contract call on `chain_id`.
@@ -627,14 +713,14 @@ async fn process_sign_request_rejects_an_unprocessable_output_schema() {
     };
 
     let refused = SignId::new([15u8; 32]);
-    let err = process_sign_request(request(15, b"{"), &ctx)
+    let err = process_sign_request(request(15, b"{"), &ctx, test_root_pk())
         .await
         .expect_err("a malformed output schema should be rejected at ingestion");
     assert!(format!("{err:#}").contains("unprocessable output schemas"));
     assert!(backlog.get(Chain::Solana, &refused).await.is_none());
 
     let admitted = SignId::new([16u8; 32]);
-    process_sign_request(request(16, b"[]"), &ctx)
+    process_sign_request(request(16, b"[]"), &ctx, test_root_pk())
         .await
         .expect("an empty output schema should be admitted");
     assert!(backlog.get(Chain::Solana, &admitted).await.is_some());
@@ -658,12 +744,12 @@ async fn process_sign_request_rejects_another_networks_chain_id() {
     };
 
     ctx.ethereum_chain_id = None;
-    process_sign_request(request(17, 11_155_111), &ctx)
+    process_sign_request(request(17, 11_155_111), &ctx, test_root_pk())
         .await
         .expect("without Ethereum configured the check is skipped");
 
     ctx.ethereum_chain_id = Some(1);
-    let err = process_sign_request(request(18, 11_155_111), &ctx)
+    let err = process_sign_request(request(18, 11_155_111), &ctx, test_root_pk())
         .await
         .expect_err("another network's chain id should be rejected at ingestion");
     assert!(format!("{err:#}").contains("this node executes on 1"));
@@ -672,7 +758,7 @@ async fn process_sign_request_rejects_another_networks_chain_id() {
         .await
         .is_none());
 
-    process_sign_request(request(19, 1), &ctx)
+    process_sign_request(request(19, 1), &ctx, test_root_pk())
         .await
         .expect("the configured network's chain id should be admitted");
     assert!(backlog
@@ -694,7 +780,7 @@ async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
-    let err = process_sign_request(request, &ctx)
+    let err = process_sign_request(request, &ctx, test_root_pk())
         .await
         .expect_err("undecodable serialized_transaction should be rejected at ingestion");
     assert!(format!("{err:#}").contains("undecodable serialized_transaction"));
@@ -723,7 +809,7 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
-    let err = process_sign_request(request, &ctx)
+    let err = process_sign_request(request, &ctx, test_root_pk())
         .await
         .expect_err("empty serialized_transaction should be rejected at ingestion");
     assert!(format!("{err:#}").contains("empty serialized_transaction"));
@@ -746,7 +832,7 @@ async fn process_sign_request_rejects_the_reserved_attestation_path() {
 
     let mut reserved = mock_sign_request(SignId::new([31u8; 32]), Chain::Solana);
     Arc::make_mut(&mut reserved).args.path = "solana response key".to_string();
-    let err = process_sign_request(reserved, &ctx)
+    let err = process_sign_request(reserved, &ctx, test_root_pk())
         .await
         .expect_err("a sign request on the attestation path must be rejected");
     assert!(err.to_string().contains("reserved attestation path"));
@@ -762,7 +848,7 @@ async fn process_sign_request_rejects_the_reserved_attestation_path() {
     let foreign_id = SignId::new([32u8; 32]);
     let mut foreign = mock_sign_request(foreign_id, Chain::Solana);
     Arc::make_mut(&mut foreign).args.path = "canton response key".to_string();
-    process_sign_request(foreign, &ctx)
+    process_sign_request(foreign, &ctx, test_root_pk())
         .await
         .expect("another chain's attestation path must still be admitted");
     assert!(backlog.get(Chain::Solana, &foreign_id).await.is_some());
@@ -778,7 +864,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
 
     // First emission inserts a new entry.
-    let was_new = process_sign_request(Arc::clone(&request), &ctx)
+    let was_new = process_sign_request(Arc::clone(&request), &ctx, test_root_pk())
         .await
         .expect("first sign request should be accepted");
     assert!(was_new, "first insert must report a new entry");
@@ -786,7 +872,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
 
     // Replay: the indexer re-emitted the same SignId
     // backlog.insert is keyed on SignId, so the replay is absorbed, not duplicated.
-    let is_new = process_sign_request(request, &ctx)
+    let is_new = process_sign_request(request, &ctx, test_root_pk())
         .await
         .expect("replayed sign request should be accepted");
     assert!(!is_new, "replayed insert must report an existing entry");
@@ -845,7 +931,7 @@ async fn process_sign_request_replay_keeps_an_advanced_entry() {
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
 
     // The same request id is emitted again while the first is in flight.
-    let is_new = process_sign_request(request, &ctx)
+    let is_new = process_sign_request(request, &ctx, test_root_pk())
         .await
         .expect("a replayed sign request is accepted");
 

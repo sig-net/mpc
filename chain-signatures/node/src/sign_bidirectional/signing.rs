@@ -4,11 +4,14 @@
 use crate::protocol::Chain;
 use k256::elliptic_curve::point::AffineCoordinates as _;
 use k256::elliptic_curve::scalar::IsHigh as _;
-use mpc_chain_tron::pb::RawTransaction;
-use mpc_primitives::{BidirectionalTxId, Signature};
+use mpc_chain_tron::{pb::RawTransaction, TronAddress};
+use mpc_primitives::{BidirectionalTxId, SignBidirectionalEvent, Signature};
 use rlp::Rlp;
 
-use super::eth_tx::{sign_and_hash_eip1559_from_unsigned, sign_and_hash_legacy_from_unsigned};
+use super::eth_tx::{
+    derive_user_address, sign_and_hash_eip1559_from_unsigned, sign_and_hash_legacy_from_unsigned,
+};
+use super::SignBidirectionalEventExt as _;
 
 /// Checks the unsigned bytes against the target chain's signing rules,
 /// returning the Ethereum calldata when the target runs schema checks.
@@ -43,6 +46,28 @@ pub(crate) fn pending_destination_id(
         ))),
         _ => Ok(None),
     }
+}
+
+/// Returns `true` if the event's serialized transaction names the requester's derived key as owner.
+/// For Tron, this checks the trigger's `owner_address`. Other chains are assumed to recover the sender from the signature.
+pub(crate) fn owned_by_requester(
+    event: &SignBidirectionalEvent,
+    root_pk: mpc_primitives::PublicKey,
+) -> bool {
+    if event.target_chain() != Ok(Chain::Tron) {
+        return true;
+    }
+    let owner = match RawTransaction::parse(&event.serialized_transaction)
+        .and_then(|raw| raw.owner_address())
+    {
+        Ok(owner) => owner,
+        // `validate` already rejected undecodable bytes.
+        Err(_) => return true,
+    };
+    let Some(epsilon) = event.epsilon().ok() else {
+        return true;
+    };
+    owner == TronAddress::from_evm(derive_user_address(root_pk, epsilon)).as_bytes()
 }
 
 /// Unsigned integer fields per transaction type, `(field index, max bytes)`,

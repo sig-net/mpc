@@ -12,8 +12,8 @@ use crate::respond_bidirectional::{
     CompletedTx,
 };
 use crate::sign_bidirectional::{
-    transaction_chain_id, BidirectionalProgress, BidirectionalTxId, SignBidirectionalEventExt,
-    SignStatus,
+    owned_by_requester, transaction_chain_id, BidirectionalProgress, BidirectionalTxId,
+    SignBidirectionalEventExt, SignStatus,
 };
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -44,6 +44,7 @@ fn validate_midnight_signing_request(request: &IndexedSignRequest) -> anyhow::Re
 pub(crate) async fn process_sign_request(
     sign_request: Arc<IndexedSignRequest>,
     ctx: &StreamContext,
+    root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<bool> {
     match &sign_request.kind {
         SignKind::RespondBidirectional(_) => anyhow::bail!("Unexpected sign request kind"),
@@ -67,6 +68,13 @@ pub(crate) async fn process_sign_request(
                 anyhow::bail!(
                     "rejecting bidirectional sign request {:?}: \
                      destination transaction {id:?} already pending",
+                    sign_request.id
+                );
+            }
+            if !owned_by_requester(event, root_pk) {
+                anyhow::bail!(
+                    "rejecting bidirectional sign request {:?}: \
+                     owner_address is not the request's derived key",
                     sign_request.id
                 );
             }
@@ -94,9 +102,8 @@ pub(crate) async fn process_sign_request(
     Ok(true)
 }
 
-/// An Ethereum transaction names its network by chain id: signed for another
-/// network, it never executes here. Here rather than in `validate`, so
-/// quarantine stays a function of the event — this reads node config.
+/// Returns the actual and expected chain ids when an Ethereum target names another network.
+/// Returns `None` if the event is not targeting Ethereum or if the chain id matches the expected one.
 fn network_mismatch(event: &SignBidirectionalEvent, expected: Option<u64>) -> Option<(u64, u64)> {
     let expected = expected?;
     if event.target_chain() != Ok(Chain::Ethereum) {
@@ -106,11 +113,10 @@ fn network_mismatch(event: &SignBidirectionalEvent, expected: Option<u64>) -> Op
     (actual != expected).then_some((actual, expected))
 }
 
-/// A flat destination id (Tron's txID covers neither signature nor derived
-/// key) names one transaction per set of raw bytes: a second request with
-/// the same bytes must be rejected while the first is pending, or its watch
-/// silently replaces the first's. Reads only checkpointed pending state, so
-/// the verdict is deterministic across nodes.
+/// A flat destination id names one transaction per set of raw bytes: a second
+/// request with the same bytes is rejected while the first is pending, or its
+/// watch would silently replace the first's. Reads only checkpointed pending
+/// state, so the verdict is deterministic across nodes.
 async fn duplicate_destination(
     event: &SignBidirectionalEvent,
     backlog: &Backlog,

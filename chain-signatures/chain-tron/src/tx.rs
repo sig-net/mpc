@@ -21,6 +21,18 @@ impl RawTransaction {
         Sha256::digest(self.encode_to_vec()).into()
     }
 
+    /// The trigger's `owner_address`, for admission checks that bind the
+    /// owner to the request's derived key.
+    pub fn owner_address(&self) -> anyhow::Result<Vec<u8>> {
+        let any = self
+            .contract
+            .first()
+            .and_then(|contract| contract.parameter.as_ref())
+            .context("missing TriggerSmartContract parameter")?;
+        let trigger = TriggerSmartContract::decode(any.value.as_slice())?;
+        Ok(trigger.owner_address)
+    }
+
     /// Parses and validates the bytes the multichain API carries for Tron
     /// targets: the bare `raw` message, unsigned by construction. Admission
     /// accepts only what the MPC can faithfully name and sign — canonical

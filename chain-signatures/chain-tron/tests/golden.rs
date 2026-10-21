@@ -176,6 +176,11 @@ fn unpacked_parameter_matches_contract_call() {
     );
     // USDT transfer calldata: selector + two 32-byte args.
     assert_eq!(trigger.data.len(), 68);
+
+    // The raw transaction should parse correctly and the owner address should match the trigger's owner address.
+    let raw =
+        RawTransaction::parse(&hex::decode(tx["raw_data_hex"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(raw.owner_address().unwrap(), trigger.owner_address);
 }
 
 #[test]

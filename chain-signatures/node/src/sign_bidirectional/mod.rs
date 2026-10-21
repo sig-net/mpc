@@ -18,7 +18,7 @@ pub use eth_tx::{derive_user_address, public_key_to_address};
 pub use progress::{BidirectionalProgress, SignProgress, SignStatus};
 pub use signing::sign_and_hash_transaction;
 use signing::validate_unsigned_transaction;
-pub(crate) use signing::{pending_destination_id, transaction_chain_id};
+pub(crate) use signing::{owned_by_requester, pending_destination_id, transaction_chain_id};
 
 /// The requester's chain-local identity string: Midnight and Canton senders
 /// are 32-byte addresses whose canonical form is the lowercase hex of those
@@ -128,10 +128,10 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         );
         self.epsilon().context("cannot derive epsilon")?;
         // TODO(tron): once the record carries structured params, admission
-        // must enforce §6.1's expiration bound (future, ≤ 24 h past the request's
-        // Midnight timestamp) and set `owner_address` by construction; raw bytes
-        // cannot check either. Duplicate destination ids are already rejected at
-        // ingestion (stream ops, `pending_destination_id`); the expiry→Unviable
+        // must enforce §6.1's expiration bound (future, ≤ 24 h past the
+        // request's Midnight timestamp); raw bytes carry no request timestamp
+        // to check against. Owner binding (`owned_by_requester`) and duplicate
+        // destination-id rejection already run at ingestion; the expiry→Unviable
         // scan must cover backlog entries, not just watchers.
         let calldata = validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
