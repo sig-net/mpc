@@ -59,6 +59,7 @@ Both artifacts below have a single owner, the node that coordinated their genera
 * Network  
   * Safety is guaranteed under asynchrony (no bounds on message delivery), while liveness is guaranteed for the periods where the network is synchronous (messages between honest nodes arrive within some bound δ, not assumed known) for long enough.  
     * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T in \[a, b\] reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling. Liveness is therefore argued for δ up to a fraction of the ceiling, not for arbitrary finite δ (details in L1)  
+  * Node clocks agree to within 30 s. Safety does not depend on it: a larger offset shortens how long a message stays acceptable, and one beyond `message_timeout` plus 30 s makes two nodes reject all of each other's messages (*Authenticated channels*).
   * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is effectively reliable and timely.
   * Channels are authenticated and encrypted: a node accepts a message only from a current committee member, signed by that member (details in *Authenticated channels* in the appendix).
 * Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
@@ -194,7 +195,7 @@ The `1 + d` cost is what a failover pays when the failover response lands, since
 
 ### Authenticated channels
 
-*Assumption* (§2). A message a node accepts was sent by the committee member it names.
+*Assumption* (§2). A message a node accepts was sent by the committee member it names, to this node, for this use, recently, and is accepted once.
 
 *Enforcement*: every batch of peer messages is encrypted to the recipient's key and signed by the sender. The inbox decrypts it and checks the signature against the sender's key in the participant map built from the node's contract state. A batch from a sender outside that map is dropped, not kept for later, so peers cannot grow the inbox (§D5).
 
@@ -202,3 +203,13 @@ Two cases need a message from a sender the node does not know yet:
 
 * Key generation sends each message once, and a peer can start it before this node has read any contract state. The inbox therefore leaves messages in its channel until the first contract state arrives. Candidates cannot change while the contract is initializing, so from then on every key generation sender is known.
 * In a resharing, a peer that has not seen the resharing yet drops a new participant's Ready. Ready repeats every 10 s, and a node sends it once more when it starts the protocol, so no peer waits for the resharing timeout because of a dropped Ready.
+
+The signature covers a domain tag, the signing time in milliseconds, the recipient's account and the payload, so an envelope is valid only for the node it was sent to, for the use it was made for, and for a limited time:
+
+* Domain. Peer messages, /sync requests and /sync replies sign under their own tags, since a request and its reply carry the same type.
+* Recipient. Named by account, not participant id, because the contract can hand an id to a second account after a cancelled resharing. The receiver verifies with its own account, so an envelope signed for another node fails like a bad signature.
+* Time. An envelope is accepted while its signing time is within `message_timeout` (/sync: 120 s) plus 30 s of the receiver's clock, in either direction. Acceptance uses the local clock; §D2 still holds, since nothing two nodes must agree on is derived from it.
+* Once. Within that window the inbox keeps every accepted signature per sender and accepts each envelope once, at most 100k per sender, evicting that sender's oldest (§D5). /sync accepts a request only if it was signed later than the last one from that sender, which works because a node runs one sync at a time, and a reply is signed with its request's time and accepted only as the answer to it.
+* Restart. A restart empties this memory, so nothing signed before the node started is accepted, except peer messages during genesis key generation: peers resend those to a node that is still starting.
+
+The envelope is part of the wire format (`PROTOCOL_VERSION` 2); peers on another version show as offline. Key generation and resharing pick recipients from the contract, not the mesh, so a version change must not overlap a resharing.
