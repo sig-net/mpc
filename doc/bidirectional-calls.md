@@ -684,9 +684,9 @@ a path from B48 through A15; the first at A12 has none.
   and Solana it does. EVM offers a way around it that this design does
   not use: a binary search on the account's nonce over block heights
   finds the block where req.tx's nonce was used up, and with it the
-  transaction that used it. At least t nodes would need providers that
-  serve account state at old blocks. On Solana, listing
-  the account's transactions does the same.
+  transaction that used it. The archive state that History requires on
+  EVM serves the account state at old blocks this needs. On Solana,
+  listing the account's transactions does the same.
 * Other signing APIs. A request on another signing API, a plain sign
   request for instance, names only a payload hash, so the MPC could not
   find a transaction it signed. With the same key as a bidirectional
