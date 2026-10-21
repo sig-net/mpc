@@ -129,6 +129,32 @@ lint-eth: (build "eth")
 test-eth-unit:
     cd chain-signatures/contract-eth && npx hardhat test
 
+# TRE-backed Tron gate: dockerized java-tron, token deployed via deploycontract
+# Usage: just test-tron-tre  (TRE_PORT overrides the host port, default 9090)
+tre-port := env_var_or_default('TRE_PORT', '9090')
+
+test-tron-tre:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Tag-pinned only: the vendor publishes no digest, so a republished
+    # 2.0.0 tag would change this chain silently.
+    trap 'docker rm -f tre >/dev/null 2>&1 || true' EXIT
+    docker rm -f tre >/dev/null 2>&1 || true
+    docker run -d --name tre -p {{tre-port}}:9090 -e useDefaultPrivateKey=true tronbox/tre:2.0.0 >/dev/null
+    # Readiness: account funding is async after healthcheck, and a deploy
+    # built against the genesis block fails broadcast.
+    ready=0
+    for _ in $(seq 1 60); do
+        if curl -fsS -m 2 http://127.0.0.1:{{tre-port}}/admin/accounts | grep -q 'Available Accounts'; then ready=1; break; fi
+        sleep 1
+    done
+    [ "$ready" = 1 ] || { echo "TRE did not become ready within 60s" >&2; exit 1; }
+    TRON_ENDPOINT=http://127.0.0.1:{{tre-port}} \
+    TRON_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000001 \
+    TRON_TOKEN_ARTIFACT=tests/fixtures/tre/gate-token.json \
+    TRON_DEADLINE_SECS=60 \
+    cargo test -p mpc-chain-tron --test live_gate -- --ignored --nocapture
+
 # Midnight real-stack test (ignored by default; needs Midnight node/indexer/proof-server + anvil)
 test-midnight: (setup "")
     cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
