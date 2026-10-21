@@ -31,11 +31,11 @@ const FAILOVER_DUPLICATE_RATE: f64 = 2.0;
 pub const DEFAULT_OBSERVE_MARGIN: Duration = Duration::from_secs(15);
 
 /// The lag from one node publishing a response until another has observed it.
-/// `None` in production, giving chain finality plus the margin; a fixture pins it
-/// so its timing does not move when a finality constant does.
+/// `None` in production, giving the chain's observe latency plus the margin; a
+/// fixture pins it so its timing does not move when a chain constant does.
 pub(crate) fn observe_lag(chain: Chain, override_lag: Option<Duration>) -> Duration {
     override_lag.unwrap_or_else(|| {
-        Duration::from_secs(chain.expected_finality_time_secs()) + DEFAULT_OBSERVE_MARGIN
+        Duration::from_secs(chain.expected_observe_latency_secs()) + DEFAULT_OBSERVE_MARGIN
     })
 }
 
@@ -99,6 +99,28 @@ mod tests {
     }
 
     const LAG: Option<Duration> = None;
+
+    /// Only Midnight takes its own lag; every other chain keeps finality plus the margin.
+    #[test]
+    fn midnight_observe_lag_outlasts_a_publish_and_others_keep_finality() {
+        assert_eq!(observe_lag(Chain::Midnight, LAG), Duration::from_secs(120));
+        for chain in [
+            Chain::Ethereum,
+            Chain::Solana,
+            Chain::Hydration,
+            Chain::Canton,
+        ] {
+            assert_eq!(
+                observe_lag(chain, LAG),
+                Duration::from_secs(chain.expected_finality_time_secs()) + DEFAULT_OBSERVE_MARGIN
+            );
+        }
+        assert_eq!(
+            observe_lag(Chain::Midnight, Some(Duration::ZERO)),
+            Duration::ZERO,
+            "a fixture override still wins"
+        );
+    }
 
     /// A proposer whose first attempt failed must still land inside the margin.
     #[test]

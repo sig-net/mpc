@@ -66,11 +66,12 @@ pub(crate) fn bidirectional_response_payload(
     payload[32..40].copy_from_slice(&attestation.block_height.to_le_bytes());
     payload[40] = attestation.outcome_kind as u8;
     payload[41..49].copy_from_slice(&attestation.serialized_output_length.to_le_bytes());
-    payload[49..81].copy_from_slice(&attestation.digest);
-    payload[81..113].copy_from_slice(&x);
-    payload[113..145].copy_from_slice(&y);
-    payload[145..177].copy_from_slice(&s);
-    payload[177] = recovery_id;
+    payload[49..81].copy_from_slice(&attestation.output_hash);
+    payload[81..113].copy_from_slice(&attestation.digest);
+    payload[113..145].copy_from_slice(&x);
+    payload[145..177].copy_from_slice(&y);
+    payload[177..209].copy_from_slice(&s);
+    payload[209] = recovery_id;
     payload
 }
 
@@ -153,7 +154,7 @@ pub(crate) fn widths_from_record(record: &SignBidirectionalRecord) -> Vec<u32> {
         widths.push(1);
         widths.extend(std::iter::repeat_n(32, entry.storage_keys.len()));
     }
-    widths.push(32); // execution_dest
+    widths.push(64); // execution_dest
     widths.push(1); // signature_dest
     widths.push(64); // params
     widths.push(record.output_deserialization_schema.len() as u32);
@@ -300,7 +301,7 @@ pub(crate) fn sample_record() -> SignBidirectionalRecord {
         },
         execution_dest: ascii_padded(b"eip155:31337"),
         output_deserialization_schema: ascii_padded_vec(b"uint256", 34),
-        respond_serialization_schema: ascii_padded_vec(b"uint256", 34),
+        respond_serialization_schema: Vec::new(),
     }
 }
 

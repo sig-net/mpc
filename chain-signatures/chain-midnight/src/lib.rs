@@ -21,6 +21,7 @@ mod state;
 #[cfg(test)]
 mod test_utils;
 mod tx;
+mod wallet_snapshot;
 
 pub use attestation::validate_attestation_response;
 pub use config::{
@@ -28,6 +29,7 @@ pub use config::{
 };
 pub use indexer::MidnightIndexer;
 pub use intent_gen::{IntentGen, IntentRequest, WireAttestation, WirePoint, WireSignature};
-pub use publisher::RecoveringMidnightPublisher;
+pub use publisher::{RecoveringMidnightPublisher, ResponseAwaiter};
 #[cfg(feature = "sandbox")]
 pub use rpc::probe_network_id;
+pub use wallet_snapshot::WalletSnapshotStore;

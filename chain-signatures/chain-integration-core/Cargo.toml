@@ -8,10 +8,11 @@ description = "Core traits and types for the MPC chain integration including sig
 [dependencies]
 alloy.workspace = true
 backon.workspace = true
-# TODO: replace anyhow with thiserror
+http.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 cait-sith.workspace = true
+thiserror.workspace = true
 k256.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true

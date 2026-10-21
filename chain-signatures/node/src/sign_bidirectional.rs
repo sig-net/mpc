@@ -128,9 +128,10 @@ pub trait SignBidirectionalEventExt {
     fn target_chain(&self) -> Result<Chain, ChainFromError>;
 
     /// The deterministic derivations respond processing runs for every bidirectional
-    /// request. Shared between admission (reject before the backlog) and the respond
-    /// path's failure handling (quarantine): both must agree on what "can never
-    /// advance" means.
+    /// request, and the schema checks output extraction applies whatever the target
+    /// chain returns. Shared between admission (reject before the backlog) and the
+    /// respond path's failure handling (quarantine): both must agree on what "can
+    /// never advance" means.
     fn validate(&self) -> anyhow::Result<()>;
 
     /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
@@ -156,22 +157,22 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
                 self.key_version,
                 &self.sender_string()?,
                 &self.path,
-            )),
+            )?),
             Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
                 self.key_version,
                 &self.sender_string()?,
                 &self.path,
-            )),
+            )?),
             Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
                 self.key_version,
                 &self.sender_string()?,
                 &self.path,
-            )),
+            )?),
             Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
                 self.key_version,
                 &self.sender_string()?,
                 &self.path,
-            )),
+            )?),
             _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
         }
     }
@@ -193,9 +194,16 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             "unsupported target chain {target}"
         );
         self.epsilon().context("cannot derive epsilon")?;
-        validate_unsigned_transaction(&self.serialized_transaction)
+        let calldata = validate_unsigned_transaction(&self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
-        Ok(())
+        // Ethereum is the only target with an execution watcher, checked above.
+        mpc_chain_ethereum::validate_schemas(
+            calldata,
+            &self.output_deserialization_schema,
+            self.chain.respond_serialization_format(),
+            &self.respond_serialization_schema,
+        )
+        .context("unprocessable output schemas")
     }
 
     fn to_bidirectional_tx(
@@ -254,41 +262,154 @@ impl BidirectionalTxExt for BidirectionalTx {
                 self.key_version,
                 &self.sender_string()?,
                 path,
-            )),
+            )?),
             Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
                 self.key_version,
                 &self.sender_string()?,
                 path,
-            )),
+            )?),
             Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
                 self.key_version,
                 &self.sender_string()?,
                 path,
-            )),
+            )?),
             Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
                 self.key_version,
                 &self.sender_string()?,
                 path,
-            )),
+            )?),
             _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
         }
     }
 }
 
 /// Check that `unsigned_rlp` would survive [`sign_and_hash_transaction`], without a
-/// real signature. Admission calls this so a transaction that cannot be signed at
-/// respond time is rejected before it enters the backlog; running the actual
-/// function is what keeps admission structurally equal to respond processing. The
-/// placeholder's recovery id is 1, the strict case: the legacy `v` computation adds
-/// `y_parity`, so validating with 0 would admit the one chain id whose `v` only
-/// overflows when the real signature draws parity 1.
-fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<()> {
+/// real signature, and return its calldata. Admission calls this so a transaction
+/// that cannot be signed at respond time is rejected before it enters the backlog;
+/// running the actual function is what keeps admission structurally equal to
+/// respond processing. The placeholder's recovery id is 1, the strict case: the
+/// legacy `v` computation adds `y_parity`, so validating with 0 would admit the one
+/// chain id whose `v` only overflows when the real signature draws parity 1.
+fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
     let placeholder = Signature::new(
         k256::ProjectivePoint::GENERATOR.to_affine(),
         k256::Scalar::ONE,
         1,
     );
-    sign_and_hash_transaction(unsigned_rlp, placeholder).map(|_| ())
+    sign_and_hash_transaction(unsigned_rlp, placeholder)?;
+    let eip1559 = is_eip1559(unsigned_rlp);
+    let body = if eip1559 {
+        &unsigned_rlp[1..]
+    } else {
+        unsigned_rlp
+    };
+    let fields = Rlp::new(body);
+    // The signature covers these exact bytes while Ethereum recovers the sender
+    // from the hash of what it decodes, so bytes after the list sign a hash
+    // Ethereum never computes.
+    anyhow::ensure!(
+        fields.payload_info()?.total() == body.len(),
+        "bytes after the transaction"
+    );
+    anyhow::ensure!(
+        fields.item_count()? == 9,
+        "transaction has {} fields, not 9",
+        fields.item_count()?
+    );
+    // Signing copies these fields as they are, so each must already be what
+    // Ethereum decodes for its type.
+    let (to_index, data_index) = if eip1559 {
+        uint_field(&fields, 0, 32)?; // chain id
+        uint_field(&fields, 1, 8)?; // nonce
+        let max_priority_fee = uint_field(&fields, 2, 32)?;
+        let max_fee = uint_field(&fields, 3, 32)?;
+        anyhow::ensure!(
+            (max_priority_fee.len(), max_priority_fee) <= (max_fee.len(), max_fee),
+            "max priority fee above max fee"
+        );
+        uint_field(&fields, 4, 8)?; // gas limit
+        uint_field(&fields, 6, 32)?; // value
+        validate_access_list(&fields.at(8)?)?;
+        (5, 7)
+    } else {
+        uint_field(&fields, 0, 8)?; // nonce
+        uint_field(&fields, 1, 32)?; // gas price
+        uint_field(&fields, 2, 8)?; // gas limit
+        uint_field(&fields, 4, 32)?; // value
+        uint_field(&fields, 6, 32)?; // chain id
+                                     // EIP-155 hashes r and s as empty strings; anything else signs another hash.
+        uint_field(&fields, 7, 0)?;
+        uint_field(&fields, 8, 0)?;
+        (3, 5)
+    };
+    // An empty `to` creates a contract, which extraction refuses, and Ethereum
+    // rejects any other length.
+    let to = string_field(&fields, to_index)?;
+    anyhow::ensure!(
+        to.len() == 20,
+        "`to` is {} bytes, not a 20-byte call target",
+        to.len()
+    );
+    string_field(&fields, data_index)
+}
+
+/// `Rlp::data` also returns a list's payload and accepts a one-byte string
+/// below 0x80 behind a prefix; Ethereum decodes neither as a string.
+fn string_field<'a>(fields: &Rlp<'a>, index: usize) -> anyhow::Result<&'a [u8]> {
+    let field = fields.at(index)?;
+    anyhow::ensure!(
+        field.is_data(),
+        "transaction field {index} is an RLP list, not a string"
+    );
+    let data = field.data()?;
+    anyhow::ensure!(
+        !(field.as_raw()[0] == 0x81 && data[0] < 0x80),
+        "transaction field {index} is not canonical RLP"
+    );
+    Ok(data)
+}
+
+/// An unsigned integer of at most `max_bytes` bytes, without leading zeros.
+fn uint_field<'a>(fields: &Rlp<'a>, index: usize, max_bytes: usize) -> anyhow::Result<&'a [u8]> {
+    let data = string_field(fields, index)?;
+    anyhow::ensure!(
+        data.first() != Some(&0),
+        "transaction field {index} has a leading zero"
+    );
+    anyhow::ensure!(
+        data.len() <= max_bytes,
+        "transaction field {index} has {} bytes, more than {max_bytes}",
+        data.len()
+    );
+    Ok(data)
+}
+
+/// A list of `[20-byte address, list of 32-byte storage keys]`.
+fn validate_access_list(access_list: &Rlp) -> anyhow::Result<()> {
+    anyhow::ensure!(access_list.is_list(), "access list is not an RLP list");
+    for i in 0..access_list.item_count()? {
+        let entry = access_list.at(i)?;
+        anyhow::ensure!(
+            entry.is_list() && entry.item_count()? == 2,
+            "access list entry {i} is not [address, storage keys]"
+        );
+        anyhow::ensure!(
+            string_field(&entry, 0)?.len() == 20,
+            "access list entry {i} has no 20-byte address"
+        );
+        let keys = entry.at(1)?;
+        anyhow::ensure!(
+            keys.is_list(),
+            "access list entry {i} storage keys are not an RLP list"
+        );
+        for k in 0..keys.item_count()? {
+            anyhow::ensure!(
+                string_field(&keys, k)?.len() == 32,
+                "access list entry {i} storage key {k} is not 32 bytes"
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn sign_and_hash_transaction(
@@ -306,19 +427,20 @@ pub fn sign_and_hash_transaction(
     if is_eip1559(unsigned_rlp) {
         sign_and_hash_eip1559_from_unsigned(unsigned_rlp, &r, &s, y_parity)
     } else {
-        // Extract chain_id from the unsigned RLP (it's the 7th field in legacy transactions)
-        // In legacy Ethereum transactions with EIP-155, there are 9 fields:
-        // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
-        // The chain_id is the 7th field (index 6, 0-based).
-        // We check for at least 9 fields to ensure chain_id is present.
-        let rlp = Rlp::new(unsigned_rlp);
-        let chain_id = if rlp.item_count().unwrap_or(0) >= 9 {
-            rlp.val_at::<u64>(6).ok()
-        } else {
-            None
-        };
+        let chain_id = transaction_chain_id(unsigned_rlp);
         sign_and_hash_legacy_from_unsigned(unsigned_rlp, chain_id, &r, &s, y_parity)
     }
+}
+
+/// The EIP-155 chain id of an unsigned EIP-1559 or legacy transaction.
+pub(crate) fn transaction_chain_id(unsigned_rlp: &[u8]) -> Option<u64> {
+    if let Some(body) = unsigned_rlp.strip_prefix(&[0x02]) {
+        return Rlp::new(body).val_at(0).ok();
+    }
+    // Legacy with EIP-155 has 9 fields:
+    // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
+    let rlp = Rlp::new(unsigned_rlp);
+    (rlp.item_count().ok()? >= 9).then(|| rlp.val_at(6).ok())?
 }
 
 fn is_eip1559(unsigned_rlp: &[u8]) -> bool {
@@ -478,7 +600,8 @@ mod derive_tests {
         let mpc_pk = hex::decode(mpc_key).unwrap();
         let mpc_pk = EncodedPoint::from_bytes(mpc_pk).unwrap();
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
-        let derivation_epsilon = derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
+        let derivation_epsilon =
+            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test").unwrap();
         let expected: Address = "0x083c8776b5e447e91bae43b7883a92a9bdb66d1d"
             .parse()
             .unwrap();
@@ -531,13 +654,33 @@ mod tests {
 
     fn legacy_tx(chain_id: u64) -> Vec<u8> {
         let mut rlp = super::EthereumTxRlp::new_list(9);
-        for _ in 0..6 {
+        // nonce, gas price, gas limit
+        for _ in 0..3 {
+            rlp.append_u64(0);
+        }
+        rlp.stream.append(&vec![0x11u8; 20]);
+        // value, data
+        for _ in 0..2 {
             rlp.append_u64(0);
         }
         rlp.append_u64(chain_id);
         rlp.append_u64(0);
         rlp.append_u64(0);
         rlp.into_vec()
+    }
+
+    #[test]
+    fn transaction_chain_id_reads_legacy_and_eip1559() {
+        assert_eq!(
+            super::transaction_chain_id(&legacy_tx(31_337)),
+            Some(31_337)
+        );
+        let eip1559 = TxEip1559 {
+            chain_id: 11_155_111,
+            ..Default::default()
+        };
+        let unsigned = eip1559.encoded_for_signing();
+        assert_eq!(super::transaction_chain_id(&unsigned), Some(11_155_111));
     }
 
     /// The negated signature verifies too, so it has to name the transaction a
@@ -590,6 +733,150 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_contract_creation() {
+        let eip1559 = |to| {
+            TxEip1559 {
+                chain_id: 1,
+                to,
+                ..Default::default()
+            }
+            .encoded_for_signing()
+        };
+        let call = TxKind::Call(alloy::primitives::Address::repeat_byte(0x11));
+        assert!(super::validate_unsigned_transaction(&eip1559(call)).is_ok());
+        assert!(super::validate_unsigned_transaction(&eip1559(TxKind::Create)).is_err());
+
+        // nonce, gas price, gas limit, empty `to`, value, data, then EIP-155 chain id 1
+        let mut legacy_create = super::EthereumTxRlp::new_list(9);
+        for field in [0, 0, 0, 0, 0, 0, 1, 0, 0] {
+            legacy_create.append_u64(field);
+        }
+        assert!(super::validate_unsigned_transaction(&legacy_tx(1)).is_ok());
+        assert!(super::validate_unsigned_transaction(&legacy_create.into_vec()).is_err());
+    }
+
+    /// Signing copies fields as they are, so admission must refuse every
+    /// encoding Ethereum would not decode as the field's type.
+    #[test]
+    fn validate_rejects_fields_ethereum_cannot_decode() {
+        let string = |bytes: &[u8]| rlp::encode(&bytes.to_vec()).to_vec();
+        let uint = |value: u64| rlp::encode(&value).to_vec();
+        let list = |items: &[Vec<u8>]| {
+            let mut stream = rlp::RlpStream::new_list(items.len());
+            for item in items {
+                stream.append_raw(item, 1);
+            }
+            stream.out().to_vec()
+        };
+        let encode = |eip1559: bool, fields: &[Vec<u8>]| {
+            let body = list(fields);
+            if eip1559 {
+                [&[2u8][..], &body].concat()
+            } else {
+                body
+            }
+        };
+        let to = string(&[0x11; 20]);
+        let data = string(&[1, 2]);
+        let pair = list(&[uint(1), uint(2)]);
+        // nonce, gas price, gas limit, to, value, data, chain id, r, s
+        let legacy = vec![
+            uint(0),
+            uint(1),
+            uint(21_000),
+            to.clone(),
+            uint(0),
+            data.clone(),
+            uint(1),
+            uint(0),
+            uint(0),
+        ];
+        // chain id, nonce, max priority fee, max fee, gas limit, to, value, data, access list
+        let access_list = list(&[list(&[string(&[0x22; 20]), list(&[string(&[0x33; 32])])])]);
+        let eip1559 = vec![
+            uint(1),
+            uint(0),
+            uint(1),
+            uint(2),
+            uint(21_000),
+            to,
+            uint(0),
+            data,
+            access_list,
+        ];
+        for (is_1559, valid) in [(false, &legacy), (true, &eip1559)] {
+            assert!(
+                super::validate_unsigned_transaction(&encode(is_1559, valid)).is_ok(),
+                "1559: {is_1559}"
+            );
+            let with = |index: usize, field: Vec<u8>| {
+                let mut fields = valid.clone();
+                fields[index] = field;
+                encode(is_1559, &fields)
+            };
+            let mut invalid = vec![
+                (
+                    "trailing byte".to_string(),
+                    [encode(is_1559, valid), vec![0]].concat(),
+                ),
+                (
+                    "ten fields".to_string(),
+                    encode(is_1559, &[valid.clone(), vec![uint(0)]].concat()),
+                ),
+            ];
+            for index in 0..9 {
+                invalid.push((format!("list in field {index}"), with(index, pair.clone())));
+            }
+            let (uints, data_index) = if is_1559 {
+                (vec![0, 1, 2, 3, 4, 6], 7)
+            } else {
+                (vec![0, 1, 2, 4, 6, 7, 8], 5)
+            };
+            for index in uints {
+                invalid.push((
+                    format!("leading zero in field {index}"),
+                    with(index, string(&[0, 1])),
+                ));
+            }
+            invalid.push((
+                "33-byte uint".to_string(),
+                with(if is_1559 { 6 } else { 4 }, string(&[1; 33])),
+            ));
+            invalid.push((
+                "9-byte gas limit".to_string(),
+                with(if is_1559 { 4 } else { 2 }, string(&[1; 9])),
+            ));
+            invalid.push((
+                "prefixed single byte".to_string(),
+                with(data_index, vec![0x81, 0x05]),
+            ));
+            if is_1559 {
+                invalid.push(("priority fee above max fee".to_string(), with(2, uint(3))));
+                invalid.push(("access list as string".to_string(), with(8, string(&[1]))));
+                invalid.push((
+                    "19-byte access list address".to_string(),
+                    with(8, list(&[list(&[string(&[0x22; 19]), list(&[])])])),
+                ));
+                invalid.push((
+                    "31-byte storage key".to_string(),
+                    with(
+                        8,
+                        list(&[list(&[string(&[0x22; 20]), list(&[string(&[0x33; 31])])])]),
+                    ),
+                ));
+            } else {
+                invalid.push(("nonzero r".to_string(), with(7, uint(1))));
+            }
+            for (case, tx) in invalid {
+                assert!(
+                    super::validate_unsigned_transaction(&tx).is_err(),
+                    "1559: {is_1559}, {case}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn validate_rejects_unsupported_target_chain() {
         use super::{SignBidirectionalEvent, SignBidirectionalEventExt as _};
         use crate::protocol::Chain;
@@ -607,7 +894,7 @@ mod tests {
             chain: Chain::Solana,
             chain_ctx: None,
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
         };
         assert!(event(Chain::Ethereum).validate().is_ok());
         assert!(event(Chain::Solana).validate().is_err());

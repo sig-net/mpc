@@ -59,12 +59,14 @@ impl AttestationMetadata {
 }
 
 /// Metadata carried by Midnight's canonical `RespondBidirectionalEvent`.
-/// The output itself travels through the cache; its length and digest travel here.
+/// The output itself travels through the cache; its length, hash and the digest
+/// over them travel here, so the event alone determines the signed digest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PublishedAttestation {
     pub block_height: u64,
     pub outcome_kind: AttestationOutcomeKind,
     pub serialized_output_length: u64,
+    pub output_hash: [u8; 32],
     pub digest: [u8; 32],
 }
 

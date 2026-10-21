@@ -3,7 +3,7 @@
 
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -18,6 +18,7 @@ use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
 use crate::intent_gen::{IntentGen, IntentRequest, WireAttestation, WirePoint, WireSignature};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
+use crate::wallet_snapshot::WalletSnapshotStore;
 
 const RESPOND: &str = "respond";
 const RESPOND_BIDIRECTIONAL: &str = "respondBidirectional";
@@ -40,6 +41,8 @@ pub(crate) struct PinnedState {
 pub(crate) trait IntentClient: Send + Sync {
     async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>>;
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<String>;
+    /// Keeps a due wallet snapshot; never fails a publish.
+    async fn refresh_snapshot(&self) {}
 }
 
 #[async_trait]
@@ -51,6 +54,20 @@ impl IntentClient for IntentGen {
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
         IntentGen::submit(self, intent).await
     }
+
+    async fn refresh_snapshot(&self) {
+        IntentGen::refresh_snapshot(self).await;
+    }
+}
+
+/// Whether this node still waits for the response an action carries. A publish waits
+/// behind the flow lock for every attempt queued ahead of it, each one or more proofs
+/// long, so another node's response can land in the meantime; the publisher asks again
+/// once its turn comes and before it submits, and drops a response no longer awaited
+/// instead of proving, paying for and posting it a second time.
+#[async_trait]
+pub trait ResponseAwaiter: Send + Sync {
+    async fn still_awaited(&self, action: &PublishAction) -> bool;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -84,6 +101,7 @@ pub struct MidnightPublisher {
     output_store: Option<Arc<dyn OutputStore>>,
     central_address: MidnightAddress,
     telemetry: Arc<dyn PublisherTelemetry>,
+    awaiter: Arc<dyn ResponseAwaiter>,
     /// One funding wallet and one DUST UTXO mean build-to-submit is one serial flow.
     flow: tokio::sync::Mutex<()>,
 }
@@ -94,6 +112,8 @@ impl MidnightPublisher {
     pub async fn connect(
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
+        awaiter: Arc<dyn ResponseAwaiter>,
+        snapshots: Option<Arc<dyn WalletSnapshotStore>>,
     ) -> anyhow::Result<Self> {
         config.publisher.validate_output_storage()?;
         let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
@@ -103,7 +123,8 @@ impl MidnightPublisher {
             config.central_address,
         )?
         .map(|store| Arc::new(store) as Arc<dyn OutputStore>);
-        let intent_gen = Arc::new(IntentGen::spawn(config, rpc.network_id()).await?);
+        let intent_gen =
+            Arc::new(IntentGen::spawn_with_snapshots(config, rpc.network_id(), snapshots).await?);
         Ok(Self::new(
             &config.publisher,
             config.central_address,
@@ -111,6 +132,7 @@ impl MidnightPublisher {
             intent_gen,
             output_store,
             telemetry,
+            awaiter,
         ))
     }
 
@@ -121,6 +143,7 @@ impl MidnightPublisher {
         client: Arc<dyn IntentClient>,
         output_store: Option<Arc<dyn OutputStore>>,
         telemetry: Arc<dyn PublisherTelemetry>,
+        awaiter: Arc<dyn ResponseAwaiter>,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -129,8 +152,22 @@ impl MidnightPublisher {
             client,
             output_store,
             telemetry,
+            awaiter,
             flow: tokio::sync::Mutex::new(()),
         }
+    }
+
+    async fn still_awaited(&self, action: &PublishAction, stage: &'static str) -> bool {
+        if self.awaiter.still_awaited(action).await {
+            return true;
+        }
+        tracing::info!(
+            sign_id = ?action.request.id,
+            stage,
+            elapsed = ?action.timestamp.elapsed(),
+            "midnight: response no longer awaited; dropping publish"
+        );
+        false
     }
 
     /// The contract state and ledger parameters at one finalized hash.
@@ -181,7 +218,14 @@ impl ChainPublisher for MidnightPublisher {
                 );
             }
         }
+        let queued = Instant::now();
         let _flow = self.flow.lock().await;
+        let queued_for = queued.elapsed();
+        if !self.still_awaited(action, "queued").await {
+            return Ok(());
+        }
+        // Before the reads that fix this intent's TTL, so a slow snapshot never shortens it.
+        self.client.refresh_snapshot().await;
         let central_address = self.central_address.to_hex();
         let sign_id = action.request.id;
         tracing::info!(
@@ -190,6 +234,7 @@ impl ChainPublisher for MidnightPublisher {
             central = %central_address,
             request_id = %hex::encode(call.request_id),
             elapsed = ?action.timestamp.elapsed(),
+            ?queued_for,
             "midnight: publishing signature"
         );
 
@@ -206,14 +251,23 @@ impl ChainPublisher for MidnightPublisher {
             ledger_parameters: hex::encode(&chain.ledger_parameters),
             ttl_seconds: ttl_seconds(&self.config, current_unix_timestamp()),
         };
+        let building = Instant::now();
         let bytes = self.client.build(&request).await?;
+        let build_took = building.elapsed();
+        if !self.still_awaited(action, "built").await {
+            return Ok(());
+        }
 
+        // Both proofs run inside submit, so its time includes the proof server's queue.
+        let submitting = Instant::now();
         let receipt = self.client.submit(&bytes).await.with_context(|| {
             format!(
-                "submitting the midnight respond intent built over the chain at {}",
-                chain.at_hash
+                "submitting the midnight respond intent built over the chain at {} failed after {:?}",
+                chain.at_hash,
+                submitting.elapsed()
             )
         })?;
+        let submit_took = submitting.elapsed();
 
         tracing::info!(
             ?sign_id,
@@ -221,6 +275,8 @@ impl ChainPublisher for MidnightPublisher {
             at_hash = %chain.at_hash,
             receipt = %receipt,
             elapsed = ?action.timestamp.elapsed(),
+            ?build_took,
+            ?submit_took,
             "midnight: published respond successfully"
         );
         self.telemetry.record_publish_metrics(action);
@@ -242,13 +298,17 @@ impl RecoveringMidnightPublisher {
     pub fn start(
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
+        awaiter: Arc<dyn ResponseAwaiter>,
+        snapshots: Option<Arc<dyn WalletSnapshotStore>>,
     ) -> anyhow::Result<Self> {
         config.validate()?;
         let config = config.clone();
         Ok(Self::spawn(move || {
             let config = config.clone();
             let telemetry = telemetry.clone();
-            async move { MidnightPublisher::connect(&config, telemetry).await }
+            let awaiter = awaiter.clone();
+            let snapshots = snapshots.clone();
+            async move { MidnightPublisher::connect(&config, telemetry, awaiter, snapshots).await }
         }))
     }
 
@@ -336,6 +396,7 @@ fn respond_call(action: &PublishAction) -> anyhow::Result<RespondCall> {
                     block_height: attestation.block_height.to_string(),
                     output_kind: attestation.outcome_kind as u8,
                     serialized_output_length: attestation.serialized_output_length.to_string(),
+                    output_hash: hex::encode(attestation.output_hash),
                     digest: hex::encode(attestation.digest),
                 }),
                 request_id,
@@ -499,6 +560,9 @@ mod tests {
         submitted: std::sync::atomic::AtomicUsize,
         /// What `submit` refuses with, standing in for the child's own verdict.
         submit_failure: Option<&'static str>,
+        refreshes: std::sync::atomic::AtomicUsize,
+        /// `refreshes` as the first build saw it.
+        refreshes_before_build: std::sync::OnceLock<usize>,
     }
 
     impl StubClient {
@@ -532,9 +596,17 @@ mod tests {
     #[async_trait]
     impl IntentClient for StubClient {
         async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
+            let _ = self
+                .refreshes_before_build
+                .set(self.refreshes.load(std::sync::atomic::Ordering::SeqCst));
             anyhow::ensure!(!self.refuse_build, "{BUILD_REFUSAL}");
             self.built.lock().unwrap().push(request.clone());
             Ok(GRANTED_INTENT.to_vec())
+        }
+
+        async fn refresh_snapshot(&self) {
+            self.refreshes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
 
         async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
@@ -606,14 +678,7 @@ mod tests {
     }
 
     fn publisher(reads: Arc<dyn PinnedReads>, client: Arc<dyn IntentClient>) -> MidnightPublisher {
-        MidnightPublisher::new(
-            &config(),
-            MidnightAddress::from_hex(CENTRAL).expect("CENTRAL is a 32-byte hex address"),
-            reads,
-            client,
-            Some(Arc::new(StubOutputStore::default())),
-            Arc::new(NoopPublisherTelemetry),
-        )
+        awaiting_publisher(reads, client, ScriptedAwaiter::new(&[]))
     }
 
     #[derive(Debug, PartialEq)]
@@ -1259,6 +1324,166 @@ mod tests {
         assert_eq!(client.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
+    /// Answers each ask from a script, then `true`, counting the asks.
+    struct ScriptedAwaiter {
+        answers: Mutex<std::collections::VecDeque<bool>>,
+        asks: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedAwaiter {
+        fn new(answers: &[bool]) -> Arc<Self> {
+            Arc::new(Self {
+                answers: Mutex::new(answers.iter().copied().collect()),
+                asks: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+
+        fn asks(&self) -> usize {
+            self.asks.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ResponseAwaiter for ScriptedAwaiter {
+        async fn still_awaited(&self, _action: &PublishAction) -> bool {
+            self.asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.answers.lock().unwrap().pop_front().unwrap_or(true)
+        }
+    }
+
+    fn awaiting_publisher(
+        reads: Arc<dyn PinnedReads>,
+        client: Arc<dyn IntentClient>,
+        awaiter: Arc<ScriptedAwaiter>,
+    ) -> MidnightPublisher {
+        MidnightPublisher::new(
+            &config(),
+            MidnightAddress::from_hex(CENTRAL).expect("CENTRAL is a 32-byte hex address"),
+            reads,
+            client,
+            Some(Arc::new(StubOutputStore::default())),
+            Arc::new(NoopPublisherTelemetry),
+            awaiter,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_response_observed_while_queued_is_dropped_before_any_read() {
+        let reads = StubReads::new();
+        let client = StubClient::new();
+        let awaiter = ScriptedAwaiter::new(&[false]);
+        let publisher = awaiting_publisher(reads.clone(), client.clone(), awaiter.clone());
+
+        publisher
+            .publish_signature(&respond_action())
+            .await
+            .expect("a response another node landed settles this publish");
+
+        assert_eq!(awaiter.asks(), 1);
+        assert!(
+            reads.reads().is_empty(),
+            "nothing is read for a dropped publish"
+        );
+        assert!(
+            client.built().is_empty(),
+            "nothing is built for a dropped publish"
+        );
+        assert_eq!(client.submissions(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_response_observed_during_the_build_is_dropped_before_submit() {
+        let client = StubClient::new();
+        let awaiter = ScriptedAwaiter::new(&[true, false]);
+        let publisher = awaiting_publisher(StubReads::new(), client.clone(), awaiter.clone());
+
+        publisher
+            .publish_signature(&respond_action())
+            .await
+            .expect("a response another node landed settles this publish");
+
+        assert_eq!(awaiter.asks(), 2);
+        assert_eq!(client.built().len(), 1);
+        assert_eq!(
+            client.submissions(),
+            0,
+            "an answered response is not paid for"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_still_awaited_is_published() {
+        let client = StubClient::new();
+        let awaiter = ScriptedAwaiter::new(&[]);
+        let publisher = awaiting_publisher(StubReads::new(), client.clone(), awaiter.clone());
+
+        publisher
+            .publish_signature(&respond_action())
+            .await
+            .expect("the stub client grants and accepts");
+
+        assert_eq!(awaiter.asks(), 2, "asked once queued and once built");
+        assert_eq!(client.submissions(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_publish_refreshes_the_wallet_snapshot_before_its_intent_s_ttl_starts() {
+        let client = StubClient::new();
+        let publisher =
+            awaiting_publisher(StubReads::new(), client.clone(), ScriptedAwaiter::new(&[]));
+
+        publisher
+            .publish_signature(&respond_action())
+            .await
+            .expect("the stub client grants and accepts");
+
+        assert_eq!(client.refreshes_before_build.get(), Some(&1));
+        assert_eq!(client.submissions(), 1);
+    }
+
+    /// The publish queued behind another asks only once its turn comes, so a response
+    /// that lands while it waits is not built or paid for.
+    #[tokio::test]
+    async fn a_queued_publish_asks_after_the_flow_it_waited_for() {
+        let reads = StubReads::new();
+        let client = Arc::new(BlockingClient::default());
+        // First publish: queued, built. Second publish: answered while it waited.
+        let awaiter = ScriptedAwaiter::new(&[true, true, false]);
+        let publisher = Arc::new(awaiting_publisher(
+            reads.clone(),
+            client.clone(),
+            awaiter.clone(),
+        ));
+        let first_entered = client.entered.notified();
+
+        let first = tokio::spawn({
+            let publisher = publisher.clone();
+            async move { publisher.publish_signature(&respond_action()).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), first_entered)
+            .await
+            .expect("the first publish reaches submit");
+        let second = tokio::spawn({
+            let publisher = publisher.clone();
+            async move { publisher.publish_signature(&respond_action()).await }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(awaiter.asks(), 2, "the queued publish has not asked yet");
+
+        client.release.notify_one();
+        first.await.unwrap().expect("the first publish succeeds");
+        second
+            .await
+            .unwrap()
+            .expect("the second publish is settled by the landed response");
+        assert_eq!(awaiter.asks(), 3);
+        assert_eq!(
+            client.attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the first publish reached submit"
+        );
+    }
+
     #[tokio::test]
     async fn a_submit_that_fails_must_not_be_reported_as_a_published_signature() {
         // An `Ok` here settles the signature as answered and nothing retries it.
@@ -1272,6 +1497,10 @@ mod tests {
         assert!(
             format!("{err:#}").contains("no spendable dust"),
             "got: {err:#}"
+        );
+        assert!(
+            format!("{err:#}").contains("failed after"),
+            "a failed submit says how long it ran: {err:#}"
         );
         assert_eq!(client.submissions(), 0);
     }
@@ -1354,6 +1583,9 @@ mod tests {
                 block_height: "42".to_string(),
                 output_kind: 0,
                 serialized_output_length: "32".to_string(),
+                output_hash: hex::encode(mpc_compact_hashing::compute_attested_output_hash(
+                    &[0xab; 32]
+                )),
                 digest: hex::encode(
                     mpc_compact_hashing::compute_attestation_hash(
                         &REQUEST_ID,
@@ -1426,9 +1658,14 @@ mod tests {
             indexer: Default::default(),
         };
 
-        let error = RecoveringMidnightPublisher::start(&config, Arc::new(NoopPublisherTelemetry))
-            .err()
-            .expect("an ftp node_url is refused before any connection attempt");
+        let error = RecoveringMidnightPublisher::start(
+            &config,
+            Arc::new(NoopPublisherTelemetry),
+            ScriptedAwaiter::new(&[]),
+            None,
+        )
+        .err()
+        .expect("an ftp node_url is refused before any connection attempt");
         assert!(format!("{error:#}").contains("node_url"), "{error:#}");
     }
 }

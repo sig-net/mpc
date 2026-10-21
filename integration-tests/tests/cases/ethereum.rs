@@ -143,7 +143,7 @@ async fn test_signature_ethereum() -> Result<()> {
         .ok_or_else(|| anyhow!("invalid network public key"))?;
 
     let sender_hex = format!("0x{}", hex::encode(requester));
-    let epsilon = derive_epsilon_eth(LATEST_MPC_KEY_VERSION, &sender_hex, path);
+    let epsilon = derive_epsilon_eth(LATEST_MPC_KEY_VERSION, &sender_hex, path)?;
     let user_affine = derive_key(network_affine, epsilon);
     let user_public_key = K256PublicKey::from_affine(user_affine)
         .map_err(|_| anyhow!("invalid derived public key"))?;
