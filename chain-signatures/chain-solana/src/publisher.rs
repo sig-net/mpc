@@ -104,7 +104,11 @@ fn sim_tx_error(sim: &RpcSimulateTransactionResult) -> Option<&TransactionError>
 /// Determine the verdict for an on-chain transaction error.
 fn on_chain(tx: &TransactionError) -> Verdict {
     match tx {
-        TransactionError::InstructionError(..) => Verdict::Terminal,
+        // deterministic failures a fresh attempt cannot change; everything
+        // else (blockhash expiry, contention) recovers on retry
+        TransactionError::InstructionError(..)
+        | TransactionError::InsufficientFundsForFee
+        | TransactionError::UnsupportedVersion => Verdict::Terminal,
         _ => Verdict::Retryable,
     }
 }
@@ -240,6 +244,17 @@ mod tests {
             TransactionError::BlockhashNotFound,
         ));
         assert!(is_retryable(&err));
+    }
+
+    #[test]
+    fn deterministic_on_chain_failures_are_terminal() {
+        for tx in [
+            TransactionError::InsufficientFundsForFee,
+            TransactionError::UnsupportedVersion,
+        ] {
+            let err = anchor_wrapped(ClientErrorKind::TransactionError(tx.clone()));
+            assert!(!is_retryable(&err), "{tx:?}");
+        }
     }
 
     #[test]
