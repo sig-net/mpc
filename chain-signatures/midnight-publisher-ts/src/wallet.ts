@@ -30,10 +30,13 @@ export type { BalancingRecipe };
 
 export interface Landed {
   readonly txId: string;
+  /** Spendable DUST in SPECK, read before the spend; absent if the wallet could not say. */
+  readonly dustBalance?: bigint;
 }
 
 export interface FundingWallet {
   requireReady(timeoutMs: number): Promise<void>;
+  dustBalance(): Promise<bigint | undefined>;
   balanceTx(tx: UnboundTransaction): Promise<BalancingRecipe>;
   finalizeTx(recipe: BalancingRecipe): Promise<FinalizedTransaction>;
   submitTx(tx: FinalizedTransaction): Promise<Landed>;
@@ -48,6 +51,21 @@ export interface FundingWallet {
 export const RECIPE_TTL_MS = 5 * 60 * 1000;
 
 class DustReadinessTimeoutError extends Error {}
+
+// Short: the figure only feeds the node's metric.
+const DUST_BALANCE_READ_MS = 1_000;
+
+// Never throws: a post must not fail over its balance.
+async function readDustBalance(facade: WalletFacade): Promise<bigint | undefined> {
+  try {
+    const state = await firstValueFrom(
+      facade.dust.state.pipe(timeout({ first: DUST_BALANCE_READ_MS, with: () => of(undefined) })),
+    );
+    return state?.progress.isStrictlyComplete() ? state.balance(new Date()) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // `initialiseWalletFacade`'s facade with each sub-wallet restored rather than started empty.
 // Keep the configuration in step with it: only the wallet constructors may differ.
@@ -237,6 +255,7 @@ async function openFacade(
         );
       }
     },
+    dustBalance: () => readDustBalance(facade),
     async balanceTx(tx) {
       const secretKeys = {
         shieldedSecretKeys: keys.shieldedSecretKeys,

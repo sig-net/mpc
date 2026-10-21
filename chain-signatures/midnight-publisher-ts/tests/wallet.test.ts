@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
 import { deriveAccountKeys, type WalletFacade } from "@sig-net/midnight-contract-deploy";
-import { concat, of, Subject } from "rxjs";
+import { BehaviorSubject, concat, of, Subject } from "rxjs";
 
 const sdk = vi.hoisted(() => {
   // Every restored sub-wallet's `stop`, in restore order.
@@ -55,6 +55,7 @@ interface DustStateStub {
   readonly progress: {
     readonly isStrictlyComplete: () => boolean;
   };
+  readonly balance?: (time: Date) => bigint;
 }
 
 const syncProgress = (appliedIndex: bigint, highestIndex: bigint) => ({
@@ -167,6 +168,33 @@ describe("openFundingWallet", () => {
     expect(complete.progress.isStrictlyComplete).toHaveBeenCalledOnce();
     expect(dustState.observed).toBe(false);
     expect(facade.stop).not.toHaveBeenCalled();
+  });
+
+  it("reads the DUST balance only from a synced wallet", async () => {
+    const dustState = new BehaviorSubject<DustStateStub>({
+      progress: { isStrictlyComplete: () => false },
+      balance: () => 7n,
+    });
+    sdk.initialiseWalletFacade.mockResolvedValueOnce(stubFacade(dustState));
+    const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
+
+    await expect(wallet.dustBalance()).resolves.toBeUndefined();
+
+    dustState.next({ progress: { isStrictlyComplete: () => true }, balance: () => 4_210n });
+    await expect(wallet.dustBalance()).resolves.toBe(4_210n);
+  });
+
+  it("gives up on a DUST balance the wallet state never emits", async () => {
+    vi.useFakeTimers();
+    const dustState = new Subject<DustStateStub>();
+    sdk.initialiseWalletFacade.mockResolvedValueOnce(stubFacade(dustState));
+    const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
+
+    const balance = wallet.dustBalance();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(balance).resolves.toBeUndefined();
+    expect(dustState.observed).toBe(false);
   });
 
   it("submits through the facade, which tracks the pending transaction, and stops it on close", async () => {
