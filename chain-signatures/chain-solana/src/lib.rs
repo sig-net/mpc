@@ -14,3 +14,4 @@ pub use anchor_lang::prelude::Pubkey;
 pub use client::{SolanaCatchupBlock, SolanaClient};
 pub use config::{SolConfig, SolIndexerConfig};
 pub use indexer::SolanaIndexer;
+pub use solana_sdk::signer::keypair::Keypair;

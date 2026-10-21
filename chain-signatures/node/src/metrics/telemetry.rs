@@ -6,6 +6,7 @@ use mpc_utils::time::unix_elapsed;
 
 use super::{
     indexers::{BIDIRECTIONAL_EXTRACTION_FAILURES, LATEST_BLOCK_NUMBER},
+    publishers::{FUNDING_WALLET_BALANCE, PUBLISH_REFUSALS},
     requests::{record_indexing_step_reached, record_request_latency_since, SignRequestStep},
 };
 
@@ -52,6 +53,18 @@ impl PublisherTelemetry for NodeTelemetry {
             action.timestamp,
         );
     }
+
+    fn funding_wallet_observed(&self, balance: f64) {
+        FUNDING_WALLET_BALANCE
+            .with_label_values(&[self.chain.as_str()])
+            .set(balance);
+    }
+
+    fn publish_refused(&self, code: &str) {
+        PUBLISH_REFUSALS
+            .with_label_values(&[self.chain.as_str(), code])
+            .inc();
+    }
 }
 
 impl ChainTelemetry for NodeTelemetry {
@@ -91,5 +104,31 @@ impl ChainTelemetry for NodeTelemetry {
         BIDIRECTIONAL_EXTRACTION_FAILURES
             .with_label_values(&[self.chain.as_str(), kind.as_str()])
             .inc();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn funding_wallet_balance_and_publish_refusals_are_labelled_by_chain() {
+        let telemetry = NodeTelemetry::new(Chain::Midnight);
+        let chain = Chain::Midnight.as_str();
+
+        telemetry.funding_wallet_observed(4.21);
+        telemetry.publish_refused("wallet_unfunded");
+        telemetry.publish_refused("wallet_unfunded");
+
+        assert_eq!(
+            FUNDING_WALLET_BALANCE.with_label_values(&[chain]).get(),
+            4.21
+        );
+        assert_eq!(
+            PUBLISH_REFUSALS
+                .with_label_values(&[chain, "wallet_unfunded"])
+                .get(),
+            2.0
+        );
     }
 }

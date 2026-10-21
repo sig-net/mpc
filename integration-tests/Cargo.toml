@@ -8,7 +8,7 @@ publish = false
 [dependencies]
 alloy = { workspace = true, features = ["provider-anvil-api"] }
 anyhow.workspace = true
-async-process = "1"
+async-process = "2"
 async-trait = "0.1"
 backon.workspace = true
 bollard = "0.21"
@@ -88,7 +88,7 @@ test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [build-dependencies]
 anyhow.workspace = true
-async-process = "1"
+async-process = "2"
 tokio.workspace = true
 
 
