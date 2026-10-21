@@ -262,9 +262,12 @@ before the contract upgraded to this library.
   processes final blocks faster than the chains produce them, so it
   reaches the head from wherever it starts.
 * History. A node can look up any final target chain transaction and its
-  receipt by transaction ID, however old. Some clients keep a bounded
-  transaction index by default, so the providers the nodes use must serve
-  the full history.
+  receipt by transaction ID, however old, and recover its output (Section
+  7.5.2.2). Some clients keep a bounded transaction index by default, so
+  the providers the nodes use must serve the full history. On EVM the
+  output is recovered by re-executing the transaction on its parent
+  block's state, which full nodes prune, so the providers must keep
+  archive state.
 * One network per chain id. A chain id names a chain family, e.g., `eip155:1`
   for every Ethereum network, and an MPC deployment watches one network
   per family. So within a deployment an id names one network, and no two
