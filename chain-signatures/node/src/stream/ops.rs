@@ -6,8 +6,9 @@ use crate::backlog::{AnyProgress, Bidirectional, Executing, Final, Initial, Sign
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
-    claims_attestation_key, is_failed_execution_response, is_failed_output,
-    published_midnight_signing_args, published_output_payload, published_output_signing_args,
+    claims_attestation_key, is_failed_execution_response, published_failure,
+    published_midnight_payload, published_midnight_signing_args, published_output_payload,
+    published_output_signing_args,
 };
 use crate::sign_bidirectional::{
     transaction_chain_id, BidirectionalProgress, SignBidirectionalEventExt, SignStatus,
@@ -300,26 +301,31 @@ pub(crate) async fn process_respond_bidirectional_event(
         }
     };
 
-    if source_chain == Chain::Midnight {
-        let expected = mpc_chain_midnight::validate_attestation_response(entry.request())?;
-        anyhow::ensure!(
-            event.attestation == Some(expected),
-            "Midnight event metadata differs from the signed response",
-        );
-    }
-    match (&event.output, &entry.request().kind) {
-        // Check the response against the output in the event, not this node's own: then every
-        // node removes the request on this event, even one that computed a different output.
-        (Some(output), SignKind::RespondBidirectional(own))
-            if source_chain != Chain::Midnight && *output != own.output =>
-        {
-            tracing::warn!(?sign_id, "published output differs from this node's");
-            let payload = published_output_payload(source_chain, &event.request_id, output)?;
-            let epsilon = entry.request().args.epsilon;
-            mpc_crypto::verify_signature(root_pk, epsilon, payload, &event.signature)
+    // Check the response the event publishes, not this node's own: then every node removes the
+    // request on this event, whatever it computed itself.
+    let payload = if source_chain == Chain::Midnight {
+        let published = event
+            .attestation
+            .as_ref()
+            .context("Midnight response lacks attestation metadata")?;
+        Some(published_midnight_payload(&event.request_id, published)?)
+    } else {
+        event
+            .output
+            .as_deref()
+            .map(|output| published_output_payload(source_chain, &event.request_id, output))
+            .transpose()?
+    };
+    match payload {
+        Some(payload) => {
+            let request = entry.request();
+            if payload != request.args.payload {
+                tracing::warn!(?sign_id, "published response differs from this node's");
+            }
+            mpc_crypto::verify_signature(root_pk, request.args.epsilon, payload, &event.signature)
                 .context("respond event carried invalid signature")?;
         }
-        _ => entry.verify_signature(root_pk, &event.signature)?,
+        None => entry.verify_signature(root_pk, &event.signature)?,
     }
 
     // The whole round trip, measured against when the initial request was
@@ -330,18 +336,16 @@ pub(crate) async fn process_respond_bidirectional_event(
     if let SignKind::RespondBidirectional(response) = &entry.request.kind {
         if let Some(origin_indexed_at) = response.origin_indexed_at {
             match unix_elapsed_checked(origin_indexed_at) {
-                Some(elapsed) => {
-                    record_request_latency(
-                        source_chain,
-                        SignRequestStep::BidirectionalTotal,
-                        execution_status(event.output.as_deref().map_or_else(
-                            || is_failed_execution_response(response),
-                            is_failed_output,
-                        )),
-                        RequestKind::RespondBidirectional,
-                        elapsed,
-                    )
-                }
+                Some(elapsed) => record_request_latency(
+                    source_chain,
+                    SignRequestStep::BidirectionalTotal,
+                    execution_status(
+                        published_failure(&event)
+                            .unwrap_or_else(|| is_failed_execution_response(response)),
+                    ),
+                    RequestKind::RespondBidirectional,
+                    elapsed,
+                ),
                 None => tracing::warn!(
                     ?sign_id,
                     origin_indexed_at,
