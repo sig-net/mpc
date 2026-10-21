@@ -8,6 +8,8 @@ use std::{
     str::FromStr,
 };
 
+pub use mpc_contract::primitives::ThresholdVotes;
+
 type ParticipantId = u32;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,49 +155,10 @@ impl Participants {
         self.find(account_id).map(|(participant, _)| participant)
     }
 
-    pub fn find_participant_info(&self, account_id: &AccountId) -> Option<&ParticipantInfo> {
-        self.find(account_id).map(|(_, info)| info)
-    }
-
     pub fn contains_account_id(&self, account_id: &AccountId) -> bool {
         self.participants
             .values()
             .any(|participant_info| participant_info.account_id == *account_id)
-    }
-
-    pub fn account_ids(&self) -> Vec<&AccountId> {
-        self.participants
-            .values()
-            .map(|participant_info| &participant_info.account_id)
-            .collect()
-    }
-
-    pub fn and(&self, other: &Self) -> Self {
-        let mut participants = self.participants.clone();
-        for (participant, info) in &other.participants {
-            participants.insert(*participant, info.clone());
-        }
-        Participants { participants }
-    }
-
-    pub fn intersection(&self, other: &[&[Participant]]) -> Self {
-        let mut intersect = BTreeMap::new();
-        let other = other
-            .iter()
-            .map(|participants| participants.iter().cloned().collect::<HashSet<_>>())
-            .collect::<Vec<_>>();
-
-        'outer: for (participant, info) in &self.participants {
-            for participants in &other {
-                if !participants.contains(participant) {
-                    continue 'outer;
-                }
-            }
-            intersect.insert(*participant, info.clone());
-        }
-        Participants {
-            participants: intersect,
-        }
     }
 
     pub fn clear(&mut self) {
@@ -233,6 +196,17 @@ pub struct CandidateInfo {
     pub sign_pk: near_crypto::PublicKey,
 }
 
+impl From<mpc_contract::primitives::CandidateInfo> for CandidateInfo {
+    fn from(candidate_info: mpc_contract::primitives::CandidateInfo) -> Self {
+        Self {
+            account_id: AccountId::from_str(candidate_info.account_id.as_ref()).unwrap(),
+            url: candidate_info.url,
+            cipher_pk: hpke::PublicKey::from_bytes(&candidate_info.cipher_pk),
+            sign_pk: BorshDeserialize::try_from_slice(candidate_info.sign_pk.as_bytes()).unwrap(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Candidates {
     pub candidates: BTreeMap<AccountId, CandidateInfo>,
@@ -254,14 +228,10 @@ impl Candidates {
     pub fn iter(&self) -> impl Iterator<Item = (&AccountId, &CandidateInfo)> {
         self.candidates.iter()
     }
-
-    pub fn find_candidate(&self, account_id: &AccountId) -> Option<&CandidateInfo> {
-        self.candidates.get(account_id)
-    }
 }
 
-impl From<mpc_contract::primitives::Candidates> for Candidates {
-    fn from(contract_candidates: mpc_contract::primitives::Candidates) -> Self {
+impl From<mpc_contract::primitives::CandidatesView> for Candidates {
+    fn from(contract_candidates: mpc_contract::primitives::CandidatesView) -> Self {
         Candidates {
             candidates: contract_candidates
                 .candidates
@@ -269,16 +239,7 @@ impl From<mpc_contract::primitives::Candidates> for Candidates {
                 .map(|(account_id, candidate_info)| {
                     (
                         AccountId::from_str(account_id.as_ref()).unwrap(),
-                        CandidateInfo {
-                            account_id: AccountId::from_str(candidate_info.account_id.as_ref())
-                                .unwrap(),
-                            url: candidate_info.url,
-                            cipher_pk: hpke::PublicKey::from_bytes(&candidate_info.cipher_pk),
-                            sign_pk: BorshDeserialize::try_from_slice(
-                                candidate_info.sign_pk.as_bytes(),
-                            )
-                            .unwrap(),
-                        },
+                        candidate_info.into(),
                     )
                 })
                 .collect(),
@@ -365,19 +326,6 @@ pub fn intersect<T: Copy + Hash + Eq>(sets: &[&[T]]) -> HashSet<T> {
     } else {
         HashSet::new()
     }
-}
-
-pub fn intersect_hash<T: Clone + Hash + Eq>(sets: &[&HashSet<T>]) -> HashSet<T> {
-    let mut sets = sets.iter();
-    let Some(&first) = sets.next() else {
-        return HashSet::new();
-    };
-    let mut intersection = first.clone();
-    for set in sets {
-        intersection.retain(|item| set.contains(item));
-    }
-
-    intersection
 }
 
 pub fn intersect_vec<T: Copy + Hash + Eq>(sets: &[&[T]]) -> Vec<T> {

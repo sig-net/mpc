@@ -1,0 +1,14 @@
+[package]
+name = "mpc-midnight-respond-codec"
+edition = "2021"
+version.workspace = true
+description = "Midnight respond attestation for executed EVM transactions"
+publish = false
+
+[dependencies]
+alloy.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+signet-midnight-serde.workspace = true

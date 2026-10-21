@@ -8,7 +8,6 @@ use alloy::primitives::Address;
 use anyhow::Context as _;
 use cait_sith::FullSignature;
 use k256::ecdsa::VerifyingKey;
-use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
 use mpc_contract::errors::SignError;
@@ -20,7 +19,6 @@ use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_fetch::ops::Function;
-use near_workspaces::types::Gas;
 use near_workspaces::types::NearToken;
 use near_workspaces::Account;
 use rand::Rng;
@@ -53,7 +51,7 @@ pub async fn request_batch_random_sign(
             .args_json(serde_json::json!({
                 "request": request,
             }))
-            .gas(Gas::from_tgas(50))
+            .gas(near_primitives::types::Gas::from_teragas(50))
             .deposit(NearToken::from_yoctonear(1));
         tx = tx.call(function);
     }
@@ -87,7 +85,7 @@ pub async fn request_batch_duplicate_sign(
             .args_json(serde_json::json!({
                 "request": request,
             }))
-            .gas(Gas::from_tgas(50))
+            .gas(near_primitives::types::Gas::from_teragas(50))
             .deposit(NearToken::from_yoctonear(1));
         tx = tx.call(function);
     }
@@ -105,7 +103,7 @@ pub async fn validate_signature(
 ) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
-    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, account_id, "test");
+    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, account_id, "test")?;
     let user_pk = derive_key(mpc_pk, epsilon);
     signature
         .verify(
@@ -147,11 +145,6 @@ pub async fn batch_duplicate_signature_production(nodes: &Cluster) -> anyhow::Re
     Ok(())
 }
 
-/// Get the x coordinate of a point, as a scalar
-pub fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
-    <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
-}
-
 pub fn recover_eth_address(
     msg_hash: &[u8; 32],
     signature_bytes: &[u8; 64],
@@ -180,7 +173,8 @@ mod tests {
     use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
-    use super::{public_key_to_address, recover_eth_address, x_coordinate};
+    use super::{public_key_to_address, recover_eth_address};
+    use mpc_crypto::x_coordinate;
 
     // This test hardcodes the output of the signing process and checks that everything verifies as expected
     // If you find yourself changing the constants in this test you are likely breaking backwards compatibility
@@ -205,7 +199,7 @@ mod tests {
 
         let account_id = account_id.parse().unwrap();
         let derivation_epsilon: k256::Scalar =
-            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
+            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test").unwrap();
         let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
         let user_address_from_pk =
             public_key_to_address(user_pk.to_encoded_point(false).as_bytes());
@@ -219,11 +213,11 @@ mod tests {
 
         let s = hex::decode(s).unwrap().try_into().unwrap();
         let s = k256::Scalar::from_bytes(s).unwrap();
-        let r = x_coordinate::<k256::Secp256k1>(&big_r);
+        let r = x_coordinate(&big_r);
 
         let signature = cait_sith::FullSignature::<k256::Secp256k1> { big_r, s };
 
-        let multichain_sig = mpc_node::kdf::into_signature(
+        let multichain_sig = mpc_crypto::kdf::reconstruct_signature(
             &user_pk,
             &signature.big_r,
             &signature.s,

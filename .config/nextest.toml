@@ -1,19 +1,26 @@
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[[profile.default.overrides]]
+filter = 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
+slow-timeout = { period = "60s", terminate-after = 15 }
+
 [test-groups]
 cluster = { max-threads = "num-cpus" }
 fixture = { max-threads = "num-cpus" }
 
 [[profile.default.overrides]]
-filter = 'test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream)'
+filter = 'test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream) | test(cases::checkpoint)'
 test-group = 'fixture'
 
 [[profile.default.overrides]]
-filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream))'
+filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream) | test(cases::checkpoint))'
 test-group = 'cluster'
 
 # Usage: cargo nextest run -p integration-tests --profile fixture
 [profile.fixture]
-default-filter = 'test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream)'
+default-filter = 'test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream) | test(cases::checkpoint)'
 
 # Usage: cargo nextest run -p integration-tests --profile cluster
 [profile.cluster]
-default-filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream))'
+default-filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream) | test(cases::checkpoint))'

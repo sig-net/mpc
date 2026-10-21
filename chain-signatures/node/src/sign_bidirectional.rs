@@ -1,91 +1,122 @@
 use crate::protocol::{Chain, IndexedSignRequest};
-use alloy::primitives::{keccak256, Address, Bytes, I256, U256};
-use alloy_dyn_abi::{DynSolType, DynSolValue};
-use borsh::BorshSerialize;
-use cait_sith::protocol::Participant;
+use alloy::primitives::{keccak256, Address};
+use anyhow::Context as _;
 use k256::elliptic_curve::point::AffineCoordinates;
+use k256::elliptic_curve::scalar::IsHigh as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-use mpc_primitives::{
-    BidirectionalTx, ChainFromError, SerDeserFormat, SignBidirectionalEvent, Signature,
+use mpc_primitives::ChainConfig as _;
+pub use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
 };
 use rlp::{Rlp, RlpStream};
-use serde_json::Value;
-use sha3::{Digest, Keccak256};
+use serde::{Deserialize, Serialize};
 
-use std::collections::HashMap;
-use std::io::Write;
+use std::sync::Arc;
 
-pub type RequestId = [u8; 32];
+use crate::backlog::Publishing;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-struct AbiField {
-    name: String,
-    #[serde(rename = "type")]
-    typ: String,
+/// Progress of an active Cait-Sith MPC signing round.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignProgress {
+    /// Actively running or awaiting MPC signing.
+    Generating,
+    /// Signature produced; ready to publish or awaiting on-chain inclusion.
+    Publishing(Publishing),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PublishState {
-    pub signature: Signature,
-    pub participants: Vec<Participant>,
-    pub is_proposer: bool,
-}
+impl SignProgress {
+    pub fn is_generating(&self) -> bool {
+        matches!(self, Self::Generating)
+    }
 
-impl PublishState {
-    fn digest_bytes(&self, tag: u8) -> Vec<u8> {
-        let mut bytes = vec![tag];
-        bytes.extend_from_slice(&self.signature.to_bytes());
-        bytes.extend_from_slice(&(self.participants.len() as u32).to_le_bytes());
-        for participant in &self.participants {
-            bytes.extend_from_slice(&participant.bytes());
+    pub fn publishing(&self) -> Option<&Publishing> {
+        match self {
+            Self::Publishing(publish) => Some(publish),
+            Self::Generating => None,
         }
-        bytes.push(u8::from(self.is_proposer));
-        bytes
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Lifecycle stages of a two-phase bidirectional transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BidirectionalProgress {
+    /// Phase 1: Signing the initial transaction for the source chain.
+    Initial(SignProgress),
+    /// Awaiting execution on the target chain.
+    Executing(Arc<BidirectionalTx>),
+    /// Phase 2: Signing the completion/respond transaction for the source chain.
+    Final {
+        respond_request: Arc<IndexedSignRequest>,
+        progress: SignProgress,
+    },
+    /// Terminal output extraction failure; retained for source checkpoint agreement.
+    Parked(Arc<BidirectionalTx>),
+}
+
+/// Overall status of any request held in the backlog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignStatus {
-    PendingGeneration,
-    PendingPublish { publish: PublishState },
-    PendingExecution { tx: BidirectionalTx },
-    PendingGenerationBidirectional,
-    PendingPublishBidirectional { publish: PublishState },
+    Sign(SignProgress),
+    Bidirectional(BidirectionalProgress),
 }
 
 impl SignStatus {
     pub fn is_pending_generation(&self) -> bool {
-        matches!(
-            self,
-            SignStatus::PendingGeneration | SignStatus::PendingGenerationBidirectional
-        )
-    }
-
-    pub fn is_pending_execution(&self) -> bool {
-        matches!(self, SignStatus::PendingExecution { .. })
-    }
-
-    pub fn digest_bytes(&self) -> Vec<u8> {
         match self {
-            SignStatus::PendingGeneration => vec![0],
-            SignStatus::PendingPublish { publish } => publish.digest_bytes(1),
-            SignStatus::PendingExecution { tx } => {
-                let mut bytes = vec![2];
-                bytes.extend_from_slice(tx.id.0.as_slice());
-                bytes.extend_from_slice(&tx.target_chain.to_bytes());
-                bytes
+            Self::Sign(progress) => progress.is_generating(),
+            Self::Bidirectional(BidirectionalProgress::Initial(progress)) => {
+                progress.is_generating()
             }
-            SignStatus::PendingGenerationBidirectional => vec![3],
-            SignStatus::PendingPublishBidirectional { publish } => publish.digest_bytes(4),
+            Self::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
+                progress.is_generating()
+            }
+            Self::Bidirectional(
+                BidirectionalProgress::Executing(_) | BidirectionalProgress::Parked(_),
+            ) => false,
         }
     }
 
-    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+    pub fn is_pending_execution(&self) -> bool {
+        matches!(
+            self,
+            Self::Bidirectional(BidirectionalProgress::Executing(_))
+        )
+    }
+
+    pub fn execution_tx(&self) -> Option<&Arc<BidirectionalTx>> {
         match self {
-            SignStatus::PendingExecution { tx } => Some(tx),
+            Self::Bidirectional(BidirectionalProgress::Executing(tx)) => Some(tx),
             _ => None,
+        }
+    }
+
+    pub fn publishing(&self) -> Option<&Publishing> {
+        match self {
+            Self::Sign(progress) => progress.publishing(),
+            Self::Bidirectional(BidirectionalProgress::Initial(progress)) => progress.publishing(),
+            Self::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
+                progress.publishing()
+            }
+            Self::Bidirectional(
+                BidirectionalProgress::Executing(_) | BidirectionalProgress::Parked(_),
+            ) => None,
+        }
+    }
+
+    /// Project this status onto what is observable at a checkpoint's own chain height.
+    ///
+    /// * `0` — the initial source-chain phase (standard Sign or initial Bidirectional).
+    /// * `1` — the post-initial phase (Bidirectional awaiting target execution, parked, or final response).
+    pub fn consensus_tag(&self) -> u8 {
+        match self {
+            Self::Sign(_) | Self::Bidirectional(BidirectionalProgress::Initial(_)) => 0,
+            Self::Bidirectional(
+                BidirectionalProgress::Executing(_)
+                | BidirectionalProgress::Final { .. }
+                | BidirectionalProgress::Parked(_),
+            ) => 1,
         }
     }
 }
@@ -95,12 +126,27 @@ pub trait SignBidirectionalEventExt {
     fn sender_string(&self) -> anyhow::Result<String>;
     fn epsilon(&self) -> anyhow::Result<Scalar>;
     fn target_chain(&self) -> Result<Chain, ChainFromError>;
+
+    /// The deterministic derivations respond processing runs for every bidirectional
+    /// request, and the schema checks output extraction applies whatever the target
+    /// chain returns. Shared between admission (reject before the backlog) and the
+    /// respond path's failure handling (quarantine): both must agree on what "can
+    /// never advance" means.
+    fn validate(&self) -> anyhow::Result<()>;
+
+    /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
+    fn to_bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        mpc_sig: Signature,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx>;
 }
 
 impl SignBidirectionalEventExt for SignBidirectionalEvent {
     fn sender_string(&self) -> anyhow::Result<String> {
         match self.chain {
-            Chain::Canton => Ok(hex::encode(self.sender)),
+            Chain::Canton | Chain::Midnight => Ok(hex::encode(self.sender)),
             _ => crate::stream::ops::sender_string(self.sender, self.chain),
         }
     }
@@ -111,23 +157,88 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
                 self.key_version,
                 &self.sender_string()?,
                 &self.path,
-            )),
+            )?),
             Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
                 self.key_version,
                 &self.sender_string()?,
                 &self.path,
-            )),
+            )?),
             Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
                 self.key_version,
                 &self.sender_string()?,
                 &self.path,
-            )),
+            )?),
+            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )?),
             _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
         }
     }
 
     fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
         Chain::from_caip2_chain_id(&self.caip2_id)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.serialized_transaction.is_empty(),
+            "empty serialized_transaction"
+        );
+        let target = self
+            .target_chain()
+            .map_err(|err| anyhow::anyhow!("bad target chain: {err:?}"))?;
+        anyhow::ensure!(
+            target.has_execution_watcher(),
+            "unsupported target chain {target}"
+        );
+        self.epsilon().context("cannot derive epsilon")?;
+        let calldata = validate_unsigned_transaction(&self.serialized_transaction)
+            .context("undecodable serialized_transaction")?;
+        // Ethereum is the only target with an execution watcher, checked above.
+        mpc_chain_ethereum::validate_schemas(
+            calldata,
+            &self.output_deserialization_schema,
+            self.chain.respond_serialization_format(),
+            &self.respond_serialization_schema,
+        )
+        .context("unprocessable output schemas")
+    }
+
+    fn to_bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        mpc_sig: Signature,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx> {
+        let target_chain = self.target_chain().with_context(|| {
+            format!("failed to determine target chain for request: {request_id:?}")
+        })?;
+        let epsilon = self.epsilon()?;
+        let from_address = derive_user_address(root_pk, epsilon);
+        let (signed_tx_hash, nonce) =
+            sign_and_hash_transaction(&self.serialized_transaction, mpc_sig)?;
+
+        Ok(BidirectionalTx {
+            id: BidirectionalTxId(signed_tx_hash),
+            sender: self.sender,
+            serialized_transaction: self.serialized_transaction.clone(),
+            source_chain: self.chain,
+            target_chain,
+            caip2_id: self.caip2_id.clone(),
+            key_version: self.key_version,
+            deposit: self.deposit,
+            path: self.path.clone(),
+            algo: self.algo.clone(),
+            dest: self.dest.clone(),
+            params: self.params.clone(),
+            output_deserialization_schema: self.output_deserialization_schema.clone(),
+            respond_serialization_schema: self.respond_serialization_schema.clone(),
+            request_id,
+            from_address: **from_address,
+            nonce,
+        })
     }
 }
 
@@ -139,7 +250,7 @@ pub trait BidirectionalTxExt {
 
 impl BidirectionalTxExt for BidirectionalTx {
     fn sender_string(&self) -> anyhow::Result<String> {
-        if self.source_chain == Chain::Canton {
+        if matches!(self.source_chain, Chain::Canton | Chain::Midnight) {
             return Ok(hex::encode(self.sender));
         }
         crate::stream::ops::sender_string(self.sender, self.source_chain)
@@ -151,196 +262,185 @@ impl BidirectionalTxExt for BidirectionalTx {
                 self.key_version,
                 &self.sender_string()?,
                 path,
-            )),
+            )?),
             Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
                 self.key_version,
                 &self.sender_string()?,
                 path,
-            )),
+            )?),
             Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
                 self.key_version,
                 &self.sender_string()?,
                 path,
-            )),
+            )?),
+            Chain::Midnight => Ok(mpc_crypto::kdf::derive_epsilon_midnight(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )?),
             _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
         }
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Output {
-    fields: HashMap<String, DynSolValue>,
-    /// `true` when this `Output` was built from a real ETH contract-call return
-    /// (via `TransactionOutput::from_call_result`); `false` for the
-    /// `non_contract_call_output()` path (plain transfers). Drives whether
-    /// `serialize` encodes real data or synthesizes per-schema defaults.
-    from_contract_call: bool,
-}
-
-impl Output {
-    pub fn is_contract_call(&self) -> bool {
-        self.from_contract_call
-    }
-
-    /// Encode this output for the given format using `schema_json_bytes` as
-    /// the field shape. For non-contract-call outputs (plain transfers),
-    /// synthesizes per-field default values from the schema. Real decoded
-    /// data from `from_call_result` flows through unchanged.
-    pub fn serialize(
-        &self,
-        format: SerDeserFormat,
-        schema_json_bytes: &[u8],
-    ) -> anyhow::Result<Vec<u8>> {
-        let schema = parse_schema_fields(schema_json_bytes)?;
-        let data_owned;
-        let data = if self.is_contract_call() {
-            self
-        } else {
-            data_owned = default_output_for_non_contract_call(&schema)?;
-            &data_owned
-        };
-        match format {
-            SerDeserFormat::Abi => encode_abi(data, &schema),
-            SerDeserFormat::Borsh => encode_borsh(data, &schema),
-        }
-    }
-}
-
-fn encode_abi(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
-    let values = schema
-        .iter()
-        .map(|field| match data.fields.get(&field.name) {
-            Some(value) => Ok(value.clone()),
-            None => Err(anyhow::anyhow!(
-                "Missing required field '{}' in output",
-                field.name
-            )),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    encode_abi_values(schema, &values)
-}
-
-fn encode_borsh(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
-    assert!(
-        schema.len() == 1,
-        "borsh schema must have exactly one field"
+/// Check that `unsigned_rlp` would survive [`sign_and_hash_transaction`], without a
+/// real signature, and return its calldata. Admission calls this so a transaction
+/// that cannot be signed at respond time is rejected before it enters the backlog;
+/// running the actual function is what keeps admission structurally equal to
+/// respond processing. The placeholder's recovery id is 1, the strict case: the
+/// legacy `v` computation adds `y_parity`, so validating with 0 would admit the one
+/// chain id whose `v` only overflows when the real signature draws parity 1.
+fn validate_unsigned_transaction(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
+    let placeholder = Signature::new(
+        k256::ProjectivePoint::GENERATOR.to_affine(),
+        k256::Scalar::ONE,
+        1,
     );
-    let val = data
-        .fields
-        .get(&schema[0].name)
-        .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", schema[0].name))?;
-    let mut buf = Vec::with_capacity(128);
-    serialize_dynsol(&mut buf, val)?;
-    Ok(buf)
-}
-
-#[derive(Debug)]
-pub struct TransactionOutput {
-    pub success: bool,
-    pub output: Output,
-}
-
-impl TransactionOutput {
-    pub fn non_contract_call_output() -> Self {
-        Self {
-            success: true,
-            output: Output {
-                fields: HashMap::new(),
-                from_contract_call: false,
-            },
-        }
-    }
-
-    pub fn from_call_result(schema_json: &[u8], call_result: &Bytes) -> anyhow::Result<Self> {
-        let schema: Vec<AbiField> = serde_json::from_slice(schema_json)
-            .map_err(|e| anyhow::anyhow!("Failed to get abi fields from schema: {e:?}"))?;
-
-        let types: Vec<DynSolType> = schema
-            .iter()
-            .map(|f| f.typ.parse()) // calls DynSolType::parse via FromStr
-            .collect::<Result<_, _>>()
-            .map_err(|e| anyhow::anyhow!("Failed to parse eth transaction types: {e:?}"))?;
-
-        // Build a single tuple DynSolType
-        let tuple_type = DynSolType::Tuple(types);
-
-        // Decode the whole result as a tuple
-        let DynSolValue::Tuple(values) = tuple_type
-            .abi_decode(call_result)
-            .map_err(|e| anyhow::anyhow!("Failed to tuple types: {e:?}"))?
-        else {
-            anyhow::bail!("Can't decode to tuple type");
-        };
-
-        // Map to named output
-        let mut output_map = HashMap::new();
-        for (field, value) in schema.into_iter().zip(values) {
-            output_map.insert(field.name, value);
-        }
-
-        Ok(TransactionOutput {
-            success: true,
-            output: Output {
-                fields: output_map,
-                from_contract_call: true,
-            },
-        })
-    }
-}
-
-pub fn hash_rlp_data(rlp_data: &[u8]) -> [u8; 32] {
-    let mut hasher = Keccak256::new();
-    hasher.update(rlp_data);
-    hasher.finalize().into()
-}
-
-pub fn decode_rlp(rlp_data: Vec<u8>, is_eip1559: bool) -> anyhow::Result<Vec<Bytes>> {
-    let payload = if is_eip1559 {
-        &rlp_data[1..]
+    sign_and_hash_transaction(unsigned_rlp, placeholder)?;
+    let eip1559 = is_eip1559(unsigned_rlp);
+    let body = if eip1559 {
+        &unsigned_rlp[1..]
     } else {
-        &rlp_data
+        unsigned_rlp
     };
+    let fields = Rlp::new(body);
+    // The signature covers these exact bytes while Ethereum recovers the sender
+    // from the hash of what it decodes, so bytes after the list sign a hash
+    // Ethereum never computes.
+    anyhow::ensure!(
+        fields.payload_info()?.total() == body.len(),
+        "bytes after the transaction"
+    );
+    anyhow::ensure!(
+        fields.item_count()? == 9,
+        "transaction has {} fields, not 9",
+        fields.item_count()?
+    );
+    // Signing copies these fields as they are, so each must already be what
+    // Ethereum decodes for its type.
+    let (to_index, data_index) = if eip1559 {
+        uint_field(&fields, 0, 32)?; // chain id
+        uint_field(&fields, 1, 8)?; // nonce
+        let max_priority_fee = uint_field(&fields, 2, 32)?;
+        let max_fee = uint_field(&fields, 3, 32)?;
+        anyhow::ensure!(
+            (max_priority_fee.len(), max_priority_fee) <= (max_fee.len(), max_fee),
+            "max priority fee above max fee"
+        );
+        uint_field(&fields, 4, 8)?; // gas limit
+        uint_field(&fields, 6, 32)?; // value
+        validate_access_list(&fields.at(8)?)?;
+        (5, 7)
+    } else {
+        uint_field(&fields, 0, 8)?; // nonce
+        uint_field(&fields, 1, 32)?; // gas price
+        uint_field(&fields, 2, 8)?; // gas limit
+        uint_field(&fields, 4, 32)?; // value
+        uint_field(&fields, 6, 32)?; // chain id
+                                     // EIP-155 hashes r and s as empty strings; anything else signs another hash.
+        uint_field(&fields, 7, 0)?;
+        uint_field(&fields, 8, 0)?;
+        (3, 5)
+    };
+    // An empty `to` creates a contract, which extraction refuses, and Ethereum
+    // rejects any other length.
+    let to = string_field(&fields, to_index)?;
+    anyhow::ensure!(
+        to.len() == 20,
+        "`to` is {} bytes, not a 20-byte call target",
+        to.len()
+    );
+    string_field(&fields, data_index)
+}
 
-    let rlp = rlp::Rlp::new(payload);
+/// `Rlp::data` also returns a list's payload and accepts a one-byte string
+/// below 0x80 behind a prefix; Ethereum decodes neither as a string.
+fn string_field<'a>(fields: &Rlp<'a>, index: usize) -> anyhow::Result<&'a [u8]> {
+    let field = fields.at(index)?;
+    anyhow::ensure!(
+        field.is_data(),
+        "transaction field {index} is an RLP list, not a string"
+    );
+    let data = field.data()?;
+    anyhow::ensure!(
+        !(field.as_raw()[0] == 0x81 && data[0] < 0x80),
+        "transaction field {index} is not canonical RLP"
+    );
+    Ok(data)
+}
 
-    if !rlp.is_list() {
-        anyhow::bail!("Input is not a valid RLP list");
+/// An unsigned integer of at most `max_bytes` bytes, without leading zeros.
+fn uint_field<'a>(fields: &Rlp<'a>, index: usize, max_bytes: usize) -> anyhow::Result<&'a [u8]> {
+    let data = string_field(fields, index)?;
+    anyhow::ensure!(
+        data.first() != Some(&0),
+        "transaction field {index} has a leading zero"
+    );
+    anyhow::ensure!(
+        data.len() <= max_bytes,
+        "transaction field {index} has {} bytes, more than {max_bytes}",
+        data.len()
+    );
+    Ok(data)
+}
+
+/// A list of `[20-byte address, list of 32-byte storage keys]`.
+fn validate_access_list(access_list: &Rlp) -> anyhow::Result<()> {
+    anyhow::ensure!(access_list.is_list(), "access list is not an RLP list");
+    for i in 0..access_list.item_count()? {
+        let entry = access_list.at(i)?;
+        anyhow::ensure!(
+            entry.is_list() && entry.item_count()? == 2,
+            "access list entry {i} is not [address, storage keys]"
+        );
+        anyhow::ensure!(
+            string_field(&entry, 0)?.len() == 20,
+            "access list entry {i} has no 20-byte address"
+        );
+        let keys = entry.at(1)?;
+        anyhow::ensure!(
+            keys.is_list(),
+            "access list entry {i} storage keys are not an RLP list"
+        );
+        for k in 0..keys.item_count()? {
+            anyhow::ensure!(
+                string_field(&keys, k)?.len() == 32,
+                "access list entry {i} storage key {k} is not 32 bytes"
+            );
+        }
     }
-
-    let mut result = Vec::new();
-
-    for i in 0..rlp.item_count()? {
-        let item = rlp.at(i)?;
-        result.push(Bytes::copy_from_slice(item.data()?));
-    }
-
-    Ok(result)
+    Ok(())
 }
 
 pub fn sign_and_hash_transaction(
     unsigned_rlp: &[u8],
     signature: Signature,
 ) -> anyhow::Result<([u8; 32], u64)> {
+    // A chain includes only the low-s encoding, and negating s negates the
+    // recovered point, so the recovery id flips with it.
+    let negate = bool::from(signature.s.is_high());
+    let s_scalar = if negate { -signature.s } else { signature.s };
+    let y_parity = (signature.recovery_id == 1) ^ negate;
     let r = signature.big_r.x().as_slice().to_vec();
-    let s = signature.s.to_bytes().as_slice().to_vec();
-    let y_parity = signature.recovery_id == 1;
+    let s = s_scalar.to_bytes().as_slice().to_vec();
 
     if is_eip1559(unsigned_rlp) {
         sign_and_hash_eip1559_from_unsigned(unsigned_rlp, &r, &s, y_parity)
     } else {
-        // Extract chain_id from the unsigned RLP (it's the 7th field in legacy transactions)
-        // In legacy Ethereum transactions with EIP-155, there are 9 fields:
-        // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
-        // The chain_id is the 7th field (index 6, 0-based).
-        // We check for at least 9 fields to ensure chain_id is present.
-        let rlp = Rlp::new(unsigned_rlp);
-        let chain_id = if rlp.item_count().unwrap_or(0) >= 9 {
-            rlp.val_at::<u64>(6).ok()
-        } else {
-            None
-        };
+        let chain_id = transaction_chain_id(unsigned_rlp);
         sign_and_hash_legacy_from_unsigned(unsigned_rlp, chain_id, &r, &s, y_parity)
     }
+}
+
+/// The EIP-155 chain id of an unsigned EIP-1559 or legacy transaction.
+pub(crate) fn transaction_chain_id(unsigned_rlp: &[u8]) -> Option<u64> {
+    if let Some(body) = unsigned_rlp.strip_prefix(&[0x02]) {
+        return Rlp::new(body).val_at(0).ok();
+    }
+    // Legacy with EIP-155 has 9 fields:
+    // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
+    let rlp = Rlp::new(unsigned_rlp);
+    (rlp.item_count().ok()? >= 9).then(|| rlp.val_at(6).ok())?
 }
 
 fn is_eip1559(unsigned_rlp: &[u8]) -> bool {
@@ -407,13 +507,20 @@ pub fn sign_and_hash_legacy_from_unsigned(
     for i in 0..6 {
         out.append_raw_field(rlp.at(i)?.as_raw());
     }
-    let v: u64 = 35 + 2 * chain_id.unwrap_or(0) + if y_parity { 1 } else { 0 };
+    // Checked: `chain_id` is attacker-controlled bytes (admission runs this decode
+    // on every observed request event), and 35 + 2 * chain_id overflows for ids
+    // near u64::MAX.
+    let v: u64 = chain_id
+        .unwrap_or(0)
+        .checked_mul(2)
+        .and_then(|doubled| doubled.checked_add(35 + u64::from(y_parity)))
+        .ok_or_else(|| anyhow::anyhow!("legacy chain_id too large"))?;
     out.append_u64(v);
     out.append_uint_bytes(r);
     out.append_uint_bytes(s);
 
     let signed_bytes = out.into_vec();
-    let hash = alloy_primitives::keccak256(&signed_bytes);
+    let hash = alloy::primitives::keccak256(&signed_bytes);
     Ok((hash.into(), nonce))
 }
 
@@ -475,34 +582,6 @@ pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Sc
     public_key_to_address(user_pk.to_encoded_point(false).as_bytes())
 }
 
-/// Synthesize per-field default values for an `Output` whose source tx was
-/// not a contract function call. The destination chain's contract still needs
-/// shaped bytes back, so we fill defaults from the schema: `bool` → `true`,
-/// `string` → `"non_function_call_success"`. Other field types are unsupported.
-fn default_output_for_non_contract_call(schema: &[AbiField]) -> anyhow::Result<Output> {
-    let mut data = HashMap::new();
-    for field in schema {
-        match field.typ.as_str() {
-            "string" => {
-                data.insert(
-                    field.name.clone(),
-                    DynSolValue::String("non_function_call_success".to_string()),
-                );
-            }
-            "bool" => {
-                data.insert(field.name.clone(), DynSolValue::Bool(true));
-            }
-            other => anyhow::bail!(
-                "cannot synthesize default for non-function-call output of type {other}"
-            ),
-        }
-    }
-    Ok(Output {
-        fields: data,
-        from_contract_call: false,
-    })
-}
-
 #[cfg(test)]
 mod derive_tests {
     use super::derive_user_address;
@@ -521,7 +600,8 @@ mod derive_tests {
         let mpc_pk = hex::decode(mpc_key).unwrap();
         let mpc_pk = EncodedPoint::from_bytes(mpc_pk).unwrap();
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
-        let derivation_epsilon = derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
+        let derivation_epsilon =
+            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test").unwrap();
         let expected: Address = "0x083c8776b5e447e91bae43b7883a92a9bdb66d1d"
             .parse()
             .unwrap();
@@ -530,138 +610,13 @@ mod derive_tests {
     }
 }
 
-fn encode_abi_values(schema: &[AbiField], values: &[DynSolValue]) -> anyhow::Result<Vec<u8>> {
-    if schema.len() != values.len() {
-        anyhow::bail!(
-            "Schema and values length mismatch: {} != {}",
-            schema.len(),
-            values.len()
-        );
-    }
-    for (f, v) in schema.iter().zip(values.iter()) {
-        let ty: DynSolType = f.typ.parse()?;
-        if !ty.matches(v) {
-            anyhow::bail!("Value {v:?} doesn't match Solidity type {}", f.typ);
-        }
-    }
-    // Encode each value and concatenate
-    let mut combined = Vec::new();
-    for v in values {
-        combined.extend(v.abi_encode());
-    }
-
-    Ok(combined)
-}
-
-/* ---------- DynSolValue -> Borsh serializer (runtime) ---------- */
-
-fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> {
-    use DynSolValue::*;
-    match v {
-        // -------- Primitives --------
-        Bool(b) => {
-            // Borsh bool is u8 (0/1) via BorshSerialize on bool
-            b.serialize(w)?;
-        }
-        Address(a) => a.serialize(w)?,
-        Uint(u, size) => write_u256(w, *u, *size)?,
-        Int(i, size) => write_i256(w, *i, *size)?,
-
-        // -------- Bytes-like --------
-        // Fixed bytes -> raw bytes (no length)
-        FixedBytes(b, _) => w.write_all(b.as_slice())?,
-        // Dynamic bytes -> Vec<u8> (u32 length + bytes)
-        Bytes(b) => b.serialize(w)?,
-
-        // -------- Strings --------
-        String(s) => s.serialize(w)?,
-
-        // -------- Arrays --------
-        // Dynamic array -> Borsh Vec<T>: u32 length + elements
-        Array(xs) => {
-            (xs.len() as u32).serialize(w)?;
-            for x in xs {
-                serialize_dynsol(w, x)?;
-            }
-        }
-        // Fixed array -> elements inline (no length)
-        FixedArray(xs) => {
-            for x in xs {
-                serialize_dynsol(w, x)?;
-            }
-        }
-
-        // -------- Tuple --------
-        // Concatenate members
-        Tuple(xs) => {
-            for x in xs {
-                serialize_dynsol(w, x)?;
-            }
-        }
-
-        // Add more variants if you use them (e.g., custom types).
-        other => anyhow::bail!("unsupported DynSolValue variant: {other:?}"),
-    }
-    Ok(())
-}
-
-/* ------------------ helpers using borsh where possible ------------------ */
-
-fn write_u256<W: Write>(w: &mut W, x: U256, size: usize) -> anyhow::Result<()> {
-    // Use the size parameter to determine how many bytes to write
-    let le = x.to_le_bytes::<{ U256::BYTES }>();
-    w.write_all(&le[..size.min(U256::BYTES)])
-        .map_err(Into::into)
-}
-
-fn write_i256<W: Write>(w: &mut W, x: I256, size: usize) -> anyhow::Result<()> {
-    // Use the size parameter to determine how many bytes to write
-    let le = x.to_le_bytes::<{ I256::BYTES }>();
-    w.write_all(&le[..size.min(I256::BYTES)])
-        .map_err(Into::into)
-}
-
-/// Parse a schema JSON describing the response shape. Accepts a JSON array of
-/// `{name, type}` objects (canonical form), a single object (treated as a
-/// one-field schema), or a bare string (treated as a single typed field with
-/// an empty name).
-fn parse_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
-    let v: Value = serde_json::from_slice(schema_json_bytes)
-        .map_err(|e| anyhow::anyhow!("schema JSON parse failed: {e:?}"))?;
-
-    Ok(match v {
-        Value::Array(arr) => arr
-            .into_iter()
-            .map(|item| {
-                serde_json::from_value(item)
-                    .map_err(|e| anyhow::anyhow!("invalid field in array: {e:?}"))
-            })
-            .collect::<Result<Vec<_>, anyhow::Error>>()?,
-        Value::Object(obj) => {
-            vec![serde_json::from_value(Value::Object(obj))
-                .map_err(|e| anyhow::anyhow!("invalid single object schema: {e:?}"))?]
-        }
-        Value::String(s) => vec![AbiField {
-            name: String::new(),
-            typ: s,
-        }],
-        other => anyhow::bail!("unsupported schema JSON shape: {other}"),
-    })
-}
-
-#[derive(Clone)]
-pub struct SignBidirectionalSignature {
-    pub public_key: mpc_crypto::PublicKey,
-    pub indexed: IndexedSignRequest,
-    pub signature: Signature,
-}
-
 #[cfg(test)]
 mod tests {
     use super::sign_and_hash_eip1559_from_unsigned;
     use alloy::consensus::{SignableTransaction, TxEip1559};
     use alloy::eips::eip2718::Encodable2718;
     use alloy::primitives::{Bytes, FixedBytes, Signature, TxKind, U256};
+    use std::sync::Arc;
 
     #[test]
     fn eip1559_hash_matches_alloy_for_create_with_leading_zero_r() {
@@ -695,5 +650,304 @@ mod tests {
 
         assert_eq!(hash, expected_hash);
         assert_eq!(nonce, 3);
+    }
+
+    fn legacy_tx(chain_id: u64) -> Vec<u8> {
+        let mut rlp = super::EthereumTxRlp::new_list(9);
+        // nonce, gas price, gas limit
+        for _ in 0..3 {
+            rlp.append_u64(0);
+        }
+        rlp.stream.append(&vec![0x11u8; 20]);
+        // value, data
+        for _ in 0..2 {
+            rlp.append_u64(0);
+        }
+        rlp.append_u64(chain_id);
+        rlp.append_u64(0);
+        rlp.append_u64(0);
+        rlp.into_vec()
+    }
+
+    #[test]
+    fn transaction_chain_id_reads_legacy_and_eip1559() {
+        assert_eq!(
+            super::transaction_chain_id(&legacy_tx(31_337)),
+            Some(31_337)
+        );
+        let eip1559 = TxEip1559 {
+            chain_id: 11_155_111,
+            ..Default::default()
+        };
+        let unsigned = eip1559.encoded_for_signing();
+        assert_eq!(super::transaction_chain_id(&unsigned), Some(11_155_111));
+    }
+
+    /// The negated signature verifies too, so it has to name the transaction a
+    /// chain will actually include.
+    #[test]
+    fn a_high_s_signature_names_the_same_transaction_as_its_low_s_form() {
+        use k256::elliptic_curve::point::AffineCoordinates as _;
+        use k256::elliptic_curve::scalar::IsHigh as _;
+
+        let unsigned = legacy_tx(31_337);
+
+        let big_r = k256::ProjectivePoint::GENERATOR.to_affine();
+        let low = k256::Scalar::from(5u64);
+        let high = -low;
+        assert!(!bool::from(low.is_high()) && bool::from(high.is_high()));
+
+        let id_of = |s, recovery_id| {
+            super::sign_and_hash_transaction(
+                &unsigned,
+                mpc_primitives::Signature::new(big_r, s, recovery_id),
+            )
+            .unwrap()
+            .0
+        };
+
+        assert_eq!(id_of(low, 1), id_of(high, 0));
+
+        // The ids would also agree if we normalised the wrong way, so compare
+        // against the low-s encoding directly.
+        let expected = super::sign_and_hash_legacy_from_unsigned(
+            &unsigned,
+            Some(31_337),
+            big_r.x().as_slice(),
+            low.to_bytes().as_slice(),
+            false,
+        )
+        .unwrap()
+        .0;
+        assert_eq!(id_of(high, 1), expected);
+    }
+
+    /// At `chain_id = (u64::MAX - 35) / 2` the legacy `v = 2c + 35 + y_parity`
+    /// overflows only for parity 1. Admission must reject it, not admit a request
+    /// that then fails at respond time whenever the signature draws parity 1.
+    #[test]
+    fn validate_rejects_the_legacy_chain_id_that_only_overflows_on_parity_one() {
+        let boundary = (u64::MAX - 35) / 2;
+        assert!(super::validate_unsigned_transaction(&legacy_tx(boundary)).is_err());
+        assert!(super::validate_unsigned_transaction(&legacy_tx(boundary - 1)).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_contract_creation() {
+        let eip1559 = |to| {
+            TxEip1559 {
+                chain_id: 1,
+                to,
+                ..Default::default()
+            }
+            .encoded_for_signing()
+        };
+        let call = TxKind::Call(alloy::primitives::Address::repeat_byte(0x11));
+        assert!(super::validate_unsigned_transaction(&eip1559(call)).is_ok());
+        assert!(super::validate_unsigned_transaction(&eip1559(TxKind::Create)).is_err());
+
+        // nonce, gas price, gas limit, empty `to`, value, data, then EIP-155 chain id 1
+        let mut legacy_create = super::EthereumTxRlp::new_list(9);
+        for field in [0, 0, 0, 0, 0, 0, 1, 0, 0] {
+            legacy_create.append_u64(field);
+        }
+        assert!(super::validate_unsigned_transaction(&legacy_tx(1)).is_ok());
+        assert!(super::validate_unsigned_transaction(&legacy_create.into_vec()).is_err());
+    }
+
+    /// Signing copies fields as they are, so admission must refuse every
+    /// encoding Ethereum would not decode as the field's type.
+    #[test]
+    fn validate_rejects_fields_ethereum_cannot_decode() {
+        let string = |bytes: &[u8]| rlp::encode(&bytes.to_vec()).to_vec();
+        let uint = |value: u64| rlp::encode(&value).to_vec();
+        let list = |items: &[Vec<u8>]| {
+            let mut stream = rlp::RlpStream::new_list(items.len());
+            for item in items {
+                stream.append_raw(item, 1);
+            }
+            stream.out().to_vec()
+        };
+        let encode = |eip1559: bool, fields: &[Vec<u8>]| {
+            let body = list(fields);
+            if eip1559 {
+                [&[2u8][..], &body].concat()
+            } else {
+                body
+            }
+        };
+        let to = string(&[0x11; 20]);
+        let data = string(&[1, 2]);
+        let pair = list(&[uint(1), uint(2)]);
+        // nonce, gas price, gas limit, to, value, data, chain id, r, s
+        let legacy = vec![
+            uint(0),
+            uint(1),
+            uint(21_000),
+            to.clone(),
+            uint(0),
+            data.clone(),
+            uint(1),
+            uint(0),
+            uint(0),
+        ];
+        // chain id, nonce, max priority fee, max fee, gas limit, to, value, data, access list
+        let access_list = list(&[list(&[string(&[0x22; 20]), list(&[string(&[0x33; 32])])])]);
+        let eip1559 = vec![
+            uint(1),
+            uint(0),
+            uint(1),
+            uint(2),
+            uint(21_000),
+            to,
+            uint(0),
+            data,
+            access_list,
+        ];
+        for (is_1559, valid) in [(false, &legacy), (true, &eip1559)] {
+            assert!(
+                super::validate_unsigned_transaction(&encode(is_1559, valid)).is_ok(),
+                "1559: {is_1559}"
+            );
+            let with = |index: usize, field: Vec<u8>| {
+                let mut fields = valid.clone();
+                fields[index] = field;
+                encode(is_1559, &fields)
+            };
+            let mut invalid = vec![
+                (
+                    "trailing byte".to_string(),
+                    [encode(is_1559, valid), vec![0]].concat(),
+                ),
+                (
+                    "ten fields".to_string(),
+                    encode(is_1559, &[valid.clone(), vec![uint(0)]].concat()),
+                ),
+            ];
+            for index in 0..9 {
+                invalid.push((format!("list in field {index}"), with(index, pair.clone())));
+            }
+            let (uints, data_index) = if is_1559 {
+                (vec![0, 1, 2, 3, 4, 6], 7)
+            } else {
+                (vec![0, 1, 2, 4, 6, 7, 8], 5)
+            };
+            for index in uints {
+                invalid.push((
+                    format!("leading zero in field {index}"),
+                    with(index, string(&[0, 1])),
+                ));
+            }
+            invalid.push((
+                "33-byte uint".to_string(),
+                with(if is_1559 { 6 } else { 4 }, string(&[1; 33])),
+            ));
+            invalid.push((
+                "9-byte gas limit".to_string(),
+                with(if is_1559 { 4 } else { 2 }, string(&[1; 9])),
+            ));
+            invalid.push((
+                "prefixed single byte".to_string(),
+                with(data_index, vec![0x81, 0x05]),
+            ));
+            if is_1559 {
+                invalid.push(("priority fee above max fee".to_string(), with(2, uint(3))));
+                invalid.push(("access list as string".to_string(), with(8, string(&[1]))));
+                invalid.push((
+                    "19-byte access list address".to_string(),
+                    with(8, list(&[list(&[string(&[0x22; 19]), list(&[])])])),
+                ));
+                invalid.push((
+                    "31-byte storage key".to_string(),
+                    with(
+                        8,
+                        list(&[list(&[string(&[0x22; 20]), list(&[string(&[0x33; 31])])])]),
+                    ),
+                ));
+            } else {
+                invalid.push(("nonzero r".to_string(), with(7, uint(1))));
+            }
+            for (case, tx) in invalid {
+                assert!(
+                    super::validate_unsigned_transaction(&tx).is_err(),
+                    "1559: {is_1559}, {case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_target_chain() {
+        use super::{SignBidirectionalEvent, SignBidirectionalEventExt as _};
+        use crate::protocol::Chain;
+
+        let event = |target: Chain| SignBidirectionalEvent {
+            sender: Default::default(),
+            serialized_transaction: legacy_tx(1),
+            dest: String::new(),
+            caip2_id: target.caip2_chain_id().to_string(),
+            key_version: 0,
+            deposit: 0,
+            path: "m/0".to_string(),
+            algo: "ECDSA".to_string(),
+            params: "{}".to_string(),
+            chain: Chain::Solana,
+            chain_ctx: None,
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
+        };
+        assert!(event(Chain::Ethereum).validate().is_ok());
+        assert!(event(Chain::Solana).validate().is_err());
+    }
+
+    #[test]
+    fn test_checkpoint_consensus_bytes_deterministic_across_publish_states() {
+        use super::{BidirectionalProgress, SignProgress, SignStatus};
+        use crate::backlog::mock::{mock_bidi_response, mock_publishing, mock_tx};
+
+        let dummy_tx = Arc::new(mock_tx(1));
+        let dummy_respond_req = mock_bidi_response(&dummy_tx);
+
+        let generation_tag = SignStatus::Sign(SignProgress::Generating).consensus_tag();
+        let publish_tag =
+            SignStatus::Sign(SignProgress::Publishing(mock_publishing())).consensus_tag();
+        assert_eq!(
+            generation_tag, publish_tag,
+            "Generating and Publishing must produce identical consensus tags"
+        );
+
+        // Initial bidirectional phase matches standard sign
+        let bidi_initial_gen_tag =
+            SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Generating))
+                .consensus_tag();
+        assert_eq!(generation_tag, bidi_initial_gen_tag);
+
+        // Post-initial phase: target-chain execution and the final response
+        // generation/publish are indistinguishable at the source-chain height.
+        let execution_tag =
+            SignStatus::Bidirectional(BidirectionalProgress::Executing(dummy_tx)).consensus_tag();
+        let gen_bidi_tag = SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request: Arc::clone(&dummy_respond_req),
+            progress: SignProgress::Generating,
+        })
+        .consensus_tag();
+        let pub_bidi_tag = SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request: dummy_respond_req,
+            progress: SignProgress::Publishing(mock_publishing()),
+        })
+        .consensus_tag();
+        assert_eq!(
+            execution_tag, gen_bidi_tag,
+            "Executing and Final Generating must share a consensus tag \
+             (target-chain execution is not observable at the source-chain height)"
+        );
+        assert_eq!(
+            gen_bidi_tag, pub_bidi_tag,
+            "Final Generating and Final Publishing must produce identical consensus tags"
+        );
+
+        // The initial source-chain phase is observable at this checkpoint's height,
+        // so it differs from the post-initial phase (execution / final response).
+        assert_ne!(generation_tag, gen_bidi_tag);
     }
 }

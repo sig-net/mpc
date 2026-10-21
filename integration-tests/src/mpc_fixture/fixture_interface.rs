@@ -4,23 +4,29 @@
 use crate::containers::Redis;
 use crate::mpc_fixture::message_collector::{CollectMessages, MessagePrinter};
 use crate::mpc_fixture::mock_chain::MockChain;
+use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
+use mpc_keys::hpke::{self, Ciphered};
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
+use mpc_node::protocol::contract::primitives::ParticipantInfo;
+use mpc_node::protocol::message::{MessageError, SignedMessage};
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
-use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
-use mpc_node::protocol::{IndexedSignRequest, MessageChannel, ProtocolState, Sign};
+use mpc_node::protocol::sync::{open_reply_for_test, SyncChannel, SyncError, SyncUpdate};
+use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
-use mpc_primitives::Chain;
+use mpc_node::types::SignCommand;
+use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest};
 use near_sdk::AccountId;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex, Notify};
 
 pub struct MpcFixture {
     pub nodes: Vec<MpcFixtureNode>,
@@ -32,14 +38,17 @@ pub struct MpcFixture {
 
 pub struct MpcFixtureNode {
     pub me: Participant,
+    pub account_id: AccountId,
     pub state: NodeStateWatcher,
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
 
-    pub sign_tx: mpsc::Sender<Sign>,
+    pub sign_tx: mpsc::Sender<SignCommand>,
     pub msg_channel: MessageChannel,
     pub mock_streams: HashMap<Chain, MockStream>,
 
+    /// Keeps the per-node checkpoint watch sender alive for the test's lifetime.
+    pub checkpoint_tx: watch::Sender<Option<CheckpointDigest>>,
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
     pub backlog: Backlog,
@@ -52,6 +61,12 @@ pub struct MpcFixtureNode {
 pub struct SharedOutput {
     pub msg_log: Arc<Mutex<dyn CollectMessages + Send>>,
     pub rpc_actions: Arc<Mutex<HashSet<String>>>,
+    /// Signaled whenever an RPC action is recorded, so `wait_for_actions`
+    /// reacts on the event instead of polling.
+    pub actions_changed: Arc<Notify>,
+    /// Publishes across all nodes. `rpc_actions` is a set keyed by the request,
+    /// so it cannot tell one node publishing from several.
+    pub publishes: Arc<AtomicUsize>,
 }
 
 impl MpcFixture {
@@ -72,6 +87,7 @@ impl MpcFixture {
             old_participants: running.participants.clone(),
             new_participants: running.participants.clone(),
             threshold: running.threshold,
+            new_threshold: running.threshold,
             public_key: running.public_key,
             finished_votes: Default::default(),
             cancel_votes: Default::default(),
@@ -79,6 +95,51 @@ impl MpcFixture {
         let _ = self
             .shared_contract_state
             .send(Some(ProtocolState::Resharing(resharing)));
+    }
+
+    /// Drive [`MockGovernance::vote_new_threshold`] from every node and wait
+    /// for the contract state to flip into `Resharing`.
+    ///
+    /// This exercises the same governance path a production node would take:
+    /// each node's [`MockGovernance`] inserts its vote into the running
+    /// state's `threshold_votes`, and the first call to cross the running
+    /// threshold transitions the contract into `Resharing`. Subsequent calls
+    /// from the remaining nodes see the resharing state and no-op gracefully.
+    pub async fn vote_threshold(&self, new_threshold: usize) -> anyhow::Result<()> {
+        let vote_futures = self.nodes.iter().map(|node| {
+            let account_id = node.account_id.clone();
+            let tx = self.shared_contract_state.clone();
+            async move {
+                let gov = MockGovernance {
+                    me: account_id,
+                    protocol_state_tx: tx,
+                };
+                gov.vote_threshold(new_threshold).await
+            }
+        });
+
+        // Collect every error and whether any node flipped the state.
+        let mut started = false;
+        let mut errs = Vec::new();
+        for result in futures::future::join_all(vote_futures).await {
+            match result {
+                Ok(true) => started = true,
+                Ok(false) => {}
+                Err(err) => errs.push(err),
+            }
+        }
+
+        if !errs.is_empty() {
+            let formatted = format!("{errs:#?}");
+            tracing::warn!(err = %formatted, "vote_threshold surfaced errors");
+            anyhow::bail!("vote_threshold errors: {formatted}");
+        }
+
+        if !started {
+            anyhow::bail!("vote_threshold: no node observed the running->resharing transition");
+        }
+
+        Ok(())
     }
 
     pub fn complete_resharing(&self) {
@@ -90,11 +151,14 @@ impl MpcFixture {
         let running = mpc_node::protocol::contract::RunningContractState {
             epoch: resharing.old_epoch + 1,
             participants: resharing.new_participants.clone(),
-            threshold: resharing.threshold,
+            // Match the contract's `vote_reshared` behavior: the running
+            // threshold becomes the freshly reshared `new_threshold`, not the
+            // old `threshold`. This matters for tests where resharing changes
+            // the threshold.
+            threshold: resharing.new_threshold,
             public_key: resharing.public_key,
-            candidates: Default::default(),
-            join_votes: Default::default(),
             leave_votes: Default::default(),
+            threshold_votes: Default::default(),
         };
         let _ = self
             .shared_contract_state
@@ -119,9 +183,12 @@ impl MpcFixture {
         }
     }
 
-    pub async fn wait_for_actions(&self, threshold: usize) -> HashSet<String> {
-        let interval = Duration::from_millis(100);
+    /// How many publishes every node has made in total.
+    pub fn publishes(&self) -> usize {
+        self.output.publishes.load(Ordering::Relaxed)
+    }
 
+    pub async fn wait_for_actions(&self, threshold: usize) -> HashSet<String> {
         loop {
             let actions = self.output.rpc_actions.lock().await;
 
@@ -130,7 +197,35 @@ impl MpcFixture {
             }
 
             drop(actions);
-            tokio::time::sleep(interval).await;
+
+            // Wait for a notification that the RPC actions changed
+            self.output.actions_changed.notified().await;
+        }
+    }
+
+    /// Like [`Self::wait_for_actions`], but only actions matching `predicate`
+    /// count towards `threshold`.
+    pub async fn wait_for_actions_matching(
+        &self,
+        threshold: usize,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        loop {
+            let matching: Vec<String> = self
+                .output
+                .rpc_actions
+                .lock()
+                .await
+                .iter()
+                .filter(|action| predicate(action.as_str()))
+                .cloned()
+                .collect();
+
+            if matching.len() >= threshold {
+                return matching;
+            }
+
+            self.output.actions_changed.notified().await;
         }
     }
 
@@ -161,6 +256,51 @@ impl MpcFixture {
             self.print_actions().await;
         }
         result.expect("should produce enough signatures")
+    }
+
+    /// Like [`Self::assert_actions`], but only actions matching `predicate`
+    /// count towards `threshold`.
+    pub async fn assert_actions_matching(
+        &self,
+        threshold: usize,
+        timeout: Duration,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        let result = tokio::time::timeout(
+            timeout,
+            self.wait_for_actions_matching(threshold, &predicate),
+        )
+        .await;
+        if result.is_err() {
+            self.print_actions().await;
+        }
+        result.unwrap_or_else(|_| panic!("should produce {threshold} matching actions"))
+    }
+
+    /// Wait for `threshold` `RpcAction::Publish` actions.
+    pub async fn assert_publish_actions(&self, threshold: usize, timeout: Duration) -> Vec<String> {
+        self.assert_actions_matching(threshold, timeout, |action| {
+            action.contains("RpcAction::Publish")
+        })
+        .await
+    }
+
+    /// Send the same `SignCommand` to every node's `sign_tx`.
+    pub async fn broadcast(&self, request: &SignCommand) {
+        for node in &self.nodes {
+            match request {
+                SignCommand::Request(entry) => {
+                    let (node_entry, _) = node.backlog.insert(Arc::clone(entry.request())).await;
+                    node.sign_tx
+                        .send(SignCommand::Request(node_entry))
+                        .await
+                        .unwrap();
+                }
+                cmd => {
+                    node.sign_tx.send(cmd.clone()).await.unwrap();
+                }
+            }
+        }
     }
 
     pub async fn print_triples(&self) {
@@ -205,15 +345,36 @@ impl MpcFixture {
             }
         }
     }
+
+    /// Advance every node's stream by one empty block.
+    ///
+    /// Real indexers emit `ChainEvent::Block` whether or not the block held
+    /// anything, and work riding the block stream, like the publish failover sweep,
+    /// only runs when one arrives. Tests waiting on such work must keep the chain
+    /// moving rather than only sleeping.
+    pub async fn tick_block(&self, chain: Chain) {
+        for node in &self.nodes {
+            let stream = node
+                .mock_streams
+                .get(&chain)
+                .expect("must have mock stream configured");
+            stream.prepare_block_of_events(&[]).await;
+            stream.progress_block_height(1).await;
+        }
+    }
 }
 
 impl MpcFixtureNode {
     pub async fn wait_for_running(&self) {
+        let mut watcher = self.state.clone();
         loop {
-            if matches!(self.state.status(), NodeStatus::Running { .. }) {
+            // watcher.status() parks the task until the status changes, so this only resumes when the status changes.
+            if matches!(watcher.status(), NodeStatus::Running { .. }) {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            if watcher.changed().await.is_err() {
+                return;
+            }
         }
     }
 
@@ -239,24 +400,55 @@ impl MpcFixtureNode {
 
     /// Simulate a /sync call between this node (as receiver) and a peer (as owner).
     ///
-    /// `from` is the owner node sending the sync update.
+    /// `from` is the owner node sending the sync update; it signs the update
+    /// and encrypts it to this node, as a real caller would.
     /// `triples` and `presignatures` are the lists of IDs the owner claims to hold.
     /// Returns the SyncUpdate response (IDs missing on this node).
     pub async fn sync(
         &self,
-        from: cait_sith::protocol::Participant,
+        from: &MpcFixtureNode,
         triples: Vec<u64>,
         presignatures: Vec<u64>,
     ) -> SyncUpdate {
         let update = SyncUpdate {
-            from,
             triples,
             presignatures,
         };
-        self.sync_channel
-            .request_update(update)
+        let network = from.config.borrow().local.network.clone();
+        let reply = self
+            .try_sync(from.me, &network.sign_sk, &update)
             .await
-            .expect("sync_channel request_update failed")
+            .expect("sync_channel request_update failed");
+        self.open_reply(&reply, &network.cipher_sk)
+            .expect("failed to open sync reply")
+    }
+
+    /// Open a sync reply from this node, as the caller holding `cipher_sk`.
+    pub fn open_reply(
+        &self,
+        reply: &Ciphered,
+        cipher_sk: &hpke::SecretKey,
+    ) -> Result<SyncUpdate, MessageError> {
+        // Only the signing key is checked.
+        let info = ParticipantInfo {
+            sign_pk: self.config.borrow().local.network.sign_sk.public_key(),
+            ..ParticipantInfo::new(self.me.into())
+        };
+        open_reply_for_test(reply, cipher_sk, self.me, &info)
+    }
+
+    /// Deliver `update` to this node as a sync request that claims to come
+    /// from `claimed` and is signed with `sign_sk`, so tests can forge either.
+    pub async fn try_sync(
+        &self,
+        claimed: Participant,
+        sign_sk: &near_crypto::SecretKey,
+        update: &SyncUpdate,
+    ) -> Result<Ciphered, SyncError> {
+        let cipher_pk = self.config.borrow().local.network.cipher_sk.public_key();
+        let encrypted = SignedMessage::encrypt(update, claimed, sign_sk, &cipher_pk)
+            .expect("failed to encrypt sync update");
+        self.sync_channel.request_update(encrypted).await
     }
 
     /// Get the list of triple IDs this node owns in storage (sorted).
@@ -284,22 +476,11 @@ impl MpcFixtureNode {
         ids
     }
 
-    /// Owned + owned using + owned generating, sorted.
-    pub async fn owned_presignatures_with_reserved(&self) -> Vec<u64> {
-        let mut ids = self
-            .presignature_storage
-            .fetch_owned_with_reserved()
-            .await
-            .unwrap();
-        ids.sort();
-        ids
-    }
-
     /// Simulate the caller side of /sync: process a peer's response by removing
     /// the peer from artifacts they don't have, pruning below threshold.
     pub async fn process_sync_response(
         &self,
-        peer: cait_sith::protocol::Participant,
+        peer: Participant,
         threshold: usize,
         response: &mpc_node::protocol::sync::SyncUpdate,
     ) {
@@ -313,12 +494,12 @@ impl MpcFixtureNode {
             .expect("remove_holder_and_prune presignatures failed");
     }
 
-    pub async fn start_web_interface(&mut self, account_id: AccountId) {
+    pub async fn start_web_interface(&mut self, account_id: AccountId) -> Option<u16> {
         let web_port = match crate::utils::pick_unused_port().await {
             Ok(port) => port,
             Err(err) => {
                 tracing::error!(?err, "failed to allocate fixture web port");
-                return;
+                return None;
             }
         };
 
@@ -328,12 +509,12 @@ impl MpcFixtureNode {
             self.state.clone(),
             self.triple_storage.clone(),
             self.presignature_storage.clone(),
-            // unused but needed to call the web interface
             SyncChannel::new().1,
             account_id,
             self.backlog.clone(),
         );
         self.web_handle = Some(tokio::spawn(task));
+        Some(web_port)
     }
 }
 
@@ -356,6 +537,8 @@ impl SharedOutput {
         Self {
             msg_log: Arc::new(Mutex::new(M::default())),
             rpc_actions: Arc::new(Mutex::new(HashSet::new())),
+            actions_changed: Arc::new(Notify::new()),
+            publishes: Default::default(),
         }
     }
 }
@@ -365,6 +548,8 @@ impl Default for SharedOutput {
         Self {
             msg_log: Arc::new(Mutex::new(MessagePrinter)),
             rpc_actions: Default::default(),
+            actions_changed: Arc::new(Notify::new()),
+            publishes: Default::default(),
         }
     }
 }

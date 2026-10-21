@@ -1,7 +1,4 @@
-use crate::{
-    Chain, ConsensusCheckpointDigest, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent,
-    SignId,
-};
+use crate::{Chain, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
@@ -9,11 +6,41 @@ pub enum SignKind {
     Sign,
     SignBidirectional(SignBidirectionalEvent),
     RespondBidirectional(RespondBidirectionalTx),
-    Checkpoint(ConsensusCheckpointDigest),
+}
+
+/// Payload-free projection of [`SignKind`], used as a metric label.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
+pub enum RequestKind {
+    #[default]
+    Sign,
+    SignBidirectional,
+    RespondBidirectional,
+}
+
+impl RequestKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sign => "sign",
+            Self::SignBidirectional => "sign_bidirectional",
+            Self::RespondBidirectional => "respond_bidirectional",
+        }
+    }
+}
+
+impl SignKind {
+    pub fn request_kind(&self) -> RequestKind {
+        match self {
+            Self::Sign => RequestKind::Sign,
+            Self::SignBidirectional(_) => RequestKind::SignBidirectional,
+            Self::RespondBidirectional(_) => RequestKind::RespondBidirectional,
+        }
+    }
 }
 
 /// All relevant info pertaining to an indexed sign request.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IndexedSignRequest {
     pub id: SignId,
     pub args: SignArgs,
@@ -39,6 +66,11 @@ impl IndexedSignRequest {
             unix_timestamp_indexed,
             kind,
         }
+    }
+
+    /// Metric-label kind of this request. See [`RequestKind`].
+    pub fn request_kind(&self) -> RequestKind {
+        self.kind.request_kind()
     }
 
     pub fn sign(id: SignId, args: SignArgs, chain: Chain, unix_timestamp_indexed: u64) -> Self {
@@ -76,28 +108,24 @@ impl IndexedSignRequest {
             SignKind::RespondBidirectional(tx),
         )
     }
+}
 
-    pub fn checkpoint(checkpoint: ConsensusCheckpointDigest, epsilon: k256::Scalar) -> Self {
-        let payload = checkpoint.sign_payload_scalar();
-        let id = checkpoint.sign_id();
-        let entropy = id.request_id;
-        let args = SignArgs {
-            entropy,
-            epsilon,
-            payload,
-            path: checkpoint.sign_path(),
-            key_version: crate::LATEST_MPC_KEY_VERSION,
-        };
-        let unix_timestamp_indexed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self::new(
-            id,
-            args,
-            Chain::NEAR,
-            unix_timestamp_indexed,
-            SignKind::Checkpoint(checkpoint),
-        )
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The label strings are a metrics contract: dashboards and alerts select on
+    /// them, so a rename here silently breaks queries rather than the build.
+    #[test]
+    fn request_kind_labels_are_stable() {
+        assert_eq!(RequestKind::Sign.as_str(), "sign");
+        assert_eq!(
+            RequestKind::SignBidirectional.as_str(),
+            "sign_bidirectional"
+        );
+        assert_eq!(
+            RequestKind::RespondBidirectional.as_str(),
+            "respond_bidirectional"
+        );
     }
 }

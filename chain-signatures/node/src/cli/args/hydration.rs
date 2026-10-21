@@ -1,14 +1,22 @@
-use crate::indexer_hydration::HydrationConfig;
+use mpc_chain_hydration::HydrationConfig;
 
 /// Configures Hydration indexer.
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_hydration_options")]
 pub struct HydrationArgs {
     /// Hydration RPC ws URL
-    #[clap(long = "hydration-rpc-ws-url", env("MPC_HYDRATION_RPC_WS_URL"))]
+    #[arg(
+        long = "hydration-rpc-ws-url",
+        env("MPC_HYDRATION_RPC_WS_URL"),
+        requires = "signer_uri"
+    )]
     pub rpc_ws_url: Option<String>,
     /// Hydration signer URI
-    #[clap(long = "hydration-signer-uri", env("MPC_HYDRATION_SIGNER_URI"))]
+    #[arg(
+        long = "hydration-signer-uri",
+        env("MPC_HYDRATION_SIGNER_URI"),
+        requires = "rpc_ws_url"
+    )]
     pub signer_uri: Option<String>,
 }
 

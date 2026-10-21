@@ -72,6 +72,15 @@ impl From<JoinError> for Error {
     }
 }
 
+impl JoinError {
+    pub(crate) fn message<T>(self, msg: T) -> Error
+    where
+        T: Into<Cow<'static, str>>,
+    {
+        Error::message(ErrorKind::Join(self), msg)
+    }
+}
+
 impl From<PublicKeyError> for Error {
     fn from(code: PublicKeyError) -> Self {
         Self::simple(ErrorKind::PublicKey(code))

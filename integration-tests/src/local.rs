@@ -7,7 +7,7 @@ use crate::execute::executable;
 use anyhow::Context;
 use async_process::Child;
 use mpc_keys::hpke;
-use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, SolArgs};
+use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use shell_escape::escape;
@@ -63,35 +63,33 @@ impl Node {
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
-        let indexer_options = mpc_node::indexer::Options {
-            running_threshold: 120,
-        };
         let eth = EthArgs::from_config(cfg.eth.clone());
         let sol = SolArgs::from_config(cfg.sol.clone());
         let hydration = HydrationArgs::from_config(cfg.hydration.clone());
         let canton = CantonArgs::from_config(cfg.canton.clone());
+        let midnight = MidnightArgs::from_config(cfg.midnight.clone());
         let near_rpc = ctx.worker.rpc_addr();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = Cli::Start {
             near_rpc: near_rpc.clone(),
             mpc_contract_id: mpc_contract_id.clone(),
             account_id: account_id.clone(),
+            env: ctx.env.clone(),
             account_sk: account_sk.to_string().parse()?,
-            web_port: Some(web_port),
+            web_port,
             cipher_sk: hex::encode(cipher_sk.to_bytes()),
-            sign_sk: Some(sign_sk.clone()),
+            sign_sk: sign_sk.clone(),
             eth,
             sol,
             hydration,
             canton,
-            indexer_options,
+            midnight,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 cfg.protocol.clone(),
             )?)),
-            client_header_referer: None,
             mesh_options: ctx.mesh_options.clone(),
             message_options: ctx.message_options.clone(),
         };
@@ -141,11 +139,7 @@ impl Node {
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
         let near_rpc = ctx.worker.rpc_addr();
 
-        let mut cfg = cfg.clone();
-        if let Some(ref mut eth_config) = cfg.eth {
-            eth_config.helios_data_path =
-                format!("{}_{}", eth_config.helios_data_path, account.id());
-        }
+        let cfg = cfg.clone();
 
         Self::spawn(
             ctx,
@@ -164,40 +158,38 @@ impl Node {
 
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
-        let indexer_options = mpc_node::indexer::Options {
-            running_threshold: 120,
-        };
 
         let eth = EthArgs::from_config(config.cfg.eth.clone());
         let sol = SolArgs::from_config(config.cfg.sol.clone());
         let hydration = HydrationArgs::from_config(config.cfg.hydration.clone());
         let canton = CantonArgs::from_config(config.cfg.canton.clone());
+        let midnight = MidnightArgs::from_config(config.cfg.midnight.clone());
         let cli = Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
+            env: ctx.env.clone(),
             account_sk: config.account.secret_key().to_string().parse()?,
-            web_port: Some(web_port),
+            web_port,
             cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
-            sign_sk: Some(config.sign_sk.clone()),
+            sign_sk: config.sign_sk.clone(),
             eth,
             sol,
             hydration,
             canton,
-            indexer_options,
+            midnight,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
                 config.cfg.protocol.clone(),
             )?)),
-            client_header_referer: None,
             mesh_options: ctx.mesh_options.clone(),
             message_options: ctx.message_options.clone(),
         };
 
         let mpc_node_id = format!("multichain/{}", config.account.id());
-        let process = execute::spawn_node_with_binary(
+        let mut process = execute::spawn_node_with_binary(
             config.binary_path.clone(),
             ctx.release,
             &mpc_node_id,
@@ -205,7 +197,7 @@ impl Node {
         )?;
         let address = format!("http://127.0.0.1:{web_port}");
         tracing::info!("node is starting at {address}");
-        utils::ping_until_ok(&address, 120).await?;
+        utils::ping_until_ok(&mut process, &address, 120).await?;
         tracing::info!(node_account_id = %config.account.id(), ?address, "node started");
 
         Ok(Self {

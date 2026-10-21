@@ -1,0 +1,378 @@
+//! Per-request driver: the `SignPhase` state machine and the `SignTask` that owns it.
+
+use super::mailbox::PositMailbox;
+use super::metrics::PhaseDurations;
+use super::organize::OrganizingPhase;
+use super::posit::PositPhase;
+use super::state::SignState;
+use super::*;
+use crate::backlog::{BacklogError, Generating, SignEntry};
+use crate::storage::presignature_storage::PresignatureTaken;
+
+use cait_sith::FullSignature;
+use k256::Secp256k1;
+use std::future::Future;
+
+/// Generating phase — see [`SignPhase::Generating`].
+pub struct GeneratingPhase {
+    pub proposer: Participant,
+    pub presignature_id: PresignatureId,
+    /// The presignature the proposer already committed before announcing START.
+    /// `None` for a deliberator, whose share is taken from storage when
+    /// generation starts.
+    pub presignature: Option<Box<PresignatureTaken>>,
+    pub accepted_participants: Vec<Participant>,
+}
+
+/// State machine for one sign request. Each phase advances to the next or loops
+/// back to `Organizing` (a new round) on any recoverable failure.
+pub enum SignPhase {
+    /// Wait for threshold active peers and elect the round's proposer; if that's
+    /// us, take a concurrency slot, reserve a presignature, and broadcast Propose.
+    Organizing(OrganizingPhase),
+    /// Agree on the presignature and participant set: the proposer collects
+    /// Accepts, commits its reservation, and broadcasts Start; each deliberator
+    /// does Propose -> Accept -> Start.
+    Posit(PositPhase),
+    /// Take the agreed presignature (the proposer's is already committed, a
+    /// deliberator takes its share from storage) and run the signing protocol
+    /// to completion.
+    Generating(GeneratingPhase),
+    /// Terminal. `Ok` means the signature was recorded in the backlog and, on
+    /// the proposer, queued for the RPC worker; it does not mean a response is
+    /// on chain, which the backlog state and the chain streams track. `Err`
+    /// means the request aborted, including a signature that was generated but
+    /// could not be handed off.
+    Complete(Result<(), SignError>),
+}
+
+impl SignPhase {
+    async fn advance(
+        &mut self,
+        ctx: &mut SignTask,
+        state: &mut SignState,
+        mailbox: &PositMailbox,
+    ) -> SignPhase {
+        match self {
+            SignPhase::Organizing(phase) => phase.advance(ctx, state).await,
+            SignPhase::Posit(phase) => phase.advance(ctx, state, mailbox).await,
+            SignPhase::Generating(phase) => phase.advance(ctx, state, mailbox).await,
+            SignPhase::Complete(result) => SignPhase::Complete(result.clone()),
+        }
+    }
+}
+
+impl GeneratingPhase {
+    async fn advance(
+        &mut self,
+        ctx: &SignTask,
+        state: &mut SignState,
+        mailbox: &PositMailbox,
+    ) -> SignPhase {
+        let sign_id = ctx.sign_id;
+
+        tracing::info!(
+            ?sign_id,
+            presignature_id = ?self.presignature_id,
+            participants = ?self.accepted_participants,
+            "posit complete, starting generation"
+        );
+
+        let taken = match self.take_presignature(ctx).await {
+            Ok(taken) => taken,
+            Err(reason) => return state.reorganize(&reason),
+        };
+
+        // Create and run signature generator, which will drive the protocol to completion.
+        let gen_ctx = ctx.generate_ctx();
+        let generator = match SignGenerator::new(
+            &gen_ctx,
+            self.proposer,
+            state.entry.request(),
+            taken,
+            self.accepted_participants.clone(),
+        )
+        .await
+        {
+            Ok(gen) => gen,
+            Err(err) => {
+                return state.reorganize(&format!("failed to create generator: {err}"));
+            }
+        };
+
+        crate::metrics::protocols::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS.inc();
+
+        let generation = generator.run(&gen_ctx);
+        let output = match Self::answering_posits(ctx, state, mailbox, generation).await {
+            Ok(output) => output,
+            Err(SignError::Aborted(cause)) => {
+                return state.reorganize(&format!("signature generation failed: {cause}"));
+            }
+        };
+
+        // The backlog write queues behind the pending map's readers, so keep
+        // answering peers while it waits.
+        let hand_off = self.hand_off(ctx, state.entry.clone(), output);
+        SignPhase::Complete(
+            Self::answering_posits(ctx, state, mailbox, hand_off)
+                .await
+                .map_err(SignError::Aborted),
+        )
+    }
+
+    /// Drive `fut` to completion while answering posit traffic: peers proposing
+    /// this signature get a Reject so they don't wait for us.
+    async fn answering_posits<F: Future>(
+        ctx: &SignTask,
+        state: &mut SignState,
+        mailbox: &PositMailbox,
+        fut: F,
+    ) -> F::Output {
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                output = &mut fut => break output,
+                task_msg = mailbox.recv() => {
+                    Self::reject_late_propose(ctx, state, task_msg).await;
+                }
+            }
+        }
+    }
+
+    /// Hand the finished signature on. This is not the on-chain publish: every
+    /// participant advances the backlog entry to publishing, the record that
+    /// publish failover works from, and the proposer queues a publish for the
+    /// RPC worker, which submits and retries on its own. `Err` means the
+    /// signature went nowhere: it did not verify, or the backlog entry could
+    /// not be advanced.
+    async fn hand_off(
+        &self,
+        ctx: &SignTask,
+        entry: SignEntry<Generating>,
+        output: FullSignature<Secp256k1>,
+    ) -> Result<(), String> {
+        let sign_id = ctx.sign_id;
+        let is_proposer = self.proposer == ctx.governance.me;
+
+        let entry = entry
+            .advance(
+                ctx.governance.public_key,
+                &output,
+                self.accepted_participants.clone(),
+                is_proposer,
+            )
+            .await
+            .map_err(|err| match err {
+                BacklogError::InvalidSignature => {
+                    tracing::error!(
+                        ?sign_id,
+                        "generated signature does not verify against the derived key; dropping it"
+                    );
+                    "generated signature does not verify".to_string()
+                }
+                err => format!("failed to mark publishing: {err}"),
+            })?;
+
+        if is_proposer {
+            crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
+            ctx.rpc.publish(entry);
+        }
+        Ok(())
+    }
+
+    /// The proposer already committed its presignature before START went out.
+    /// A deliberator takes its share from storage, which can fail.
+    async fn take_presignature(&mut self, ctx: &SignTask) -> Result<PresignatureTaken, String> {
+        if let Some(taken) = self.presignature.take() {
+            return Ok(*taken);
+        }
+
+        let id = self.presignature_id;
+        ctx.presignatures
+            .take(id, self.proposer)
+            .await
+            .ok_or_else(|| format!("failed to take presignature {id} from storage"))
+    }
+
+    /// Reject a `Propose` that arrives while we are already generating; drop
+    /// stale Accept/Reject/Start messages.
+    async fn reject_late_propose(
+        ctx: &SignTask,
+        state: &mut SignState,
+        task_msg: SignPositMessage,
+    ) {
+        let SignPositMessage {
+            presignature_id,
+            round,
+            from,
+            action,
+            ..
+        } = task_msg;
+        if !matches!(action, PositAction::Propose) {
+            return;
+        }
+        let me = ctx.governance.me;
+        let reason = if state.round() > round {
+            PositRejectReason::StaleRound(state.round())
+        } else {
+            state.record_peer_round(round);
+            PositRejectReason::AlreadyGenerating
+        };
+        tracing::info!(
+            sign_id = ?ctx.sign_id,
+            ?from,
+            round,
+            my_round = state.round(),
+            ?reason,
+            "received Propose while already generating, rejecting"
+        );
+        ctx.msg
+            .send(
+                me,
+                from,
+                PositMessage {
+                    id: PositProtocolId::signature(ctx.sign_id, ctx.kind, presignature_id, round),
+                    from: me,
+                    action: PositAction::RejectWithReason(reason),
+                },
+            )
+            .await;
+    }
+}
+
+/// Owns everything needed to fulfil one sign request; the context passed between phases of the state machine.
+pub struct SignTask {
+    pub governance: GovernanceInfo,
+    pub sign_id: SignId,
+    pub kind: RequestKind,
+    pub presignatures: PresignatureStorage,
+    pub msg: MessageChannel,
+    pub rpc: RpcChannel,
+    pub cfg: ProtocolConfig,
+    pub is_proposer: Arc<AtomicBool>,
+    /// Posit round, shared with `SignEntry` so it survives a respawn.
+    pub round: Arc<AtomicUsize>,
+    pub limiter: SignLimiter,
+    pub node_account_id: near_account_id::AccountId,
+    /// Reports a peer's sync status to the mesh. A `MissingArtifact` reject
+    /// proves our holder list is wrong about what that peer stored, and state
+    /// sync is what corrects it; this puts the peer back through it.
+    pub sync_report_tx: SyncReportSender,
+}
+
+impl SignTask {
+    /// Drive the signature generation state machine to completion
+    pub async fn run(
+        mut self,
+        entry: SignEntry<Generating>,
+        mesh_state: watch::Receiver<MeshState>,
+        mailbox: Arc<PositMailbox>,
+    ) -> Result<(), SignError> {
+        let sign_id = self.sign_id;
+        tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
+
+        let mut state = SignState::new(entry, mesh_state, Arc::clone(&self.round));
+        let mut phase = SignPhase::Organizing(OrganizingPhase);
+
+        // Sum per-phase time across loop attempts; emit on Complete(Ok) only.
+        let mut durations = PhaseDurations::default();
+
+        loop {
+            let phase_start = Instant::now();
+            let current_phase_step = match &phase {
+                SignPhase::Organizing(_) => Some(SignRequestStep::Organizing),
+                SignPhase::Posit(_) => Some(SignRequestStep::Posit),
+                SignPhase::Generating(_) => Some(SignRequestStep::Generating),
+                SignPhase::Complete(_) => None,
+            };
+
+            let new_phase = phase.advance(&mut self, &mut state, &mailbox).await;
+            if let Some(step) = current_phase_step {
+                durations.add(step, phase_start.elapsed());
+                if matches!(&new_phase, SignPhase::Organizing(_)) {
+                    SIGN_REQUEST_LOOPS
+                        .with_label_values(&[state.request().chain.as_str(), step.as_str()])
+                        .inc();
+                }
+            }
+
+            match new_phase {
+                SignPhase::Complete(result) => {
+                    if result.is_ok() {
+                        durations.emit(state.request().chain, state.request().request_kind());
+                    }
+                    return result;
+                }
+                new_phase => phase = new_phase,
+            }
+        }
+    }
+
+    /// Snapshot the fields the generation protocol needs.
+    fn generate_ctx(&self) -> GenerateCtx {
+        GenerateCtx {
+            governance: self.governance.clone(),
+            msg: self.msg.clone(),
+            cfg: self.cfg.clone(),
+            node_account_id: self.node_account_id.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::posit::tests::{sent_posit, setup};
+    use super::*;
+
+    fn propose(from: Participant, round: usize) -> SignPositMessage {
+        SignPositMessage {
+            presignature_id: 42,
+            round,
+            from,
+            action: PositAction::Propose,
+        }
+    }
+
+    /// A behind peer is answered the way every other phase answers one, with
+    /// StaleRound carrying our round, so it catches up in a single bump.
+    #[tokio::test]
+    async fn late_propose_from_behind_peer_carries_our_round() {
+        let me = Participant::from(0);
+        let behind = Participant::from(1);
+        let mut t = setup(me, behind, 2);
+        t.state.set_round(5);
+
+        GeneratingPhase::reject_late_propose(&t.ctx, &mut t.state, propose(behind, 2)).await;
+
+        let (round, action) = sent_posit(&mut t.outbox, me, behind);
+        // The id echoes the rejected round; ours rides in the reject.
+        assert_eq!(round, 2);
+        assert_eq!(
+            action,
+            PositAction::RejectWithReason(PositRejectReason::StaleRound(5))
+        );
+        assert_eq!(t.state.round(), 5);
+    }
+
+    /// An ahead peer's round is recorded, so the reorganize after a failed
+    /// generation lands on it instead of climbing one round at a time.
+    #[tokio::test]
+    async fn late_propose_from_ahead_peer_is_recorded() {
+        let me = Participant::from(0);
+        let ahead = Participant::from(1);
+        let mut t = setup(me, ahead, 2);
+        t.state.set_round(3);
+
+        GeneratingPhase::reject_late_propose(&t.ctx, &mut t.state, propose(ahead, 12)).await;
+
+        let (_, action) = sent_posit(&mut t.outbox, me, ahead);
+        assert!(matches!(
+            action,
+            PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating)
+        ));
+
+        // Caught up in one bump: max(3 + 1, 12) = 12.
+        t.state.reorganize("generation failed");
+        assert_eq!(t.state.round(), 12);
+    }
+}

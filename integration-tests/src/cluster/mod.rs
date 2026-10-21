@@ -3,7 +3,8 @@ pub mod spawner;
 use std::collections::{HashMap, HashSet};
 
 use mpc_contract::primitives::Participants;
-use mpc_primitives::{Chain, Checkpoint};
+use mpc_node::backlog::Checkpoint;
+use mpc_primitives::Chain;
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Finality, NearToken};
 use near_workspaces::{Account, AccountId, Contract, Worker};
@@ -11,13 +12,14 @@ use spawner::{ClusterSpawner, Prestockpile};
 
 use crate::actions::sign::SignAction;
 use crate::actions::wait::WaitAction;
-use crate::containers::{self, DockerClient};
+use crate::containers;
 use crate::local::NodeEnvConfig;
 use crate::utils::{self, vote_join, vote_leave};
 use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
-use mpc_contract::{ProtocolContractState, RunningContractState};
-use mpc_node::web::{BenchMetrics, StateView};
+use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
+use mpc_node::protocol::state::NodeStatus;
+use mpc_node::web::{BenchMetrics, StatusResponse};
 
 use anyhow::Context;
 use url::Url;
@@ -32,13 +34,13 @@ pub fn spawn() -> ClusterSpawner {
 
 pub struct Cluster {
     pub cfg: NodeConfig,
-    pub docker_client: DockerClient,
     pub rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
     pub nodes: Nodes,
     pub account_idx: usize,
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
+    pub midnight: Option<crate::midnight::MidnightContext>,
 }
 
 impl Cluster {
@@ -62,15 +64,36 @@ impl Cluster {
         Url::parse(self.nodes.url(id)).unwrap()
     }
 
-    pub async fn fetch_state(&self, id: usize) -> anyhow::Result<StateView> {
-        let url = self.url(id).join("/state").unwrap();
-        let state_view: StateView = self.http_client.get(url).send().await?.json().await?;
-        Ok(state_view)
+    pub async fn fetch_status(&self, id: usize) -> anyhow::Result<NodeStatus> {
+        let url = self.url(id).join("/status").unwrap();
+        let resp: StatusResponse = self.http_client.get(url).send().await?.json().await?;
+        Ok(resp.status)
     }
 
-    pub async fn fetch_states(&self) -> anyhow::Result<Vec<StateView>> {
-        let tasks = (0..self.len()).map(|id| self.fetch_state(id));
+    pub async fn fetch_statuses(&self) -> anyhow::Result<Vec<NodeStatus>> {
+        let tasks = (0..self.len()).map(|id| self.fetch_status(id));
         futures::future::try_join_all(tasks).await
+    }
+
+    /// Reads a gauge from the node's `/metrics`, ignoring its labels.
+    pub async fn fetch_gauge(&self, id: usize, name: &str) -> anyhow::Result<i64> {
+        let url = self.url(id).join("/metrics").unwrap();
+        let body = self.http_client.get(url).send().await?.text().await?;
+        body.lines()
+            .find_map(|line| {
+                let rest = line.strip_prefix(name)?;
+                // `name value` or `name{labels} value`
+                let rest = match rest.strip_prefix('{') {
+                    Some(labels) => &labels[labels.find('}')? + 1..],
+                    None => rest,
+                };
+                rest.strip_prefix(' ')
+            })
+            .with_context(|| format!("metric {name} not found"))?
+            .trim()
+            .parse::<f64>()
+            .map(|v| v as i64)
+            .with_context(|| format!("metric {name} is not a number"))
     }
 
     pub async fn fetch_bench_metrics(&self, id: usize) -> anyhow::Result<BenchMetrics> {
@@ -95,8 +118,8 @@ impl Cluster {
         self.nodes.contract()
     }
 
-    pub async fn contract_state(&self) -> anyhow::Result<ProtocolContractState> {
-        let state: ProtocolContractState = self
+    pub async fn contract_state(&self) -> anyhow::Result<ProtocolContractStateView> {
+        let state: ProtocolContractStateView = self
             .contract()
             .view("state")
             .finality(Finality::Final)
@@ -106,9 +129,9 @@ impl Cluster {
         Ok(state)
     }
 
-    pub async fn expect_running(&self) -> anyhow::Result<RunningContractState> {
+    pub async fn expect_running(&self) -> anyhow::Result<RunningContractStateView> {
         let state = self.contract_state().await?;
-        if let ProtocolContractState::Running(state) = state {
+        if let ProtocolContractStateView::Running(state) = state {
             Ok(state)
         } else {
             anyhow::bail!("expected running state, got {:?}", state)
@@ -133,7 +156,7 @@ impl Cluster {
     }
 
     pub async fn root_public_key(&self) -> anyhow::Result<near_sdk::PublicKey> {
-        let state: RunningContractState = self.expect_running().await?;
+        let state: RunningContractStateView = self.expect_running().await?;
         Ok(state.public_key)
     }
 
@@ -314,7 +337,7 @@ impl Cluster {
                         Err(e) => {
                             // Once threshold is reached by another voter, remaining votes may race
                             // and fail with `Update not found` even though update succeeded.
-                            if e.to_string().contains("Update not found") {
+                            if format!("{e:#}").contains("Update not found") {
                                 success += 1;
                                 voted = true;
                                 break;

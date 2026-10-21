@@ -8,28 +8,25 @@ publish = false
 [dependencies]
 alloy = { workspace = true, features = ["provider-anvil-api"] }
 anyhow.workspace = true
-async-process = "1"
+async-process = "2"
 async-trait = "0.1"
 backon.workspace = true
-bollard = "0.17.0"
+bollard = "0.21"
 borsh.workspace = true
 bs58 = "0.5.1"
 ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
 futures = "0.3"
-futures-util.workspace = true
-generic-array = { version = "0.14.7", default-features = false }
 hex.workspace = true
-hyper.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-semver.workspace = true
 shell-escape = "0.1.5"
-testcontainers = "0.23.1"
+testcontainers = "0.28"
 tokio = { version = "1.45.1", features = ["full", "test-util"] }
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
@@ -43,6 +40,7 @@ rlp = "0.5"
 anchor-client.workspace = true
 signet-program.workspace = true
 solana-sdk.workspace = true
+solana-commitment-config.workspace = true
 solana-client.workspace = true
 solana-transaction-status.workspace = true
 
@@ -61,19 +59,27 @@ near-account-id.workspace = true
 near-crypto.workspace = true
 near-fetch.workspace = true
 near-sdk.workspace = true
-near-jsonrpc-client = "0.15.0"
+near-jsonrpc-client.workspace = true
 near-primitives.workspace = true
-near-workspaces = "0.16.0"
+near-workspaces.workspace = true
 
 # local chain-signatures dependencies
 mpc-crypto.workspace = true
+mpc-compact-hashing.workspace = true
 mpc-contract.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-chain-canton.workspace = true
+mpc-chain-solana.workspace = true
+mpc-chain-ethereum = { workspace = true, features = ["contract-test"] }
+mpc-chain-hydration.workspace = true
+mpc-chain-midnight = { workspace = true, features = ["sandbox"] }
 mpc-keys.workspace = true
 mpc-node = { path = "../chain-signatures/node", default-features = false, features = [
     "test-feature",
     "debug-page",
 ] }
 mpc-primitives.workspace = true
+mpc-utils.workspace = true
 
 [dev-dependencies]
 criterion = "0.5.1"
@@ -82,7 +88,7 @@ test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [build-dependencies]
 anyhow.workspace = true
-async-process = "1"
+async-process = "2"
 tokio.workspace = true
 
 
@@ -98,5 +104,3 @@ harness = false
 
 [features]
 default = []
-docker-test = []
-helios = ["mpc-node/helios"]

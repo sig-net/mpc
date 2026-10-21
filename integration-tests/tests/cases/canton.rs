@@ -9,10 +9,13 @@ use integration_tests::canton::{
     EVM_TYPE2_TEST_CONTRACT_ADDRESS,
 };
 use integration_tests::cluster;
-use mpc_node::indexer_canton::contracts::{
-    EvmType2TransactionParams, RespondBidirectionalEventPayload, SignatureRespondedEventPayload,
+use mpc_chain_canton::{
+    compute_request_id,
+    daml::{
+        EvmType2TransactionParams, RespondBidirectionalEventPayload, SignatureRespondedEventPayload,
+    },
+    parse_canton_signature,
 };
-use mpc_node::indexer_canton::{compute_request_id, parse_canton_signature};
 use mpc_node::respond_bidirectional::CANTON_RESPOND_BIDIRECTIONAL_PATH;
 use mpc_node::sign_bidirectional::{derive_user_address, sign_and_hash_transaction};
 use mpc_node::util::NearPublicKeyExt;
@@ -128,7 +131,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
         LATEST_MPC_KEY_VERSION,
         &expected_event.sender,
         &canton.requester_party,
-    );
+    )?;
     let expected_sender_addr = derive_user_address(root_pk, sign_epsilon);
 
     anvil
@@ -209,7 +212,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
         LATEST_MPC_KEY_VERSION,
         &expected_event.sender,
         CANTON_RESPOND_BIDIRECTIONAL_PATH,
-    );
+    )?;
     let respond_derived_pk = mpc_crypto::derive_key(root_pk, respond_epsilon);
 
     let respond_ecdsa = k256::ecdsa::Signature::from_scalars(

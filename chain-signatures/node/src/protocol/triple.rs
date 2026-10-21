@@ -7,9 +7,9 @@ use crate::mesh::MeshState;
 use crate::protocol::posit::{PositRejectReason, Positor};
 use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
 use crate::types::TripleProtocol;
-use crate::util::{AffinePointExt, JoinMap};
-
+use mpc_chain_near::AffinePointExt as _;
 use mpc_contract::config::ProtocolConfig;
+use mpc_utils::task::JoinMap;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::triples::{TriplePub, TripleShare};
@@ -474,38 +474,44 @@ impl TripleSpawner {
         positor: Positor<()>,
         timeout: Duration,
     ) {
-        if positor.is_proposer() {
-            for &to in &participants {
-                if to == self.me {
-                    continue;
-                }
-                self.msg
-                    .send(
-                        self.me,
-                        to,
-                        PositMessage {
-                            id: PositProtocolId::Triple(id),
-                            from: self.me,
-                            action: PositAction::Start(participants.clone()),
-                        },
-                    )
-                    .await;
-            }
-            self.ongoing_owned.insert(id);
-        }
+        let is_proposer = positor.is_proposer();
 
+        // Peers start generating as soon as START arrives. Announce only once we
+        // hold the slot: without us they cannot converge and stall until timeout.
         if let Err(err) = self
             .generate_with_id(id, &participants, positor.id(), timeout)
             .await
         {
-            self.ongoing_owned.remove(&id);
             tracing::warn!(
                 id,
                 ?participants,
-                is_proposer = positor.is_proposer(),
+                is_proposer,
                 ?err,
-                "unable to start triple generation on START"
+                "unable to start triple generation"
             );
+            return;
+        }
+
+        if !is_proposer {
+            return;
+        }
+
+        self.ongoing_owned.insert(id);
+        for &to in &participants {
+            if to == self.me {
+                continue;
+            }
+            self.msg
+                .send(
+                    self.me,
+                    to,
+                    PositMessage {
+                        id: PositProtocolId::Triple(id),
+                        from: self.me,
+                        action: PositAction::Start(participants.clone()),
+                    },
+                )
+                .await;
         }
     }
 

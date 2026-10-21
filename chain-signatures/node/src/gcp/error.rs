@@ -1,21 +1,18 @@
-#[derive(Debug, thiserror::Error)]
-pub enum ConvertError {
-    #[error("expected property `{0}` was missing")]
-    MissingProperty(String),
-    #[error("expected property type `{expected}`, got `{got}`")]
-    UnexpectedPropertyType { expected: String, got: String },
-    #[error("property `{0}` is malfored")]
-    MalformedProperty(String),
-    #[error("parsing integar from string erred out: `{0}`")]
-    ParseInt(String),
-}
-
 #[derive(thiserror::Error, Debug)]
 pub enum SecretStorageError {
-    #[error("GCP error: {0}")]
-    GcpError(#[from] google_secretmanager1::Error),
+    #[error("GCP auth error: {0}")]
+    Auth(#[from] google_cloud_auth::errors::CredentialsError),
+    #[error("GCP API error ({status}): {message}")]
+    Api {
+        status: reqwest::StatusCode,
+        message: String,
+    },
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("(de)serialization error: {0}")]
     SerdeError(#[from] serde_json::Error),
+    #[error("base64 decode error: {0}")]
+    Base64(#[from] base64::DecodeError),
 }

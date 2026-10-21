@@ -3,12 +3,33 @@ use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use k256::Secp256k1;
+use mpc_node::backlog::BacklogEntry;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
-use mpc_primitives::{SignArgs, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use sha2::Digest;
+use std::sync::Arc;
+
+pub(crate) fn dummy_indexed_sign_request(id: u8, chain: Chain) -> Arc<IndexedSignRequest> {
+    Arc::new(IndexedSignRequest::sign(
+        SignId::new([id; 32]),
+        SignArgs {
+            entropy: [id; 32],
+            epsilon: k256::Scalar::ONE,
+            payload: k256::Scalar::ONE,
+            path: "m/0".to_string(),
+            key_version: 0,
+        },
+        chain,
+        0,
+    ))
+}
+
+pub(crate) fn dummy_backlog_entry(id: u8, chain: Chain) -> BacklogEntry {
+    BacklogEntry::new(dummy_indexed_sign_request(id, chain))
+}
 
 pub(crate) fn dummy_presignature(id: u64) -> Presignature {
     dummy_presignature_with_holders(id, vec![Participant::from(1), Participant::from(2)])
@@ -150,4 +171,9 @@ pub fn test_sign_arg(seed: impl Into<u32>) -> SignArgs {
         path: "test".to_owned(),
         key_version: LATEST_MPC_KEY_VERSION,
     }
+}
+
+pub(crate) fn sign_request(seed: u32, chain: Chain) -> IndexedSignRequest {
+    let bytes: [u8; 32] = seed.to_be_bytes().repeat(8).try_into().unwrap();
+    IndexedSignRequest::sign(SignId::new(bytes), test_sign_arg(seed), chain, 0)
 }

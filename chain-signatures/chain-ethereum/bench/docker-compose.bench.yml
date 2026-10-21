@@ -1,0 +1,20 @@
+# eRPC + Redis for the catchup benchmark. Start, then point the benchmark at
+# http://localhost:4000/sepolia/evm/11155111 so reads hit the Redis cache
+# instead of the live endpoints.
+#
+#   docker compose -f bench/docker-compose.bench.yml up -d
+#   docker compose -f bench/docker-compose.bench.yml down -v  # clear cache
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 2s, retries: 10 }
+
+  erpc:
+    image: flairsdk/erpc:main-eeee5c0f
+    ports: ["4000:4000", "4001:4001"]
+    volumes: ["./erpc.yaml:/erpc.yaml:ro"]
+    entrypoint: ["/erpc-server"]
+    command: ["--config", "/erpc.yaml"]
+    depends_on: { redis: { condition: service_healthy } }

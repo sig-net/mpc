@@ -2,16 +2,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
+use mpc_keys::hpke::{self, Ciphered};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
+use crate::config::NetworkConfig;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, StorageError, TripleStorage};
 
-use super::contract::primitives::ParticipantInfo;
+use super::contract::primitives::{ParticipantInfo, ParticipantMap, Participants};
+use super::message::{MessageError, SignedMessage};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 
@@ -46,7 +49,6 @@ pub enum SyncPeerResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
-    pub from: Participant,
     pub triples: Vec<TripleId>,
     pub presignatures: Vec<PresignatureId>,
 }
@@ -54,7 +56,6 @@ pub struct SyncUpdate {
 impl SyncUpdate {
     pub fn empty() -> Self {
         Self {
-            from: Participant::from(u32::MAX),
             triples: Vec::new(),
             presignatures: Vec::new(),
         }
@@ -66,8 +67,10 @@ impl SyncUpdate {
 }
 
 pub struct SyncRequest {
-    pub update: SyncUpdate,
-    pub response_tx: oneshot::Sender<Result<SyncUpdate, StorageError>>,
+    /// A `SyncUpdate` signed by its sender and encrypted to us.
+    pub update: Ciphered,
+    /// Our reply, signed by us and encrypted to the sender.
+    pub response_tx: oneshot::Sender<Result<Ciphered, StorageError>>,
 }
 
 impl SyncRequest {
@@ -76,13 +79,26 @@ impl SyncRequest {
         triples: TripleStorage,
         presignatures: PresignatureStorage,
         me: Participant,
+        network: NetworkConfig,
+        participants: ParticipantMap,
     ) {
         let start = Instant::now();
 
-        let outdated_triples = match triples
-            .remove_outdated(self.update.from, &self.update.triples)
-            .await
-        {
+        // The signer is the owner whose shares we drop.
+        let (from, update) = match SignedMessage::decrypt_with::<SyncUpdate, _>(
+            &self.update,
+            &network.cipher_sk,
+            &participants,
+            |_| Ok(()),
+        ) {
+            Ok(verified) => verified,
+            Err(err) => {
+                tracing::warn!(?err, "rejected sync update");
+                return;
+            }
+        };
+
+        let outdated_triples = match triples.remove_outdated(from, &update.triples).await {
             Ok(result) => result,
             Err(err) => {
                 let _ = self.response_tx.send(Err(err));
@@ -90,7 +106,7 @@ impl SyncRequest {
             }
         };
         let outdated_presignatures = match presignatures
-            .remove_outdated(self.update.from, &self.update.presignatures)
+            .remove_outdated(from, &update.presignatures)
             .await
         {
             Ok(result) => result,
@@ -110,10 +126,21 @@ impl SyncRequest {
         );
 
         let response = SyncUpdate {
-            from: me,
             triples: outdated_triples.not_found,
             presignatures: outdated_presignatures.not_found,
         };
+        // The signature check above found the sender in `participants`.
+        let Some(info) = participants.get(&from) else {
+            return;
+        };
+        let response =
+            match SignedMessage::encrypt(&response, me, &network.sign_sk, &info.cipher_pk) {
+                Ok(response) => response,
+                Err(err) => {
+                    tracing::warn!(?err, "failed to encrypt sync response");
+                    return;
+                }
+            };
 
         let _ = self.response_tx.send(Ok(response));
     }
@@ -130,10 +157,10 @@ pub struct SyncTask {
     mesh_state: watch::Receiver<MeshState>,
     contract: ContractStateWatcher,
     requests: SyncRequestReceiver,
-    synced_peer_tx: mpsc::Sender<Participant>,
+    sync_report_tx: SyncReportSender,
+    network: NetworkConfig,
 }
 
-// TODO: add a watch channel for mesh active participants.
 impl SyncTask {
     pub fn new(
         client: &NodeClient,
@@ -141,7 +168,8 @@ impl SyncTask {
         presignatures: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
         contract: ContractStateWatcher,
-        synced_peer_tx: mpsc::Sender<Participant>,
+        sync_report_tx: SyncReportSender,
+        network: NetworkConfig,
     ) -> (SyncChannel, Self) {
         let (requests, channel) = SyncChannel::new();
         let task = Self {
@@ -151,7 +179,8 @@ impl SyncTask {
             mesh_state,
             contract,
             requests,
-            synced_peer_tx,
+            sync_report_tx,
+            network,
         };
         (channel, task)
     }
@@ -166,7 +195,7 @@ impl SyncTask {
         // Do NOT start until we have our own participant info
         tracing::info!("sync waiting for participant info");
         let start = Instant::now();
-        let (threshold, me) = self.contract.wait_info().await;
+        let (_, me) = self.contract.wait_info().await;
         tracing::info!(?me, elapsed = ?start.elapsed(), "starting sync loop...");
 
         self.triples.set_me(me);
@@ -187,7 +216,7 @@ impl SyncTask {
                         continue;
                     }
 
-                    let Some(update) = self.new_update(me).await else {
+                    let Some(update) = self.new_update().await else {
                         continue;
                     };
                     let start = Instant::now();
@@ -200,6 +229,7 @@ impl SyncTask {
                         update,
                         receivers.into_iter(),
                         me,
+                        self.network.clone(),
                     ));
                     broadcast = Some((start, task));
                 }
@@ -216,6 +246,11 @@ impl SyncTask {
 
                     match handle.await {
                         Ok(responses) => {
+                            // Re-read every time: resharing can change the threshold.
+                            let Some((threshold, _)) = self.contract.info().await else {
+                                tracing::warn!("contract has no threshold yet, dropping sync responses");
+                                continue;
+                            };
                             // Process sync responses: update artifact participants based on not_found data
                             if let Err(err) = self.process_sync_responses(responses, threshold).await {
                                 tracing::warn!(?err, "failed to process sync responses");
@@ -228,13 +263,20 @@ impl SyncTask {
                     }
                 }
                 Some(sync_req) = self.requests.updates.recv() => {
-                    tokio::spawn(sync_req.process(self.triples.clone(), self.presignatures.clone(), me));
+                    let participants = self.contract.participant_map().await;
+                    tokio::spawn(sync_req.process(
+                        self.triples.clone(),
+                        self.presignatures.clone(),
+                        me,
+                        self.network.clone(),
+                        participants,
+                    ));
                 }
             }
         }
     }
 
-    async fn new_update(&self, me: Participant) -> Option<SyncUpdate> {
+    async fn new_update(&self) -> Option<SyncUpdate> {
         let triples = match self.triples.fetch_owned_with_reserved().await {
             Ok(ids) => ids,
             Err(err) => {
@@ -257,7 +299,6 @@ impl SyncTask {
         };
 
         Some(SyncUpdate {
-            from: me,
             triples,
             presignatures,
         })
@@ -274,7 +315,12 @@ impl SyncTask {
         for (peer, result) in responses {
             match result {
                 SyncPeerResponse::SelfPeer => {
-                    if self.synced_peer_tx.send(peer).await.is_err() {
+                    if self
+                        .sync_report_tx
+                        .send((peer, SyncKind::Synced))
+                        .await
+                        .is_err()
+                    {
                         tracing::error!("sync reporter is down: state sync will no longer work");
                         return Err("sync reporter is down".to_string());
                     }
@@ -310,7 +356,12 @@ impl SyncTask {
                                 "batch removed peer from artifacts and pruned"
                             );
                             // Only notify mesh if both succeeded
-                            if self.synced_peer_tx.send(peer).await.is_err() {
+                            if self
+                                .sync_report_tx
+                                .send((peer, SyncKind::Synced))
+                                .await
+                                .is_err()
+                            {
                                 tracing::error!(
                                     ?peer,
                                     "sync reporter is down: state sync will no longer work"
@@ -337,11 +388,26 @@ impl SyncTask {
         Ok(())
     }
 
-    /// Channel for communicating back from the sync task which nodes are now updated.
-    pub fn synced_nodes_channel() -> (mpsc::Sender<Participant>, mpsc::Receiver<Participant>) {
+    /// Channel for reporting to the mesh which nodes changed sync status.
+    /// Sized well above the participant count: a full channel drops whatever
+    /// report is being sent, and the cost of losing a desync report is one
+    /// more failed round for that peer.
+    pub fn sync_report_channel() -> (SyncReportSender, SyncReportReceiver) {
         mpsc::channel(MAX_SYNC_UPDATE_REQUESTS)
     }
 }
+
+/// Which way a peer's sync status changed. `Synced` comes from the sync task
+/// once a peer's artifacts have been reconciled; `Desynced` comes from anyone
+/// who learns our record of what that peer stores is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncKind {
+    Synced,
+    Desynced,
+}
+
+pub type SyncReportSender = mpsc::Sender<(Participant, SyncKind)>;
+pub type SyncReportReceiver = mpsc::Receiver<(Participant, SyncKind)>;
 
 /// Broadcast an update to all participants specified by `receivers`.
 /// Returns results for all peers that complete within BROADCAST_TIMEOUT.
@@ -351,6 +417,7 @@ async fn broadcast_sync(
     update: SyncUpdate,
     receivers: impl Iterator<Item = (Participant, ParticipantInfo)>,
     me: Participant,
+    network: NetworkConfig,
 ) -> Vec<(Participant, SyncPeerResponse)> {
     let mut tasks = JoinSet::new();
     let update = Arc::new(update);
@@ -358,12 +425,12 @@ async fn broadcast_sync(
     for (p, info) in receivers {
         let client = client.clone();
         let update = update.clone();
-        let url = info.url;
+        let network = network.clone();
         tasks.spawn(async move {
             let sync_result = if p != me {
-                match client.sync(&url, &update).await {
+                match sync_peer(&client, &update, me, &network, p, &info).await {
                     Ok(response) => SyncPeerResponse::Success(response),
-                    Err(err) => SyncPeerResponse::Failed(err.to_string()),
+                    Err(err) => SyncPeerResponse::Failed(err),
                 }
             } else {
                 SyncPeerResponse::SelfPeer
@@ -405,6 +472,58 @@ async fn broadcast_sync(
     results
 }
 
+/// Send our signed update to `peer` and open its signed reply.
+async fn sync_peer(
+    client: &NodeClient,
+    update: &SyncUpdate,
+    me: Participant,
+    network: &NetworkConfig,
+    peer: Participant,
+    info: &ParticipantInfo,
+) -> Result<SyncUpdate, String> {
+    let encrypted = SignedMessage::encrypt(update, me, &network.sign_sk, &info.cipher_pk)
+        .map_err(|err| err.to_string())?;
+    let reply = client
+        .sync(&info.url, &encrypted)
+        .await
+        .map_err(|err| err.to_string())?;
+    open_reply(&reply, &network.cipher_sk, peer, info).map_err(|err| err.to_string())
+}
+
+/// Decrypt a sync reply and check it was signed by `peer`, the node we asked.
+/// `info` must be `peer`'s entry from the contract.
+fn open_reply(
+    reply: &Ciphered,
+    cipher_sk: &hpke::SecretKey,
+    peer: Participant,
+    info: &ParticipantInfo,
+) -> Result<SyncUpdate, MessageError> {
+    let mut only_peer = Participants::default();
+    only_peer.insert(&peer, info.clone());
+    let (from, reply) = SignedMessage::decrypt_with::<SyncUpdate, _>(
+        reply,
+        cipher_sk,
+        &ParticipantMap::One(only_peer),
+        |_| Ok(()),
+    )?;
+    if from != peer {
+        return Err(MessageError::Verification(
+            "sync reply was not signed by the peer we asked",
+        ));
+    }
+    Ok(reply)
+}
+
+#[cfg(any(test, feature = "test-feature"))]
+pub fn open_reply_for_test(
+    reply: &Ciphered,
+    cipher_sk: &hpke::SecretKey,
+    peer: Participant,
+    info: &ParticipantInfo,
+) -> Result<SyncUpdate, MessageError> {
+    open_reply(reply, cipher_sk, peer, info)
+}
+
 #[derive(Clone)]
 pub struct SyncChannel {
     request_update: mpsc::Sender<SyncRequest>,
@@ -424,10 +543,10 @@ impl SyncChannel {
         (requests, channel)
     }
 
-    pub async fn request_update(&self, update: SyncUpdate) -> Result<SyncUpdate, SyncError> {
+    pub async fn request_update(&self, update: Ciphered) -> Result<Ciphered, SyncError> {
         let (response_tx, response_rx) = oneshot::channel();
         let request = SyncRequest {
-            update: update.clone(),
+            update,
             response_tx,
         };
 
