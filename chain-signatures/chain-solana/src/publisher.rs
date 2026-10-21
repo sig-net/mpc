@@ -90,7 +90,8 @@ fn rpc_verdict(rpc: &RpcError) -> Verdict {
         ..
     } = rpc
     else {
-        // anchor's confirm loop timed out: the next attempt sends a fresh blockhash
+        // every non-preflight shape (ForUser confirm timeout, NodeUnhealthy,
+        // request/parse failures, undecodable preflight data) is retryable
         return Verdict::Retryable;
     };
     sim_tx_error(sim).map_or(Verdict::Retryable, on_chain)
@@ -294,6 +295,21 @@ mod tests {
             anchor_client::SignerError::KeypairPubkeyMismatch,
         ));
         assert!(!is_retryable(&err));
+    }
+
+    #[test]
+    fn anchor_level_failures_are_terminal() {
+        let program_error = anchor_lang::solana_program::program_error::ProgramError::Custom(0);
+        let errs = [
+            AnchorClientError::AccountNotFound,
+            AnchorClientError::LogParseError("nope".to_string()),
+            AnchorClientError::ProgramError(program_error.clone()),
+            AnchorClientError::AnchorError(anchor_lang::error::Error::from(program_error)),
+        ];
+        for e in errs {
+            let err = publish_error(e);
+            assert!(!is_retryable(&err), "{err:#}");
+        }
     }
 
     #[tokio::test]
