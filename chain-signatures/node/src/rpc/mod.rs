@@ -103,6 +103,11 @@ impl mpc_chain_midnight::ResponseAwaiter for BacklogAwaiter {
     }
 }
 
+/// A second leg waiting for its source chain to catch up: expected, so retried quietly.
+#[derive(Debug, thiserror::Error)]
+#[error("{0} is not caught up")]
+struct SourceNotCaughtUp(Chain);
+
 /// Whether this node's backlog still waits for the response `action` carries.
 /// An entry that left the backlog was answered on chain or pruned by consensus.
 /// Either way there is nothing left to publish. Errs, for a retry, on a second leg
@@ -117,7 +122,7 @@ async fn publish_still_awaited(backlog: &Backlog, action: &PublishAction) -> any
         && request.request_kind() == RequestKind::RespondBidirectional
         && !backlog.is_caught_up(request.chain)
     {
-        anyhow::bail!("{} is not caught up", request.chain);
+        return Err(SourceNotCaughtUp(request.chain).into());
     }
     Ok(awaited)
 }
@@ -735,13 +740,22 @@ pub async fn execute_publish(
         "publish",
         // Log the error and retry attempt
         |attempt, err, sleep| {
-            tracing::warn!(
-                ?sign_id,
-                retry_count = attempt,
-                elapsed = ?action.timestamp.elapsed(),
-                ?chain,
-                "failed to publish ({err:#}), retrying in {sleep:?}"
-            );
+            if err.chain().any(|cause| cause.is::<SourceNotCaughtUp>()) {
+                tracing::debug!(
+                    ?sign_id,
+                    retry_count = attempt,
+                    ?chain,
+                    "holding publish ({err:#}), retrying in {sleep:?}"
+                );
+            } else {
+                tracing::warn!(
+                    ?sign_id,
+                    retry_count = attempt,
+                    elapsed = ?action.timestamp.elapsed(),
+                    ?chain,
+                    "failed to publish ({err:#}), retrying in {sleep:?}"
+                );
+            }
         },
         // Try to publish the signature
         {
@@ -1322,7 +1336,10 @@ mod tests {
         backlog.insert_mock_final(&tx).await;
         assert!(!publish_still_awaited(&backlog, &first_leg).await.unwrap());
         // Behind on the source chain, the awaited second leg is retried, not published.
-        assert!(publish_still_awaited(&backlog, &second_leg).await.is_err());
+        let behind = publish_still_awaited(&backlog, &second_leg)
+            .await
+            .unwrap_err();
+        assert!(behind.is::<SourceNotCaughtUp>());
         backlog.set_caught_up(tx.source_chain, true);
         assert!(publish_still_awaited(&backlog, &second_leg).await.unwrap());
     }
