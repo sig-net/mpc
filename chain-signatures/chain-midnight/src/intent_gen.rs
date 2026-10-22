@@ -41,7 +41,7 @@ pub(crate) fn is_ambiguous_submit(error: &anyhow::Error) -> bool {
 
 /// A request the child answered without carrying out, under its `protocol.ts` code.
 #[derive(Debug)]
-struct Refusal {
+pub(crate) struct Refusal {
     code: String,
     message: String,
     /// The child's account of its funding wallet, logged but kept out of the error text:
@@ -63,6 +63,33 @@ impl std::fmt::Display for Refusal {
 }
 
 impl std::error::Error for Refusal {}
+
+#[cfg(test)]
+impl Refusal {
+    pub(crate) fn new(code: &str, message: &str) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.to_string(),
+            wallet_state: None,
+            wallet_used: false,
+        }
+    }
+}
+
+/// The child's code for a refused request, if `error` is one.
+pub(crate) fn refusal_code(error: &anyhow::Error) -> Option<&str> {
+    error
+        .downcast_ref::<Refusal>()
+        .map(|refusal| refusal.code.as_str())
+}
+
+/// A posted transaction and the funding wallet's DUST before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submitted {
+    pub tx_id: String,
+    /// Spendable DUST in SPECK; `None` when unreadable or malformed.
+    pub dust_balance: Option<u128>,
+}
 
 /// A refused submit costs its child whatever the reason: one restored from the latest
 /// wallet snapshot is cheap, so no refusal is diagnosed in place. The exception is a
@@ -223,16 +250,30 @@ impl IntentGen {
         hex::decode(&intent).context("decoding the intent the builder granted")
     }
 
-    /// Balances, proves and posts `intent`, answering with what names it on chain.
+    /// Balances, proves and posts `intent`, answering with what names it on chain and
+    /// the funding wallet's DUST before it.
     /// Attempted exactly once.
-    pub async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
+    pub async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
         let request = SubmitRequest {
             intent: hex::encode(intent),
         };
-        self.dispatch(&request, Operation::Submit)
-            .await?
+        let reply = self.dispatch(&request, Operation::Submit).await?;
+        let tx_id = reply
             .tx_id
-            .context("midnight intent builder posted a transaction without naming it")
+            .context("midnight intent builder posted a transaction without naming it")?;
+        // The transaction has landed: a malformed balance only loses the reading.
+        let dust_balance = reply.dust_balance.and_then(|balance| {
+            balance
+                .parse()
+                .inspect_err(|_| {
+                    tracing::warn!(%balance, "midnight intent builder sent a malformed DUST balance")
+                })
+                .ok()
+        });
+        Ok(Submitted {
+            tx_id,
+            dust_balance,
+        })
     }
 
     /// Keeps the child's wallet snapshot when one is due. Called between publishes, where no
@@ -799,6 +840,8 @@ struct WireReply {
     intent: Option<String>,
     /// What names a posted transaction on chain. The submit arm's own payload.
     tx_id: Option<String>,
+    /// The submit arm's DUST balance before the spend, as decimal SPECK.
+    dust_balance: Option<String>,
     /// The snapshot arm's own payload, opaque here.
     wallet_snapshot: Option<String>,
     code: Option<String>,
@@ -1034,8 +1077,35 @@ mod tests {
         r#"read -r line; case "$line" in *'"op":"submit"'*) intent=$(printf "%s" "$line" | sed -n 's/.*"intent":"\([0-9a-f]*\)".*/\1/p'); printf '{"id":0,"ok":true,"txId":"%s","blockHash":"cd"}\n' "$intent" ;; *) printf '{"id":0,"ok":false,"code":"bad_request","message":"this line carries no submit op"}\n' ;; esac"#,
     ))
     .await;
-        let tx_id = builder.submit(SAMPLE_INTENT).await.unwrap();
-        assert_eq!(tx_id, hex::encode(SAMPLE_INTENT));
+        let submitted = builder.submit(SAMPLE_INTENT).await.unwrap();
+        assert_eq!(
+            submitted,
+            Submitted {
+                tx_id: hex::encode(SAMPLE_INTENT),
+                dust_balance: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_submit_carries_the_dust_balance_the_child_reports() {
+        let builder = spawn_stub(&stub_config(
+            r#"read -r line; printf '{"id":0,"ok":true,"txId":"ab","dustBalance":"4210000000000000"}\n'"#,
+        ))
+        .await;
+        let submitted = builder.submit(SAMPLE_INTENT).await.unwrap();
+        assert_eq!(submitted.dust_balance, Some(4_210_000_000_000_000));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_dust_balance_does_not_fail_a_landed_submit() {
+        let builder = spawn_stub(&stub_config(
+            r#"read -r line; printf '{"id":0,"ok":true,"txId":"ab","dustBalance":"0x10"}\n'"#,
+        ))
+        .await;
+        let submitted = builder.submit(SAMPLE_INTENT).await.unwrap();
+        assert_eq!(submitted.tx_id, "ab");
+        assert_eq!(submitted.dust_balance, None);
     }
 
     #[tokio::test]
@@ -1142,6 +1212,7 @@ mod tests {
             !is_ambiguous_submit(&err),
             "a refusal spent nothing: {err:#}"
         );
+        assert_eq!(refusal_code(&err), Some("wallet_unfunded"));
     }
 
     #[tokio::test]
@@ -1157,6 +1228,7 @@ mod tests {
             .expect_err("an ambiguous child answer is not a receipt");
 
         assert!(is_ambiguous_submit(&error), "unexpected error: {error:#}");
+        assert_eq!(refusal_code(&error), Some("ambiguous_submit"));
         assert!(format!("{error:#}").contains("may still land"));
         assert!(
             builder.session.lock().await.is_none(),

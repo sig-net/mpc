@@ -21,7 +21,7 @@ use mpc_primitives::{
     SignKind,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -151,6 +151,8 @@ pub struct Backlog {
     execution_watchers: Arc<EnumMap<Chain, RwLock<ExecutionWatchers>>>,
     /// Total number of pending requests across all chains, wrapped in Arc to make clonable
     total_pending: Arc<AtomicUsize>,
+    /// Whether each chain's stream has caught up, read across streams
+    caught_up: Arc<EnumMap<Chain, AtomicBool>>,
 }
 
 impl Default for Backlog {
@@ -171,7 +173,17 @@ impl Backlog {
             requests: Arc::default(),
             execution_watchers: Arc::default(),
             total_pending: Arc::new(AtomicUsize::new(0)),
+            caught_up: Arc::default(),
         }
+    }
+
+    /// Whether `chain`'s stream has caught up.
+    pub(crate) fn is_caught_up(&self, chain: Chain) -> bool {
+        self.caught_up[chain].load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_caught_up(&self, chain: Chain, caught_up: bool) {
+        self.caught_up[chain].store(caught_up, Ordering::SeqCst);
     }
 
     /// Get the pending requests for a specific chain.

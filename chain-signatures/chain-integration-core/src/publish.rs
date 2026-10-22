@@ -4,9 +4,6 @@ use std::time::Instant;
 use crate::utils::retry::{run_gated, SharedBackoff};
 
 use cait_sith::protocol::Participant;
-use cait_sith::FullSignature;
-use k256::Secp256k1;
-use mpc_crypto::PublicKey;
 use mpc_primitives::{IndexedSignRequest, Signature};
 
 /// Trait for publishing signatures to different blockchains (single attempt, caller handles retries).
@@ -69,35 +66,10 @@ pub struct PublishAction {
     pub timestamp: Instant,
 }
 
-impl PublishAction {
-    pub fn new(
-        public_key: PublicKey,
-        request: Arc<IndexedSignRequest>,
-        output: FullSignature<Secp256k1>,
-        participants: Vec<Participant>,
-    ) -> Option<Self> {
-        let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
-        let signature = mpc_crypto::reconstruct_signature(
-            &expected_public_key,
-            &output.big_r,
-            &output.s,
-            request.args.payload,
-        )
-        .ok()?;
-        Some(Self {
-            request,
-            signature,
-            participants,
-            timestamp: Instant::now(),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::test::{make_indexed, make_publish_action, make_signature, scalar};
-    use k256::AffinePoint;
+    use crate::utils::test::make_publish_action;
     use mpc_primitives::{Chain, SignId, SignKind};
     use std::time::Duration;
 
@@ -204,44 +176,5 @@ mod tests {
             base,
             "success must reset the escalation level"
         );
-    }
-
-    #[test]
-    fn publish_action_accepts_valid_signature() {
-        let sk = k256::SecretKey::random(&mut rand::thread_rng());
-        let pk: AffinePoint = sk.public_key().into();
-        let epsilon = scalar(&[1u8; 32]);
-        let payload = scalar(&[42u8; 32]);
-
-        let output = make_signature(&sk, epsilon, payload);
-        let request = make_indexed(
-            Chain::NEAR,
-            epsilon,
-            payload,
-            SignKind::Sign,
-            SignId::new([0u8; 32]),
-        );
-
-        assert!(PublishAction::new(pk, Arc::new(request), output, vec![]).is_some());
-    }
-
-    #[test]
-    fn publish_action_rejects_invalid_signature() {
-        let sk = k256::SecretKey::random(&mut rand::thread_rng());
-        let pk: AffinePoint = sk.public_key().into();
-        let epsilon = scalar(&[1u8; 32]);
-        let payload = scalar(&[42u8; 32]);
-
-        let mut output = make_signature(&sk, epsilon, payload);
-        output.s += k256::Scalar::ONE;
-        let request = make_indexed(
-            Chain::NEAR,
-            epsilon,
-            payload,
-            SignKind::Sign,
-            SignId::new([0u8; 32]),
-        );
-
-        assert!(PublishAction::new(pk, Arc::new(request), output, vec![]).is_none());
     }
 }

@@ -252,6 +252,9 @@ async function submitOnce(config: Config, id: number, intent: Uint8Array): Promi
   } catch (error) {
     throw asPublisherError(error);
   }
+  // Before the spend: once balanced, the wallet's single coin reads as spent until the
+  // change confirms.
+  const dustBalance = await ready.wallet.dustBalance();
 
   const provingTimeout = new PublisherError(
     "proving_timeout",
@@ -287,7 +290,8 @@ async function submitOnce(config: Config, id: number, intent: Uint8Array): Promi
   const answerBudgetMs = remaining();
   try {
     if (answerBudgetMs <= 0) throw timeout;
-    return await withDeadline(work, answerBudgetMs, timeout);
+    const landed = await withDeadline(work, answerBudgetMs, timeout);
+    return { ...landed, dustBalance };
   } catch (error) {
     throw walletFailure(error);
   }

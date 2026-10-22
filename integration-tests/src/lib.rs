@@ -43,10 +43,8 @@ use serde_json::json;
 pub enum NodeBinarySource {
     /// Use the current compiled code from target/release
     CurrentCode,
-    /// Use the tagged mainnet binary compiled under target/compat/mainnet/<version>
-    Mainnet,
-    /// Use the tagged testnet binary compiled under target/compat/testnet/<version>
-    Testnet,
+    /// Use the latest release binary compiled under target/compat/latest
+    LatestRelease,
 }
 
 impl NodeBinarySource {
@@ -55,8 +53,7 @@ impl NodeBinarySource {
         match self {
             // Will use default executable lookup
             NodeBinarySource::CurrentCode => Ok(None),
-            NodeBinarySource::Mainnet => Ok(Some(execute::compatibility_binary("mainnet")?)),
-            NodeBinarySource::Testnet => Ok(Some(execute::compatibility_binary("testnet")?)),
+            NodeBinarySource::LatestRelease => Ok(Some(execute::latest_release_binary()?)),
         }
     }
 }
