@@ -165,10 +165,9 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         threshold: usize,
         action: &PositAction,
     ) -> PositInternalAction<S> {
-        // Before getting to this point, we should have already checked storage for the related protocols.
-        // All information passed to this function should be valid. The only information that still needs
-        // to be checked is the information about the posit itself and whether we're in the right state for
-        // it to proceed and be acted upon.
+        // Callers check storage only before answering a PROPOSE. A START finds an entry only
+        // if its PROPOSE passed, and generation start refuses a running or stored id. ACCEPT
+        // and REJECT are never answered to prevent ping-pong between nodes.
 
         match action {
             PositAction::Propose => {

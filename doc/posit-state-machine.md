@@ -397,9 +397,10 @@ the same pair reuses the id.
   entry's clock. The entry is dropped 12 s after the latest `PROPOSE`. `START`
   from the owner of a live entry starts the generation; without one it is
   answered with a `REJECT`, which the owner, already generating, cannot act on.
-- **Checks.** Every message, whatever its action, is first checked against
-  storage (already generating or stored; for presignatures also the id and
-  whether the pair is held), and a failed check is answered with a `REJECT`.
+- **Checks.** Only a `PROPOSE` is answered after checks (already generating or
+  stored; for presignatures also the id and whether the pair is held), with a
+  `REJECT` if one fails. `START` relies on the generation-start refusal below.
+  `ACCEPT` and `REJECT` are never answered.
 
 Every node listed in `START` must contribute. If one does not, the generation runs
 to its timeout (10 min for triples, 45 s for presignatures) and its inputs are
