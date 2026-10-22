@@ -29,6 +29,7 @@ pub use args::{
     solana::SolArgs,
 };
 
+use anyhow::Context as _;
 use clap::Parser;
 use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
@@ -48,6 +49,7 @@ use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
+use secrecy::{ExposeSecret as _, SecretString};
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
 use url::Url;
@@ -78,7 +80,7 @@ pub enum Cli {
         env: String,
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"))]
-        account_sk: SecretKey,
+        account_sk: SecretString,
         /// The web port for this server
         /// this is default to 3000 for all nodes now.
         /// Partners can choose to change the port, but then they also need to make sure they change their load balancer config to match this
@@ -86,10 +88,10 @@ pub enum Cli {
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"))]
-        cipher_sk: String,
+        cipher_sk: SecretString,
         /// The secret key used to sign messages to be sent between nodes.
         #[arg(long, env("MPC_SIGN_SK"))]
-        sign_sk: SecretKey,
+        sign_sk: SecretString,
         /// Ethereum Indexer options
         #[command(flatten)]
         eth: EthArgs,
@@ -163,13 +165,13 @@ impl Cli {
                     "--env".to_string(),
                     env,
                     "--account-sk".to_string(),
-                    account_sk.to_string(),
+                    account_sk.expose_secret().to_string(),
                     "--cipher-sk".to_string(),
-                    cipher_sk,
+                    cipher_sk.expose_secret().to_string(),
                     "--redis-url".to_string(),
                     storage_options.redis_url.to_string(),
                 ];
-                args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
+                args.extend(["--sign-sk".to_string(), sign_sk.expose_secret().to_string()]);
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
@@ -229,7 +231,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 option_env!("BUILD_TIMESTAMP"),
             );
 
-            let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
+            let cipher_sk =
+                hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk.expose_secret())?)?;
+            let account_sk: SecretKey = account_sk
+                .expose_secret()
+                .parse()
+                .context("invalid account sk")?;
+            let sign_sk: SecretKey = sign_sk.expose_secret().parse().context("invalid sign sk")?;
 
             let cipher_pk_hex = hex::encode(cipher_sk.public_key().to_bytes());
 
@@ -1521,5 +1529,109 @@ mod tests {
             "publish must wait out the stack gate's engaged window (base cooldown), took {:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn secrets_redacted_in_cli_debug() {
+        let dummy_account_sk = "ed25519:5M3dD6YxZz8PqS9aW4uL2kR7tY1eX3mN6bV5cT8gH0jF";
+        let dummy_cipher_sk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let dummy_sign_sk = "ed25519:3kR7tY1eX3mN6bV5cT8gH0jF5M3dD6YxZz8PqS9aW4uL";
+        let dummy_sol_sk = "dummy_solana_secret_key_string_value";
+        let dummy_eth_sk = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+        let dummy_hydration_uri = "//Alice/dummy/hydration/uri";
+        let dummy_canton_secret = "super_secret_canton_oidc_client_secret";
+        let dummy_midnight_seed =
+            "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f";
+
+        let cli = Cli::Start {
+            near_rpc: "http://127.0.0.1:3030".to_string(),
+            mpc_contract_id: "dev.near".parse().unwrap(),
+            account_id: "test.near".parse().unwrap(),
+            env: "test".to_string(),
+            account_sk: dummy_account_sk.into(),
+            web_port: 3000,
+            cipher_sk: dummy_cipher_sk.into(),
+            sign_sk: dummy_sign_sk.into(),
+            eth: EthArgs {
+                eth_account_sk: Some(dummy_eth_sk.into()),
+                eth_contract_address: None,
+                eth_execution_rpc_http_url: None,
+                eth_network: "sepolia".to_string(),
+                eth_refresh_finalized_interval: 10000,
+                eth_optimistic_requests: false,
+            },
+            sol: SolArgs {
+                sol_account_sk: Some(dummy_sol_sk.into()),
+                sol_rpc_http_url: None,
+                sol_program_address: None,
+                sol_poll_interval_ms: 1000,
+            },
+            hydration: HydrationArgs {
+                rpc_ws_url: None,
+                signer_uri: Some(dummy_hydration_uri.into()),
+            },
+            canton: CantonArgs {
+                canton_json_api_url: None,
+                canton_json_api_ws_url: None,
+                canton_ledger_api_user: None,
+                canton_oidc_token_url: None,
+                canton_oidc_client_id: None,
+                canton_oidc_client_secret: Some(dummy_canton_secret.into()),
+                canton_oidc_audience: None,
+                canton_oidc_scope: None,
+                canton_party_id: None,
+                canton_signer_contract_id: None,
+                canton_signer_template_id: None,
+            },
+            midnight: MidnightArgs {
+                midnight_node_url: None,
+                midnight_central_address: None,
+                midnight_funding_seed: Some(dummy_midnight_seed.into()),
+                midnight_intent_gen_command: None,
+                midnight_proof_server_url: None,
+                midnight_indexer_url: None,
+                midnight_indexer_ws_url: None,
+                midnight_output_storage_bucket: None,
+                midnight_output_storage_prefix: None,
+                midnight_output_storage_timeout_secs: None,
+                #[cfg(feature = "test-feature")]
+                midnight_output_storage_emulator_endpoint: None,
+            },
+            my_address: None,
+            storage_options: storage::Options {
+                gcp_project_id: "test".to_string(),
+                sk_share_secret_id: None,
+                sk_share_local_path: None,
+                redis_url: "redis://127.0.0.1:6379".to_string(),
+            },
+            log_options: logs::Options::default(),
+            override_config: None,
+            mesh_options: mesh::Options {
+                ping_interval: 1000,
+            },
+            message_options: node_client::Options {
+                timeout: 1000,
+                state_timeout: 1000,
+                sync_timeout: 60000,
+            },
+        };
+        let debug_str = format!("{cli:?}");
+
+        for secret in [
+            dummy_account_sk,
+            dummy_cipher_sk,
+            dummy_sign_sk,
+            dummy_sol_sk,
+            dummy_eth_sk,
+            dummy_hydration_uri,
+            dummy_canton_secret,
+            dummy_midnight_seed,
+        ] {
+            assert!(
+                !debug_str.contains(secret),
+                "debug representation leaked secret: {secret}"
+            );
+        }
+        assert!(debug_str.contains("[REDACTED]"));
     }
 }
