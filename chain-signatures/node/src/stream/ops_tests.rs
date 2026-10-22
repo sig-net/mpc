@@ -882,6 +882,30 @@ async fn process_sign_request_duplicate_is_idempotent() {
         "replaying the same SignId must not grow the backlog"
     );
 
+    // Same idempotence for a pending Tron request: its own bytes already sit
+    // in the backlog, and the duplicate scan must skip them rather than
+    // reject the replay as "already pending".
+    let root_pk = test_root_pk();
+    let bytes = owned_tron_bytes(root_pk, &tron_bidirectional_event(Vec::new()));
+    let tron = |seed: u8| {
+        Arc::new(IndexedSignRequest::sign_bidirectional(
+            SignId::new([seed; 32]),
+            test_sign_args(seed),
+            Chain::Solana,
+            current_unix_timestamp(),
+            tron_bidirectional_event(bytes.clone()),
+        ))
+    };
+    assert!(process_sign_request(Arc::clone(&tron(41)), &ctx, root_pk)
+        .await
+        .expect("first Tron request is admitted"));
+    assert!(
+        !process_sign_request(tron(41), &ctx, root_pk)
+            .await
+            .expect("replaying a pending Tron request is absorbed, not rejected"),
+        "the replay must not report a new entry"
+    );
+
     // No sign command was enqueued during catchup
     assert!(
         timeout(Duration::from_millis(100), sign_rx.recv())
@@ -2208,7 +2232,7 @@ async fn duplicate_destination_keys_on_the_flat_id() {
 
     let backlog = Backlog::new();
     assert_eq!(
-        duplicate_destination(&first, &backlog).await,
+        duplicate_destination(&first, SignId::new([9; 32]), &backlog).await,
         None,
         "an empty backlog has nothing to collide with"
     );
@@ -2226,12 +2250,17 @@ async fn duplicate_destination_keys_on_the_flat_id() {
     backlog.insert(request(second, 1)).await;
 
     assert_eq!(
-        duplicate_destination(&first, &backlog).await,
-        expected,
-        "identical raw bytes parse to one destination id"
+        duplicate_destination(&first, SignId::new([1; 32]), &backlog).await,
+        None,
+        "the request's own pending entry is skipped — indexer replays stay idempotent"
     );
     assert_eq!(
-        duplicate_destination(&other, &backlog).await,
+        duplicate_destination(&first, SignId::new([9; 32]), &backlog).await,
+        expected,
+        "identical raw bytes under another request collide"
+    );
+    assert_eq!(
+        duplicate_destination(&other, SignId::new([9; 32]), &backlog).await,
         None,
         "different bytes never collide"
     );

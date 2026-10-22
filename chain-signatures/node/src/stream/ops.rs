@@ -65,7 +65,7 @@ pub(crate) async fn process_sign_request(
                     sign_request.id
                 );
             }
-            if let Some(id) = duplicate_destination(event, &ctx.backlog).await {
+            if let Some(id) = duplicate_destination(event, sign_request.id, &ctx.backlog).await {
                 anyhow::bail!(
                     "rejecting bidirectional sign request {:?}: \
                      destination transaction {id:?} already pending",
@@ -116,10 +116,13 @@ fn network_mismatch(event: &SignBidirectionalEvent, expected: Option<u64>) -> Op
 
 /// A flat destination id names one transaction per set of raw bytes: a second
 /// request with the same bytes is rejected while the first is pending, or its
-/// watch would silently replace the first's. Reads only checkpointed pending
-/// state, so the verdict is deterministic across nodes.
+/// watch would silently replace the first's. The request's own entry is
+/// skipped — an indexer replay of a pending request is absorbed at insert,
+/// not rejected. Reads only checkpointed pending state, so the verdict is
+/// deterministic across nodes.
 async fn duplicate_destination(
     event: &SignBidirectionalEvent,
+    sign_id: SignId,
     backlog: &Backlog,
 ) -> Option<BidirectionalTxId> {
     let id = event.flat_destination_id()?;
@@ -127,6 +130,7 @@ async fn duplicate_destination(
         .pending_requests(event.chain)
         .await
         .iter()
+        .filter(|pending| pending.id != sign_id)
         .filter_map(|pending| match &pending.kind {
             SignKind::SignBidirectional(other) => Some(other),
             _ => None,
