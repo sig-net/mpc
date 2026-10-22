@@ -22,4 +22,9 @@ Network–Applications: only additive changes (new flows) are allowed.
 
 ## Design
 
-- [ ] The changes follow the design in [doc/](https://github.com/sig-net/mpc/tree/develop/doc), or this PR updates the docs to reflect them
+<!-- Tick exactly one. Non-trivial changes need a design doc in doc/. -->
+
+- [ ] Trivial: no design decision involved (CI, tests, tooling, dependencies, refactor without behaviour change)
+- [ ] Follows the existing design in [doc/](https://github.com/sig-net/mpc/tree/develop/doc)
+- [ ] Adds or changes the design; docs updated in this PR or in: [link]
+- [ ] Non-trivial, but this area has no design doc yet; tracked in: [issue link]

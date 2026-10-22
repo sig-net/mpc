@@ -6,10 +6,10 @@ import { z } from "zod";
 import type { Config } from "./config.js";
 import { describeFailure, jsonObject, PublisherError, type ErrorCode } from "./errors.js";
 import { buildIntent, RESPOND_CIRCUITS, type BuildIntentInput } from "./intent.js";
-import { handleSubmit, SUBMIT_TIMEOUT_MS, warmupPublisher } from "./submit.js";
+import { handleSubmit, snapshotWallet, SUBMIT_TIMEOUT_MS, warmupPublisher } from "./submit.js";
 import { RECIPE_TTL_MS } from "./wallet.js";
 
-export const PUBLISHER_PROTOCOL_VERSION = 2 as const;
+export const PUBLISHER_PROTOCOL_VERSION = 3 as const;
 
 export type BuildRequest = { readonly id: number } & Omit<BuildIntentInput, "coinPublicKey">;
 
@@ -25,7 +25,14 @@ export type Response =
       readonly recipeTtlMs: number;
     }
   | { readonly id: number; readonly ok: true; readonly intent: string }
-  | { readonly id: number; readonly ok: true; readonly txId: string }
+  | {
+      readonly id: number;
+      readonly ok: true;
+      readonly txId: string;
+      /** Decimal SPECK, read before the spend; absent if the wallet could not say. */
+      readonly dustBalance?: string;
+    }
+  | { readonly id: number; readonly ok: true; readonly walletSnapshot: string }
   | {
       readonly id: number | null;
       readonly ok: false;
@@ -39,7 +46,7 @@ const MUST_BE_HEX_32 = "must be 64 lowercase hex";
 const MUST_BE_LEDGER_HEX = "must be lowercase hex, an even number of digits";
 const MUST_BE_A_CIRCUIT = "must be respond or respondBidirectional";
 const MUST_BE_A_TTL = "must be a positive integer, in absolute unix seconds";
-const MUST_BE_AN_OP = "must be ready, build, or submit";
+const MUST_BE_AN_OP = "must be ready, build, submit, or snapshot";
 
 const wireObject = <T extends z.ZodRawShape>(shape: T) => z.object(shape, MUST_BE_AN_OBJECT);
 
@@ -66,7 +73,9 @@ const SubmitSchema = wireObject({ id: wireId, intent: ledgerHex });
 const ReadySchema = wireObject({
   id: wireId,
   protocolVersion: z.literal(PUBLISHER_PROTOCOL_VERSION, `must be ${PUBLISHER_PROTOCOL_VERSION}`),
+  walletSnapshot: z.string("must be a string").optional(),
 });
+const SnapshotSchema = wireObject({ id: wireId });
 const uint64 = z
   .string()
   .regex(/^(0|[1-9][0-9]*)$/, "must be an unsigned decimal integer")
@@ -115,7 +124,7 @@ async function answer(config: Config, body: Record<string, unknown>): Promise<Re
     case "ready": {
       const parsed = ReadySchema.safeParse(body);
       if (!parsed.success) throw toBadRequest(parsed.error);
-      warmupPublisher(config);
+      warmupPublisher(config, parsed.data.walletSnapshot);
       return {
         id: parsed.data.id,
         ok: true,
@@ -140,7 +149,17 @@ async function answer(config: Config, body: Record<string, unknown>): Promise<Re
       if (!parsed.success) throw toBadRequest(parsed.error);
       const request: SubmitRequest = parsed.data;
       const landed = await handleSubmit(config, request.id, Buffer.from(request.intent, "hex"));
-      return { id: request.id, ok: true, txId: landed.txId };
+      return {
+        id: request.id,
+        ok: true,
+        txId: landed.txId,
+        dustBalance: landed.dustBalance?.toString(),
+      };
+    }
+    case "snapshot": {
+      const parsed = SnapshotSchema.safeParse(body);
+      if (!parsed.success) throw toBadRequest(parsed.error);
+      return { id: parsed.data.id, ok: true, walletSnapshot: await snapshotWallet() };
     }
     default:
       throw new PublisherError("bad_request", `invalid request: \`op\` ${MUST_BE_AN_OP}`);
@@ -159,10 +178,11 @@ export async function handleLine(config: Config, line: string): Promise<string> 
     const code: ErrorCode = named ? error.code : "internal";
     // A `bad_request` is the caller's own doing; anything else keeps its cause chain
     // here, where the wire cannot carry it.
+    const walletState = named ? error.walletState : undefined;
     if (code !== "bad_request") {
-      const evidence = named && error.cause !== undefined ? error.cause : error;
+      const wallet = walletState === undefined ? "" : `; wallet: ${walletState}`;
       console.error(
-        `request failed code=${code} id=${id}: ${describeFailure(evidence).slice(0, 4_000)}`,
+        `request failed code=${code} id=${id}: ${describeFailure(error).slice(0, 4_000)}${wallet}`,
       );
     }
     return JSON.stringify({
@@ -170,6 +190,9 @@ export async function handleLine(config: Config, line: string): Promise<string> 
       ok: false,
       code,
       message: named ? error.message : describeFailure(error),
+      walletState,
+      // Present only when true: the parent counts only these against a restored wallet.
+      walletUsed: named && error.walletUsed ? true : undefined,
     });
   }
 }

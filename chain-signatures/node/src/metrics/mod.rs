@@ -11,6 +11,7 @@ pub mod indexers;
 pub mod messaging;
 pub mod nodes;
 pub mod protocols;
+pub mod publishers;
 pub mod requests;
 pub mod storage;
 pub mod telemetry;
@@ -86,12 +87,18 @@ pub fn try_create_int_gauge_vec_with_node_account_id(
     help: &str,
     labels: &[&str],
 ) -> Result<prometheus::IntGaugeVec> {
-    check_metric_multichain_prefix(name)?;
-    let mut opts = Opts::new(name, help);
-    opts = opts.const_label("node_account_id".to_string(), node_account_id().to_string());
-    let gauge = prometheus::IntGaugeVec::new(opts, labels)?;
-    prometheus::register(Box::new(gauge.clone()))?;
-    Ok(gauge)
+    register(prometheus::IntGaugeVec::new(
+        node_opts(name, help)?,
+        labels,
+    )?)
+}
+
+pub fn try_create_gauge_vec_with_node_account_id(
+    name: &str,
+    help: &str,
+    labels: &[&str],
+) -> Result<prometheus::GaugeVec> {
+    register(prometheus::GaugeVec::new(node_opts(name, help)?, labels)?)
 }
 
 pub fn try_create_counter_vec_with_node_and_version(
@@ -99,16 +106,10 @@ pub fn try_create_counter_vec_with_node_and_version(
     help: &str,
     labels: &[&str],
 ) -> Result<prometheus::CounterVec> {
-    check_metric_multichain_prefix(name)?;
-    let mut opts = Opts::new(name, help);
-    opts = opts
-        .const_label("node_account_id".to_string(), node_account_id().to_string())
-        .const_label("version".to_string(), version().to_string())
-        .const_label("git_commit_hash".to_string(), git_commit_hash().to_string())
-        .const_label("build_timestamp".to_string(), build_timestamp().to_string());
-    let counter = prometheus::CounterVec::new(opts, labels)?;
-    prometheus::register(Box::new(counter.clone()))?;
-    Ok(counter)
+    register(prometheus::CounterVec::new(
+        node_build_opts(name, help)?,
+        labels,
+    )?)
 }
 
 pub fn try_create_counter_vec_with_node_account_id(
@@ -116,12 +117,7 @@ pub fn try_create_counter_vec_with_node_account_id(
     help: &str,
     labels: &[&str],
 ) -> Result<prometheus::CounterVec> {
-    check_metric_multichain_prefix(name)?;
-    let mut opts = Opts::new(name, help);
-    opts = opts.const_label("node_account_id".to_string(), node_account_id().to_string());
-    let counter = prometheus::CounterVec::new(opts, labels)?;
-    prometheus::register(Box::new(counter.clone()))?;
-    Ok(counter)
+    register(prometheus::CounterVec::new(node_opts(name, help)?, labels)?)
 }
 
 pub fn try_create_histogram_vec_with_node_account_id(
@@ -130,15 +126,10 @@ pub fn try_create_histogram_vec_with_node_account_id(
     labels: &[&str],
     buckets: Option<Vec<f64>>,
 ) -> Result<HistogramVec> {
-    check_metric_multichain_prefix(name)?;
-    let mut opts = HistogramOpts::new(name, help);
-    if let Some(buckets) = buckets {
-        opts = opts.buckets(buckets);
-    }
-    opts = opts.const_label("node_account_id".to_string(), node_account_id().to_string());
-    let histogram = HistogramVec::new(opts, labels)?;
-    prometheus::register(Box::new(histogram.clone()))?;
-    Ok(histogram)
+    register(HistogramVec::new(
+        histogram_opts(node_opts(name, help)?, buckets),
+        labels,
+    )?)
 }
 
 pub fn try_create_histogram_vec_with_node_and_version(
@@ -147,19 +138,38 @@ pub fn try_create_histogram_vec_with_node_and_version(
     labels: &[&str],
     buckets: Option<Vec<f64>>,
 ) -> Result<HistogramVec> {
+    register(HistogramVec::new(
+        histogram_opts(node_build_opts(name, help)?, buckets),
+        labels,
+    )?)
+}
+
+/// `name`'s options with the node's account id as a const label.
+fn node_opts(name: &str, help: &str) -> Result<Opts> {
     check_metric_multichain_prefix(name)?;
-    let mut opts = HistogramOpts::new(name, help);
-    if let Some(buckets) = buckets {
-        opts = opts.buckets(buckets);
-    }
-    opts = opts
-        .const_label("node_account_id".to_string(), node_account_id().to_string())
+    Ok(Opts::new(name, help)
+        .const_label("node_account_id".to_string(), node_account_id().to_string()))
+}
+
+/// [`node_opts`] plus the node's build as const labels.
+fn node_build_opts(name: &str, help: &str) -> Result<Opts> {
+    Ok(node_opts(name, help)?
         .const_label("version".to_string(), version().to_string())
         .const_label("git_commit_hash".to_string(), git_commit_hash().to_string())
-        .const_label("build_timestamp".to_string(), build_timestamp().to_string());
-    let histogram = HistogramVec::new(opts, labels)?;
-    prometheus::register(Box::new(histogram.clone()))?;
-    Ok(histogram)
+        .const_label("build_timestamp".to_string(), build_timestamp().to_string()))
+}
+
+fn histogram_opts(opts: Opts, buckets: Option<Vec<f64>>) -> HistogramOpts {
+    let opts = HistogramOpts::from(opts);
+    match buckets {
+        Some(buckets) => opts.buckets(buckets),
+        None => opts,
+    }
+}
+
+fn register<M: prometheus::core::Collector + Clone + 'static>(metric: M) -> Result<M> {
+    prometheus::register(Box::new(metric.clone()))?;
+    Ok(metric)
 }
 
 fn check_metric_multichain_prefix(name: &str) -> Result<()> {
