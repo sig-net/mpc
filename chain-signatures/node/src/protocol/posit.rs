@@ -173,7 +173,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         match action {
             PositAction::Propose => {
                 // We have no information about this posit, so we can just accept it.
-                let Some((positor, _)) = self.posits.get(&id) else {
+                let Some((positor, timestamp)) = self.posits.get_mut(&id) else {
                     self.posits
                         .insert(id, (Positor::Deliberator(from), Instant::now()));
                     return PositInternalAction::Reply(PositAction::Accept);
@@ -199,6 +199,9 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                         PositRejectReason::InvalidRequest,
                     ))
                 } else {
+                    // A repeated PROPOSE is a new attempt by the same proposer, whose
+                    // START can come up to a full posit timeout from now.
+                    *timestamp = Instant::now();
                     PositInternalAction::Reply(PositAction::Accept)
                 }
             }
@@ -682,5 +685,35 @@ mod tests {
         let actions = posits1.expire_and_start(threshold, base_delay, deliberator_extra_delay);
         assert_eq!(actions.len(), 0);
         assert_eq!(posits1.len(), 0);
+    }
+
+    #[test]
+    fn test_posits_repeated_propose_refreshes_expiration() {
+        let threshold = 2;
+        let proposer = Participant::from(0);
+        let mut posits1 = Posits::<Id, ()>::new(Participant::from(1));
+        let base_delay = Duration::from_secs(1);
+        let deliberator_extra_delay = Duration::from_millis(200);
+
+        let id = 101;
+        posits1.act(id, proposer, threshold, &PositAction::Propose);
+        std::thread::sleep(Duration::from_millis(700));
+        posits1.act(id, proposer, threshold, &PositAction::Propose);
+        std::thread::sleep(Duration::from_millis(700));
+
+        // 1.4 s after the first PROPOSE but 0.7 s after the second: still open.
+        posits1.expire_and_start(threshold, base_delay, deliberator_extra_delay);
+        assert_eq!(posits1.len(), 1);
+
+        let action = posits1.act(
+            id,
+            proposer,
+            threshold,
+            &PositAction::Start(vec![proposer, Participant::from(1)]),
+        );
+        assert!(matches!(
+            action,
+            PositInternalAction::StartProtocol(_, Positor::Deliberator(_))
+        ));
     }
 }
