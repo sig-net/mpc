@@ -93,6 +93,7 @@ pub fn test_canton_sign_bidirectional_request(
 pub fn respond_event(sign_id: SignId, signature: Signature) -> RespondBidirectionalEvent {
     RespondBidirectionalEvent {
         attestation: None,
+        output: None,
         request_id: sign_id.request_id,
         signature,
         chain: Chain::Solana,
