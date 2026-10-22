@@ -56,7 +56,7 @@ Using | nop
 
 Deleting from the directory should only happen if the current state as seen by the owner is `Available`.
 
-The owner should not delete in `Generating`, as it could mean the peer simply hasn't processed the INIT(generate) message, yet.
+The owner should not delete in `Generating`, as it could mean the peer simply hasn't processed the PROPOSE yet.
 
 The owner should not delete in `Using`, as it could mean the peer is already in `done` for this P or T.
 
@@ -72,11 +72,11 @@ actions defined in this specification.
 
 Owner / Peer | init | Generating | Available | Using | done | lost in crash
 -- | -- | -- | -- | -- | -- | --
-init | nop | Impossible: owner goes to Generating when it sends INIT(generate) | Impossible: owner goes to Generating when it sends INIT(generate) | Impossible: owner goes to Generating when it sends INIT(generate) | nop | nop
-Generating | <= respond missingOwner ignores it | nop | nop | nop | Impossible, owner would never send INIT(output) while still generating the input | <= respond missingOwner should delete participant(but ignores it because it could also be init)
-Available | Impossible: owner can’t reach Available before all participants are at least at Generating, since protocol won’t start before everybody is in Generating already | nop | nop | nop | Impossible, owner goes to Using when sending INIT | <= respond missingOwner deletes participant
+init | nop | Impossible: owner goes to Generating when it sends PROPOSE | Impossible: owner goes to Generating when it sends PROPOSE | Impossible: owner goes to Generating when it sends PROPOSE | nop | nop
+Generating | <= respond missingOwner ignores it | nop | nop | nop | Impossible, owner would never send PROPOSE for the output while still generating the input | <= respond missingOwner should delete participant(but ignores it because it could also be init)
+Available | Impossible: owner can’t reach Available before all participants are at least at Generating, since protocol won’t start before everybody is in Generating already | nop | nop | nop | Impossible, owner goes to Using before sending START | <= respond missingOwner deletes participant
 Using | Impossible, Using comes after Available, see Available/init | nop | nop | nop | <= respond missingOwner ignores it | <= respond missingOwner ignores it
-done | Impossible, done comes after Available, see Available/init | Impossible: peer must be in Prepare(consume) and Using(generate) when owner sends INIT(consume) | Impossible: peer must be in Prepare(consume) and Using(generate) when owner sends INIT(consume) | nop(partially finished protocol) | nop | nop
+done | Impossible, done comes after Available, see Available/init | Impossible: peer takes the input as Using when it receives START for the consuming protocol, and the owner cannot finish without the peer's contribution | Impossible: peer takes the input as Using when it receives START for the consuming protocol, and the owner cannot finish without the peer's contribution | nop(partially finished protocol) | nop | nop
 lost in crash | nop | optional: peer deletes obsolete input | optional: peer deletes obsolete input | nop | nop | nop
 
 
@@ -86,6 +86,7 @@ action in all rows. Further, neither side can differentiate between the `init` /
 `done` / `lost` states. So they must also have the same actions for all those
 states.
 
-Provably impossible states are key for correctness. The `Prepare` phase
+Provably impossible states are key for correctness. The posit phase
 specifically allows to mark all cases impossible where one node would still be
-in `init` while others are already `Running`.
+in `init` while others are already `Generating`: START only goes to nodes that
+accepted, and nobody generates before START.
