@@ -203,7 +203,14 @@ Triples and Pre-Signatures are persistently stored on each node. They go through
 the following lifecycle. Nodes must keep track of them in order for state sync
 to work.
 
-![graph](./graphs/p_and_t_states.svg)
+```mermaid
+stateDiagram-v2
+    [*] --> Generating: ON receive INIT(generate)
+    Generating --> Available: ON generating protocol success
+    Generating --> [*]: ON generating protocol failed
+    Available --> Using: ON removal from DB = receive INIT(consume) (start of following protocol)
+    Using --> [*]: ON consuming protocol finish
+```
 
 ### States
 
@@ -249,7 +256,17 @@ holders. Both data structures are further specified below.
 
 ### Node Connection Status
 
-![graph](./graphs/node_connection.svg)
+```mermaid
+stateDiagram-v2
+    Offline --> Syncing: ON ping answer with active node state
+    Offline --> Inactive: ON ping answer with inactive node state
+    Inactive --> Syncing: ON ping answer with active node state
+    Syncing --> Active: ON sync response handled
+    Active --> Syncing: ON desync report
+    Inactive --> Offline: ON ping fail
+    Syncing --> Offline: ON ping fail
+    Active --> Offline: ON ping fail
+```
 
 Nodes keep pinging each other, checking their peers status.
 
