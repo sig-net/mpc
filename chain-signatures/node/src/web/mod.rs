@@ -31,14 +31,13 @@ use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::Semaphore;
 use tracing::Instrument;
 
-const MAX_CONCURRENT_CHECKPOINT_REQUESTS: usize = 8;
-const CHECKPOINT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-/// Each peer keeps at most one `/sync` in flight to us, so this leaves
-/// headroom above the participant count while bounding unauthenticated work.
+/// Keeps `/checkpoint` lookups from starving the Redis pool.
+const MAX_CONCURRENT_CHECKPOINT_REQUESTS: usize = 16;
+/// Each peer keeps at most one `/sync` in flight, so this clears the participant count.
 const MAX_CONCURRENT_SYNC_REQUESTS: usize = 16;
 
 struct AxumState {
@@ -78,27 +77,19 @@ pub async fn run(
         backlog,
     };
 
+    let sync_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_SYNC_REQUESTS));
+    let sync_limit = middleware::from_fn_with_state(sync_permits, limit_concurrency);
     // Sync can be a large payload, so we set a higher limit for payload.
-    // The concurrency limit runs before the body is read, so rejected
-    // requests never buffer their payload.
     let sync = Router::new()
         .route("/sync", post(sync))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
-        .layer(middleware::from_fn_with_state(
-            Arc::new(Semaphore::new(MAX_CONCURRENT_SYNC_REQUESTS)),
-            limit_concurrency,
-        ));
+        .layer(sync_limit);
 
-    // Bounds concurrent `/checkpoint` lookups so the endpoint cannot starve
-    // the Redis pool the protocol shares.
     let checkpoint_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CHECKPOINT_REQUESTS));
-    let checkpoint =
-        Router::new()
-            .route("/checkpoint", get(checkpoint))
-            .layer(middleware::from_fn_with_state(
-                checkpoint_permits,
-                limit_concurrency,
-            ));
+    let checkpoint_limit = middleware::from_fn_with_state(checkpoint_permits, limit_concurrency);
+    let checkpoint = Router::new()
+        .route("/checkpoint", get(checkpoint))
+        .layer(checkpoint_limit);
 
     let mut router = Router::new()
         // healthcheck endpoint
@@ -354,35 +345,29 @@ async fn checkpoint(
 ) -> Result<Cbor<CheckpointResponse>> {
     let start = Instant::now();
 
+    let mut resp = HashMap::new();
     let selections = query.parse()?;
 
-    let lookups = async {
-        let mut resp = HashMap::new();
-        for (chain, digest) in selections {
-            let checkpoint = if let Some(digest) = digest {
-                state.backlog.checkpoints().find(chain, digest).await
-            } else {
-                state
-                    .backlog
-                    .checkpoints()
-                    .latest(chain)
-                    .await
-                    .ok()
-                    .flatten()
-            };
+    for (chain, digest) in selections {
+        let checkpoint = if let Some(digest) = digest {
+            state.backlog.checkpoints().find(chain, digest).await
+        } else {
+            state
+                .backlog
+                .checkpoints()
+                .latest(chain)
+                .await
+                .ok()
+                .flatten()
+        };
 
-            let Some(checkpoint) = checkpoint else {
-                tracing::debug!(?chain, ?digest, "unable to find checkpoint");
-                continue;
-            };
+        let Some(checkpoint) = checkpoint else {
+            tracing::debug!(?chain, ?digest, "unable to find checkpoint");
+            continue;
+        };
 
-            resp.insert(chain, checkpoint);
-        }
-        resp
-    };
-    let resp = tokio::time::timeout(CHECKPOINT_REQUEST_TIMEOUT, lookups)
-        .await
-        .map_err(|_| Error::Busy)?;
+        resp.insert(chain, checkpoint);
+    }
 
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["checkpoint"])
