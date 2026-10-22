@@ -166,7 +166,7 @@ pub struct ClusterSpawner {
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
     pub program_address: Option<String>,
-    prestockpile: Option<Prestockpile>,
+    pub(crate) prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
     pub use_midnight: bool,
@@ -487,7 +487,8 @@ impl IntoFuture for ClusterSpawner {
                 cluster.wait().running().nodes_running().await?;
 
                 if let Some(prestockpile) = self.prestockpile {
-                    cluster.prestockpile(prestockpile).await;
+                    let stockpiled = self.pregenerated_keys.is_enabled();
+                    cluster.prestockpile(prestockpile, stockpiled).await;
                 }
             }
 
