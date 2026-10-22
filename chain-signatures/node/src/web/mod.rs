@@ -18,10 +18,10 @@ use crate::web::error::Result;
 
 use anyhow::Context;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Query};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderName, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
@@ -31,8 +31,11 @@ use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::Instrument;
+
+/// Peers give up within this on every endpoint, so longer requests only serve attackers.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct AxumState {
     node: NodeStateWatcher,
@@ -97,6 +100,10 @@ pub async fn run(
     }
 
     let app = router
+        .layer(middleware::from_fn_with_state(
+            REQUEST_TIMEOUT,
+            limit_duration,
+        ))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(Extension(Arc::new(axum_state)));
 
@@ -112,6 +119,19 @@ pub async fn run(
     tracing::info!(?addr, "starting http server");
     if let Err(err) = axum::serve(listener, app).await {
         tracing::error!(?addr, ?err, "web server exited with an error");
+    }
+}
+
+/// Answers 503 once the request outlives `timeout`, so a slow client cannot
+/// hold a handler, or the body it is still uploading, for longer than a peer would.
+async fn limit_duration(
+    State(timeout): State<Duration>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    match tokio::time::timeout(timeout, next.run(req)).await {
+        Ok(response) => response,
+        Err(_) => Error::Timeout.into_response(),
     }
 }
 
