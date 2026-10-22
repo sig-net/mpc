@@ -112,16 +112,13 @@ fn sim_tx_error(sim: &RpcSimulateTransactionResult) -> Option<&TransactionError>
 }
 
 /// Determine the verdict for an on-chain transaction error.
-/// Fresh attempts only re-sign with a new blockhash: errors tied to the
-/// payload, program, or payer are deterministic; the rest recover on retry.
+/// Fresh attempts re-sign with a fresh blockhash and balances change at
+/// runtime, so only errors a restart must fix (payload, program, payer
+/// account type) are terminal; an underfunded payer recovers once topped up.
 fn on_chain(tx: &TransactionError) -> Verdict {
     match tx {
-        // deterministic given our fixed payload, program, and payer
-        TransactionError::AccountNotFound
-        | TransactionError::InsufficientFundsForFee
-        | TransactionError::InvalidAccountForFee
-        | TransactionError::InsufficientFundsForRent { .. }
-        | TransactionError::InvalidRentPayingAccount
+        // fixed only by a restart
+        TransactionError::InvalidAccountForFee
         | TransactionError::ProgramAccountNotFound
         | TransactionError::InvalidProgramForExecution
         | TransactionError::CallChainTooDeep
@@ -142,8 +139,8 @@ fn on_chain(tx: &TransactionError) -> Verdict {
         | TransactionError::InvalidAddressLookupTableIndex
         | TransactionError::InstructionError(..)
         | TransactionError::UnsupportedVersion => Verdict::Terminal,
-        // duplicates, contention, congestion, cluster/validator state;
-        // unknown variants keep the default
+        // balances, duplicates, contention, congestion, cluster/validator
+        // state; unknown variants keep the default
         _ => Verdict::Retryable,
     }
 }
@@ -266,13 +263,9 @@ mod tests {
     }
 
     #[test]
-    fn on_chain_deterministic_failures_are_terminal() {
+    fn on_chain_unrecoverable_failures_are_terminal() {
         let terminal = [
-            TransactionError::AccountNotFound,
-            TransactionError::InsufficientFundsForFee,
             TransactionError::InvalidAccountForFee,
-            TransactionError::InsufficientFundsForRent { account_index: 0 },
-            TransactionError::InvalidRentPayingAccount,
             TransactionError::ProgramAccountNotFound,
             TransactionError::InvalidProgramForExecution,
             TransactionError::CallChainTooDeep,
@@ -303,6 +296,10 @@ mod tests {
     #[test]
     fn on_chain_transient_failures_stay_retryable() {
         let transient = [
+            TransactionError::AccountNotFound,
+            TransactionError::InsufficientFundsForFee,
+            TransactionError::InsufficientFundsForRent { account_index: 0 },
+            TransactionError::InvalidRentPayingAccount,
             TransactionError::BlockhashNotFound,
             TransactionError::AccountInUse,
             TransactionError::WouldExceedMaxBlockCostLimit,
