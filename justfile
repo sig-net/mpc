@@ -95,7 +95,8 @@ alias ts := test-seq
 # Build artifacts: `just build` = whole Rust workspace (via setup),
 # `just build eth` = EVM artifacts, `just build contract` = NEAR contract wasm,
 # `just build midnight` = midnight-publisher-ts fixtures,
-# `just build tests` = integration test binaries without running them,
+# `just build tests` = integration test binaries without running them
+#   (three attempts: the near-sandbox download in near-workspaces' build script can fail),
 # `just build compat` = latest release node binary for the compat test
 # Usage: just build [target] (target="" | eth | contract | midnight | tests | compat)
 build target="":
@@ -106,7 +107,8 @@ build target="":
     elif [ "{{target}}" = "midnight" ]; then \
       cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-caller && npm run typecheck:real-stack; \
     elif [ "{{target}}" = "tests" ]; then \
-      cargo build -p integration-tests --tests; \
+      build_tests() { cargo build -p integration-tests --tests; }; \
+      build_tests || build_tests || build_tests; \
     elif [ "{{target}}" = "compat" ]; then \
       ./scripts/build-compat-binaries.sh; \
     elif [ -z "{{target}}" ]; then \
