@@ -112,13 +112,38 @@ fn sim_tx_error(sim: &RpcSimulateTransactionResult) -> Option<&TransactionError>
 }
 
 /// Determine the verdict for an on-chain transaction error.
+/// Fresh attempts only re-sign with a new blockhash: errors tied to the
+/// payload, program, or payer are deterministic; the rest recover on retry.
 fn on_chain(tx: &TransactionError) -> Verdict {
     match tx {
-        // deterministic failures a fresh attempt cannot change; everything
-        // else (blockhash expiry, contention) recovers on retry
-        TransactionError::InstructionError(..)
+        // deterministic given our fixed payload, program, and payer
+        TransactionError::AccountNotFound
         | TransactionError::InsufficientFundsForFee
+        | TransactionError::InvalidAccountForFee
+        | TransactionError::InsufficientFundsForRent { .. }
+        | TransactionError::InvalidRentPayingAccount
+        | TransactionError::ProgramAccountNotFound
+        | TransactionError::InvalidProgramForExecution
+        | TransactionError::CallChainTooDeep
+        | TransactionError::AccountLoadedTwice
+        | TransactionError::MissingSignatureForFee
+        | TransactionError::InvalidAccountIndex
+        | TransactionError::SignatureFailure
+        | TransactionError::SanitizeFailure
+        | TransactionError::InvalidWritableAccount
+        | TransactionError::TooManyAccountLocks
+        | TransactionError::DuplicateInstruction(..)
+        | TransactionError::InvalidLoadedAccountsDataSizeLimit
+        | TransactionError::MaxLoadedAccountsDataSizeExceeded
+        | TransactionError::UnbalancedTransaction
+        | TransactionError::AddressLookupTableNotFound
+        | TransactionError::InvalidAddressLookupTableOwner
+        | TransactionError::InvalidAddressLookupTableData
+        | TransactionError::InvalidAddressLookupTableIndex
+        | TransactionError::InstructionError(..)
         | TransactionError::UnsupportedVersion => Verdict::Terminal,
+        // duplicates, contention, congestion, cluster/validator state;
+        // unknown variants keep the default
         _ => Verdict::Retryable,
     }
 }
@@ -241,29 +266,61 @@ mod tests {
     }
 
     #[test]
-    fn on_chain_instruction_failure_is_terminal() {
-        let err = anchor_wrapped(ClientErrorKind::TransactionError(
-            TransactionError::InstructionError(0, InstructionError::Custom(0)),
-        ));
-        assert!(!is_retryable(&err));
-    }
-
-    #[test]
-    fn on_chain_expiry_and_contention_stay_retryable() {
-        let err = anchor_wrapped(ClientErrorKind::TransactionError(
-            TransactionError::BlockhashNotFound,
-        ));
-        assert!(is_retryable(&err));
-    }
-
-    #[test]
-    fn deterministic_on_chain_failures_are_terminal() {
-        for tx in [
+    fn on_chain_deterministic_failures_are_terminal() {
+        let terminal = [
+            TransactionError::AccountNotFound,
             TransactionError::InsufficientFundsForFee,
+            TransactionError::InvalidAccountForFee,
+            TransactionError::InsufficientFundsForRent { account_index: 0 },
+            TransactionError::InvalidRentPayingAccount,
+            TransactionError::ProgramAccountNotFound,
+            TransactionError::InvalidProgramForExecution,
+            TransactionError::CallChainTooDeep,
+            TransactionError::AccountLoadedTwice,
+            TransactionError::MissingSignatureForFee,
+            TransactionError::InvalidAccountIndex,
+            TransactionError::SignatureFailure,
+            TransactionError::SanitizeFailure,
+            TransactionError::InvalidWritableAccount,
+            TransactionError::TooManyAccountLocks,
+            TransactionError::DuplicateInstruction(0),
+            TransactionError::InvalidLoadedAccountsDataSizeLimit,
+            TransactionError::MaxLoadedAccountsDataSizeExceeded,
+            TransactionError::UnbalancedTransaction,
+            TransactionError::AddressLookupTableNotFound,
+            TransactionError::InvalidAddressLookupTableOwner,
+            TransactionError::InvalidAddressLookupTableData,
+            TransactionError::InvalidAddressLookupTableIndex,
+            TransactionError::InstructionError(0, InstructionError::Custom(0)),
             TransactionError::UnsupportedVersion,
-        ] {
+        ];
+        for tx in terminal {
             let err = anchor_wrapped(ClientErrorKind::TransactionError(tx.clone()));
-            assert!(!is_retryable(&err), "{tx:?}");
+            assert!(!is_retryable(&err), "{tx:?} should be terminal");
+        }
+    }
+
+    #[test]
+    fn on_chain_transient_failures_stay_retryable() {
+        let transient = [
+            TransactionError::BlockhashNotFound,
+            TransactionError::AccountInUse,
+            TransactionError::WouldExceedMaxBlockCostLimit,
+            TransactionError::WouldExceedMaxAccountCostLimit,
+            TransactionError::WouldExceedAccountDataBlockLimit,
+            TransactionError::WouldExceedMaxVoteCostLimit,
+            TransactionError::WouldExceedAccountDataTotalLimit,
+            TransactionError::AlreadyProcessed,
+            TransactionError::ClusterMaintenance,
+            TransactionError::AccountBorrowOutstanding,
+            TransactionError::ResanitizationNeeded,
+            TransactionError::ProgramExecutionTemporarilyRestricted { account_index: 0 },
+            TransactionError::ProgramCacheHitMaxLimit,
+            TransactionError::CommitCancelled,
+        ];
+        for tx in transient {
+            let err = anchor_wrapped(ClientErrorKind::TransactionError(tx.clone()));
+            assert!(is_retryable(&err), "{tx:?} should be retryable");
         }
     }
 
