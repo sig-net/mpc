@@ -54,9 +54,6 @@ struct AxumState {
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     my_account_id: AccountId,
     backlog: Backlog,
-    /// Bounds concurrent `/checkpoint` lookups so the endpoint cannot starve
-    /// the Redis pool the protocol shares.
-    checkpoint_permits: Semaphore,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -79,7 +76,6 @@ pub async fn run(
         sync_channel,
         my_account_id,
         backlog,
-        checkpoint_permits: Semaphore::new(MAX_CONCURRENT_CHECKPOINT_REQUESTS),
     };
 
     // Sync can be a large payload, so we set a higher limit for payload.
@@ -93,6 +89,17 @@ pub async fn run(
             limit_concurrency,
         ));
 
+    // Bounds concurrent `/checkpoint` lookups so the endpoint cannot starve
+    // the Redis pool the protocol shares.
+    let checkpoint_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CHECKPOINT_REQUESTS));
+    let checkpoint =
+        Router::new()
+            .route("/checkpoint", get(checkpoint))
+            .layer(middleware::from_fn_with_state(
+                checkpoint_permits,
+                limit_concurrency,
+            ));
+
     let mut router = Router::new()
         // healthcheck endpoint
         .route(
@@ -105,9 +112,9 @@ pub async fn run(
         .route("/msg", post(msg))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
-        .route("/checkpoint", get(checkpoint))
         .route("/debug", get(debug::page))
-        .merge(sync);
+        .merge(sync)
+        .merge(checkpoint);
 
     if cfg!(feature = "bench") {
         router = router.route("/bench/metrics", get(bench_metrics));
@@ -348,10 +355,6 @@ async fn checkpoint(
     let start = Instant::now();
 
     let selections = query.parse()?;
-    let _permit = state
-        .checkpoint_permits
-        .try_acquire()
-        .map_err(|_| Error::Busy)?;
 
     let lookups = async {
         let mut resp = HashMap::new();
