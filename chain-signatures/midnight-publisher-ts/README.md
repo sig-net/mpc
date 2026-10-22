@@ -14,7 +14,7 @@ Operations are:
 
 - `ready`: validates protocol compatibility, starts background construction and synchronization of the memoized funding wallet, and returns without waiting for wallet readiness. The reply also advertises `submitTimeoutMs` and `recipeTtlMs`. A `walletSnapshot` makes the wallet resume from it (see [Wallet snapshots](#wallet-snapshots)).
 - `build`: runs the selected `respond` circuit and returns a serialized ledger intent. It does not open, synchronize, or use the funding wallet.
-- `submit`: deserializes and proves the intent, DUST-balances it with the funding wallet, finalizes it, posts it, and returns the transaction ID.
+- `submit`: deserializes and proves the intent, DUST-balances it with the funding wallet, finalizes it, posts it, and returns the transaction ID. When the wallet can say, the reply also carries its spendable DUST before the spend, as decimal SPECK (`dustBalance`), for the node's balance metric.
 - `snapshot`: returns `walletSnapshot`, the funding wallet's encoded sub-wallet states. It is refused with `wallet_unsynced` until the wallet has fully synced and with `wallet_busy` while a submit still owns the wallet or any submitted transaction or coin is still in flight.
 
 `build` and `submit` are separate operations so that the intent is built from the contract state Rust has already read and verified for the request, rather than from state a wallet SDK would fetch on its own, and so that only `submit` ever touches the funding wallet.
