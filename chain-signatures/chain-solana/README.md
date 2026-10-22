@@ -28,7 +28,7 @@ variables:
 
 ### Stall budgets
 
-Chain-config env vars (see `ChainConfig` in `mpc-primitives/src/chain.rs`),
+Chain-config env vars (see `ChainConfig` in `chain-signatures/primitives/src/chain.rs`),
 consumed by the node's stream supervisor — not `SolConfig` fields:
 
 | env var | default | trips on |
