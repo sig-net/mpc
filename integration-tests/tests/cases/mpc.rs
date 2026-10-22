@@ -1282,13 +1282,20 @@ async fn test_everybody_participate_triple_protocol() {
                 node.me
             );
 
+            // Peers finish the protocol independently of the owner, so give them time.
             for peer in &network.nodes {
-                assert!(
-                    peer.triple_storage.contains_by_owner(*id, node.me).await,
-                    "triple {id} owned by {:?} should be present on {:?}",
-                    node.me,
-                    peer.me
-                );
+                tokio::time::timeout(Duration::from_secs(20), async {
+                    while !peer.triple_storage.contains_by_owner(*id, node.me).await {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "triple {id} owned by {:?} should be present on {:?}",
+                        node.me, peer.me
+                    )
+                });
             }
         }
     }
@@ -1327,15 +1334,24 @@ async fn test_everybody_participate_presignature_protocol() {
                 node.me
             );
 
+            // Peers finish the protocol independently of the owner, so give them time.
             for peer in &network.nodes {
-                assert!(
-                    peer.presignature_storage
+                tokio::time::timeout(Duration::from_secs(20), async {
+                    while !peer
+                        .presignature_storage
                         .contains_by_owner(*id, node.me)
-                        .await,
-                    "presignature {id} owned by {:?} should be present on {:?}",
-                    node.me,
-                    peer.me
-                );
+                        .await
+                    {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "presignature {id} owned by {:?} should be present on {:?}",
+                        node.me, peer.me
+                    )
+                });
             }
         }
     }
