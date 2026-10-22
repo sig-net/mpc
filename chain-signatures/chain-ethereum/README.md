@@ -20,15 +20,15 @@ plumbed through from the node's config, not constructed by hand.
 
 ## Configuration
 
-`EthConfig` fields, typically populated from environment variables:
+`EthConfig` fields and the node CLI env vars that populate them:
 
 | field                     | env var             | required? | notes |
 |---------------------------|---------------------|-----------|-------|
-| `execution_rpc_http_url`  | `RPC_URL`           | yes       | execution-layer JSON-RPC endpoint (Alchemy, Infura, OnFinality, …) |
-| `contract_address`        | `CONTRACT_ADDRESS`  | yes       | MPC contract address, with or without the `0x` prefix |
-| `network`                 | `NETWORK`           | no        | default `sepolia` |
-| `refresh_finalized_interval` | —                | no        | milliseconds between finalized-head watcher polls (production) |
-| `optimistic_requests`     | `OPTIMISTIC`        | no        | default off (production waits for finality via the finalized-head watcher); set `1` for the demo/soft-tip path |
+| `execution_rpc_http_url`  | `MPC_ETH_EXECUTION_RPC_HTTP_URL` | yes       | execution-layer JSON-RPC endpoint (Alchemy, Infura, OnFinality, …) |
+| `contract_address`        | `MPC_ETH_CONTRACT_ADDRESS` | yes       | MPC contract address, with or without the `0x` prefix |
+| `network`                 | `MPC_ETH_NETWORK` | no        | default `sepolia` |
+| `refresh_finalized_interval` | `MPC_ETH_REFRESH_FINALIZED_INTERVAL` | no        | milliseconds between finalized-head watcher polls (production) |
+| `optimistic_requests`     | `MPC_ETH_OPTIMISTIC_REQUESTS` | no        | default off (production waits for finality via the finalized-head watcher); set `true` for the demo/soft-tip path |
 
 ### Stall budget
 
