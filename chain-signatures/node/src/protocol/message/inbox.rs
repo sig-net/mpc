@@ -685,7 +685,8 @@ mod tests {
         setup.inbox.abort();
     }
 
-    /// The same ciphertext delivered twice reaches subscribers once.
+    /// A resent ciphertext (an outbox retry) is dropped, but the same messages
+    /// encrypted again (a repeated PROPOSE) are delivered.
     #[tokio::test]
     async fn test_inbox_idempotency() {
         let setup = inbox_setup();
@@ -711,38 +712,24 @@ mod tests {
             _ => panic!("failed to join on inbox"),
         }
 
-        setup.channel.unsubscribe_triple(1).await;
-        setup.channel.unsubscribe_triple(2).await;
-        setup.channel.unsubscribe_triple(3).await;
-
-        // The same ciphertext again, as an outbox retry would send it.
         setup.channel.send_inbox(resent).await;
-        let mut recv1 = tokio::time::timeout(
-            Duration::from_millis(300),
-            setup.channel.subscribe_triple(1),
-        )
-        .await
-        .unwrap();
-        let mut recv2 = tokio::time::timeout(
-            Duration::from_millis(300),
-            setup.channel.subscribe_triple(2),
-        )
-        .await
-        .unwrap();
-        let mut recv3 = tokio::time::timeout(
-            Duration::from_millis(300),
-            setup.channel.subscribe_triple(3),
-        )
-        .await
-        .unwrap();
+        let result = tokio::time::timeout(Duration::from_millis(300), recv1.recv()).await;
+        assert!(result.is_err(), "resent ciphertext was delivered again");
 
-        let result1 = tokio::time::timeout(Duration::from_millis(100), recv1.recv()).await;
-        let result2 = tokio::time::timeout(Duration::from_millis(100), recv2.recv()).await;
-        let result3 = tokio::time::timeout(Duration::from_millis(100), recv3.recv()).await;
-
-        assert!(result1.is_err());
-        assert!(result2.is_err());
-        assert!(result3.is_err());
+        let encrypted = SignedMessage::encrypt(
+            &batch,
+            setup.from,
+            &setup.me,
+            &setup.sign_sk,
+            &setup.cipher_pk,
+        )
+        .unwrap();
+        setup.channel.send_inbox(encrypted).await;
+        let result = tokio::time::timeout(Duration::from_millis(300), recv1.recv()).await;
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "same messages encrypted again were dropped"
+        );
 
         setup.inbox.abort();
     }
@@ -815,10 +802,10 @@ mod tests {
         assert!(MessageInbox::verify_senders(batches, Some(me)).is_empty());
 
         // Wrong signing key: rejected at signature verification already, and it
-        // must not reach the dedup cache on the way out. That cache is keyed on
-        // the signature, and our cipher key is public, so anyone able to reach
-        // the node could otherwise flood it with signatures of their choosing
-        // and evict the entries that make real duplicates detectable.
+        // must not reach the dedup cache on the way out. Our cipher key is
+        // public, so anyone able to reach the node could otherwise flood that
+        // cache with entries of their choosing and evict the ones that make real
+        // duplicates detectable.
         let forged_envelope = triple_batch(3, peer);
         let encrypted =
             SignedMessage::encrypt(&forged_envelope, peer, &account, &my_sign_sk, &cipher_pk)
@@ -830,7 +817,7 @@ mod tests {
         assert_eq!(
             inbox.replay.len(),
             cached,
-            "unverified signature entered the dedup cache",
+            "unverified batch entered the dedup cache",
         );
 
         // Control: consistent sender passes through.
