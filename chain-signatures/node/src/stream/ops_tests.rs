@@ -1109,20 +1109,36 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
 }
 
 #[tokio::test]
-async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
+async fn process_execution_confirmed_waits_for_source_catchup() {
     let backlog = Backlog::new();
 
     let tx = test_bidirectional_tx(4, Chain::Solana, Chain::Ethereum);
     backlog.insert_mock_executing(&tx).await;
 
+    // Restarted: caught up on the target chain, still behind on the source chain.
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
-    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+    let mut ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+    ctx.backlog.set_caught_up(Chain::Ethereum, true);
     process_execution_confirmed(
         tx.id,
         789u64,
         ExecutionOutcome::Failed,
         &ctx,
         tx.target_chain,
+    )
+    .await
+    .unwrap();
+    assert!(
+        sign_rx.try_recv().is_err(),
+        "second leg signed before source catchup"
+    );
+
+    crate::stream::handle_chain_event(
+        mpc_primitives::ChainEvent::CatchupCompleted,
+        &mut ctx,
+        &NoopChainTelemetry,
+        ProjectivePoint::GENERATOR.to_affine(),
+        Chain::Solana,
     )
     .await
     .unwrap();
@@ -1139,7 +1155,7 @@ async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
                 mpc_primitives::SignKind::RespondBidirectional(_)
             );
         }
-        other => panic!("expected cross-chain follow-up request, got {other:?}"),
+        other => panic!("expected the second leg at source catchup, got {other:?}"),
     }
 }
 
