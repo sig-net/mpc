@@ -11,6 +11,7 @@
 ## Keys
 
 - [Account derivation](account-derivation.md): how per-chain accounts and keys are derived from the root key.
+- [Delta derivation](delta-derivation.md): requirements for the per-request re-randomization scalar and its inputs, in particular the chain entropy.
 
 ## Operations
 
