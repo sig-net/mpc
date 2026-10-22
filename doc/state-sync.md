@@ -10,7 +10,18 @@ runs when a peer rejects a proposal for an artifact we list it as holding: that
 reject is proof our record for that peer is stale, and re-syncing it repairs
 every artifact it is missing, not only the one that happened to be proposed.
 
-![graph](./graphs/state_sync.svg)
+```mermaid
+flowchart TB
+    subgraph request [ ]
+        direction LR
+        A1["Node A<br/>(Owner)"] -- "Sync Request<br/>List of P and T owned by Node A" --> B1["Node B<br/>(Non-Owner)"]
+    end
+    subgraph response [ ]
+        direction RL
+        B2["Node B<br/>(Non-Owner)"] -- "Sync Response<br/>List of P and T owned by Node A<br/>that are not stored at Node B" --> A2["Node A<br/>(Owner)"]
+    end
+    request ~~~ response
+```
 
 During state sync, the owner sends a list of Pre-signatures and Triples that it expects the other node to hold a share of. Specifically, it sends all owned IDs which satisfy:
 
