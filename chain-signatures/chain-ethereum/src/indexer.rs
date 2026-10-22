@@ -379,6 +379,10 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     }
 }
 
+/// Blocks a fresh head reading may be ahead of the indexer for catchup to count as
+/// complete. A round is far shorter than a block interval, so none are needed.
+const CATCHUP_GAP_TOLERANCE: u64 = 0;
+
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> {
     const CHAIN: Chain = Chain::Ethereum;
@@ -395,7 +399,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             .finalized_head
             .spawn_watcher(self.client.clone(), cancel.clone());
 
-        // Anchor = tip-at-startup + 1: the catchup-live boundary.
+        // Anchor = tip-at-startup + 1: where a node without a checkpoint starts.
         let Some(anchor) = self.sample_anchor(&cancel).await else {
             tracing::debug!("ethereum indexer cancelled before the startup tip was sampled");
             return Ok(());
@@ -425,36 +429,27 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             );
         }
 
-        // Catchup: process all blocks up to the anchor, then emit a CatchupCompleted event.
-        while next < anchor {
-            // Wait for the next block to be processable
-            let Some(upper) = self
-                .wait_processable_bound(&mut finalized_watcher, next, &cancel)
-                .await?
-            else {
-                return Ok(()); // cancelled while waiting
-            };
-            // Clamp the upper bound to the anchor so we don't process beyond it.
-            let end = upper.min(anchor.saturating_sub(1)) + 1;
-            self.process_range(&events_tx, next, end, &cancel).await?;
-            next = end;
-        }
-
-        if cancel.is_cancelled() {
-            tracing::debug!("ethereum indexer cancelled after catchup; skipping CatchupCompleted");
-            return Ok(());
-        }
-        tracing::info!(
-            height = next,
-            "ethereum catchup complete; entering live tail"
-        );
-        events_tx
-            .send(ChainEvent::CatchupCompleted)
-            .await
-            .context("failed to send catchup completed event")?;
-
-        // Live tail: process each block as it becomes processable, waiting for the finalized head to reach it.
+        // Process each block as it becomes processable. Catchup is complete once a
+        // fresh head reading, taken after a round, leaves nothing to process.
+        let mut head = anchor.saturating_sub(1);
+        let mut caught_up = false;
         loop {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            let behind = head.saturating_add(1).saturating_sub(next) > CATCHUP_GAP_TOLERANCE;
+            if !caught_up && !behind {
+                tracing::info!(
+                    height = next,
+                    "ethereum catchup complete; entering live tail"
+                );
+                events_tx
+                    .send(ChainEvent::CatchupCompleted)
+                    .await
+                    .context("failed to send catchup completed event")?;
+                caught_up = true;
+            }
+
             let Some(upper) = self
                 .wait_processable_bound(&mut finalized_watcher, next, &cancel)
                 .await?
@@ -464,6 +459,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             self.process_range(&events_tx, next, upper + 1, &cancel)
                 .await?;
             next = upper + 1;
+            head = finalized_watcher.head().unwrap_or(upper);
         }
     }
 }
@@ -916,6 +912,16 @@ mod tests {
 
     impl RunFixture {
         async fn spawn(processed: u64, finalized: u64) -> Self {
+            Self::spawn_with_head_bump(processed, finalized, None).await
+        }
+
+        /// `bump = Some((at, to))` moves the head to `to` while the catchup batch
+        /// holding block `at` is served, so the reading after that round sees it.
+        async fn spawn_with_head_bump(
+            processed: u64,
+            finalized: u64,
+            bump: Option<(u64, u64)>,
+        ) -> Self {
             let mut server = Server::new_async().await;
             let finalized = Arc::new(AtomicU64::new(finalized));
 
@@ -935,6 +941,14 @@ mod tests {
                 .create_async()
                 .await;
 
+            let builder = test_utils::TestIndexerBuilder::new(server.url());
+            builder
+                .state_manager
+                .set_processed_block(Chain::Ethereum, processed)
+                .await;
+            let indexer = builder.build().await;
+            let tracker = indexer.finalized_head.clone();
+
             // Catchup batches (JSON-RPC array body): derive ids and block
             // numbers from the request.
             server
@@ -942,33 +956,36 @@ mod tests {
                 .match_body(Matcher::Regex(r"^\[".to_string()))
                 .with_status(200)
                 .with_header("content-type", "application/json")
-                .with_body_from_request(|req| {
-                    let body: serde_json::Value =
-                        serde_json::from_slice(req.body().expect("request body"))
-                            .expect("json body");
-                    let items = body
-                        .as_array()
-                        .expect("batch body")
-                        .iter()
-                        .map(|r| {
-                            let id = r["id"].as_u64().expect("request id");
-                            let hex = r["params"][0].as_str().expect("block number param");
-                            let number = u64::from_str_radix(hex.trim_start_matches("0x"), 16)
-                                .expect("hex block number");
-                            test_utils::block_response(id, number)
-                        })
-                        .collect();
-                    serde_json::Value::Array(items).to_string().into_bytes()
+                .with_body_from_request({
+                    let finalized = finalized.clone();
+                    move |req| {
+                        let body: serde_json::Value =
+                            serde_json::from_slice(req.body().expect("request body"))
+                                .expect("json body");
+                        let items: Vec<_> = body
+                            .as_array()
+                            .expect("batch body")
+                            .iter()
+                            .map(|r| {
+                                let id = r["id"].as_u64().expect("request id");
+                                let hex = r["params"][0].as_str().expect("block number param");
+                                let number = u64::from_str_radix(hex.trim_start_matches("0x"), 16)
+                                    .expect("hex block number");
+                                (number, test_utils::block_response(id, number))
+                            })
+                            .collect();
+                        if let Some((at, to)) = bump {
+                            if items.iter().any(|(number, _)| *number == at) {
+                                finalized.store(to, Ordering::Relaxed);
+                                tracker.set_head(to);
+                            }
+                        }
+                        let items = items.into_iter().map(|(_, item)| item).collect();
+                        serde_json::Value::Array(items).to_string().into_bytes()
+                    }
                 })
                 .create_async()
                 .await;
-
-            let builder = test_utils::TestIndexerBuilder::new(server.url());
-            builder
-                .state_manager
-                .set_processed_block(Chain::Ethereum, processed)
-                .await;
-            let indexer = builder.build().await;
 
             let (events_tx, events_rx) = chain_event_channel();
             let cancel = CancellationToken::new();
@@ -1019,6 +1036,25 @@ mod tests {
             matches!(event, ChainEvent::CatchupCompleted),
             "expected CatchupCompleted, got {event:?}"
         );
+
+        f.cancel_and_join().await;
+    }
+
+    #[tokio::test]
+    async fn run_completes_catchup_only_when_a_fresh_head_leaves_nothing() {
+        // The head moves to 12 while the first round (6..=9) is served, so a
+        // reading after that round still finds blocks to process: catchup
+        // completes after the second round, not at the startup tip.
+        let mut f = RunFixture::spawn_with_head_bump(5, 9, Some((9, 12))).await;
+
+        for n in 6..=12 {
+            let event = f.next_event().await;
+            assert!(
+                matches!(event, ChainEvent::Block(b) if b == n),
+                "expected Block({n}), got {event:?}"
+            );
+        }
+        assert!(matches!(f.next_event().await, ChainEvent::CatchupCompleted));
 
         f.cancel_and_join().await;
     }

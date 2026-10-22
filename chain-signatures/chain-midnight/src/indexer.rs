@@ -498,6 +498,11 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         Ok(())
     }
 
+    /// Blocks a fresh finalized head may be ahead of the indexer for catchup to
+    /// count as complete. A round is far shorter than a block interval, so none
+    /// are needed.
+    const CATCHUP_GAP_TOLERANCE: u64 = 0;
+
     /// `run()` over an explicit [`ChainSource`], the fixture seam.
     pub(crate) async fn run_with_source<C: ChainSource>(
         &self,
@@ -510,61 +515,43 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .get_processed_block(Chain::Midnight)
             .await
             .unwrap_or(0);
-        let anchor = tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            result = source.finalized_head() => result
-                .context("failed to sample the midnight anchor")?,
-        };
-
         let mut last_processed = checkpoint;
-        if checkpoint == 0 {
-            // A fresh node has no gap to close, and walking from genesis would
-            // reprocess the whole chain, so catchup anchors at the finalized head.
-            tracing::info!(
-                anchor = anchor.number,
-                "midnight fresh start: no checkpoint, anchoring at the finalized head"
-            );
-            last_processed = anchor.number;
-        } else {
-            for number in checkpoint.saturating_add(1)..anchor.number {
-                match self
-                    .index_height(source, &events_tx, number, &cancel)
-                    .await?
-                {
-                    Indexed::Done => last_processed = number,
-                    Indexed::Cancelled => return Ok(()),
-                }
-            }
-            if anchor.number > checkpoint {
-                match self
-                    .index_block(source, &events_tx, &anchor, &cancel)
-                    .await?
-                {
-                    Indexed::Done => last_processed = anchor.number,
-                    Indexed::Cancelled => return Ok(()),
-                }
-            }
-        }
-        events_tx
-            .send(ChainEvent::CatchupCompleted)
-            .await
-            .context("failed to send midnight catchup completed event")?;
+        let mut caught_up = false;
 
+        // Index up to each fresh finalized head. Catchup is complete once a
+        // reading taken after a round leaves nothing to index.
         loop {
-            if cancel
-                .cancelled_within(self.config.indexer.poll_interval)
-                .await
-            {
-                return Ok(());
-            }
-
             let block = tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
                 result = source.finalized_head() => result
                     .context("failed to poll the midnight finalized head")?,
             };
 
-            if block.number <= last_processed {
+            if last_processed == 0 {
+                // A fresh node has no gap to close, and walking from genesis would
+                // reprocess the whole chain, so catchup anchors at the finalized head.
+                tracing::info!(
+                    anchor = block.number,
+                    "midnight fresh start: no checkpoint, anchoring at the finalized head"
+                );
+                last_processed = block.number;
+            }
+
+            let behind = block.number.saturating_sub(last_processed) > Self::CATCHUP_GAP_TOLERANCE;
+            if !behind {
+                if !caught_up {
+                    events_tx
+                        .send(ChainEvent::CatchupCompleted)
+                        .await
+                        .context("failed to send midnight catchup completed event")?;
+                    caught_up = true;
+                }
+                if cancel
+                    .cancelled_within(self.config.indexer.poll_interval)
+                    .await
+                {
+                    return Ok(());
+                }
                 continue;
             }
             for number in last_processed.saturating_add(1)..block.number {
@@ -1687,7 +1674,6 @@ mod tests {
             one_call(EmissionKind::SignBidirectional, notification(rid)),
         );
         source.set_state(CALLER, 7, caller_state(&record, rid));
-        live_tx.send(block_ref(9)).await.expect("queue live block");
 
         let mut harness = RunFixture::spawn(source, 5).await;
         assert_block(harness.next_event().await, 6);
@@ -1698,7 +1684,28 @@ mod tests {
             harness.next_event().await,
             ChainEvent::CatchupCompleted
         ));
+        live_tx.send(block_ref(9)).await.expect("send live block");
         assert_block(harness.next_event().await, 9);
+        harness.cancel_and_join().await;
+    }
+
+    #[tokio::test]
+    async fn run_completes_catchup_only_when_a_fresh_head_leaves_nothing() {
+        // The first head reading says 8, the next says 11: the blocks finalised
+        // during the first round are catchup too, so completion follows them.
+        let source = FixtureSource {
+            head: 11,
+            sampled_heads: Mutex::new(VecDeque::from([HeadSample::Block(block_ref(8))])),
+            ..Default::default()
+        };
+        let mut harness = RunFixture::spawn(source, 5).await;
+        for number in 6..=11 {
+            assert_block(harness.next_event().await, number);
+        }
+        assert!(matches!(
+            harness.next_event().await,
+            ChainEvent::CatchupCompleted
+        ));
         harness.cancel_and_join().await;
     }
 
@@ -1794,8 +1801,8 @@ mod tests {
             .handle
             .await
             .expect("run task")
-            .expect_err("anchor read errors fail the run for a supervised restart");
-        assert!(err.to_string().contains("anchor"), "{err:#}");
+            .expect_err("head read errors fail the run for a supervised restart");
+        assert!(err.to_string().contains("finalized head"), "{err:#}");
     }
 
     #[tokio::test]

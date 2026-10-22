@@ -96,15 +96,19 @@ impl PollState {
         }
     }
 
-    /// Advance past a drained tick. The next tick starts at the anchor, and `CatchupCompleted` is emitted.
+    /// Advance past a drained tick: the next tick starts at the anchor.
     fn drained(self, anchor: u64) -> Self {
         Self {
             next_start: self.next_start.max(anchor),
-            caught_up: true,
             ..self
         }
     }
 }
+
+/// Slots a fresh anchor may be ahead of the indexer for catchup to count as
+/// complete. Slots advance about as fast as a tick drains, so a fresh anchor
+/// is rarely exactly at the watermark; this is a few seconds of slots.
+const CATCHUP_GAP_TOLERANCE: u64 = 10;
 
 pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
     program_id: Pubkey,
@@ -558,14 +562,24 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             let anchor = res?;
             state = state.observe_anchor(anchor, self.slot_stall_timeout)?;
 
+            // Catchup is complete once a fresh anchor is within tolerance of the
+            // watermark the previous tick left; until then ticks run back to back.
+            let gap = anchor.saturating_sub(state.next_start);
             let tick_started_at = Instant::now();
             self.drain_range(&events_tx, anchor, state.next_start, &cancel)
                 .await?;
-
-            let was_caught_up = state.caught_up;
             state = state.drained(anchor);
 
-            if !was_caught_up {
+            if !state.caught_up && gap > CATCHUP_GAP_TOLERANCE {
+                tracing::info!(
+                    anchor_slot = anchor,
+                    gap,
+                    elapsed = ?tick_started_at.elapsed(),
+                    "solana catchup round complete; anchor still ahead"
+                );
+                continue;
+            }
+            if !state.caught_up {
                 tracing::info!(
                     anchor_slot = anchor,
                     elapsed = ?tick_started_at.elapsed(),
@@ -575,6 +589,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
                     .send(ChainEvent::CatchupCompleted)
                     .await
                     .context("failed to send catchup completed event")?;
+                state.caught_up = true;
             } else {
                 tracing::debug!(
                     anchor_slot = anchor,
@@ -1526,11 +1541,9 @@ mod tests {
         let sm = MockStateManager::new();
         let state = PollState::resumed(&sm, 10).await;
 
-        // anchor 10 drains `[next_start, 10)`: the next tick starts at 10
-        // and the catchup gate flips.
+        // anchor 10 drains `[next_start, 10)`: the next tick starts at 10.
         let state = state.drained(10);
         assert_eq!(state.next_start, 10);
-        assert!(state.caught_up);
 
         let state = state.drained(30);
         assert_eq!(state.next_start, 30);
@@ -1555,6 +1568,48 @@ mod tests {
             f.events_rx.try_recv().is_err(),
             "a frozen anchor covers no new slots, so no Block markers may be emitted"
         );
+
+        f.cancel_and_join().await;
+    }
+
+    #[tokio::test]
+    async fn run_completes_catchup_only_when_a_fresh_anchor_is_within_tolerance() {
+        let mut server = mockito::Server::new_async().await;
+        // No program activity: every slot drains to a marker.
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&[]))
+            .expect(2)
+            .create_async()
+            .await;
+
+        // getSlot script: seed 10, tick 1 at 30 (20 slots behind: a catchup
+        // round, no completion), tick 2 at 35 (within tolerance: complete).
+        let mut f = RunFixture::spawn_with_server(
+            server,
+            &[10, 30, 35],
+            Some(9),
+            None,
+            Duration::from_secs(30),
+        )
+        .await;
+
+        for slot in 10..35 {
+            let event = f.next_event().await;
+            assert!(
+                matches!(event, Some(ChainEvent::Block(s)) if s == slot),
+                "expected Block({slot}), got {event:?}"
+            );
+        }
+        assert!(matches!(
+            f.next_event().await,
+            Some(ChainEvent::CatchupCompleted)
+        ));
 
         f.cancel_and_join().await;
     }

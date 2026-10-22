@@ -115,6 +115,11 @@ impl FinalizedHeadWatcher {
         }
     }
 
+    /// The cached head, without waiting for it to cover anything.
+    pub fn head(&self) -> Option<u64> {
+        *self.tracker.head.borrow()
+    }
+
     pub async fn wait_for(&mut self, block_number: u64) -> Result<u64, WatcherExit> {
         let mut head_rx = self.tracker.head.subscribe();
         loop {

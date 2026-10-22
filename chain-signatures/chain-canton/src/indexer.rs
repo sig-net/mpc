@@ -321,6 +321,10 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
     }
 }
 
+/// Offsets a fresh ledger end may be ahead of the indexer for catchup to count as
+/// complete. Updates are sparse next to a round, so none are needed.
+const CATCHUP_GAP_TOLERANCE: u64 = 0;
+
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
     const CHAIN: Chain = Chain::Canton;
@@ -338,18 +342,28 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
             .await
             .unwrap_or(0);
         let mut last_seen_offset = checkpoint;
-
-        let anchor = self.client.fetch_ledger_end().await?;
         let mut ws_conn = self.subscribe(last_seen_offset).await?;
 
-        self.process_catchup_offset(
-            &mut ws_conn,
-            &events_tx,
-            &mut last_seen_offset,
-            anchor,
-            &cancel,
-        )
-        .await?;
+        // Catchup is complete once a fresh ledger end, read after a round, is
+        // within tolerance of the last processed offset.
+        loop {
+            let ledger_end = self.client.fetch_ledger_end().await?;
+            let behind = ledger_end.saturating_sub(last_seen_offset) > CATCHUP_GAP_TOLERANCE;
+            if !behind {
+                break;
+            }
+            self.process_catchup_offset(
+                &mut ws_conn,
+                &events_tx,
+                &mut last_seen_offset,
+                ledger_end,
+                &cancel,
+            )
+            .await?;
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+        }
 
         events_tx
             .send(ChainEvent::CatchupCompleted)
