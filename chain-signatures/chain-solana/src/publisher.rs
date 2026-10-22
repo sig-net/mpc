@@ -13,6 +13,7 @@ use signet_program::instruction::{
 };
 use solana_client::{
     client_error::ClientErrorKind,
+    rpc_custom_error::JSON_RPC_SERVER_ERROR_TRANSACTION_SIGNATURE_VERIFICATION_FAILURE,
     rpc_request::{RpcError, RpcResponseErrorData},
     rpc_response::RpcSimulateTransactionResult,
 };
@@ -83,18 +84,26 @@ fn kind_verdict(kind: &ClientErrorKind) -> Verdict {
     }
 }
 
+/// JSON-RPC 2.0 spec invalid-params (jsonrpc-core 18.0.0 error.rs).
+const JSON_RPC_INVALID_PARAMS: i64 = -32602;
+
 /// Determine the verdict for an RPC error.
 fn rpc_verdict(rpc: &RpcError) -> Verdict {
-    let RpcError::RpcResponseError {
-        data: RpcResponseErrorData::SendTransactionPreflightFailure(sim),
-        ..
-    } = rpc
-    else {
-        // every non-preflight shape (ForUser confirm timeout, NodeUnhealthy,
-        // request/parse failures, undecodable preflight data) is retryable
+    let RpcError::RpcResponseError { code, data, .. } = rpc else {
+        // non-response shapes (ForUser confirm timeout, request/parse failures)
         return Verdict::Retryable;
     };
-    sim_tx_error(sim).map_or(Verdict::Retryable, on_chain)
+    if let RpcResponseErrorData::SendTransactionPreflightFailure(sim) = data {
+        return sim_tx_error(sim).map_or(Verdict::Retryable, on_chain);
+    }
+    match *code {
+        // Deterministic sendTransaction rejections, both with `data: Empty`:
+        // Oversized transaction, signature verification failure
+        JSON_RPC_INVALID_PARAMS
+        | JSON_RPC_SERVER_ERROR_TRANSACTION_SIGNATURE_VERIFICATION_FAILURE => Verdict::Terminal,
+        // NodeUnhealthy, undecodable preflight data, every other code
+        _ => Verdict::Retryable,
+    }
 }
 
 /// `UiTransactionError.source()` is the inner `TransactionError`
@@ -282,6 +291,29 @@ mod tests {
             data: RpcResponseErrorData::SendTransactionPreflightFailure(sim),
         }));
         assert!(!is_retryable(&err));
+    }
+
+    #[test]
+    fn deterministic_send_rejections_are_terminal() {
+        // both arrive on the wire with `data: Empty`
+        let rejects = [
+            (
+                JSON_RPC_INVALID_PARAMS,
+                "Transaction too large: 1300 bytes (max: 1232 bytes)",
+            ),
+            (
+                JSON_RPC_SERVER_ERROR_TRANSACTION_SIGNATURE_VERIFICATION_FAILURE,
+                "Transaction signature verification failure",
+            ),
+        ];
+        for (code, message) in rejects {
+            let err = anchor_wrapped(ClientErrorKind::RpcError(RpcError::RpcResponseError {
+                code,
+                message: message.to_string(),
+                data: RpcResponseErrorData::Empty,
+            }));
+            assert!(!is_retryable(&err), "code {code} should be terminal");
+        }
     }
 
     #[test]
