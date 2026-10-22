@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use futures_util::stream::{self, StreamExt};
 use futures_util::Stream;
 use mpc_chain_integration_core::{
-    utils::retry::SharedBackoff, ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
+    utils::retry::SharedBackoff, Catchup, CatchupGate, ChainIndexer, ChainTelemetry,
+    NoopPublisherTelemetry, StateManager,
 };
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use mpc_utils::task::retry_until_ok;
@@ -34,8 +35,6 @@ struct PollState {
     last_observed_slot: Option<u64>,
     /// When `last_observed_slot` last advanced.
     slot_last_advanced_at: Instant,
-    /// Whether [`ChainEvent::CatchupCompleted`] has been emitted
-    caught_up: bool,
 }
 
 impl PollState {
@@ -52,7 +51,6 @@ impl PollState {
             next_start,
             last_observed_slot: None,
             slot_last_advanced_at: Instant::now(),
-            caught_up: false,
         }
     }
 
@@ -104,11 +102,6 @@ impl PollState {
         }
     }
 }
-
-/// Slots a fresh anchor may be ahead of the indexer for catchup to count as
-/// complete. Slots advance about as fast as a tick drains, so a fresh anchor
-/// is rarely exactly at the watermark; this is a few seconds of slots.
-const CATCHUP_GAP_TOLERANCE: u64 = 10;
 
 pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
     program_id: Pubkey,
@@ -554,6 +547,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             return Ok(());
         };
         let mut state = PollState::resumed(&self.state_manager, seed?).await;
+        // Slots advance about as fast as a tick drains, so a fresh anchor is
+        // rarely at the watermark; a few seconds of slots are tolerated.
+        let mut gate = CatchupGate::new(10);
 
         loop {
             let Some(res) = self.next_anchor(&cancel).await else {
@@ -562,40 +558,38 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             let anchor = res?;
             state = state.observe_anchor(anchor, self.slot_stall_timeout)?;
 
-            // Catchup is complete once a fresh anchor is within tolerance of the
-            // watermark the previous tick left; until then ticks run back to back.
             let gap = anchor.saturating_sub(state.next_start);
             let tick_started_at = Instant::now();
             self.drain_range(&events_tx, anchor, state.next_start, &cancel)
                 .await?;
             state = state.drained(anchor);
 
-            if !state.caught_up && gap > CATCHUP_GAP_TOLERANCE {
-                tracing::info!(
-                    anchor_slot = anchor,
-                    gap,
-                    elapsed = ?tick_started_at.elapsed(),
-                    "solana catchup round complete; anchor still ahead"
-                );
-                continue;
-            }
-            if !state.caught_up {
-                tracing::info!(
-                    anchor_slot = anchor,
-                    elapsed = ?tick_started_at.elapsed(),
-                    "solana catchup complete"
-                );
-                events_tx
-                    .send(ChainEvent::CatchupCompleted)
-                    .await
-                    .context("failed to send catchup completed event")?;
-                state.caught_up = true;
-            } else {
-                tracing::debug!(
+            match gate.observe(gap) {
+                Catchup::Behind => {
+                    tracing::info!(
+                        anchor_slot = anchor,
+                        gap,
+                        elapsed = ?tick_started_at.elapsed(),
+                        "solana catchup round complete; anchor still ahead"
+                    );
+                    continue;
+                }
+                Catchup::Completed => {
+                    tracing::info!(
+                        anchor_slot = anchor,
+                        elapsed = ?tick_started_at.elapsed(),
+                        "solana catchup complete"
+                    );
+                    events_tx
+                        .send(ChainEvent::CatchupCompleted)
+                        .await
+                        .context("failed to send catchup completed event")?;
+                }
+                Catchup::Live => tracing::debug!(
                     anchor_slot = anchor,
                     elapsed = ?tick_started_at.elapsed(),
                     "solana poll iteration complete"
-                );
+                ),
             }
 
             tokio::select! {
@@ -1503,7 +1497,6 @@ mod tests {
         let state = PollState::resumed(&sm, 100).await;
         assert_eq!(state.next_start, 42);
         assert_eq!(state.last_observed_slot, None);
-        assert!(!state.caught_up);
 
         // Fresh deployment: nothing persisted, start live from the seed anchor.
         let fresh = PollState::resumed(&MockStateManager::new(), 100).await;

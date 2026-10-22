@@ -19,7 +19,9 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
+use mpc_chain_integration_core::{
+    Catchup, CatchupGate, ChainIndexer, ChainTelemetry, StateManager,
+};
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
@@ -498,11 +500,6 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         Ok(())
     }
 
-    /// Blocks a fresh finalized head may be ahead of the indexer for catchup to
-    /// count as complete. A round is far shorter than a block interval, so none
-    /// are needed.
-    const CATCHUP_GAP_TOLERANCE: u64 = 0;
-
     /// `run()` over an explicit [`ChainSource`], the fixture seam.
     pub(crate) async fn run_with_source<C: ChainSource>(
         &self,
@@ -516,10 +513,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .await
             .unwrap_or(0);
         let mut last_processed = checkpoint;
-        let mut caught_up = false;
+        // Blocks are seconds apart, so no gap is tolerated.
+        let mut gate = CatchupGate::new(0);
 
-        // Index up to each fresh finalized head. Catchup is complete once a
-        // reading taken after a round leaves nothing to index.
         loop {
             let block = tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
@@ -537,38 +533,39 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 last_processed = block.number;
             }
 
-            let behind = block.number.saturating_sub(last_processed) > Self::CATCHUP_GAP_TOLERANCE;
-            if !behind {
-                if !caught_up {
+            match gate.observe(block.number.saturating_sub(last_processed)) {
+                Catchup::Behind => {
+                    for number in last_processed.saturating_add(1)..block.number {
+                        match self
+                            .index_height(source, &events_tx, number, &cancel)
+                            .await?
+                        {
+                            Indexed::Done => {}
+                            Indexed::Cancelled => return Ok(()),
+                        }
+                    }
+                    match self
+                        .index_block(source, &events_tx, &block, &cancel)
+                        .await?
+                    {
+                        Indexed::Done => last_processed = block.number,
+                        Indexed::Cancelled => return Ok(()),
+                    }
+                    continue;
+                }
+                Catchup::Completed => {
                     events_tx
                         .send(ChainEvent::CatchupCompleted)
                         .await
                         .context("failed to send midnight catchup completed event")?;
-                    caught_up = true;
                 }
-                if cancel
-                    .cancelled_within(self.config.indexer.poll_interval)
-                    .await
-                {
-                    return Ok(());
-                }
-                continue;
+                Catchup::Live => {}
             }
-            for number in last_processed.saturating_add(1)..block.number {
-                match self
-                    .index_height(source, &events_tx, number, &cancel)
-                    .await?
-                {
-                    Indexed::Done => {}
-                    Indexed::Cancelled => return Ok(()),
-                }
-            }
-            match self
-                .index_block(source, &events_tx, &block, &cancel)
-                .await?
+            if cancel
+                .cancelled_within(self.config.indexer.poll_interval)
+                .await
             {
-                Indexed::Done => last_processed = block.number,
-                Indexed::Cancelled => return Ok(()),
+                return Ok(());
             }
         }
     }

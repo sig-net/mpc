@@ -12,7 +12,9 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
 use mpc_chain_integration_core::utils::retry::SharedBackoff;
-use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
+use mpc_chain_integration_core::{
+    Catchup, CatchupGate, ChainIndexer, ChainTelemetry, StateManager,
+};
 use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
 use mpc_utils::task::{retry_until_ok, retry_until_some};
 use std::sync::{Arc, Mutex};
@@ -379,10 +381,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     }
 }
 
-/// Blocks a fresh head reading may be ahead of the indexer for catchup to count as
-/// complete. A round is far shorter than a block interval, so none are needed.
-const CATCHUP_GAP_TOLERANCE: u64 = 0;
-
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> {
     const CHAIN: Chain = Chain::Ethereum;
@@ -429,37 +427,40 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             );
         }
 
-        // Process each block as it becomes processable. Catchup is complete once a
-        // fresh head reading, taken after a round, leaves nothing to process.
+        // Blocks are seconds apart and a round is batched, so no gap is tolerated.
+        let mut gate = CatchupGate::new(0);
         let mut head = anchor.saturating_sub(1);
-        let mut caught_up = false;
         loop {
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            let behind = head.saturating_add(1).saturating_sub(next) > CATCHUP_GAP_TOLERANCE;
-            if !caught_up && !behind {
-                tracing::info!(
-                    height = next,
-                    "ethereum catchup complete; entering live tail"
-                );
-                events_tx
-                    .send(ChainEvent::CatchupCompleted)
-                    .await
-                    .context("failed to send catchup completed event")?;
-                caught_up = true;
+            match gate.observe(head.saturating_add(1).saturating_sub(next)) {
+                Catchup::Behind => {
+                    self.process_range(&events_tx, next, head + 1, &cancel)
+                        .await?;
+                    next = head + 1;
+                    head = finalized_watcher.head().unwrap_or(head);
+                    continue;
+                }
+                Catchup::Completed => {
+                    tracing::info!(
+                        height = next,
+                        "ethereum catchup complete; entering live tail"
+                    );
+                    events_tx
+                        .send(ChainEvent::CatchupCompleted)
+                        .await
+                        .context("failed to send catchup completed event")?;
+                }
+                Catchup::Live => {}
             }
-
             let Some(upper) = self
                 .wait_processable_bound(&mut finalized_watcher, next, &cancel)
                 .await?
             else {
                 return Ok(()); // cancelled while waiting
             };
-            self.process_range(&events_tx, next, upper + 1, &cancel)
-                .await?;
-            next = upper + 1;
-            head = finalized_watcher.head().unwrap_or(upper);
+            head = upper;
         }
     }
 }

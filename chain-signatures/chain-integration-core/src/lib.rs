@@ -6,7 +6,7 @@ mod state;
 mod telemetry;
 pub mod utils;
 
-pub use indexer::ChainIndexer;
+pub use indexer::{Catchup, CatchupGate, ChainIndexer};
 pub use publish::{ChainPublisher, GatedPublisher, PublishAction};
 pub use state::{MockStateManager, StateManager};
 pub use telemetry::{

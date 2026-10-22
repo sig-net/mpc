@@ -11,7 +11,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use mpc_chain_integration_core::utils::retry::SharedBackoff;
 use mpc_chain_integration_core::{
-    ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
+    Catchup, CatchupGate, ChainIndexer, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
 use mpc_primitives::{Chain, ChainConfig as _, ChainEvent};
 use std::sync::Arc;
@@ -321,10 +321,6 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
     }
 }
 
-/// Offsets a fresh ledger end may be ahead of the indexer for catchup to count as
-/// complete. Updates are sparse next to a round, so none are needed.
-const CATCHUP_GAP_TOLERANCE: u64 = 0;
-
 #[async_trait]
 impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
     const CHAIN: Chain = Chain::Canton;
@@ -344,14 +340,13 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
         let mut last_seen_offset = checkpoint;
         let mut ws_conn = self.subscribe(last_seen_offset).await?;
 
-        // Catchup is complete once a fresh ledger end, read after a round, is
-        // within tolerance of the last processed offset.
+        // Updates are sparse next to a round, so no gap is tolerated.
+        let mut gate = CatchupGate::new(0);
         loop {
             let ledger_end = self.client.fetch_ledger_end().await?;
-            let behind = ledger_end.saturating_sub(last_seen_offset) > CATCHUP_GAP_TOLERANCE;
-            if !behind {
+            let Catchup::Behind = gate.observe(ledger_end.saturating_sub(last_seen_offset)) else {
                 break;
-            }
+            };
             self.process_catchup_offset(
                 &mut ws_conn,
                 &events_tx,
