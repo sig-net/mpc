@@ -547,9 +547,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             return Ok(());
         };
         let mut state = PollState::resumed(&self.state_manager, seed?).await;
-        // Slots advance about as fast as a tick drains, so a fresh anchor is
-        // rarely at the watermark; a few seconds of slots are tolerated.
-        let mut gate = CatchupGate::new(10);
+        let mut gate = CatchupGate::new(Chain::Solana.catchup_tolerance());
 
         loop {
             let Some(res) = self.next_anchor(&cancel).await else {
@@ -558,23 +556,23 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             let anchor = res?;
             state = state.observe_anchor(anchor, self.slot_stall_timeout)?;
 
-            let gap = anchor.saturating_sub(state.next_start);
+            // Both bounds are exclusive, so the gap is unchanged.
+            let catchup = gate.observe(anchor, state.next_start);
             let tick_started_at = Instant::now();
             self.drain_range(&events_tx, anchor, state.next_start, &cancel)
                 .await?;
             state = state.drained(anchor);
 
-            match gate.observe(gap) {
-                Catchup::Behind => {
+            match catchup {
+                Catchup::Index { .. } => {
                     tracing::info!(
                         anchor_slot = anchor,
-                        gap,
                         elapsed = ?tick_started_at.elapsed(),
                         "solana catchup round complete; anchor still ahead"
                     );
                     continue;
                 }
-                Catchup::Completed => {
+                Catchup::UpToDate { first_time: true } => {
                     tracing::info!(
                         anchor_slot = anchor,
                         elapsed = ?tick_started_at.elapsed(),
@@ -585,7 +583,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
                         .await
                         .context("failed to send catchup completed event")?;
                 }
-                Catchup::Live => tracing::debug!(
+                Catchup::UpToDate { first_time: false } => tracing::debug!(
                     anchor_slot = anchor,
                     elapsed = ?tick_started_at.elapsed(),
                     "solana poll iteration complete"

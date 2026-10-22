@@ -27,6 +27,9 @@ pub trait ChainConfig {
     fn respond_serialization_format(&self) -> SerDeserFormat;
     /// Whether bidirectional requests can target this chain.
     fn has_execution_watcher(&self) -> bool;
+    /// Blocks the head may sit ahead of the last indexed height while the
+    /// indexer still counts as caught up.
+    fn catchup_tolerance(&self) -> u64;
 }
 
 impl ChainConfig for Chain {
@@ -140,6 +143,16 @@ impl ChainConfig for Chain {
 
     fn has_execution_watcher(&self) -> bool {
         matches!(self, Chain::Ethereum)
+    }
+
+    fn catchup_tolerance(&self) -> u64 {
+        match self {
+            // Slots advance about as fast as a round of indexing drains them,
+            // so a fresh anchor is rarely at the watermark.
+            Chain::Solana => 10,
+            // Blocks are seconds or more apart and a round is batched.
+            _ => 0,
+        }
     }
 }
 

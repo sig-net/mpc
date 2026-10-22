@@ -15,7 +15,7 @@ use mpc_chain_integration_core::utils::retry::SharedBackoff;
 use mpc_chain_integration_core::{
     Catchup, CatchupGate, ChainIndexer, ChainTelemetry, StateManager,
 };
-use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
+use mpc_primitives::{Chain, ChainConfig as _, ChainEvent, IndexedSignRequest};
 use mpc_utils::task::{retry_until_ok, retry_until_some};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -427,22 +427,21 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             );
         }
 
-        // Blocks are seconds apart and a round is batched, so no gap is tolerated.
-        let mut gate = CatchupGate::new(0);
+        let mut gate = CatchupGate::new(Chain::Ethereum.catchup_tolerance());
         let mut head = anchor.saturating_sub(1);
         loop {
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            match gate.observe(head.saturating_add(1).saturating_sub(next)) {
-                Catchup::Behind => {
-                    self.process_range(&events_tx, next, head + 1, &cancel)
+            match gate.observe(head, next.saturating_sub(1)) {
+                Catchup::Index { to } => {
+                    self.process_range(&events_tx, next, to + 1, &cancel)
                         .await?;
-                    next = head + 1;
+                    next = to + 1;
                     head = finalized_watcher.head().unwrap_or(head);
                     continue;
                 }
-                Catchup::Completed => {
+                Catchup::UpToDate { first_time: true } => {
                     tracing::info!(
                         height = next,
                         "ethereum catchup complete; entering live tail"
@@ -452,7 +451,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                         .await
                         .context("failed to send catchup completed event")?;
                 }
-                Catchup::Live => {}
+                Catchup::UpToDate { first_time: false } => {}
             }
             let Some(upper) = self
                 .wait_processable_bound(&mut finalized_watcher, next, &cancel)

@@ -23,7 +23,8 @@ use mpc_chain_integration_core::{
     Catchup, CatchupGate, ChainIndexer, ChainTelemetry, StateManager,
 };
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
+    Chain, ChainConfig as _, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent,
+    SignatureRespondedEvent,
 };
 use mpc_utils::{task::CancellationTokenExt as _, time::current_unix_timestamp};
 use tokio::sync::mpsc;
@@ -513,8 +514,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
             .await
             .unwrap_or(0);
         let mut last_processed = checkpoint;
-        // Blocks are seconds apart, so no gap is tolerated.
-        let mut gate = CatchupGate::new(0);
+        let mut gate = CatchupGate::new(Chain::Midnight.catchup_tolerance());
 
         loop {
             let block = tokio::select! {
@@ -533,9 +533,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 last_processed = block.number;
             }
 
-            match gate.observe(block.number.saturating_sub(last_processed)) {
-                Catchup::Behind => {
-                    for number in last_processed.saturating_add(1)..block.number {
+            match gate.observe(block.number, last_processed) {
+                Catchup::Index { to } => {
+                    for number in last_processed.saturating_add(1)..to {
                         match self
                             .index_height(source, &events_tx, number, &cancel)
                             .await?
@@ -553,13 +553,13 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                     }
                     continue;
                 }
-                Catchup::Completed => {
+                Catchup::UpToDate { first_time: true } => {
                     events_tx
                         .send(ChainEvent::CatchupCompleted)
                         .await
                         .context("failed to send midnight catchup completed event")?;
                 }
-                Catchup::Live => {}
+                Catchup::UpToDate { first_time: false } => {}
             }
             if cancel
                 .cancelled_within(self.config.indexer.poll_interval)

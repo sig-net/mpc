@@ -340,18 +340,17 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
         let mut last_seen_offset = checkpoint;
         let mut ws_conn = self.subscribe(last_seen_offset).await?;
 
-        // Updates are sparse next to a round, so no gap is tolerated.
-        let mut gate = CatchupGate::new(0);
+        let mut gate = CatchupGate::new(Chain::Canton.catchup_tolerance());
         loop {
             let ledger_end = self.client.fetch_ledger_end().await?;
-            let Catchup::Behind = gate.observe(ledger_end.saturating_sub(last_seen_offset)) else {
+            let Catchup::Index { to } = gate.observe(ledger_end, last_seen_offset) else {
                 break;
             };
             self.process_catchup_offset(
                 &mut ws_conn,
                 &events_tx,
                 &mut last_seen_offset,
-                ledger_end,
+                to,
                 &cancel,
             )
             .await?;
