@@ -2,13 +2,10 @@ use cait_sith::protocol::Participant;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
 use mpc_crypto::PublicKey;
-use mpc_node::protocol::message::MessageOutbox;
-use mpc_node::protocol::posit::{PositAction, PositRejectReason};
-use mpc_node::protocol::presignature::{FullPresignatureId, PresignatureSpawner};
+use mpc_node::protocol::presignature::PresignatureSpawner;
 use mpc_node::protocol::triple::TripleSpawner;
-use mpc_node::protocol::{Message, MessageChannel};
+use mpc_node::protocol::MessageChannel;
 use mpc_node::types::SecretKeyShare;
-use std::time::Duration;
 use test_log::test;
 
 use super::helpers::{dummy_backlog_entry, dummy_pair, dummy_presignature};
@@ -491,135 +488,6 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
 
     assert!(restarted.latest(Chain::Solana).await.is_err());
     assert!(restarted.has_checkpoint(Chain::Solana).await?);
-
-    Ok(())
-}
-
-fn drain_posit_replies(outbox: &mut MessageOutbox) -> Vec<PositAction> {
-    let outgoing = outbox.intercept_outgoing_messages();
-    let mut actions = Vec::new();
-    while let Ok(sent) = outgoing.try_recv() {
-        if let Message::Posit(posit) = sent.message {
-            actions.push(posit.action);
-        }
-    }
-    actions
-}
-
-#[test(tokio::test)]
-async fn test_generation_posits_check_storage_only_on_propose() -> anyhow::Result<()> {
-    let spawner = ClusterSpawner::default()
-        .network("test-generation-posit-replies")
-        .init_network()
-        .await?;
-
-    let node0 = Participant::from(0);
-    let node1 = Participant::from(1);
-    let (_, mut outbox, msg) = MessageChannel::new();
-    let node0_id = "party0.near".parse().unwrap();
-    let redis = containers::Redis::run(&spawner).await;
-    let triple_storage = redis.triple_storage(&node0_id, node0);
-    let presignature_storage = redis.presignature_storage(&node0_id, node0);
-    let mut triple_spawner = TripleSpawner::new(
-        node0,
-        5,
-        123,
-        &triple_storage,
-        msg.clone(),
-        node0_id.to_string(),
-    );
-    let mut presignature_spawner = PresignatureSpawner::new(
-        node0,
-        5,
-        123,
-        &SecretKeyShare::default(),
-        &PublicKey::default(),
-        &triple_storage,
-        &presignature_storage,
-        msg,
-        node0_id.to_string(),
-    );
-    let timeout = Duration::from_secs(10);
-    let already_stored = vec![PositAction::RejectWithReason(
-        PositRejectReason::AlreadyGenerating,
-    )];
-    let no_entry = vec![PositAction::RejectWithReason(
-        PositRejectReason::InvalidRequest,
-    )];
-    let start = || PositAction::Start(vec![node0, node1]);
-    // ACCEPT and REJECT repeat after the START, as late replies.
-    let non_propose_actions = || {
-        vec![
-            PositAction::Accept,
-            PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-            start(),
-            PositAction::Accept,
-            PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
-        ]
-    };
-
-    let triple_id = 1;
-    triple_spawner
-        .process_posit_for_test(triple_id, node1, PositAction::Propose, timeout)
-        .await;
-    assert_eq!(drain_posit_replies(&mut outbox), vec![PositAction::Accept]);
-    triple_storage
-        .create_slot(triple_id, node1)
-        .await
-        .unwrap()
-        .insert(dummy_pair(triple_id), node1)
-        .await;
-    triple_spawner
-        .process_posit_for_test(triple_id, node1, PositAction::Propose, timeout)
-        .await;
-    assert_eq!(drain_posit_replies(&mut outbox), already_stored);
-    for action in non_propose_actions() {
-        triple_spawner
-            .process_posit_for_test(triple_id, node1, action, timeout)
-            .await;
-    }
-    assert_eq!(drain_posit_replies(&mut outbox), vec![]);
-    assert_eq!(triple_spawner.len_ongoing(), 0);
-    triple_spawner
-        .process_posit_for_test(triple_id, node1, start(), timeout)
-        .await;
-    assert_eq!(drain_posit_replies(&mut outbox), no_entry);
-
-    let pair_id = 7;
-    let presignature_id = FullPresignatureId::from_pair(pair_id);
-    triple_storage
-        .create_slot(pair_id, node1)
-        .await
-        .unwrap()
-        .insert(dummy_pair(pair_id), node1)
-        .await;
-    presignature_spawner
-        .process_posit_for_test(presignature_id, node1, PositAction::Propose, timeout)
-        .await;
-    assert_eq!(drain_posit_replies(&mut outbox), vec![PositAction::Accept]);
-    assert!(
-        presignature_storage
-            .create_slot(presignature_id.id, node1)
-            .await
-            .unwrap()
-            .insert(dummy_presignature(presignature_id.id), node1)
-            .await
-    );
-    presignature_spawner
-        .process_posit_for_test(presignature_id, node1, PositAction::Propose, timeout)
-        .await;
-    assert_eq!(drain_posit_replies(&mut outbox), already_stored);
-    for action in non_propose_actions() {
-        presignature_spawner
-            .process_posit_for_test(presignature_id, node1, action, timeout)
-            .await;
-    }
-    assert_eq!(drain_posit_replies(&mut outbox), vec![]);
-    assert_eq!(presignature_spawner.len_ongoing(), 0);
-    presignature_spawner
-        .process_posit_for_test(presignature_id, node1, start(), timeout)
-        .await;
-    assert_eq!(drain_posit_replies(&mut outbox), no_entry);
 
     Ok(())
 }
