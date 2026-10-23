@@ -161,7 +161,7 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         check_request_fields(self)?;
         self.epsilon().context("cannot derive epsilon")?;
         // TODO(tron): once the record carries structured params, admission
-        // must enforce §6.1's expiration bound (future, ≤ 24 h past the
+        // must enforce §4.3's expiration bound (future, ≤ 24 h past the
         // request's Midnight timestamp); raw bytes carry no request timestamp
         // to check against. Owner binding (`owned_by_requester`) and duplicate
         // destination-id rejection already run at ingestion; the expiry→Unviable
