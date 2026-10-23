@@ -23,7 +23,7 @@ pub enum Protocols {
 
 pub type Round = usize;
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum PositProtocolId {
     Triple(TripleId),
     Presignature(FullPresignatureId),
