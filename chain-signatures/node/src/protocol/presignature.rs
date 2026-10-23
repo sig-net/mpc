@@ -404,33 +404,25 @@ impl PresignatureSpawner {
         complete_presignatures + ongoing_generators
     }
 
-    async fn process_posit(
-        &mut self,
+    /// Returns why a PROPOSE fails id or storage checks or `None` if they pass.
+    async fn propose_rejection(
+        &self,
         id: FullPresignatureId,
         from: Participant,
-        action: PositAction,
-        timeout: Duration,
-    ) {
-        let internal_action = if !id.validate() {
+    ) -> Option<PositRejectReason> {
+        if !id.validate() {
             tracing::error!(
                 ?id,
                 ?from,
-                ?action,
                 "presignature id does not match the expected hash"
             );
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::InvalidRequest,
-            ))
+            Some(PositRejectReason::InvalidRequest)
         } else if self.contains_ongoing(id.id) {
-            tracing::warn!(?id, ?from, ?action, "presignature already generating");
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::AlreadyGenerating,
-            ))
+            tracing::warn!(?id, ?from, "presignature already generating");
+            Some(PositRejectReason::AlreadyGenerating)
         } else if self.contains(id.id).await {
-            tracing::warn!(?id, ?from, ?action, "presignature already generated");
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::AlreadyGenerating,
-            ))
+            tracing::warn!(?id, ?from, "presignature already generated");
+            Some(PositRejectReason::AlreadyGenerating)
         } else if !{
             // TODO: we can potentially wait for the triples to exist first to then be able to accept.
             // whereas we just blatantly reject here. The problem with waiting is that the other side
@@ -438,15 +430,38 @@ impl PresignatureSpawner {
             self.triples.contains_reserved(id.pair_id).await
                 || self.triples.contains(id.pair_id).await
         } {
-            tracing::warn!(
-                ?id,
-                ?from,
-                ?action,
-                "presignature required triples are not known"
-            );
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::MissingArtifact,
-            ))
+            tracing::warn!(?id, ?from, "presignature required triples are not known");
+            Some(PositRejectReason::MissingArtifact)
+        } else {
+            None
+        }
+    }
+
+    /// Lets integration tests feed posit messages without the run loop.
+    #[cfg(any(test, feature = "test-feature"))]
+    pub async fn process_posit_for_test(
+        &mut self,
+        id: FullPresignatureId,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+    ) {
+        self.process_posit(id, from, action, timeout).await;
+    }
+
+    async fn process_posit(
+        &mut self,
+        id: FullPresignatureId,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+    ) {
+        let rejection = match action {
+            PositAction::Propose => self.propose_rejection(id, from).await,
+            _ => None,
+        };
+        let internal_action = if let Some(reason) = rejection {
+            PositInternalAction::Reply(PositAction::RejectWithReason(reason))
         } else {
             let internal_action = self.posits.act(id, from, self.threshold, &action);
             #[cfg(feature = "debug-page")]
