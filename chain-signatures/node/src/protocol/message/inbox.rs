@@ -276,8 +276,10 @@ impl MessageInbox {
 
         match decrypted {
             Ok(batch) => return Some(batch),
-            // Unverifiable, so dropped. The only honest unknown sender is a new
-            // resharing participant, and it resends Ready every 10 seconds.
+            // Unverifiable, so dropped. An honest sender is unknown only if it is
+            // a new resharing participant, which resends Ready every 10 seconds,
+            // or if our contract view went back to an older epoch, which already
+            // takes this node out of Running.
             Err(MessageError::UnknownParticipant(from)) => {
                 tracing::debug!(?from, "inbox: dropped batch from unknown participant");
             }
