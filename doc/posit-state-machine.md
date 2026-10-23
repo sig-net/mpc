@@ -382,7 +382,12 @@ Each of the two pipelines runs its posits in one serial loop (`triple.rs`,
 `presignature.rs`) that handles incoming posit messages, a 100 ms stockpile tick
 and a 1 s expiry tick. On the stockpile tick, the owner of the new artifact
 proposes at most one generation, while it owns fewer than
-`min_triples` or `min_presignatures`. A triple is proposed to all active nodes. A
+`min_triples` or `min_presignatures`. The counts that decide this are read
+from storage on the expiry tick, and cached; the stockpile tick
+itself touches storage only when it proposes, so a node at its CPU quota is not
+starved of the loop by its own bookkeeping. The floor and cap are judged on
+counts up to 1 s old, so a node can overshoot its floor by at most one second
+of proposals, bounded by `max_concurrent_introduction`. A triple is proposed to all active nodes. A
 presignature uses a triple pair the owner holds, reserved in memory, and is
 proposed to the pair's active holders; its id is the pair's hash, so a retry of
 the same pair reuses the id.

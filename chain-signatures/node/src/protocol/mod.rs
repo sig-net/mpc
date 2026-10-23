@@ -38,6 +38,27 @@ use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
 use tokio::sync::{mpsc, watch};
 
+use crate::storage::protocol_storage::StockCounts;
+
+/// Whether a spawner should propose another generation: below its own floor,
+/// the network cap not reached counting generations in flight, and both
+/// concurrency caps free. `stock` may be up to a second old, so the floor can
+/// be overshot by at most one second of proposals, bounded by `max_introduced`.
+pub(crate) fn wants_more_stock(
+    stock: StockCounts,
+    ongoing: usize,
+    introduced: usize,
+    min: usize,
+    max: usize,
+    max_introduced: usize,
+    max_ongoing: usize,
+) -> bool {
+    stock.generated + ongoing < max
+        && stock.mine < min
+        && introduced < max_introduced
+        && ongoing < max_ongoing
+}
+
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
     pub(crate) secret_storage: SecretNodeStorageVariant,
@@ -255,5 +276,30 @@ mod tests {
     fn test_parse_node_version_invalid() {
         assert_eq!(parse_node_version("bad_version"), 999999999000);
         assert_eq!(parse_node_version(""), 999999999000);
+    }
+
+    #[test]
+    fn wants_more_stock_branches() {
+        let stock = StockCounts {
+            mine: 3,
+            generated: 10,
+        };
+        assert!(wants_more_stock(stock, 2, 1, 5, 100, 10, 128));
+        assert!(
+            !wants_more_stock(stock, 2, 1, 3, 100, 10, 128),
+            "floor reached"
+        );
+        assert!(
+            !wants_more_stock(stock, 2, 1, 5, 12, 10, 128),
+            "network cap counts in flight"
+        );
+        assert!(
+            !wants_more_stock(stock, 2, 10, 5, 100, 10, 128),
+            "introduction cap"
+        );
+        assert!(
+            !wants_more_stock(stock, 128, 1, 5, 1000, 10, 128),
+            "generation cap"
+        );
     }
 }
