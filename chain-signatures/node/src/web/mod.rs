@@ -11,7 +11,7 @@ use crate::backlog::{Backlog, Checkpoint};
 use crate::config::NetworkConfig;
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus};
-use crate::protocol::sync::{self, SyncError};
+use crate::protocol::sync::{self, SyncError, SyncFreshness};
 use crate::protocol::{Chain, MessageChannel};
 use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, TripleStorage};
@@ -50,6 +50,7 @@ struct AxumState {
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     my_account_id: AccountId,
     backlog: Backlog,
+    sync_freshness: SyncFreshness,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -74,6 +75,7 @@ pub async fn run(
         network,
         my_account_id,
         backlog,
+        sync_freshness: SyncFreshness::default(),
     };
 
     // Sync can be a large payload, so we set a higher limit for payload.
@@ -232,8 +234,10 @@ async fn sync(
         &state.triple_storage,
         &state.presignature_storage,
         me,
+        state.contract.account_id(),
         &state.network,
         &participants,
+        &state.sync_freshness,
     )
     .await?;
     WEB_ENDPOINT_LATENCY

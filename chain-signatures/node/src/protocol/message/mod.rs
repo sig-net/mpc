@@ -17,8 +17,8 @@ pub use crate::protocol::message::types::{
     PresignatureMessage, Protocols, ReadyMessage, ResharingMessage, SignatureMessage,
     TripleMessage,
 };
-pub(crate) use crypto::cbor_to_bytes;
-pub use crypto::SignedMessage;
+pub(crate) use crypto::{cbor_to_bytes, signed_after_start};
+pub use crypto::{now_millis, MessageDomain, Opened, SignedMessage};
 pub use inbox::MessageInbox;
 pub use outbox::{MessageOutbox, SendMessage};
 pub use sub::{PresignaturePosit, SignaturePosit, Subscriber, TriplePosit};

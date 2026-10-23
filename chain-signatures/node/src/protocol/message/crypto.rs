@@ -5,36 +5,124 @@ use crate::protocol::contract::primitives::ParticipantMap;
 use crate::protocol::message::types::MessageError;
 
 use cait_sith::protocol::Participant;
+use chrono::Utc;
 use mpc_keys::hpke::{self, Ciphered};
+use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-/// A signed message that can be encrypted. Note that the message's signature is included
-/// in the encrypted message to avoid from it being tampered with without first decrypting.
+use std::time::Duration;
+
+const MAX_CLOCK_SKEW: Duration = Duration::from_secs(30);
+
+pub fn now_millis() -> u64 {
+    Utc::now().timestamp_millis() as u64
+}
+
+/// Within `max_age` plus clock skew of our clock, in either direction.
+pub(crate) fn in_window(sent_at: u64, max_age: Duration) -> bool {
+    now_millis().abs_diff(sent_at) <= (max_age + MAX_CLOCK_SKEW).as_millis() as u64
+}
+
+/// What an envelope is for; one made for one use fails verification in another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageDomain {
+    Message,
+    SyncRequest,
+    SyncReply,
+}
+
+impl MessageDomain {
+    fn tag(self) -> &'static [u8] {
+        match self {
+            Self::Message => b"mpc-node/signed-message/v2",
+            Self::SyncRequest => b"mpc-node/sync-request/v2",
+            Self::SyncReply => b"mpc-node/sync-reply/v2",
+        }
+    }
+}
+
+/// A signed message that can be encrypted; the signature covers use, recipient and time.
 #[derive(Serialize, Deserialize)]
 pub struct SignedMessage {
     /// The message with all it's related info.
     #[serde(with = "serde_bytes")]
     pub msg: Vec<u8>,
-    /// The signature used to verify the authenticity of the encrypted message.
+    /// Signature by `from` over [`Self::signed_bytes`].
     pub sig: Signature,
     /// From which particpant the message was sent.
     pub from: Participant,
+    /// When the sender signed, in milliseconds since the UNIX epoch.
+    pub sent_at: u64,
+}
+
+/// A decrypted envelope whose signature and time checked out.
+pub struct Opened<T> {
+    pub from: Participant,
+    pub sig: Signature,
+    pub sent_at: u64,
+    pub msg: T,
+}
+
+/// A restart forgets what was accepted, so anything signed earlier is rejected.
+pub(crate) fn signed_after_start(started_at: u64, sent_at: u64) -> Result<(), MessageError> {
+    if sent_at < started_at {
+        return Err(MessageError::Verification(
+            "signed before this node started",
+        ));
+    }
+    Ok(())
 }
 
 impl SignedMessage {
     pub const ASSOCIATED_DATA: &'static [u8] = b"";
 
+    /// The bytes the sender signs. The recipient is named by account, which a
+    /// node always knows and the contract never hands to anyone else, unlike a
+    /// participant id. It is not sent along: the recipient fills in its own.
+    fn signed_bytes(domain: MessageDomain, to: &AccountId, sent_at: u64, msg: &[u8]) -> Vec<u8> {
+        let to = to.as_bytes();
+        [
+            domain.tag(),
+            &sent_at.to_le_bytes(),
+            &(to.len() as u32).to_le_bytes(),
+            to,
+            msg,
+        ]
+        .concat()
+    }
+
+    /// Encrypt a peer message, signed now.
     pub fn encrypt<T: Serialize>(
         msg: &T,
         from: Participant,
+        to: &AccountId,
+        sign_sk: &near_crypto::SecretKey,
+        cipher_pk: &hpke::PublicKey,
+    ) -> Result<Ciphered, MessageError> {
+        let domain = MessageDomain::Message;
+        Self::encrypt_at(domain, msg, from, to, now_millis(), sign_sk, cipher_pk)
+    }
+
+    /// Encrypt under `domain`, signed at `sent_at`.
+    pub fn encrypt_at<T: Serialize>(
+        domain: MessageDomain,
+        msg: &T,
+        from: Participant,
+        to: &AccountId,
+        sent_at: u64,
         sign_sk: &near_crypto::SecretKey,
         cipher_pk: &hpke::PublicKey,
     ) -> Result<Ciphered, MessageError> {
         let msg = cbor_to_bytes(msg)?;
-        let sig = sign_sk.sign(&msg);
-        let msg = Self { msg, sig, from };
+        let sig = sign_sk.sign(&Self::signed_bytes(domain, to, sent_at, &msg));
+        let msg = Self {
+            msg,
+            sig,
+            from,
+            sent_at,
+        };
         let msg = cbor_to_bytes(&msg)?;
         let ciphered = cipher_pk
             .encrypt(&msg, Self::ASSOCIATED_DATA)
@@ -44,46 +132,55 @@ impl SignedMessage {
         Ok(ciphered)
     }
 
+    /// Decrypt and verify that the sender signed this under `domain`, for us,
+    /// within `max_age`. The caller must still reject replays.
     pub fn decrypt<T: DeserializeOwned>(
+        domain: MessageDomain,
         encrypted: &Ciphered,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
-    ) -> Result<T, MessageError> {
-        Self::decrypt_with(encrypted, cipher_sk, participants, |_| Ok(())).map(|(_, msg)| msg)
-    }
-
-    /// Decrypt and verify, returning the authenticated sender (proven by its
-    /// signature) alongside the payload. Sender fields inside the payload
-    /// are unverified claims by the signer.
-    pub fn decrypt_with<T: DeserializeOwned, F: FnMut(&Signature) -> Result<(), MessageError>>(
-        encrypted: &Ciphered,
-        cipher_sk: &hpke::SecretKey,
-        participants: &ParticipantMap,
-        mut check: F,
-    ) -> Result<(Participant, T), MessageError> {
+        me: &AccountId,
+        max_age: Duration,
+    ) -> Result<Opened<T>, MessageError> {
         let msg = cipher_sk
             .decrypt(encrypted, Self::ASSOCIATED_DATA)
             .inspect_err(|err| {
                 tracing::error!(?err, "failed to decrypt message");
             })?;
-        let Self { msg, sig, from } = cbor_from_bytes(&msg)?;
+        let Self {
+            msg,
+            sig,
+            from,
+            sent_at,
+        } = cbor_from_bytes(&msg)?;
         let info = participants
             .get(&from)
             .ok_or(MessageError::UnknownParticipant(from))?;
 
-        if !sig.verify(&msg, &info.sign_pk) {
+        // Also fails if signed for another use, recipient or time.
+        if !sig.verify(
+            &Self::signed_bytes(domain, me, sent_at, &msg),
+            &info.sign_pk,
+        ) {
             tracing::error!(?from, "signed message erred out with invalid signature");
             return Err(MessageError::Verification(
                 "invalid signature while verifying authenticity of encrypted protocol message",
             ));
         }
 
-        // Only after verifying: the caller dedups on this signature, so letting
-        // an unverified batch through would hand anyone able to reach us a way
-        // to fill or evict that cache with signatures of their choosing.
-        check(&sig)?;
+        if !in_window(sent_at, max_age) {
+            tracing::warn!(?from, sent_at, "signed message is outside the time window");
+            return Err(MessageError::Verification(
+                "signed message is outside the accepted time window",
+            ));
+        }
 
-        Ok((from, cbor_from_bytes(&msg)?))
+        Ok(Opened {
+            from,
+            sig,
+            sent_at,
+            msg: cbor_from_bytes(&msg)?,
+        })
     }
 }
 
@@ -171,14 +268,117 @@ mod tests {
             data: vec![128u8; 1024],
             timestamp: 1234567,
         })];
-        let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-        let decrypted_batch: Vec<Message> =
-            SignedMessage::decrypt(&encrypted, &cipher_sk, &participants).unwrap();
+        let me = account("test.near");
+        let encrypted = SignedMessage::encrypt(&batch, from, &me, &sign_sk, &cipher_pk).unwrap();
+        let decrypted_batch: Vec<Message> = SignedMessage::decrypt(
+            MessageDomain::Message,
+            &encrypted,
+            &cipher_sk,
+            &participants,
+            &me,
+            MAX_AGE,
+        )
+        .unwrap()
+        .msg;
 
         assert_eq!(
             batch, decrypted_batch,
             "batch messages did not get encrypted and decrypted correctly"
         );
+    }
+
+    const MAX_AGE: Duration = Duration::from_secs(300);
+
+    fn account(id: &str) -> AccountId {
+        id.parse().unwrap()
+    }
+
+    /// Participant 0 as the only sender.
+    fn sender(sign_sk: &near_crypto::SecretKey, cipher_pk: &hpke::PublicKey) -> ParticipantMap {
+        let mut participants = Participants::default();
+        let info = ParticipantInfo {
+            sign_pk: sign_sk.public_key(),
+            cipher_pk: cipher_pk.clone(),
+            ..ParticipantInfo::new(0)
+        };
+        participants.insert(&Participant::from(0), info);
+        ParticipantMap::One(participants)
+    }
+
+    fn batch(from: Participant) -> Vec<Message> {
+        vec![Message::Generating(GeneratingMessage {
+            from,
+            data: vec![1, 2, 3],
+        })]
+    }
+
+    /// An envelope opens only at the node it was signed for.
+    #[test]
+    fn test_rejects_envelope_signed_for_another_recipient() {
+        let (cipher_sk, cipher_pk) = hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
+        let participants = sender(&sign_sk, &cipher_pk);
+        let (me, other) = (account("me.near"), account("other.near"));
+
+        let from = Participant::from(0);
+        let encrypted =
+            SignedMessage::encrypt(&batch(from), from, &me, &sign_sk, &cipher_pk).unwrap();
+        let open = |me| {
+            let domain = MessageDomain::Message;
+            SignedMessage::decrypt::<Vec<Message>>(
+                domain,
+                &encrypted,
+                &cipher_sk,
+                &participants,
+                me,
+                MAX_AGE,
+            )
+        };
+        let delivered = open(&me).unwrap();
+        assert_eq!((delivered.from, delivered.msg), (from, batch(from)));
+        assert!(matches!(open(&other), Err(MessageError::Verification(_))));
+    }
+
+    /// An envelope is accepted only within the time window.
+    #[test]
+    fn test_rejects_envelope_outside_the_time_window() {
+        let (cipher_sk, cipher_pk) = hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
+        let participants = sender(&sign_sk, &cipher_pk);
+        let me = account("me.near");
+        let from = Participant::from(0);
+        let skew = MAX_CLOCK_SKEW.as_millis() as u64;
+        let max_age = MAX_AGE.as_millis() as u64;
+
+        let verify = |sent_at: u64| -> Result<Vec<Message>, MessageError> {
+            let encrypted = SignedMessage::encrypt_at(
+                MessageDomain::Message,
+                &batch(from),
+                from,
+                &me,
+                sent_at,
+                &sign_sk,
+                &cipher_pk,
+            )?;
+            let domain = MessageDomain::Message;
+            SignedMessage::decrypt(domain, &encrypted, &cipher_sk, &participants, &me, MAX_AGE)
+                .map(|opened| opened.msg)
+        };
+
+        // Margins of 10 seconds keep the test independent of its own runtime.
+        assert!(verify(now_millis()).is_ok());
+        assert!(verify(now_millis() - max_age - skew + 10_000).is_ok());
+        assert!(verify(now_millis() + max_age + skew - 10_000).is_ok());
+        assert!(matches!(
+            verify(now_millis() - max_age - skew - 10_000),
+            Err(MessageError::Verification(_))
+        ));
+        assert!(matches!(
+            verify(now_millis() + max_age + skew + 10_000),
+            Err(MessageError::Verification(_))
+        ));
     }
 
     #[test]
@@ -189,6 +389,7 @@ mod tests {
             msg: Vec<u8>,
             sig: near_crypto::Signature,
             from: Participant,
+            sent_at: u64,
 
             // default will call Default::default() if missing in serialized bytes.
             #[serde(default)]
@@ -201,15 +402,23 @@ mod tests {
             fn encrypt<T: Serialize>(
                 batch: &T,
                 from: Participant,
+                to: &AccountId,
                 sign_sk: &near_crypto::SecretKey,
                 cipher_pk: &hpke::PublicKey,
             ) -> Ciphered {
                 let msg = super::cbor_to_bytes(batch).unwrap();
-                let sig = sign_sk.sign(&msg);
+                let sent_at = now_millis();
+                let sig = sign_sk.sign(&SignedMessage::signed_bytes(
+                    MessageDomain::Message,
+                    to,
+                    sent_at,
+                    &msg,
+                ));
                 let msg = Self {
                     msg,
                     sig,
                     from,
+                    sent_at,
                     added_field: vec![127; 1024],
                 };
                 let msg = super::cbor_to_bytes(&msg).unwrap();
@@ -283,6 +492,7 @@ mod tests {
             },
         );
         let participants = ParticipantMap::One(participants);
+        let me = account("test.near");
 
         // Test forward compatibility
         let old_batch = vec![
@@ -307,7 +517,8 @@ mod tests {
                 timestamp: 1234567,
             }),
         ];
-        let encrypted = SignedMessage::encrypt(&old_batch, from, &sign_sk, &cipher_pk).unwrap();
+        let encrypted =
+            SignedMessage::encrypt(&old_batch, from, &me, &sign_sk, &cipher_pk).unwrap();
         let new_batch: Vec<NewMessage> = NewSignedMessage::decrypt(&encrypted, &cipher_sk);
         assert_eq!(
             new_batch, old_batch,
@@ -326,9 +537,17 @@ mod tests {
             }),
             NewMessage::NewVariant("hello".to_string()),
         ];
-        let new_ciphered = NewSignedMessage::encrypt(&new_batch, from, &sign_sk, &cipher_pk);
-        let old_batch: Vec<Message> =
-            SignedMessage::decrypt(&new_ciphered, &cipher_sk, &participants).unwrap();
+        let new_ciphered = NewSignedMessage::encrypt(&new_batch, from, &me, &sign_sk, &cipher_pk);
+        let old_batch: Vec<Message> = SignedMessage::decrypt(
+            MessageDomain::Message,
+            &new_ciphered,
+            &cipher_sk,
+            &participants,
+            &me,
+            MAX_AGE,
+        )
+        .unwrap()
+        .msg;
         assert_eq!(
             new_batch, old_batch,
             "encrypt/decrypt failed backward compatibility"
@@ -368,7 +587,8 @@ mod tests {
         let (_cipher_sk, cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
-        let ciphered = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+        let me = account("test.near");
+        let ciphered = SignedMessage::encrypt(&batch, from, &me, &sign_sk, &cipher_pk).unwrap();
         let ciphered_bytesize = ciphered.text.len();
 
         let margin_percent = 0.05;
