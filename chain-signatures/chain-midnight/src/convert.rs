@@ -36,7 +36,7 @@ pub fn generate_sign_request(
 
     let key_version = u32::from(record.key_version);
     let algo = match record.algo {
-        ALGO_ECDSA => "ecdsa".to_string(),
+        ALGO_ECDSA => "ECDSA".to_string(),
         reserved => anyhow::bail!("unsupported algo {reserved}: only ecdsa (0) is real"),
     };
     let dest = match record.signature_dest {
@@ -167,6 +167,14 @@ mod tests {
             record.output_deserialization_schema
         );
         assert!(event.respond_serialization_schema.is_empty());
+        assert_eq!(
+            event.algo, "ECDSA",
+            "the node accepts only the SDK spelling"
+        );
+        assert_eq!(
+            event.dest, "",
+            "signature_dest is reserved and travels blank"
+        );
         assert_eq!(event.params, "", "params is reserved and travels blank");
         assert_eq!(event.chain, Chain::Midnight);
         assert_eq!(event.chain_ctx, None);

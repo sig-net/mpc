@@ -77,11 +77,6 @@ fn check_request_fields(event: &SignBidirectionalEvent) -> anyhow::Result<()> {
         "key version must be {LATEST_MPC_KEY_VERSION}, got {}",
         event.key_version
     );
-    // Midnight's record holds these fields as enums, and its decoder refuses every
-    // value but the one it renders (chain-midnight convert.rs).
-    if event.chain == Chain::Midnight {
-        return Ok(());
-    }
     let fields = (
         event.algo.as_str(),
         event.dest.as_str(),
@@ -291,7 +286,7 @@ mod tests {
     #[test]
     fn validate_accepts_only_key_version_1_and_the_sdk_fields() {
         type Edit = fn(&mut SignBidirectionalEvent);
-        let cases: [(&str, Edit, bool); 14] = [
+        let cases: [(&str, Edit, bool); 15] = [
             ("as the SDKs send it", |_| {}, true),
             ("from Hydration", |e| e.chain = Chain::Hydration, true),
             (
@@ -322,13 +317,14 @@ mod tests {
             ("dest ethereum", |e| e.dest = "ethereum".to_string(), false),
             ("dest tron", |e| e.dest = "tron".to_string(), false),
             ("params {}", |e| e.params = "{}".to_string(), false),
+            ("from Midnight", |e| e.chain = Chain::Midnight, true),
             (
-                "from Midnight, as its decoder renders it",
+                "from Midnight, algo lowercase",
                 |e| {
                     e.chain = Chain::Midnight;
                     e.algo = "ecdsa".to_string();
                 },
-                true,
+                false,
             ),
             (
                 "from Midnight at key version 0",
@@ -356,7 +352,7 @@ mod tests {
             deposit: 0,
             path: "m/0".to_string(),
             algo: "ECDSA".to_string(),
-            params: "{}".to_string(),
+            params: String::new(),
             chain: Chain::Midnight,
             chain_ctx: None,
             output_deserialization_schema: vec![],
