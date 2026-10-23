@@ -171,7 +171,7 @@ pub fn test_sign_request_event(
         key_version: LATEST_MPC_KEY_VERSION,
         path: sandbox.requester_party.clone(),
         algo: "ECDSA".to_string(),
-        dest: "ethereum".to_string(),
+        dest: String::new(),
         params: String::new(),
         output_deserialization_schema: EVM_TYPE2_BOOL_OUTPUT_SCHEMA.to_string(),
         respond_serialization_schema: EVM_TYPE2_BOOL_OUTPUT_SCHEMA.to_string(),

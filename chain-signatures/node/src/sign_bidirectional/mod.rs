@@ -10,6 +10,7 @@ use crate::protocol::Chain;
 use anyhow::Context as _;
 use k256::Scalar;
 use mpc_primitives::ChainConfig as _;
+use mpc_primitives::LATEST_MPC_KEY_VERSION;
 pub use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
 };
@@ -62,25 +63,22 @@ fn derive_epsilon(
     }
 }
 
-/// The only `(algo, dest, params)` a request may carry: what the SDKs send today
-/// for Ethereum targets. No caller targets Tron yet, so its requests carry the same
-/// values by convention. The node signs ECDSA whatever they say, but they enter the
-/// request id, so any other value would give one execution a second request id (G2).
-const SDK_REQUEST_FIELDS: (&str, &str, &str) = ("ECDSA", "ethereum", "");
+/// The only `(algo, dest, params)` a request may carry (Section 7.1 of
+/// doc/bidirectional-calls.md). The node signs ECDSA whatever they say, but they
+/// enter the request id, so any other value would give one execution a second
+/// request id (G2). `dest` is deprecated: it has no meaning and stays blank until
+/// it leaves the request id with the Section 7 format.
+const SDK_REQUEST_FIELDS: (&str, &str, &str) = ("ECDSA", "", "");
 
-/// Key version at least 1 and [`SDK_REQUEST_FIELDS`].
+/// Key version [`LATEST_MPC_KEY_VERSION`] and [`SDK_REQUEST_FIELDS`].
 fn check_request_fields(event: &SignBidirectionalEvent) -> anyhow::Result<()> {
-    // Hydration's dispenser pallet, live in its runtime, sends key version 0 and
-    // algo "ecdsa", and hashes both into its own request id. Exempt until it
-    // moves to the SDK values.
-    if event.chain == Chain::Hydration {
-        return Ok(());
-    }
     anyhow::ensure!(
-        event.key_version >= 1,
-        "key version 0 derives the legacy key, whose response key the SDKs do not derive"
+        event.key_version == LATEST_MPC_KEY_VERSION,
+        "key version must be {LATEST_MPC_KEY_VERSION}, got {}",
+        event.key_version
     );
-    // Midnight's decoder refuses every value but the one it renders.
+    // Midnight's record holds these fields as enums, and its decoder refuses every
+    // value but the one it renders (chain-midnight convert.rs).
     if event.chain == Chain::Midnight {
         return Ok(());
     }
@@ -254,7 +252,10 @@ impl BidirectionalTxExt for BidirectionalTx {
 #[cfg(test)]
 mod tests {
     use super::eth_tx::legacy_tx;
-    use super::{SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature};
+    use super::{
+        SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature, LATEST_MPC_KEY_VERSION,
+        SDK_REQUEST_FIELDS,
+    };
     use crate::protocol::Chain;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, EncodedPoint};
@@ -267,13 +268,13 @@ mod tests {
         SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: legacy_tx(1),
-            dest: "ethereum".to_string(),
+            dest: SDK_REQUEST_FIELDS.1.to_string(),
             caip2_id: target.caip2_chain_id().to_string(),
-            key_version: 1,
+            key_version: LATEST_MPC_KEY_VERSION,
             deposit: 0,
             path: "m/0".to_string(),
-            algo: "ECDSA".to_string(),
-            params: String::new(),
+            algo: SDK_REQUEST_FIELDS.0.to_string(),
+            params: SDK_REQUEST_FIELDS.2.to_string(),
             chain: Chain::Solana,
             chain_ctx: None,
             output_deserialization_schema: vec![],
@@ -290,17 +291,24 @@ mod tests {
     #[test]
     fn validate_accepts_only_key_version_1_and_the_sdk_fields() {
         type Edit = fn(&mut SignBidirectionalEvent);
-        let cases: [(&str, Edit, bool); 13] = [
+        let cases: [(&str, Edit, bool); 14] = [
             ("as the SDKs send it", |_| {}, true),
             ("from Hydration", |e| e.chain = Chain::Hydration, true),
             (
-                "from Hydration, as its dispenser sends it",
+                "from Hydration at key version 0",
                 |e| {
                     e.chain = Chain::Hydration;
                     e.key_version = 0;
+                },
+                false,
+            ),
+            (
+                "from Hydration, algo lowercase",
+                |e| {
+                    e.chain = Chain::Hydration;
                     e.algo = "ecdsa".to_string();
                 },
-                true,
+                false,
             ),
             ("from Canton", |e| e.chain = Chain::Canton, true),
             ("key version 0", |e| e.key_version = 0, false),
@@ -311,7 +319,7 @@ mod tests {
                 false,
             ),
             ("algo lowercase", |e| e.algo = "ecdsa".to_string(), false),
-            ("dest empty", |e| e.dest = String::new(), false),
+            ("dest ethereum", |e| e.dest = "ethereum".to_string(), false),
             ("dest tron", |e| e.dest = "tron".to_string(), false),
             ("params {}", |e| e.params = "{}".to_string(), false),
             (
@@ -319,7 +327,6 @@ mod tests {
                 |e| {
                     e.chain = Chain::Midnight;
                     e.algo = "ecdsa".to_string();
-                    e.dest = String::new();
                 },
                 true,
             ),

@@ -544,7 +544,7 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
         deposit: 0,
         path: String::new(),
         algo: "ECDSA".to_string(),
-        dest: "ethereum".to_string(),
+        dest: String::new(),
         params: String::new(),
         chain: Chain::Solana,
         chain_ctx: None,
@@ -573,7 +573,10 @@ async fn process_sign_request_rejects_key_version_0() {
     let err = process_sign_request(request, &ctx, test_root_pk())
         .await
         .expect_err("key version 0 should be rejected at ingestion");
-    assert!(format!("{err:#}").contains("key version 0"), "err: {err:#}");
+    assert!(
+        format!("{err:#}").contains("key version must be 1, got 0"),
+        "err: {err:#}"
+    );
     assert!(backlog.get(Chain::Solana, &sign_id).await.is_none());
 }
 
@@ -1178,7 +1181,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: unsigned_rlp,
-            dest: "ethereum".to_string(),
+            dest: String::new(),
             caip2_id: tx.caip2_id.clone(),
             key_version: tx.key_version,
             deposit: tx.deposit,

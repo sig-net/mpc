@@ -190,7 +190,7 @@ pub fn mock_bidi_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
         SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: vec![1, 2, 3],
-            dest: "ethereum".to_string(),
+            dest: String::new(),
             caip2_id: target_chain.caip2_chain_id().to_string(),
             key_version: 1,
             deposit: 0,

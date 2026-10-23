@@ -104,7 +104,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .path(path)
         .key_version(key_version)
         .algorithm("ECDSA")
-        .destination("ethereum")
+        .destination("")
         .parameters("")
         .await?;
 

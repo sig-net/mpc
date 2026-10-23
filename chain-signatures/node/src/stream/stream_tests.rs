@@ -170,7 +170,7 @@ fn build_solana_to_ethereum_bidirectional_request(
         deposit: 0,
         path: "".to_string(),
         algo: "ECDSA".to_string(),
-        dest: "ethereum".to_string(),
+        dest: String::new(),
         params: "".to_string(),
         chain: Chain::Solana,
         chain_ctx: Some(Pubkey::new_unique().to_bytes().to_vec()),
