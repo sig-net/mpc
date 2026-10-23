@@ -11,9 +11,9 @@ big_r' = big_r * delta,  k' = k / delta,  sigma' = (sigma + epsilon * k) / delta
 
 ## Requirements
 
-1. `delta` is unpredictable until the request is committed on-chain. Nobody may know which `delta` will apply to a request before the request is posted. Binding `delta` to `request_id`, the hash of the request fields (payload, key, epsilon), gives this if `H` behaves like a random function.
+1. `delta` is unpredictable until the request is committed on-chain. Nobody may know which `delta` will apply to a request before the request is posted. `entropy` gives this. It must be a value the requester cannot know or influence before the block containing the request is validated: a validator-chosen field of that block, read from a final block so every node derives the same `delta`. Nothing derived from the transaction or the request qualifies, since the requester computes those before broadcast. A malicious block producer is out of scope.
 
-2. `entropy` strengthens unpredictability. `H` is not a true random function, so an adversary might retain some control over `delta` and the payload together. `entropy` removes that by making `delta` depend on a value outside the adversary's control. It must be a value the requester cannot know or influence before the block containing the request is validated: a validator-chosen field of that block. Nothing derived from the transaction or the request qualifies, since the requester computes those before broadcast. A malicious block producer is out of scope.
+2. `delta` is different for every request. Binding `delta` to `request_id`, the hash of the request fields (payload, key, epsilon), gives this, also when requests share `entropy`, such as all requests in one block.
 
 3. `big_r` gives uniqueness. One `delta` must map to exactly one presignature, so the presignature's public nonce is part of the derivation. Uniqueness does not imply unpredictability; the two are separate requirements served by separate inputs.
 
