@@ -103,8 +103,8 @@ pub(crate) async fn process_sign_request(
     Ok(true)
 }
 
-/// Returns the actual and expected chain ids when an Ethereum target names another network,
-/// the actual one `None` when it does not fit a u64, as no watched network's does.
+/// Returns the actual and expected chain ids when an Ethereum target names another network.
+/// The actual one is `None` when it does not decode as a u64, which no watched network's id exceeds.
 /// Returns `None` if the event is not targeting Ethereum or if the chain id matches the expected one.
 fn network_mismatch(
     event: &SignBidirectionalEvent,
