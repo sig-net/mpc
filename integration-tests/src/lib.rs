@@ -310,11 +310,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         ping_interval: 1000,
     };
 
-    let message_options = node_client::Options {
-        timeout: 1000,
-        state_timeout: 1000,
-        sync_timeout: 60000,
-    };
+    let message_options = node_client::Options::default();
 
     // If using pregenerated keys, inject them into storage before nodes start
     if spawner.pregenerated_keys.is_enabled() {

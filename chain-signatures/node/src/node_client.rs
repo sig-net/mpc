@@ -1,7 +1,10 @@
 use crate::backlog::Checkpoint;
 use crate::protocol::message::cbor_to_bytes;
 use crate::protocol::Chain;
-use crate::web::{CheckpointResponse, StatusResponse};
+use crate::web::{
+    CheckpointResponse, StatusResponse, CHECKPOINT_TIMEOUT, MSG_TIMEOUT, STATUS_TIMEOUT,
+    SYNC_TIMEOUT,
+};
 
 use mpc_keys::hpke::Ciphered;
 use reqwest::IntoUrl;
@@ -18,15 +21,15 @@ use std::time::Duration;
 #[group(id = "message_options")]
 pub struct Options {
     /// Default timeout used for all outbound requests to other nodes.
-    #[arg(long, env("MPC_NODE_TIMEOUT"), default_value = "1000")]
+    #[arg(long, env("MPC_NODE_TIMEOUT"), default_value_t = MSG_TIMEOUT.as_millis() as u64)]
     pub timeout: u64,
 
     /// Timeout used for fetching the state of a node.
-    #[arg(long, env("MPC_NODE_STATE_TIMEOUT"), default_value = "1000")]
+    #[arg(long, env("MPC_NODE_STATE_TIMEOUT"), default_value_t = STATUS_TIMEOUT.as_millis() as u64)]
     pub state_timeout: u64,
 
     /// Timeout used for sync requests to other nodes.
-    #[arg(long, env("MPC_NODE_SYNC_TIMEOUT"), default_value = "60000")]
+    #[arg(long, env("MPC_NODE_SYNC_TIMEOUT"), default_value_t = SYNC_TIMEOUT.as_millis() as u64)]
     pub sync_timeout: u64,
 }
 
@@ -46,9 +49,9 @@ impl Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            timeout: 1000,
-            state_timeout: 1000,
-            sync_timeout: 60000,
+            timeout: MSG_TIMEOUT.as_millis() as u64,
+            state_timeout: STATUS_TIMEOUT.as_millis() as u64,
+            sync_timeout: SYNC_TIMEOUT.as_millis() as u64,
         }
     }
 }
@@ -224,7 +227,7 @@ impl NodeClient {
         let resp = self
             .http
             .get(url)
-            .timeout(Duration::from_secs(15))
+            .timeout(CHECKPOINT_TIMEOUT)
             .send()
             .await?;
 
@@ -258,7 +261,7 @@ impl NodeClient {
         let resp = self
             .http
             .get(url)
-            .timeout(Duration::from_secs(15))
+            .timeout(CHECKPOINT_TIMEOUT)
             .send()
             .await?;
 
