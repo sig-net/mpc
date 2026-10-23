@@ -404,7 +404,7 @@ impl PresignatureSpawner {
         complete_presignatures + ongoing_generators
     }
 
-    /// Why a PROPOSE fails the id and storage checks, or `None` if it passes them.
+    /// Returns why a PROPOSE fails id or storage checks or `None` if they pass.
     async fn propose_rejection(
         &self,
         id: FullPresignatureId,
