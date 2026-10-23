@@ -60,7 +60,7 @@ Both artifacts below have a single owner, the node that coordinated their genera
   * Safety is guaranteed under asynchrony (no bounds on message delivery), while liveness is guaranteed for the periods where the network is synchronous (messages between honest nodes arrive within some bound δ, not assumed known) for long enough.  
     * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T in \[a, b\] reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling. Liveness is therefore argued for δ up to a fraction of the ceiling, not for arbitrary finite δ (details in L1)  
   * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is effectively reliable and timely.
-  * Channels are authenticated and encrypted. 
+  * Channels are authenticated and encrypted: a node accepts a message only from a current committee member, signed by that member (details in *Authenticated channels* in the appendix).
 * Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
 * Chain state reaches a node only through its RPC provider. Different nodes can use different RPC providers. The current security model assumes that the number of nodes using a specific RPC provider is below t.  
 * The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active), a subset of the committee. It may be wrong, and no two nodes ever need the same guess; §6 D2 governs what may be derived from it. A reachable peer is additionally kept *out* of the active set while a state sync runs (a transient Syncing state), whether that sync is the initial one, a post-reconnect one, or one triggered by the peer's `MissingArtifact` reject of a presignature we list it as holding (only when the rejects end the round), so "active" is strictly narrower than "reachable".
@@ -191,3 +191,14 @@ The `1 + d` cost is what a failover pays when the failover response lands, since
 *Rationale.* Without it a reconnecting node never resumes work, so an ordinary restart becomes an indefinite local outage instead of a transient one.
 
 *Enforcement.* A peer reporting Running waits in Syncing, outside the active set, until a sync round-trip succeeds; for a correct, reachable peer in a synchronous interval it does, so the property holds. The bound is the poll interval, the round-trip, and the batch it rides in: syncs run concurrently but report as one group capped by `BROADCAST_TIMEOUT` (120 s), so a fast peer activates at the slowest peer's pace. A peer that becomes reachable just after a batch starts is not picked up by it either, since only one batch runs at a time, which puts the worst case at roughly two `BROADCAST_TIMEOUT`s. Per-peer reporting would cut that to the peer's own round-trip.
+
+### Authenticated channels
+
+*Assumption* (§2). A message a node accepts was sent by the committee member it names.
+
+*Enforcement*: every batch of peer messages is encrypted to the recipient's key and signed by the sender. The inbox decrypts it and checks the signature against the sender's key in the participant map built from the node's contract state. A batch from a sender outside that map is dropped, not kept for later, so peers cannot grow the inbox (§D5).
+
+Two cases need a message from a sender the node does not know yet:
+
+* Key generation sends each message once, and a peer can start it before this node has read any contract state. The inbox therefore leaves messages in its channel until the first contract state arrives. Candidates cannot change while the contract is initializing, so from then on every key generation sender is known.
+* In a resharing, a peer that has not seen the resharing yet drops a new participant's Ready. Ready repeats every 10 s, and a node sends it once more when it starts the protocol, so no peer waits for the resharing timeout because of a dropped Ready.
