@@ -261,6 +261,26 @@ pub struct SignTask {
 }
 
 impl SignTask {
+    /// Send one posit message for this sign request to `to`.
+    pub async fn send_posit(
+        &self,
+        to: Participant,
+        presignature_id: PresignatureId,
+        round: usize,
+        action: PositAction,
+    ) {
+        self.msg
+            .send_posit(
+                self.governance.me,
+                to,
+                PositProtocolId::signature(self.sign_id, self.kind, presignature_id, round),
+                action,
+            )
+            .await;
+    }
+}
+
+impl SignTask {
     /// Drive the signature generation state machine to completion
     pub async fn run(
         mut self,
