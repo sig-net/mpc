@@ -379,29 +379,31 @@ because the round timeout ran out.
 
 Generations are agreed on by a simpler posit: no rounds, no rotating proposer.
 Each of the two pipelines runs its posits in one serial loop (`triple.rs`,
-`presignature.rs`) that handles incoming posit messages, a 100 ms stockpile tick
-and a 1 s expiry tick. On the stockpile tick, the owner of the new artifact
-proposes at most one generation, while it owns fewer than
-`min_triples` or `min_presignatures`. A triple is proposed to all active nodes. A
+`presignature.rs`) that handles incoming posit messages, a stockpile tick and an
+expiry tick. On the stockpile tick, the owner of the new artifact proposes at
+most one generation, while it owns fewer than `min_triples` or
+`min_presignatures`. A triple is proposed to all active nodes. A
 presignature uses a triple pair the owner holds, reserved in memory, and is
 proposed to the pair's active holders; its id is the pair's hash, so a retry of
 the same pair reuses the id.
 
 - **Owner.** Starts once every node it proposed to has replied and at least t
-  accepted, or at the first expiry tick after 10 s if at least t accepted;
-  otherwise it aborts silently and the pair returns to the pool. To start, it
-  takes the pair from storage (presignatures) and sends `START` listing the
-  nodes that accepted.
+  accepted, or at the first expiry tick after the posit timeout if at least t
+  accepted; otherwise it aborts silently and the pair returns to the pool. To
+  start, it takes the pair from storage (presignatures) and sends `START`
+  listing the nodes that accepted.
 - **Deliberator.** On `PROPOSE` records an entry and replies `ACCEPT`; a
   repeated `PROPOSE` from the same owner is accepted again and restarts the
-  entry's clock. The entry is dropped 12 s after the latest `PROPOSE`. `START`
+  entry's clock. The entry is dropped once the posit timeout plus a margin has
+  passed since the latest `PROPOSE`, so it outlives the owner's wait. `START`
   from the owner of a live entry starts the generation; without one it is
   answered with a `REJECT`, which the owner, already generating, cannot act on.
-- **Checks.** Every message, whatever its action, is first checked against
-  storage (already generating or stored; for presignatures also the id and
-  whether the pair is held), and a failed check is answered with a `REJECT`.
+- **Checks.** Only a `PROPOSE` is answered after checks (already generating or
+  stored; for presignatures also the id and whether the pair is held), with a
+  `REJECT` if one fails. `START` relies on the generation-start refusal below.
+  `ACCEPT` and `REJECT` are never answered.
 
 Every node listed in `START` must contribute. If one does not, the generation runs
-to its timeout (10 min for triples, 45 s for presignatures) and its inputs are
-consumed. A node refuses to start a generation for an id that is already running
-or stored, and the pair is taken from storage atomically when the generation starts.
+to its `generation_timeout` (contract config) and its inputs are consumed. A node
+refuses to start a generation for an id that is already running or stored, and
+the pair is taken from storage atomically when the generation starts.
