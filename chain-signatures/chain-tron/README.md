@@ -2,7 +2,7 @@
 
 Tron integration for the MPC chain-signatures stack. Tron is a
 **destination chain** for bidirectional signing (see
-`doc/bidirectional_calls.md`): requests originate on the source chain,
+`doc/bidirectional-calls.md`): requests originate on the source chain,
 nodes assemble and sign `TriggerSmartContract` transactions, and a
 relayer broadcasts them. There is no Tron indexer and no Tron contract —
 this crate is the transaction format: protobuf parsing, signing, and

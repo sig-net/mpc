@@ -1,4 +1,4 @@
-use super::message::{MessageChannel, PositMessage, PositProtocolId, TripleMessage};
+use super::message::{MessageChannel, PositProtocolId, TripleMessage};
 use super::posit::{PositAction, PositInternalAction, Posits};
 use super::MpcSignProtocol;
 use crate::config::Config;
@@ -451,15 +451,7 @@ impl TripleSpawner {
             PositInternalAction::Abort => {}
             PositInternalAction::Reply(action) => {
                 self.msg
-                    .send(
-                        self.me,
-                        from,
-                        PositMessage {
-                            id: PositProtocolId::Triple(id),
-                            from: self.me,
-                            action,
-                        },
-                    )
+                    .send_posit(self.me, from, PositProtocolId::Triple(id), action)
                     .await;
             }
             PositInternalAction::StartProtocol(participants, positor) => {
@@ -473,23 +465,14 @@ impl TripleSpawner {
     async fn propose_posit(&mut self, active: &[Participant]) {
         let pair_id = rand::random();
         self.posits.propose(pair_id, (), active);
-        for &p in active.iter() {
-            if p == self.me {
-                continue;
-            }
-
-            self.msg
-                .send(
-                    self.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Triple(pair_id),
-                        from: self.me,
-                        action: PositAction::Propose,
-                    },
-                )
-                .await;
-        }
+        self.msg
+            .broadcast_posit(
+                self.me,
+                active,
+                PositProtocolId::Triple(pair_id),
+                PositAction::Propose,
+            )
+            .await;
     }
 
     async fn start_generation(
@@ -522,22 +505,14 @@ impl TripleSpawner {
         }
 
         self.ongoing_owned.insert(id);
-        for &to in &participants {
-            if to == self.me {
-                continue;
-            }
-            self.msg
-                .send(
-                    self.me,
-                    to,
-                    PositMessage {
-                        id: PositProtocolId::Triple(id),
-                        from: self.me,
-                        action: PositAction::Start(participants.clone()),
-                    },
-                )
-                .await;
-        }
+        self.msg
+            .broadcast_posit(
+                self.me,
+                &participants,
+                PositProtocolId::Triple(id),
+                PositAction::Start(participants.clone()),
+            )
+            .await;
     }
 
     async fn generate_with_id(
