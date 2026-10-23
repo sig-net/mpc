@@ -187,7 +187,7 @@ request that is already being signed. Holders still generating reject it with
 finished drop it (`dead_ids`), so the proposer holds its reservation until the
 round times out.
 
-The tally is keyed on `SinglePositCounter::participants` and `process_action`
+The tally is keyed on `PositCounter::participants` and `process_action`
 drops senders outside that set, so a reply from a member the proposer did not
 address cannot move `enough_rejects` or `meets_totality`. A member that holds
 the presignature but was absent from the active set at reservation time is in
