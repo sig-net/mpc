@@ -17,45 +17,6 @@ use std::collections::HashMap;
 use std::str::Utf8Error;
 use std::time::Duration;
 
-#[derive(Debug, Clone, clap::Parser)]
-#[group(id = "message_options")]
-pub struct Options {
-    /// Default timeout used for all outbound requests to other nodes.
-    #[arg(long, env("MPC_NODE_TIMEOUT"), default_value_t = MSG_TIMEOUT.as_millis() as u64)]
-    pub timeout: u64,
-
-    /// Timeout used for fetching the state of a node.
-    #[arg(long, env("MPC_NODE_STATE_TIMEOUT"), default_value_t = STATUS_TIMEOUT.as_millis() as u64)]
-    pub state_timeout: u64,
-
-    /// Timeout used for sync requests to other nodes.
-    #[arg(long, env("MPC_NODE_SYNC_TIMEOUT"), default_value_t = SYNC_TIMEOUT.as_millis() as u64)]
-    pub sync_timeout: u64,
-}
-
-impl Options {
-    pub fn into_str_args(self) -> Vec<String> {
-        vec![
-            "--timeout".to_string(),
-            self.timeout.to_string(),
-            "--state-timeout".to_string(),
-            self.state_timeout.to_string(),
-            "--sync-timeout".to_string(),
-            self.sync_timeout.to_string(),
-        ]
-    }
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            timeout: MSG_TIMEOUT.as_millis() as u64,
-            state_timeout: STATUS_TIMEOUT.as_millis() as u64,
-            sync_timeout: SYNC_TIMEOUT.as_millis() as u64,
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum RequestError {
     #[error("http request was unsuccessful: {0} => {1}")]
@@ -75,7 +36,6 @@ pub enum RequestError {
 #[derive(Debug, Clone)]
 pub struct NodeClient {
     http: reqwest::Client,
-    options: Options,
 }
 
 fn check_checkpoint_version(version: u64) -> Result<(), RequestError> {
@@ -92,14 +52,19 @@ fn decode_checkpoint_response(body: &[u8]) -> Result<CheckpointResponse, Request
     Ok(resp)
 }
 
+impl Default for NodeClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NodeClient {
-    pub fn new(options: &Options) -> Self {
+    pub fn new() -> Self {
         Self {
             http: reqwest::Client::builder()
-                .timeout(Duration::from_millis(options.timeout))
+                .timeout(MSG_TIMEOUT)
                 .build()
                 .unwrap(),
-            options: options.clone(),
         }
     }
 
@@ -181,12 +146,7 @@ impl NodeClient {
         let mut url = base.into_url()?;
         url.set_path("status");
 
-        let resp = self
-            .http
-            .get(url)
-            .timeout(Duration::from_millis(self.options.state_timeout))
-            .send()
-            .await?;
+        let resp = self.http.get(url).timeout(STATUS_TIMEOUT).send().await?;
 
         Ok(resp.json().await?)
     }
@@ -198,12 +158,7 @@ impl NodeClient {
     ) -> Result<Ciphered, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("sync");
-        self.post_cbor_response(
-            &url,
-            update,
-            Duration::from_millis(self.options.sync_timeout),
-        )
-        .await
+        self.post_cbor_response(&url, update, SYNC_TIMEOUT).await
     }
 
     pub async fn checkpoint(
@@ -337,7 +292,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = NodeClient::new(&Options::default());
+        let client = NodeClient::new();
         let result = tokio::time::timeout(
             Duration::from_millis(100),
             client.fetch_checkpoint_by_digest(server.url(), Chain::Ethereum, [0u8; 32]),

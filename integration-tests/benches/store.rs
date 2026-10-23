@@ -11,7 +11,7 @@ use integration_tests::{cluster::spawner::ClusterSpawner, containers::Redis};
 use k256::Secp256k1;
 use mpc_node::{
     mesh::{Mesh, MeshState},
-    node_client::{self, NodeClient},
+    node_client::NodeClient,
     protocol::{
         contract::{primitives::Participants, RunningContractState},
         presignature::Presignature,
@@ -95,7 +95,7 @@ fn env() -> (Runtime, SyncEnv) {
                 .stockpile_triples(&spawner.cfg, &participants, 1)
                 .await;
         }
-        let client = NodeClient::new(&node_client::Options::default());
+        let client = NodeClient::new();
         let (sync_report_tx, sync_report_rx) = mpsc::channel(1024);
         let mesh = Mesh::new(
             &client,

@@ -31,7 +31,7 @@ use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::backlog::Checkpoint;
 use mpc_node::web::CheckpointResponse;
-use mpc_node::{logs, mesh, node_client, storage};
+use mpc_node::{logs, mesh, storage};
 use mpc_primitives::Chain;
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{KeyType, SecretKey};
@@ -232,7 +232,6 @@ pub struct Context {
     pub storage_options: storage::Options,
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
-    pub message_options: node_client::Options,
     pub ethereum: Option<EthereumContext>,
 }
 
@@ -310,8 +309,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         ping_interval: 1000,
     };
 
-    let message_options = node_client::Options::default();
-
     // If using pregenerated keys, inject them into storage before nodes start
     if spawner.pregenerated_keys.is_enabled() {
         tracing::info!("injecting pregenerated keyshares into storage...");
@@ -351,7 +348,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         storage_options,
         log_options,
         mesh_options,
-        message_options,
         ethereum,
     })
 }
