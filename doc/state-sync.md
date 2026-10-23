@@ -87,7 +87,7 @@ init | nop | Impossible: owner goes to Generating when it sends PROPOSE | Imposs
 Generating | <= respond missingOwner ignores it | nop | nop | nop | Impossible, owner would never send PROPOSE for the output while still generating the input | <= respond missingOwner should delete participant(but ignores it because it could also be init)
 Available | Impossible: owner can’t reach Available before all participants are at least at Generating, since protocol won’t start before everybody is in Generating already | nop | nop | nop | Impossible, owner goes to Using before sending START | <= respond missingOwner deletes participant
 Using | Impossible, Using comes after Available, see Available/init | nop | nop | nop | <= respond missingOwner ignores it | <= respond missingOwner ignores it
-done | Impossible, done comes after Available, see Available/init | Impossible: peer takes the input as Using when it receives START for the consuming protocol, and the owner cannot finish without the peer's contribution | Impossible: peer takes the input as Using when it receives START for the consuming protocol, and the owner cannot finish without the peer's contribution | nop(partially finished protocol) | nop | nop
+done | Impossible, done comes after Available, see Available/init | nop: happens when the peer had not stored the input yet, so it could not accept and START went to others; once stored, see done/Available | optional: peer deletes obsolete input (happens when the peer's ACCEPT was late, as START goes only to the accepters) | nop(partially finished protocol) | nop | nop
 lost in crash | nop | optional: peer deletes obsolete input | optional: peer deletes obsolete input | nop | nop | nop
 
 
