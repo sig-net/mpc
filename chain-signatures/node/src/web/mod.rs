@@ -18,10 +18,10 @@ use crate::web::error::Result;
 
 use anyhow::Context;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::extract::{DefaultBodyLimit, Query};
 use axum::http::{HeaderName, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
@@ -32,10 +32,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tower_http::timeout::TimeoutLayer;
 use tracing::Instrument;
 
-/// Peers give up within this on every endpoint, so longer requests only serve attackers.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Per-endpoint timeouts. A node waits this long on a peer, and the server cuts
+/// requests at the same values, so a node never serves a request its caller
+/// already gave up on.
+pub const MSG_TIMEOUT: Duration = Duration::from_secs(1);
+pub const STATUS_TIMEOUT: Duration = Duration::from_secs(1);
+pub const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
+pub const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Cap for the endpoints no node calls: the health check, metrics and the debug page.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Answers 408 once a request outlives `timeout`.
+fn timeout(timeout: Duration) -> TimeoutLayer {
+    TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, timeout)
+}
 
 struct AxumState {
     node: NodeStateWatcher,
@@ -76,7 +89,7 @@ pub async fn run(
 
     // Sync can be a large payload, so we set a higher limit for payload.
     let sync = Router::new()
-        .route("/sync", post(sync))
+        .route("/sync", post(sync).layer(timeout(SYNC_TIMEOUT)))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024));
 
     let mut router = Router::new()
@@ -86,24 +99,27 @@ pub async fn run(
             get(|| async move {
                 tracing::info!("node is ready to accept connections");
                 StatusCode::OK
-            }),
+            })
+            .layer(timeout(DEFAULT_TIMEOUT)),
         )
-        .route("/msg", post(msg))
-        .route("/status", get(status))
-        .route("/metrics", get(metrics))
-        .route("/checkpoint", get(checkpoint))
-        .route("/debug", get(debug::page))
+        .route("/msg", post(msg).layer(timeout(MSG_TIMEOUT)))
+        .route("/status", get(status).layer(timeout(STATUS_TIMEOUT)))
+        .route("/metrics", get(metrics).layer(timeout(DEFAULT_TIMEOUT)))
+        .route(
+            "/checkpoint",
+            get(checkpoint).layer(timeout(CHECKPOINT_TIMEOUT)),
+        )
+        .route("/debug", get(debug::page).layer(timeout(DEFAULT_TIMEOUT)))
         .merge(sync);
 
     if cfg!(feature = "bench") {
-        router = router.route("/bench/metrics", get(bench_metrics));
+        router = router.route(
+            "/bench/metrics",
+            get(bench_metrics).layer(timeout(DEFAULT_TIMEOUT)),
+        );
     }
 
     let app = router
-        .layer(middleware::from_fn_with_state(
-            REQUEST_TIMEOUT,
-            limit_duration,
-        ))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(Extension(Arc::new(axum_state)));
 
@@ -119,19 +135,6 @@ pub async fn run(
     tracing::info!(?addr, "starting http server");
     if let Err(err) = axum::serve(listener, app).await {
         tracing::error!(?addr, ?err, "web server exited with an error");
-    }
-}
-
-/// Answers 503 once the request outlives `timeout`, so a slow client cannot
-/// hold a handler, or the body it is still uploading, for longer than a peer would.
-async fn limit_duration(
-    State(timeout): State<Duration>,
-    req: Request<Body>,
-    next: Next,
-) -> Response {
-    match tokio::time::timeout(timeout, next.run(req)).await {
-        Ok(response) => response,
-        Err(_) => Error::Timeout.into_response(),
     }
 }
 

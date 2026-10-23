@@ -23,8 +23,6 @@ pub enum Error {
     Sync(#[from] SyncError),
     #[error("invalid parameters: {0}")]
     InvalidParameters(String),
-    #[error("request timed out")]
-    Timeout,
 }
 
 impl Error {
@@ -36,7 +34,6 @@ impl Error {
             Error::Rpc(_) => StatusCode::BAD_REQUEST,
             Error::InvalidParameters(_) => StatusCode::BAD_REQUEST,
             Error::Sync(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Error::Timeout => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }
