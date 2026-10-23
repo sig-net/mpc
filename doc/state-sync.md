@@ -83,7 +83,7 @@ actions defined in this specification.
 
 Owner / Peer | init | Generating | Available | Using | done | lost in crash
 -- | -- | -- | -- | -- | -- | --
-init | nop | Impossible: owner goes to Generating when it sends PROPOSE | Impossible: owner goes to Generating when it sends PROPOSE | Impossible: owner goes to Generating when it sends PROPOSE | nop | nop
+init | nop | Impossible: owner goes to Generating before it sends START | Impossible: owner goes to Generating before it sends START | Impossible: owner goes to Generating before it sends START | nop | nop
 Generating | <= respond missingOwner ignores it | nop | nop | nop | Impossible, owner would never send PROPOSE for the output while still generating the input | <= respond missingOwner should delete participant(but ignores it because it could also be init)
 Available | Impossible: owner can’t reach Available before all participants are at least at Generating, since protocol won’t start before everybody is in Generating already | nop | nop | nop | Impossible, owner goes to Using before sending START | <= respond missingOwner deletes participant
 Using | Impossible, Using comes after Available, see Available/init | nop | nop | nop | <= respond missingOwner ignores it | <= respond missingOwner ignores it
