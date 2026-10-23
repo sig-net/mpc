@@ -23,6 +23,8 @@ pub(crate) struct BlockProofSeed {
 pub(crate) struct CandidateTransactionEmissions {
     pub ledger_tx_hash: [u8; 32],
     pub extrinsic_index: u32,
+    /// `TxPartialSuccess`: any fallible phase in `calls` may have rolled back.
+    pub partial_success: bool,
     pub calls: Vec<SingletonCallEmissions>,
 }
 
@@ -124,6 +126,7 @@ mod proof_seed_tests {
             candidates: vec![CandidateTransactionEmissions {
                 ledger_tx_hash: [0x55; 32],
                 extrinsic_index: 1,
+                partial_success: false,
                 calls: vec![SingletonCallEmissions {
                     phase: crate::emissions::TranscriptPhase::Guaranteed,
                     physical_segment: 1,

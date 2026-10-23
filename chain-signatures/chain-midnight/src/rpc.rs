@@ -502,6 +502,7 @@ impl MidnightRpc {
             decoded_candidates.push(CandidateTransactionEmissions {
                 ledger_tx_hash,
                 extrinsic_index: found.details.index(),
+                partial_success: status == AppliedStatus::PartialSuccess,
                 calls,
             });
         }
@@ -1401,7 +1402,10 @@ mod tests {
                 .expect("candidate is present in the block body");
             // The capture's only singleton phase is a fallible notification, which a
             // partial success keeps.
-            assert_eq!(block.candidates, fully_applied.candidates);
+            let mut expected = fully_applied.candidates.clone();
+            assert!(!expected[0].partial_success);
+            expected[0].partial_success = true;
+            assert_eq!(block.candidates, expected);
         }
         let block = read_fallible_capture(encode_status_records(&[other_extrinsic]))
             .await
