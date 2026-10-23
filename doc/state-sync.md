@@ -67,7 +67,7 @@ Using | nop
 
 Deleting from the directory should only happen if the current state as seen by the owner is `Available`.
 
-The owner should not delete in `Generating`, as it could mean the peer simply hasn't processed the PROPOSE yet.
+The owner should not delete in `Generating`, as it could mean the peer simply hasn't processed the START yet.
 
 The owner should not delete in `Using`, as it could mean the peer is already in `done` for this P or T.
 
