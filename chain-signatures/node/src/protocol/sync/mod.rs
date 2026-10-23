@@ -23,9 +23,6 @@ use super::triple::TripleId;
 /// our issue will more than likely not be the channel size.
 const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
 
-/// Timeout for waiting for a sync response from the sync task
-const SYNC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// Timeout for the entire broadcast operation (waiting for all peers to respond)
 const BROADCAST_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -554,16 +551,10 @@ impl SyncChannel {
             return Err(SyncError::QueueFailed);
         }
 
-        let result = tokio::time::timeout(SYNC_RESPONSE_TIMEOUT, response_rx)
-            .await
-            .map_err(|_err| {
-                tracing::debug!("sync response timeout");
-                SyncError::ResponseFailed
-            })?
-            .map_err(|_err| {
-                tracing::debug!("failed to receive sync response from channel");
-                SyncError::ResponseFailed
-            })?;
+        let result = response_rx.await.map_err(|_err| {
+            tracing::debug!("failed to receive sync response from channel");
+            SyncError::ResponseFailed
+        })?;
 
         result.map_err(|err| {
             tracing::debug!(?err, "sync processing failed in storage layer");
