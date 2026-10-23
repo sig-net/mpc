@@ -68,7 +68,7 @@ fn derive_epsilon(
 /// enter the request id, so any other value would give one execution a second
 /// request id (G2). `dest` is deprecated: it has no meaning and stays blank until
 /// it leaves the request id with the Section 7 format.
-const SDK_REQUEST_FIELDS: (&str, &str, &str) = ("ECDSA", "", "");
+pub(crate) const SDK_REQUEST_FIELDS: (&str, &str, &str) = ("ECDSA", "", "");
 
 /// Key version [`LATEST_MPC_KEY_VERSION`] and [`SDK_REQUEST_FIELDS`].
 fn check_request_fields(event: &SignBidirectionalEvent) -> anyhow::Result<()> {

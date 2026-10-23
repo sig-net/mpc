@@ -9,6 +9,7 @@ use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction};
 use crate::sign_bidirectional::derive_user_address;
+use crate::sign_bidirectional::SDK_REQUEST_FIELDS;
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
@@ -543,9 +544,9 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
         key_version: 1,
         deposit: 0,
         path: String::new(),
-        algo: "ECDSA".to_string(),
-        dest: String::new(),
-        params: String::new(),
+        algo: SDK_REQUEST_FIELDS.0.to_string(),
+        dest: SDK_REQUEST_FIELDS.1.to_string(),
+        params: SDK_REQUEST_FIELDS.2.to_string(),
         chain: Chain::Solana,
         chain_ctx: None,
         output_deserialization_schema: vec![],
