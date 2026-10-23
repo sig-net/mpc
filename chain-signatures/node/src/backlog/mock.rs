@@ -2,7 +2,9 @@ use crate::backlog::{
     Backlog, BacklogEntry, Bidirectional, Checkpoint, Checkpoints, Executing, Final, Generating,
     Initial, PendingRequests, Publishing, Sign, SignEntry,
 };
-use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+use crate::sign_bidirectional::{
+    BidirectionalProgress, SignProgress, SignStatus, SDK_REQUEST_FIELDS,
+};
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Scalar, Secp256k1};
@@ -190,13 +192,13 @@ pub fn mock_bidi_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
         SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: vec![1, 2, 3],
-            dest: "test_dest".to_string(),
+            dest: SDK_REQUEST_FIELDS.1.to_string(),
             caip2_id: target_chain.caip2_chain_id().to_string(),
             key_version: 1,
             deposit: 0,
             path: "test".to_string(),
-            algo: "ECDSA".to_string(),
-            params: "{}".to_string(),
+            algo: SDK_REQUEST_FIELDS.0.to_string(),
+            params: SDK_REQUEST_FIELDS.2.to_string(),
             chain,
             chain_ctx: None,
             output_deserialization_schema: vec![],

@@ -9,6 +9,7 @@ use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction};
 use crate::sign_bidirectional::derive_user_address;
+use crate::sign_bidirectional::SDK_REQUEST_FIELDS;
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
@@ -540,17 +541,44 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
         sender: [0u8; 32],
         serialized_transaction,
         caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-        key_version: 0,
+        key_version: 1,
         deposit: 0,
         path: String::new(),
-        algo: String::new(),
-        dest: Chain::Ethereum.to_string(),
-        params: String::new(),
+        algo: SDK_REQUEST_FIELDS.0.to_string(),
+        dest: SDK_REQUEST_FIELDS.1.to_string(),
+        params: SDK_REQUEST_FIELDS.2.to_string(),
         chain: Chain::Solana,
         chain_ctx: None,
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
     }
+}
+
+#[tokio::test]
+async fn process_sign_request_rejects_key_version_0() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+    let sign_id = SignId::new([24u8; 32]);
+    let request = Arc::new(IndexedSignRequest::sign_bidirectional(
+        sign_id,
+        test_sign_args(24),
+        Chain::Solana,
+        current_unix_timestamp(),
+        SignBidirectionalEvent {
+            key_version: 0,
+            ..bidirectional_event(legacy_contract_call(1))
+        },
+    ));
+
+    let err = process_sign_request(request, &ctx, test_root_pk())
+        .await
+        .expect_err("key version 0 should be rejected at ingestion");
+    assert!(
+        format!("{err:#}").contains("key version must be 1, got 0"),
+        "err: {err:#}"
+    );
+    assert!(backlog.get(Chain::Solana, &sign_id).await.is_none());
 }
 
 /// Recorded mainnet USDT transfer (chain-tron fixture `usdt-transfer-1.json`),
@@ -560,7 +588,6 @@ const TRON_RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f
 fn tron_bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEvent {
     SignBidirectionalEvent {
         caip2_id: Chain::Tron.caip2_chain_id().to_string(),
-        dest: Chain::Tron.to_string(),
         output_deserialization_schema: vec![],
         respond_serialization_schema: vec![],
         ..bidirectional_event(serialized_transaction)
@@ -1155,13 +1182,13 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: unsigned_rlp,
-            dest: tx.dest.clone(),
+            dest: String::new(),
             caip2_id: tx.caip2_id.clone(),
             key_version: tx.key_version,
             deposit: tx.deposit,
             path: tx.path.clone(),
             algo: tx.algo.clone(),
-            params: tx.params.clone(),
+            params: String::new(),
             chain: Chain::Solana,
             chain_ctx: Some(Pubkey::new_unique().to_bytes().to_vec()),
             output_deserialization_schema: tx.output_deserialization_schema.clone(),
