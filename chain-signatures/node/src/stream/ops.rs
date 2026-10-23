@@ -103,15 +103,19 @@ pub(crate) async fn process_sign_request(
     Ok(true)
 }
 
-/// Returns the actual and expected chain ids when an Ethereum target names another network.
+/// Returns the actual and expected chain ids when an Ethereum target names another network,
+/// the actual one `None` when it does not fit a u64, as no watched network's does.
 /// Returns `None` if the event is not targeting Ethereum or if the chain id matches the expected one.
-fn network_mismatch(event: &SignBidirectionalEvent, expected: Option<u64>) -> Option<(u64, u64)> {
+fn network_mismatch(
+    event: &SignBidirectionalEvent,
+    expected: Option<u64>,
+) -> Option<(Option<u64>, u64)> {
     let expected = expected?;
     if event.target_chain() != Ok(Chain::Ethereum) {
         return None;
     }
-    let actual = transaction_chain_id(&event.serialized_transaction)?;
-    (actual != expected).then_some((actual, expected))
+    let actual = transaction_chain_id(&event.serialized_transaction);
+    (actual != Some(expected)).then_some((actual, expected))
 }
 
 /// A flat destination id names one transaction per set of raw bytes: a second
