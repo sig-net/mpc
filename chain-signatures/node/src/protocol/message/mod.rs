@@ -34,6 +34,7 @@ use crate::protocol::message::filter::MAX_FILTER_SIZE;
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeResponse, SubscriptionMessage,
 };
+use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::triple::TripleId;
 use crate::protocol::Config;
@@ -116,6 +117,42 @@ impl MessageChannel {
             tracing::error!(?err, "outbox: failed to send message to participants");
         } else {
             set_channel_capacity_tx("outgoing", &self.outgoing);
+        }
+    }
+
+    /// Send one posit message as `me`.
+    pub async fn send_posit(
+        &self,
+        me: Participant,
+        to: Participant,
+        id: PositProtocolId,
+        action: PositAction,
+    ) {
+        self.send(
+            me,
+            to,
+            PositMessage {
+                id,
+                from: me,
+                action,
+            },
+        )
+        .await;
+    }
+
+    /// Send the same posit message to every participant in `to` except `me`.
+    pub async fn broadcast_posit(
+        &self,
+        me: Participant,
+        to: &[Participant],
+        id: PositProtocolId,
+        action: PositAction,
+    ) {
+        for &p in to {
+            if p == me {
+                continue;
+            }
+            self.send_posit(me, p, id, action.clone()).await;
         }
     }
 

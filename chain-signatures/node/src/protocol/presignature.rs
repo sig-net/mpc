@@ -1,4 +1,4 @@
-use super::message::{MessageChannel, PositMessage, PositProtocolId, PresignatureMessage};
+use super::message::{MessageChannel, PositProtocolId, PresignatureMessage};
 use super::posit::{PositAction, Positor, Posits};
 use super::triple::TripleId;
 use crate::config::Config;
@@ -462,15 +462,7 @@ impl PresignatureSpawner {
             }
             PositInternalAction::Reply(action) => {
                 self.msg
-                    .send(
-                        self.me,
-                        from,
-                        PositMessage {
-                            id: PositProtocolId::Presignature(id),
-                            from: self.me,
-                            action,
-                        },
-                    )
+                    .send_posit(self.me, from, PositProtocolId::Presignature(id), action)
                     .await;
             }
             PositInternalAction::StartProtocol(participants, positor) => {
@@ -521,23 +513,14 @@ impl PresignatureSpawner {
         tracing::info!(?id, "proposing protocol to generate a new presignature");
 
         self.posits.propose(id, reservation, &participants);
-        for &p in participants.iter() {
-            if p == self.me {
-                continue;
-            }
-
-            self.msg
-                .send(
-                    self.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Presignature(id),
-                        from: self.me,
-                        action: PositAction::Propose,
-                    },
-                )
-                .await;
-        }
+        self.msg
+            .broadcast_posit(
+                self.me,
+                &participants,
+                PositProtocolId::Presignature(id),
+                PositAction::Propose,
+            )
+            .await;
     }
 
     /// Generate new presignatures if this node owns fewer than the per-node minimum
@@ -703,22 +686,14 @@ impl PresignatureSpawner {
             return;
         }
 
-        for &p in &participants {
-            if p == self.me {
-                continue;
-            }
-            self.msg
-                .send(
-                    self.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Presignature(id),
-                        from: self.me,
-                        action: PositAction::Start(participants.clone()),
-                    },
-                )
-                .await;
-        }
+        self.msg
+            .broadcast_posit(
+                self.me,
+                &participants,
+                PositProtocolId::Presignature(id),
+                PositAction::Start(participants.clone()),
+            )
+            .await;
     }
 
     async fn run(

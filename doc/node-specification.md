@@ -5,7 +5,8 @@ nodes, in a way that the network can execute signature requests in a stable and
 reliable manner.
 
 It's a high level specification, describing the distributed algorithms and
-messages.
+messages. The lifecycle of a protocol invocation (proposal, rounds, timeouts)
+is specified in [posit-state-machine.md](posit-state-machine.md).
 
 ## Definitions
 
@@ -14,7 +15,7 @@ messages.
 The MPC network has three protocols that it serves.
 
 - Triple Generation
-- Pre-signature Seneration
+- Pre-signature Generation
 - Signature
 
 These are distributed algorithms. The execution of such an algorithm across the
