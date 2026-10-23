@@ -2368,6 +2368,54 @@ async fn unobserved_response_settles_when_it_verifies() {
     }
 }
 
+/// A successful output may begin with the failure prefix: the round trip's latency is still
+/// recorded as `ok`, from the outcome this node recorded.
+#[tokio::test]
+async fn final_response_latency_follows_the_recorded_outcome() {
+    let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
+    // No other test completes a Hydration round trip, so the counts below are this test's.
+    let tx = test_bidirectional_tx(107, Chain::Hydration, Chain::Ethereum);
+    let backlog = Backlog::new();
+    backlog.insert_mock_executing(&tx).await;
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+    let outcome = ExecutionOutcome::Success {
+        output: vec![0xde, 0xad, 0xbe, 0xef, 1],
+    };
+    process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
+        .await
+        .unwrap();
+    let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
+        panic!("the observed outcome must be signed");
+    };
+    let SignKind::RespondBidirectional(own) = &entry.request().kind else {
+        panic!("the outcome is signed as a response");
+    };
+    let event = RespondBidirectionalEvent {
+        output: Some(own.output.clone()),
+        attestation: None,
+        request_id: tx.request_id,
+        signature: mpc_crypto::generate_signature(&root_sk, &entry.request().args),
+        chain: Chain::Hydration,
+    };
+    let count = |status| {
+        crate::metrics::requests::request_latency_count(
+            Chain::Hydration,
+            SignRequestStep::BidirectionalTotal,
+            status,
+            RequestKind::RespondBidirectional,
+        )
+    };
+    let (ok, failed) = (count("ok"), count("execution_failed"));
+
+    process_respond_bidirectional_event(event, &ctx, root_sk.public_key().into())
+        .await
+        .unwrap();
+
+    assert_eq!(count("ok"), ok + 1);
+    assert_eq!(count("execution_failed"), failed);
+}
+
 /// A node that computed a different output than the network signed settles on the published
 /// one, so it removes the request at the same event as the others.
 #[tokio::test]

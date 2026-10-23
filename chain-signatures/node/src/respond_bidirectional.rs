@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 
-pub(crate) fn is_failed_execution_response(response: &RespondBidirectionalTx) -> bool {
+fn is_failed_execution_response(response: &RespondBidirectionalTx) -> bool {
     let outcome_kind = response
         .outcome_kind
         .or(response.attestation.map(|metadata| metadata.outcome_kind));
@@ -436,7 +436,7 @@ mod tests {
         assert_eq!(respond.outcome_kind, Some(AttestationOutcomeKind::Executed));
     }
 
-    /// The metric status for a round trip is derived from this marker, so the
+    /// The metric status for a round trip is derived from the recorded outcome, so the
     /// failed and successful paths must stay distinguishable.
     #[tokio::test]
     async fn failed_execution_output_is_detectable() {
