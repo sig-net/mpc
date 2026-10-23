@@ -107,7 +107,7 @@ impl MockServers {
     }
 
     pub fn client(&self) -> NodeClient {
-        NodeClient::new(&crate::node_client::Options::default())
+        NodeClient::new()
     }
 
     pub async fn push(&mut self, id: u32) {
