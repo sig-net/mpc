@@ -23,9 +23,6 @@ use super::triple::TripleId;
 /// issue will more than likely not be the channel size.
 const MAX_SYNC_REPORTS: usize = 1024;
 
-/// Timeout for the entire broadcast operation (waiting for all peers to respond)
-const BROADCAST_TIMEOUT: Duration = Duration::from_secs(120);
-
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
     #[error("not a participant yet")]
@@ -334,8 +331,8 @@ pub type SyncReportSender = mpsc::Sender<(Participant, SyncKind)>;
 pub type SyncReportReceiver = mpsc::Receiver<(Participant, SyncKind)>;
 
 /// Broadcast an update to all participants specified by `receivers`.
-/// Returns results for all peers that complete within BROADCAST_TIMEOUT.
-/// Peers that don't respond are not included in results and will be retried later.
+/// Returns results for all peers. Every call is bounded by the client's sync
+/// timeout, and peers that fail are retried on a later broadcast.
 async fn broadcast_sync(
     client: NodeClient,
     update: SyncUpdate,
@@ -363,34 +360,12 @@ async fn broadcast_sync(
         });
     }
 
-    let deadline = Instant::now() + BROADCAST_TIMEOUT;
     let mut results = Vec::new();
-    while !tasks.is_empty() {
-        let now = Instant::now();
-        if now >= deadline {
-            break;
+    while let Some(res) = tasks.join_next().await {
+        match res {
+            Ok((p, sync_result)) => results.push((p, sync_result)),
+            Err(err) => tracing::warn!(?err, "sync task failed"),
         }
-
-        tokio::select! {
-            res = tasks.join_next() => {
-                match res {
-                    Some(Ok((p, sync_result))) => {
-                        results.push((p, sync_result));
-                    }
-                    Some(Err(err)) => {
-                        tracing::warn!(?err, "sync task failed");
-                    }
-                    None => break,
-                }
-            }
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                break;
-            }
-        }
-    }
-
-    if !tasks.is_empty() {
-        tasks.abort_all();
     }
 
     results
