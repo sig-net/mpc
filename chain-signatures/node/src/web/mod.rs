@@ -42,7 +42,7 @@ use tracing::Instrument;
 /// already gave up on.
 pub const MSG_TIMEOUT: Duration = Duration::from_secs(1);
 pub const STATUS_TIMEOUT: Duration = Duration::from_secs(1);
-pub const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
+pub const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Cap for the endpoints no node calls: the health check, metrics and the debug page.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
