@@ -1,4 +1,4 @@
-use super::message::{MessageChannel, PositMessage, PositProtocolId, TripleMessage};
+use super::message::{MessageChannel, PositProtocolId, TripleMessage};
 use super::posit::{PositAction, PositInternalAction, Posits};
 use super::MpcSignProtocol;
 use crate::config::Config;
@@ -396,6 +396,35 @@ impl TripleSpawner {
         self.triple_storage.len_generated().await + self.ongoing.len()
     }
 
+    /// Returns why a PROPOSE fails storage checks or `None` if they pass.
+    async fn propose_rejection(
+        &self,
+        id: TripleId,
+        from: Participant,
+    ) -> Option<PositRejectReason> {
+        if self.contains_ongoing(id) {
+            tracing::warn!(id, ?from, "triple already generating");
+            Some(PositRejectReason::AlreadyGenerating)
+        } else if self.contains(id).await {
+            tracing::warn!(id, ?from, "triple already generated");
+            Some(PositRejectReason::AlreadyGenerating)
+        } else {
+            None
+        }
+    }
+
+    /// Lets integration tests feed posit messages without the run loop.
+    #[cfg(any(test, feature = "test-feature"))]
+    pub async fn process_posit_for_test(
+        &mut self,
+        id: TripleId,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+    ) {
+        self.process_posit(id, from, action, timeout).await;
+    }
+
     async fn process_posit(
         &mut self,
         id: TripleId,
@@ -403,16 +432,12 @@ impl TripleSpawner {
         action: PositAction,
         timeout: Duration,
     ) {
-        let internal_action = if self.contains_ongoing(id) {
-            tracing::warn!(id, ?from, ?action, "triple already generating");
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::AlreadyGenerating,
-            ))
-        } else if self.contains(id).await {
-            tracing::warn!(id, ?from, ?action, "triple already generated");
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::AlreadyGenerating,
-            ))
+        let rejection = match action {
+            PositAction::Propose => self.propose_rejection(id, from).await,
+            _ => None,
+        };
+        let internal_action = if let Some(reason) = rejection {
+            PositInternalAction::Reply(PositAction::RejectWithReason(reason))
         } else {
             let internal_action = self.posits.act(id, from, self.threshold, &action);
             #[cfg(feature = "debug-page")]
@@ -426,15 +451,7 @@ impl TripleSpawner {
             PositInternalAction::Abort => {}
             PositInternalAction::Reply(action) => {
                 self.msg
-                    .send(
-                        self.me,
-                        from,
-                        PositMessage {
-                            id: PositProtocolId::Triple(id),
-                            from: self.me,
-                            action,
-                        },
-                    )
+                    .send_posit(self.me, from, PositProtocolId::Triple(id), action)
                     .await;
             }
             PositInternalAction::StartProtocol(participants, positor) => {
@@ -448,23 +465,14 @@ impl TripleSpawner {
     async fn propose_posit(&mut self, active: &[Participant]) {
         let pair_id = rand::random();
         self.posits.propose(pair_id, (), active);
-        for &p in active.iter() {
-            if p == self.me {
-                continue;
-            }
-
-            self.msg
-                .send(
-                    self.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Triple(pair_id),
-                        from: self.me,
-                        action: PositAction::Propose,
-                    },
-                )
-                .await;
-        }
+        self.msg
+            .broadcast_posit(
+                self.me,
+                active,
+                PositProtocolId::Triple(pair_id),
+                PositAction::Propose,
+            )
+            .await;
     }
 
     async fn start_generation(
@@ -497,22 +505,14 @@ impl TripleSpawner {
         }
 
         self.ongoing_owned.insert(id);
-        for &to in &participants {
-            if to == self.me {
-                continue;
-            }
-            self.msg
-                .send(
-                    self.me,
-                    to,
-                    PositMessage {
-                        id: PositProtocolId::Triple(id),
-                        from: self.me,
-                        action: PositAction::Start(participants.clone()),
-                    },
-                )
-                .await;
-        }
+        self.msg
+            .broadcast_posit(
+                self.me,
+                &participants,
+                PositProtocolId::Triple(id),
+                PositAction::Start(participants.clone()),
+            )
+            .await;
     }
 
     async fn generate_with_id(

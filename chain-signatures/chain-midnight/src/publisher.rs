@@ -71,7 +71,7 @@ impl IntentClient for IntentGen {
 /// instead of proving, paying for and posting it a second time.
 #[async_trait]
 pub trait ResponseAwaiter: Send + Sync {
-    async fn still_awaited(&self, action: &PublishAction) -> bool;
+    async fn still_awaited(&self, action: &PublishAction) -> anyhow::Result<bool>;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -168,9 +168,13 @@ impl MidnightPublisher {
         }
     }
 
-    async fn still_awaited(&self, action: &PublishAction, stage: &'static str) -> bool {
-        if self.awaiter.still_awaited(action).await {
-            return true;
+    async fn still_awaited(
+        &self,
+        action: &PublishAction,
+        stage: &'static str,
+    ) -> anyhow::Result<bool> {
+        if self.awaiter.still_awaited(action).await? {
+            return Ok(true);
         }
         tracing::info!(
             sign_id = ?action.request.id,
@@ -178,7 +182,7 @@ impl MidnightPublisher {
             elapsed = ?action.timestamp.elapsed(),
             "midnight: response no longer awaited; dropping publish"
         );
-        false
+        Ok(false)
     }
 
     /// The contract state and ledger parameters at one finalized hash.
@@ -232,7 +236,7 @@ impl ChainPublisher for MidnightPublisher {
         let queued = Instant::now();
         let _flow = self.flow.lock().await;
         let queued_for = queued.elapsed();
-        if !self.still_awaited(action, "queued").await {
+        if !self.still_awaited(action, "queued").await? {
             return Ok(());
         }
         // Before the reads that fix this intent's TTL, so a slow snapshot never shortens it.
@@ -269,7 +273,7 @@ impl ChainPublisher for MidnightPublisher {
             .await
             .inspect_err(|error| self.record_refusal(error))?;
         let build_took = building.elapsed();
-        if !self.still_awaited(action, "built").await {
+        if !self.still_awaited(action, "built").await? {
             return Ok(());
         }
 
@@ -1482,9 +1486,9 @@ mod tests {
 
     #[async_trait]
     impl ResponseAwaiter for ScriptedAwaiter {
-        async fn still_awaited(&self, _action: &PublishAction) -> bool {
+        async fn still_awaited(&self, _action: &PublishAction) -> anyhow::Result<bool> {
             self.asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.answers.lock().unwrap().pop_front().unwrap_or(true)
+            Ok(self.answers.lock().unwrap().pop_front().unwrap_or(true))
         }
     }
 

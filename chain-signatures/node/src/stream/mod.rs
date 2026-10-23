@@ -105,6 +105,8 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 return Ok(());
             }
             ctx.caught_up = true;
+            // Set before the requeue scan, so an entry that misses the scan sees it.
+            ctx.backlog.set_caught_up(chain, true);
 
             requeue_pending_sign_requests(ctx, chain)
                 .await
@@ -121,7 +123,7 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             let kind = request.request_kind();
 
             // Record the request's indexed timestamp if it's a new request
-            let is_new = process_sign_request(request, ctx)
+            let is_new = process_sign_request(request, ctx, root_pk)
                 .await
                 .context("failed to process sign request")?;
 

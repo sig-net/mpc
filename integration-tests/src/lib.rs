@@ -43,10 +43,8 @@ use serde_json::json;
 pub enum NodeBinarySource {
     /// Use the current compiled code from target/release
     CurrentCode,
-    /// Use the tagged mainnet binary compiled under target/compat/mainnet/<version>
-    Mainnet,
-    /// Use the tagged testnet binary compiled under target/compat/testnet/<version>
-    Testnet,
+    /// Use the latest release binary compiled under target/compat/latest
+    LatestRelease,
 }
 
 impl NodeBinarySource {
@@ -55,8 +53,7 @@ impl NodeBinarySource {
         match self {
             // Will use default executable lookup
             NodeBinarySource::CurrentCode => Ok(None),
-            NodeBinarySource::Mainnet => Ok(Some(execute::compatibility_binary("mainnet")?)),
-            NodeBinarySource::Testnet => Ok(Some(execute::compatibility_binary("testnet")?)),
+            NodeBinarySource::LatestRelease => Ok(Some(execute::latest_release_binary()?)),
         }
     }
 }
@@ -461,6 +458,13 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
             candidates: candidates.clone().into_iter().collect(),
         };
         let participants = mpc_contract::primitives::Participants::from(candidates_struct);
+        // Stockpile before the contract runs: once it does, each node's first state
+        // sync with a peer can prune triples still being inserted.
+        if let Some(prestockpile) = spawner.host_prestockpile() {
+            ctx.redis
+                .stockpile_triples(cfg, &participants, prestockpile.multiplier)
+                .await;
+        }
         // Convert secp256k1 public key to NEAR public key format (secp256k1)
         use k256::elliptic_curve::sec1::ToEncodedPoint;
         let near_pk = near_crypto::PublicKey::SECP256K1(

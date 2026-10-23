@@ -818,7 +818,7 @@ async fn test_sync_rejects_reply_as_request() {
         .expect("node0's update should be accepted");
 
     assert!(
-        node0.sync_channel.request_update(reply).await.is_err(),
+        node0.deliver_sync(&reply).await.is_err(),
         "node1's reply should not pass as a request from node1"
     );
     assert_eq!(shares_by_owner(node0, &owners).await, before);
@@ -853,12 +853,11 @@ async fn test_sync_rejects_replayed_request() {
     let replay = serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
 
     node1
-        .sync_channel
-        .request_update(request)
+        .deliver_sync(&request)
         .await
         .expect("first delivery should be accepted");
     assert!(
-        node1.sync_channel.request_update(replay).await.is_err(),
+        node1.deliver_sync(&replay).await.is_err(),
         "the same request delivered again should be rejected"
     );
 }

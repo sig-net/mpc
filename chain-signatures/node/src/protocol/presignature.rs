@@ -1,4 +1,4 @@
-use super::message::{MessageChannel, PositMessage, PositProtocolId, PresignatureMessage};
+use super::message::{MessageChannel, PositProtocolId, PresignatureMessage};
 use super::posit::{PositAction, Positor, Posits};
 use super::triple::TripleId;
 use crate::config::Config;
@@ -404,33 +404,25 @@ impl PresignatureSpawner {
         complete_presignatures + ongoing_generators
     }
 
-    async fn process_posit(
-        &mut self,
+    /// Returns why a PROPOSE fails id or storage checks or `None` if they pass.
+    async fn propose_rejection(
+        &self,
         id: FullPresignatureId,
         from: Participant,
-        action: PositAction,
-        timeout: Duration,
-    ) {
-        let internal_action = if !id.validate() {
+    ) -> Option<PositRejectReason> {
+        if !id.validate() {
             tracing::error!(
                 ?id,
                 ?from,
-                ?action,
                 "presignature id does not match the expected hash"
             );
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::InvalidRequest,
-            ))
+            Some(PositRejectReason::InvalidRequest)
         } else if self.contains_ongoing(id.id) {
-            tracing::warn!(?id, ?from, ?action, "presignature already generating");
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::AlreadyGenerating,
-            ))
+            tracing::warn!(?id, ?from, "presignature already generating");
+            Some(PositRejectReason::AlreadyGenerating)
         } else if self.contains(id.id).await {
-            tracing::warn!(?id, ?from, ?action, "presignature already generated");
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::AlreadyGenerating,
-            ))
+            tracing::warn!(?id, ?from, "presignature already generated");
+            Some(PositRejectReason::AlreadyGenerating)
         } else if !{
             // TODO: we can potentially wait for the triples to exist first to then be able to accept.
             // whereas we just blatantly reject here. The problem with waiting is that the other side
@@ -438,15 +430,38 @@ impl PresignatureSpawner {
             self.triples.contains_reserved(id.pair_id).await
                 || self.triples.contains(id.pair_id).await
         } {
-            tracing::warn!(
-                ?id,
-                ?from,
-                ?action,
-                "presignature required triples are not known"
-            );
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::MissingArtifact,
-            ))
+            tracing::warn!(?id, ?from, "presignature required triples are not known");
+            Some(PositRejectReason::MissingArtifact)
+        } else {
+            None
+        }
+    }
+
+    /// Lets integration tests feed posit messages without the run loop.
+    #[cfg(any(test, feature = "test-feature"))]
+    pub async fn process_posit_for_test(
+        &mut self,
+        id: FullPresignatureId,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+    ) {
+        self.process_posit(id, from, action, timeout).await;
+    }
+
+    async fn process_posit(
+        &mut self,
+        id: FullPresignatureId,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+    ) {
+        let rejection = match action {
+            PositAction::Propose => self.propose_rejection(id, from).await,
+            _ => None,
+        };
+        let internal_action = if let Some(reason) = rejection {
+            PositInternalAction::Reply(PositAction::RejectWithReason(reason))
         } else {
             let internal_action = self.posits.act(id, from, self.threshold, &action);
             #[cfg(feature = "debug-page")]
@@ -462,15 +477,7 @@ impl PresignatureSpawner {
             }
             PositInternalAction::Reply(action) => {
                 self.msg
-                    .send(
-                        self.me,
-                        from,
-                        PositMessage {
-                            id: PositProtocolId::Presignature(id),
-                            from: self.me,
-                            action,
-                        },
-                    )
+                    .send_posit(self.me, from, PositProtocolId::Presignature(id), action)
                     .await;
             }
             PositInternalAction::StartProtocol(participants, positor) => {
@@ -521,23 +528,14 @@ impl PresignatureSpawner {
         tracing::info!(?id, "proposing protocol to generate a new presignature");
 
         self.posits.propose(id, reservation, &participants);
-        for &p in participants.iter() {
-            if p == self.me {
-                continue;
-            }
-
-            self.msg
-                .send(
-                    self.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Presignature(id),
-                        from: self.me,
-                        action: PositAction::Propose,
-                    },
-                )
-                .await;
-        }
+        self.msg
+            .broadcast_posit(
+                self.me,
+                &participants,
+                PositProtocolId::Presignature(id),
+                PositAction::Propose,
+            )
+            .await;
     }
 
     /// Generate new presignatures if this node owns fewer than the per-node minimum
@@ -703,22 +701,14 @@ impl PresignatureSpawner {
             return;
         }
 
-        for &p in &participants {
-            if p == self.me {
-                continue;
-            }
-            self.msg
-                .send(
-                    self.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Presignature(id),
-                        from: self.me,
-                        action: PositAction::Start(participants.clone()),
-                    },
-                )
-                .await;
-        }
+        self.msg
+            .broadcast_posit(
+                self.me,
+                &participants,
+                PositProtocolId::Presignature(id),
+                PositAction::Start(participants.clone()),
+            )
+            .await;
     }
 
     async fn run(

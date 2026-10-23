@@ -488,6 +488,13 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
                     return Ok(());
                 }
             };
+            let output = match get_named_vec_u8(&fields, "serialized_output") {
+                Ok(output) => output,
+                Err(e) => {
+                    tracing::error!(?e, "failed to get serialized_output");
+                    return Ok(());
+                }
+            };
             tracing::info!(
                 "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?})"
             );
@@ -495,6 +502,7 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
                 .send(ChainEvent::RespondBidirectional(
                     RespondBidirectionalEvent {
                         attestation: None,
+                        output: Some(output),
                         request_id,
                         signature,
                         chain: Chain::Hydration,
@@ -796,6 +804,22 @@ fn value_to_vec_u8(v: &Value<u32>) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The response output decodes to the bytes the pallet emitted, whatever its length.
+    #[test]
+    fn serialized_output_decodes_any_length() {
+        for output in [vec![], vec![7u8], vec![0xde, 0xad, 0xbe, 0xef, 1]] {
+            let bytes = output.iter().map(|byte| Value::u128(u128::from(*byte)));
+            let fields = Composite::Named(vec![(
+                "serialized_output".to_string(),
+                Value::unnamed_composite(bytes).map_context(|_| 0u32),
+            )]);
+            assert_eq!(
+                get_named_vec_u8(&fields, "serialized_output").unwrap(),
+                output
+            );
+        }
+    }
 
     #[test]
     fn request_id_matches_ethabi() {
