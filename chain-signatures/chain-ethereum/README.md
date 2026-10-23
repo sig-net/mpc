@@ -36,7 +36,7 @@ plumbed through from the node's config, not constructed by hand.
 finality plus a 5-minute buffer) is the supervisor watchdog budget: restart
 the indexer when no `ChainEvent::Block` is dispatched within it. Sibling
 chains expose the same knob; see `ChainConfig` in
-`mpc-primitives/src/chain.rs`.
+`chain-signatures/primitives/src/chain.rs`.
 
 ### Catchup fetch tuning
 

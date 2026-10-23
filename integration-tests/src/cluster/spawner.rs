@@ -231,20 +231,11 @@ impl ClusterSpawner {
         self
     }
 
-    /// Add mainnet nodes to the cluster using the tagged binary under target/compat/mainnet.
-    pub fn mainnet_nodes(mut self, count: usize) -> Self {
+    /// Add nodes running the latest release binary under target/compat/latest.
+    pub fn latest_release_nodes(mut self, count: usize) -> Self {
         let current_len = self.node_binary_sources.len();
         self.node_binary_sources
-            .extend((0..count).map(|_| NodeBinarySource::Mainnet));
-        self.cfg.nodes = current_len + count;
-        self
-    }
-
-    /// Add testnet nodes to the cluster using the tagged binary under target/compat/testnet.
-    pub fn testnet_nodes(mut self, count: usize) -> Self {
-        let current_len = self.node_binary_sources.len();
-        self.node_binary_sources
-            .extend((0..count).map(|_| NodeBinarySource::Testnet));
+            .extend((0..count).map(|_| NodeBinarySource::LatestRelease));
         self.cfg.nodes = current_len + count;
         self
     }
@@ -277,6 +268,14 @@ impl ClusterSpawner {
     pub fn prestockpile(mut self, multiplier: u32) -> Self {
         self.prestockpile = Some(Prestockpile { multiplier });
         self
+    }
+
+    /// The stockpile `host` applies before the contract starts, which it can only
+    /// do with pregenerated keys.
+    pub(crate) fn host_prestockpile(&self) -> Option<&Prestockpile> {
+        self.prestockpile
+            .as_ref()
+            .filter(|_| self.pregenerated_keys.is_enabled())
     }
 
     fn load_pregenerated_keys(mut self) -> Self {
@@ -477,6 +476,7 @@ impl IntoFuture for ClusterSpawner {
             };
 
             let nodes = self.run().await?;
+            let stockpiled_in_host = self.host_prestockpile().is_some();
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
@@ -495,8 +495,11 @@ impl IntoFuture for ClusterSpawner {
             if self.wait_for_running {
                 cluster.wait().running().nodes_running().await?;
 
-                if let Some(prestockpile) = self.prestockpile {
-                    cluster.prestockpile(prestockpile).await;
+                if let Some(prestockpile) = &self.prestockpile {
+                    if !stockpiled_in_host {
+                        cluster.stockpile(prestockpile).await;
+                    }
+                    cluster.wait_stockpiled().await;
                 }
             }
 

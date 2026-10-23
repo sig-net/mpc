@@ -802,7 +802,7 @@ stay out.
 | `respondSerializationSchema` | `bytes` | no | no longer used where the MPC derives the response encoding from `outputDeserializationSchema` and the source chain's types; integrations not yet migrated still read it |
 
 Enums: `MPCSignatureAlgorithm { ecdsa, reserved }`,
-`MPCDestination { unused, reserved }`, `TxParamType { evmType2, tron }`.
+`MPCDestination { unused, reserved }`, `TxParamType { evmType2, reserved }`.
 
 `RequestId` is `bytes(32)`. `Signature` is the MPC's ECDSA signature:
 `bigR`, an affine point `{ x: bytes(32), y: bytes(32) }`, `s: bytes(32)`

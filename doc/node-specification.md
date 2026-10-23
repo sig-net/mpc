@@ -5,7 +5,8 @@ nodes, in a way that the network can execute signature requests in a stable and
 reliable manner.
 
 It's a high level specification, describing the distributed algorithms and
-messages.
+messages. The lifecycle of a protocol invocation (proposal, rounds, timeouts)
+is specified in [posit-state-machine.md](posit-state-machine.md).
 
 ## Definitions
 
@@ -14,7 +15,7 @@ messages.
 The MPC network has three protocols that it serves.
 
 - Triple Generation
-- Pre-signature Seneration
+- Pre-signature Generation
 - Signature
 
 These are distributed algorithms. The execution of such an algorithm across the
@@ -40,162 +41,6 @@ about the non-owned protocol invocation on their own. This makes it easier to
 avoid many common distributed faults, such as two nodes deciding differently on
 the same invocation. It is not byzantine fault-tolerant, however, which this
 specification explicitly not is trying to achieve.
-
-## Protocol State Machine
-
-The following graph shows the lifetime of a protocol invocation. Each
-participant has its own instance of this state machine. It is a form of
-two-phase commit, with a pre-selected leader (called `Owner`), executed over a
-peer-to-peer network.
-
-The arrows in blue show how the `Owner` transitions between states, while the
-red arrows are for all other `Participants`. Red arrows generally only wait on
-messages by the owner, while the owner (blue) sends these messages whenever
-itself transitions forward.
-
-For the signature protocol, all participants must check that requests were
-indexed and finalized, as noted in the graph.
-
-![graph](./graphs/protocol_states.svg)
-
-
-### States
-
-`init` and `done` are implicit states. All other states must be explicitly
-stored and ideally persisted.
-
-#### init
-
-In the `init` state, nodes should only accept incoming messages from the owner
-of a protocol ID and discard all other messages they might receive about that
-ID.
-
-#### Prepare
-
-The primary purpose of the `Prepare` phase is to avoid multiple instances of the
-same (protocol ID, retry count) running simultaneously. It is crucial to have
-this phase to satisfy the non-reuse security assumption of the cryptographic
-protocol.
-
-A secondary purpose is to support state sync, which we need for a fault-tolerant
-participant selection.
-
-In the `Prepare` state, the owner establishes the participants list. It sends an
-INIT message to all valid participants, where a participant is valid if it is
-currently active and holds necessary P or T according to the owner's directory.
-All nodes that answer OK can be included in the participants list.
-
-Participants enter the `Prepare` state after they answered an INIT with OK.
-After that, they may accept messages from non-owner peers and put them in a
-queue. However, crucially, participants are still not allowed to send messages
-about the protocol, yet.
-
-*Why can we not apply incoming messages in the Prepare phase?*
-
-For simple fault-tolerance, applying messages can be okay but sending messages
-is forbidden in all security models. Applying messages is only dangerous in
-byzantine-fault tolerance security models, since malicious peers could perform a
-DoS attack and overwhelm other nodes with CPU-intensive messages.
-
-*Why can we not send messages, yet?*
-
-This is due to the black box assumption on the underlying cryptography. Signing
-messages and sending them out might reveal information. This could lead to
-security vulnerabilities if we later invoke the same protocol again but with a
-different set of participants, for example. Sending messages with one
-participant set would mean we have to use a fresh P or T if we later change the
-participant set. In the prepare phase, we specifically don't know the
-participant set, yet, thus we should not send messages unless we are okay with
-wasting Ps and Ts.
-
-Even without the black box assumption, we know that cait-sith requires strict
-non-reuse of Ps and Ts. 
-
-*Why should we still care about incoming messages?*
-
-Nodes in the `Prepare` state may receive messages from other nodes that are
-already in the `Running` state. In that case, nodes should either reject
-messages or keep them in a buffer. If rejected, the sender (in `Running` state)
-must retry sending the rejected message. If buffered, the receiver should
-process the buffered messages right after it transitions to the `Running` state.
-
-*Why not skip the Prepare phase and go directly to Running?*
-
-A phase between `init` and `Running` guarantees that as soon as one node is in
-the `Running` phase, no other participant of that protocol is still in `init`.
-
-We need this property for two reasons.
-
-1. To avoid input reuse, we can only enter `Running` when the participant list
-   is immutably decided. But as long as some participants could be in `init`,
-   the list is just a guess. Making it immutable at this point would mean we
-   have to use a fresh P or T on every change of participants set, leading to
-   poor performance and reduced throughput.
-   With the additional phase, we can select a minimal subset of fast responding
-   nodes, which gives better latency and does not waste P and T inputs.
-2. For state sync, this property solves corner cases. Example: When the owner is
-   already done with a pre-signature generation but the peer has not even
-   started the protocol, yet. The owner then sends a sync request, without the
-   triple for that protocol in the list. The peer would than have to delete it
-   and would no longer have it when the delayed `INIT` message arrives. But
-   thanks to the `Prepare` state, we know all participants are at least in the
-   `Prepare` phase and thus have marked the input Triples as `Using` before the
-   owner can even start running the protocol. Hence, once it reaches `done`,
-   every participant has it as `Using`. In that state, peers never delete
-   triples since it knows the protocol is running and it should be expected that
-   the owner may finish faster than the peer.
-
-
-#### Running
-
-In the `Running` state, nodes continuously poke the local message generators and
-exchange messages to progress the protocol.
-
-Messages sent to participants that are offline or reject the message must be
-retried until either the receiver accepts the message or the protocol invocation
-globally times out.
-
-For recovery, we use the
-[Event-Sourcing](https://dev.to/alisamir/understanding-event-sourcing-a-detailed-guide-4cjp)
-pattern, while the protocol is running. The actual latest state is only held in
-memory but the stored events allow to recover it from persisted data.
-
-Specifically, this means tha all received messages during the `Running` state
-must be persisted before they are applied. These can be replayed on boot for
-recovery after a crash. After a protocol finishes, events can be discarded.
-
-Note: Unlike fully event-driven architectures, the MPC network does not need to
-have a separate event store component. The Event-Sourcing pattern is only applied
-locally within one node.
-
-### Owner Transitions
-
-The owner of the protocol invocation progresses the protocol:
-
-- When a new valid request is registered (indexed for the signature protocol,
-  initiated by background task for triple/pre-signature generation)
-    - Select a list of potential participants, based on the own view of which
-      nodes are active and hold the relevant data in their storage.
-    - Asynchronously send an INIT message to all the participants and wait until
-      enough messages have been received. (HTTP success response or explicit
-      OK message back)
-    - Transition to `Prepare` state
-- Once enough INIT messages have been answered with a success response
-    - Wait for finality of the request (for signatures only)
-    - Select participants that responded OK
-    - Send out a START message to all participants, with the list of participants
-    - Transition to `Running` state
-    - Start poking own generator and sending out the corresponding messages
-
-Owners must also handle the following error case:
-- Not enough participants answered the INIT message with an (HTTP success response
-      or explicit OK message back)
-    - Retry, maybe some more participants are online now
-    - After a threshold of retries, switch to a different P or T input that has
-      more active participants.
-
-Other error cases can be handled with a global timeout to abort and retry for
-signatures.
 
 ## Triple and Pre-Signature State Machine
 
