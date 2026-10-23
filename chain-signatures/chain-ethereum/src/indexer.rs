@@ -538,6 +538,49 @@ mod tests {
         finalized_mock.assert_async().await;
     }
 
+    /// An RPC that keeps failing past the client's own retries is retried, not refused.
+    #[tokio::test]
+    async fn sample_chain_id_retries_until_the_rpc_answers() {
+        let mut server = Server::new_async().await;
+        let calls = AtomicU64::new(0);
+        let chain_id_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_chainId"})))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body().expect("request body")).expect("json body");
+                let id = &body["id"];
+                let reply = if calls.fetch_add(1, Ordering::Relaxed) < 4 {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {"code": -32000, "message": "unavailable"}
+                    })
+                } else {
+                    json!({"jsonrpc": "2.0", "id": id, "result": format!("{SEPOLIA_CHAIN_ID:#x}")})
+                };
+                reply.to_string().into_bytes()
+            })
+            .expect(5)
+            .create_async()
+            .await;
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+
+        let chain_id = tokio::time::timeout(
+            Duration::from_secs(10),
+            indexer.sample_chain_id(&CancellationToken::new()),
+        )
+        .await
+        .expect("the chain id should be sampled once the RPC answers");
+
+        assert_eq!(chain_id, Some(SEPOLIA_CHAIN_ID));
+        chain_id_mock.assert_async().await;
+    }
+
     #[tokio::test]
     async fn sample_anchor_fetches_latest_head_in_optimistic_mode() {
         let mut server = Server::new_async().await;
