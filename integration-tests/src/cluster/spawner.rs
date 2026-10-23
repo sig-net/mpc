@@ -166,7 +166,7 @@ pub struct ClusterSpawner {
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
     pub program_address: Option<String>,
-    pub(crate) prestockpile: Option<Prestockpile>,
+    prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
     pub use_midnight: bool,
@@ -268,6 +268,14 @@ impl ClusterSpawner {
     pub fn prestockpile(mut self, multiplier: u32) -> Self {
         self.prestockpile = Some(Prestockpile { multiplier });
         self
+    }
+
+    /// The stockpile `host` applies before the contract starts, which it can only
+    /// do with pregenerated keys.
+    pub(crate) fn host_prestockpile(&self) -> Option<&Prestockpile> {
+        self.prestockpile
+            .as_ref()
+            .filter(|_| self.pregenerated_keys.is_enabled())
     }
 
     fn load_pregenerated_keys(mut self) -> Self {
@@ -468,6 +476,7 @@ impl IntoFuture for ClusterSpawner {
             };
 
             let nodes = self.run().await?;
+            let stockpiled_in_host = self.host_prestockpile().is_some();
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
@@ -486,9 +495,11 @@ impl IntoFuture for ClusterSpawner {
             if self.wait_for_running {
                 cluster.wait().running().nodes_running().await?;
 
-                if let Some(prestockpile) = self.prestockpile {
-                    let stockpiled = self.pregenerated_keys.is_enabled();
-                    cluster.prestockpile(prestockpile, stockpiled).await;
+                if let Some(prestockpile) = &self.prestockpile {
+                    if !stockpiled_in_host {
+                        cluster.stockpile(prestockpile).await;
+                    }
+                    cluster.wait_stockpiled().await;
                 }
             }
 

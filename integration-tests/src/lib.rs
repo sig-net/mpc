@@ -460,12 +460,10 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
         let participants = mpc_contract::primitives::Participants::from(candidates_struct);
         // Stockpile before the contract runs: once it does, each node's first state
         // sync with a peer can prune triples still being inserted.
-        if let Some(prestockpile) = &spawner.prestockpile {
-            if spawner.wait_for_running {
-                ctx.redis
-                    .stockpile_triples(cfg, &participants, prestockpile.multiplier)
-                    .await;
-            }
+        if let Some(prestockpile) = spawner.host_prestockpile() {
+            ctx.redis
+                .stockpile_triples(cfg, &participants, prestockpile.multiplier)
+                .await;
         }
         // Convert secp256k1 public key to NEAR public key format (secp256k1)
         use k256::elliptic_curve::sec1::ToEncodedPoint;

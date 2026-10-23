@@ -366,18 +366,17 @@ impl Cluster {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    /// Waits for the stockpile, stockpiling first unless `host` did before the
-    /// contract started.
-    pub async fn prestockpile(&self, prestockpile: Prestockpile, stockpiled: bool) {
-        if !stockpiled {
-            let participants = self.participants().await.unwrap();
-            self.nodes
-                .ctx()
-                .redis
-                .stockpile_triples(&self.cfg, &participants, prestockpile.multiplier)
-                .await;
-        }
+    pub async fn stockpile(&self, prestockpile: &Prestockpile) {
+        let participants = self.participants().await.unwrap();
+        self.nodes
+            .ctx()
+            .redis
+            .stockpile_triples(&self.cfg, &participants, prestockpile.multiplier)
+            .await;
+    }
 
+    /// Waits until every node owns `min_presignatures` presignatures.
+    pub async fn wait_stockpiled(&self) {
         self.wait()
             .min_mine_presignatures(self.cfg.protocol.presignature.min_presignatures as usize)
             .await
