@@ -165,7 +165,8 @@ fn compute_tron_tx_params_digest(tx: &TronTxParams) -> anyhow::Result<[u8; 32]> 
 mod tests {
     use super::*;
     use crate::test_utils::{
-        sample_record, sample_record_with_partial_access_list, sample_tron_params, tron_record,
+        sample_evm_params, sample_record, sample_record_with_partial_access_list,
+        sample_tron_params, tron_record,
     };
 
     #[test]
@@ -430,7 +431,7 @@ mod tests {
                 "2e2f17aed8b2b6618dd3219fe2904343964140b0681d73cf5c1494884379db00",
             ),
         ] {
-            let mut tx = crate::test_utils::sample_evm_params();
+            let mut tx = sample_evm_params();
             tx.calldata.is_some = is_some;
             tx.calldata.value.no_words = no_words;
             tx.calldata.value.words = vec![[0x11; 32]; usize::from(u16::MAX)];
@@ -462,7 +463,7 @@ mod tests {
                 "47664bbc1405de0d88af438901c6161ad88d246db61fe72c7ef1288164427000",
             ),
         ] {
-            let mut tx = crate::test_utils::sample_evm_params();
+            let mut tx = sample_evm_params();
             tx.calldata.value.no_words = 0;
             tx.calldata.value.words.clear();
             tx.access_list_entry_count = used;
@@ -500,7 +501,7 @@ mod tests {
                 "1a3c3cc6eb756cb0beb291facb7c5704a6fc0731c854e231af4323a8555d9900",
             ),
         ] {
-            let mut tx = crate::test_utils::sample_evm_params();
+            let mut tx = sample_evm_params();
             tx.calldata.value.no_words = 0;
             tx.calldata.value.words.clear();
             tx.access_list_entry_count = 1;
