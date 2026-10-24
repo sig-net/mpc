@@ -748,7 +748,7 @@ mod tests {
 
     fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
         let mut record = sample_record();
-        record.tx_params.nonce = nonce;
+        record.evm_mut().nonce = nonce;
         let rid = crate::hashing::compute_request_id(&record).unwrap();
         (record, rid)
     }
@@ -1916,7 +1916,7 @@ mod tests {
     async fn path_walk_and_conversion_failures_drop_only_the_affected_entry() {
         let (good_record, good_rid) = named_record_and_rid(7);
         let mut bad_record = sample_record();
-        bad_record.tx_params.nonce = 8;
+        bad_record.evm_mut().nonce = 8;
         bad_record.algo = 1;
         let bad_rid = crate::hashing::compute_request_id(&bad_record).unwrap();
         let mut source = FixtureSource::default();

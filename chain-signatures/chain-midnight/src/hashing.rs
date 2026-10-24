@@ -5,28 +5,25 @@ use midnight_transient_crypto::hash::{transient_hash, upgrade_from_transient};
 use midnight_transient_crypto::repr::FieldRepr as _;
 use mpc_compact_hashing::HashDomain;
 
-use crate::records::{EvmType2TxParams, SignBidirectionalRecord};
-use crate::tx::TX_PARAM_TYPE_EVM_TYPE2;
+use crate::records::SignBidirectionalRecord;
+use mpc_primitives::{EvmType2TxParams, TronTxParams, TxParams};
 
 /// Hash `RequestIdPreimageV1`, after its domain tag, from an already decoded
-/// EVM type-2 record.
-///
-/// Reserved signature destination/params and serialization schemas are excluded.
-/// The transaction enters as a digest of its used entries, independent of capacity.
+/// record. The transaction enters as its type's digest of used entries,
+/// independent of capacity.
 pub(crate) fn compute_request_id(record: &SignBidirectionalRecord) -> anyhow::Result<[u8; 32]> {
-    anyhow::ensure!(
-        record.tx_param_type == TX_PARAM_TYPE_EVM_TYPE2,
-        "unsupported tx_param_type {}: request identity requires evmType2 (0)",
-        record.tx_param_type
-    );
+    let tx_params_digest = match &record.tx_params {
+        TxParams::EvmType2(tx) => compute_evm_type2_tx_params_digest_v1(tx)?,
+        TxParams::Tron(tx) => compute_tron_tx_params_digest(tx)?,
+    };
     let preimage = (
         HashDomain::RequestId as u8,
         record.key_version,
         record.sender,
         record.path,
         record.algo,
-        record.tx_param_type,
-        compute_evm_type2_tx_params_digest_v1(&record.tx_params)?,
+        record.tx_params.discriminant(),
+        tx_params_digest,
         record.execution_dest,
     )
         .field_vec();
@@ -120,6 +117,50 @@ fn compute_evm_type2_tx_params_digest_v1(tx: &EvmType2TxParams) -> anyhow::Resul
     Ok(upgrade_from_transient(hash).0)
 }
 
+/// Mirror `calculateTronTxParamsDigestV1` (§7.4): one header fold, then one fold
+/// per used calldata word, the evmType2 shape over the TriggerSmartContract fields.
+/// There is no access list, so the fold chain ends with the words.
+fn compute_tron_tx_params_digest(tx: &TronTxParams) -> anyhow::Result<[u8; 32]> {
+    let no_words = if tx.calldata.is_some {
+        tx.calldata.value.no_words
+    } else {
+        0
+    };
+    let selector = if tx.calldata.is_some {
+        tx.calldata.value.selector
+    } else {
+        [0; 4]
+    };
+    anyhow::ensure!(
+        tx.calldata.value.words.len() <= usize::from(u16::MAX),
+        "calldata capacity exceeds the Compact Uint<16> fold counter"
+    );
+    anyhow::ensure!(
+        usize::from(no_words) <= tx.calldata.value.words.len(),
+        "calldata no_words exceeds capacity"
+    );
+    let mut hash = transient_hash(
+        &(
+            HashDomain::TronTxHeader as u8,
+            tx.ref_block_bytes,
+            tx.ref_block_hash,
+            tx.timestamp,
+            tx.expiration,
+            tx.fee_limit,
+            tx.contract_address,
+            tx.call_value,
+            tx.calldata.is_some,
+            selector,
+            no_words,
+        )
+            .field_vec(),
+    );
+    for word in &tx.calldata.value.words[..usize::from(no_words)] {
+        hash = transient_hash(&(HashDomain::TronTxWord as u8, hash, *word).field_vec());
+    }
+    Ok(upgrade_from_transient(hash).0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,7 +186,7 @@ mod tests {
         record.execution_dest = [0x02; 64];
         record.output_deserialization_schema = vec![0x07; 34];
         record.respond_serialization_schema = vec![0x08; 34];
-        let tx = &mut record.tx_params;
+        let tx = record.evm_mut();
         tx.nonce = 1;
         tx.max_priority_fee_per_gas = 1_000_000_000;
         tx.max_fee_per_gas = 30_000_000_000;
@@ -156,7 +197,7 @@ mod tests {
         tx.calldata.value.no_words = 2;
         tx.calldata.value.words = vec![[0x11; 32], [0x12; 32]];
         tx.access_list_entry_count = 1;
-        tx.access_list = vec![crate::records::EvmAccessListEntry {
+        tx.access_list = vec![mpc_primitives::EvmAccessListEntry {
             address: [0xcc; 20],
             storage_key_count: 2,
             storage_keys: vec![[0x22; 32], [0x23; 32]],
@@ -169,6 +210,58 @@ mod tests {
             hex::encode(compute_request_id(&record).unwrap()),
             "2985be91d1a1191749abaee288eed371d19607e69cec0b43468cb750a9dc8d00"
         );
+    }
+
+    #[test]
+    fn tron_request_id_matches_the_golden_vector() {
+        let params = crate::test_utils::sample_tron_params();
+        let record = crate::test_utils::tron_record(params.clone());
+        assert_eq!(
+            hex::encode(compute_tron_tx_params_digest(&params).unwrap()),
+            "e387f99d546a394b96180956656c7800aae76b96ba459ed87919656a34d33400"
+        );
+        assert_eq!(
+            hex::encode(compute_request_id(&record).unwrap()),
+            "e74c66064dc639e473b095dfcf76eba53297df9b580868b14c382e0e2a901a00"
+        );
+    }
+
+    #[test]
+    fn tron_request_identity_ignores_unused_calldata_capacity() {
+        let mut params = crate::test_utils::sample_tron_params();
+        let original = compute_request_id(&crate::test_utils::tron_record(params.clone())).unwrap();
+        params.calldata.value.words.push([0xa5; 32]);
+        assert_eq!(
+            compute_request_id(&crate::test_utils::tron_record(params)).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn tron_request_identity_binds_every_header_field_and_word() {
+        let base = crate::test_utils::sample_tron_params();
+        let original = compute_request_id(&crate::test_utils::tron_record(base.clone())).unwrap();
+        let cases: &[(&str, fn(&mut mpc_primitives::TronTxParams))] = &[
+            ("ref block bytes", |tx| tx.ref_block_bytes[0] ^= 1),
+            ("ref block hash", |tx| tx.ref_block_hash[7] ^= 1),
+            ("timestamp", |tx| tx.timestamp += 1),
+            ("expiration", |tx| tx.expiration += 1),
+            ("fee limit", |tx| tx.fee_limit += 1),
+            ("contract address", |tx| tx.contract_address[20] ^= 1),
+            ("call value", |tx| tx.call_value += 1),
+            ("calldata selector", |tx| tx.calldata.value.selector[0] ^= 1),
+            ("calldata word", |tx| tx.calldata.value.words[0][31] ^= 1),
+            ("calldata presence", |tx| tx.calldata.is_some = false),
+        ];
+        for (name, mutate) in cases {
+            let mut params = base.clone();
+            mutate(&mut params);
+            assert_ne!(
+                compute_request_id(&crate::test_utils::tron_record(params)).unwrap(),
+                original,
+                "rid must bind {name}"
+            );
+        }
     }
 
     #[test]
@@ -186,53 +279,66 @@ mod tests {
     fn request_identity_binds_transaction_key_sender_and_destination() {
         let record = sample_record_with_partial_access_list();
         let original = compute_request_id(&record).unwrap();
-        let mut changes = vec![record.clone(); 15];
-        changes[0].tx_params.nonce += 1;
-        changes[1].tx_params.max_fee_per_gas += 1;
-        changes[2].key_version += 1;
-        changes[3].path[0] ^= 1;
-        changes[4].sender[0] ^= 1;
-        changes[5].execution_dest[0] ^= 1;
-        changes[6].algo = 1;
-        changes[7].tx_params.calldata.value.selector[0] ^= 1;
-        changes[8].tx_params.calldata.value.words[1][31] ^= 1;
-        changes[9].tx_params.access_list[0].address[0] ^= 1;
-        changes[10].tx_params.access_list[0].storage_keys[2][31] ^= 1;
-        changes[11].tx_params.calldata.value.no_words -= 1;
-        changes[12].tx_params.access_list_entry_count = 0;
-        changes[13].tx_params.access_list[0].storage_key_count -= 1;
-        changes[14].tx_params.calldata.is_some = false;
-        for (index, changed) in changes.iter().enumerate() {
+        let cases: &[(&str, fn(&mut SignBidirectionalRecord))] = &[
+            ("nonce", |r| r.evm_mut().nonce += 1),
+            ("max fee per gas", |r| r.evm_mut().max_fee_per_gas += 1),
+            ("key version", |r| r.key_version += 1),
+            ("path", |r| r.path[0] ^= 1),
+            ("sender", |r| r.sender[0] ^= 1),
+            ("execution destination", |r| r.execution_dest[0] ^= 1),
+            ("algo", |r| r.algo = 1),
+            ("calldata selector", |r| {
+                r.evm_mut().calldata.value.selector[0] ^= 1
+            }),
+            ("unused calldata word", |r| {
+                r.evm_mut().calldata.value.words[1][31] ^= 1
+            }),
+            ("access-list address", |r| {
+                r.evm_mut().access_list[0].address[0] ^= 1
+            }),
+            ("unused storage key", |r| {
+                r.evm_mut().access_list[0].storage_keys[2][31] ^= 1
+            }),
+            ("calldata word count", |r| {
+                r.evm_mut().calldata.value.no_words -= 1
+            }),
+            ("access-list entry count", |r| {
+                r.evm_mut().access_list_entry_count = 0
+            }),
+            ("storage key count", |r| {
+                r.evm_mut().access_list[0].storage_key_count -= 1
+            }),
+            ("calldata presence", |r| {
+                r.evm_mut().calldata.is_some = false
+            }),
+        ];
+        for (name, mutate) in cases {
+            let mut changed = record.clone();
+            mutate(&mut changed);
             assert_ne!(
-                compute_request_id(changed).unwrap(),
+                compute_request_id(&changed).unwrap(),
                 original,
-                "case {index}"
+                "rid must bind {name}"
             );
         }
-        let mut unsupported = record;
-        unsupported.tx_param_type = 1;
-        assert!(compute_request_id(&unsupported)
-            .unwrap_err()
-            .to_string()
-            .contains("tx_param_type"));
     }
 
     #[test]
     fn request_identity_ignores_unused_capacity_and_absent_calldata_body() {
         let mut record = sample_record_with_partial_access_list();
-        record.tx_params.calldata.value.no_words = 1;
-        record.tx_params.access_list[0].storage_key_count = 1;
+        record.evm_mut().calldata.value.no_words = 1;
+        record.evm_mut().access_list[0].storage_key_count = 1;
         let mut changes = vec![record.clone(); 7];
-        changes[0].tx_params.calldata.value.words[1][31] ^= 1;
-        changes[1].tx_params.access_list[1].address[0] = 1;
-        changes[2].tx_params.access_list[1].storage_key_count = u8::MAX;
-        changes[3].tx_params.access_list[1].storage_keys[1][31] = 1;
-        changes[4].tx_params.access_list[0].storage_keys[2][31] = 1;
-        changes[5].tx_params.calldata.value.words.push([0xa5; 32]);
+        changes[0].evm_mut().calldata.value.words[1][31] ^= 1;
+        changes[1].evm_mut().access_list[1].address[0] = 1;
+        changes[2].evm_mut().access_list[1].storage_key_count = u8::MAX;
+        changes[3].evm_mut().access_list[1].storage_keys[1][31] = 1;
+        changes[4].evm_mut().access_list[0].storage_keys[2][31] = 1;
+        changes[5].evm_mut().calldata.value.words.push([0xa5; 32]);
         changes[6]
-            .tx_params
+            .evm_mut()
             .access_list
-            .push(record.tx_params.access_list[0].clone());
+            .push(record.evm().access_list[0].clone());
         let original = compute_request_id(&record).unwrap();
         let transaction = crate::tx::serialized_transaction(&record).unwrap();
         for (index, changed) in changes.iter().enumerate() {
@@ -247,21 +353,27 @@ mod tests {
             );
         }
         let mut compact = record.clone();
-        compact.tx_params.calldata.value.words.truncate(1);
-        compact.tx_params.access_list.truncate(1);
-        compact.tx_params.access_list[0].storage_keys.truncate(1);
+        {
+            let tx = compact.evm_mut();
+            tx.calldata.value.words.truncate(1);
+            tx.access_list.truncate(1);
+            tx.access_list[0].storage_keys.truncate(1);
+        }
         assert_eq!(compute_request_id(&compact).unwrap(), original);
         assert_eq!(
             crate::tx::serialized_transaction(&compact).unwrap(),
             transaction
         );
 
-        record.tx_params.calldata.is_some = false;
+        record.evm_mut().calldata.is_some = false;
         let original = compute_request_id(&record).unwrap();
         let transaction = crate::tx::serialized_transaction(&record).unwrap();
-        record.tx_params.calldata.value.selector = [0xff; 4];
-        record.tx_params.calldata.value.no_words = u16::MAX;
-        record.tx_params.calldata.value.words.clear();
+        {
+            let tx = record.evm_mut();
+            tx.calldata.value.selector = [0xff; 4];
+            tx.calldata.value.no_words = u16::MAX;
+            tx.calldata.value.words.clear();
+        }
         assert_eq!(compute_request_id(&record).unwrap(), original);
         assert_eq!(
             crate::tx::serialized_transaction(&record).unwrap(),
@@ -272,19 +384,22 @@ mod tests {
     #[test]
     fn request_identity_rejects_used_counts_beyond_capacity() {
         let record = sample_record_with_partial_access_list();
-        let mut changes = vec![record; 3];
-        changes[0].tx_params.calldata.value.no_words = 3;
-        changes[1].tx_params.access_list_entry_count = 3;
-        changes[2].tx_params.access_list[0].storage_key_count = 4;
-        for (changed, expected) in changes.iter().zip([
-            "calldata no_words",
-            "access_list_entry_count",
-            "storage_key_count",
-        ]) {
-            assert!(compute_request_id(changed)
-                .unwrap_err()
-                .to_string()
-                .contains(expected));
+        let cases: &[(&str, fn(&mut SignBidirectionalRecord))] = &[
+            ("calldata no_words", |r| {
+                r.evm_mut().calldata.value.no_words = 3
+            }),
+            ("access_list_entry_count", |r| {
+                r.evm_mut().access_list_entry_count = 3
+            }),
+            ("storage_key_count", |r| {
+                r.evm_mut().access_list[0].storage_key_count = 4
+            }),
+        ];
+        for (expected, mutate) in cases {
+            let mut changed = record.clone();
+            mutate(&mut changed);
+            let err = compute_request_id(&changed).unwrap_err().to_string();
+            assert!(err.contains(expected), "{expected}: {err}");
         }
     }
 
@@ -312,7 +427,7 @@ mod tests {
                 "2e2f17aed8b2b6618dd3219fe2904343964140b0681d73cf5c1494884379db00",
             ),
         ] {
-            let mut tx = sample_record().tx_params;
+            let mut tx = crate::test_utils::sample_evm_params();
             tx.calldata.is_some = is_some;
             tx.calldata.value.no_words = no_words;
             tx.calldata.value.words = vec![[0x11; 32]; usize::from(u16::MAX)];
@@ -344,11 +459,11 @@ mod tests {
                 "47664bbc1405de0d88af438901c6161ad88d246db61fe72c7ef1288164427000",
             ),
         ] {
-            let mut tx = sample_record().tx_params;
+            let mut tx = crate::test_utils::sample_evm_params();
             tx.calldata.value.no_words = 0;
             tx.calldata.value.words.clear();
             tx.access_list_entry_count = used;
-            let entry = crate::records::EvmAccessListEntry {
+            let entry = mpc_primitives::EvmAccessListEntry {
                 address: [0xef; 20],
                 storage_key_count: 0,
                 storage_keys: Vec::new(),
@@ -382,11 +497,11 @@ mod tests {
                 "1a3c3cc6eb756cb0beb291facb7c5704a6fc0731c854e231af4323a8555d9900",
             ),
         ] {
-            let mut tx = sample_record().tx_params;
+            let mut tx = crate::test_utils::sample_evm_params();
             tx.calldata.value.no_words = 0;
             tx.calldata.value.words.clear();
             tx.access_list_entry_count = 1;
-            tx.access_list = vec![crate::records::EvmAccessListEntry {
+            tx.access_list = vec![mpc_primitives::EvmAccessListEntry {
                 address: [0xef; 20],
                 storage_key_count: used_keys,
                 storage_keys: vec![[0x22; 32]; usize::from(u8::MAX)],
@@ -440,7 +555,7 @@ mod tests {
                 vector["name"]
             );
             assert_eq!(
-                hex::encode(compute_evm_type2_tx_params_digest_v1(&record.tx_params).unwrap()),
+                hex::encode(compute_evm_type2_tx_params_digest_v1(record.evm()).unwrap()),
                 vector["txParamsDigest"].as_str().unwrap(),
                 "{}",
                 vector["name"]

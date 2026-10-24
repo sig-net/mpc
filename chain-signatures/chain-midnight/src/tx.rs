@@ -7,38 +7,33 @@ use k256::Scalar;
 use mpc_chain_integration_core::utils::hashing::hash_payload;
 use mpc_primitives::ScalarExt as _;
 
-use crate::records::{CompactMaybe, EvmCalldata, EvmType2TxParams, SignBidirectionalRecord};
+use crate::records::SignBidirectionalRecord;
+use mpc_primitives::{CompactMaybe, EvmCalldata, EvmType2TxParams, TxParams};
 
-/// `TxParamType::evmType2`, the only decomposition the contract defines (the other
-/// discriminant is reserved).
-pub(crate) const TX_PARAM_TYPE_EVM_TYPE2: u8 = 0;
-
-impl TryFrom<&EvmType2TxParams> for TxEip1559 {
-    type Error = anyhow::Error;
-
-    fn try_from(params: &EvmType2TxParams) -> anyhow::Result<Self> {
-        Ok(Self {
-            chain_id: params.chain_id,
-            nonce: params.nonce,
-            gas_limit: params.gas_limit,
-            max_fee_per_gas: params.max_fee_per_gas,
-            max_priority_fee_per_gas: params.max_priority_fee_per_gas,
-            to: TxKind::Call(Address::from(params.to)),
-            value: U256::from(params.value),
-            access_list: assemble_access_list(params),
-            input: assemble_calldata(&params.calldata)?,
-        })
-    }
+fn to_eip1559(params: &EvmType2TxParams) -> anyhow::Result<TxEip1559> {
+    Ok(TxEip1559 {
+        chain_id: params.chain_id,
+        nonce: params.nonce,
+        gas_limit: params.gas_limit,
+        max_fee_per_gas: params.max_fee_per_gas,
+        max_priority_fee_per_gas: params.max_priority_fee_per_gas,
+        to: TxKind::Call(Address::from(params.to)),
+        value: U256::from(params.value),
+        access_list: assemble_access_list(params),
+        input: assemble_calldata(&params.calldata)?,
+    })
 }
 
 /// Assembles the unsigned EIP-1559 transaction a verified record describes.
 pub fn to_unsigned_tx(record: &SignBidirectionalRecord) -> anyhow::Result<TxEip1559> {
-    anyhow::ensure!(
-        record.tx_param_type == TX_PARAM_TYPE_EVM_TYPE2,
-        "unsupported tx_param_type {}: only evmType2 (0) assembles into a transaction",
-        record.tx_param_type
-    );
-    TxEip1559::try_from(&record.tx_params)
+    match &record.tx_params {
+        TxParams::EvmType2(params) => to_eip1559(params),
+        // The protobuf raw assembly and sha256 payload dispatch for Tron land with
+        // the rest of PR C; until then a Tron record cannot become a signing payload.
+        TxParams::Tron(_) => anyhow::bail!(
+            "tx_params is tron, which assembles a TriggerSmartContract raw, not an EVM transaction"
+        ),
+    }
 }
 
 /// The RLP-encoded unsigned signing payload (`0x02 ‖ rlp(fields)`): what
@@ -101,16 +96,15 @@ fn assemble_access_list(params: &EvmType2TxParams) -> AccessList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{sample_record, sample_record_with_partial_access_list};
+    use crate::test_utils::sample_record_with_partial_access_list;
 
     #[test]
-    fn to_unsigned_tx_requires_evm_type2_param_type() {
-        let mut record = sample_record();
-        record.tx_param_type = 1;
+    fn to_unsigned_tx_rejects_tron_params() {
+        let record = crate::test_utils::sample_tron_record();
         let err = to_unsigned_tx(&record)
-            .expect_err("the reserved tx_param_type must not assemble as evmType2")
+            .expect_err("tron params must not assemble as an EVM transaction")
             .to_string();
-        assert!(err.contains("tx_param_type"), "err: {err}");
+        assert!(err.contains("tron"), "err: {err}");
     }
 
     #[test]
@@ -120,14 +114,14 @@ mod tests {
         // both levels, which clamps.
         let mut record = sample_record_with_partial_access_list();
 
-        record.tx_params.calldata.value.no_words = 3; // capacity is 2
+        record.evm_mut().calldata.value.no_words = 3; // capacity is 2
         let err = serialized_transaction(&record)
             .expect_err("a word count past capacity must error, matching the reference throw")
             .to_string();
         assert!(err.contains("no_words"), "err: {err}");
-        record.tx_params.calldata.value.no_words = 2;
+        record.evm_mut().calldata.value.no_words = 2;
 
-        record.tx_params.access_list_entry_count = 9; // capacity is 2
+        record.evm_mut().access_list_entry_count = 9; // capacity is 2
         let tx = to_unsigned_tx(&record).expect("an entry count past capacity clamps");
         assert_eq!(
             tx.access_list.0.len(),
@@ -135,8 +129,8 @@ mod tests {
             "slice semantics: every present entry, no invented ones"
         );
 
-        record.tx_params.access_list_entry_count = 1;
-        record.tx_params.access_list[0].storage_key_count = 9; // capacity is 3
+        record.evm_mut().access_list_entry_count = 1;
+        record.evm_mut().access_list[0].storage_key_count = 9; // capacity is 3
         let tx = to_unsigned_tx(&record).expect("a key count past capacity clamps");
         assert_eq!(
             tx.access_list.0[0].storage_keys.len(),
@@ -150,7 +144,7 @@ mod tests {
         // With an entry count of 0 no entry is emitted, so the key-level slice never
         // runs there.
         let mut record = sample_record_with_partial_access_list();
-        record.tx_params.access_list[0].storage_key_count = 0; // key capacity is 3
+        record.evm_mut().access_list[0].storage_key_count = 0; // key capacity is 3
         let tx = to_unsigned_tx(&record).expect("assembles");
         assert_eq!(
             tx.access_list.0.len(),

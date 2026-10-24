@@ -1,14 +1,15 @@
 //! Test-only record builders shared by the unit tests.
 
-use crate::records::{
-    CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams, SignBidirectionalRecord,
-};
+use crate::records::SignBidirectionalRecord;
 use midnight_base_crypto::fab::{
     AlignedValue, Alignment, AlignmentAtom, AlignmentSegment, Value, ValueAtom,
 };
 use midnight_onchain_state::state::StateValue;
 use midnight_storage::storage::{Array, HashMap};
 use midnight_storage::DefaultDB;
+use mpc_primitives::{
+    CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams, TronTxParams, TxParams,
+};
 
 use crate::reader::Node;
 
@@ -85,37 +86,41 @@ pub(crate) fn trim(bytes: &[u8]) -> Vec<u8> {
 /// trailing zeros dropped, a false Boolean the empty atom and a true one `[1]`,
 /// integers little-endian trimmed.
 pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>> {
-    let tx = &record.tx_params;
     let mut atoms: Vec<Vec<u8>> = vec![
         trim(&[record.key_version]),
         trim(&record.sender),
         trim(&record.path),
         trim(&[record.algo]),
-        trim(&[record.tx_param_type]),
-        trim(&tx.chain_id.to_le_bytes()),
-        trim(&tx.nonce.to_le_bytes()),
-        trim(&tx.max_priority_fee_per_gas.to_le_bytes()),
-        trim(&tx.max_fee_per_gas.to_le_bytes()),
-        trim(&tx.gas_limit.to_le_bytes()),
-        trim(&tx.to),
-        trim(&tx.value.to_le_bytes()),
-        if tx.calldata.is_some {
-            vec![1]
-        } else {
-            Vec::new()
-        },
-        trim(&tx.calldata.value.selector),
-        trim(&tx.calldata.value.no_words.to_le_bytes()),
+        trim(&[record.tx_params.discriminant()]),
     ];
-    for word in &tx.calldata.value.words {
-        atoms.push(trim(word));
-    }
-    atoms.push(trim(&[tx.access_list_entry_count]));
-    for entry in &tx.access_list {
-        atoms.push(trim(&entry.address));
-        atoms.push(trim(&[entry.storage_key_count]));
-        for key in &entry.storage_keys {
-            atoms.push(trim(key));
+    match &record.tx_params {
+        TxParams::EvmType2(tx) => {
+            atoms.push(trim(&tx.chain_id.to_le_bytes()));
+            atoms.push(trim(&tx.nonce.to_le_bytes()));
+            atoms.push(trim(&tx.max_priority_fee_per_gas.to_le_bytes()));
+            atoms.push(trim(&tx.max_fee_per_gas.to_le_bytes()));
+            atoms.push(trim(&tx.gas_limit.to_le_bytes()));
+            atoms.push(trim(&tx.to));
+            atoms.push(trim(&tx.value.to_le_bytes()));
+            push_calldata_atoms(&mut atoms, &tx.calldata);
+            atoms.push(trim(&[tx.access_list_entry_count]));
+            for entry in &tx.access_list {
+                atoms.push(trim(&entry.address));
+                atoms.push(trim(&[entry.storage_key_count]));
+                for key in &entry.storage_keys {
+                    atoms.push(trim(key));
+                }
+            }
+        }
+        TxParams::Tron(tx) => {
+            atoms.push(trim(&tx.ref_block_bytes));
+            atoms.push(trim(&tx.ref_block_hash));
+            atoms.push(trim(&tx.timestamp.to_le_bytes()));
+            atoms.push(trim(&tx.expiration.to_le_bytes()));
+            atoms.push(trim(&tx.fee_limit.to_le_bytes()));
+            atoms.push(trim(&tx.contract_address));
+            atoms.push(trim(&tx.call_value.to_le_bytes()));
+            push_calldata_atoms(&mut atoms, &tx.calldata);
         }
     }
     atoms.push(trim(&record.execution_dest));
@@ -126,33 +131,60 @@ pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>
     atoms
 }
 
+fn push_calldata_atoms(atoms: &mut Vec<Vec<u8>>, calldata: &CompactMaybe<EvmCalldata>) {
+    atoms.push(if calldata.is_some {
+        vec![1]
+    } else {
+        Vec::new()
+    });
+    atoms.push(trim(&calldata.value.selector));
+    atoms.push(trim(&calldata.value.no_words.to_le_bytes()));
+    for word in &calldata.value.words {
+        atoms.push(trim(word));
+    }
+}
+
 /// The width the contract declares for each atom of a record, in atom order. The wire
 /// carries this beside the atoms, so a fixture without it is not a record cell.
 pub(crate) fn widths_from_record(record: &SignBidirectionalRecord) -> Vec<u32> {
-    let tx = &record.tx_params;
     let mut widths: Vec<u32> = vec![
         1,  // key_version
         32, // sender
         32, // path
         1,  // algo
         1,  // tx_param_type
-        8,  // chain_id
-        8,  // nonce
-        16, // max_priority_fee_per_gas
-        16, // max_fee_per_gas
-        8,  // gas_limit
-        20, // to
-        16, // value
-        1,  // calldata.is_some
-        4,  // calldata.selector
-        2,  // calldata.no_words
     ];
-    widths.extend(std::iter::repeat_n(32, tx.calldata.value.words.len()));
-    widths.push(1); // access_list_entry_count
-    for entry in &tx.access_list {
-        widths.push(20);
-        widths.push(1);
-        widths.extend(std::iter::repeat_n(32, entry.storage_keys.len()));
+    match &record.tx_params {
+        TxParams::EvmType2(tx) => {
+            widths.extend([
+                8,  // chain_id
+                8,  // nonce
+                16, // max_priority_fee_per_gas
+                16, // max_fee_per_gas
+                8,  // gas_limit
+                20, // to
+                16, // value
+            ]);
+            push_calldata_widths(&mut widths, &tx.calldata);
+            widths.push(1); // access_list_entry_count
+            for entry in &tx.access_list {
+                widths.push(20);
+                widths.push(1);
+                widths.extend(std::iter::repeat_n(32, entry.storage_keys.len()));
+            }
+        }
+        TxParams::Tron(tx) => {
+            widths.extend([
+                2,  // ref_block_bytes
+                8,  // ref_block_hash
+                8,  // timestamp
+                8,  // expiration
+                8,  // fee_limit
+                21, // contract_address
+                8,  // call_value
+            ]);
+            push_calldata_widths(&mut widths, &tx.calldata);
+        }
     }
     widths.push(64); // execution_dest
     widths.push(1); // signature_dest
@@ -160,6 +192,15 @@ pub(crate) fn widths_from_record(record: &SignBidirectionalRecord) -> Vec<u32> {
     widths.push(record.output_deserialization_schema.len() as u32);
     widths.push(record.respond_serialization_schema.len() as u32);
     widths
+}
+
+fn push_calldata_widths(widths: &mut Vec<u32>, calldata: &CompactMaybe<EvmCalldata>) {
+    widths.extend([
+        1, // calldata.is_some
+        4, // calldata.selector
+        2, // calldata.no_words
+    ]);
+    widths.extend(std::iter::repeat_n(32, calldata.value.words.len()));
 }
 
 pub(crate) fn cell_from_atoms(atoms: &[Vec<u8>], widths: &[u32]) -> Node {
@@ -268,9 +309,33 @@ fn ascii_padded_vec(text: &[u8], width: usize) -> Vec<u8> {
     out
 }
 
-/// The canonical record the unit tests build on: sender `0xab * 32`, path
-/// `"caller-path"`, one used calldata word, no access list. The smallest shape that
-/// still exercises every capacity-scaled vector.
+/// The canonical evmType2 payload the unit tests build on: chain id 31337,
+/// nonce 3, one used calldata word, no access list. The smallest shape that still
+/// exercises every capacity-scaled vector.
+pub(crate) fn sample_evm_params() -> EvmType2TxParams {
+    EvmType2TxParams {
+        chain_id: 31337,
+        nonce: 3,
+        max_priority_fee_per_gas: 1,
+        max_fee_per_gas: 2,
+        gas_limit: 21000,
+        to: [0xcd; 20],
+        value: 5,
+        calldata: CompactMaybe {
+            is_some: true,
+            value: EvmCalldata {
+                selector: [0xca, 0x11, 0xab, 0x1e],
+                no_words: 1,
+                words: vec![[0x11; 32]],
+            },
+        },
+        access_list_entry_count: 0,
+        access_list: Vec::new(),
+    }
+}
+
+/// The canonical record the unit tests build on: [`sample_evm_params`] lifted
+/// into the record container.
 pub(crate) fn sample_record() -> SignBidirectionalRecord {
     SignBidirectionalRecord {
         sender: [0xab; 32],
@@ -279,29 +344,78 @@ pub(crate) fn sample_record() -> SignBidirectionalRecord {
         algo: 0,
         signature_dest: 0,
         params: [0u8; 64],
-        tx_param_type: 0,
-        tx_params: EvmType2TxParams {
-            chain_id: 31337,
-            nonce: 3,
-            max_priority_fee_per_gas: 1,
-            max_fee_per_gas: 2,
-            gas_limit: 21000,
-            to: [0xcd; 20],
-            value: 5,
-            calldata: CompactMaybe {
-                is_some: true,
-                value: EvmCalldata {
-                    selector: [0xca, 0x11, 0xab, 0x1e],
-                    no_words: 1,
-                    words: vec![[0x11; 32]],
-                },
-            },
-            access_list_entry_count: 0,
-            access_list: Vec::new(),
-        },
+        tx_params: TxParams::EvmType2(sample_evm_params()),
         execution_dest: ascii_padded(b"eip155:31337"),
         output_deserialization_schema: ascii_padded_vec(b"uint256", 34),
         respond_serialization_schema: Vec::new(),
+    }
+}
+
+/// The tron counterpart of `sample_evm_params`: same sender and path via
+/// [`tron_record`], reference fields from a plausible block, one used calldata word
+/// so the capacity-scaled vector is exercised.
+pub(crate) fn sample_tron_params() -> TronTxParams {
+    TronTxParams {
+        ref_block_bytes: [0x27, 0x10],
+        ref_block_hash: [0x42; 8],
+        timestamp: 1_728_000_000_000,
+        expiration: 1_728_000_000_000 + 60_000,
+        fee_limit: 1_000_000_000,
+        contract_address: {
+            let mut address = [0xcd; 21];
+            address[0] = 0x41;
+            address
+        },
+        call_value: 0,
+        calldata: CompactMaybe {
+            is_some: true,
+            value: EvmCalldata {
+                selector: [0xa9, 0x05, 0x9c, 0xbb],
+                no_words: 1,
+                words: vec![[0x33; 32]],
+            },
+        },
+    }
+}
+
+/// The tron counterpart of [`evm_record`], with `execution_dest` naming Tron and
+/// empty schemas.
+pub(crate) fn tron_record(params: TronTxParams) -> SignBidirectionalRecord {
+    SignBidirectionalRecord {
+        sender: [0xab; 32],
+        key_version: 1,
+        path: ascii_padded(b"caller-path"),
+        algo: 0,
+        signature_dest: 0,
+        params: [0u8; 64],
+        tx_params: TxParams::Tron(params),
+        execution_dest: ascii_padded(b"tron:mainnet"),
+        output_deserialization_schema: Vec::new(),
+        respond_serialization_schema: Vec::new(),
+    }
+}
+
+/// The tron counterpart of `sample_record`.
+pub(crate) fn sample_tron_record() -> SignBidirectionalRecord {
+    tron_record(sample_tron_params())
+}
+
+/// Test-only typed access to a record's evmType2 payload. Panics on a tron
+/// record, which no evm-shape test builds.
+#[cfg(test)]
+impl SignBidirectionalRecord {
+    pub(crate) fn evm(&self) -> &EvmType2TxParams {
+        let TxParams::EvmType2(params) = &self.tx_params else {
+            panic!("expected an evmType2 record")
+        };
+        params
+    }
+
+    pub(crate) fn evm_mut(&mut self) -> &mut EvmType2TxParams {
+        let TxParams::EvmType2(params) = &mut self.tx_params else {
+            panic!("expected an evmType2 record")
+        };
+        params
     }
 }
 
@@ -309,7 +423,7 @@ pub(crate) fn sample_record() -> SignBidirectionalRecord {
 /// `REQUEST_FIXED_VALUE_ATOMS`. This is the plain-transfer shape.
 pub(crate) fn minimal_record() -> SignBidirectionalRecord {
     let mut record = sample_record();
-    record.tx_params.calldata = CompactMaybe {
+    record.evm_mut().calldata = CompactMaybe {
         is_some: false,
         value: EvmCalldata {
             selector: [0; 4],
@@ -317,16 +431,16 @@ pub(crate) fn minimal_record() -> SignBidirectionalRecord {
             words: Vec::new(),
         },
     };
-    record.tx_params.access_list_entry_count = 0;
-    record.tx_params.access_list = Vec::new();
+    record.evm_mut().access_list_entry_count = 0;
+    record.evm_mut().access_list = Vec::new();
     record
 }
 
 /// `sample_record` carrying an access list at capacity with every slot unused.
 pub(crate) fn sample_record_with_unused_access_list() -> SignBidirectionalRecord {
     let mut record = sample_record();
-    record.tx_params.access_list_entry_count = 0;
-    record.tx_params.access_list = vec![
+    record.evm_mut().access_list_entry_count = 0;
+    record.evm_mut().access_list = vec![
         EvmAccessListEntry {
             address: [0u8; 20],
             storage_key_count: 0,
@@ -341,10 +455,11 @@ pub(crate) fn sample_record_with_unused_access_list() -> SignBidirectionalRecord
 /// 2 calldata words, 2 access-list entries, 3 storage keys each.
 pub(crate) fn sample_record_with_partial_access_list() -> SignBidirectionalRecord {
     let mut record = sample_record();
-    record.tx_params.calldata.value.no_words = 2;
-    record.tx_params.calldata.value.words = vec![[0x11; 32], [0x22; 32]];
-    record.tx_params.access_list_entry_count = 1;
-    record.tx_params.access_list = vec![
+    let tx = record.evm_mut();
+    tx.calldata.value.no_words = 2;
+    tx.calldata.value.words = vec![[0x11; 32], [0x22; 32]];
+    tx.access_list_entry_count = 1;
+    tx.access_list = vec![
         EvmAccessListEntry {
             address: [0xef; 20],
             storage_key_count: 3,
