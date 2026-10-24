@@ -58,6 +58,8 @@ pub struct RespondBidirectionalEvent {
     /// Midnight's published metadata is untrusted until matched to the signed response.
     /// Legacy source-chain integrations omit it; Midnight requires it for completion.
     pub attestation: Option<crate::PublishedAttestation>,
+    /// The signed output, on chains whose event publishes it. Untrusted until verified.
+    pub output: Option<crate::RespondBidirectionalSerializedOutput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

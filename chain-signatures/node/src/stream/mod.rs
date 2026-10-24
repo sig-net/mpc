@@ -32,6 +32,9 @@ pub struct StreamContext {
     /// Overrides the failover schedule's observe lag; `None` is production. Fixtures
     /// pin it.
     pub observe_lag: Option<Duration>,
+    /// The chain id of the Ethereum network this node executes on; `None` when
+    /// Ethereum is not configured, which skips the admission check on it.
+    pub ethereum_chain_id: Option<u64>,
 }
 
 impl StreamContext {
@@ -54,7 +57,13 @@ impl StreamContext {
             checkpoints_rx,
             caught_up: false,
             observe_lag: None,
+            ethereum_chain_id: None,
         }
+    }
+
+    pub fn with_ethereum_chain_id(mut self, chain_id: Option<u64>) -> Self {
+        self.ethereum_chain_id = chain_id;
+        self
     }
 
     /// Pin the publish failover schedule's observe lag, for fixtures that assert
@@ -96,6 +105,8 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 return Ok(());
             }
             ctx.caught_up = true;
+            // Set before the requeue scan, so an entry that misses the scan sees it.
+            ctx.backlog.set_caught_up(chain, true);
 
             requeue_pending_sign_requests(ctx, chain)
                 .await

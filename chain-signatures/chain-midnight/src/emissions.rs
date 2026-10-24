@@ -86,7 +86,7 @@ fn log_items<P: ProofKind<DefaultDB>>(
     transcript: &Transcript<DefaultDB>,
 ) -> anyhow::Result<Vec<VersionedLogItem<DefaultDB>>> {
     let program = Vec::from(&transcript.program);
-    // Live ingestion establishes TxApplied first; transaction normalization is
+    // Live ingestion establishes the node status first; transaction normalization is
     // the ledger's responsibility. Only constrain what we can replay correctly.
     // Noops and checkpoints only consume gas during VM execution; they cannot
     // observe or change the stack, state, effects or logs. Ignore them for shape
@@ -205,12 +205,43 @@ pub fn emissions_of_call<P: ProofKind<DefaultDB>>(
     Ok(emissions)
 }
 
+/// A fallible singleton phase [`partial_success_emissions_in`] leaves out, and why.
+#[derive(Debug)]
+pub struct SkippedFallibleCall {
+    pub call_index: u32,
+    pub physical_segment: u16,
+    pub reason: anyhow::Error,
+}
+
 /// Extract only after the caller establishes that the whole transaction applied.
-/// A partial-success transaction cannot use this path: its failed phases must not emit.
+/// A partial-success transaction uses [`partial_success_emissions_in`].
 pub fn emissions_in(
     tx: &DecodedTransaction,
     singleton: &[u8; 32],
 ) -> anyhow::Result<Vec<SingletonCallEmissions>> {
+    let (decoded, skipped) = decode_singleton_calls(tx, singleton, false)?;
+    debug_assert!(skipped.is_empty());
+    Ok(decoded)
+}
+
+/// Extract from a transaction whose node status is `TxPartialSuccess`, which does not say
+/// which fallible segments committed. Guaranteed phases committed and decode as in
+/// [`emissions_in`]. A fallible phase keeps only its notifications, which the indexer
+/// signs only when the caller's state holds the request and did not at the parent block;
+/// its responses have no such check. A fallible phase that does not decode may never have run, so it is skipped
+/// instead of failing the block.
+pub fn partial_success_emissions_in(
+    tx: &DecodedTransaction,
+    singleton: &[u8; 32],
+) -> anyhow::Result<(Vec<SingletonCallEmissions>, Vec<SkippedFallibleCall>)> {
+    decode_singleton_calls(tx, singleton, true)
+}
+
+fn decode_singleton_calls(
+    tx: &DecodedTransaction,
+    singleton: &[u8; 32],
+    partial_success: bool,
+) -> anyhow::Result<(Vec<SingletonCallEmissions>, Vec<SkippedFallibleCall>)> {
     let all_calls: Vec<_> = tx.calls().collect();
     let mut calls = all_calls
         .iter()
@@ -229,6 +260,7 @@ pub fn emissions_in(
     // sorting physical segments numerically and retaining action order within each.
     calls.sort_by_key(|(segment, call_index, _)| (*segment, *call_index));
     let mut decoded = Vec::new();
+    let mut skipped = Vec::new();
     for phase in [TranscriptPhase::Guaranteed, TranscriptPhase::Fallible] {
         for (physical_segment, call_index, call) in &calls {
             let transcript = match phase {
@@ -236,9 +268,39 @@ pub fn emissions_in(
                 TranscriptPhase::Fallible => call.fallible_transcript.as_deref(),
             };
             let emissions = if let Some(transcript) = transcript {
-                emissions_of_transcript(call, transcript).with_context(|| {
+                let emissions = emissions_of_transcript(call, transcript).with_context(|| {
                     format!("singleton call {call_index}, segment {physical_segment}, {phase:?}")
-                })?
+                });
+                if partial_success && phase == TranscriptPhase::Fallible {
+                    let mut skip = |reason| {
+                        skipped.push(SkippedFallibleCall {
+                            call_index: *call_index,
+                            physical_segment: *physical_segment,
+                            reason,
+                        })
+                    };
+                    let (notifications, responses): (Vec<_>, Vec<_>) = match emissions {
+                        Ok(emissions) => emissions
+                            .into_iter()
+                            .partition(|emission| emission.kind == EmissionKind::SignBidirectional),
+                        Err(reason) => {
+                            skip(reason);
+                            continue;
+                        }
+                    };
+                    if !responses.is_empty() {
+                        skip(anyhow::anyhow!(
+                            "{} response emissions in a fallible phase",
+                            responses.len()
+                        ));
+                        if notifications.is_empty() {
+                            continue;
+                        }
+                    }
+                    notifications
+                } else {
+                    emissions?
+                }
             } else if phase == TranscriptPhase::Guaranteed && call.fallible_transcript.is_none() {
                 Vec::new()
             } else {
@@ -253,7 +315,7 @@ pub fn emissions_in(
             });
         }
     }
-    Ok(decoded)
+    Ok((decoded, skipped))
 }
 
 #[cfg(test)]
@@ -1119,6 +1181,108 @@ mod tests {
                 .collect();
             assert_eq!(decoded, callers, "{name}: direct caller");
         }
+    }
+
+    #[test]
+    fn a_partial_success_keeps_only_notifications_from_fallible_phases() {
+        let both = [
+            emit_ops(SIGN_BIDIRECTIONAL_EVENT, FALLIBLE),
+            emit_ops(SIGNATURE_RESPONDED_EVENT, FALLIBLE),
+        ]
+        .concat();
+        let tx = transaction(vec![
+            call(
+                SINGLETON,
+                Some(emit_ops(RESPOND_BIDIRECTIONAL_EVENT, GUARANTEED)),
+                Some(both),
+            ),
+            call(
+                SINGLETON,
+                None,
+                Some(emit_ops(RESPOND_BIDIRECTIONAL_EVENT, FALLIBLE)),
+            ),
+        ]);
+
+        let (decoded, skipped) = partial_success_emissions_in(&tx, &SINGLETON).unwrap();
+
+        assert_eq!(
+            decoded,
+            vec![
+                SingletonCallEmissions {
+                    call_index: 0,
+                    caller: None,
+                    physical_segment: 1,
+                    phase: TranscriptPhase::Guaranteed,
+                    emissions: vec![Emission {
+                        kind: EmissionKind::RespondBidirectional,
+                        payload: GUARANTEED,
+                    }],
+                },
+                SingletonCallEmissions {
+                    call_index: 0,
+                    caller: None,
+                    physical_segment: 1,
+                    phase: TranscriptPhase::Fallible,
+                    emissions: vec![Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: FALLIBLE,
+                    }],
+                },
+            ]
+        );
+        assert_eq!(
+            skipped
+                .iter()
+                .map(|s| (s.call_index, s.physical_segment))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (1, 1)]
+        );
+        assert!(skipped
+            .iter()
+            .all(|s| format!("{:#}", s.reason).contains("response")));
+        assert_eq!(
+            emissions_in(&tx, &SINGLETON).unwrap().len(),
+            3,
+            "a fully applied transaction keeps every emission"
+        );
+    }
+
+    #[test]
+    fn a_partial_success_skips_an_undecodable_fallible_phase_but_not_a_guaranteed_one() {
+        let mut bad = transcript(emit_ops(SIGN_BIDIRECTIONAL_EVENT, GUARANTEED));
+        bad.effects.unshielded_mints = HashMap::new().insert(Default::default(), 1);
+        let mut rolled_back = call(SINGLETON, None, None);
+        rolled_back.fallible_transcript = Some(Sp::new(bad.clone()));
+        let tx = transaction(vec![
+            rolled_back,
+            call(
+                SINGLETON,
+                None,
+                Some(emit_ops(SIGN_BIDIRECTIONAL_EVENT, FALLIBLE)),
+            ),
+        ]);
+
+        let (decoded, skipped) = partial_success_emissions_in(&tx, &SINGLETON).unwrap();
+
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|c| (c.call_index, c.phase, c.emissions.len()))
+                .collect::<Vec<_>>(),
+            vec![(1, TranscriptPhase::Fallible, 1)]
+        );
+        let [skipped] = skipped.as_slice() else {
+            panic!("expected one skipped phase, got {skipped:?}");
+        };
+        assert_eq!((skipped.call_index, skipped.physical_segment), (0, 1));
+        assert!(format!("{:#}", skipped.reason).contains("expected empty declared effects"));
+        assert!(emissions_in(&tx, &SINGLETON).is_err());
+
+        let mut committed = call(SINGLETON, None, None);
+        committed.guaranteed_transcript = Some(Sp::new(bad));
+        let error =
+            partial_success_emissions_in(&transaction(vec![committed]), &SINGLETON).unwrap_err();
+        assert!(format!("{error:#}").contains("expected empty declared effects"));
     }
 
     #[test]

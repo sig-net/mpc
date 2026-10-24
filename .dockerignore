@@ -8,5 +8,3 @@ target/
 Dockerfile
 .dockerignore
 infra/
-flake.lock
-flake.nix

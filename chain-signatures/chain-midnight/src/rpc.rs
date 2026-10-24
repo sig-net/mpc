@@ -3,11 +3,14 @@
 use std::time::Duration;
 
 use anyhow::Context as _;
+use http::StatusCode;
 use jsonrpsee::core::client::{ClientT as _, Error as JsonrpseeClientError};
 use jsonrpsee::core::traits::ToRpcParams;
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use jsonrpsee::types::error::{INVALID_PARAMS_CODE, OVERSIZED_RESPONSE_CODE};
-use mpc_chain_integration_core::utils::retry::{is_retryable, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{
+    exhausted, http_status_read_retryable, is_retryable, RetryConfig,
+};
 use subxt::backend::legacy::rpc_methods::NumberOrHex;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::backend::rpc::{RawRpcFuture, RawRpcSubscription, RawValue, RpcClient, RpcClientT};
@@ -20,7 +23,7 @@ use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
 use crate::config::{MidnightConfig, RpcConfig};
-use crate::emissions::{emissions_in, DecodedTransaction};
+use crate::emissions::{emissions_in, partial_success_emissions_in, DecodedTransaction};
 use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
 
@@ -64,8 +67,75 @@ impl ToRpcParams for Params {
 }
 
 /// Request-only jsonrpsee HTTP transport behind Subxt's raw client seam.
-#[derive(Clone)]
-struct HttpRpcClient(HttpClient);
+///
+/// A load balancer keeps one keep-alive connection on one node, so a node that has
+/// fallen out of sync would fail every request for as long as the connection lives. A
+/// failed request therefore replaces the client and its connection pool, and the next
+/// request dials afresh.
+struct HttpRpcClient {
+    node_url: String,
+    config: RpcConfig,
+    /// The client plus a generation, so concurrent failures replace it once.
+    current: std::sync::RwLock<(u64, HttpClient)>,
+}
+
+impl HttpRpcClient {
+    fn new(node_url: &str, config: &RpcConfig) -> anyhow::Result<Self> {
+        Ok(Self {
+            current: std::sync::RwLock::new((0, build_http_client(node_url, config)?)),
+            node_url: node_url.to_owned(),
+            config: config.clone(),
+        })
+    }
+
+    fn current(&self) -> (u64, HttpClient) {
+        self.current
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Replaces the client generation `failed` unless another failure already has. The
+    /// build loads TLS roots, so it runs outside the lock every request takes. A client
+    /// that cannot be rebuilt is kept: it is no worse than before the failure.
+    fn replace(&self, failed: u64) {
+        if self.current().0 != failed {
+            return;
+        }
+        let client = match build_http_client(&self.node_url, &self.config) {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "keeping the midnight HTTP RPC client after a failed request"
+                );
+                return;
+            }
+        };
+        let mut current = self
+            .current
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if current.0 != failed {
+            return;
+        }
+        let generation = current.0 + 1;
+        *current = (generation, client);
+        drop(current);
+        tracing::info!(
+            generation,
+            "replaced the midnight HTTP RPC client after a failed request"
+        );
+    }
+}
+
+fn build_http_client(node_url: &str, config: &RpcConfig) -> anyhow::Result<HttpClient> {
+    HttpClientBuilder::default()
+        .max_response_size(config.max_response_size)
+        .request_timeout(config.request_timeout)
+        .build(node_url)
+        .context("failed to build the midnight HTTP RPC client")
+}
 
 impl RpcClientT for HttpRpcClient {
     fn request_raw<'a>(
@@ -74,17 +144,19 @@ impl RpcClientT for HttpRpcClient {
         params: Option<Box<RawValue>>,
     ) -> RawRpcFuture<'a, Box<RawValue>> {
         Box::pin(async move {
-            self.0
-                .request(method, Params(params))
-                .await
-                .map_err(|error| match error {
-                    JsonrpseeClientError::Call(error) => RawRpcError::User(UserError {
-                        code: error.code(),
-                        message: error.message().to_owned(),
-                        data: error.data().map(ToOwned::to_owned),
-                    }),
-                    error => RawRpcError::Client(Box::new(error)),
-                })
+            let (generation, client) = self.current();
+            let result = client.request(method, Params(params)).await;
+            if result.is_err() {
+                self.replace(generation);
+            }
+            result.map_err(|error| match error {
+                JsonrpseeClientError::Call(error) => RawRpcError::User(UserError {
+                    code: error.code(),
+                    message: error.message().to_owned(),
+                    data: error.data().map(ToOwned::to_owned),
+                }),
+                error => RawRpcError::Client(Box::new(error)),
+            })
         })
     }
 
@@ -138,11 +210,17 @@ impl subxt::events::StaticEvent for TxPartialSuccess {
     const EVENT: &'static str = "TxPartialSuccess";
 }
 
-/// Accept only one unambiguous full-success status from this extrinsic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppliedStatus {
+    Applied,
+    PartialSuccess,
+}
+
+/// Accept only one unambiguous applied status from this extrinsic, with its ledger hash.
 /// These are RPC-reported events; this check does not verify their inclusion.
-fn fully_applied_hash(
+fn applied_status(
     events: &subxt::blocks::ExtrinsicEvents<SubstrateConfig>,
-) -> anyhow::Result<Option<[u8; 32]>> {
+) -> anyhow::Result<Option<([u8; 32], AppliedStatus)>> {
     let mut applied = None;
     let mut partial = None;
     for event in events.iter() {
@@ -164,7 +242,9 @@ fn fully_applied_hash(
         applied.is_none() || partial.is_none(),
         "conflicting Midnight statuses"
     );
-    Ok(applied)
+    Ok(applied
+        .map(|hash| (hash, AppliedStatus::Applied))
+        .or(partial.map(|hash| (hash, AppliedStatus::PartialSuccess))))
 }
 
 fn decode_applied_transaction(
@@ -175,7 +255,7 @@ fn decode_applied_transaction(
         .context("candidate ledger transaction did not decode")?;
     anyhow::ensure!(
         tx.transaction_hash().0 .0 == expected_hash,
-        "TxApplied hash does not match the candidate ledger transaction"
+        "status hash does not match the candidate ledger transaction"
     );
     Ok(tx)
 }
@@ -211,12 +291,7 @@ fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
 }
 
 fn connect_http_endpoint(node_url: &str, config: &RpcConfig) -> anyhow::Result<RpcClient> {
-    let client = HttpClientBuilder::default()
-        .max_response_size(config.max_response_size)
-        .request_timeout(config.request_timeout)
-        .build(node_url)
-        .context("failed to build the midnight HTTP RPC client")?;
-    Ok(RpcClient::new(HttpRpcClient(client)))
+    Ok(RpcClient::new(HttpRpcClient::new(node_url, config)?))
 }
 
 pub(crate) struct MidnightRpc {
@@ -366,18 +441,16 @@ impl MidnightRpc {
             scale_system_events
                 .get_or_insert_with(|| events.all_events_in_block().bytes().to_vec());
 
-            let applied = fully_applied_hash(&events)
+            let applied = applied_status(&events)
                 .map_err(|err| BlockHold::new("emission-schema-hold", height, err))?;
-            let Some(ledger_tx_hash) = applied else {
-                let partial = events.find_first::<TxPartialSuccess>()?;
+            let Some((ledger_tx_hash, status)) = applied else {
                 tracing::warn!(
                     reason = "unsupported-midnight-status",
-                    status = if partial.is_some() { "TxPartialSuccess" } else { "NoTxApplied" },
-                    tx_hash = partial.map(|event| hex::encode(event.0.tx_hash)),
+                    status = "NoTxApplied",
                     height,
                     block_hash = %block_ref.hash,
                     extrinsic_index = found.details.index(),
-                    "midnight transaction skipped: only TxApplied is supported"
+                    "midnight transaction skipped: it has no applied status"
                 );
                 continue;
             };
@@ -394,9 +467,7 @@ impl MidnightRpc {
                     )
                 },
             )?;
-            // TxApplied covers both logical phases. Partial results cannot identify
-            // committed fallible segments through this node's status events.
-            let calls = emissions_in(&tx, singleton).map_err(|err| {
+            let schema_hold = |err: anyhow::Error| {
                 BlockHold::new(
                     "emission-schema-hold",
                     height,
@@ -406,10 +477,32 @@ impl MidnightRpc {
                         hex::encode(ledger_tx_hash)
                     )),
                 )
-            })?;
+            };
+            let calls = match status {
+                AppliedStatus::Applied => emissions_in(&tx, singleton).map_err(schema_hold)?,
+                AppliedStatus::PartialSuccess => {
+                    let (calls, skipped) =
+                        partial_success_emissions_in(&tx, singleton).map_err(schema_hold)?;
+                    for skipped in skipped {
+                        tracing::warn!(
+                            reason = "partial-success-fallible-skipped",
+                            tx_hash = %hex::encode(ledger_tx_hash),
+                            height,
+                            block_hash = %block_ref.hash,
+                            extrinsic_index = found.details.index(),
+                            call_index = skipped.call_index,
+                            physical_segment = skipped.physical_segment,
+                            error = %format_args!("{:#}", skipped.reason),
+                            "midnight fallible singleton phase skipped in a partial success"
+                        );
+                    }
+                    calls
+                }
+            };
             decoded_candidates.push(CandidateTransactionEmissions {
                 ledger_tx_hash,
                 extrinsic_index: found.details.index(),
+                partial_success: status == AppliedStatus::PartialSuccess,
                 calls,
             });
         }
@@ -646,7 +739,9 @@ fn is_read_retryable(error: &anyhow::Error) -> bool {
         return false;
     }
     if let Some(status) = rejected_http_status(error) {
-        return is_retryable(&anyhow::anyhow!("HTTP status {status}"));
+        // reads stay conservative: a retry reconnects onto a healthy LB
+        // backend (#1469), so only classic client errors are terminal
+        return StatusCode::from_u16(status).map_or(true, http_status_read_retryable);
     }
     if error.chain().any(|cause| {
         matches!(
@@ -688,13 +783,13 @@ where
             tracing::warn!(
                 operation,
                 attempt = retry_count,
-                error = %error,
+                error = %format_args!("{error:#}"),
                 ?retry_in,
                 "RPC call failed, retrying"
             );
         })
         .await
-        .map_err(|error| error.context(format!("exhausted after {} attempts", retry_count + 1)))
+        .map_err(|error| exhausted(error, retry_count))
 }
 
 impl Reads {
@@ -845,12 +940,13 @@ mod tests {
     }
 
     #[test]
-    fn full_success_gate_uses_the_captured_extrinsic_status() {
+    fn status_gate_uses_the_captured_extrinsic_status() {
         let raw = include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec();
         let events = captured_status_events(raw.clone(), 4);
-        let hash = fully_applied_hash(&events)
+        let (hash, status) = applied_status(&events)
             .expect("valid status")
             .expect("TxApplied");
+        assert_eq!(status, AppliedStatus::Applied);
         let tx = decode_applied_transaction(
             include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
             hash,
@@ -865,7 +961,7 @@ mod tests {
         assert_eq!(calls[0].physical_segment, 49592);
         assert_eq!(calls[0].emissions.len(), 1);
         assert_eq!(
-            fully_applied_hash(&captured_status_events(raw, 0)).unwrap(),
+            applied_status(&captured_status_events(raw, 0)).unwrap(),
             None
         );
         let mut wrong_hash = hash;
@@ -880,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn full_success_gate_rejects_partial_and_ambiguous_statuses() {
+    fn status_gate_reads_partial_success_and_rejects_ambiguous_statuses() {
         let events = captured_status_events(
             include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
             4,
@@ -901,16 +997,18 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let mut applied_hash = [0u8; 32];
+        applied_hash.copy_from_slice(&applied.bytes()[7..39]);
         assert_eq!(
-            fully_applied_hash(&captured_status_events(
+            applied_status(&captured_status_events(
                 encode_status_records(&[partial.clone()]),
                 4,
             ))
             .unwrap(),
-            None
+            Some((applied_hash, AppliedStatus::PartialSuccess))
         );
         assert_eq!(
-            fully_applied_hash(&captured_status_events(encode_status_records(&[]), 4,)).unwrap(),
+            applied_status(&captured_status_events(encode_status_records(&[]), 4,)).unwrap(),
             None
         );
         for records in [
@@ -919,13 +1017,13 @@ mod tests {
             vec![partial.clone(), partial],
         ] {
             assert!(
-                fully_applied_hash(&captured_status_events(encode_status_records(&records), 4,))
+                applied_status(&captured_status_events(encode_status_records(&records), 4,))
                     .is_err(),
                 "ambiguous outcome must hold"
             );
         }
         assert!(
-            fully_applied_hash(&captured_status_events(
+            applied_status(&captured_status_events(
                 encode_status_records(&[applied.bytes()[..12].to_vec()]),
                 4,
             ))
@@ -1232,20 +1330,111 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn block_reader_skips_partial_success_and_other_extrinsics_statuses() {
+    async fn block_reader_skips_an_undecodable_fallible_phase_only_in_a_partial_success() {
+        use midnight_ledger_v9::structure::ContractAction;
+        use midnight_storage::arena::Sp;
+
+        let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
+        let tx: DecodedTransaction =
+            midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
+        let (segment, mut call) = tx.calls().nth(1).unwrap();
+        let singleton = call.address.0 .0;
+        let mut transcript = call.fallible_transcript.as_deref().unwrap().clone();
+        transcript.effects.unshielded_mints =
+            midnight_storage::storage::HashMap::new().insert(Default::default(), 1);
+        call.fallible_transcript = Some(Sp::new(transcript));
+        let DecodedTransaction::Standard(mut tx) = tx else {
+            panic!("standard captured transaction");
+        };
+        let mut intent = (*tx.intents.get(&segment).unwrap()).clone();
+        let mut actions = Vec::from(&intent.actions);
+        let action = actions
+            .iter_mut()
+            .find(|action| matches!(action, ContractAction::Call(call) if call.address.0 .0 == singleton))
+            .unwrap();
+        *action = ContractAction::Call(Sp::new(call));
+        intent.actions = actions.into();
+        tx.intents = tx.intents.insert(segment, intent);
+        let tx = DecodedTransaction::Standard(tx);
+        let mut bytes = Vec::new();
+        midnight_serialize::tagged_serialize(&tx, &mut bytes).unwrap();
+        let mut applied = captured_applied_status_record();
+        applied[7..39].copy_from_slice(&tx.transaction_hash().0 .0);
+        let mut partial = applied.clone();
+        partial[6] = 7; // TxPartialSuccess in the captured metadata.
+
+        // Synthetic effects and statuses: this exercises the reader's status policy, not
+        // node acceptance of such a transaction.
+        let recorder = crate::test_utils::EventRecorder::default();
+        // Keep a second scoped dispatch registered so callsites first reached by a
+        // parallel test register against the live dispatches, not that thread's default.
+        let _registration_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::layer::SubscriberExt::with(
+            tracing_subscriber::registry(),
+            recorder.clone(),
+        );
+        let subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let block = read_fallible_transaction(encode_status_records(&[partial]), &bytes)
+            .await
+            .expect("an undecodable fallible phase of a partial success does not hold")
+            .unwrap();
+        drop(subscriber_guard);
+        assert_eq!(block.candidates.len(), 1);
+        assert!(block.candidates[0].calls.is_empty());
+        let skipped = recorder
+            .snapshot()
+            .into_iter()
+            .filter(|fields| {
+                fields.get("reason").map(String::as_str)
+                    == Some("\"partial-success-fallible-skipped\"")
+            })
+            .collect::<Vec<_>>();
+        let [skipped] = skipped.as_slice() else {
+            panic!("expected one skipped-phase warning, got {skipped:?}");
+        };
+        assert_eq!(skipped.get("call_index").map(String::as_str), Some("1"));
+        assert!(skipped["error"].contains("expected empty declared effects"));
+
+        let err = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
+            .await
+            .expect_err("the same phase of a fully applied transaction holds");
+        let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
+        assert_eq!(hold.reason, "emission-schema-hold");
+    }
+
+    #[tokio::test]
+    async fn block_reader_reads_partial_success_and_skips_other_extrinsics_statuses() {
         let applied = captured_applied_status_record();
         assert_eq!(&applied[..7], &[0, 4, 0, 0, 0, 5, 2]);
+        let fully_applied =
+            read_fallible_capture(encode_status_records(std::slice::from_ref(&applied)))
+                .await
+                .unwrap()
+                .unwrap();
         let mut partial = applied.clone();
         partial[6] = 7; // TxPartialSuccess in the captured metadata.
         let mut other_extrinsic = applied;
         other_extrinsic[1..5].copy_from_slice(&0u32.to_le_bytes());
-        for records in [vec![partial.clone()], vec![other_extrinsic, partial]] {
+        for records in [
+            vec![partial.clone()],
+            vec![other_extrinsic.clone(), partial],
+        ] {
             let block = read_fallible_capture(encode_status_records(&records))
                 .await
-                .expect("unsupported outcome is skipped")
+                .expect("a partial success is read")
                 .expect("candidate is present in the block body");
-            assert!(block.candidates.is_empty());
+            // The capture's only singleton phase is a fallible notification, which a
+            // partial success keeps.
+            let mut expected = fully_applied.candidates.clone();
+            assert!(!expected[0].partial_success);
+            expected[0].partial_success = true;
+            assert_eq!(block.candidates, expected);
         }
+        let block = read_fallible_capture(encode_status_records(&[other_extrinsic]))
+            .await
+            .expect("an unapplied candidate is skipped")
+            .expect("candidate is present in the block body");
+        assert!(block.candidates.is_empty());
     }
 
     #[tokio::test]
@@ -1487,10 +1676,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_http_statuses_follow_the_shared_retry_partition() {
+    async fn real_http_statuses_follow_the_read_partition() {
+        // 409 retries on purpose: another LB backend may serve the read fine
         for (status, reason, expected_attempts) in [
             (403, "Forbidden", 1),
+            (409, "Conflict", 3),
             (429, "Too Many Requests", 3),
+            (402, "Payment Required", 3),
             (500, "Internal Server Error", 3),
         ] {
             let (address, calls, server) = http_status_server(status, reason).await;
@@ -1519,6 +1711,137 @@ mod tests {
                 "HTTP {status} used the wrong retry policy"
             );
         }
+    }
+
+    /// A keep-alive HTTP server whose first connection reaches a node that has fallen
+    /// out of sync: every request on that connection fails as such a node fails, and
+    /// every later connection answers like a healthy node. A load balancer keeps one
+    /// connection on one backend, as this server does.
+    async fn stale_first_backend_server(
+    ) -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind keep-alive HTTP server");
+        let address = listener
+            .local_addr()
+            .expect("keep-alive HTTP server address");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let accepted = connections.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept HTTP connection");
+                let stale = accepted.fetch_add(1, Ordering::SeqCst) == 0;
+                tokio::spawn(serve_keep_alive(stream, stale));
+            }
+        });
+        (address, connections, server)
+    }
+
+    async fn serve_keep_alive(mut stream: tokio::net::TcpStream, stale: bool) {
+        let mut buffer = Vec::new();
+        loop {
+            let body_start = loop {
+                if let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break end + 4;
+                }
+                let mut chunk = [0; 1024];
+                match stream.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                }
+            };
+            let headers = String::from_utf8_lossy(&buffer[..body_start]).to_ascii_lowercase();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map(|value| value.trim().parse().expect("numeric content-length"))
+                .unwrap_or(0);
+            while buffer.len() < body_start + length {
+                let mut chunk = [0; 1024];
+                match stream.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let request: serde_json::Value =
+                serde_json::from_slice(&buffer[body_start..body_start + length])
+                    .expect("JSON-RPC request body");
+            buffer.drain(..body_start + length);
+            let reply = if stale {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "error": {
+                        "code": INVALID_PARAMS_CODE,
+                        "message": "Unable to get requested contract state",
+                    },
+                })
+            } else {
+                json!({"jsonrpc": "2.0", "id": request["id"], "result": hash_of_byte(0x22)})
+            }
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}",
+                reply.len()
+            );
+            if stream.write_all(response.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_moves_off_the_backend_its_connection_reached() {
+        let (address, connections, server) = stale_first_backend_server().await;
+        let reads = Reads::new(
+            connect_http(&http_config(address)).expect("build request-only client"),
+            Duration::from_secs(1),
+            attempts(0),
+        );
+
+        let stale = reads.finalized_head().await;
+        let recovered = reads.finalized_head().await;
+        let kept = reads.finalized_head().await;
+        server.abort();
+
+        stale.expect_err("the first connection reaches the stale backend");
+        for read in [recovered, kept] {
+            let head = read.expect("a request after the failure reached the stale backend again");
+            assert_eq!(hex_0x(head), hash_of_byte(0x22));
+        }
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            2,
+            "a failure must open one new connection and a success must keep it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retried_read_recovers_from_the_backend_its_connection_reached() {
+        let (address, connections, server) = stale_first_backend_server().await;
+        let reads = Reads::new(
+            connect_http(&http_config(address)).expect("build request-only client"),
+            Duration::from_secs(1),
+            attempts(2),
+        );
+
+        let head = reads.finalized_head().await;
+        server.abort();
+
+        let head = head.expect("the retry reached the stale backend again");
+        assert_eq!(hex_0x(head), hash_of_byte(0x22));
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_late_failure_does_not_replace_the_client_that_replaced_its_own() {
+        let client = HttpRpcClient::new("http://127.0.0.1:1", &RpcConfig::default())
+            .expect("build request-only client");
+
+        client.replace(0);
+        client.replace(0);
+
+        assert_eq!(client.current().0, 1);
     }
 
     #[tokio::test]

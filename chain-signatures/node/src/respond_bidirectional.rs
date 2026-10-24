@@ -3,9 +3,10 @@ use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
-    AttestationMetadata, AttestationOutcomeKind, BidirectionalTx, Chain, ChainConfig as _,
-    IndexedSignRequest, PublishedAttestation, RespondBidirectionalSerializedOutput,
-    RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId, SignKind,
+    AttestationError, AttestationMetadata, AttestationOutcomeKind, BidirectionalTx, Chain,
+    ChainConfig as _, IndexedSignRequest, PublishedAttestation, RespondBidirectionalEvent,
+    RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
+    SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
 use std::sync::Arc;
@@ -15,7 +16,21 @@ const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 pub(crate) fn is_failed_execution_response(response: &RespondBidirectionalTx) -> bool {
     match response.attestation {
         Some(metadata) => metadata.outcome_kind != AttestationOutcomeKind::Executed,
-        None => response.output.starts_with(&MAGIC_ERROR_PREFIX),
+        None => is_failed_output(&response.output),
+    }
+}
+
+/// Whether a non-Midnight response output reports a failed execution.
+fn is_failed_output(output: &[u8]) -> bool {
+    output.starts_with(&MAGIC_ERROR_PREFIX)
+}
+
+/// Whether the response `event` publishes reports a failed execution, if it publishes one.
+pub(crate) fn published_failure(event: &RespondBidirectionalEvent) -> Option<bool> {
+    match (&event.attestation, &event.output) {
+        (Some(published), _) => Some(published.outcome_kind != AttestationOutcomeKind::Executed),
+        (None, Some(output)) => Some(is_failed_output(output)),
+        (None, None) => None,
     }
 }
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
@@ -40,25 +55,36 @@ pub(crate) fn claims_attestation_key(request: &IndexedSignRequest) -> bool {
         && respond_bidirectional_path(request.chain) == Some(request.args.path.as_str())
 }
 
-/// The key tweak and payload a genuine published Midnight response for `tx` is signed
-/// with, recomputed from the event alone: the digest covers the output's length and hash,
-/// both carried by the event, so a node that never observed the outcome still binds the
-/// response to this request.
+/// The key tweak and payload a genuine published Midnight response for `tx` is signed with.
 pub(crate) fn published_midnight_signing_args(
     tx: &BidirectionalTx,
     published: &PublishedAttestation,
 ) -> anyhow::Result<(Scalar, Scalar)> {
+    let payload = published_midnight_payload(&tx.request_id, published)?;
+    let epsilon = tx.epsilon(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH)?;
+    Ok((epsilon, payload))
+}
+
+/// The payload a genuine published Midnight response for `request_id` is signed with,
+/// recomputed from the event alone: the digest covers the output's length and hash, both
+/// carried by the event, so a node that never observed the outcome still binds the response
+/// to this request. The digest does not cover the key version; epsilon binds it.
+pub(crate) fn published_midnight_payload(
+    request_id: &[u8; 32],
+    published: &PublishedAttestation,
+) -> anyhow::Result<Scalar> {
     anyhow::ensure!(
-        tx.source_chain == Chain::Midnight,
-        "published attestations are Midnight responses"
+        published.outcome_kind == AttestationOutcomeKind::Executed
+            || published.serialized_output_length == 0,
+        AttestationError::NonemptyFailureOutput
     );
     let metadata = AttestationMetadata {
-        key_version: tx.key_version,
+        key_version: 0,
         block_height: published.block_height,
         outcome_kind: published.outcome_kind,
     };
     let digest = mpc_compact_hashing::compute_attestation_digest(
-        &tx.request_id,
+        request_id,
         &metadata,
         published.serialized_output_length,
         &published.output_hash,
@@ -67,10 +93,8 @@ pub(crate) fn published_midnight_signing_args(
         digest == published.digest,
         "Midnight event digest differs from the response it names"
     );
-    let payload = Scalar::from_bytes(digest)
-        .ok_or_else(|| anyhow::anyhow!("Midnight attestation digest is not a scalar"))?;
-    let epsilon = tx.epsilon(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH)?;
-    Ok((epsilon, payload))
+    Scalar::from_bytes(digest)
+        .ok_or_else(|| anyhow::anyhow!("Midnight attestation digest is not a scalar"))
 }
 
 pub struct CompletedTx {
@@ -118,8 +142,6 @@ impl CompletedTx {
     }
 
     async fn process_failed_tx(&self) -> anyhow::Result<IndexedSignRequest> {
-        tracing::info!("Tx failed: {:?}", self.tx.id);
-
         let source_chain = self.tx.source_chain;
         if source_chain == Chain::Midnight {
             return self.create_respond_bidirectional_sign_request(
@@ -171,7 +193,7 @@ impl CompletedTx {
             block_height: self.block_height,
             outcome_kind,
         });
-        let message = calculate_respond_bidirectional_hash_message_for_chain(
+        let payload = response_payload(
             source_chain,
             &request_id_bytes,
             &serialized_output,
@@ -179,15 +201,10 @@ impl CompletedTx {
         )?;
         tracing::info!(
             "Respond bidirectional message hash: {:?}",
-            hex::encode(message)
+            hex::encode(payload.to_bytes())
         );
-        let Some(payload) = Scalar::from_bytes(message) else {
-            anyhow::bail!("Failed to convert respond bidirectional message to scalar: {message:?}");
-        };
-        let path = respond_bidirectional_path(source_chain)
-            .ok_or_else(|| anyhow::anyhow!("Unsupported chain: {}", source_chain))?
-            .to_string();
-        let epsilon = self.tx.epsilon(&path)?;
+        let (path, epsilon) = response_key(&self.tx)?;
+        let path = path.to_string();
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest::respond_bidirectional(
             SignId::new(request_id_bytes),
@@ -209,6 +226,53 @@ impl CompletedTx {
             },
         ))
     }
+}
+
+/// The payload a response with `output` is signed with.
+fn response_payload(
+    chain: Chain,
+    request_id: &[u8; 32],
+    output: &[u8],
+    attestation: Option<&AttestationMetadata>,
+) -> anyhow::Result<Scalar> {
+    let message = calculate_respond_bidirectional_hash_message_for_chain(
+        chain,
+        request_id,
+        output,
+        attestation,
+    )?;
+    Scalar::from_bytes(message).ok_or_else(|| {
+        anyhow::anyhow!("Failed to convert respond bidirectional message to scalar: {message:?}")
+    })
+}
+
+/// The path and epsilon a response for `tx` is signed with.
+fn response_key(tx: &BidirectionalTx) -> anyhow::Result<(&'static str, Scalar)> {
+    let path = respond_bidirectional_path(tx.source_chain)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported chain: {}", tx.source_chain))?;
+    Ok((path, tx.epsilon(path)?))
+}
+
+/// The payload a response with `output` is signed with, on source chains other than Midnight.
+/// This won't be necessary once those chains sign the Section 7 digest of
+/// bidirectional-calls.md and no request signed the old way is left.
+pub(crate) fn published_output_payload(
+    chain: Chain,
+    request_id: &[u8; 32],
+    output: &[u8],
+) -> anyhow::Result<Scalar> {
+    response_payload(chain, request_id, output, None)
+}
+
+/// The epsilon and payload a response for `tx` with `output` is signed with, on source
+/// chains other than Midnight.
+pub(crate) fn published_output_signing_args(
+    tx: &BidirectionalTx,
+    output: &[u8],
+) -> anyhow::Result<(Scalar, Scalar)> {
+    let (_, epsilon) = response_key(tx)?;
+    let payload = published_output_payload(tx.source_chain, &tx.request_id, output)?;
+    Ok((epsilon, payload))
 }
 
 pub fn calculate_respond_bidirectional_hash_message(
@@ -604,6 +668,96 @@ mod tests {
                     .create_unviable_sign_request()
                     .is_err(),
                 "{chain}"
+            );
+        }
+    }
+
+    /// A node that missed the outcome must verify against exactly what the signing
+    /// node signed, for every outcome.
+    #[tokio::test]
+    async fn published_midnight_signing_args_match_the_signed_response() {
+        let tx = sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]);
+        let completed = CompletedTx::new(Arc::clone(&tx), None, None, 456);
+        for request in [
+            completed
+                .create_sign_request_from_serialized_output((1..=32).collect())
+                .unwrap(),
+            completed.create_failed_sign_request().await.unwrap(),
+            completed.create_unviable_sign_request().unwrap(),
+        ] {
+            let published = mpc_chain_midnight::validate_attestation_response(&request).unwrap();
+            assert_eq!(
+                published_midnight_signing_args(&tx, &published).unwrap(),
+                (request.args.epsilon, request.args.payload),
+                "{:?}",
+                published.outcome_kind
+            );
+        }
+    }
+
+    #[test]
+    fn published_midnight_signing_args_reject_a_digest_for_another_response() {
+        let tx = sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]);
+        let request = CompletedTx::new(Arc::clone(&tx), None, None, 456)
+            .create_sign_request_from_serialized_output((1..=32).collect())
+            .unwrap();
+        let published = mpc_chain_midnight::validate_attestation_response(&request).unwrap();
+        let other_request = sample_bidirectional_tx(Chain::Midnight, [0x30; 32]);
+        assert!(published_midnight_signing_args(&other_request, &published).is_err());
+        for tampered in [
+            PublishedAttestation {
+                block_height: 457,
+                ..published
+            },
+            PublishedAttestation {
+                serialized_output_length: 31,
+                ..published
+            },
+            PublishedAttestation {
+                output_hash: [0; 32],
+                ..published
+            },
+            PublishedAttestation {
+                digest: [0; 32],
+                ..published
+            },
+        ] {
+            assert!(
+                published_midnight_signing_args(&tx, &tampered).is_err(),
+                "{tampered:?}"
+            );
+        }
+    }
+
+    /// The digest is consistent with the claimed fields, so only the output rule rejects it.
+    #[test]
+    fn published_midnight_signing_args_reject_output_on_a_failure() {
+        let tx = sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]);
+        let output_hash = mpc_compact_hashing::compute_attested_output_hash(&[1]);
+        for outcome_kind in [
+            AttestationOutcomeKind::Failed,
+            AttestationOutcomeKind::Unviable,
+        ] {
+            let metadata = AttestationMetadata {
+                key_version: tx.key_version,
+                block_height: 456,
+                outcome_kind,
+            };
+            let published = PublishedAttestation {
+                block_height: 456,
+                outcome_kind,
+                serialized_output_length: 1,
+                output_hash,
+                digest: mpc_compact_hashing::compute_attestation_digest(
+                    &tx.request_id,
+                    &metadata,
+                    1,
+                    &output_hash,
+                ),
+            };
+            assert!(
+                published_midnight_signing_args(&tx, &published).is_err(),
+                "{outcome_kind:?}"
             );
         }
     }

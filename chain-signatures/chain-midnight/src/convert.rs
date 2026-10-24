@@ -7,9 +7,7 @@
 //! equal.
 
 use mpc_chain_integration_core::utils::hashing::hash_payload;
-use mpc_primitives::{
-    Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, LATEST_MPC_KEY_VERSION,
-};
+use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId};
 
 use crate::records::SignBidirectionalRecord;
 use crate::tx::{payload_scalar, serialized_transaction};
@@ -36,13 +34,7 @@ pub fn generate_sign_request(
         hex::encode(read_address),
     );
 
-    // Upper bound only, matching Canton: version 0 is accepted and selects the legacy
-    // comma-format derivation in `mpc_crypto::kdf`.
     let key_version = u32::from(record.key_version);
-    anyhow::ensure!(
-        key_version <= LATEST_MPC_KEY_VERSION,
-        "unsupported key_version {key_version}: the latest is {LATEST_MPC_KEY_VERSION}"
-    );
     let algo = match record.algo {
         ALGO_ECDSA => "ecdsa".to_string(),
         reserved => anyhow::bail!("unsupported algo {reserved}: only ecdsa (0) is real"),
@@ -77,7 +69,7 @@ pub fn generate_sign_request(
 
     // The one render of the requester.
     let requester = hex::encode(read_address);
-    let epsilon = mpc_crypto::kdf::derive_epsilon_midnight(key_version, &requester, &path);
+    let epsilon = mpc_crypto::kdf::derive_epsilon_midnight(key_version, &requester, &path)?;
     let entropy = hash_payload(&request_id);
 
     Ok(IndexedSignRequest::sign_bidirectional(
@@ -200,7 +192,8 @@ mod tests {
                 request.args.key_version,
                 &hex::encode(READ_ADDRESS),
                 reserved,
-            ),
+            )
+            .unwrap(),
         );
     }
 
@@ -270,7 +263,8 @@ mod tests {
                 0,
                 &"ab".repeat(32),
                 &hex::encode(record.path)
-            ),
+            )
+            .unwrap(),
             "version 0 must route through the legacy derivation"
         );
 

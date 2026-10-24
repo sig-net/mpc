@@ -231,20 +231,11 @@ impl ClusterSpawner {
         self
     }
 
-    /// Add mainnet nodes to the cluster using the tagged binary under target/compat/mainnet.
-    pub fn mainnet_nodes(mut self, count: usize) -> Self {
+    /// Add nodes running the latest release binary under target/compat/latest.
+    pub fn latest_release_nodes(mut self, count: usize) -> Self {
         let current_len = self.node_binary_sources.len();
         self.node_binary_sources
-            .extend((0..count).map(|_| NodeBinarySource::Mainnet));
-        self.cfg.nodes = current_len + count;
-        self
-    }
-
-    /// Add testnet nodes to the cluster using the tagged binary under target/compat/testnet.
-    pub fn testnet_nodes(mut self, count: usize) -> Self {
-        let current_len = self.node_binary_sources.len();
-        self.node_binary_sources
-            .extend((0..count).map(|_| NodeBinarySource::Testnet));
+            .extend((0..count).map(|_| NodeBinarySource::LatestRelease));
         self.cfg.nodes = current_len + count;
         self
     }

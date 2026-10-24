@@ -47,8 +47,10 @@ export circuit initialise(responseKey: Secp256k1Point): [] {
 circuit fileIsEvenRequest(
   call: IsEvenCall,
   keyVersion: Uint<8>,
+  to: Bytes<20>,
+  argWord: Bytes<32>,
   outputSchema: Bytes<64>
-): RequestId {
+): [] {
   const calldata = EvmCalldata<1> {
     selector: Bytes [0x2a, 0x2e, 0x13, 0x20],
     noWords: 1 as Uint<16>,
