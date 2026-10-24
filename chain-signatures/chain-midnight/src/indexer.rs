@@ -387,31 +387,65 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         // transaction wrote. Only a record new in this block was written by a committed
         // segment of this block.
         if let Some(parent_hash) = rolled_back_parent {
-            let preexisting = match source.contract_state_tree(&caller_hex, parent_hash).await {
-                Ok(ContractState::Absent) => false,
-                Ok(ContractState::Tree(tree)) => !matches!(
-                    signet_field_node_by_path(&tree, &unpacked.requests_path)
-                        .map(|field| resolve_verified_record(field, rid)),
-                    Ok(Resolved::Absent)
-                ),
-                Ok(ContractState::Undecodable(_)) => true,
-                Err(err) if is_oversized_contract_state(&err) => true,
+            let parent_tree = match source.contract_state_tree(&caller_hex, parent_hash).await {
+                Ok(ContractState::Tree(tree)) => Some(tree),
+                Ok(ContractState::Absent) => None,
+                Ok(ContractState::Undecodable(err)) => {
+                    return Ok(drop_entry(
+                        "parent-state-undecodable",
+                        height,
+                        Some(rid),
+                        &format!("{caller_hex}: {err:#}"),
+                    ));
+                }
+                Err(err) if is_oversized_contract_state(&err) => {
+                    return Ok(drop_entry(
+                        "parent-state-too-large",
+                        height,
+                        Some(rid),
+                        &format!("{caller_hex}: {err:#}"),
+                    ));
+                }
                 Err(err) => {
                     return Err(err.context(format!(
                         "failed to read caller state {caller_hex} at the parent block"
                     )));
                 }
             };
-            if preexisting {
-                return Ok(drop_entry(
-                    "request-preexisting",
-                    height,
-                    Some(rid),
-                    &format!(
-                        "{caller_hex} held the record before this block, and this fallible \
-                         notification of a partial success may have rolled back"
-                    ),
-                ));
+            if let Some(tree) = parent_tree {
+                let field = match signet_field_node_by_path(&tree, &unpacked.requests_path) {
+                    Ok(field) => field,
+                    Err(err) => {
+                        return Ok(drop_entry(
+                            "parent-requests-field-walk",
+                            height,
+                            Some(rid),
+                            &format!("{err:#}"),
+                        ));
+                    }
+                };
+                match resolve_verified_record(field, rid) {
+                    Resolved::Absent => {}
+                    Resolved::Found(_) => {
+                        return Ok(drop_entry(
+                            "request-preexisting",
+                            height,
+                            Some(rid),
+                            &format!(
+                                "{caller_hex} held the record before this block, and this \
+                                 fallible notification of a partial success may have rolled back"
+                            ),
+                        ));
+                    }
+                    Resolved::Dropped { reason, detail } => {
+                        return Ok(drop_entry(
+                            reason,
+                            height,
+                            Some(rid),
+                            &format!("at the parent block: {detail}"),
+                        ));
+                    }
+                }
             }
         }
         match generate_sign_request(&record, &unpacked.caller_address, rid, indexed_ts) {
@@ -1947,7 +1981,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unusable_parent_state_does_not_sign_a_partial_success_notification() {
+    async fn a_parent_state_without_a_new_record_drops_with_its_own_reason() {
         let (record, rid) = named_record_and_rid(7);
         let (other, _) = named_record_and_rid(8);
         let wrong_id = array_of(vec![
@@ -1957,11 +1991,12 @@ mod tests {
             StateValue::Null,
             map_of(vec![(key_of(rid), cell_from_record(&other))]),
         ]);
-        for case in [
-            "undecodable",
-            "oversized",
-            "requests field missing",
-            "wrong id",
+        for (case, reason) in [
+            ("undecodable", "parent-state-undecodable"),
+            ("oversized", "parent-state-too-large"),
+            ("requests field missing", "parent-requests-field-walk"),
+            ("wrong id", "rid-mismatch"),
+            ("already there", "request-preexisting"),
         ] {
             let mut source = FixtureSource::default();
             source.set_partial_success_emissions(9, fallible_notification(rid));
@@ -1977,16 +2012,33 @@ mod tests {
                 "requests field missing" => {
                     source.set_state(CALLER, 8, array_of(vec![StateValue::Null]))
                 }
-                _ => source.set_state(CALLER, 8, wrong_id.clone()),
+                "wrong id" => source.set_state(CALLER, 8, wrong_id.clone()),
+                _ => source.set_state(CALLER, 8, caller_state(&record, rid)),
             }
 
+            let recorder = EventRecorder::default();
+            // Keep a second scoped dispatch registered so callsites first reached by a
+            // parallel test register against the live dispatches, not that thread's default.
+            let _registration_guard =
+                tracing::subscriber::set_default(tracing_subscriber::registry());
+            let subscriber = tracing_subscriber::registry().with(recorder.clone());
+            let _subscriber_guard = tracing::subscriber::set_default(subscriber);
             let events = direct_indexer()
                 .await
                 .process_block(&source, &block_ref(9))
                 .await
-                .expect("an unusable parent state is a per-entry drop");
+                .expect("a parent state without a new record is a per-entry drop");
 
             assert!(events.is_empty(), "{case}");
+            let reasons = recorder
+                .snapshot()
+                .into_iter()
+                .filter_map(|fields| fields.get("reason").cloned())
+                .collect::<Vec<_>>();
+            assert!(
+                reasons.contains(&format!("{reason:?}")),
+                "{case}: expected {reason}, got {reasons:?}"
+            );
         }
     }
 

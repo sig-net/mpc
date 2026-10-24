@@ -227,8 +227,8 @@ pub fn emissions_in(
 /// Extract from a transaction whose node status is `TxPartialSuccess`, which does not say
 /// which fallible segments committed. Guaranteed phases committed and decode as in
 /// [`emissions_in`]. A fallible phase keeps only its notifications, which the indexer
-/// signs only when the caller's state holds the request; its responses have no such
-/// check. A fallible phase that does not decode may never have run, so it is skipped
+/// signs only when the caller's state holds the request and did not at the parent block;
+/// its responses have no such check. A fallible phase that does not decode may never have run, so it is skipped
 /// instead of failing the block.
 pub fn partial_success_emissions_in(
     tx: &DecodedTransaction,

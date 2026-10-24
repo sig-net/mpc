@@ -29,7 +29,7 @@ A `TxPartialSuccess` status does not say which fallible segments committed. The 
 
 Supported singleton programs consist of literal, non-storage `Push`/`Log` pairs: `Push` places the encoded event on the execution stack, and `Log` emits it. `Noop` (no-op) and `Ckpt` (checkpoint) instructions may appear before, between or after those instructions. During VM execution, they only charge gas and do not change the recovered events. The reader ignores them when checking the instruction pattern, but replays the original program.
 
-The node validates the transaction structure; the reader checks whether it can reconstruct events without the original contract state. Declared effects must be empty, and events must use a supported Signet schema. Unsupported instructions or event schemas stop processing at that block. A fallible transcript alone is not a reason to reject a call. Caller record and signature validation still apply after decoding.
+The node validates the transaction structure; the reader checks whether it can reconstruct events without the original contract state. Declared effects must be empty, and events must use a supported Signet schema. Unsupported instructions or event schemas stop processing at that block, except in a fallible transcript of a `TxPartialSuccess` transaction, as above. A fallible transcript alone is not a reason to reject a call. Caller record and signature validation still apply after decoding.
 
 ## Midnight attestation API
 
