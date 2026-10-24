@@ -541,6 +541,8 @@ mod tests {
     /// An RPC that keeps failing past the client's own retries is retried, not refused.
     #[tokio::test]
     async fn sample_chain_id_retries_until_the_rpc_answers() {
+        // The test client makes 3 attempts per call, so this takes 4 sampling rounds.
+        const FAILURES: u64 = 10;
         let mut server = Server::new_async().await;
         let calls = AtomicU64::new(0);
         let chain_id_mock = server
@@ -552,7 +554,7 @@ mod tests {
                 let body: serde_json::Value =
                     serde_json::from_slice(req.body().expect("request body")).expect("json body");
                 let id = &body["id"];
-                let reply = if calls.fetch_add(1, Ordering::Relaxed) < 4 {
+                let reply = if calls.fetch_add(1, Ordering::Relaxed) < FAILURES {
                     json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -563,7 +565,7 @@ mod tests {
                 };
                 reply.to_string().into_bytes()
             })
-            .expect(5)
+            .expect(FAILURES as usize + 1)
             .create_async()
             .await;
         let indexer = test_utils::TestIndexerBuilder::new(server.url())
