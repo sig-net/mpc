@@ -186,7 +186,7 @@ impl EthereumTestEnvironment {
             account_sk: self.sandbox.secret_key.parse().unwrap(),
             execution_rpc_http_url: self.sandbox.external_http_endpoint.parse().unwrap(),
             contract_address: self.contract_address,
-            network: "sepolia".to_string(),
+            network: "anvil".to_string(),
             refresh_finalized_interval: 500,
             optimistic_requests,
             gas: Default::default(),
