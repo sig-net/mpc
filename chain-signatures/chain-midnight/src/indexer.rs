@@ -647,57 +647,17 @@ mod tests {
     use crate::source::{BlockProofSeed, CandidateTransactionEmissions};
     use crate::test_utils::{
         array_of, cell_from_record, hex_32, key_of, map_of, notification_payload, response_payload,
-        sample_record,
+        sample_record, EventRecorder,
     };
     use midnight_onchain_state::state::StateValue;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use mpc_primitives::SignId;
     use std::collections::{HashMap, HashSet, VecDeque};
-    use std::fmt;
-    use std::sync::{Arc, Mutex};
-    use tracing::field::{Field, Visit};
-    use tracing::{Event, Subscriber};
-    use tracing_subscriber::layer::{Context, SubscriberExt};
-    use tracing_subscriber::Layer;
+    use std::sync::Mutex;
+    use tracing_subscriber::layer::SubscriberExt;
 
     type TestIndexer = MidnightIndexer<MockStateManager, NoopChainTelemetry>;
-
-    type RecordedFields = HashMap<&'static str, String>;
-
-    #[derive(Clone, Default)]
-    struct EventRecorder {
-        events: Arc<Mutex<Vec<RecordedFields>>>,
-    }
-
-    impl EventRecorder {
-        fn snapshot(&self) -> Vec<RecordedFields> {
-            self.events.lock().expect("recorded events").clone()
-        }
-    }
-
-    struct FieldRecorder<'a> {
-        fields: &'a mut RecordedFields,
-    }
-
-    impl Visit for FieldRecorder<'_> {
-        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-            self.fields.insert(field.name(), format!("{value:?}"));
-        }
-    }
-
-    impl<S> Layer<S> for EventRecorder
-    where
-        S: Subscriber,
-    {
-        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
-            let mut fields = HashMap::new();
-            event.record(&mut FieldRecorder {
-                fields: &mut fields,
-            });
-            self.events.lock().expect("recorded events").push(fields);
-        }
-    }
 
     const CALLER: [u8; 32] = [0xab; 32];
     const SINGLETON: [u8; 32] = [0x12; 32];
@@ -1983,6 +1943,50 @@ mod tests {
             for event in events {
                 assert_request(event, rid);
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unusable_parent_state_does_not_sign_a_partial_success_notification() {
+        let (record, rid) = named_record_and_rid(7);
+        let (other, _) = named_record_and_rid(8);
+        let wrong_id = array_of(vec![
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+            map_of(vec![(key_of(rid), cell_from_record(&other))]),
+        ]);
+        for case in [
+            "undecodable",
+            "oversized",
+            "requests field missing",
+            "wrong id",
+        ] {
+            let mut source = FixtureSource::default();
+            source.set_partial_success_emissions(9, fallible_notification(rid));
+            source.set_state(CALLER, 9, caller_state(&record, rid));
+            match case {
+                "undecodable" => {
+                    source.undecodable_states.insert(
+                        (hex::encode(CALLER), hash_of(8)),
+                        "unexpected state tag".to_string(),
+                    );
+                }
+                "oversized" => source.set_oversized_state(CALLER, 8),
+                "requests field missing" => {
+                    source.set_state(CALLER, 8, array_of(vec![StateValue::Null]))
+                }
+                _ => source.set_state(CALLER, 8, wrong_id.clone()),
+            }
+
+            let events = direct_indexer()
+                .await
+                .process_block(&source, &block_ref(9))
+                .await
+                .expect("an unusable parent state is a per-entry drop");
+
+            assert!(events.is_empty(), "{case}");
         }
     }
 

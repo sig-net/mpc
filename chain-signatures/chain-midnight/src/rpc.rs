@@ -1365,12 +1365,35 @@ mod tests {
 
         // Synthetic effects and statuses: this exercises the reader's status policy, not
         // node acceptance of such a transaction.
+        let recorder = crate::test_utils::EventRecorder::default();
+        // Keep a second scoped dispatch registered so callsites first reached by a
+        // parallel test register against the live dispatches, not that thread's default.
+        let _registration_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::layer::SubscriberExt::with(
+            tracing_subscriber::registry(),
+            recorder.clone(),
+        );
+        let subscriber_guard = tracing::subscriber::set_default(subscriber);
         let block = read_fallible_transaction(encode_status_records(&[partial]), &bytes)
             .await
             .expect("an undecodable fallible phase of a partial success does not hold")
             .unwrap();
+        drop(subscriber_guard);
         assert_eq!(block.candidates.len(), 1);
         assert!(block.candidates[0].calls.is_empty());
+        let skipped = recorder
+            .snapshot()
+            .into_iter()
+            .filter(|fields| {
+                fields.get("reason").map(String::as_str)
+                    == Some("\"partial-success-fallible-skipped\"")
+            })
+            .collect::<Vec<_>>();
+        let [skipped] = skipped.as_slice() else {
+            panic!("expected one skipped-phase warning, got {skipped:?}");
+        };
+        assert_eq!(skipped.get("call_index").map(String::as_str), Some("1"));
+        assert!(skipped["error"].contains("expected empty declared effects"));
 
         let err = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
             .await
