@@ -8,9 +8,8 @@ use crate::backlog::{
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
-    claims_attestation_key, is_failed_execution_response, published_failure,
-    published_midnight_payload, published_midnight_signing_args, published_output_payload,
-    published_output_signing_args,
+    claims_attestation_key, published_failure, published_midnight_payload,
+    published_midnight_signing_args, published_output_payload, published_output_signing_args,
 };
 use crate::sign_bidirectional::{
     owned_by_requester, transaction_chain_id, BidirectionalProgress, BidirectionalTxId,
@@ -389,10 +388,7 @@ pub(crate) async fn process_respond_bidirectional_event(
                 Some(elapsed) => record_request_latency(
                     source_chain,
                     SignRequestStep::BidirectionalTotal,
-                    execution_status(
-                        published_failure(&event)
-                            .unwrap_or_else(|| is_failed_execution_response(response)),
-                    ),
+                    execution_status(published_failure(&event, response)),
                     RequestKind::RespondBidirectional,
                     elapsed,
                 ),
