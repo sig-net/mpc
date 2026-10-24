@@ -1320,7 +1320,8 @@ mod tests {
                 1,
                 &hex::encode(CALLER),
                 &hex::encode(genuine.path),
-            ),
+            )
+            .unwrap(),
             "the signing key derives from the contract the record was read from"
         );
 

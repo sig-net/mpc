@@ -45,6 +45,13 @@ export enum PlacementScenario {
   FallibleSegmentPair = "fallibleSegmentPair",
   /** A guaranteed intent followed by a fallible intent that fails when applied. */
   PartialSuccess = "partialSuccess",
+  /** A fallible intent that commits followed by a fallible intent that fails when applied. */
+  FallibleThenFailing = "fallibleThenFailing",
+  /**
+   * A fallible call proven before the same request is filed by another transaction, so it
+   * fails when applied after that one.
+   */
+  RolledBackReplay = "rolledBackReplay",
 }
 
 export interface PlacementOutcome {
@@ -191,6 +198,17 @@ export async function submitPlacement(
     const call = await placed(first, true);
     parts = [call];
     phases = new Map([[call.segment, "fallible"]]);
+  } else if (scenario === PlacementScenario.RolledBackReplay) {
+    const replay = await placed(first, true);
+    parts = [replay];
+    phases = new Map([[replay.segment, "fallible"]]);
+    beforeBalancing = async () => {
+      const original = await placed(first, false);
+      const landed = await submitBuilt(context, original.tx, () => Promise.resolve());
+      if (landed.status !== SucceedEntirely) {
+        throw new Error(`the replayed request finalized as ${landed.status}`);
+      }
+    };
   } else if (second === undefined) {
     throw new Error(`${scenario} needs two calls`);
   } else if (
@@ -218,17 +236,25 @@ export async function submitPlacement(
     ]);
   } else {
     let buildHigher = () => placed(second, true);
-    if (scenario === PlacementScenario.PartialSuccess) {
+    const failing =
+      scenario === PlacementScenario.PartialSuccess ||
+      scenario === PlacementScenario.FallibleThenFailing;
+    if (failing) {
       const gate = await currentGate(context);
       buildHigher = () => buildCall(context, "submitGatedRequest", [second, context.schema, gate]);
       beforeBalancing = async () => {
         await context.bumpGate();
       };
     }
-    const [lower, higher] = await buildOrdered(() => placed(first, false), buildHigher);
+    const lowerPhase =
+      scenario === PlacementScenario.FallibleThenFailing ? "fallible" : "guaranteed";
+    const [lower, higher] = await buildOrdered(
+      () => placed(first, lowerPhase === "fallible"),
+      buildHigher,
+    );
     parts = [lower, higher];
     phases = new Map([
-      [lower.segment, "guaranteed"],
+      [lower.segment, lowerPhase],
       [higher.segment, "fallible"],
     ]);
   }
@@ -250,7 +276,12 @@ export async function submitPlacement(
   }
 
   const finalized = await submitBuilt(context, tx, beforeBalancing);
-  const status = scenario === PlacementScenario.PartialSuccess ? FailFallible : SucceedEntirely;
+  const status =
+    scenario === PlacementScenario.PartialSuccess ||
+    scenario === PlacementScenario.FallibleThenFailing ||
+    scenario === PlacementScenario.RolledBackReplay
+      ? FailFallible
+      : SucceedEntirely;
   if (finalized.status !== status) {
     throw new Error(`${scenario} finalized as ${finalized.status}, expected ${status}`);
   }

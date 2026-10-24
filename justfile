@@ -155,9 +155,11 @@ test-tron-tre:
     TRON_DEADLINE_SECS=60 \
     cargo test -p mpc-chain-tron --test live_gate -- --ignored --nocapture
 
-# Midnight real-stack test (ignored by default; needs Midnight node/indexer/proof-server + anvil)
-test-midnight: (setup "")
-    cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E 'test(=cases::midnight_stream::midnight_to_ethereum_to_midnight_consumes_caller_response)'
+# Midnight real-stack tests (ignored by default; each starts a Midnight node/indexer/proof-server,
+# Anvil and an MPC cluster). Runs one named test from cases::midnight_stream, or all of them.
+# Usage: just test-midnight [test]
+test-midnight test="": (build "eth") (setup "")
+    cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E '{{ if test == "" { "test(/^cases::midnight_stream::/)" } else { "test(=cases::midnight_stream::" + test + ")" } }}'
 
 # Midnight TS/Rust seam differential (needs dist/ built via npm test in midnight-publisher-ts)
 test-midnight-seam:

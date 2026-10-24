@@ -85,7 +85,7 @@ npm run typecheck
 npm test
 ```
 
-`npm run gen:api-parity-vectors` compiles the pinned Compact oracle and regenerates the request-cell, output-hash, attestation-digest, and cache fixtures consumed by Rust tests. Run `npm run compile:real-stack-caller` before `npm run typecheck:real-stack`; it also compiles the oracle bindings.
+`npm run gen:api-parity-vectors` compiles the pinned Compact oracle and regenerates the request-cell, output-hash, attestation-digest, and cache fixtures consumed by Rust tests. Run `npm run compile:real-stack-caller` and `npm run compile:real-stack-vault` before `npm run typecheck:real-stack`; the caller compile also compiles the oracle bindings.
 
 `npm run start` runs the TypeScript entry point during development. `npm run format` and `npm run lint:fix` apply the local formatting and lint fixes. `npm test` builds first because the process tests execute `dist/main.js`; `npm run build` emits that runtime entry point without opening or synchronizing a wallet.
 

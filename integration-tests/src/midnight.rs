@@ -95,6 +95,8 @@ pub enum PlacementScenario {
     GuaranteedThenFallibleSegments,
     FallibleSegmentPair,
     PartialSuccess,
+    FallibleThenFailing,
+    RolledBackReplay,
 }
 
 #[derive(Debug, Deserialize)]

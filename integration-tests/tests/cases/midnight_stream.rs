@@ -742,25 +742,56 @@ async fn midnight_indexes_notifications_by_transcript_placement() -> anyhow::Res
         }
     }
 
-    // A guaranteed intent commits while the fallible intent after it fails. The MPC indexes
-    // only fully applied transactions, so neither request is ever signed; their nonces lie
-    // beyond the executed range.
-    let partial = midnight
+    // Partially successful transactions: the node does not say which fallible segments
+    // committed. A request whose segment committed is signed; one whose segment rolled
+    // back never is, so its nonce lies beyond the executed range.
+    let mut skipped = Vec::new();
+    for (scenario, committed_phase) in [
+        (PlacementScenario::PartialSuccess, "guaranteed"),
+        (PlacementScenario::FallibleThenFailing, "fallible"),
+    ] {
+        let nonce = nonces.len() as u64;
+        let rolled_back_nonce = 1_000 + skipped.len() as u64;
+        let partial = midnight
+            .submit_placement(
+                scenario,
+                &[
+                    (nonce, target.into_array()),
+                    (rolled_back_nonce, target.into_array()),
+                ],
+                argument,
+            )
+            .await?;
+        anyhow::ensure!(
+            partial.status == "FailFallible" && partial.committed == partial.requests[..1],
+            "{scenario:?}: expected only the first intent to commit: {partial:?}"
+        );
+        anyhow::ensure!(
+            notification_phase(&partial.placement, &partial.requests[0]) == Some(committed_phase),
+            "{scenario:?} did not notify the committed request in the {committed_phase} transcript"
+        );
+        let committed = request_id(&partial.requests[0])?;
+        nonces.insert(committed, nonce);
+        expected.push(committed);
+        skipped.push(request_id(&partial.requests[1])?);
+    }
+    // A fallible call proven before its request is filed by another transaction, and applied
+    // after it, rolls back while naming a filed request. Only the filing is indexed.
+    let nonce = nonces.len() as u64;
+    let replay = midnight
         .submit_placement(
-            PlacementScenario::PartialSuccess,
-            &[(1_000, target.into_array()), (1_001, target.into_array())],
+            PlacementScenario::RolledBackReplay,
+            &[(nonce, target.into_array())],
             argument,
         )
         .await?;
     anyhow::ensure!(
-        partial.status == "FailFallible" && partial.committed == partial.requests[..1],
-        "expected only the guaranteed intent to commit: {partial:?}"
+        replay.status == "FailFallible" && replay.committed == replay.requests,
+        "expected the replay to roll back after its request was filed: {replay:?}"
     );
-    let skipped = partial
-        .requests
-        .iter()
-        .map(|id| request_id(id))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let replayed = request_id(&replay.requests[0])?;
+    nonces.insert(replayed, nonce);
+    expected.push(replayed);
 
     // Blocks index in order, so once this later request is indexed every earlier
     // notification has been indexed or skipped.
