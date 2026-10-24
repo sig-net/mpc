@@ -6,12 +6,10 @@
 
 /// `TxParamType` discriminant (§7.1): evmType2 = 0.
 pub const TX_PARAM_TYPE_EVM_TYPE2: u8 = 0;
-/// `TxParamType` discriminant (§7.1): tron = 1, the index `reserved` held before
-/// the variant was named (agreed in #1461).
+/// `TxParamType` discriminant (§7.1): tron = 1.
 pub const TX_PARAM_TYPE_TRON: u8 = 1;
 
-/// `txParamType` with `txParams` (§7.1): the discriminant names the payload's
-/// structure, so they are one type here, never two that can disagree.
+/// `txParamType` with `txParams` (§7.1)
 #[derive(Debug, Clone, PartialEq)]
 pub enum TxParams {
     EvmType2(EvmType2TxParams),

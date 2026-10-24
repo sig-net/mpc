@@ -541,8 +541,7 @@ fn decode_sign_bidirectional(
         path: bytes_n::<32>(cursor, "path")?,
         algo: bounded_enum(cursor, "algo")?,
         tx_params: {
-            // Consumed positionally: the width-checked atom's value was already
-            // pinned by `read_tx_param_type`; the variant encodes it.
+            // Consume the tx_param_type atom (not used here)
             let _ = uint::<u8>(cursor, 1, "tx_param_type")?;
             decode_tx_params(cursor, layout)?
         },
@@ -1323,6 +1322,8 @@ mod tests {
     fn resolve_verified_record_drops_over_capacity_used_counts() {
         let record = sample_record_with_partial_access_list();
         let rid = compute_request_id(&record).unwrap();
+
+        // Table of test cases for over-capacity used counts: (description, mutation function)
         let cases: &[(&str, fn(&mut SignBidirectionalRecord))] = &[
             ("calldata no_words past capacity", |r| {
                 r.evm_mut().calldata.value.no_words = 3
@@ -1334,6 +1335,7 @@ mod tests {
                 r.evm_mut().access_list[0].storage_key_count = 4
             }),
         ];
+
         for (name, mutate) in cases {
             let mut invalid = record.clone();
             mutate(&mut invalid);

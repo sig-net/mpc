@@ -164,7 +164,9 @@ fn compute_tron_tx_params_digest(tx: &TronTxParams) -> anyhow::Result<[u8; 32]> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{sample_record, sample_record_with_partial_access_list};
+    use crate::test_utils::{
+        sample_record, sample_record_with_partial_access_list, sample_tron_params, tron_record,
+    };
 
     #[test]
     fn request_id_matches_compact_golden() {
@@ -214,8 +216,8 @@ mod tests {
 
     #[test]
     fn tron_request_id_matches_the_golden_vector() {
-        let params = crate::test_utils::sample_tron_params();
-        let record = crate::test_utils::tron_record(params.clone());
+        let params = sample_tron_params();
+        let record = tron_record(params.clone());
         assert_eq!(
             hex::encode(compute_tron_tx_params_digest(&params).unwrap()),
             "e387f99d546a394b96180956656c7800aae76b96ba459ed87919656a34d33400"
@@ -228,19 +230,18 @@ mod tests {
 
     #[test]
     fn tron_request_identity_ignores_unused_calldata_capacity() {
-        let mut params = crate::test_utils::sample_tron_params();
-        let original = compute_request_id(&crate::test_utils::tron_record(params.clone())).unwrap();
+        let mut params = sample_tron_params();
+        let original = compute_request_id(&tron_record(params.clone())).unwrap();
         params.calldata.value.words.push([0xa5; 32]);
-        assert_eq!(
-            compute_request_id(&crate::test_utils::tron_record(params)).unwrap(),
-            original
-        );
+        assert_eq!(compute_request_id(&tron_record(params)).unwrap(), original);
     }
 
     #[test]
     fn tron_request_identity_binds_every_header_field_and_word() {
-        let base = crate::test_utils::sample_tron_params();
-        let original = compute_request_id(&crate::test_utils::tron_record(base.clone())).unwrap();
+        let base = sample_tron_params();
+        let original = compute_request_id(&tron_record(base.clone())).unwrap();
+
+        // Table of test cases for fields that must affect the request ID
         let cases: &[(&str, fn(&mut mpc_primitives::TronTxParams))] = &[
             ("ref block bytes", |tx| tx.ref_block_bytes[0] ^= 1),
             ("ref block hash", |tx| tx.ref_block_hash[7] ^= 1),
@@ -257,7 +258,7 @@ mod tests {
             let mut params = base.clone();
             mutate(&mut params);
             assert_ne!(
-                compute_request_id(&crate::test_utils::tron_record(params)).unwrap(),
+                compute_request_id(&tron_record(params)).unwrap(),
                 original,
                 "rid must bind {name}"
             );
@@ -279,6 +280,8 @@ mod tests {
     fn request_identity_binds_transaction_key_sender_and_destination() {
         let record = sample_record_with_partial_access_list();
         let original = compute_request_id(&record).unwrap();
+
+        // Table of test cases for fields that must affect the request ID
         let cases: &[(&str, fn(&mut SignBidirectionalRecord))] = &[
             ("nonce", |r| r.evm_mut().nonce += 1),
             ("max fee per gas", |r| r.evm_mut().max_fee_per_gas += 1),

@@ -351,9 +351,7 @@ pub(crate) fn sample_record() -> SignBidirectionalRecord {
     }
 }
 
-/// The tron counterpart of `sample_evm_params`: same sender and path via
-/// [`tron_record`], reference fields from a plausible block, one used calldata word
-/// so the capacity-scaled vector is exercised.
+/// The canonical Tron transaction parameters the unit tests build on.
 pub(crate) fn sample_tron_params() -> TronTxParams {
     TronTxParams {
         ref_block_bytes: [0x27, 0x10],

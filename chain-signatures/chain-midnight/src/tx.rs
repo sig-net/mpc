@@ -28,8 +28,7 @@ fn to_eip1559(params: &EvmType2TxParams) -> anyhow::Result<TxEip1559> {
 pub fn to_unsigned_tx(record: &SignBidirectionalRecord) -> anyhow::Result<TxEip1559> {
     match &record.tx_params {
         TxParams::EvmType2(params) => to_eip1559(params),
-        // The protobuf raw assembly and sha256 payload dispatch for Tron land with
-        // the rest of PR C; until then a Tron record cannot become a signing payload.
+        // TODO: Implement Tron transaction assembly
         TxParams::Tron(_) => anyhow::bail!(
             "tx_params is tron, which assembles a TriggerSmartContract raw, not an EVM transaction"
         ),
@@ -96,11 +95,11 @@ fn assemble_access_list(params: &EvmType2TxParams) -> AccessList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::sample_record_with_partial_access_list;
+    use crate::test_utils::{sample_record_with_partial_access_list, sample_tron_record};
 
     #[test]
     fn to_unsigned_tx_rejects_tron_params() {
-        let record = crate::test_utils::sample_tron_record();
+        let record = sample_tron_record();
         let err = to_unsigned_tx(&record)
             .expect_err("tron params must not assemble as an EVM transaction")
             .to_string();
