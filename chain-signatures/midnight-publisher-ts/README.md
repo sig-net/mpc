@@ -23,13 +23,13 @@ The process memoizes one wallet facade, including while it is starting. A single
 
 ## Supported event transactions
 
-The MPC reader processes events from finalized transactions with one unambiguous `TxApplied` (full success) status and a matching transaction hash. It reads both guaranteed and fallible transcripts of calls to the configured Signet singleton, processing all guaranteed phases before fallible phases in ledger execution order.
+The MPC reader processes events from finalized transactions with one unambiguous `TxApplied` (full success) or `TxPartialSuccess` status and a matching transaction hash. It reads both guaranteed and fallible transcripts of calls to the configured Signet singleton, processing all guaranteed phases before fallible phases in ledger execution order.
 
-A `TxPartialSuccess` result causes the reader to skip every event from that transaction, including guaranteed events and events from successful fallible segments. This does not undo any effects committed by Midnight. Other candidates without `TxApplied` are also logged and skipped. Malformed status data, duplicate `TxApplied` or `TxPartialSuccess` events, conflicting statuses, and transaction hash mismatches stop processing at that block.
+A `TxPartialSuccess` status does not say which fallible segments committed. The reader keeps every guaranteed event, since the guaranteed section committed, but from fallible transcripts only `SignBidirectionalEvent` notifications: a request is signed only when the caller's state holds its record at that block and did not hold it at the parent block, since a rolled-back segment never wrote it but may name a record an earlier transaction wrote. Response events in fallible transcripts are skipped, and so is a fallible transcript that does not decode, with a warning. Candidates without either status are logged and skipped. Malformed status data, duplicate `TxApplied` or `TxPartialSuccess` events, conflicting statuses, and transaction hash mismatches stop processing at that block.
 
 Supported singleton programs consist of literal, non-storage `Push`/`Log` pairs: `Push` places the encoded event on the execution stack, and `Log` emits it. `Noop` (no-op) and `Ckpt` (checkpoint) instructions may appear before, between or after those instructions. During VM execution, they only charge gas and do not change the recovered events. The reader ignores them when checking the instruction pattern, but replays the original program.
 
-The node validates the transaction structure; the reader checks whether it can reconstruct events without the original contract state. Declared effects must be empty, and events must use a supported Signet schema. Unsupported instructions or event schemas stop processing at that block. A fallible transcript alone is not a reason to reject a call: it is supported when the whole transaction succeeds. Caller record and signature validation still apply after decoding.
+The node validates the transaction structure; the reader checks whether it can reconstruct events without the original contract state. Declared effects must be empty, and events must use a supported Signet schema. Unsupported instructions or event schemas stop processing at that block, except in a fallible transcript of a `TxPartialSuccess` transaction, as above. A fallible transcript alone is not a reason to reject a call. Caller record and signature validation still apply after decoding.
 
 ## Midnight attestation API
 
@@ -39,7 +39,7 @@ Final attestations bind `(requestId, blockHeight, outputKind, serializedOutputLe
 
 A `build` request for `respondBidirectional` requires `attestation: { blockHeight, outputKind, serializedOutputLength, outputHash, digest }`. Both uint64 fields are decimal strings, `outputKind` is a numeric enum index, and `outputHash` and `digest` are 64 lowercase hex characters each. The existing `requestId` and `signature` fields remain common to both response circuits. `respond` rejects attestation metadata. Both circuits receive one SDK record containing the request ID.
 
-`devtools/real-stack/caller.compact` imports the canonical SDK request and attestation circuits directly. The vector generator compares its compiled Compact digests with the SDK TypeScript helper and extracts the response payload from the installed singleton's emitted event.
+`devtools/real-stack/caller.compact` imports the canonical SDK request and attestation circuits directly. The vector generator compares its compiled Compact digests with the SDK TypeScript helper and extracts the response payload from the installed singleton's emitted event. `devtools/real-stack/erc20-vault.compact` is an unmodified copy of the example vault the real-stack vault test drives; `provenance.json` records its source commit, compiler, Signet library, and SHA-256. The vault is written against the same `@sig-net/midnight` `0.25.0-rc.1` as the caller. The respond vector generator computes expected outputs with `@sig-net/midnight` `0.24.0-rc.10`, installed under the `@sig-net/midnight-respond-oracle` alias.
 
 ## Deadlines and retry policy
 
@@ -85,7 +85,7 @@ npm run typecheck
 npm test
 ```
 
-`npm run gen:api-parity-vectors` compiles the pinned Compact oracle and regenerates the request-cell, output-hash, attestation-digest, and cache fixtures consumed by Rust tests. Run `npm run compile:real-stack-caller` before `npm run typecheck:real-stack`; it also compiles the oracle bindings.
+`npm run gen:api-parity-vectors` compiles the pinned Compact oracle and regenerates the request-cell, output-hash, attestation-digest, and cache fixtures consumed by Rust tests. Run `npm run compile:real-stack-caller` and `npm run compile:real-stack-vault` before `npm run typecheck:real-stack`; the caller compile also compiles the oracle bindings.
 
 `npm run start` runs the TypeScript entry point during development. `npm run format` and `npm run lint:fix` apply the local formatting and lint fixes. `npm test` builds first because the process tests execute `dist/main.js`; `npm run build` emits that runtime entry point without opening or synchronizing a wallet.
 

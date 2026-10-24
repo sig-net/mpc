@@ -5,7 +5,7 @@
 
 use crate::config::MidnightConfig;
 use crate::convert::generate_sign_request;
-use crate::emissions::{EmissionKind, SingletonCallEmissions};
+use crate::emissions::{EmissionKind, SingletonCallEmissions, TranscriptPhase};
 use crate::reader::{
     decode_bidirectional_response_payload, decode_notification, decode_response_payload,
     resolve_verified_record, signet_field_node_by_path, unpack_notification_v1, Resolved,
@@ -157,6 +157,8 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                             let notification = decode_notification(&emission.payload);
                             let request_id = hex::encode(notification.request_id);
                             let indexed_ts = *indexed_ts.get_or_insert_with(current_unix_timestamp);
+                            let maybe_rolled_back =
+                                candidate.partial_success && phase == TranscriptPhase::Fallible;
                             if let Some(request) = self
                                 .process_entry(
                                     source,
@@ -164,6 +166,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     caller,
                                     &block.hash,
                                     block.number,
+                                    maybe_rolled_back.then_some(block.parent_hash.as_str()),
                                     indexed_ts,
                                 )
                                 .await
@@ -253,8 +256,10 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
     }
 
     /// One decoded notification: unpack it, read the caller's ledger at
-    /// `at_hash`, gate through `resolve_verified_record`, convert.
+    /// `at_hash`, gate through `resolve_verified_record`, convert. `rolled_back_parent`
+    /// is the parent block's hash when the notification's phase may have rolled back.
     ///
+    #[allow(clippy::too_many_arguments)]
     async fn process_entry<C: ChainSource>(
         &self,
         source: &C,
@@ -262,6 +267,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         caller: Option<[u8; 32]>,
         at_hash: &str,
         height: u64,
+        rolled_back_parent: Option<&str>,
         indexed_ts: u64,
     ) -> anyhow::Result<Option<IndexedSignRequest>> {
         let rid = notification.request_id;
@@ -377,6 +383,71 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 return Ok(drop_entry(reason, height, Some(rid), &detail));
             }
         };
+        // A notification whose segment rolled back can still name a record an earlier
+        // transaction wrote. Only a record new in this block was written by a committed
+        // segment of this block.
+        if let Some(parent_hash) = rolled_back_parent {
+            let parent_tree = match source.contract_state_tree(&caller_hex, parent_hash).await {
+                Ok(ContractState::Tree(tree)) => Some(tree),
+                Ok(ContractState::Absent) => None,
+                Ok(ContractState::Undecodable(err)) => {
+                    return Ok(drop_entry(
+                        "parent-state-undecodable",
+                        height,
+                        Some(rid),
+                        &format!("{caller_hex}: {err:#}"),
+                    ));
+                }
+                Err(err) if is_oversized_contract_state(&err) => {
+                    return Ok(drop_entry(
+                        "parent-state-too-large",
+                        height,
+                        Some(rid),
+                        &format!("{caller_hex}: {err:#}"),
+                    ));
+                }
+                Err(err) => {
+                    return Err(err.context(format!(
+                        "failed to read caller state {caller_hex} at the parent block"
+                    )));
+                }
+            };
+            if let Some(tree) = parent_tree {
+                let field = match signet_field_node_by_path(&tree, &unpacked.requests_path) {
+                    Ok(field) => field,
+                    Err(err) => {
+                        return Ok(drop_entry(
+                            "parent-requests-field-walk",
+                            height,
+                            Some(rid),
+                            &format!("{err:#}"),
+                        ));
+                    }
+                };
+                match resolve_verified_record(field, rid) {
+                    Resolved::Absent => {}
+                    Resolved::Found(_) => {
+                        return Ok(drop_entry(
+                            "request-preexisting",
+                            height,
+                            Some(rid),
+                            &format!(
+                                "{caller_hex} held the record before this block, and this \
+                                 fallible notification of a partial success may have rolled back"
+                            ),
+                        ));
+                    }
+                    Resolved::Dropped { reason, detail } => {
+                        return Ok(drop_entry(
+                            reason,
+                            height,
+                            Some(rid),
+                            &format!("at the parent block: {detail}"),
+                        ));
+                    }
+                }
+            }
+        }
         match generate_sign_request(&record, &unpacked.caller_address, rid, indexed_ts) {
             Ok(request) => Ok(Some(request)),
             Err(err) => {
@@ -610,57 +681,17 @@ mod tests {
     use crate::source::{BlockProofSeed, CandidateTransactionEmissions};
     use crate::test_utils::{
         array_of, cell_from_record, hex_32, key_of, map_of, notification_payload, response_payload,
-        sample_record,
+        sample_record, EventRecorder,
     };
     use midnight_onchain_state::state::StateValue;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use mpc_primitives::SignId;
     use std::collections::{HashMap, HashSet, VecDeque};
-    use std::fmt;
-    use std::sync::{Arc, Mutex};
-    use tracing::field::{Field, Visit};
-    use tracing::{Event, Subscriber};
-    use tracing_subscriber::layer::{Context, SubscriberExt};
-    use tracing_subscriber::Layer;
+    use std::sync::Mutex;
+    use tracing_subscriber::layer::SubscriberExt;
 
     type TestIndexer = MidnightIndexer<MockStateManager, NoopChainTelemetry>;
-
-    type RecordedFields = HashMap<&'static str, String>;
-
-    #[derive(Clone, Default)]
-    struct EventRecorder {
-        events: Arc<Mutex<Vec<RecordedFields>>>,
-    }
-
-    impl EventRecorder {
-        fn snapshot(&self) -> Vec<RecordedFields> {
-            self.events.lock().expect("recorded events").clone()
-        }
-    }
-
-    struct FieldRecorder<'a> {
-        fields: &'a mut RecordedFields,
-    }
-
-    impl Visit for FieldRecorder<'_> {
-        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-            self.fields.insert(field.name(), format!("{value:?}"));
-        }
-    }
-
-    impl<S> Layer<S> for EventRecorder
-    where
-        S: Subscriber,
-    {
-        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
-            let mut fields = HashMap::new();
-            event.record(&mut FieldRecorder {
-                fields: &mut fields,
-            });
-            self.events.lock().expect("recorded events").push(fields);
-        }
-    }
 
     const CALLER: [u8; 32] = [0xab; 32];
     const SINGLETON: [u8; 32] = [0x12; 32];
@@ -727,6 +758,7 @@ mod tests {
             candidates: vec![CandidateTransactionEmissions {
                 ledger_tx_hash: LEDGER_TX_HASH,
                 extrinsic_index: 1,
+                partial_success: false,
                 calls,
             }],
         }
@@ -793,6 +825,16 @@ mod tests {
     impl FixtureSource {
         fn set_emissions(&mut self, height: u64, calls: Vec<SingletonCallEmissions>) {
             self.emissions.insert(height, Some(batch(height, calls)));
+        }
+
+        fn set_partial_success_emissions(
+            &mut self,
+            height: u64,
+            calls: Vec<SingletonCallEmissions>,
+        ) {
+            let mut emissions = batch(height, calls);
+            emissions.candidates[0].partial_success = true;
+            self.emissions.insert(height, Some(emissions));
         }
 
         fn set_state(&mut self, address: [u8; 32], height: u64, state: crate::reader::Node) {
@@ -1188,6 +1230,150 @@ mod tests {
         }
     }
 
+    /// Defense in depth: every row is sent by the contract it names, so the caller check
+    /// passes and exactly one later gate stands between the pointed-at ledger entry and a
+    /// signature. Removing any one gate must fail its row.
+    #[tokio::test(flavor = "current_thread")]
+    async fn each_gate_after_the_caller_check_drops_what_it_guards() {
+        const IMPOSTOR: [u8; 32] = [0xbb; 32];
+        const NOT_A_REQUEST_FIELD: u8 = 5;
+        const MISFILED_FIELD: u8 = 6;
+        const FOREIGN_SENDER_FIELD: u8 = 7;
+        const MISFILED_KEY: [u8; 32] = [0x66; 32];
+
+        let record_from = |sender: [u8; 32], nonce: u64| {
+            let mut record = sample_record();
+            record.sender = sender;
+            record.tx_params.nonce = nonce;
+            let rid = crate::hashing::compute_request_id(&record).unwrap();
+            (record, rid)
+        };
+        let (genuine, genuine_rid) = record_from(CALLER, 1);
+        let (misfiled, _) = record_from(CALLER, 2);
+        let (foreign, foreign_rid) = record_from(IMPOSTOR, 3);
+        let (claims_caller, claims_caller_rid) = record_from(CALLER, 4);
+        let caller_ledger = array_of(vec![
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+            map_of(vec![(key_of(genuine_rid), cell_from_record(&genuine))]),
+            // A Bytes<8> field keyed by a genuine id: the id alone must not make a request.
+            map_of(vec![(
+                key_of(genuine_rid),
+                crate::test_utils::cell_from_atoms(&[vec![7]], &[8]),
+            )]),
+            map_of(vec![(key_of(MISFILED_KEY), cell_from_record(&misfiled))]),
+            map_of(vec![(key_of(foreign_rid), cell_from_record(&foreign))]),
+        ]);
+        // The impostor's own request map holds a record that claims CALLER as sender.
+        let impostor_ledger = array_of(vec![
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+            map_of(vec![(
+                key_of(claims_caller_rid),
+                cell_from_record(&claims_caller),
+            )]),
+        ]);
+
+        let process = async |sender: [u8; 32], field: u8, rid: [u8; 32]| {
+            let mut source = FixtureSource::default();
+            source.set_emissions(
+                9,
+                vec![SingletonCallEmissions {
+                    phase: crate::emissions::TranscriptPhase::Guaranteed,
+                    physical_segment: 1,
+                    call_index: 1,
+                    caller: Some(sender),
+                    emissions: vec![Emission {
+                        kind: EmissionKind::SignBidirectional,
+                        payload: notification_payload(1, rid, sender, &[field]),
+                    }],
+                }],
+            );
+            source.set_state(CALLER, 9, caller_ledger.clone());
+            source.set_state(IMPOSTOR, 9, impostor_ledger.clone());
+            let recorder = EventRecorder::default();
+            let _registration_guard =
+                tracing::subscriber::set_default(tracing_subscriber::registry());
+            let subscriber = tracing_subscriber::registry().with(recorder.clone());
+            let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+            let events = direct_indexer()
+                .await
+                .process_block(&source, &block_ref(9))
+                .await
+                .expect("a gate drop is per entry, not a block failure");
+            (events, recorder.snapshot())
+        };
+
+        // Control: the genuine request signs under the key derived from its caller.
+        let (events, _) = process(CALLER, REQUESTS_FIELD, genuine_rid).await;
+        let [ChainEvent::SignRequest { request, .. }] = events.as_slice() else {
+            panic!("the genuine request must be signed, got {events:?}");
+        };
+        assert_eq!(request.id, SignId::new(genuine_rid));
+        assert_eq!(
+            request.args.epsilon,
+            mpc_crypto::kdf::derive_epsilon_midnight(
+                1,
+                &hex::encode(CALLER),
+                &hex::encode(genuine.path),
+            )
+            .unwrap(),
+            "the signing key derives from the contract the record was read from"
+        );
+
+        for (name, sender, field, rid, reason, detail) in [
+            (
+                "a non-request field keyed by a genuine id",
+                CALLER,
+                NOT_A_REQUEST_FIELD,
+                genuine_rid,
+                "record-undecodable",
+                "",
+            ),
+            (
+                "a request-shaped record filed under a key that is not its id",
+                CALLER,
+                MISFILED_FIELD,
+                MISFILED_KEY,
+                "rid-mismatch",
+                "",
+            ),
+            (
+                "a record in the caller's ledger naming another contract as sender",
+                CALLER,
+                FOREIGN_SENDER_FIELD,
+                foreign_rid,
+                "convert-rejected",
+                "does not match the address it was read from",
+            ),
+            (
+                "an impostor's own record claiming the victim as sender",
+                IMPOSTOR,
+                REQUESTS_FIELD,
+                claims_caller_rid,
+                "convert-rejected",
+                "does not match the address it was read from",
+            ),
+        ] {
+            let (events, recorded) = process(sender, field, rid).await;
+            assert!(
+                events.is_empty(),
+                "{name}: must not be signed, got {events:?}"
+            );
+            let expected_reason = format!("{reason:?}");
+            let drop = recorded
+                .iter()
+                .find(|fields| fields.get("reason") == Some(&expected_reason))
+                .unwrap_or_else(|| panic!("{name}: no {reason} drop in {recorded:?}"));
+            let message = drop.get("message").map(String::as_str).unwrap_or_default();
+            assert!(message.contains(detail), "{name}: drop message {message}");
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn successful_request_logs_ledger_hash_and_sign_id_together() {
         let (record, rid) = named_record_and_rid(7);
@@ -1323,6 +1509,7 @@ mod tests {
                 call.caller,
                 CAPTURE_BLOCK_HASH,
                 CAPTURE_HEIGHT,
+                None,
                 0,
             )
             .await
@@ -1383,6 +1570,7 @@ mod tests {
                 call.caller,
                 CAPTURE_BLOCK_HASH,
                 CAPTURE_HEIGHT,
+                None,
                 0,
             )
             .await
@@ -1891,6 +2079,159 @@ mod tests {
         ));
         second.cancel_and_join().await;
         drop(live_tx);
+    }
+
+    fn fallible_notification(rid: [u8; 32]) -> Vec<SingletonCallEmissions> {
+        let mut calls = one_call(EmissionKind::SignBidirectional, notification(rid));
+        calls[0].phase = crate::emissions::TranscriptPhase::Fallible;
+        calls
+    }
+
+    #[tokio::test]
+    async fn a_partial_success_signs_a_fallible_notification_only_for_a_new_record() {
+        let (record, rid) = named_record_and_rid(7);
+        let (other, other_rid) = named_record_and_rid(8);
+        for (case, parent, signed) in [
+            ("caller not yet deployed", None, true),
+            (
+                "record written in this block",
+                Some(caller_state(&other, other_rid)),
+                true,
+            ),
+            (
+                "record already there",
+                Some(caller_state(&record, rid)),
+                false,
+            ),
+        ] {
+            let mut source = FixtureSource::default();
+            source.set_partial_success_emissions(9, fallible_notification(rid));
+            source.set_state(CALLER, 9, caller_state(&record, rid));
+            if let Some(parent) = parent {
+                source.set_state(CALLER, 8, parent);
+            }
+
+            let events = direct_indexer()
+                .await
+                .process_block(&source, &block_ref(9))
+                .await
+                .expect("block processes");
+
+            assert_eq!(events.len(), usize::from(signed), "{case}");
+            for event in events {
+                assert_request(event, rid);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_parent_state_without_a_new_record_drops_with_its_own_reason() {
+        let (record, rid) = named_record_and_rid(7);
+        let (other, _) = named_record_and_rid(8);
+        let wrong_id = array_of(vec![
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+            StateValue::Null,
+            map_of(vec![(key_of(rid), cell_from_record(&other))]),
+        ]);
+        for (case, reason) in [
+            ("undecodable", "parent-state-undecodable"),
+            ("oversized", "parent-state-too-large"),
+            ("requests field missing", "parent-requests-field-walk"),
+            ("wrong id", "rid-mismatch"),
+            ("already there", "request-preexisting"),
+        ] {
+            let mut source = FixtureSource::default();
+            source.set_partial_success_emissions(9, fallible_notification(rid));
+            source.set_state(CALLER, 9, caller_state(&record, rid));
+            match case {
+                "undecodable" => {
+                    source.undecodable_states.insert(
+                        (hex::encode(CALLER), hash_of(8)),
+                        "unexpected state tag".to_string(),
+                    );
+                }
+                "oversized" => source.set_oversized_state(CALLER, 8),
+                "requests field missing" => {
+                    source.set_state(CALLER, 8, array_of(vec![StateValue::Null]))
+                }
+                "wrong id" => source.set_state(CALLER, 8, wrong_id.clone()),
+                _ => source.set_state(CALLER, 8, caller_state(&record, rid)),
+            }
+
+            let recorder = EventRecorder::default();
+            // Keep a second scoped dispatch registered so callsites first reached by a
+            // parallel test register against the live dispatches, not that thread's default.
+            let _registration_guard =
+                tracing::subscriber::set_default(tracing_subscriber::registry());
+            let subscriber = tracing_subscriber::registry().with(recorder.clone());
+            let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+            let events = direct_indexer()
+                .await
+                .process_block(&source, &block_ref(9))
+                .await
+                .expect("a parent state without a new record is a per-entry drop");
+
+            assert!(events.is_empty(), "{case}");
+            let reasons = recorder
+                .snapshot()
+                .into_iter()
+                .filter_map(|fields| fields.get("reason").cloned())
+                .collect::<Vec<_>>();
+            assert!(
+                reasons.contains(&format!("{reason:?}")),
+                "{case}: expected {reason}, got {reasons:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_partial_success_fallible_notification_needs_a_new_record() {
+        let (record, rid) = named_record_and_rid(7);
+        let guaranteed = one_call(EmissionKind::SignBidirectional, notification(rid));
+        for (case, partial_success, calls) in [
+            ("partial success, guaranteed", true, guaranteed.clone()),
+            ("applied, guaranteed", false, guaranteed),
+            ("applied, fallible", false, fallible_notification(rid)),
+        ] {
+            let mut source = FixtureSource::default();
+            if partial_success {
+                source.set_partial_success_emissions(9, calls);
+            } else {
+                source.set_emissions(9, calls);
+            }
+            source.set_state(CALLER, 9, caller_state(&record, rid));
+            source.set_state_error(CALLER, 8, "the parent block must not be read");
+
+            let events = direct_indexer()
+                .await
+                .process_block(&source, &block_ref(9))
+                .await
+                .expect("block processes");
+
+            assert_eq!(events.len(), 1, "{case}");
+            assert_request(events.into_iter().next().unwrap(), rid);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_parent_state_holds_a_partial_success() {
+        let (record, rid) = named_record_and_rid(7);
+        let mut source = FixtureSource::default();
+        source.set_partial_success_emissions(9, fallible_notification(rid));
+        source.set_state(CALLER, 9, caller_state(&record, rid));
+        source.set_state_error(CALLER, 8, "state is unavailable at the parent block");
+
+        let err = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect_err("an unreadable parent state holds the block");
+        assert!(
+            format!("{err:#}").contains("state is unavailable at the parent block"),
+            "{err:#}"
+        );
     }
 
     #[tokio::test]

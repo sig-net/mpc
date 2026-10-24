@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/sig-net/midnight-examples",
+  "pullRequest": "https://github.com/sig-net/midnight-examples/pull/93",
+  "commit": "ae4effad7197955eaa9eb175f3eb20939d70febc",
+  "compiler": "0.33.0-rc.2",
+  "signetLibrary": "@sig-net/midnight@0.25.0-rc.1",
+  "license": "erc20-vault.LICENSE",
+  "files": [
+    {
+      "source": "examples/erc20-vault/contract/src/erc20-vault.compact",
+      "destination": "erc20-vault.compact",
+      "sha256": "d85fd20caa097135528f964e800b755e48d74ff75788d0d93dd41a6246662c23"
+    }
+  ]
+}
