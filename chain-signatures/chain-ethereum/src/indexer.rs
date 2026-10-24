@@ -414,6 +414,11 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 "ethereum RPC serves chain id {actual}, but network {} has chain id {expected}",
                 self.config.network
             );
+        } else {
+            tracing::warn!(
+                network = %self.config.network,
+                "unknown ethereum network: the RPC's chain id is not checked"
+            );
         }
 
         // Spawn the finalized head watcher.
