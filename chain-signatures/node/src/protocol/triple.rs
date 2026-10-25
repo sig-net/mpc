@@ -294,7 +294,6 @@ impl Drop for TripleGenerator {
         let msg = self.msg.clone();
         tokio::spawn(async move {
             msg.unsubscribe_triple(id).await;
-            msg.filter_triple(id).await;
         });
     }
 }
@@ -407,6 +406,35 @@ impl TripleSpawner {
         self.triple_storage.len_generated().await + self.ongoing.len()
     }
 
+    /// Returns why a PROPOSE fails storage checks or `None` if they pass.
+    async fn propose_rejection(
+        &self,
+        id: TripleId,
+        from: Participant,
+    ) -> Option<PositRejectReason> {
+        if self.contains_ongoing(id) {
+            tracing::warn!(id, ?from, "triple already generating");
+            Some(PositRejectReason::AlreadyGenerating)
+        } else if self.contains(id).await {
+            tracing::warn!(id, ?from, "triple already generated");
+            Some(PositRejectReason::AlreadyGenerating)
+        } else {
+            None
+        }
+    }
+
+    /// Lets integration tests feed posit messages without the run loop.
+    #[cfg(any(test, feature = "test-feature"))]
+    pub async fn process_posit_for_test(
+        &mut self,
+        id: TripleId,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+    ) {
+        self.process_posit(id, from, action, timeout).await;
+    }
+
     async fn process_posit(
         &mut self,
         id: TripleId,
@@ -414,16 +442,12 @@ impl TripleSpawner {
         action: PositAction,
         timeout: Duration,
     ) {
-        let internal_action = if self.contains_ongoing(id) {
-            tracing::warn!(id, ?from, ?action, "triple already generating");
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::AlreadyGenerating,
-            ))
-        } else if self.contains(id).await {
-            tracing::warn!(id, ?from, ?action, "triple already generated");
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::AlreadyGenerating,
-            ))
+        let rejection = match action {
+            PositAction::Propose => self.propose_rejection(id, from).await,
+            _ => None,
+        };
+        let internal_action = if let Some(reason) = rejection {
+            PositInternalAction::Reply(PositAction::RejectWithReason(reason))
         } else {
             let internal_action = self.posits.act(id, from, self.threshold, &action);
             #[cfg(feature = "debug-page")]

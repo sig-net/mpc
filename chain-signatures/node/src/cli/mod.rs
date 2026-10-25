@@ -7,7 +7,7 @@ use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
-use crate::node_client::{self, NodeClient};
+use crate::node_client::NodeClient;
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
@@ -123,8 +123,6 @@ pub enum Cli {
         override_config: Option<OverrideConfig>,
         #[command(flatten)]
         mesh_options: mesh::Options,
-        #[command(flatten)]
-        message_options: node_client::Options,
     },
 }
 
@@ -150,7 +148,6 @@ impl Cli {
                 log_options,
                 override_config,
                 mesh_options,
-                message_options,
             } => {
                 let mut args = vec![
                     "start".to_string(),
@@ -190,7 +187,6 @@ impl Cli {
                 args.extend(storage_options.into_str_args());
                 args.extend(log_options.into_str_args());
                 args.extend(mesh_options.into_str_args());
-                args.extend(message_options.into_str_args());
                 args
             }
         }
@@ -218,7 +214,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             log_options,
             override_config,
             mesh_options,
-            message_options,
         } => {
             let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
@@ -282,7 +277,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher,
                 contract_state_tx,
                 sync_report_tx,
-            } = MeshHandles::new(message_options, mesh_options, &account_id);
+            } = MeshHandles::new(mesh_options, &account_id);
 
             let stack = ChainStack::new(ChainConfigs::from_args(
                 eth, sol, hydration, canton, midnight,
@@ -672,12 +667,8 @@ struct MeshHandles {
 }
 
 impl MeshHandles {
-    fn new(
-        message_options: node_client::Options,
-        mesh_options: mesh::Options,
-        account_id: &AccountId,
-    ) -> Self {
-        let node_client = NodeClient::new(&message_options);
+    fn new(mesh_options: mesh::Options, account_id: &AccountId) -> Self {
+        let node_client = NodeClient::new();
         let (sync_report_tx, sync_report_rx) = SyncTask::sync_report_channel();
         let mesh = Mesh::new(&node_client, mesh_options, account_id, sync_report_rx);
         let mesh_state = mesh.watch();
