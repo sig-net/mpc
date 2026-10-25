@@ -6,10 +6,10 @@
 mod common;
 
 use common::build_raw;
-use mpc_chain_tron::pb::{
+use mpc_tron_wire::pb::{
     Message, RawTransaction, Transaction, TriggerSmartContract, TRIGGER_SMART_CONTRACT_TYPE_URL,
 };
-use mpc_chain_tron::{parse_hex, NowBlock, TronAddress};
+use mpc_tron_wire::{parse_hex, NowBlock, TronAddress};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
