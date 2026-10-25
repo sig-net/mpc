@@ -267,3 +267,162 @@ async fn pump(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+    use tokio_tungstenite::WebSocketStream;
+
+    type ServerSocket = WebSocketStream<tokio::net::TcpStream>;
+
+    /// The events as the indexer serves them, `dustLedgerEvents` payloads verbatim.
+    fn fixture_events() -> Vec<serde_json::Value> {
+        serde_json::from_str(include_str!("../fixtures/dust-events-undeployed.json")).unwrap()
+    }
+
+    /// One `graphql-transport-ws` server connection running `script`, at the URL
+    /// returned.
+    async fn indexer<F, Fut>(script: F) -> (String, tokio::task::JoinHandle<()>)
+    where
+        F: FnOnce(ServerSocket) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let socket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &Request, mut response: Response| {
+                    assert_eq!(
+                        request.headers()["Sec-WebSocket-Protocol"],
+                        "graphql-transport-ws"
+                    );
+                    response.headers_mut().insert(
+                        "Sec-WebSocket-Protocol",
+                        HeaderValue::from_static("graphql-transport-ws"),
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            script(socket).await;
+        });
+        (url, server)
+    }
+
+    async fn receive(socket: &mut ServerSocket) -> serde_json::Value {
+        loop {
+            if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
+                return serde_json::from_str(&text).unwrap();
+            }
+        }
+    }
+
+    async fn send(socket: &mut ServerSocket, message: serde_json::Value) {
+        socket
+            .send(Message::text(message.to_string()))
+            .await
+            .unwrap();
+    }
+
+    /// Acknowledges the connection after a ping the client must answer first.
+    async fn accept(socket: &mut ServerSocket) {
+        assert_eq!(receive(socket).await["type"], "connection_init");
+        send(socket, json!({ "type": "ping" })).await;
+        assert_eq!(receive(socket).await["type"], "pong");
+        send(socket, json!({ "type": "connection_ack" })).await;
+    }
+
+    #[tokio::test]
+    async fn the_subscription_delivers_the_indexer_s_events_in_order_until_it_ends() {
+        let events: Vec<_> = fixture_events().into_iter().take(3).collect();
+        let served = events.clone();
+        let (url, server) = indexer(move |mut socket| async move {
+            accept(&mut socket).await;
+            let subscribe = receive(&mut socket).await;
+            assert_eq!(subscribe["type"], "subscribe");
+            assert_eq!(subscribe["payload"]["variables"]["id"], 1);
+            for (index, event) in served.into_iter().enumerate() {
+                send(
+                    &mut socket,
+                    json!({ "id": "1", "type": "next", "payload": { "data": { "dustLedgerEvents": event } } }),
+                )
+                .await;
+                if index == 0 {
+                    send(&mut socket, json!({ "type": "ping" })).await;
+                    assert_eq!(receive(&mut socket).await["type"], "pong");
+                }
+            }
+            send(&mut socket, json!({ "id": "1", "type": "complete" })).await;
+        })
+        .await;
+
+        let updates: Vec<_> = IndexerDustEvents::new(url)
+            .subscribe(Some(1))
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        server.await.unwrap();
+
+        assert_eq!(updates.len(), 4, "three events, then the end");
+        for (update, event) in updates.iter().zip(&events) {
+            let update = update.as_ref().unwrap();
+            assert_eq!(update.id, event["id"].as_u64().unwrap());
+            assert_eq!(update.max_id, event["maxId"].as_u64().unwrap());
+            assert_eq!(
+                update.raw,
+                hex::decode(event["raw"].as_str().unwrap()).unwrap()
+            );
+        }
+        let end = updates[3].as_ref().unwrap_err();
+        assert!(format!("{end:#}").contains("ended"), "{end:#}");
+    }
+
+    #[tokio::test]
+    async fn an_errors_payload_ends_the_subscription_with_an_error() {
+        let (url, server) = indexer(|mut socket| async move {
+            accept(&mut socket).await;
+            receive(&mut socket).await;
+            send(
+                &mut socket,
+                json!({ "id": "1", "type": "next", "payload": { "errors": [{ "message": "boom" }] } }),
+            )
+            .await;
+            // Held open: the error alone must end the stream.
+            let _ = socket.next().await;
+        })
+        .await;
+
+        let mut stream = IndexerDustEvents::new(url).subscribe(None).await.unwrap();
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(format!("{error:#}").contains("boom"), "{error:#}");
+        assert!(stream.next().await.is_none());
+        drop(stream);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_indexed_time_is_the_newest_block_s_milliseconds_in_seconds() {
+        let (url, server) = indexer(|mut socket| async move {
+            accept(&mut socket).await;
+            let query = receive(&mut socket).await;
+            assert_eq!(query["payload"]["query"], "query { block { timestamp } }");
+            send(
+                &mut socket,
+                json!({ "id": "1", "type": "next", "payload": { "data": { "block": { "timestamp": 1_761_400_000_999u64 } } } }),
+            )
+            .await;
+        })
+        .await;
+
+        let time = IndexerDustEvents::new(url).indexed_time().await.unwrap();
+        server.await.unwrap();
+        assert_eq!(time, Timestamp::from_secs(1_761_400_000));
+    }
+}
