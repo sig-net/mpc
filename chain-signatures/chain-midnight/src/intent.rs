@@ -8,7 +8,7 @@ pub(crate) struct AmbiguousSubmit;
 impl std::fmt::Display for AmbiguousSubmit {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(
-            "the answer was lost; the transaction may still land, and a later publisher retry \
+            "the transaction was not seen finalized; it may still land, and a later publisher retry \
              may post the response again",
         )
     }

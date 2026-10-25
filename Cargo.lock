@@ -7381,7 +7381,7 @@ dependencies = [
 [[package]]
 name = "minocrab-publisher"
 version = "0.1.0"
-source = "git+https://github.com/sig-net/minocrab?rev=f3b8589fe9f08fc81eb8c3f51689f3bae1d3cb01#f3b8589fe9f08fc81eb8c3f51689f3bae1d3cb01"
+source = "git+https://github.com/sig-net/minocrab?rev=5b117de2e2fa95cbc47da24ed83a81a4c300723b#5b117de2e2fa95cbc47da24ed83a81a4c300723b"
 dependencies = [
  "anyhow",
  "midnight-base-crypto",
@@ -11442,7 +11442,7 @@ dependencies = [
 [[package]]
 name = "signet-protocol"
 version = "0.1.0"
-source = "git+https://github.com/sig-net/minocrab?rev=f3b8589fe9f08fc81eb8c3f51689f3bae1d3cb01#f3b8589fe9f08fc81eb8c3f51689f3bae1d3cb01"
+source = "git+https://github.com/sig-net/minocrab?rev=5b117de2e2fa95cbc47da24ed83a81a4c300723b#5b117de2e2fa95cbc47da24ed83a81a4c300723b"
 dependencies = [
  "sha2 0.11.0",
 ]

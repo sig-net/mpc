@@ -2492,4 +2492,143 @@ mod tests {
             Err(SubmitRefusal::Unanswered(_))
         ));
     }
+
+    /// Serves the captured block 432 as `0x43`, whose parent `0x42` runs the
+    /// captured runtime, with `events` as its `System::Events` and
+    /// `Timestamp::Now` at `millis`.
+    async fn captured_landing_node(
+        events: Vec<u8>,
+        millis: u64,
+    ) -> (MidnightPublisherRpc, jsonrpsee::server::ServerHandle) {
+        let raw_metadata = include_bytes!("../fixtures/fallible-block-432-metadata.scale");
+        let metadata = subxt::Metadata::decode_all(&mut &raw_metadata[..]).unwrap();
+        let opaque = format!("0x{}", hex::encode(raw_metadata.to_vec().encode()));
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let transport = connect_http(&http_config(server.local_addr().unwrap())).unwrap();
+        let keys = OnlineClient::<SubstrateConfig>::from_rpc_client_with(
+            H256([0x11; 32]),
+            subxt::client::RuntimeVersion {
+                spec_version: 1,
+                transaction_version: 1,
+            },
+            metadata,
+            transport.clone(),
+        )
+        .unwrap();
+        let storage_key = |pallet: &str, entry: &str| {
+            let key = keys
+                .storage()
+                .address_bytes(&subxt::dynamic::storage(
+                    pallet,
+                    entry,
+                    Vec::<subxt::dynamic::Value>::new(),
+                ))
+                .unwrap();
+            format!("0x{}", hex::encode(key))
+        };
+        let events_key = storage_key("System", "Events");
+        let now_key = storage_key("Timestamp", "Now");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("chain_getHeader", |params, _, _| {
+                let [hash] = params.parse::<[String; 1]>().unwrap();
+                assert_eq!(hash, hash_of_byte(0x43));
+                json!({
+                    "parentHash": hash_of_byte(0x42),
+                    "number": "0x1b0",
+                    "stateRoot": hash_of_byte(0x44),
+                    "extrinsicsRoot": hash_of_byte(0x45),
+                    "digest": { "logs": [] }
+                })
+            })
+            .unwrap();
+        module
+            .register_method("state_getRuntimeVersion", |params, _, _| {
+                let [hash] = params.parse::<[String; 1]>().unwrap();
+                assert_eq!(
+                    hash,
+                    hash_of_byte(0x42),
+                    "block 0x43 ran its parent's runtime"
+                );
+                json!({
+                    "specName": "midnight",
+                    "implName": "midnight",
+                    "authoringVersion": 1,
+                    "specVersion": 1,
+                    "implVersion": 0,
+                    "apis": [],
+                    "transactionVersion": 1,
+                    "stateVersion": 1
+                })
+            })
+            .unwrap();
+        module
+            .register_method("state_call", move |params, _, _| {
+                let (method, _data, _at) = params.parse::<(String, String, String)>().unwrap();
+                match method.as_str() {
+                    "Metadata_metadata_at_version" => "0x00".to_string(),
+                    "Metadata_metadata" => opaque.clone(),
+                    other => panic!("unexpected runtime call {other}"),
+                }
+            })
+            .unwrap();
+        module
+            .register_method("state_getStorage", move |params, _, _| {
+                let (key, at) = params.parse::<(String, String)>().unwrap();
+                assert_eq!(at, hash_of_byte(0x43));
+                if key == events_key {
+                    format!("0x{}", hex::encode(&events))
+                } else if key == now_key {
+                    format!("0x{}", hex::encode(millis.encode()))
+                } else {
+                    panic!("unexpected storage key {key}")
+                }
+            })
+            .unwrap();
+        let handle = server.start(module);
+        let rpc = MidnightPublisherRpc {
+            rpc: transport.clone(),
+            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+            genesis_hash: H256([0x11; 32]),
+            clients: Default::default(),
+            network_id: "undeployed".to_string(),
+        };
+        (rpc, handle)
+    }
+
+    #[tokio::test]
+    async fn the_publisher_reads_a_landing_and_the_block_time_from_a_captured_block() {
+        use crate::native::SubmitChain as _;
+
+        let applied = crate::test_utils::hex_32(
+            "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d",
+        );
+        let mut other = applied;
+        other[0] ^= 1;
+        let block = hash_of_byte(0x43);
+
+        let (rpc, _handle) = captured_landing_node(
+            include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
+            1_761_400_000_999,
+        )
+        .await;
+        assert_eq!(
+            rpc.landing(&block, applied).await.unwrap(),
+            Some(Landing::Applied)
+        );
+        assert_eq!(rpc.landing(&block, other).await.unwrap(), None);
+        assert_eq!(
+            rpc.block_time(&block).await.unwrap(),
+            midnight_base_crypto::time::Timestamp::from_secs(1_761_400_000),
+            "Timestamp::Now is milliseconds"
+        );
+
+        let mut partial = captured_applied_status_record();
+        partial[6] = 7; // TxPartialSuccess in the captured metadata.
+        let (rpc, _handle) = captured_landing_node(encode_status_records(&[partial]), 0).await;
+        assert_eq!(
+            rpc.landing(&block, applied).await.unwrap(),
+            Some(Landing::PartialSuccess)
+        );
+    }
 }

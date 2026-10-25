@@ -6,8 +6,8 @@
 //!
 //! The wallet never adopts the pending marks `DustLocalState::spend` sets on its
 //! scratch copy. It reserves the UTXOs a submitted transaction spends instead, and a
-//! reservation ends when the chain spends them, when the submit is refused, or when
-//! the transaction's TTL has passed and it can no longer land.
+//! reservation ends when the chain spends them, when the submit is refused, or a
+//! minute after the transaction's TTL, by when it has landed or never will.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -722,11 +722,44 @@ pub(crate) mod tests {
         let shared = shared();
         let updates = fixture_updates();
         apply(&shared, updates[..5].iter().cloned().map(Ok).collect()).unwrap();
+        let held = vec![DustNullifier(midnight_transient_crypto::curve::Fr::from(
+            7u64,
+        ))];
+        shared.state().reservations.push(Reservation {
+            spent: held.clone(),
+            until: Timestamp::from_secs(u64::MAX / 2),
+        });
         let mut corrupt = updates[5].clone();
         corrupt.raw.truncate(10);
         let error = apply(&shared, vec![Ok(corrupt)]).unwrap_err();
         assert!(format!("{error:#}").contains("restarting"), "{error:#}");
-        assert_eq!(shared.state().applied, None);
+        let state = shared.state();
+        assert_eq!(state.applied, None);
+        assert_eq!(
+            state
+                .reservations
+                .iter()
+                .map(|r| &r.spent)
+                .collect::<Vec<_>>(),
+            [&held],
+            "a submit in flight still holds its UTXOs across the restart"
+        );
+    }
+
+    #[test]
+    fn a_quiet_resubscription_is_ready_again_once_it_delivers() {
+        let shared = shared();
+        let updates = fixture_updates();
+        apply(&shared, updates.iter().cloned().map(Ok).collect()).unwrap();
+        // What `follow` records when a subscription ends.
+        shared.state().connected = false;
+        assert!(
+            !shared.state().is_ready(),
+            "a dropped subscription is not ready"
+        );
+        // On a quiet chain the resubscription re-delivers only the newest applied event.
+        apply(&shared, vec![Ok(updates.last().unwrap().clone())]).unwrap();
+        assert!(shared.state().is_ready());
     }
 
     /// Delivers the fixture once, then nothing.
