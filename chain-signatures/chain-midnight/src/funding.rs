@@ -113,6 +113,8 @@ pub(crate) struct FeePlan {
     pub tx: UnprovenTx,
     pub spent: Vec<DustNullifier>,
     pub fee: u128,
+    /// The spendable DUST it was planned from, in SPECK.
+    pub available: u128,
 }
 
 struct Reservation {
@@ -456,7 +458,12 @@ pub(crate) fn plan_fee(
             .map_err(|error| SubmitError::Internal(format!("pricing the fee: {error:?}")))?;
         let deficit = dust_deficit(&merged, fee)?;
         if deficit == 0 {
-            return Ok(FeePlan { tx, spent, fee });
+            return Ok(FeePlan {
+                tx,
+                spent,
+                fee,
+                available,
+            });
         }
         required = required.saturating_add(deficit);
     }
@@ -605,6 +612,14 @@ pub(crate) mod tests {
         .unwrap();
 
         assert!(!plan.spent.is_empty());
+        let spendable: u128 = local
+            .utxos()
+            .filter_map(|utxo| {
+                let generation = local.generation_info(&utxo)?;
+                Some(DustOutput::from(utxo).updated_value(&generation, ctime, &local.params))
+            })
+            .sum();
+        assert_eq!(plan.available, spendable, "nothing was reserved");
         let merged = base.merge(&plan.tx.mock_prove().unwrap()).unwrap();
         let fee = merged
             .fees_with_margin(&INITIAL_PARAMETERS, FEE_BLOCKS_MARGIN)

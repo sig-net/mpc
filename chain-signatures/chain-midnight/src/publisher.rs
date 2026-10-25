@@ -14,13 +14,16 @@ use mpc_utils::task::AbortOnDrop;
 use mpc_utils::time::current_unix_timestamp;
 
 use crate::attestation::validate_attestation_response;
-use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
-use crate::intent_gen::{
-    refusal_code, IntentGen, IntentRequest, Submitted, WireAttestation, WirePoint, WireSignature,
+use crate::config::{
+    validate_publisher_network_id, MidnightAddress, MidnightConfig, PublisherConfig,
 };
+use crate::dust_feed::IndexerDustEvents;
+use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
+use crate::intent::{IntentRequest, Submitted, WireAttestation, WirePoint, WireSignature};
+use crate::native::{NativeIntentClient, Provers};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
 use crate::rpc::{MidnightPublisherRpc, PinnedReads};
-use crate::wallet_snapshot::WalletSnapshotStore;
+use crate::submit_error::refusal_code;
 
 const SPECK_PER_DUST: f64 = 1e15;
 
@@ -36,32 +39,14 @@ pub(crate) struct PinnedState {
     pub ledger_parameters: Vec<u8>,
 }
 
-/// What builds a respond intent and turns it into a transaction the node has accepted:
-/// the companion process in production, a stand-in in the in-process tests. `submit`
-/// takes the bytes `build` wrote: re-serializing a decoded intent would stake the
-/// transaction on a round trip nothing checks. `Submitted` names the transaction,
-/// opaque here, and carries the funding wallet's DUST before it.
+/// What builds a respond intent and turns it into a finalized transaction: the native
+/// client in production, a stand-in in the in-process tests. `submit` takes the bytes
+/// `build` wrote. `Submitted` names the transaction, opaque here, and carries the
+/// funding wallet's DUST before it.
 #[async_trait]
 pub(crate) trait IntentClient: Send + Sync {
     async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>>;
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted>;
-    /// Keeps a due wallet snapshot; never fails a publish.
-    async fn refresh_snapshot(&self) {}
-}
-
-#[async_trait]
-impl IntentClient for IntentGen {
-    async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
-        IntentGen::build(self, request).await
-    }
-
-    async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
-        IntentGen::submit(self, intent).await
-    }
-
-    async fn refresh_snapshot(&self) {
-        IntentGen::refresh_snapshot(self).await;
-    }
 }
 
 /// Whether this node still waits for the response an action carries. A publish waits
@@ -117,7 +102,6 @@ impl MidnightPublisher {
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
         awaiter: Arc<dyn ResponseAwaiter>,
-        snapshots: Option<Arc<dyn WalletSnapshotStore>>,
     ) -> anyhow::Result<Self> {
         config.publisher.validate_output_storage()?;
         let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
@@ -127,8 +111,26 @@ impl MidnightPublisher {
             config.central_address,
         )?
         .map(|store| Arc::new(store) as Arc<dyn OutputStore>);
-        let intent_gen =
-            Arc::new(IntentGen::spawn_with_snapshots(config, rpc.network_id(), snapshots).await?);
+        validate_publisher_network_id(rpc.network_id())?;
+        // Before the wallet starts: a failed connect leaves nothing replaying.
+        let provers = Arc::new(Provers::new(
+            &config.publisher.contract_artifacts_dir,
+            &config.publisher.zk_params_dir,
+        )?);
+        let key = dust_secret_key(&parse_seed(&config.publisher.funding_seed)?)?;
+        let wallet = FundingWallet::start(
+            key,
+            Arc::new(IndexerDustEvents::new(
+                config.publisher.indexer_ws_url.clone(),
+            )),
+        );
+        let client = Arc::new(NativeIntentClient::new(
+            rpc.clone(),
+            wallet,
+            provers,
+            rpc.network_id(),
+            config.publisher.submit_timeout,
+        ));
         Ok(Self::new(
             &config.publisher,
             config.central_address,
@@ -161,7 +163,7 @@ impl MidnightPublisher {
         }
     }
 
-    /// Counts a request the child answered with an error code.
+    /// Counts a failed build or submit by its error class.
     fn record_refusal(&self, error: &anyhow::Error) {
         if let Some(code) = refusal_code(error) {
             self.telemetry.publish_refused(code);
@@ -239,8 +241,6 @@ impl ChainPublisher for MidnightPublisher {
         if !self.still_awaited(action, "queued").await? {
             return Ok(());
         }
-        // Before the reads that fix this intent's TTL, so a slow snapshot never shortens it.
-        self.client.refresh_snapshot().await;
         let central_address = self.central_address.to_hex();
         let sign_id = action.request.id;
         tracing::info!(
@@ -292,10 +292,8 @@ impl ChainPublisher for MidnightPublisher {
                 )
             })?;
         let submit_took = submitting.elapsed();
-        if let Some(speck) = submitted.dust_balance {
-            self.telemetry
-                .funding_wallet_observed(speck as f64 / SPECK_PER_DUST);
-        }
+        self.telemetry
+            .funding_wallet_observed(submitted.dust_balance as f64 / SPECK_PER_DUST);
 
         tracing::info!(
             ?sign_id,
@@ -327,7 +325,6 @@ impl RecoveringMidnightPublisher {
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
         awaiter: Arc<dyn ResponseAwaiter>,
-        snapshots: Option<Arc<dyn WalletSnapshotStore>>,
     ) -> anyhow::Result<Self> {
         config.validate()?;
         let config = config.clone();
@@ -335,8 +332,7 @@ impl RecoveringMidnightPublisher {
             let config = config.clone();
             let telemetry = telemetry.clone();
             let awaiter = awaiter.clone();
-            let snapshots = snapshots.clone();
-            async move { MidnightPublisher::connect(&config, telemetry, awaiter, snapshots).await }
+            async move { MidnightPublisher::connect(&config, telemetry, awaiter).await }
         }))
     }
 
@@ -472,7 +468,8 @@ fn ttl_seconds(config: &PublisherConfig, now: u64) -> u64 {
 mod tests {
     use super::*;
 
-    use crate::intent_gen::{is_ambiguous_submit, AmbiguousSubmit, Refusal};
+    use crate::intent::{is_ambiguous_submit, AmbiguousSubmit};
+    use crate::submit_error::SubmitError;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -586,14 +583,11 @@ mod tests {
         submitted: std::sync::atomic::AtomicUsize,
         /// What `submit` refuses with.
         submit_failure: Option<&'static str>,
-        /// The child's refusal codes `build` and `submit` answer with.
-        build_refusal: Option<&'static str>,
-        submit_refusal: Option<&'static str>,
+        /// The error classes `build` and `submit` fail with.
+        build_refusal: Option<fn(String) -> SubmitError>,
+        submit_refusal: Option<fn(String) -> SubmitError>,
         /// The DUST a landed submit reports.
-        dust_balance: Option<u128>,
-        refreshes: std::sync::atomic::AtomicUsize,
-        /// `refreshes` as the first build saw it.
-        refreshes_before_build: std::sync::OnceLock<usize>,
+        dust_balance: u128,
     }
 
     impl StubClient {
@@ -627,20 +621,12 @@ mod tests {
     #[async_trait]
     impl IntentClient for StubClient {
         async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
-            let _ = self
-                .refreshes_before_build
-                .set(self.refreshes.load(std::sync::atomic::Ordering::SeqCst));
             anyhow::ensure!(!self.refuse_build, "{BUILD_REFUSAL}");
-            if let Some(code) = self.build_refusal {
-                return Err(refused(code));
+            if let Some(class) = self.build_refusal {
+                return Err(refused(class));
             }
             self.built.lock().unwrap().push(request.clone());
             Ok(GRANTED_INTENT.to_vec())
-        }
-
-        async fn refresh_snapshot(&self) {
-            self.refreshes
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
 
         async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
@@ -653,8 +639,8 @@ mod tests {
                 // Before the record: a submit that failed posted nothing.
                 anyhow::bail!("{failure}");
             }
-            if let Some(code) = self.submit_refusal {
-                return Err(refused(code));
+            if let Some(class) = self.submit_refusal {
+                return Err(refused(class));
             }
             self.submitted
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -705,7 +691,7 @@ mod tests {
             }
             Ok(Submitted {
                 tx_id: format!("receipt-{attempt}"),
-                dust_balance: None,
+                dust_balance: 0,
             })
         }
     }
@@ -1267,14 +1253,9 @@ mod tests {
         assert_eq!(client.submissions(), 1);
     }
 
-    /// A refusal shaped as `granted` shapes the child's.
-    fn refused(code: &str) -> anyhow::Error {
-        let error = anyhow::Error::new(Refusal::new(code, "refused by the stub"));
-        if code == "ambiguous_submit" {
-            error.context(AmbiguousSubmit)
-        } else {
-            error
-        }
+    /// A failure shaped the way the native client shapes it.
+    fn refused(class: fn(String) -> SubmitError) -> anyhow::Error {
+        class("refused by the stub".to_string()).into_anyhow()
     }
 
     #[derive(Default)]
@@ -1314,7 +1295,7 @@ mod tests {
     async fn a_landed_publish_reports_the_wallet_s_dust_balance() {
         let telemetry = Arc::new(WalletTelemetry::default());
         let client = Arc::new(StubClient {
-            dust_balance: Some(4_210_000_000_000_000),
+            dust_balance: 4_210_000_000_000_000,
             ..Default::default()
         });
 
@@ -1332,18 +1313,18 @@ mod tests {
         let telemetry = Arc::new(WalletTelemetry::default());
         let clients = [
             StubClient {
-                build_refusal: Some("contract_mismatch"),
+                build_refusal: Some(SubmitError::ContractMismatch),
                 ..Default::default()
             },
             StubClient {
-                submit_refusal: Some("wallet_unfunded"),
+                submit_refusal: Some(SubmitError::WalletUnfunded),
                 ..Default::default()
             },
             StubClient {
-                submit_refusal: Some("ambiguous_submit"),
+                submit_refusal: Some(SubmitError::Ambiguous),
                 ..Default::default()
             },
-            // Without a child's code there is nothing to count.
+            // Without an error class there is nothing to count.
             StubClient {
                 submit_failure: Some("pipe closed"),
                 ..Default::default()
@@ -1566,21 +1547,6 @@ mod tests {
         assert_eq!(client.submissions(), 1);
     }
 
-    #[tokio::test]
-    async fn a_publish_refreshes_the_wallet_snapshot_before_its_intent_s_ttl_starts() {
-        let client = StubClient::new();
-        let publisher =
-            awaiting_publisher(StubReads::new(), client.clone(), ScriptedAwaiter::new(&[]));
-
-        publisher
-            .publish_signature(&respond_action())
-            .await
-            .expect("the stub client grants and accepts");
-
-        assert_eq!(client.refreshes_before_build.get(), Some(&1));
-        assert_eq!(client.submissions(), 1);
-    }
-
     /// The publish queued behind another asks only once its turn comes, so a response
     /// that lands while it waits is not built or paid for.
     #[tokio::test]
@@ -1799,7 +1765,6 @@ mod tests {
             &config,
             Arc::new(NoopPublisherTelemetry),
             ScriptedAwaiter::new(&[]),
-            None,
         )
         .err()
         .expect("an ftp node_url is refused before any connection attempt");

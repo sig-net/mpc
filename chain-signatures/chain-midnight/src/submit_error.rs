@@ -37,6 +37,21 @@ pub(crate) enum SubmitError {
 }
 
 impl SubmitError {
+    /// The class's name, as its message is prefixed with.
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::BadRequest(_) => "bad_request",
+            Self::ContractMismatch(_) => "contract_mismatch",
+            Self::WalletUnsynced(_) => "wallet_unsynced",
+            Self::WalletBusy(_) => "wallet_busy",
+            Self::WalletUnfunded(_) => "wallet_unfunded",
+            Self::ProvingTimeout(_) => "proving_timeout",
+            Self::StateConflict(_) => "state_conflict",
+            Self::Ambiguous(_) => "ambiguous_submit",
+            Self::Internal(_) => "internal",
+        }
+    }
+
     /// As the publisher's error, marked when the transaction may still land.
     pub(crate) fn into_anyhow(self) -> anyhow::Error {
         let ambiguous = matches!(self, Self::Ambiguous(_));
@@ -45,6 +60,41 @@ impl SubmitError {
             error.context(AmbiguousSubmit)
         } else {
             error
+        }
+    }
+}
+
+/// The class of a failed build or submit, if `error` carries one.
+pub(crate) fn refusal_code(error: &anyhow::Error) -> Option<&'static str> {
+    error.downcast_ref::<SubmitError>().map(SubmitError::code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_class_is_counted_under_the_code_its_message_carries() {
+        let classes: [fn(String) -> SubmitError; 9] = [
+            SubmitError::BadRequest,
+            SubmitError::ContractMismatch,
+            SubmitError::WalletUnsynced,
+            SubmitError::WalletBusy,
+            SubmitError::WalletUnfunded,
+            SubmitError::ProvingTimeout,
+            SubmitError::StateConflict,
+            SubmitError::Ambiguous,
+            SubmitError::Internal,
+        ];
+        for class in classes {
+            let error = class("reason".to_string());
+            let message = error.to_string();
+            let code = error.code();
+            assert_eq!(message, format!("[{code}] reason"));
+            assert_eq!(
+                refusal_code(&error.into_anyhow().context("publishing")),
+                Some(code)
+            );
         }
     }
 }

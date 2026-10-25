@@ -32,7 +32,7 @@ use rand::{Rng as _, SeedableRng as _};
 use tokio::time::Instant;
 
 use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
-use crate::intent::{IntentRequest, WireAttestation, WireSignature};
+use crate::intent::{IntentRequest, Submitted, WireAttestation, WireSignature};
 use crate::publisher::IntentClient;
 use crate::rpc::{Landing, PinnedReads, SubmitRefusal};
 use crate::submit_error::SubmitError;
@@ -205,7 +205,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         Ok(bytes)
     }
 
-    async fn submit_intent(&self, intent: &[u8]) -> Result<String, SubmitError> {
+    async fn submit_intent(&self, intent: &[u8]) -> Result<Submitted, SubmitError> {
         let deadline = Instant::now() + self.submit_timeout;
         let intent: PreimageIntent<DefaultDB> =
             midnight_serialize::tagged_deserialize(&mut &intent[..]).map_err(|error| {
@@ -294,8 +294,13 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             before_post = ?started.elapsed(),
             "midnight: posting respond"
         );
-        self.post(&bytes, tx_hash, &plan.spent, head_number, ttl, deadline)
-            .await
+        let tx_id = self
+            .post(&bytes, tx_hash, &plan.spent, head_number, ttl, deadline)
+            .await?;
+        Ok(Submitted {
+            tx_id,
+            dust_balance: plan.available,
+        })
     }
 
     /// The respond call proven under the packaged contract keys (zkir v3).
@@ -470,7 +475,7 @@ where
         self.build_intent(request).map_err(SubmitError::into_anyhow)
     }
 
-    async fn submit(&self, intent: &[u8]) -> anyhow::Result<String> {
+    async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
         self.submit_intent(intent)
             .await
             .map_err(SubmitError::into_anyhow)
@@ -1214,7 +1219,6 @@ mod bench {
     //! sample; proving wants `--release`.
 
     use midnight_ledger_v9::structure::INITIAL_PARAMETERS;
-    use rand::SeedableRng as _;
 
     use super::tests::{bidirectional_request, respond_request, RecordingWallet, ScriptedChain};
     use super::*;
@@ -1398,7 +1402,11 @@ mod live {
                 .submit(&intent)
                 .await
                 .unwrap_or_else(|error| panic!("{circuit}: {error:#}"));
-            println!("{circuit}: landed {landed} in {:?}", started.elapsed());
+            println!(
+                "{circuit}: landed {} in {:?}",
+                landed.tx_id,
+                started.elapsed()
+            );
         }
     }
 }

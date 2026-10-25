@@ -21,6 +21,14 @@ pub(crate) fn is_ambiguous_submit(error: &anyhow::Error) -> bool {
     error.downcast_ref::<AmbiguousSubmit>().is_some()
 }
 
+/// A finalized transaction and the funding wallet's DUST before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Submitted {
+    pub tx_id: String,
+    /// Spendable DUST in SPECK.
+    pub dust_balance: u128,
+}
+
 /// One respond call. Every byte field is bare lowercase hex with no `0x`; the builder
 /// converts nothing and rejects anything else.
 #[derive(Debug, Clone, PartialEq)]

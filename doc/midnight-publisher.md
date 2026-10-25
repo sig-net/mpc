@@ -44,6 +44,8 @@ A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for 
 | `ambiguous_submit` | The transaction was not seen finalized within the budget and may still land. A retry may post the response again; duplicate responses are harmless. |
 | `internal` | Anything else. |
 
+The node counts each failure by its class in `multichain_publish_refusals`. A landed publish sets `multichain_funding_wallet_balance` to the spendable DUST its fee was planned from.
+
 ## Configuration and artifacts
 
 The operator configures the node URL, the singleton address, the funding seed and the indexer subscription URL (`--midnight-indexer-ws-url`). The node image carries what proving reads, at the paths `PublisherConfig` defaults to:
