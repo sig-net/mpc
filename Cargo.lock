@@ -7525,6 +7525,7 @@ dependencies = [
  "mpc-crypto",
  "mpc-primitives",
  "rand 0.8.8",
+ "sha2 0.11.0",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
