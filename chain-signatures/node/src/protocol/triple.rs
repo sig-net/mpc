@@ -292,7 +292,6 @@ impl Drop for TripleGenerator {
         let msg = self.msg.clone();
         tokio::spawn(async move {
             msg.unsubscribe_triple(id).await;
-            msg.filter_triple(id).await;
         });
     }
 }
