@@ -6,9 +6,12 @@ use super::organize::OrganizingPhase;
 use super::posit::PositPhase;
 use super::state::SignState;
 use super::*;
-use crate::backlog::{Generating, SignEntry};
-
+use crate::backlog::{BacklogError, Generating, SignEntry};
 use crate::storage::presignature_storage::PresignatureTaken;
+
+use cait_sith::FullSignature;
+use k256::Secp256k1;
+use std::future::Future;
 
 /// Generating phase — see [`SignPhase::Generating`].
 pub struct GeneratingPhase {
@@ -35,7 +38,11 @@ pub enum SignPhase {
     /// deliberator takes its share from storage) and run the signing protocol
     /// to completion.
     Generating(GeneratingPhase),
-    /// Terminal: the request finished (`Ok`) or aborted (`Err`).
+    /// Terminal. `Ok` means the signature was recorded in the backlog and, on
+    /// the proposer, queued for the RPC worker; it does not mean a response is
+    /// on chain, which the backlog state and the chain streams track. `Err`
+    /// means the request aborted, including a signature that was generated but
+    /// could not be handed off.
     Complete(Result<(), SignError>),
 }
 
@@ -95,26 +102,82 @@ impl GeneratingPhase {
 
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS.inc();
 
-        // Drive generation while answering posit traffic: peers proposing this
-        // signature get a Reject so they don't wait for us. The generator itself
-        // knows nothing about posits.
-        let generation = generator.run(&gen_ctx, state.entry.clone());
-        tokio::pin!(generation);
-        let result = loop {
+        let generation = generator.run(&gen_ctx);
+        let output = match Self::answering_posits(ctx, state, mailbox, generation).await {
+            Ok(output) => output,
+            Err(SignError::Aborted(cause)) => {
+                return state.reorganize(&format!("signature generation failed: {cause}"));
+            }
+        };
+
+        // The backlog write queues behind the pending map's readers, so keep
+        // answering peers while it waits.
+        let hand_off = self.hand_off(ctx, state.entry.clone(), output);
+        SignPhase::Complete(
+            Self::answering_posits(ctx, state, mailbox, hand_off)
+                .await
+                .map_err(SignError::Aborted),
+        )
+    }
+
+    /// Drive `fut` to completion while answering posit traffic: peers proposing
+    /// this signature get a Reject so they don't wait for us.
+    async fn answering_posits<F: Future>(
+        ctx: &SignTask,
+        state: &mut SignState,
+        mailbox: &PositMailbox,
+        fut: F,
+    ) -> F::Output {
+        tokio::pin!(fut);
+        loop {
             tokio::select! {
-                result = &mut generation => break result,
+                output = &mut fut => break output,
                 task_msg = mailbox.recv() => {
                     Self::reject_late_propose(ctx, state, task_msg).await;
                 }
             }
-        };
-
-        match result {
-            Ok(()) => SignPhase::Complete(Ok(())),
-            Err(SignError::Aborted(cause)) => {
-                state.reorganize(&format!("signature generation failed: {cause}"))
-            }
         }
+    }
+
+    /// Hand the finished signature on. This is not the on-chain publish: every
+    /// participant advances the backlog entry to publishing, the record that
+    /// publish failover works from, and the proposer queues a publish for the
+    /// RPC worker, which submits and retries on its own. `Err` means the
+    /// signature went nowhere: it did not verify, or the backlog entry could
+    /// not be advanced.
+    async fn hand_off(
+        &self,
+        ctx: &SignTask,
+        entry: SignEntry<Generating>,
+        output: FullSignature<Secp256k1>,
+    ) -> Result<(), String> {
+        let sign_id = ctx.sign_id;
+        let is_proposer = self.proposer == ctx.governance.me;
+
+        let entry = entry
+            .advance(
+                ctx.governance.public_key,
+                &output,
+                self.accepted_participants.clone(),
+                is_proposer,
+            )
+            .await
+            .map_err(|err| match err {
+                BacklogError::InvalidSignature => {
+                    tracing::error!(
+                        ?sign_id,
+                        "generated signature does not verify against the derived key; dropping it"
+                    );
+                    "generated signature does not verify".to_string()
+                }
+                err => format!("failed to mark publishing: {err}"),
+            })?;
+
+        if is_proposer {
+            crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
+            ctx.rpc.publish(entry);
+        }
+        Ok(())
     }
 
     /// The proposer already committed its presignature before START went out.
@@ -198,6 +261,26 @@ pub struct SignTask {
 }
 
 impl SignTask {
+    /// Send one posit message for this sign request to `to`.
+    pub async fn send_posit(
+        &self,
+        to: Participant,
+        presignature_id: PresignatureId,
+        round: usize,
+        action: PositAction,
+    ) {
+        self.msg
+            .send_posit(
+                self.governance.me,
+                to,
+                PositProtocolId::signature(self.sign_id, self.kind, presignature_id, round),
+                action,
+            )
+            .await;
+    }
+}
+
+impl SignTask {
     /// Drive the signature generation state machine to completion
     pub async fn run(
         mut self,
@@ -250,7 +333,6 @@ impl SignTask {
         GenerateCtx {
             governance: self.governance.clone(),
             msg: self.msg.clone(),
-            rpc: self.rpc.clone(),
             cfg: self.cfg.clone(),
             node_account_id: self.node_account_id.clone(),
         }

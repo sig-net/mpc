@@ -104,25 +104,27 @@ To run benchmarks, simply run the `bench.sh` script in the root:
 ./bench.sh
 ```
 
-## Production compatibility tests
+## Release compatibility test
 
-Historical compatibility tests boot one node from the latest code and one node
-from the production tags (`testnet` = 1.10.0, `mainnet` = 1.1.2). To run them
-locally:
+The release compatibility test boots one node from the current code and one
+node from the latest release tag, with threshold 2, and signs. It is
+informational: a failure means investigate before a rolling deploy.
+To run it locally:
 
-1. Build the tagged binaries (only needed once per version):
+1. Build the latest release binary (only needed once per tag):
     ```bash
-    ./scripts/build-compat-binaries.sh
+    just build compat
     ```
-    Set `FORCE_REBUILD=1` if you need to rebuild an existing binary.
-2. Execute the tests:
+    Set `COMPAT_TAG=<tag>` to build another tag and `FORCE_REBUILD=1` to
+    rebuild an existing binary.
+2. Execute the test (builds the contract and the current node first):
     ```bash
-    ./scripts/test-prod-compat.sh
+    just test-compat
     ```
 
-The build script generates binaries under `target/compat/<channel>/<version>` so
-the integration test cluster can spawn historical nodes without checking
-artifacts into git.
+The build script generates the binary under `target/compat/<tag>` and points
+`target/compat/latest` at it, so the integration test cluster can spawn a
+previous-release node without checking artifacts into git.
 
 ## FAQ
 

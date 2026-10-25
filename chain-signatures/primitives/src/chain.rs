@@ -21,10 +21,12 @@ pub trait ChainConfig {
     /// Solana: frozen anchor). Env-overridable
     fn feed_stall_timeout_secs(&self) -> u64;
     fn expected_finality_time_secs(&self) -> u64;
+    /// From publishing a response until it is final on chain.
+    fn expected_observe_latency_secs(&self) -> u64;
     fn expected_response_time_secs(&self) -> u64;
     fn respond_serialization_format(&self) -> SerDeserFormat;
     /// Whether bidirectional requests can target this chain.
-    fn has_execution_watcher(&self) -> bool;
+    fn supports_bidirectional_signing(&self) -> bool;
 }
 
 impl ChainConfig for Chain {
@@ -113,9 +115,18 @@ impl ChainConfig for Chain {
         }
     }
 
+    fn expected_observe_latency_secs(&self) -> u64 {
+        match self {
+            // Proves twice before submitting, then waits for finality.
+            Chain::Midnight => 105,
+            _ => self.expected_finality_time_secs(),
+        }
+    }
+
     fn expected_response_time_secs(&self) -> u64 {
-        // finality time * 2 = finality time of sign/sign_bidirectional event + finality time of respond event
-        self.expected_finality_time_secs() * 2 + 5 // + Buffer time
+        // Finality of the request event + observe latency of the response
+        self.expected_finality_time_secs() + self.expected_observe_latency_secs() + 5
+        // + Buffer time
     }
 
     fn respond_serialization_format(&self) -> SerDeserFormat {
@@ -127,8 +138,8 @@ impl ChainConfig for Chain {
         }
     }
 
-    fn has_execution_watcher(&self) -> bool {
-        matches!(self, Chain::Ethereum)
+    fn supports_bidirectional_signing(&self) -> bool {
+        matches!(self, Chain::Ethereum | Chain::Tron)
     }
 }
 

@@ -337,7 +337,7 @@ impl Cluster {
                         Err(e) => {
                             // Once threshold is reached by another voter, remaining votes may race
                             // and fail with `Update not found` even though update succeeded.
-                            if e.to_string().contains("Update not found") {
+                            if format!("{e:#}").contains("Update not found") {
                                 success += 1;
                                 voted = true;
                                 break;
@@ -366,14 +366,17 @@ impl Cluster {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    pub async fn prestockpile(&self, prestockpile: Prestockpile) {
+    pub async fn stockpile(&self, prestockpile: &Prestockpile) {
         let participants = self.participants().await.unwrap();
         self.nodes
             .ctx()
             .redis
             .stockpile_triples(&self.cfg, &participants, prestockpile.multiplier)
             .await;
+    }
 
+    /// Waits until every node owns `min_presignatures` presignatures.
+    pub async fn wait_stockpiled(&self) {
         self.wait()
             .min_mine_presignatures(self.cfg.protocol.presignature.min_presignatures as usize)
             .await

@@ -7,7 +7,7 @@ use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
-use crate::node_client::{self, NodeClient};
+use crate::node_client::NodeClient;
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
@@ -17,6 +17,7 @@ use crate::protocol::sync::{SyncReportSender, SyncTask};
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::storage::midnight_wallet_storage::MidnightWalletStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
@@ -37,7 +38,9 @@ use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher, GatedPublisher};
-use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher};
+use mpc_chain_midnight::{
+    MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher, WalletSnapshotStore,
+};
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_chain_tron::TronConfig;
@@ -120,8 +123,6 @@ pub enum Cli {
         override_config: Option<OverrideConfig>,
         #[command(flatten)]
         mesh_options: mesh::Options,
-        #[command(flatten)]
-        message_options: node_client::Options,
     },
 }
 
@@ -147,7 +148,6 @@ impl Cli {
                 log_options,
                 override_config,
                 mesh_options,
-                message_options,
             } => {
                 let mut args = vec![
                     "start".to_string(),
@@ -187,7 +187,6 @@ impl Cli {
                 args.extend(storage_options.into_str_args());
                 args.extend(log_options.into_str_args());
                 args.extend(mesh_options.into_str_args());
-                args.extend(message_options.into_str_args());
                 args
             }
         }
@@ -215,7 +214,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             log_options,
             override_config,
             mesh_options,
-            message_options,
         } => {
             let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
@@ -249,6 +247,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage,
                 presignature_storage,
                 backlog,
+                midnight_wallet,
             } = StorageHandles::new(&account_id, &storage_options).await?;
 
             let my_address = my_address.unwrap_or_else(|| {
@@ -278,11 +277,12 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher,
                 contract_state_tx,
                 sync_report_tx,
-            } = MeshHandles::new(message_options, mesh_options, &account_id);
+            } = MeshHandles::new(mesh_options, &account_id);
 
             let stack = ChainStack::new(ChainConfigs::from_args(
                 eth, sol, hydration, canton, midnight,
-            )?);
+            )?)
+            .with_midnight_wallet(midnight_wallet);
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
                 near_crypto::Signer::InMemory(s) => s,
@@ -305,7 +305,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             )
             .await;
 
-            let (sync_channel, sync_task) = SyncTask::new(
+            let sync_task = SyncTask::new(
                 &node_client,
                 triple_storage.clone(),
                 presignature_storage.clone(),
@@ -337,7 +337,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             } = ProtocolHandles::new(
                 &account_id,
                 override_config,
-                network,
+                network.clone(),
                 sign_rx,
                 &node_client,
                 &contract_watcher,
@@ -374,7 +374,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 node_watcher,
                 triple_storage,
                 presignature_storage,
-                sync_channel,
+                contract_watcher.clone(),
+                network.clone(),
                 account_id,
                 backlog.clone(),
             ));
@@ -504,6 +505,8 @@ struct ChainStack {
     /// One 429 cooldown gate per chain, shared by that chain's indexer and
     /// publisher (they hit the same RPC endpoint).
     gates: EnumMap<Chain, SharedBackoff>,
+    /// Where the Midnight publisher's funding wallet resumes from across restarts.
+    midnight_wallet: Option<Arc<dyn WalletSnapshotStore>>,
 }
 
 impl ChainStack {
@@ -511,7 +514,13 @@ impl ChainStack {
         Self {
             configs,
             gates: EnumMap::from_fn(|_| SharedBackoff::new()),
+            midnight_wallet: None,
         }
+    }
+
+    fn with_midnight_wallet(mut self, store: Arc<dyn WalletSnapshotStore>) -> Self {
+        self.midnight_wallet = Some(store);
+        self
     }
 
     fn gate(&self, chain: Chain) -> SharedBackoff {
@@ -586,7 +595,12 @@ impl ChainStack {
         if let Some(midnight) = &self.configs.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
             let awaiter = Arc::new(rpc::BacklogAwaiter::new(backlog));
-            match RecoveringMidnightPublisher::start(midnight, telemetry, awaiter) {
+            match RecoveringMidnightPublisher::start(
+                midnight,
+                telemetry,
+                awaiter,
+                self.midnight_wallet.clone(),
+            ) {
                 Ok(client) => {
                     publishers.insert(
                         Chain::Midnight,
@@ -653,12 +667,8 @@ struct MeshHandles {
 }
 
 impl MeshHandles {
-    fn new(
-        message_options: node_client::Options,
-        mesh_options: mesh::Options,
-        account_id: &AccountId,
-    ) -> Self {
-        let node_client = NodeClient::new(&message_options);
+    fn new(mesh_options: mesh::Options, account_id: &AccountId) -> Self {
+        let node_client = NodeClient::new();
         let (sync_report_tx, sync_report_rx) = SyncTask::sync_report_channel();
         let mesh = Mesh::new(&node_client, mesh_options, account_id, sync_report_rx);
         let mesh_state = mesh.watch();
@@ -729,6 +739,7 @@ struct StorageHandles {
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     backlog: Backlog,
+    midnight_wallet: Arc<dyn WalletSnapshotStore>,
 }
 
 const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -763,11 +774,13 @@ impl StorageHandles {
             redis_pool.clone(),
             account_id.clone(),
         ));
+        let midnight_wallet = Arc::new(MidnightWalletStorage::new(redis_pool, account_id));
         Ok(Self {
             key_storage,
             triple_storage,
             presignature_storage,
             backlog,
+            midnight_wallet,
         })
     }
 }
@@ -860,7 +873,7 @@ async fn spawn_indexers(
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
 ) {
-    let ChainStack { configs, gates } = stack;
+    let ChainStack { configs, gates, .. } = stack;
     let ChainConfigs {
         eth,
         sol,

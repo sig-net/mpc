@@ -3,11 +3,13 @@
 //! reproduce recorded transactions byte-for-byte. Captured from TronGrid
 //! `gettransactionbyid` (USDT transfers, block #86891375).
 
+mod common;
+
+use common::build_raw;
 use mpc_chain_tron::pb::{
-    Contract, ContractType, Message, RawTransaction, Transaction, TriggerSmartContract,
+    Message, RawTransaction, Transaction, TriggerSmartContract, TRIGGER_SMART_CONTRACT_TYPE_URL,
 };
 use mpc_chain_tron::{parse_hex, NowBlock, TronAddress};
-use prost_types::Any;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
@@ -16,47 +18,6 @@ const FIXTURES: [&str; 3] = [
     "tests/fixtures/usdt-transfer-2.json",
     "tests/fixtures/usdt-transfer-3.json",
 ];
-
-/// Validity window and energy-fee cap; observed on recorded transfers.
-const EXPIRATION_MS: i64 = 300_000;
-const FEE_LIMIT_SUN: i64 = 50_000_000;
-const TRIGGER_SMART_CONTRACT_TYPE_URL: &str = "type.googleapis.com/protocol.TriggerSmartContract";
-
-/// Test-local assembly of raw transactions from structured parameters.
-fn build_raw(
-    owner: &TronAddress,
-    contract: &TronAddress,
-    call_data: &[u8],
-    reference: &NowBlock,
-    now_ms: i64,
-) -> RawTransaction {
-    let trigger = TriggerSmartContract {
-        owner_address: owner.as_bytes().to_vec(),
-        contract_address: contract.as_bytes().to_vec(),
-        call_value: 0,
-        data: call_data.to_vec(),
-        call_token_value: 0,
-        token_id: 0,
-    };
-    let contract = Contract {
-        r#type: ContractType::TriggerSmartContract as i32,
-        parameter: Some(Any {
-            type_url: TRIGGER_SMART_CONTRACT_TYPE_URL.to_string(),
-            value: trigger.encode_to_vec(),
-        }),
-        permission_id: 0,
-    };
-    let (ref_block_bytes, ref_block_hash) = reference.reference_fields();
-    RawTransaction {
-        ref_block_bytes,
-        ref_block_num: 0,
-        ref_block_hash,
-        expiration: now_ms + EXPIRATION_MS,
-        timestamp: now_ms,
-        fee_limit: FEE_LIMIT_SUN,
-        contract: vec![contract],
-    }
-}
 
 fn fixture(path: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -166,10 +127,7 @@ fn unpacked_parameter_matches_contract_call() {
     let raw = raw_from_fixture(&tx);
     let contract = &raw.contract[0];
     let any = contract.parameter.as_ref().unwrap();
-    assert_eq!(
-        any.type_url,
-        "type.googleapis.com/protocol.TriggerSmartContract"
-    );
+    assert_eq!(any.type_url, TRIGGER_SMART_CONTRACT_TYPE_URL);
     let trigger = TriggerSmartContract::decode(any.value.as_slice()).unwrap();
     assert_eq!(
         hex::encode(&trigger.owner_address),
@@ -179,6 +137,11 @@ fn unpacked_parameter_matches_contract_call() {
     );
     // USDT transfer calldata: selector + two 32-byte args.
     assert_eq!(trigger.data.len(), 68);
+
+    // The raw transaction should parse correctly and the owner address should match the trigger's owner address.
+    let raw =
+        RawTransaction::parse(&hex::decode(tx["raw_data_hex"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(raw.owner_address().unwrap(), trigger.owner_address);
 }
 
 #[test]
@@ -189,10 +152,15 @@ fn parse_accepts_and_rejects() {
     // Garbage is rejected.
     assert!(RawTransaction::parse(&[0xff, 0xff]).is_err());
 
-    // Missing ref block is rejected.
+    // Missing reference fields are rejected.
     let mut bare = raw_from_fixture(&tx);
     bare.ref_block_bytes = Vec::new();
-
+    assert!(RawTransaction::parse(&bare.encode_to_vec()).is_err());
+    let mut bare = raw_from_fixture(&tx);
+    bare.ref_block_hash = Vec::new();
+    assert!(RawTransaction::parse(&bare.encode_to_vec()).is_err());
+    let mut bare = raw_from_fixture(&tx);
+    bare.expiration = 0;
     assert!(RawTransaction::parse(&bare.encode_to_vec()).is_err());
 
     // A second contract is rejected.
@@ -204,6 +172,67 @@ fn parse_accepts_and_rejects() {
     let mut typed = raw_from_fixture(&tx);
     typed.contract[0].r#type = 1;
     assert!(RawTransaction::parse(&typed.encode_to_vec()).is_err());
+}
+
+/// The contract's parameter must be a `TriggerSmartContract` — matching
+/// `Any` type URL and 21-byte `0x41`-prefixed addresses — or java-tron
+/// rejects the signed transaction at broadcast.
+#[test]
+fn parse_rejects_malformed_trigger_parameters() {
+    let tx = tx_fixture();
+
+    let mut missing = raw_from_fixture(&tx);
+    missing.contract[0].parameter = None;
+    assert!(RawTransaction::parse(&missing.encode_to_vec()).is_err());
+
+    let mut wrong_url = raw_from_fixture(&tx);
+    wrong_url.contract[0].parameter.as_mut().unwrap().type_url =
+        "type.googleapis.com/protocol.TransferContract".to_string();
+    assert!(RawTransaction::parse(&wrong_url.encode_to_vec()).is_err());
+
+    let reparameterized =
+        |mut raw: RawTransaction, mutate: &dyn Fn(&mut TriggerSmartContract)| -> Vec<u8> {
+            let any = raw.contract[0].parameter.as_mut().unwrap();
+            let mut trigger = TriggerSmartContract::decode(any.value.as_slice()).unwrap();
+            mutate(&mut trigger);
+            any.value = trigger.encode_to_vec();
+            raw.encode_to_vec()
+        };
+
+    for malformed in [
+        reparameterized(raw_from_fixture(&tx), &|t| {
+            t.contract_address.remove(0);
+        }),
+        reparameterized(raw_from_fixture(&tx), &|t| {
+            t.contract_address[0] = 0x42;
+        }),
+        reparameterized(raw_from_fixture(&tx), &|t| {
+            t.owner_address.remove(0);
+        }),
+    ] {
+        assert!(RawTransaction::parse(&malformed).is_err());
+    }
+}
+
+/// parse admits only the canonical encoding: anything that decodes but
+/// re-encodes differently would desync the payload preimage (the submitted
+/// bytes) from the txID preimage (the re-encoded transaction).
+#[test]
+fn parse_requires_the_canonical_encoding() {
+    let tx = tx_fixture();
+
+    // An unknown field (30) decodes but re-encodes away.
+    let mut memo = hex::decode(tx["raw_data_hex"].as_str().unwrap()).unwrap();
+    memo.extend_from_slice(&[0xf0, 0x01]);
+    assert!(RawTransaction::parse(&memo).is_err());
+
+    // A non-minimal length varint (`88 00` = 8) names the same field but
+    // re-encodes minimally.
+    let mut padded = hex::decode(tx["raw_data_hex"].as_str().unwrap()).unwrap();
+    assert_eq!(&padded[4..6], &[0x22, 0x08], "field 4, length 8");
+    padded[5] = 0x88;
+    padded.insert(6, 0x00);
+    assert!(RawTransaction::parse(&padded).is_err());
 }
 
 #[test]

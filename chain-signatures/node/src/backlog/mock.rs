@@ -37,6 +37,9 @@ pub trait BacklogTestExt: sealed::Sealed {
         &self,
         tx: &BidirectionalTx,
     ) -> SignEntry<Bidirectional<Final<Generating>>>;
+
+    /// Mark `chain` caught up, as its stream does at catchup.
+    fn mark_caught_up(&self, chain: Chain);
 }
 
 impl BacklogTestExt for Backlog {
@@ -78,6 +81,10 @@ impl BacklogTestExt for Backlog {
             .advance(ExecutionOutcome::Success { output: vec![] }, 456)
             .await
             .expect("advance to final generating")
+    }
+
+    fn mark_caught_up(&self, chain: Chain) {
+        self.set_caught_up(chain, true);
     }
 }
 
@@ -252,6 +259,7 @@ pub fn mock_bidi_response_request(
             tx_id,
             output: vec![],
             attestation: None,
+            outcome_kind: None,
             origin_indexed_at: None,
             chain_ctx: None,
         },

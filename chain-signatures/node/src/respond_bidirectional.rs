@@ -4,7 +4,7 @@ use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
     AttestationError, AttestationMetadata, AttestationOutcomeKind, BidirectionalTx, Chain,
-    ChainConfig as _, IndexedSignRequest, PublishedAttestation,
+    ChainConfig as _, IndexedSignRequest, PublishedAttestation, RespondBidirectionalEvent,
     RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
     SignKind,
 };
@@ -13,10 +13,32 @@ use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 
-pub(crate) fn is_failed_execution_response(response: &RespondBidirectionalTx) -> bool {
-    match response.attestation {
-        Some(metadata) => metadata.outcome_kind != AttestationOutcomeKind::Executed,
-        None => response.output.starts_with(&MAGIC_ERROR_PREFIX),
+fn is_failed_execution_response(response: &RespondBidirectionalTx) -> bool {
+    let outcome_kind = response
+        .outcome_kind
+        .or(response.attestation.map(|metadata| metadata.outcome_kind));
+    match outcome_kind {
+        Some(outcome_kind) => outcome_kind != AttestationOutcomeKind::Executed,
+        None => is_failed_output(&response.output),
+    }
+}
+
+/// Whether a non-Midnight response output whose outcome is not recorded reports a failed
+/// execution. A successful output may also begin with the prefix.
+fn is_failed_output(output: &[u8]) -> bool {
+    output.starts_with(&MAGIC_ERROR_PREFIX)
+}
+
+/// Whether the response `event` publishes reports a failed execution. Outside Midnight the
+/// event carries only the output, so an output equal to this node's `own` takes its outcome.
+pub(crate) fn published_failure(
+    event: &RespondBidirectionalEvent,
+    own: &RespondBidirectionalTx,
+) -> bool {
+    match (&event.attestation, &event.output) {
+        (Some(published), _) => published.outcome_kind != AttestationOutcomeKind::Executed,
+        (None, Some(output)) if *output != own.output => is_failed_output(output),
+        (None, _) => is_failed_execution_response(own),
     }
 }
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
@@ -41,26 +63,36 @@ pub(crate) fn claims_attestation_key(request: &IndexedSignRequest) -> bool {
         && respond_bidirectional_path(request.chain) == Some(request.args.path.as_str())
 }
 
-/// The key tweak and payload a genuine published Midnight response for `tx` is signed
-/// with, recomputed from the event alone: the digest covers the output's length and hash,
-/// both carried by the event, so a node that never observed the outcome still binds the
-/// response to this request.
+/// The key tweak and payload a genuine published Midnight response for `tx` is signed with.
 pub(crate) fn published_midnight_signing_args(
     tx: &BidirectionalTx,
     published: &PublishedAttestation,
 ) -> anyhow::Result<(Scalar, Scalar)> {
+    let payload = published_midnight_payload(&tx.request_id, published)?;
+    let epsilon = tx.epsilon(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH)?;
+    Ok((epsilon, payload))
+}
+
+/// The payload a genuine published Midnight response for `request_id` is signed with,
+/// recomputed from the event alone: the digest covers the output's length and hash, both
+/// carried by the event, so a node that never observed the outcome still binds the response
+/// to this request. The digest does not cover the key version; epsilon binds it.
+pub(crate) fn published_midnight_payload(
+    request_id: &[u8; 32],
+    published: &PublishedAttestation,
+) -> anyhow::Result<Scalar> {
     anyhow::ensure!(
         published.outcome_kind == AttestationOutcomeKind::Executed
             || published.serialized_output_length == 0,
         AttestationError::NonemptyFailureOutput
     );
     let metadata = AttestationMetadata {
-        key_version: tx.key_version,
+        key_version: 0,
         block_height: published.block_height,
         outcome_kind: published.outcome_kind,
     };
     let digest = mpc_compact_hashing::compute_attestation_digest(
-        &tx.request_id,
+        request_id,
         &metadata,
         published.serialized_output_length,
         &published.output_hash,
@@ -69,10 +101,8 @@ pub(crate) fn published_midnight_signing_args(
         digest == published.digest,
         "Midnight event digest differs from the response it names"
     );
-    let payload = Scalar::from_bytes(digest)
-        .ok_or_else(|| anyhow::anyhow!("Midnight attestation digest is not a scalar"))?;
-    let epsilon = tx.epsilon(MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH)?;
-    Ok((epsilon, payload))
+    Scalar::from_bytes(digest)
+        .ok_or_else(|| anyhow::anyhow!("Midnight attestation digest is not a scalar"))
 }
 
 pub struct CompletedTx {
@@ -171,7 +201,7 @@ impl CompletedTx {
             block_height: self.block_height,
             outcome_kind,
         });
-        let message = calculate_respond_bidirectional_hash_message_for_chain(
+        let payload = response_payload(
             source_chain,
             &request_id_bytes,
             &serialized_output,
@@ -179,15 +209,10 @@ impl CompletedTx {
         )?;
         tracing::info!(
             "Respond bidirectional message hash: {:?}",
-            hex::encode(message)
+            hex::encode(payload.to_bytes())
         );
-        let Some(payload) = Scalar::from_bytes(message) else {
-            anyhow::bail!("Failed to convert respond bidirectional message to scalar: {message:?}");
-        };
-        let path = respond_bidirectional_path(source_chain)
-            .ok_or_else(|| anyhow::anyhow!("Unsupported chain: {}", source_chain))?
-            .to_string();
-        let epsilon = self.tx.epsilon(&path)?;
+        let (path, epsilon) = response_key(&self.tx)?;
+        let path = path.to_string();
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest::respond_bidirectional(
             SignId::new(request_id_bytes),
@@ -204,11 +229,59 @@ impl CompletedTx {
                 tx_id: self.tx.id,
                 output: serialized_output,
                 attestation,
+                outcome_kind: Some(outcome_kind),
                 origin_indexed_at: self.origin_indexed_at,
                 chain_ctx: self.chain_ctx.clone(),
             },
         ))
     }
+}
+
+/// The payload a response with `output` is signed with.
+fn response_payload(
+    chain: Chain,
+    request_id: &[u8; 32],
+    output: &[u8],
+    attestation: Option<&AttestationMetadata>,
+) -> anyhow::Result<Scalar> {
+    let message = calculate_respond_bidirectional_hash_message_for_chain(
+        chain,
+        request_id,
+        output,
+        attestation,
+    )?;
+    Scalar::from_bytes(message).ok_or_else(|| {
+        anyhow::anyhow!("Failed to convert respond bidirectional message to scalar: {message:?}")
+    })
+}
+
+/// The path and epsilon a response for `tx` is signed with.
+fn response_key(tx: &BidirectionalTx) -> anyhow::Result<(&'static str, Scalar)> {
+    let path = respond_bidirectional_path(tx.source_chain)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported chain: {}", tx.source_chain))?;
+    Ok((path, tx.epsilon(path)?))
+}
+
+/// The payload a response with `output` is signed with, on source chains other than Midnight.
+/// This won't be necessary once those chains sign the Section 7 digest of
+/// bidirectional-calls.md and no request signed the old way is left.
+pub(crate) fn published_output_payload(
+    chain: Chain,
+    request_id: &[u8; 32],
+    output: &[u8],
+) -> anyhow::Result<Scalar> {
+    response_payload(chain, request_id, output, None)
+}
+
+/// The epsilon and payload a response for `tx` with `output` is signed with, on source
+/// chains other than Midnight.
+pub(crate) fn published_output_signing_args(
+    tx: &BidirectionalTx,
+    output: &[u8],
+) -> anyhow::Result<(Scalar, Scalar)> {
+    let (_, epsilon) = response_key(tx)?;
+    let payload = published_output_payload(tx.source_chain, &tx.request_id, output)?;
+    Ok((epsilon, payload))
 }
 
 pub fn calculate_respond_bidirectional_hash_message(
@@ -360,9 +433,10 @@ mod tests {
         assert_eq!(respond.output, output);
         assert_eq!(respond.origin_indexed_at, Some(100));
         assert_eq!(respond.chain_ctx, chain_ctx);
+        assert_eq!(respond.outcome_kind, Some(AttestationOutcomeKind::Executed));
     }
 
-    /// The metric status for a round trip is derived from this marker, so the
+    /// The metric status for a round trip is derived from the recorded outcome, so the
     /// failed and successful paths must stay distinguishable.
     #[tokio::test]
     async fn failed_execution_output_is_detectable() {
@@ -394,12 +468,101 @@ mod tests {
         assert!(!is_failed_execution_response(&succeeded));
     }
 
+    /// A successful output may itself begin with the error prefix.
+    #[test]
+    fn success_with_error_prefix_remains_success() {
+        for chain in [Chain::Solana, Chain::Canton, Chain::Hydration] {
+            let request =
+                CompletedTx::new(sample_bidirectional_tx(chain, [0x33; 32]), None, None, 0)
+                    .create_sign_request_from_serialized_output(
+                        [&MAGIC_ERROR_PREFIX[..], &[1]].concat(),
+                    )
+                    .unwrap();
+            let SignKind::RespondBidirectional(response) = request.kind else {
+                panic!("expected RespondBidirectional");
+            };
+            assert!(!is_failed_execution_response(&response), "{chain}");
+        }
+    }
+
+    /// The metric status follows the published response, read through this node's recorded
+    /// outcome wherever the event carries the same output. Legacy records keep the prefix.
+    #[test]
+    fn published_failure_reads_the_recorded_outcome() {
+        use AttestationOutcomeKind::{Executed, Failed};
+        let prefixed = [&MAGIC_ERROR_PREFIX[..], &[1]].concat();
+        let published_failed = mpc_primitives::PublishedAttestation {
+            block_height: 1,
+            outcome_kind: Failed,
+            serialized_output_length: 0,
+            output_hash: [0; 32],
+            digest: [0; 32],
+        };
+        for (case, own_outcome, published_output, attestation, failed) in [
+            (
+                "same output, executed",
+                Some(Executed),
+                Some(prefixed.clone()),
+                None,
+                false,
+            ),
+            (
+                "same output, failed",
+                Some(Failed),
+                Some(prefixed.clone()),
+                None,
+                true,
+            ),
+            ("no output, executed", Some(Executed), None, None, false),
+            (
+                "other output, prefixed",
+                Some(Executed),
+                Some(MAGIC_ERROR_PREFIX.to_vec()),
+                None,
+                true,
+            ),
+            (
+                "other output, plain",
+                Some(Failed),
+                Some(vec![7]),
+                None,
+                false,
+            ),
+            ("legacy, prefixed", None, Some(prefixed.clone()), None, true),
+            (
+                "Midnight attestation",
+                Some(Executed),
+                None,
+                Some(published_failed),
+                true,
+            ),
+        ] {
+            let own = RespondBidirectionalTx {
+                tx_id: mpc_primitives::BidirectionalTxId([1; 32]),
+                output: prefixed.clone(),
+                attestation: None,
+                outcome_kind: own_outcome,
+                origin_indexed_at: None,
+                chain_ctx: None,
+            };
+            let event = RespondBidirectionalEvent {
+                request_id: [1; 32],
+                signature: crate::backlog::mock::mock_signature(),
+                chain: Chain::Solana,
+                attestation,
+                output: published_output,
+            };
+            assert_eq!(published_failure(&event, &own), failed, "{case}");
+        }
+    }
+
     #[test]
     fn respond_bidirectional_tx_defaults_missing_origin() {
         let response = RespondBidirectionalTx {
             tx_id: mpc_primitives::BidirectionalTxId([1; 32]),
             output: vec![],
             attestation: None,
+            outcome_kind: None,
             origin_indexed_at: Some(100),
             chain_ctx: None,
         };
@@ -428,6 +591,10 @@ mod tests {
         let roundtrip: RespondBidirectionalTx =
             serde_json::from_value(serde_json::to_value(&response).unwrap()).unwrap();
         assert_eq!(roundtrip.attestation, response.attestation);
+        assert_eq!(
+            roundtrip.outcome_kind,
+            Some(AttestationOutcomeKind::Executed)
+        );
         assert_eq!(roundtrip.output, MAGIC_ERROR_PREFIX);
     }
 

@@ -387,7 +387,7 @@ checksum = "d91676d242c0ced99c0dd6d0096d7337babe9457cc43407d26aa6367fcf90553"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
- "http 1.3.1",
+ "http 1.5.0",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -1957,7 +1957,7 @@ dependencies = [
  "axum-core 0.4.5",
  "bytes",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "hyper",
@@ -1990,7 +1990,7 @@ dependencies = [
  "axum-core 0.5.6",
  "bytes",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "itoa",
@@ -2015,7 +2015,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "mime",
@@ -2035,7 +2035,7 @@ checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
 dependencies = [
  "bytes",
  "futures-core",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "mime",
@@ -2056,7 +2056,7 @@ dependencies = [
  "bytes",
  "fastrand",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "mime",
@@ -2411,7 +2411,7 @@ dependencies = [
  "futures-util",
  "hex",
  "home",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body-util",
  "hyper",
  "hyper-named-pipe",
@@ -3459,9 +3459,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
 ]
@@ -4890,7 +4890,7 @@ dependencies = [
  "google-cloud-gax",
  "hex",
  "hmac 0.13.0",
- "http 1.3.1",
+ "http 1.5.0",
  "jiff",
  "reqwest 0.13.4",
  "rustc_version 0.4.1",
@@ -4915,7 +4915,7 @@ dependencies = [
  "futures",
  "google-cloud-rpc",
  "google-cloud-wkt",
- "http 1.3.1",
+ "http 1.5.0",
  "pin-project",
  "rand 0.10.3",
  "serde",
@@ -4938,7 +4938,7 @@ dependencies = [
  "google-cloud-rpc",
  "google-cloud-wkt",
  "h2",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "hyper",
@@ -5051,7 +5051,7 @@ dependencies = [
  "google-cloud-type",
  "google-cloud-wkt",
  "hex",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "md5",
  "percent-encoding",
@@ -5142,7 +5142,7 @@ dependencies = [
  "fnv",
  "futures-core",
  "futures-sink",
- "http 1.3.1",
+ "http 1.5.0",
  "indexmap 2.14.0",
  "slab",
  "tokio",
@@ -5421,12 +5421,11 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.3.1"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4a85d31aea989eead29a3aaf9e1115a180df8282431156e533de47660892565"
+checksum = "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0"
 dependencies = [
  "bytes",
- "fnv",
  "itoa",
 ]
 
@@ -5437,7 +5436,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca2a8f2913ee65f60facd6a5905613afaa448497a0230cc41ce022d93290bc2c"
 dependencies = [
  "bytes",
- "http 1.3.1",
+ "http 1.5.0",
 ]
 
 [[package]]
@@ -5448,7 +5447,7 @@ checksum = "b021d93e26becf5dc7e1b75b1bed1fd93124b374ceb73f43d4d4eafec896a64a"
 dependencies = [
  "bytes",
  "futures-core",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "pin-project-lite",
 ]
@@ -5485,7 +5484,7 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "h2",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "httparse",
  "httpdate",
@@ -5518,7 +5517,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d191583f3da1305256f22463b9bb0471acad48a4e534a5218b9963e9c1f59b2"
 dependencies = [
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "hyper",
  "hyper-util",
  "log",
@@ -5527,7 +5526,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 0.26.9",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -5569,7 +5568,7 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "hyper",
  "ipnet",
@@ -6236,7 +6235,7 @@ checksum = "cc4280b709ac3bb5e16cf3bad5056a0ec8df55fa89edfe996361219aadc2c7ea"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "jsonrpsee-core",
  "pin-project",
  "rustls",
@@ -6261,7 +6260,7 @@ dependencies = [
  "bytes",
  "futures-timer",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "jsonrpsee-types",
@@ -6309,7 +6308,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21429bcdda37dcf2d43b68621b994adede0e28061f816b038b0f18c70c143d51"
 dependencies = [
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "hyper",
@@ -6335,7 +6334,7 @@ version = "0.24.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0f05e0028e55b15dbd2107163b3c744cd3bb4474f193f95d9708acbf5677e44"
 dependencies = [
- "http 1.3.1",
+ "http 1.5.0",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -6347,7 +6346,7 @@ version = "0.24.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78fc744f17e7926d57f478cf9ca6e1ee5d8332bf0514860b1a3cdf1742e614cc"
 dependencies = [
- "http 1.3.1",
+ "http 1.5.0",
  "jsonrpsee-client-transport",
  "jsonrpsee-core",
  "jsonrpsee-types",
@@ -7422,7 +7421,7 @@ dependencies = [
  "bytes",
  "colored",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "hyper",
@@ -7438,7 +7437,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-canton"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7465,7 +7464,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-ethereum"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7473,6 +7472,7 @@ dependencies = [
  "borsh",
  "futures-util",
  "hex",
+ "http 1.5.0",
  "k256",
  "mockito",
  "mpc-chain-integration-core",
@@ -7491,7 +7491,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-hydration"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7516,17 +7516,19 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-integration-core"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
  "backon",
  "cait-sith",
+ "http 1.5.0",
  "k256",
  "mpc-crypto",
  "mpc-primitives",
  "rand 0.8.8",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-util",
  "tracing",
@@ -7534,7 +7536,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-midnight"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7545,6 +7547,7 @@ dependencies = [
  "google-cloud-auth",
  "google-cloud-storage",
  "hex",
+ "http 1.5.0",
  "jsonrpsee",
  "k256",
  "memchr",
@@ -7581,7 +7584,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-near"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7603,7 +7606,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-solana"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "alloy",
  "anchor-client",
@@ -7636,7 +7639,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-tron"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7659,7 +7662,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-compact-hashing"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "hex",
  "midnight-transient-crypto 3.0.0",
@@ -7669,7 +7672,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-contract"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "anyhow",
  "borsh",
@@ -7694,7 +7697,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-crypto"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7711,7 +7714,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-keys"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "hex",
  "hpke",
@@ -7721,7 +7724,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-midnight-respond-codec"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7733,7 +7736,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-node"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7753,7 +7756,7 @@ dependencies = [
  "futures-util",
  "google-cloud-auth",
  "hex",
- "http 1.3.1",
+ "http 1.5.0",
  "k256",
  "local-ip-address",
  "lru 0.18.2",
@@ -7801,6 +7804,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-http",
  "tracing",
  "tracing-opentelemetry 0.30.0",
  "tracing-stackdriver",
@@ -7810,7 +7814,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-primitives"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "borsh",
  "ciborium",
@@ -7825,7 +7829,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-utils"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -7842,7 +7846,7 @@ dependencies = [
  "bytes",
  "encoding_rs",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "httparse",
  "memchr",
  "mime",
@@ -8808,7 +8812,7 @@ dependencies = [
  "base64 0.21.7",
  "chrono",
  "getrandom 0.2.16",
- "http 1.3.1",
+ "http 1.5.0",
  "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
@@ -8982,7 +8986,7 @@ checksum = "46d7ab32b827b5b495bd90fa95a6cb65ccc293555dcc3199ae2937d2d237c8ed"
 dependencies = [
  "async-trait",
  "bytes",
- "http 1.3.1",
+ "http 1.5.0",
  "opentelemetry 0.29.1",
  "reqwest 0.12.28",
  "tracing",
@@ -8995,7 +8999,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d899720fe06916ccba71c01d04ecd77312734e2de3467fd30d9d580c8ce85656"
 dependencies = [
  "futures-core",
- "http 1.3.1",
+ "http 1.5.0",
  "opentelemetry 0.29.1",
  "opentelemetry-http",
  "opentelemetry-proto 0.29.0",
@@ -9012,7 +9016,7 @@ version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dbee664a43e07615731afc539ca60c6d9f1a9425e25ca09c57bc36c87c55852b"
 dependencies = [
- "http 1.3.1",
+ "http 1.5.0",
  "opentelemetry 0.30.0",
  "opentelemetry-proto 0.30.0",
  "opentelemetry_sdk 0.30.0",
@@ -10184,7 +10188,7 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "hyper",
@@ -10213,7 +10217,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -10226,7 +10230,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "hyper",
@@ -10266,7 +10270,7 @@ checksum = "57f17d28a6e6acfe1733fe24bcd30774d13bffa4b8a22535b4c8c98423088d4e"
 dependencies = [
  "anyhow",
  "async-trait",
- "http 1.3.1",
+ "http 1.5.0",
  "reqwest 0.12.28",
  "serde",
  "thiserror 1.0.69",
@@ -10524,7 +10528,7 @@ dependencies = [
  "rustls-webpki",
  "security-framework 3.7.0",
  "security-framework-sys",
- "webpki-root-certs 0.26.9",
+ "webpki-root-certs 0.26.11",
  "windows-sys 0.59.0",
 ]
 
@@ -10536,7 +10540,7 @@ checksum = "1d99feebc72bae7ab76ba994bb5e121b8d83d910ca40b36e0921f53becc41784"
 dependencies = [
  "core-foundation 0.10.0",
  "core-foundation-sys",
- "jni",
+ "jni 0.21.1",
  "log",
  "once_cell",
  "rustls",
@@ -10545,7 +10549,28 @@ dependencies = [
  "rustls-webpki",
  "security-framework 3.7.0",
  "security-framework-sys",
- "webpki-root-certs 1.0.6",
+ "webpki-root-certs 1.0.10",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rustls-platform-verifier"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26d1e2536ce4f35f4846aa13bff16bd0ff40157cdb14cc056c7b14ba41233ba0"
+dependencies = [
+ "core-foundation 0.10.0",
+ "core-foundation-sys",
+ "jni 0.22.4",
+ "log",
+ "once_cell",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-platform-verifier-android",
+ "rustls-webpki",
+ "security-framework 3.7.0",
+ "security-framework-sys",
+ "webpki-root-certs 1.0.10",
  "windows-sys 0.61.2",
 ]
 
@@ -11392,7 +11417,7 @@ dependencies = [
 
 [[package]]
 name = "signet-crypto"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "getrandom 0.2.16",
  "hex",
@@ -11413,7 +11438,7 @@ dependencies = [
 
 [[package]]
 name = "signet-primitives"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "borsh",
  "enum-map",
@@ -11652,7 +11677,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures",
- "http 1.3.1",
+ "http 1.5.0",
  "httparse",
  "log",
  "rand 0.8.8",
@@ -14666,7 +14691,7 @@ dependencies = [
  "etcetera",
  "ferroid",
  "futures",
- "http 1.3.1",
+ "http 1.5.0",
  "itertools 0.14.0",
  "log",
  "memchr",
@@ -14899,7 +14924,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite 0.28.0",
- "webpki-roots 0.26.9",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -14915,7 +14940,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite 0.29.0",
- "webpki-roots 0.26.9",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -15014,7 +15039,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "percent-encoding",
@@ -15035,7 +15060,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "hyper",
@@ -15063,7 +15088,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "h2",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "hyper",
@@ -15139,7 +15164,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
- "http 1.3.1",
+ "http 1.5.0",
  "http-body",
  "http-body-util",
  "pin-project-lite",
@@ -15358,7 +15383,7 @@ checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
 dependencies = [
  "bytes",
  "data-encoding",
- "http 1.3.1",
+ "http 1.5.0",
  "httparse",
  "log",
  "rand 0.9.5",
@@ -15367,7 +15392,7 @@ dependencies = [
  "sha1",
  "thiserror 2.0.19",
  "utf-8",
- "webpki-roots 0.26.9",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -15378,7 +15403,7 @@ checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
 dependencies = [
  "bytes",
  "data-encoding",
- "http 1.3.1",
+ "http 1.5.0",
  "httparse",
  "log",
  "rand 0.9.5",
@@ -15570,7 +15595,7 @@ dependencies = [
  "serde_json",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -15580,7 +15605,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e994ba84b0bd1b1b0cf92878b7ef898a5c1760108fe7b6010327e274917a808c"
 dependencies = [
  "base64 0.22.1",
- "http 1.3.1",
+ "http 1.5.0",
  "httparse",
  "log",
 ]
@@ -16224,36 +16249,36 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "0.26.9"
+version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "180d2741b6115c3d906577e6533ad89472d48d96df00270fccb78233073d77f7"
+checksum = "75c7f0ef91146ebfb530314f5f1d24528d7f0767efbfd31dce919275413e393e"
 dependencies = [
- "rustls-pki-types",
+ "webpki-root-certs 1.0.10",
 ]
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.6"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "804f18a4ac2676ffb4e8b5b5fa9ae38af06df08162314f96a68d2a363e21a8ca"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "0.26.9"
+version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29aad86cec885cafd03e8305fd727c418e970a521322c91688414d5b8efba16b"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "rustls-pki-types",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.7"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

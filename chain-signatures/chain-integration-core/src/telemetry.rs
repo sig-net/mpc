@@ -63,6 +63,13 @@ impl ChainTelemetry for NoopChainTelemetry {
 pub trait PublisherTelemetry: Send + Sync + 'static {
     /// Records metrics related to publishing a signature to the chain.
     fn record_publish_metrics(&self, action: &PublishAction);
+
+    /// Records the spendable balance, in the chain's fee unit, of the wallet the
+    /// publisher pays fees from.
+    fn funding_wallet_observed(&self, _balance: f64) {}
+
+    /// Records a request the chain's publisher answered with an error code.
+    fn publish_refused(&self, _code: &str) {}
 }
 
 /// No-op implementation for tests
