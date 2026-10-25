@@ -63,6 +63,10 @@ export interface PlacementOutcome {
   /** Requests present in the caller's ledger after the transaction. */
   committed: string[];
   placement: CallPlacement[];
+  /** The indexer's per-segment results, `transactionResult.segments`. */
+  segments: [number, string][];
+  blockHeight: number;
+  txHash: string;
 }
 
 export interface PlacementContext {
@@ -74,12 +78,12 @@ export interface PlacementContext {
   bumpGate: () => Promise<unknown>;
 }
 
-type CircuitArgs<K extends CallerCircuitId> =
+export type CircuitArgs<K extends CallerCircuitId> =
   Parameters<ProvableCircuits<CallerPrivateState>[K]> extends [unknown, ...infer Args]
     ? Args
     : never;
 
-interface BuiltCall {
+export interface BuiltCall {
   tx: UnprovenTransaction;
   segment: number;
   requests: string[];
@@ -87,7 +91,7 @@ interface BuiltCall {
 
 const normalizeAddress = (address: string) => address.replace(/^0x/i, "").toLowerCase();
 
-async function buildCall<K extends CallerCircuitId>(
+export async function buildCall<K extends CallerCircuitId>(
   context: PlacementContext,
   circuitId: K,
   args: CircuitArgs<K>,
@@ -118,7 +122,7 @@ async function buildCall<K extends CallerCircuitId>(
 
 // midnight-js randomizes each intent's segment; rebuild both calls until the first lands in
 // the lower segment.
-async function buildOrdered(
+export async function buildOrdered(
   buildLower: () => Promise<BuiltCall>,
   buildHigher: () => Promise<BuiltCall>,
 ): Promise<[BuiltCall, BuiltCall]> {
@@ -155,7 +159,7 @@ async function committedRequests(context: PlacementContext, requests: string[]):
   return requests.filter((requestId) => map.member(hexToBytes(requestId)));
 }
 
-async function currentGate(context: PlacementContext): Promise<bigint> {
+export async function currentGate(context: PlacementContext): Promise<bigint> {
   const state = await context.providers.publicDataProvider.queryContractState(
     context.callerAddress,
   );
@@ -163,7 +167,14 @@ async function currentGate(context: PlacementContext): Promise<bigint> {
   return ledger(state.data).gate;
 }
 
-async function submitBuilt(
+/** The indexer's per-segment results for a finalized transaction, segment id first. */
+export function segmentsOf(finalized: FinalizedTxData): [number, string][] {
+  return [...(finalized.segmentStatusMap ?? new Map<number, unknown>())].map(
+    ([segment, status]) => [segment, String(status)],
+  );
+}
+
+export async function submitBuilt(
   context: PlacementContext,
   tx: UnprovenTransaction,
   beforeBalancing: () => Promise<unknown>,
@@ -291,5 +302,8 @@ export async function submitPlacement(
     notifications,
     committed: await committedRequests(context, requests),
     placement,
+    segments: segmentsOf(finalized),
+    blockHeight: finalized.blockHeight,
+    txHash: String(finalized.txHash),
   };
 }

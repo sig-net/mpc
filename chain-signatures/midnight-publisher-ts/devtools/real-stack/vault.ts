@@ -19,6 +19,7 @@ import {
   ContractState,
   Intent,
   Transaction,
+  type UnprovenTransaction,
 } from "@midnightntwrk/ledger-v9";
 import type { WalletFacade } from "@midnightntwrk/wallet-sdk-facade";
 import {
@@ -53,7 +54,7 @@ import {
   type FlushSlot,
   type GasParams,
 } from "./managed/erc20-vault/contract/index.js";
-import type { CallPlacement } from "./placement.js";
+import { placementOf, type CallPlacement } from "./placement.js";
 import {
   buildVaultProviders,
   VAULT_PRIVATE_STATE_ID,
@@ -80,6 +81,8 @@ type VaultAction = keyof typeof REQUEST_MAPS;
 
 const FLUSH_WIDTH = 10;
 const FLUSH_TTL_MS = 5 * 60_000;
+// A stale flush waits for the real flush and the send it rides with to be proven.
+const STALE_FLUSH_TTL_MS = 30 * 60_000;
 const CHAIN_ID = 31337n;
 const DEPOSIT_GAS: GasParams = {
   gasLimit: 100_000n,
@@ -116,6 +119,23 @@ export interface VaultOperation {
   evmBlockHeight: number;
   /** Serialized output the attestation signs, hex. */
   output: string;
+}
+
+/** The outcome of {@link runVaultPartialSend}. */
+export interface VaultPartialSendResult {
+  vaultAddress: string;
+  requestId: string;
+  status: string;
+  /** The indexer's per-segment results, `transactionResult.segments`. */
+  segments: [number, string][];
+  blockHeight: number;
+  txHash: string;
+  placement: CallPlacement[];
+  /** Whether the vault's deposit map holds the request after the transaction. */
+  committed: boolean;
+  /** Whether a second send of the same entry fails with "Request already sent". */
+  retryRejected: boolean;
+  retryError?: string;
 }
 
 export interface VaultRunResult {
@@ -334,6 +354,18 @@ class VaultRun {
   // call before the wallet adds its fee payment, and a guaranteed flush plus that payment
   // can exceed the node's time-to-dismiss cap. Mirrors submitFlush in the vault package.
   private async flush(inIndexes: readonly bigint[], requestIds: readonly Uint8Array[]) {
+    const unprovenTx = await this.buildFlush(inIndexes, requestIds, FLUSH_TTL_MS);
+    const finalized = await submitTx(this.providers, { unprovenTx, circuitId: "flushQueue" });
+    if (finalized.status !== SucceedEntirely) {
+      throw new Error(`the flush finalized as ${finalized.status}`);
+    }
+  }
+
+  private async buildFlush(
+    inIndexes: readonly bigint[],
+    requestIds: readonly Uint8Array[],
+    ttlMs: number,
+  ): Promise<UnprovenTransaction> {
     const call = await createUnprovenCallTx(this.providers, {
       ...createCallTxOptions(
         vaultCompiledContract,
@@ -366,16 +398,12 @@ class VaultRun {
         verifierKeyHash: hashVerifierKey(operation.verifierKey),
       }),
     );
-    const unprovenTx = Transaction.fromPartsRandomized(
+    return Transaction.fromPartsRandomized(
       this.input.config.networkId,
       undefined,
       undefined,
-      Intent.new(new Date(Date.now() + FLUSH_TTL_MS)).addCall(prototype),
+      Intent.new(new Date(Date.now() + ttlMs)).addCall(prototype),
     );
-    const finalized = await submitTx(this.providers, { unprovenTx, circuitId: "flushQueue" });
-    if (finalized.status !== SucceedEntirely) {
-      throw new Error(`the flush finalized as ${finalized.status}`);
-    }
   }
 
   private sendCircuit(action: VaultAction) {
@@ -714,6 +742,80 @@ class VaultRun {
     return { vaultAddress: this.vaultAddress, targets: this.targets, operations: this.operations };
   }
 
+  /**
+   * CertiK SNA-07's shape on the real vault: a stranger sends a user's flushed deposit in one
+   * intent, beside a flush proven before the deposit was flushed, which fails when applied.
+   * The send commits, so the transaction partially succeeds, and a second send of the same
+   * entry is refused.
+   */
+  async partialSend(): Promise<VaultPartialSendResult> {
+    const inIndex = newInputIndex();
+    await this.vault.callTx.startDeposit(
+      inIndex,
+      BigInt(await this.evm.provider.getTransactionCount(this.userEvm)),
+      DEPOSIT_GAS,
+      { erc20Address: hexToBytes(this.targets.usdc), amount: DEPOSIT_AMOUNT },
+    );
+    const stale = await this.buildFlush([inIndex], [], STALE_FLUSH_TTL_MS);
+    await this.flush([inIndex], []);
+    const flushed = await this.readLedger();
+    const outIndex = [...flushed.outputRequestBuffer].find(
+      ([, { entry }]) => entry.action === Action.deposit && entry.inIndex === inIndex,
+    )?.[0];
+    if (outIndex === undefined) throw new Error("the flush did not move the deposit");
+    const staleSegments = [...(stale.intents?.keys() ?? [])];
+    let send: UnprovenTransaction | undefined;
+    for (let attempt = 0; attempt < 32 && send === undefined; attempt += 1) {
+      const built = await createUnprovenCallTx(this.providers, {
+        compiledContract: vaultCompiledContract,
+        contractAddress: this.vaultAddress,
+        circuitId: "sendDeposit",
+        privateStateId: VAULT_PRIVATE_STATE_ID,
+        args: [outIndex],
+      } as never);
+      const tx = (built as { private: { unprovenTx: UnprovenTransaction } }).private.unprovenTx;
+      if ([...(tx.intents?.keys() ?? [])].every((segment) => !staleSegments.includes(segment))) {
+        send = tx;
+      }
+    }
+    if (send === undefined) throw new Error("could not keep the send and stale flush apart");
+    const tx = send.merge(stale);
+    const placement = placementOf(tx);
+    const proven = await this.providers.proofProvider.proveTx(tx);
+    const balanced = await this.providers.walletProvider.balanceTx(proven);
+    const txId = await this.providers.midnightProvider.submitTx(balanced);
+    const finalized = await this.providers.publicDataProvider.watchForTxData(txId);
+    const after = await this.readLedger();
+    const outHex = bytesToHex(outIndex);
+    const ids = [...after.evictionMap]
+      .filter(([, index]) => bytesToHex(index) === outHex)
+      .map(([id]) => id);
+    const [requestId] = ids;
+    if (requestId === undefined || ids.length !== 1) {
+      throw new Error(`the send recorded ${String(ids.length)} request ids`);
+    }
+    let retryError: string | undefined;
+    try {
+      await this.vault.callTx.sendDeposit(outIndex);
+    } catch (error) {
+      retryError = error instanceof Error ? error.message : String(error);
+    }
+    return {
+      vaultAddress: this.vaultAddress,
+      requestId: requestIdHex(requestId),
+      status: String(finalized.status),
+      segments: [...(finalized.segmentStatusMap ?? new Map())].map(
+        ([segment, status]) => [segment, String(status)] as [number, string],
+      ),
+      blockHeight: finalized.blockHeight,
+      txHash: String(finalized.txHash),
+      placement,
+      committed: after.bidirectionalDepositMap.member(requestId),
+      retryRejected: retryError?.includes("Request already sent") ?? false,
+      retryError,
+    };
+  }
+
   close(): void {
     this.evm.provider.destroy();
   }
@@ -725,6 +827,20 @@ export async function runVault(input: VaultRunInput): Promise<VaultRunResult> {
   try {
     await run.deployAndInitialise();
     return await run.run();
+  } finally {
+    run.close();
+  }
+}
+
+/**
+ * Deploys the vault, queues and flushes a deposit, then sends it in a partially successful
+ * transaction: CertiK SNA-07's shape.
+ */
+export async function runVaultPartialSend(input: VaultRunInput): Promise<VaultPartialSendResult> {
+  const run = new VaultRun(input);
+  try {
+    await run.deployAndInitialise();
+    return await run.partialSend();
   } finally {
     run.close();
   }

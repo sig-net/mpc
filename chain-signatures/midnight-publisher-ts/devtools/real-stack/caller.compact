@@ -225,3 +225,28 @@ export circuit verifyResponse32(response: RespondBidirectionalEventV1, serialize
 export pure circuit checkResponse32(response: RespondBidirectionalEventV1, serializedOutput: Bytes<32>, responseKey: Secp256k1Point): Boolean {
   return verifyRespondBidirectionalEventV1<32>(serializedOutput, response, responseKey);
 }
+
+// Test-only shapes for the partial-success review, kept to one circuit so the caller's
+// deploy stays within the block limits. Mode 0 files `call`'s request without notifying.
+// Mode 1 notifies of `requestId`, applying only while `gate` still equals `expectedGate`.
+// Mode 2 removes `requestId`, then files `call`'s request, the same id, again and notifies.
+export circuit reviewShape(
+  mode: Uint<8>,
+  call: IsEvenCall,
+  schema: Bytes<64>,
+  requestId: RequestId,
+  expectedGate: Uint<64>
+): RequestId {
+  if (disclose(mode) == 0) {
+    return fileIsEvenRequest(call, 1, schema);
+  } else {
+    addBallast();
+    if (disclose(mode) == 1) {
+      assert(gate == disclose(expectedGate), "Gate moved");
+      return notifySigner(disclose(requestId));
+    } else {
+      requests.remove(disclose(requestId));
+      return notifySigner(fileIsEvenRequest(call, 1, schema));
+    }
+  }
+}

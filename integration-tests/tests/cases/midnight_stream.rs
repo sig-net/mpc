@@ -8,7 +8,7 @@ use alloy::providers::{Provider as _, ProviderBuilder};
 use alloy::rpc::types::{TransactionInput, TransactionRequest};
 use anyhow::Context as _;
 use integration_tests::cluster;
-use integration_tests::midnight::{CallPlacement, PlacementScenario};
+use integration_tests::midnight::{AdversarialScenario, CallPlacement, PlacementScenario};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_integration_core::utils::test::ChainIndexerStream;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
@@ -995,6 +995,245 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
     for id in &request_ids {
         wait_for_completed_checkpoint(&cluster, *id, final_block).await?;
     }
+    midnight.shutdown().await?;
+    Ok(())
+}
+
+/// Partially successful transaction shapes from the partial-success security review, on the
+/// real stack. The reader decides from the caller's state at the block and its parent, so
+/// each shape pins one decision that state can or cannot make.
+#[ignore = "starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster"]
+#[serial]
+#[test(tokio::test)]
+async fn midnight_partial_success_review_shapes() -> anyhow::Result<()> {
+    let cluster = cluster::spawn().ethereum().midnight().await?;
+    cluster.wait().signable().await?;
+    let midnight = cluster
+        .midnight
+        .as_ref()
+        .context("Midnight context was not started")?;
+    let indexer = MidnightIndexer::new(
+        midnight.config.clone(),
+        MockStateManager::new(),
+        NoopChainTelemetry,
+    )
+    .await?;
+    let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
+    let ethereum = cluster
+        .nodes
+        .ctx()
+        .ethereum
+        .as_ref()
+        .context("Ethereum context was not started")?;
+    // No request here executes on the EVM, so the target needs no code.
+    let target = Address::repeat_byte(0x61);
+    let mut argument = [0; 32];
+    argument[31] = 6;
+    let root_public_key =
+        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
+    let mut heights = BTreeMap::new();
+    let mut observed = Observed::default();
+    let mut placed = Vec::new();
+
+    // The placement test's partial successes, beside the shapes below.
+    for (name, scenario, nonce) in [
+        ("partialSuccess", PlacementScenario::PartialSuccess, 10),
+        (
+            "fallibleThenFailing",
+            PlacementScenario::FallibleThenFailing,
+            12,
+        ),
+    ] {
+        let outcome = midnight
+            .submit_placement(
+                scenario,
+                &[
+                    (nonce, target.into_array()),
+                    (nonce + 1, target.into_array()),
+                ],
+                argument,
+            )
+            .await?;
+        tracing::info!(name, ?outcome, "review shape submitted");
+        anyhow::ensure!(
+            outcome.status == "FailFallible" && outcome.committed == outcome.requests[..1],
+            "{name}: expected only the first intent to commit: {outcome:?}"
+        );
+        heights.insert(name.to_string(), outcome.block_height);
+        placed.push((
+            name,
+            request_id(&outcome.requests[0])?,
+            request_id(&outcome.requests[1])?,
+        ));
+    }
+    let replay = midnight
+        .submit_placement(
+            PlacementScenario::RolledBackReplay,
+            &[(14, target.into_array())],
+            argument,
+        )
+        .await?;
+    tracing::info!(?replay, "review shape submitted");
+    anyhow::ensure!(
+        replay.status == "FailFallible" && replay.committed == replay.requests,
+        "rolledBackReplay: {replay:?}"
+    );
+    heights.insert("rolledBackReplay".into(), replay.block_height);
+    let replay_id = request_id(&replay.requests[0])?;
+
+    // A request filed without a notification, then notified by a call that rolls back.
+    let write = midnight
+        .submit_adversarial(
+            AdversarialScenario::WriteThenRolledBackNotify,
+            (15, target.into_array()),
+            argument,
+        )
+        .await?;
+    tracing::info!(?write, "review shape submitted");
+    anyhow::ensure!(
+        write.status == "FailFallible"
+            && write.committed
+            && write.notifications == [write.request_id.clone()]
+            && notification_phase(&write.placement, &write.request_id) == Some("fallible"),
+        "writeThenRolledBackNotify: {write:?}"
+    );
+    heights.insert("writeThenRolledBackNotify".into(), write.block_height);
+
+    // A filing and its rolled-back replay in one transaction.
+    let same_tx = midnight
+        .submit_adversarial(
+            AdversarialScenario::SameTxReplay,
+            (16, target.into_array()),
+            argument,
+        )
+        .await?;
+    tracing::info!(?same_tx, "review shape submitted");
+    anyhow::ensure!(
+        same_tx.status == "FailFallible"
+            && same_tx.committed
+            && same_tx.notifications == [same_tx.request_id.clone(), same_tx.request_id.clone()],
+        "sameTxReplay: {same_tx:?}"
+    );
+    heights.insert("sameTxReplay".into(), same_tx.block_height);
+
+    // SNA-07 against the real vault: a stranger sends a user's flushed deposit in an intent
+    // that commits, beside a stale flush that fails.
+    let mpc_public_key = format!(
+        "0x{}",
+        hex::encode(root_public_key.to_encoded_point(false).as_bytes())
+    );
+    let vault = midnight
+        .run_vault_partial_send(
+            &mpc_public_key,
+            &ethereum.sandbox.external_http_endpoint,
+            &ethereum.sandbox.secret_key,
+        )
+        .await?;
+    tracing::info!(?vault, "review shape submitted");
+    anyhow::ensure!(
+        vault.status == "FailFallible" && vault.committed && vault.retry_rejected,
+        "vault partial send: {vault:?}"
+    );
+    heights.insert("vaultPartialSend".into(), vault.block_height);
+    let vault_id = request_id(&vault.request_id)?;
+
+    // A twin: the same request id removed and filed again in one partially successful
+    // transaction, after its original was filed and indexed in an earlier block. Its record
+    // is in the caller's state at the block and at its parent.
+    let original = midnight
+        .prepare_twin((0, target.into_array()), argument)
+        .await?;
+    tracing::info!(?original, "twin original filed");
+    let original_id = request_id(&original.request_id)?;
+    observed
+        .until(&mut events, "the twin original's SignRequest", |observed| {
+            observed.indexed().contains(&original_id)
+        })
+        .await?;
+    let indexed_before_twin = observed.indexed().len();
+    let twin = midnight
+        .fire_twin(
+            original_id,
+            (0, target.into_array()),
+            (1_000, target.into_array()),
+            argument,
+        )
+        .await?;
+    tracing::info!(?twin, "review shape submitted");
+    anyhow::ensure!(
+        twin.status == "FailFallible"
+            && twin.committed
+            && twin.notifications.len() == 2
+            && twin.notifications.contains(&twin.request_id)
+            && twin.block_height > original.block_height,
+        "twin: {twin:?}"
+    );
+    heights.insert("twinOriginal".into(), original.block_height);
+    heights.insert("twin".into(), twin.block_height);
+    // The failing call beside the twin notifies of its own request, which never committed.
+    let twin_failing = twin
+        .notifications
+        .iter()
+        .find(|id| **id != twin.request_id)
+        .map(|id| request_id(id))
+        .context("the twin's failing call did not notify")??;
+
+    let sentinel = midnight
+        .submit_is_even(17, target.into_array(), argument, "bool")
+        .await?;
+    let sentinel_id = request_id(&sentinel.request_id)?;
+    observed
+        .until(&mut events, "the sentinel SignRequest", |observed| {
+            observed.indexed().contains(&sentinel_id)
+        })
+        .await?;
+    let write_id = request_id(&write.request_id)?;
+    observed
+        .until(
+            &mut events,
+            "the MPC signatures of the vault deposit and the unnotified filing",
+            |observed| {
+                observed.responded.contains(&vault_id) && observed.responded.contains(&write_id)
+            },
+        )
+        .await?;
+    let count = |id: &[u8; 32]| observed.indexed().iter().filter(|seen| *seen == id).count();
+    let mut decisions = serde_json::json!({
+        "rolledBackReplay": count(&replay_id),
+        "writeThenRolledBackNotify": count(&write_id),
+        "sameTxReplay": count(&request_id(&same_tx.request_id)?),
+        "vaultPartialSend": count(&vault_id),
+        "twinIndexedAfterRefile": observed.indexed()[indexed_before_twin..]
+            .iter()
+            .filter(|seen| **seen == original_id)
+            .count(),
+        "twinFailing": count(&twin_failing),
+    });
+    for (name, committed, rolled_back) in &placed {
+        decisions[format!("{name}Committed")] = count(committed).into();
+        decisions[format!("{name}RolledBack")] = count(rolled_back).into();
+    }
+    tracing::info!(%decisions, ?heights, "review decisions");
+
+    // The reader cannot tell which fallible segment committed. A record new in the block was
+    // written by a committed segment, so a filing without a notification is signed when a
+    // rolled-back call names it, and a record removed and filed again within the block is not.
+    anyhow::ensure!(
+        decisions
+            == serde_json::json!({
+                "partialSuccessCommitted": 1,
+                "partialSuccessRolledBack": 0,
+                "fallibleThenFailingCommitted": 1,
+                "fallibleThenFailingRolledBack": 0,
+                "rolledBackReplay": 1,
+                "writeThenRolledBackNotify": 1,
+                "sameTxReplay": 2,
+                "vaultPartialSend": 1,
+                "twinIndexedAfterRefile": 0,
+                "twinFailing": 0,
+            }),
+        "unexpected reader decisions {decisions}"
+    );
     midnight.shutdown().await?;
     Ok(())
 }

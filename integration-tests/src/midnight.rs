@@ -111,6 +111,59 @@ pub struct PlacementOutcome {
     /// Requests the caller's ledger holds after the transaction.
     pub committed: Vec<String>,
     pub placement: Vec<CallPlacement>,
+    /// The indexer's per-segment results, `transactionResult.segments`.
+    pub segments: Vec<(u16, String)>,
+    pub block_height: u64,
+    pub tx_hash: String,
+}
+
+/// Partially successful shapes from the partial-success review; see `adversarial.ts` in the
+/// real-stack driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AdversarialScenario {
+    WriteThenRolledBackNotify,
+    SameTxReplay,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdversarialOutcome {
+    pub status: String,
+    pub request_id: String,
+    /// Whether the caller's ledger holds the request after the transaction.
+    pub committed: bool,
+    pub notifications: Vec<String>,
+    pub placement: Vec<CallPlacement>,
+    /// The indexer's per-segment results.
+    pub segments: Vec<(u16, String)>,
+    pub block_height: u64,
+    pub tx_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedTwin {
+    pub request_id: String,
+    pub block_height: u64,
+    pub placement: Vec<CallPlacement>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultPartialSend {
+    pub vault_address: String,
+    pub request_id: String,
+    pub status: String,
+    pub segments: Vec<(u16, String)>,
+    pub block_height: u64,
+    pub tx_hash: String,
+    pub placement: Vec<CallPlacement>,
+    /// Whether the vault's deposit map holds the request after the transaction.
+    pub committed: bool,
+    /// Whether a later send of the same entry fails with "Request already sent".
+    pub retry_rejected: bool,
+    pub retry_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -286,6 +339,77 @@ impl MidnightContext {
             .await
     }
 
+    /// Build and submit one partial-success review shape for a Boolean isEven request.
+    pub async fn submit_adversarial(
+        &self,
+        scenario: AdversarialScenario,
+        call: (u64, [u8; 20]),
+        argument: [u8; 32],
+    ) -> anyhow::Result<AdversarialOutcome> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "submitAdversarial",
+                "scenario": scenario,
+                "call": placement_call(call, argument),
+            }))
+            .await
+    }
+
+    /// File and notify `call`'s request in a guaranteed transcript: a twin's original.
+    pub async fn prepare_twin(
+        &self,
+        call: (u64, [u8; 20]),
+        argument: [u8; 32],
+    ) -> anyhow::Result<PreparedTwin> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "prepareTwin",
+                "call": placement_call(call, argument),
+            }))
+            .await
+    }
+
+    /// Remove the original, `call`'s request, and file its twin with the same id in one
+    /// call, beside a fallible call for `failing` that fails when applied.
+    pub async fn fire_twin(
+        &self,
+        request_id: [u8; 32],
+        call: (u64, [u8; 20]),
+        failing: (u64, [u8; 20]),
+        argument: [u8; 32],
+    ) -> anyhow::Result<AdversarialOutcome> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "fireTwin",
+                "requestId": format!("0x{}", hex::encode(request_id)),
+                "call": placement_call(call, argument),
+                "failing": placement_call(failing, argument),
+            }))
+            .await
+    }
+
+    /// Deploy the ERC20 vault, queue and flush a deposit, then send it in a partially
+    /// successful transaction (CertiK SNA-07's shape).
+    pub async fn run_vault_partial_send(
+        &self,
+        mpc_public_key: &str,
+        evm_rpc_url: &str,
+        evm_funder_key: &str,
+    ) -> anyhow::Result<VaultPartialSend> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "runVaultPartialSend",
+                "mpcPublicKey": mpc_public_key,
+                "evmRpcUrl": evm_rpc_url,
+                "evmFunderKey": evm_funder_key,
+            }))
+            .await
+    }
+
     /// Deploy the ERC20 vault and its local EVM targets, then run every request kind it
     /// sends through the MPC and settle each on Midnight.
     pub async fn run_vault(
@@ -380,6 +504,14 @@ impl MidnightContext {
             .await?;
         Ok(())
     }
+}
+
+fn placement_call((nonce, target): (u64, [u8; 20]), argument: [u8; 32]) -> serde_json::Value {
+    serde_json::json!({
+        "nonce": nonce.to_string(),
+        "target": hex::encode(target),
+        "argument": hex::encode(argument),
+    })
 }
 
 #[derive(Serialize)]

@@ -35,7 +35,18 @@ import {
   type Secp256k1Point,
   type SignetPublicStateSource,
 } from "@sig-net/midnight";
-import { submitPlacement, type IsEvenCall, type PlacementScenario } from "./fallible.js";
+import {
+  fireTwin,
+  prepareTwin,
+  submitAdversarial,
+  type AdversarialScenario,
+} from "./adversarial.js";
+import {
+  submitPlacement,
+  type IsEvenCall,
+  type PlacementContext,
+  type PlacementScenario,
+} from "./fallible.js";
 import { ledger, pureCircuits } from "./managed/caller/contract/index.js";
 import type { CallPlacement } from "./placement.js";
 import {
@@ -45,7 +56,7 @@ import {
   type CallerContract,
   type CallerProviders,
 } from "./providers.js";
-import { runVault } from "./vault.js";
+import { runVault, runVaultPartialSend } from "./vault.js";
 import { createCallerPrivateState } from "./witnesses.js";
 
 const DEPLOYER_SEED = "02".repeat(32);
@@ -105,11 +116,33 @@ interface SubmitPlacementRequest {
   calls: PlacementCall[];
 }
 
+interface SubmitAdversarialRequest {
+  op: "submitAdversarial";
+  scenario: AdversarialScenario;
+  call: PlacementCall;
+}
+
+interface PrepareTwinRequest {
+  op: "prepareTwin";
+  call: PlacementCall;
+}
+
+interface FireTwinRequest {
+  op: "fireTwin";
+  requestId: string;
+  call: PlacementCall;
+  failing: PlacementCall;
+}
+
 interface RunVaultRequest {
   op: "runVault";
   mpcPublicKey: string;
   evmRpcUrl: string;
   evmFunderKey: string;
+}
+
+interface RunVaultPartialSendRequest extends Omit<RunVaultRequest, "op"> {
+  op: "runVaultPartialSend";
 }
 
 interface ShutdownRequest {
@@ -124,7 +157,11 @@ type Request =
   | SettleResponseRequest
   | NotifyAsCallerRequest
   | SubmitPlacementRequest
+  | SubmitAdversarialRequest
+  | PrepareTwinRequest
+  | FireTwinRequest
   | RunVaultRequest
+  | RunVaultPartialSendRequest
   | ShutdownRequest;
 
 interface Session {
@@ -380,6 +417,24 @@ async function bootstrap(request: BootstrapRequest) {
   };
 }
 
+function isEvenCall(call: PlacementCall): IsEvenCall {
+  return {
+    evmNonce: BigInt(call.nonce),
+    to: bytes(call.target, 20),
+    argWord: bytes(call.argument, 32),
+  };
+}
+
+function placementContext(active: Session): PlacementContext {
+  return {
+    providers: active.providers,
+    callerAddress: active.callerAddress,
+    signetAddress: active.centralAddress,
+    schema: outputSchema("bool"),
+    bumpGate: () => active.caller.callTx.bumpGate(),
+  };
+}
+
 async function dispatch(request: Request): Promise<unknown> {
   if (request.op === "bootstrap") return bootstrap(request);
   if (request.op === "shutdown") {
@@ -406,8 +461,8 @@ async function dispatch(request: Request): Promise<unknown> {
     );
     return {};
   }
-  if (request.op === "runVault") {
-    return runVault({
+  if (request.op === "runVault" || request.op === "runVaultPartialSend") {
+    return (request.op === "runVault" ? runVault : runVaultPartialSend)({
       config: active.config,
       artifactDir: active.artifactDir,
       centralAddress: active.centralAddress,
@@ -420,21 +475,24 @@ async function dispatch(request: Request): Promise<unknown> {
     });
   }
   if (request.op === "submitPlacement") {
-    const calls = request.calls.map((call): IsEvenCall => ({
-      evmNonce: BigInt(call.nonce),
-      to: bytes(call.target, 20),
-      argWord: bytes(call.argument, 32),
-    }));
     return submitPlacement(
-      {
-        providers: active.providers,
-        callerAddress: active.callerAddress,
-        signetAddress: active.centralAddress,
-        schema: outputSchema("bool"),
-        bumpGate: () => active.caller.callTx.bumpGate(),
-      },
+      placementContext(active),
       request.scenario,
-      calls,
+      request.calls.map(isEvenCall),
+    );
+  }
+  if (request.op === "submitAdversarial") {
+    return submitAdversarial(placementContext(active), request.scenario, isEvenCall(request.call));
+  }
+  if (request.op === "prepareTwin") {
+    return prepareTwin(placementContext(active), isEvenCall(request.call));
+  }
+  if (request.op === "fireTwin") {
+    return fireTwin(
+      placementContext(active),
+      request.requestId.replace(/^0x/i, "").toLowerCase(),
+      isEvenCall(request.call),
+      isEvenCall(request.failing),
     );
   }
   if (request.op === "signedTransaction") {
