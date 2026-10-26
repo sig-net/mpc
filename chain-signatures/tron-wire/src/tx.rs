@@ -233,24 +233,26 @@ mod tests {
         let mut with_words = params();
         with_words.calldata.is_some = true;
         with_words.calldata.value.words = vec![[0x11; 32]; 2];
-        let cases: &[(&str, fn(&mut TronTxParams))] = &[
-            ("calldata no_words", |p| {
-                p.calldata.value.no_words = 3;
-            }),
-            ("exceeds the int64 wire field", |p| {
-                p.expiration = u64::MAX;
-            }),
-            ("missing expiration", |p| {
-                p.expiration = 0;
-            }),
-        ];
-        for (expected, mutate) in cases {
-            let mut params = with_words.clone();
-            mutate(&mut params);
-            let err = to_unsigned_tron_tx(&params, owner())
-                .expect_err("unrepresentable params must not assemble");
-            let err = format!("{err:#}");
-            assert!(err.contains(expected), "{expected}: {err}");
-        }
+
+        let mut over_words = with_words.clone();
+        over_words.calldata.value.no_words = 3;
+        let err = format!(
+            "{:#}",
+            to_unsigned_tron_tx(&over_words, owner()).unwrap_err()
+        );
+        assert!(err.contains("calldata no_words"), "{err}");
+
+        let mut overflow = with_words.clone();
+        overflow.expiration = u64::MAX;
+        let err = format!("{:#}", to_unsigned_tron_tx(&overflow, owner()).unwrap_err());
+        assert!(err.contains("exceeds the int64 wire field"), "{err}");
+
+        let mut zero_expiration = with_words;
+        zero_expiration.expiration = 0;
+        let err = format!(
+            "{:#}",
+            to_unsigned_tron_tx(&zero_expiration, owner()).unwrap_err()
+        );
+        assert!(err.contains("missing expiration"), "{err}");
     }
 }

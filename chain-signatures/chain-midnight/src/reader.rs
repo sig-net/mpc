@@ -1322,39 +1322,21 @@ mod tests {
     fn resolve_verified_record_drops_over_capacity_used_counts() {
         let record = sample_record_with_partial_access_list();
         let rid = compute_request_id(&record).unwrap();
-
-        // Table of test cases for over-capacity used counts: (description, mutation function)
-        let cases: &[(&str, fn(&mut SignBidirectionalRecord))] = &[
-            ("calldata no_words past capacity", |r| {
-                r.evm_mut().calldata.value.no_words = 3
-            }),
-            ("access_list_entry_count past capacity", |r| {
-                r.evm_mut().access_list_entry_count = 3
-            }),
-            ("storage_key_count past capacity", |r| {
-                r.evm_mut().access_list[0].storage_key_count = 4
-            }),
-        ];
-
-        for (name, mutate) in cases {
-            let mut invalid = record.clone();
-            mutate(&mut invalid);
+        let mut invalid_records = vec![record.clone(); 3];
+        invalid_records[0].evm_mut().calldata.value.no_words = 3;
+        invalid_records[1].evm_mut().access_list_entry_count = 3;
+        invalid_records[2].evm_mut().access_list[0].storage_key_count = 4;
+        for invalid in invalid_records {
             let cell = cell_from_record(&invalid);
-            assert!(
-                decode_record(&cell).is_ok(),
-                "{name}: the field types remain valid"
-            );
+            assert!(decode_record(&cell).is_ok(), "the field types remain valid");
             let map = map_of(vec![(key_of(rid), cell)]);
-            assert!(
-                matches!(
-                    resolve_verified_record(&map, rid),
-                    Resolved::Dropped {
-                        reason: "record-undecodable",
-                        ..
-                    }
-                ),
-                "{name}"
-            );
+            assert!(matches!(
+                resolve_verified_record(&map, rid),
+                Resolved::Dropped {
+                    reason: "record-undecodable",
+                    ..
+                }
+            ));
         }
     }
 

@@ -241,27 +241,22 @@ mod tests {
     fn tron_request_identity_binds_every_header_field_and_word() {
         let base = sample_tron_params();
         let original = compute_request_id(&tron_record(base.clone())).unwrap();
-
-        // Table of test cases for fields that must affect the request ID
-        let cases: &[(&str, fn(&mut mpc_primitives::TronTxParams))] = &[
-            ("ref block bytes", |tx| tx.ref_block_bytes[0] ^= 1),
-            ("ref block hash", |tx| tx.ref_block_hash[7] ^= 1),
-            ("timestamp", |tx| tx.timestamp += 1),
-            ("expiration", |tx| tx.expiration += 1),
-            ("fee limit", |tx| tx.fee_limit += 1),
-            ("contract address", |tx| tx.contract_address[20] ^= 1),
-            ("call value", |tx| tx.call_value += 1),
-            ("calldata selector", |tx| tx.calldata.value.selector[0] ^= 1),
-            ("calldata word", |tx| tx.calldata.value.words[0][31] ^= 1),
-            ("calldata presence", |tx| tx.calldata.is_some = false),
-        ];
-        for (name, mutate) in cases {
-            let mut params = base.clone();
-            mutate(&mut params);
+        let mut changes = vec![base.clone(); 10];
+        changes[0].ref_block_bytes[0] ^= 1;
+        changes[1].ref_block_hash[7] ^= 1;
+        changes[2].timestamp += 1;
+        changes[3].expiration += 1;
+        changes[4].fee_limit += 1;
+        changes[5].contract_address[20] ^= 1;
+        changes[6].call_value += 1;
+        changes[7].calldata.value.selector[0] ^= 1;
+        changes[8].calldata.value.words[0][31] ^= 1;
+        changes[9].calldata.is_some = false;
+        for (index, changed) in changes.iter().enumerate() {
             assert_ne!(
-                compute_request_id(&tron_record(params)).unwrap(),
+                compute_request_id(&tron_record(changed.clone())).unwrap(),
                 original,
-                "rid must bind {name}"
+                "case {index}"
             );
         }
     }
@@ -281,48 +276,27 @@ mod tests {
     fn request_identity_binds_transaction_key_sender_and_destination() {
         let record = sample_record_with_partial_access_list();
         let original = compute_request_id(&record).unwrap();
-
-        // Table of test cases for fields that must affect the request ID
-        let cases: &[(&str, fn(&mut SignBidirectionalRecord))] = &[
-            ("nonce", |r| r.evm_mut().nonce += 1),
-            ("max fee per gas", |r| r.evm_mut().max_fee_per_gas += 1),
-            ("key version", |r| r.key_version += 1),
-            ("path", |r| r.path[0] ^= 1),
-            ("sender", |r| r.sender[0] ^= 1),
-            ("execution destination", |r| r.execution_dest[0] ^= 1),
-            ("algo", |r| r.algo = 1),
-            ("calldata selector", |r| {
-                r.evm_mut().calldata.value.selector[0] ^= 1
-            }),
-            ("unused calldata word", |r| {
-                r.evm_mut().calldata.value.words[1][31] ^= 1
-            }),
-            ("access-list address", |r| {
-                r.evm_mut().access_list[0].address[0] ^= 1
-            }),
-            ("unused storage key", |r| {
-                r.evm_mut().access_list[0].storage_keys[2][31] ^= 1
-            }),
-            ("calldata word count", |r| {
-                r.evm_mut().calldata.value.no_words -= 1
-            }),
-            ("access-list entry count", |r| {
-                r.evm_mut().access_list_entry_count = 0
-            }),
-            ("storage key count", |r| {
-                r.evm_mut().access_list[0].storage_key_count -= 1
-            }),
-            ("calldata presence", |r| {
-                r.evm_mut().calldata.is_some = false
-            }),
-        ];
-        for (name, mutate) in cases {
-            let mut changed = record.clone();
-            mutate(&mut changed);
+        let mut changes = vec![record.clone(); 15];
+        changes[0].evm_mut().nonce += 1;
+        changes[1].evm_mut().max_fee_per_gas += 1;
+        changes[2].key_version += 1;
+        changes[3].path[0] ^= 1;
+        changes[4].sender[0] ^= 1;
+        changes[5].execution_dest[0] ^= 1;
+        changes[6].algo = 1;
+        changes[7].evm_mut().calldata.value.selector[0] ^= 1;
+        changes[8].evm_mut().calldata.value.words[1][31] ^= 1;
+        changes[9].evm_mut().access_list[0].address[0] ^= 1;
+        changes[10].evm_mut().access_list[0].storage_keys[2][31] ^= 1;
+        changes[11].evm_mut().calldata.value.no_words -= 1;
+        changes[12].evm_mut().access_list_entry_count = 0;
+        changes[13].evm_mut().access_list[0].storage_key_count -= 1;
+        changes[14].evm_mut().calldata.is_some = false;
+        for (index, changed) in changes.iter().enumerate() {
             assert_ne!(
-                compute_request_id(&changed).unwrap(),
+                compute_request_id(changed).unwrap(),
                 original,
-                "rid must bind {name}"
+                "case {index}"
             );
         }
     }
@@ -388,21 +362,16 @@ mod tests {
     #[test]
     fn request_identity_rejects_used_counts_beyond_capacity() {
         let record = sample_record_with_partial_access_list();
-        let cases: &[(&str, fn(&mut SignBidirectionalRecord))] = &[
-            ("calldata no_words", |r| {
-                r.evm_mut().calldata.value.no_words = 3
-            }),
-            ("access_list_entry_count", |r| {
-                r.evm_mut().access_list_entry_count = 3
-            }),
-            ("storage_key_count", |r| {
-                r.evm_mut().access_list[0].storage_key_count = 4
-            }),
-        ];
-        for (expected, mutate) in cases {
-            let mut changed = record.clone();
-            mutate(&mut changed);
-            let err = compute_request_id(&changed).unwrap_err().to_string();
+        let mut changes = vec![record; 3];
+        changes[0].evm_mut().calldata.value.no_words = 3;
+        changes[1].evm_mut().access_list_entry_count = 3;
+        changes[2].evm_mut().access_list[0].storage_key_count = 4;
+        for (changed, expected) in changes.iter().zip([
+            "calldata no_words",
+            "access_list_entry_count",
+            "storage_key_count",
+        ]) {
+            let err = compute_request_id(changed).unwrap_err().to_string();
             assert!(err.contains(expected), "{expected}: {err}");
         }
     }
