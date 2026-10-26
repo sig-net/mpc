@@ -24,18 +24,25 @@ pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Sc
 /// The scalar the MPC signs for a bidirectional request's transaction.
 /// Tron signs its transaction id (sha256 of the raw), reduced mod n: the raw
 /// is deterministic, so an over-field hash has no re-nonce escape — and
-/// verification is mod n, so reduce(txid) still verifies. Other targets sign
-/// keccak256 and reject a non-canonical hash, as the plain signing flow does.
+/// verification is mod n, so reduce(txid) still verifies. Ethereum signs
+/// keccak256 and rejects a non-canonical hash, as the plain signing flow
+/// does; no other chain is a bidirectional signing target.
 pub fn bidirectional_payload_scalar(target: Chain, serialized: &[u8]) -> anyhow::Result<Scalar> {
     match target {
         Chain::Tron => Ok(reduce(Sha256::digest(serialized).into())),
-        _ => {
+        Chain::Ethereum => {
             let hash: [u8; 32] = keccak256(serialized).into();
             let Some(payload) = Scalar::from_bytes(hash) else {
                 anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {hash:?}");
             };
             Ok(payload)
         }
+        Chain::NEAR
+        | Chain::Solana
+        | Chain::Bitcoin
+        | Chain::Hydration
+        | Chain::Canton
+        | Chain::Midnight => anyhow::bail!("no bidirectional signing scheme for {target}"),
     }
 }
 
@@ -65,5 +72,25 @@ mod tests {
         assert_eq!(tron.to_bytes().as_slice(), &expected[..]);
         let evm = bidirectional_payload_scalar(Chain::Ethereum, &raw).unwrap();
         assert_ne!(evm, tron);
+    }
+
+    #[test]
+    fn every_chain_gets_a_deliberate_scheme() {
+        let raw = [0u8; 32];
+        assert!(bidirectional_payload_scalar(Chain::Tron, &raw).is_ok());
+        assert!(bidirectional_payload_scalar(Chain::Ethereum, &raw).is_ok());
+        for chain in [
+            Chain::NEAR,
+            Chain::Solana,
+            Chain::Bitcoin,
+            Chain::Hydration,
+            Chain::Canton,
+            Chain::Midnight,
+        ] {
+            assert!(
+                bidirectional_payload_scalar(chain, &raw).is_err(),
+                "{chain} must have no scheme"
+            );
+        }
     }
 }
