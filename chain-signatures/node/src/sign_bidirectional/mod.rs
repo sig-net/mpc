@@ -109,10 +109,11 @@ pub trait SignBidirectionalEventExt {
     fn flat_destination_id(&self) -> Option<BidirectionalTxId>;
 
     /// The deterministic derivations respond processing runs for every bidirectional
-    /// request, the schema checks output extraction applies to whatever the target
-    /// chain returns, and the reserved request fields. Shared between admission (reject before the backlog)
+    /// request, and the schema checks output extraction applies to whatever the
+    /// target chain returns. Shared between admission (reject before the backlog)
     /// and the respond path's failure handling (quarantine): both must agree on
-    /// what "can never advance" means.
+    /// what "can never advance" means. Off-spec reserved request fields are only
+    /// logged for now.
     fn validate(&self) -> anyhow::Result<()>;
 
     /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
