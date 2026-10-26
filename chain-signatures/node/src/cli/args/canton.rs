@@ -1,4 +1,5 @@
 use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
+use secrecy::{ExposeSecret as _, SecretString};
 
 /// CLI arguments for the Canton indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -49,7 +50,7 @@ pub struct CantonArgs {
         env("MPC_CANTON_OIDC_CLIENT_SECRET"),
         requires = "canton_json_api_url"
     )]
-    pub canton_oidc_client_secret: Option<String>,
+    pub canton_oidc_client_secret: Option<SecretString>,
     #[arg(
         long,
         env("MPC_CANTON_OIDC_AUDIENCE"),
@@ -96,7 +97,10 @@ impl CantonArgs {
             args.extend(["--canton-oidc-client-id".to_string(), v]);
         }
         if let Some(v) = self.canton_oidc_client_secret {
-            args.extend(["--canton-oidc-client-secret".to_string(), v]);
+            args.extend([
+                "--canton-oidc-client-secret".to_string(),
+                v.expose_secret().to_string(),
+            ]);
         }
         if let Some(v) = self.canton_oidc_audience {
             args.extend(["--canton-oidc-audience".to_string(), v]);
@@ -120,7 +124,7 @@ impl CantonArgs {
         let auth = CantonAuthConfig {
             token_url: self.canton_oidc_token_url?,
             client_id: self.canton_oidc_client_id?,
-            client_secret: self.canton_oidc_client_secret?,
+            client_secret: self.canton_oidc_client_secret?.expose_secret().to_string(),
             audience: self.canton_oidc_audience?,
             scope: self.canton_oidc_scope,
         };
@@ -151,7 +155,7 @@ impl CantonArgs {
                     canton_ledger_api_user: Some(c.ledger_api_user),
                     canton_oidc_token_url: Some(token_url),
                     canton_oidc_client_id: Some(client_id),
-                    canton_oidc_client_secret: Some(client_secret),
+                    canton_oidc_client_secret: Some(client_secret.into()),
                     canton_oidc_audience: Some(audience),
                     canton_oidc_scope: scope,
                     canton_party_id: Some(c.party_id),
