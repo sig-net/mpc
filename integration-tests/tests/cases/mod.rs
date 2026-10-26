@@ -27,6 +27,7 @@ pub mod helpers;
 pub mod midnight_stream;
 pub mod mpc;
 pub mod mpc_with_stream;
+pub mod posit;
 pub mod solana;
 pub mod solana_stream;
 pub mod state_sync;
@@ -126,7 +127,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         let outcome = nodes.sign().path(hd_path).await?;
 
         let derivation_epsilon =
-            derive_epsilon_near(LATEST_MPC_KEY_VERSION, outcome.account.id(), hd_path);
+            derive_epsilon_near(LATEST_MPC_KEY_VERSION, outcome.account.id(), hd_path)?;
         let user_pk = derive_key(mpc_pk, derivation_epsilon);
         let multichain_sig = reconstruct_signature(
             &user_pk,
@@ -411,6 +412,125 @@ async fn test_resharing_possible_with_kicked_node_offline() -> anyhow::Result<()
     assert!(!final_state.participants.contains_key(&kick_account));
 
     // sign to ensure everything is working
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_resharing_possible_with_multiple_kicked_nodes_offline() -> anyhow::Result<()> {
+    set_resharing_running_timeout(Duration::from_secs(20));
+
+    // Spawn 5-node cluster with threshold 3.
+    // With threshold 3, the 3 online nodes meet threshold 3 to batch-kick both offline nodes.
+    let mut nodes = cluster::spawn()
+        .nodes(5)
+        .threshold(3)
+        .disable_prestockpile()
+        .await?;
+    nodes.wait().signable().await?;
+    let initial_state = nodes.expect_running().await?;
+    assert_eq!(initial_state.participants.len(), 5);
+    assert_eq!(initial_state.threshold, 3);
+
+    let kick_1 = nodes.account_id(1).clone();
+    let kick_2 = nodes.account_id(2).clone();
+
+    // Kill both nodes simultaneously while they are still participants.
+    let _ = nodes.kill_node(&kick_1).await;
+    let _ = nodes.kill_node(&kick_2).await;
+
+    // The remaining 3 online participants vote to kick both offline nodes in one batch.
+    // This transitions directly to Resharing with new_participants excluding both dead nodes,
+    // avoiding the deadlock where a remaining offline node prevents readiness completion.
+    nodes
+        .kick_participants(&[kick_1.clone(), kick_2.clone()])
+        .await?;
+
+    // Wait for cluster to reach Running state on next epoch
+    let final_state = nodes
+        .wait()
+        .running_on_epoch(initial_state.epoch + 1)
+        .await?;
+
+    assert_eq!(
+        final_state.participants.len(),
+        3,
+        "should have 3 participants remaining"
+    );
+    assert_eq!(
+        final_state.threshold,
+        mpc_contract::utils::compute_threshold(3),
+        "threshold should be recomputed for 3 participants"
+    );
+    assert!(!final_state.participants.contains_key(&kick_1));
+    assert!(!final_state.participants.contains_key(&kick_2));
+
+    // Sign to ensure the reshared 3-node network is fully functional
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_resharing_batch_join_and_kick() -> anyhow::Result<()> {
+    set_resharing_running_timeout(Duration::from_secs(20));
+
+    // Spawn 3-node cluster with threshold 2.
+    let mut nodes = cluster::spawn()
+        .nodes(3)
+        .threshold(2)
+        .disable_prestockpile()
+        .await?;
+    nodes.wait().signable().await?;
+    let initial_state = nodes.expect_running().await?;
+    assert_eq!(initial_state.participants.len(), 3);
+    assert_eq!(initial_state.threshold, 2);
+
+    // Start a new node that registers as a candidate in the contract
+    let join_account = nodes.start(None).await?;
+    let kick_account = nodes.account_id(0).clone();
+
+    tracing::info!(
+        join = %join_account.id(),
+        kick = %kick_account,
+        "simultaneous join and kick batch reshare"
+    );
+
+    // Vote for batch reshare with 1 join and 1 kick
+    nodes
+        .reshare_participants(&[join_account.id()], &[&kick_account])
+        .await?;
+
+    // Wait for cluster to reach Running state on the next epoch
+    let final_state = nodes
+        .wait()
+        .running_on_epoch(initial_state.epoch + 1)
+        .candidate_missing(join_account.id())
+        .participant_present(join_account.id())
+        .participant_missing(&kick_account)
+        .await?;
+
+    assert_eq!(
+        final_state.participants.len(),
+        3,
+        "total participant count should remain 3 (1 joined, 1 kicked)"
+    );
+    assert_eq!(final_state.threshold, 2, "threshold should remain 2");
+    assert_eq!(
+        initial_state.public_key, final_state.public_key,
+        "public key must stay the same after resharing"
+    );
+    assert!(final_state.participants.contains_key(join_account.id()));
+    assert!(!final_state.participants.contains_key(&kick_account));
+
+    // Stop the kicked node and ensure remaining nodes are running
+    let _ = nodes.stop(&kick_account).await?;
+    nodes.wait().nodes_running().await?;
+
+    // Sign to ensure the new 3-node cohort is fully functional
     nodes.wait().signable().await?;
     nodes.sign().await?;
 

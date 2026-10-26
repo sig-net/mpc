@@ -12,8 +12,7 @@ use mpc_chain_integration_core::{
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
-    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
-    MAX_SECP256K1_SCALAR,
+    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, MAX_SECP256K1_SCALAR,
 };
 use mpc_utils::time::current_unix_timestamp;
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
@@ -62,10 +61,6 @@ impl HydrationSignatureRequestedEvent {
 
     fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
-        if self.key_version > LATEST_MPC_KEY_VERSION {
-            tracing::warn!("unsupported key version: {}", self.key_version);
-            return None;
-        }
 
         let payload = Scalar::from_bytes(self.payload).or_else(|| {
             tracing::warn!(
@@ -84,7 +79,14 @@ impl HydrationSignatureRequestedEvent {
             self.key_version,
             &self.sender_string(),
             &self.path,
-        );
+        )
+        .inspect_err(|_| {
+            tracing::info!(
+                key_version = self.key_version,
+                "unsupported key version; dropping sign request"
+            )
+        })
+        .ok()?;
 
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "hydration signature requested");
@@ -178,20 +180,21 @@ impl HydrationSignBidirectionalRequestedEvent {
 
     pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
-        if self.key_version > LATEST_MPC_KEY_VERSION {
-            tracing::warn!("unsupported key version: {}", self.key_version);
-            return None;
-        }
 
         let request_id = self.generate_request_id();
 
-        // Call the existing derive_epsilon_sol function with the correct parameters
-        // to match the TypeScript implementation
         let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
             self.key_version,
             &self.sender_string(),
             &self.path,
-        );
+        )
+        .inspect_err(|_| {
+            tracing::info!(
+                key_version = self.key_version,
+                "unsupported key version; dropping sign request"
+            )
+        })
+        .ok()?;
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "hydration signature requested");
@@ -485,6 +488,13 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
                     return Ok(());
                 }
             };
+            let output = match get_named_vec_u8(&fields, "serialized_output") {
+                Ok(output) => output,
+                Err(e) => {
+                    tracing::error!(?e, "failed to get serialized_output");
+                    return Ok(());
+                }
+            };
             tracing::info!(
                 "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?})"
             );
@@ -492,6 +502,7 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
                 .send(ChainEvent::RespondBidirectional(
                     RespondBidirectionalEvent {
                         attestation: None,
+                        output: Some(output),
                         request_id,
                         signature,
                         chain: Chain::Hydration,
@@ -793,6 +804,22 @@ fn value_to_vec_u8(v: &Value<u32>) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The response output decodes to the bytes the pallet emitted, whatever its length.
+    #[test]
+    fn serialized_output_decodes_any_length() {
+        for output in [vec![], vec![7u8], vec![0xde, 0xad, 0xbe, 0xef, 1]] {
+            let bytes = output.iter().map(|byte| Value::u128(u128::from(*byte)));
+            let fields = Composite::Named(vec![(
+                "serialized_output".to_string(),
+                Value::unnamed_composite(bytes).map_context(|_| 0u32),
+            )]);
+            assert_eq!(
+                get_named_vec_u8(&fields, "serialized_output").unwrap(),
+                output
+            );
+        }
+    }
 
     #[test]
     fn request_id_matches_ethabi() {

@@ -20,6 +20,7 @@ import {
   handleSubmit,
   primePublisher,
   shutdownPublisher,
+  snapshotWallet,
   SUBMIT_TIMEOUT_MS,
   type Publisher,
   warmupPublisher,
@@ -186,6 +187,34 @@ describe("handleSubmit: the flow", () => {
     }
   });
 
+  it("names the wallet's state in a failed submit, which outlives the process it retires", async () => {
+    primeStub({
+      balanceTx: failing("Wallet.InsufficientFunds"),
+      describe: async () => "dust(spendable=0 inFlight=5)",
+    });
+
+    const failure = await refused(7);
+
+    expect(failure.code).toBe("wallet_unfunded");
+    expect(failure.message).toBe("Wallet.InsufficientFunds");
+    expect(failure.walletState).toBe("dust(spendable=0 inFlight=5)");
+  });
+
+  it("says whether the wallet was used, which only balance, finalize and submit do", async () => {
+    for (const [edges, walletUsed] of [
+      [{ requireReady: failing("DUST indexing is still catching up") }, false],
+      [{ proveTx: failing("proof server /prove request failed: ECONNREFUSED") }, false],
+      [{ balanceTx: failing("Wallet.InsufficientFunds") }, true],
+      [{ finalizeTx: failing("proof server /prove request failed: ECONNREFUSED") }, true],
+      [{ submitTx: failing("1010: Invalid Transaction: Custom error: 170") }, true],
+    ] as const) {
+      await closePublisher();
+      primeStub(edges);
+
+      expect((await refused(8)).walletUsed, Object.keys(edges)[0]).toBe(walletUsed);
+    }
+  });
+
   it("finds the cause Effect hides on a Symbol, which is where the classification lives", async () => {
     // Every node error is wrapped in a constant-message SubmissionError; matching only
     // the rendered message would classify every rejection as a plain `internal`.
@@ -214,6 +243,38 @@ describe("handleSubmit: the flow", () => {
 
     expect(refusal.code).toBe("state_conflict");
     expect(refusal.message).toContain("Transaction submission error");
+  });
+
+  it("treats a node that cannot validate the transaction as a refusal, not an ambiguous submit", async () => {
+    // The shape a stagenet node with a corrupt ledger store produced: the RPC rejects
+    // `submitAndWatchExtrinsic` before the pool admits the transaction, the node client
+    // wraps that rejection, and the submission service wraps the node client's error.
+    class SubmissionError extends Data.TaggedError("SubmissionError")<{
+      message: string;
+      cause?: unknown;
+    }> {}
+    primeStub({
+      submitTx: () =>
+        Effect.runPromise(
+          Effect.fail(
+            new SubmissionError({
+              message: "Transaction submission error",
+              cause: new SubmissionError({
+                message: "Transaction submission failed",
+                cause: new Error(
+                  "1002: Verification Error: Runtime error: Execution failed: Execution aborted due to trap: host code panicked while being called by the runtime: root should be in the arena",
+                ),
+              }),
+            }),
+          ),
+        ) as Promise<Landed>,
+    });
+
+    const refusal = await refused(9);
+
+    expect(refusal.code).toBe("state_conflict");
+    // The node's reason, not just the constant wrapper text, so the logs say why.
+    expect(refusal.message).toContain("1002: Verification Error");
   });
 });
 
@@ -382,5 +443,53 @@ describe("handleSubmit: the busy gate", () => {
     const refusal = await refused(2);
     expect(refusal.code).toBe("wallet_busy");
     expect(refusal.message).toContain("request 1");
+  });
+});
+
+describe("snapshotWallet", () => {
+  it("refuses while a submit holds the wallet and snapshots once it settles", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const balancing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    primeStub({
+      balanceTx: async (tx) => {
+        entered();
+        await held;
+        return tx;
+      },
+      snapshot: async () => "snapshot-bytes",
+    });
+
+    const first = handleSubmit(CONFIG, 1, intent);
+    await balancing;
+    await expect(snapshotWallet()).rejects.toMatchObject({
+      code: "wallet_busy",
+      message: expect.stringContaining("request 1"),
+    });
+
+    release();
+    await first;
+    await expect(snapshotWallet()).resolves.toBe("snapshot-bytes");
+  });
+
+  it("restores the wallet it opens from the snapshot handed over at ready", async () => {
+    vi.mocked(openFundingWallet)
+      .mockClear()
+      .mockResolvedValueOnce({} as FundingWallet);
+
+    warmupPublisher(CONFIG, "snapshot-bytes");
+    await vi.waitFor(() => expect(openFundingWallet).toHaveBeenCalledOnce());
+
+    expect(openFundingWallet).toHaveBeenCalledWith(
+      CONFIG.accountKeys,
+      CONFIG.networkId,
+      CONFIG.endpoints,
+      "snapshot-bytes",
+    );
   });
 });

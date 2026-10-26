@@ -1,6 +1,7 @@
 use crate::abi::ChainSignatures;
 use crate::config::{GasConfig, PublisherConfig};
 use crate::EthConfig;
+use alloy::contract::Error as ContractError;
 use alloy::network::EthereumWallet;
 use alloy::primitives::{B256, U256};
 use alloy::providers::{
@@ -10,9 +11,13 @@ use alloy::providers::{
     Provider, ProviderBuilder, RootProvider, WalletProvider,
 };
 use alloy::rpc::types::TransactionReceipt;
+use alloy::transports::{
+    RpcError as AlloyRpcError, TransportError as AlloyTransportError, TransportErrorKind,
+};
+use http::StatusCode;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc_gated, SharedBackoff},
+    utils::retry::{http_status_read_retryable, retry_rpc, RpcFailure, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{SignId, Signature};
@@ -198,32 +203,34 @@ impl BatchPublisher {
             "publishing batch of ethereum signatures",
         );
         let max_attempts = self.config.batch_publish_retry.max_times;
-        let res = retry_rpc_gated!(
+        let res = retry_rpc!(
             // Every step inside is individually timeout-bounded (estimate, send, receipt).
             Duration::MAX,
             self.config.batch_publish_retry,
             self.shared_backoff,
+            "batch publish",
             |attempt, err, sleep| {
                 tracing::warn!(
                     num_requests = actions.len(),
-                    "batch publish failed (attempt {attempt}/{max_attempts}): {err}, retrying in {sleep:?}"
+                    "batch publish failed (attempt {attempt}/{max_attempts}): {err:#}, retrying in {sleep:?}"
                 );
             },
             { self.batch_publish_signatures(&actions).await }
         );
 
         if let Err(err) = &res {
-            tracing::error!(%err, "batch publish failed");
+            tracing::error!(error = %format_args!("{err:#}"), "batch publish failed");
         }
 
+        let failure = res.as_ref().err().map(batch_failure);
         for queued in actions.drain(..) {
             if res.is_ok() {
                 self.telemetry.record_publish_metrics(&queued.action);
             }
-            let result = res
-                .as_ref()
-                .map_err(|err| anyhow::anyhow!("{err:#}"))
-                .map(|_| ());
+            let result = match failure.clone() {
+                Some(failure) => Err(batch_publish_error(failure)),
+                None => Ok(()),
+            };
             let _ = queued.done.send(result);
         }
     }
@@ -234,16 +241,17 @@ impl BatchPublisher {
         tx_hash: B256,
         sign_ids: &[SignId],
     ) -> anyhow::Result<TransactionReceipt> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.config.receipt_timeout,
             self.config.receipt_retry,
             self.shared_backoff,
+            "get tx receipt",
             // Log the error and retry attempt
             |attempt, err, sleep| {
                 tracing::error!(
                     ?sign_ids,
                     attempt,
-                    "failed to get eth signature respond transaction receipt: {err}, retrying in {sleep:?}"
+                    "failed to get eth signature respond transaction receipt: {err:#}, retrying in {sleep:?}"
                 );
             },
             // Try to get the transaction receipt
@@ -262,7 +270,7 @@ impl BatchPublisher {
                         Ok(receipt)
                     }
                     Ok(None) => Err(anyhow::anyhow!("Receipt not ready yet")),
-                    Err(e) => Err(anyhow::anyhow!("RPC Error: {e}")),
+                    Err(e) => Err(receipt_poll_error(e)),
                 }
             }
         )
@@ -274,15 +282,16 @@ impl BatchPublisher {
         gas: u64,
         sign_ids: &[SignId],
     ) -> anyhow::Result<B256> {
-        retry_rpc_gated!(
+        retry_rpc!(
             self.config.send_timeout,
             self.config.send_retry,
             self.shared_backoff,
+            "send tx",
             |attempt, err, sleep| {
                 tracing::warn!(
                     ?sign_ids,
                     attempt,
-                    "send eth tx failed: {err}, retrying in {sleep:?}"
+                    "send eth tx failed: {err:#}, retrying in {sleep:?}"
                 );
             },
             {
@@ -296,7 +305,7 @@ impl BatchPublisher {
                     .get_transaction_count(self.contract.provider().default_signer_address())
                     .pending()
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to fetch nonce: {e}"))?;
+                    .map_err(|e| anyhow::Error::new(e).context("Failed to fetch nonce"))?;
 
                 tracing::info!(
                     nonce,
@@ -311,7 +320,7 @@ impl BatchPublisher {
                     .send()
                     .await
                     .map(|pending| *pending.tx_hash())
-                    .map_err(|e| anyhow::anyhow!("RPC Error: {e}"))
+                    .map_err(send_error)
             }
         )
     }
@@ -328,7 +337,10 @@ impl BatchPublisher {
 
         if !receipt.status() {
             tracing::error!(?sign_ids, ?tx_hash, "ethereum transaction failed");
-            anyhow::bail!("Ethereum transaction reverted");
+            // deterministic rejection: the same batch would revert again
+            return Err(anyhow::Error::new(RpcFailure::terminal(format!(
+                "Ethereum transaction {tx_hash:#x} reverted"
+            ))));
         }
 
         tracing::info!(
@@ -354,7 +366,7 @@ impl BatchPublisher {
             Ok(Ok(est)) => self.gas.clamp_estimate(est),
             Ok(Err(e)) => {
                 tracing::warn!(
-                    error = %e,
+                    error = %format_args!("{e:#}"),
                     num_requests,
                     "dynamic gas estimation failed, falling back to static heuristic"
                 );
@@ -391,6 +403,76 @@ impl BatchPublisher {
     }
 }
 
+/// The batch failure's carrier, built once per batch: `anyhow::Error` can
+/// cross only one oneshot, so each waiter gets a clone.
+fn batch_failure(err: &anyhow::Error) -> RpcFailure {
+    RpcFailure::from_chain(err).unwrap_or_else(|| RpcFailure::retryable(format!("{err:#}")))
+}
+
+/// One waiter's copy of the failed batch result.
+fn batch_publish_error(failure: RpcFailure) -> anyhow::Error {
+    anyhow::Error::new(failure).context("eth batch publish failed")
+}
+
+/// JSON-RPC message and HTTP status from an RPC error, regardless of
+/// packaging: `ErrorResp` on HTTP 200, or a 4xx envelope (alloy keeps only
+/// the raw body string — alloy-transport-http `reqwest_transport`).
+fn rpc_error_parts(err: &AlloyTransportError) -> (Option<u16>, String) {
+    match err {
+        AlloyRpcError::ErrorResp(payload) => (None, payload.message.to_string()),
+        AlloyRpcError::Transport(TransportErrorKind::HttpError(http)) => {
+            let message = serde_json::from_str::<serde_json::Value>(&http.body)
+                .ok()
+                .and_then(|body| {
+                    body.get("error")?
+                        .get("message")?
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| http.body.clone());
+            (Some(http.status), message)
+        }
+        _ => (None, err.to_string()),
+    }
+}
+
+/// Mempool rejections (`nonce too low`, `replacement transaction
+/// underpriced`) are recoverable — the retry refetches the nonce — so the
+/// payload verdict overrides any 4xx envelope; other errors stay typed.
+// TODO: `already known` maps to Ok once the tx lifecycle pins the tx hash.
+fn send_error(err: ContractError) -> anyhow::Error {
+    if let ContractError::TransportError(rpc) = &err {
+        let (status, message) = rpc_error_parts(rpc);
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("nonce too low") || lower.contains("replacement transaction underpriced")
+        {
+            return match status.and_then(|status| StatusCode::from_u16(status).ok()) {
+                Some(status) => {
+                    RpcFailure::with_verdict(status, false, format!("RPC Error: {message}")).into()
+                }
+                None => RpcFailure::retryable(format!("RPC Error: {message}")).into(),
+            };
+        }
+    }
+    anyhow::Error::new(err)
+}
+
+/// Receipt polling is a read post-broadcast: non-classic statuses stay
+/// retryable so a live tx isn't abandoned to failover; the duplicate-resend
+/// risk on long polls belongs to the tx-lifecycle TODO.
+fn receipt_poll_error(err: AlloyTransportError) -> anyhow::Error {
+    let (status, message) = rpc_error_parts(&err);
+    match status.and_then(|status| StatusCode::from_u16(status).ok()) {
+        Some(status) => RpcFailure::with_verdict(
+            status,
+            !http_status_read_retryable(status),
+            format!("RPC Error: {message}"),
+        )
+        .into(),
+        None => anyhow::Error::new(err),
+    }
+}
+
 #[async_trait::async_trait]
 impl ChainPublisher for EthClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
@@ -414,7 +496,7 @@ mod tests {
     use alloy::primitives::{Address, B256, U256};
     use k256::{AffinePoint, Scalar};
     use mockito::{Matcher, Mock, Server};
-    use mpc_chain_integration_core::utils::retry::RetryConfig;
+    use mpc_chain_integration_core::utils::retry::{is_retryable, RetryConfig};
     use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{Chain, SignKind};
@@ -637,7 +719,7 @@ mod tests {
         );
 
         assert!(r1.is_err() && r2.is_err());
-        assert!(r1.unwrap_err().to_string().contains("429"));
+        assert!(format!("{:#}", r1.unwrap_err()).contains("429"));
         // The gate forces retries into separate >= 50ms cooldown windows.
         assert!(start.elapsed() >= Duration::from_millis(100));
     }
@@ -702,6 +784,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn receipt_poll_transient_4xx_is_retried() {
+        let mut server = Server::new_async().await;
+        let tx_hash = B256::repeat_byte(0xcd);
+
+        // a live tx must survive a transient poll quirk
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(409)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32000, "message": "conflict"}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": mock_receipt_json(tx_hash, "0x1")
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut publisher = test_publisher(&server.url());
+        publisher.config.receipt_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            max_times: 2,
+            jitter: false,
+        };
+
+        let receipt = publisher
+            .wait_for_transaction_receipt(tx_hash, &[SignId::new([5u8; 32])])
+            .await
+            .unwrap_or_else(|err| {
+                panic!("transient 409 must not abandon the receipt poll: {err:#}")
+            });
+        assert!(receipt.status());
+    }
+
+    #[tokio::test]
+    async fn nonce_fetch_409_fails_fast() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+
+        // pre-broadcast: terminal is intended, failover covers delivery
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(409)
+            .with_body("conflict")
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .expect(0)
+            .create_async()
+            .await;
+
+        let mut publisher = test_publisher(&server.url());
+        publisher.config.send_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            max_times: 2,
+            jitter: false,
+        };
+
+        let err = publisher
+            .send_responses(vec![], 21000, &[SignId::new([6u8; 32])])
+            .await
+            .expect_err("nonce fetch must fail");
+        assert!(!is_retryable(&err), "{err:#}");
+    }
+
+    #[tokio::test]
     async fn test_send_eth_responses_refetches_nonce_on_retry() {
         let mut server = Server::new_async().await;
         mock_alloy_background_rpcs(&mut server).await;
@@ -740,6 +918,120 @@ mod tests {
         // Assert that `eth_getTransactionCount` was called multiple times.
         nonce_mock.assert_async().await;
         send_mock.assert_async().await;
+    }
+
+    fn http_wrapped_send_error(status: u16, message: &str) -> anyhow::Error {
+        let body = json!({"error": {"code": -32000, "message": message}}).to_string();
+        send_error(ContractError::TransportError(AlloyRpcError::Transport(
+            TransportErrorKind::HttpError(alloy::transports::HttpError { status, body }),
+        )))
+    }
+
+    #[test]
+    fn mempool_rejections_override_their_4xx_envelope() {
+        for status in [400u16, 429] {
+            for message in ["nonce too low", "replacement transaction underpriced"] {
+                let err = http_wrapped_send_error(status, message);
+                assert!(is_retryable(&err), "{message} on {status}: {err:#}");
+            }
+        }
+    }
+
+    #[test]
+    fn unrecognized_4xx_send_payloads_stay_terminal() {
+        // 400 is in the string fallback's terminal list; the others would
+        // silently default to retryable if the typed status were lost
+        for status in [400u16, 409, 410, 413, 422] {
+            let err = http_wrapped_send_error(status, "invalid sender");
+            assert!(!is_retryable(&err), "{status}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn batch_publish_error_preserves_typed_statuses_across_the_oneshot() {
+        // A typed 4xx with no `RpcFailure` carrier (e.g. an unrecognized
+        // 409 send rejection) must stay terminal after the fan-out — the
+        // node's unbounded publish loop reads exactly this error.
+        let err = http_wrapped_send_error(409, "conflict").context("exhausted after 1 attempts");
+        assert!(
+            !is_retryable(&batch_publish_error(batch_failure(&err))),
+            "{err:#}"
+        );
+
+        // throttles keep engaging the gate through the fan-out
+        let err = http_wrapped_send_error(429, "slow down").context("exhausted after 3 attempts");
+        let out = batch_publish_error(batch_failure(&err));
+        assert!(is_retryable(&out), "{err:#}");
+        assert!(SharedBackoff::new().engage_if_throttled(&out).is_some());
+
+        // signal-less errors: explicit retryable verdict — a standalone "429"
+        // in an id must not engage the gate
+        let err = anyhow::anyhow!("route to upstream node-429 reset")
+            .context("exhausted after 3 attempts");
+        let out = batch_publish_error(batch_failure(&err));
+        assert!(is_retryable(&out), "{err:#}");
+        assert!(SharedBackoff::new().engage_if_throttled(&out).is_none());
+    }
+
+    #[tokio::test]
+    async fn send_retries_nonce_too_low_regardless_of_envelope() {
+        // Some providers wrap JSON-RPC errors in a 4xx instead of 200 —
+        // the payload decides, not the envelope.
+        for (case, status) in [("4xx envelope", 400u16), ("200 error body", 200)] {
+            let mut server = Server::new_async().await;
+            mock_alloy_background_rpcs(&mut server).await;
+
+            // refetched per send attempt
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(
+                    json!({"method": "eth_getTransactionCount"}),
+                ))
+                .with_status(200)
+                .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+                .expect_at_least(2)
+                .create_async()
+                .await;
+
+            let tx_hash = B256::repeat_byte(0x31);
+            // rejection first (mockito prefers the first mock still missing hits)
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(
+                    json!({"method": "eth_sendRawTransaction"}),
+                ))
+                .with_status(status as usize)
+                .with_body(
+                    json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "error": {"code": -32000, "message": "nonce too low"}
+                    })
+                    .to_string(),
+                )
+                .expect(1)
+                .create_async()
+                .await;
+            server
+                .mock("POST", "/")
+                .match_body(Matcher::PartialJson(
+                    json!({"method": "eth_sendRawTransaction"}),
+                ))
+                .with_status(200)
+                .with_body(
+                    json!({"jsonrpc": "2.0", "id": 1, "result": format!("{tx_hash:#x}")})
+                        .to_string(),
+                )
+                .expect(1)
+                .create_async()
+                .await;
+
+            let publisher = test_publisher(&server.url());
+            let hash = publisher
+                .send_responses(vec![], 21000, &[SignId::new([9u8; 32])])
+                .await
+                .unwrap_or_else(|err| panic!("{case}: {err:#}"));
+            assert_eq!(hash, tx_hash, "{case}");
+        }
     }
 
     #[tokio::test]
@@ -797,6 +1089,193 @@ mod tests {
 
         // It should return Err(()) because the receipt status was 0x0
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn reverted_batch_is_terminal_and_not_retried() {
+        let mut server = Server::new_async().await;
+        let tx_hash = B256::repeat_byte(0x25);
+        mock_alloy_background_rpcs(&mut server).await;
+
+        // Nonce, send, and receipt each hit exactly once: the batch retry
+        // budget must not re-send a deterministically reverting tx.
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let send_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({"jsonrpc": "2.0", "id": 1, "result": format!("{tx_hash:#x}")}).to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": mock_receipt_json(tx_hash, "0x0")
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut batcher = test_publisher(&server.url());
+        batcher.config.max_batch_size = 1;
+        batcher.config.batch_publish_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            max_times: 2,
+            jitter: false,
+        };
+
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(batcher.run_batch_respond(rx));
+        let (queued, result) = queue(mock_publish_action(7));
+        tx.send(queued).await.unwrap();
+
+        let err = result.await.unwrap().expect_err("reverted batch must fail");
+        // The verdict crosses the oneshot intact, so the node's publish loop
+        // stops instead of retrying forever.
+        assert!(!is_retryable(&err), "revoked-tx must be terminal: {err:#}");
+        assert!(format!("{err:#}").contains("reverted"));
+        send_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn exhausted_throttle_stays_retryable_at_the_waiter() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        // persistent 429: the send loop exhausts, the batch budget is spent
+        let send_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(429)
+            .with_body("Too Many Requests")
+            .expect(3)
+            .create_async()
+            .await;
+
+        let mut cfg = mock_config(&server.url());
+        cfg.publisher.send_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 2,
+            jitter: false,
+        };
+        cfg.publisher.batch_publish_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 0,
+            jitter: false,
+        };
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(50), Duration::from_millis(200));
+        let mut batcher = BatchPublisher::new(&cfg, Arc::new(NoopPublisherTelemetry), gate.clone());
+        batcher.config.max_batch_size = 1;
+
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(batcher.run_batch_respond(rx));
+        let (queued, result) = queue(mock_publish_action(8));
+        tx.send(queued).await.unwrap();
+
+        let err = result
+            .await
+            .unwrap()
+            .expect_err("throttled batch must fail");
+        // liveness at the node loop: an exhausted throttle stays retryable
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(gate.remaining() > Duration::ZERO, "gate must engage");
+        send_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn typed_409_send_rejection_is_terminal_through_the_pipeline() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        // a 4xx with no mempool payload: terminal by status, no carrier
+        let send_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(409)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32000, "message": "conflict"}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        // generous budgets: expect(1) pins terminality, not budget exhaustion
+        let fast = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_times: 2,
+            jitter: false,
+        };
+        let mut batcher = test_publisher(&server.url());
+        batcher.config.max_batch_size = 1;
+        batcher.config.send_retry = fast;
+        batcher.config.batch_publish_retry = fast;
+
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(batcher.run_batch_respond(rx));
+        let (queued, result) = queue(mock_publish_action(9));
+        tx.send(queued).await.unwrap();
+
+        let err = result
+            .await
+            .unwrap()
+            .expect_err("conflicted batch must fail");
+        assert!(!is_retryable(&err), "409 must stay terminal: {err:#}");
+        send_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -1065,7 +1544,7 @@ mod tests {
         tx.send(queued).await.unwrap();
 
         let err = result.await.unwrap().expect_err("batch publish must fail");
-        assert!(err.to_string().contains("mock error"), "got: {err}");
+        assert!(format!("{err:#}").contains("mock error"), "got: {err:#}");
     }
 
     #[tokio::test]

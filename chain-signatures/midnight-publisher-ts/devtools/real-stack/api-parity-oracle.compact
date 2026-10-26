@@ -2,15 +2,15 @@ pragma language_version >= 0.25;
 import CompactStandardLibrary;
 import "@sig-net/midnight/src/Signet";
 
-export ledger record34: SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 34, 34>;
-export ledger record000: SignBidirectionalEventV1<EvmType2TxParams<0, 0, 0>, 34, 34>;
-export ledger record122: SignBidirectionalEventV1<EvmType2TxParams<1, 2, 2>, 34, 34>;
-export ledger record223: SignBidirectionalEventV1<EvmType2TxParams<2, 2, 3>, 34, 34>;
+export ledger record34: SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 34, 0>;
+export ledger record000: SignBidirectionalEventV1<EvmType2TxParams<0, 0, 0>, 34, 0>;
+export ledger record122: SignBidirectionalEventV1<EvmType2TxParams<1, 2, 2>, 34, 0>;
+export ledger record223: SignBidirectionalEventV1<EvmType2TxParams<2, 2, 3>, 34, 0>;
 constructor(
-  initial34: SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 34, 34>,
-  initial000: SignBidirectionalEventV1<EvmType2TxParams<0, 0, 0>, 34, 34>,
-  initial122: SignBidirectionalEventV1<EvmType2TxParams<1, 2, 2>, 34, 34>,
-  initial223: SignBidirectionalEventV1<EvmType2TxParams<2, 2, 3>, 34, 34>
+  initial34: SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 34, 0>,
+  initial000: SignBidirectionalEventV1<EvmType2TxParams<0, 0, 0>, 34, 0>,
+  initial122: SignBidirectionalEventV1<EvmType2TxParams<1, 2, 2>, 34, 0>,
+  initial223: SignBidirectionalEventV1<EvmType2TxParams<2, 2, 3>, 34, 0>
 ) {
   record34 = disclose(initial34);
   record000 = disclose(initial000);
@@ -19,9 +19,9 @@ constructor(
 }
 
 export pure circuit requestId34(
-  request: SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 34, 34>
+  request: SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 34, 0>
 ): RequestId {
-  return calculateEvmType2RequestIdV1<1, 0, 0, 34, 34>(request);
+  return calculateEvmType2RequestIdV1<1, 0, 0, 34>(request);
 }
 
 export pure circuit txParamsDigest34(txParams: EvmType2TxParams<1, 0, 0>): Bytes<32> {
@@ -29,9 +29,9 @@ export pure circuit txParamsDigest34(txParams: EvmType2TxParams<1, 0, 0>): Bytes
 }
 
 export pure circuit requestId000(
-  request: SignBidirectionalEventV1<EvmType2TxParams<0, 0, 0>, 34, 34>
+  request: SignBidirectionalEventV1<EvmType2TxParams<0, 0, 0>, 34, 0>
 ): RequestId {
-  return calculateEvmType2RequestIdV1<0, 0, 0, 34, 34>(request);
+  return calculateEvmType2RequestIdV1<0, 0, 0, 34>(request);
 }
 
 export pure circuit txParamsDigest000(txParams: EvmType2TxParams<0, 0, 0>): Bytes<32> {
@@ -39,9 +39,9 @@ export pure circuit txParamsDigest000(txParams: EvmType2TxParams<0, 0, 0>): Byte
 }
 
 export pure circuit requestId122(
-  request: SignBidirectionalEventV1<EvmType2TxParams<1, 2, 2>, 34, 34>
+  request: SignBidirectionalEventV1<EvmType2TxParams<1, 2, 2>, 34, 0>
 ): RequestId {
-  return calculateEvmType2RequestIdV1<1, 2, 2, 34, 34>(request);
+  return calculateEvmType2RequestIdV1<1, 2, 2, 34>(request);
 }
 
 export pure circuit txParamsDigest122(txParams: EvmType2TxParams<1, 2, 2>): Bytes<32> {
@@ -49,9 +49,9 @@ export pure circuit txParamsDigest122(txParams: EvmType2TxParams<1, 2, 2>): Byte
 }
 
 export pure circuit requestId223(
-  request: SignBidirectionalEventV1<EvmType2TxParams<2, 2, 3>, 34, 34>
+  request: SignBidirectionalEventV1<EvmType2TxParams<2, 2, 3>, 34, 0>
 ): RequestId {
-  return calculateEvmType2RequestIdV1<2, 2, 3, 34, 34>(request);
+  return calculateEvmType2RequestIdV1<2, 2, 3, 34>(request);
 }
 
 export pure circuit txParamsDigest223(txParams: EvmType2TxParams<2, 2, 3>): Bytes<32> {
@@ -61,13 +61,21 @@ export pure circuit txParamsDigest223(txParams: EvmType2TxParams<2, 2, 3>): Byte
 export pure circuit digest0(
   requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<0>
 ): Bytes<32> {
-  return calculateSignetAttestationDigestV1<0>(requestId, blockHeight, kind, data);
+  return calculateSignetAttestationDigestV1(requestId, blockHeight, kind, 0, calculateAttestedOutputHashV1<0>(data));
+}
+
+export pure circuit outputHash0(data: Bytes<0>): Bytes<32> {
+  return calculateAttestedOutputHashV1<0>(data);
 }
 
 export pure circuit digest32(
   requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<32>
 ): Bytes<32> {
-  return calculateSignetAttestationDigestV1<32>(requestId, blockHeight, kind, data);
+  return calculateSignetAttestationDigestV1(requestId, blockHeight, kind, 32, calculateAttestedOutputHashV1<32>(data));
+}
+
+export pure circuit outputHash32(data: Bytes<32>): Bytes<32> {
+  return calculateAttestedOutputHashV1<32>(data);
 }
 
 export pure circuit verify32(
@@ -79,31 +87,51 @@ export pure circuit verify32(
 export pure circuit digest1(
   requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<1>
 ): Bytes<32> {
-  return calculateSignetAttestationDigestV1<1>(requestId, blockHeight, kind, data);
+  return calculateSignetAttestationDigestV1(requestId, blockHeight, kind, 1, calculateAttestedOutputHashV1<1>(data));
+}
+
+export pure circuit outputHash1(data: Bytes<1>): Bytes<32> {
+  return calculateAttestedOutputHashV1<1>(data);
 }
 
 export pure circuit digest30(
   requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<30>
 ): Bytes<32> {
-  return calculateSignetAttestationDigestV1<30>(requestId, blockHeight, kind, data);
+  return calculateSignetAttestationDigestV1(requestId, blockHeight, kind, 30, calculateAttestedOutputHashV1<30>(data));
+}
+
+export pure circuit outputHash30(data: Bytes<30>): Bytes<32> {
+  return calculateAttestedOutputHashV1<30>(data);
 }
 
 export pure circuit digest31(
   requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<31>
 ): Bytes<32> {
-  return calculateSignetAttestationDigestV1<31>(requestId, blockHeight, kind, data);
+  return calculateSignetAttestationDigestV1(requestId, blockHeight, kind, 31, calculateAttestedOutputHashV1<31>(data));
+}
+
+export pure circuit outputHash31(data: Bytes<31>): Bytes<32> {
+  return calculateAttestedOutputHashV1<31>(data);
 }
 
 export pure circuit digest62(
   requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<62>
 ): Bytes<32> {
-  return calculateSignetAttestationDigestV1<62>(requestId, blockHeight, kind, data);
+  return calculateSignetAttestationDigestV1(requestId, blockHeight, kind, 62, calculateAttestedOutputHashV1<62>(data));
+}
+
+export pure circuit outputHash62(data: Bytes<62>): Bytes<32> {
+  return calculateAttestedOutputHashV1<62>(data);
 }
 
 export pure circuit digest63(
   requestId: RequestId, blockHeight: Uint<64>, kind: OutputKind, data: Bytes<63>
 ): Bytes<32> {
-  return calculateSignetAttestationDigestV1<63>(requestId, blockHeight, kind, data);
+  return calculateSignetAttestationDigestV1(requestId, blockHeight, kind, 63, calculateAttestedOutputHashV1<63>(data));
+}
+
+export pure circuit outputHash63(data: Bytes<63>): Bytes<32> {
+  return calculateAttestedOutputHashV1<63>(data);
 }
 
 export pure circuit verify0(
