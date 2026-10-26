@@ -41,9 +41,13 @@ pub fn generate_sign_request(
         hex::encode(read_address),
     );
 
+    anyhow::ensure!(
+        record.key_version >= 1,
+        "key_version 0 predates bidirectional signing: at least 1 is required"
+    );
     let key_version = u32::from(record.key_version);
     let algo = match record.algo {
-        ALGO_ECDSA => "ecdsa".to_string(),
+        ALGO_ECDSA => "ECDSA".to_string(),
         reserved => anyhow::bail!("unsupported algo {reserved}: only ecdsa (0) is real"),
     };
     let dest = match record.signature_dest {
@@ -261,6 +265,14 @@ mod tests {
             record.output_deserialization_schema
         );
         assert!(event.respond_serialization_schema.is_empty());
+        assert_eq!(
+            event.algo, "ECDSA",
+            "the node accepts only the SDK spelling"
+        );
+        assert_eq!(
+            event.dest, "",
+            "signature_dest is reserved and travels blank"
+        );
         assert_eq!(event.params, "", "params is reserved and travels blank");
         assert_eq!(event.chain, Chain::Midnight);
         assert_eq!(event.chain_ctx, None);
@@ -363,29 +375,19 @@ mod tests {
     }
 
     #[test]
-    fn generate_sign_request_routes_and_bounds_key_versions() {
-        // Version 0 is accepted, matching Canton, and routes through the legacy
-        // derivation rather than the v2 caip2 one.
+    fn generate_sign_request_bounds_key_versions() {
         let mut record = caller_record();
         record.key_version = 0;
-        let legacy = generate_sign_request(
+        let err = generate_sign_request(
             &record,
             &READ_ADDRESS,
             REQUEST_ID,
             INDEXED_TS,
             test_root_pk(),
         )
-        .expect("key_version 0 is accepted");
-        assert_eq!(
-            legacy.args.epsilon,
-            mpc_crypto::kdf::derive_epsilon_midnight(
-                0,
-                &"ab".repeat(32),
-                &hex::encode(record.path)
-            )
-            .unwrap(),
-            "version 0 must route through the legacy derivation"
-        );
+        .expect_err("key_version 0 predates bidirectional signing")
+        .to_string();
+        assert!(err.contains("key_version"), "err: {err}");
 
         let mut record = caller_record();
         record.key_version = 2;

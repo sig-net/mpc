@@ -63,7 +63,8 @@ pub enum Cli {
         #[arg(
             long,
             env("MPC_NEAR_RPC"),
-            default_value("https://rpc.testnet.near.org")
+            default_value("https://rpc.testnet.near.org"),
+            hide_env_values = true
         )]
         near_rpc: String,
         /// MPC contract id
@@ -77,7 +78,7 @@ pub enum Cli {
         #[arg(long, env("MPC_ENV"))]
         env: String,
         /// This node's account ed25519 secret key
-        #[arg(long, env("MPC_ACCOUNT_SK"))]
+        #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
         account_sk: SecretKey,
         /// The web port for this server
         /// this is default to 3000 for all nodes now.
@@ -85,10 +86,10 @@ pub enum Cli {
         #[arg(long, env("MPC_WEB_PORT"), default_value = "3000")]
         web_port: u16,
         /// The cipher secret key used to decrypt messages between nodes.
-        #[arg(long, env("MPC_CIPHER_SK"))]
+        #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true)]
         cipher_sk: String,
         /// The secret key used to sign messages to be sent between nodes.
-        #[arg(long, env("MPC_SIGN_SK"))]
+        #[arg(long, env("MPC_SIGN_SK"), hide_env_values = true)]
         sign_sk: SecretKey,
         /// Ethereum Indexer options
         #[command(flatten)]
@@ -1520,5 +1521,51 @@ mod tests {
             "publish must wait out the stack gate's engaged window (base cooldown), took {:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn hide_env_values_configured_on_secret_arguments() {
+        use clap::CommandFactory;
+
+        let cmd = Cli::command();
+        let start = cmd
+            .find_subcommand("start")
+            .expect("start subcommand must exist");
+
+        let sensitive_arg_ids = [
+            // Secret keys & credentials
+            "account_sk",
+            "cipher_sk",
+            "sign_sk",
+            "redis_url",
+            "sol_account_sk",
+            "eth_account_sk",
+            "signer_uri",
+            "canton_oidc_client_secret",
+            "midnight_funding_seed",
+            "near_rpc",
+            "otlp_endpoint",
+            "eth_execution_rpc_http_url",
+            "sol_rpc_http_url",
+            "rpc_ws_url",
+            "canton_json_api_url",
+            "canton_json_api_ws_url",
+            "canton_oidc_token_url",
+            "midnight_node_url",
+            "midnight_proof_server_url",
+            "midnight_indexer_url",
+            "midnight_indexer_ws_url",
+        ];
+
+        for arg_id in sensitive_arg_ids {
+            let arg = start
+                .get_arguments()
+                .find(|a| a.get_id() == arg_id)
+                .unwrap_or_else(|| panic!("arg {arg_id} not found"));
+            assert!(
+                arg.is_hide_env_values_set(),
+                "arg {arg_id} must have hide_env_values set"
+            );
+        }
     }
 }

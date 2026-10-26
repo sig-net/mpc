@@ -796,6 +796,7 @@ mod tests {
                 tx_id: BidirectionalTxId([0x11; 32]),
                 output,
                 attestation: Some(METADATA),
+                outcome_kind: None,
                 origin_indexed_at: None,
                 chain_ctx: None,
             }),
