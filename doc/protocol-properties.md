@@ -208,7 +208,7 @@ The signature covers a domain tag, the signing time in milliseconds, the recipie
 
 * Domain. Peer messages, /sync requests and /sync replies sign under their own tags, since a request and its reply carry the same type.
 * Recipient. Named by account, not participant id, because the contract can hand an id to a second account after a cancelled resharing. The receiver verifies with its own account, so an envelope signed for another node fails like a bad signature.
-* Time. An envelope is accepted while its signing time is within `message_timeout` (/sync: 120 s) plus 30 s of the receiver's clock, in either direction. Acceptance uses the local clock; §D2 still holds, since nothing two nodes must agree on is derived from it.
+* Time. An envelope is accepted while its signing time is within `message_timeout` (/sync: `SYNC_TIMEOUT`, 30 s) plus 30 s of the receiver's clock, in either direction. Acceptance uses the local clock; §D2 still holds, since nothing two nodes must agree on is derived from it.
 * Once. Within that window the inbox keeps every accepted signature per sender and accepts each envelope once, at most 100k per sender, evicting that sender's oldest (§D5). /sync accepts a request only if it was signed later than the last one from that sender, which works because a node runs one sync at a time, and a reply is signed with its request's time and accepted only as the answer to it.
 * Restart. A restart empties this memory, so nothing signed before the node started is accepted, except peer messages during genesis key generation: peers resend those to a node that is still starting.
 
