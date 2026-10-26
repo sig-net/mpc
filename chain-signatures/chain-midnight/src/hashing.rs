@@ -190,7 +190,7 @@ mod tests {
                 serde_json::to_string(
                     &crate::test_utils::atoms_from_record(&record)
                         .iter()
-                        .map(|a| hex::encode(a))
+                        .map(hex::encode)
                         .collect::<Vec<_>>()
                 )
                 .unwrap()

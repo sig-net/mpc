@@ -385,8 +385,8 @@ pub(crate) fn sample_tron_params() -> TronTxParams {
     }
 }
 
-/// The tron counterpart of [`evm_record`], with `execution_dest` naming Tron and
-/// empty schemas.
+/// The tron counterpart of [`sample_record`], with `execution_dest` naming
+/// Tron and empty schemas.
 pub(crate) fn tron_record(params: TronTxParams) -> SignBidirectionalRecord {
     SignBidirectionalRecord {
         sender: [0xab; 32],

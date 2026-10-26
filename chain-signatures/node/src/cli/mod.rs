@@ -1027,6 +1027,7 @@ async fn spawn_indexers(
         let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
         // TODO: read-side gating - this indexer's reads don't share the
         // chain's cooldown gate yet
+        tracing::info!("Midnight indexer waiting for the network public key");
         let root_pk = contract_watcher.wait_public_key().await;
         match MidnightIndexer::new(
             midnight_config,
