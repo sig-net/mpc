@@ -3,7 +3,7 @@
 use mpc_primitives::TxParams;
 
 /// One signing request, the contract's `SignBidirectionalEventV1` record.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SignBidirectionalRecord {
     /// `Uint<8>`: the first field of the record and request-id preimage.
     pub key_version: u8,
