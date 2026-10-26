@@ -415,7 +415,7 @@ impl MpcContract {
                 let new_count = (participants.len() - kicks.len()) + joins.len();
                 const MIN_PARTICIPANTS: usize = 2;
                 if new_count < MIN_PARTICIPANTS {
-                    return Err(VoteError::ParticipantsBelowThreshold.into());
+                    return Err(VoteError::ParticipantsBelowMinimum.into());
                 }
 
                 let proposal = ReshareProposal { joins, kicks };
