@@ -117,8 +117,8 @@ impl SolanaSignEvent {
                 let payload = match bidirectional_payload_scalar(target, &ev.serialized_transaction)
                 {
                     Ok(payload) => payload,
-                    Err(_) => {
-                        tracing::info!(?sign_id, "payload exceeds the curve order; dropping");
+                    Err(err) => {
+                        tracing::info!(?sign_id, ?target, "dropping: {err:#}");
                         return None;
                     }
                 };
