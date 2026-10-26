@@ -34,6 +34,10 @@ pub fn generate_sign_request(
         hex::encode(read_address),
     );
 
+    anyhow::ensure!(
+        record.key_version >= 1,
+        "key_version 0 predates bidirectional signing: at least 1 is required"
+    );
     let key_version = u32::from(record.key_version);
     let algo = match record.algo {
         ALGO_ECDSA => "ECDSA".to_string(),
@@ -258,23 +262,13 @@ mod tests {
     }
 
     #[test]
-    fn generate_sign_request_routes_and_bounds_key_versions() {
-        // Version 0 is accepted, matching Canton, and routes through the legacy
-        // derivation rather than the v2 caip2 one.
+    fn generate_sign_request_bounds_key_versions() {
         let mut record = caller_record();
         record.key_version = 0;
-        let legacy = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
-            .expect("key_version 0 is accepted");
-        assert_eq!(
-            legacy.args.epsilon,
-            mpc_crypto::kdf::derive_epsilon_midnight(
-                0,
-                &"ab".repeat(32),
-                &hex::encode(record.path)
-            )
-            .unwrap(),
-            "version 0 must route through the legacy derivation"
-        );
+        let err = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
+            .expect_err("key_version 0 predates bidirectional signing")
+            .to_string();
+        assert!(err.contains("key_version"), "err: {err}");
 
         let mut record = caller_record();
         record.key_version = 2;
