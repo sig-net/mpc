@@ -34,7 +34,8 @@ pub struct Options {
     #[arg(
         long,
         env("MPC_OTLP_ENDPOINT"),
-        default_value = "http://localhost:4318"
+        default_value = "http://localhost:4318",
+        hide_env_values = true
     )]
     pub otlp_endpoint: String,
 

@@ -145,7 +145,7 @@ pub fn make_test_stream_context(
         ContractStateWatcher::with_running(&account_id, root_pk, threshold, Default::default());
     let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let (cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, rpc_rx) = test_rpc_channel(8);
     let mut ctx = StreamContext::new(
         backlog,
@@ -171,7 +171,7 @@ pub fn make_test_stream_context_with_rpc(
         ContractStateWatcher::with_running(&account_id, root_pk, 1, Default::default());
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, rpc_rx) = test_rpc_channel(8);
     let mut ctx = StreamContext::new(
         backlog,
@@ -244,7 +244,7 @@ pub async fn run_stream_with_two_node_mesh<I: ChainIndexer>(
     }
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(mesh_state);
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
     run_supervised(

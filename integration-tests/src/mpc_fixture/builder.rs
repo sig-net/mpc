@@ -24,7 +24,7 @@ use mpc_node::backlog::Backlog;
 use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
-use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
+use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
@@ -602,7 +602,7 @@ impl MpcFixtureNodeBuilder {
                 rpc_channel.clone(),
                 context.contract_state.clone(),
                 mesh_rx.clone(),
-                NodeClient::new(&Default::default()),
+                NodeClient::new(),
                 checkpoints_rx.clone(),
             )
             .with_observe_lag(context.observe_lag)
@@ -621,14 +621,14 @@ impl MpcFixtureNodeBuilder {
             mock_chain,
         );
 
-        // --- SyncChannel and SyncTask setup ---
-        let node_client = NodeClient::new(&NodeClientOptions::default());
-        let (sync_channel, sync_task) = SyncTask::new(
+        // --- SyncTask setup ---
+        let node_client = NodeClient::new();
+        let sync_task = SyncTask::new(
             &node_client,
             triple_storage.clone(),
             presignature_storage.clone(),
             mesh_rx.clone(),
-            context.contract_state,
+            context.contract_state.clone(),
             mpc_node::protocol::sync::SyncTask::sync_report_channel().0,
             config_tx.borrow().local.network.clone(),
         );
@@ -647,7 +647,7 @@ impl MpcFixtureNodeBuilder {
             presignature_storage,
             backlog,
             checkpoint_tx,
-            sync_channel,
+            contract: context.contract_state,
             web_handle: None,
         };
 

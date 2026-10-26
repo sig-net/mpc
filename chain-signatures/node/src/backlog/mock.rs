@@ -259,6 +259,7 @@ pub fn mock_bidi_response_request(
             tx_id,
             output: vec![],
             attestation: None,
+            outcome_kind: None,
             origin_indexed_at: None,
             chain_ctx: None,
         },

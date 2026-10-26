@@ -37,6 +37,10 @@ pub struct RespondBidirectionalTx {
     /// Absent in legacy checkpoints; Midnight publication requires explicit metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation: Option<crate::AttestationMetadata>,
+    /// The execution outcome the response reports, on every source chain. Absent in
+    /// legacy checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_kind: Option<crate::AttestationOutcomeKind>,
     /// Unix timestamp at which the initial request was indexed. This remains
     /// distinct from the follow-up request's own indexing timestamp so queueing
     /// and per-leg latency metrics retain their existing semantics.
