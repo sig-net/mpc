@@ -63,17 +63,20 @@ fn derive_epsilon(
     }
 }
 
-/// The only `(algo, dest, params)` a request may carry (Section 7.1 of
+/// The only `algo`, `dest` and `params` a request may carry (Section 7.1 of
 /// doc/bidirectional-calls.md). The node signs ECDSA whatever they say, but they
 /// enter the request id, so any other value would give one execution a second
 /// request id (G2). `dest` is deprecated: it has no meaning and stays blank until
 /// it leaves the request id with the Section 7 format.
-pub(crate) const SDK_REQUEST_FIELDS: (&str, &str, &str) = ("ECDSA", "", "");
+pub(crate) const SDK_ALGO: &str = "ECDSA";
+pub(crate) const SDK_DEST: &str = "";
+pub(crate) const SDK_PARAMS: &str = "";
 
 /// Key version 0 predates bidirectional signing.
 const MIN_BIDIRECTIONAL_KEY_VERSION: u32 = 1;
 
-/// Key version in `MIN_BIDIRECTIONAL_KEY_VERSION..=LATEST_MPC_KEY_VERSION` and [`SDK_REQUEST_FIELDS`].
+/// Key version in `MIN_BIDIRECTIONAL_KEY_VERSION..=LATEST_MPC_KEY_VERSION`, and
+/// [`SDK_ALGO`], [`SDK_DEST`] and [`SDK_PARAMS`].
 fn check_request_fields(event: &SignBidirectionalEvent) -> anyhow::Result<()> {
     anyhow::ensure!(
         event.key_version >= MIN_BIDIRECTIONAL_KEY_VERSION,
@@ -90,9 +93,10 @@ fn check_request_fields(event: &SignBidirectionalEvent) -> anyhow::Result<()> {
         event.dest.as_str(),
         event.params.as_str(),
     );
+    let expected = (SDK_ALGO, SDK_DEST, SDK_PARAMS);
     anyhow::ensure!(
-        fields == SDK_REQUEST_FIELDS,
-        "(algo, dest, params) must be {SDK_REQUEST_FIELDS:?}, got {fields:?}"
+        fields == expected,
+        "(algo, dest, params) must be {expected:?}, got {fields:?}"
     );
     Ok(())
 }
@@ -266,7 +270,7 @@ mod tests {
     use super::eth_tx::legacy_tx;
     use super::{
         SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature, LATEST_MPC_KEY_VERSION,
-        SDK_REQUEST_FIELDS,
+        SDK_ALGO, SDK_DEST, SDK_PARAMS,
     };
     use crate::protocol::Chain;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -280,13 +284,13 @@ mod tests {
         SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: legacy_tx(1),
-            dest: SDK_REQUEST_FIELDS.1.to_string(),
+            dest: SDK_DEST.to_string(),
             caip2_id: target.caip2_chain_id().to_string(),
             key_version: LATEST_MPC_KEY_VERSION,
             deposit: 0,
             path: "m/0".to_string(),
-            algo: SDK_REQUEST_FIELDS.0.to_string(),
-            params: SDK_REQUEST_FIELDS.2.to_string(),
+            algo: SDK_ALGO.to_string(),
+            params: SDK_PARAMS.to_string(),
             chain: Chain::Solana,
             chain_ctx: None,
             output_deserialization_schema: vec![],

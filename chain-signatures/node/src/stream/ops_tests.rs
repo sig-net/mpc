@@ -9,8 +9,8 @@ use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction};
 use crate::sign_bidirectional::derive_user_address;
-use crate::sign_bidirectional::SDK_REQUEST_FIELDS;
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+use crate::sign_bidirectional::{SDK_ALGO, SDK_DEST, SDK_PARAMS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
@@ -441,13 +441,13 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
             SignBidirectionalEvent {
                 sender: Default::default(),
                 serialized_transaction: unsigned_rlp,
-                dest: SDK_REQUEST_FIELDS.1.to_string(),
+                dest: SDK_DEST.to_string(),
                 caip2_id: "not-a-chain".to_string(),
                 key_version: 1,
                 deposit: 0,
                 path: "m/0".to_string(),
-                algo: SDK_REQUEST_FIELDS.0.to_string(),
-                params: SDK_REQUEST_FIELDS.2.to_string(),
+                algo: SDK_ALGO.to_string(),
+                params: SDK_PARAMS.to_string(),
                 chain: Chain::Solana,
                 chain_ctx: Some(Pubkey::new_unique().to_bytes().to_vec()),
                 output_deserialization_schema: vec![],
@@ -544,9 +544,9 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
         key_version: 1,
         deposit: 0,
         path: String::new(),
-        algo: SDK_REQUEST_FIELDS.0.to_string(),
-        dest: SDK_REQUEST_FIELDS.1.to_string(),
-        params: SDK_REQUEST_FIELDS.2.to_string(),
+        algo: SDK_ALGO.to_string(),
+        dest: SDK_DEST.to_string(),
+        params: SDK_PARAMS.to_string(),
         chain: Chain::Solana,
         chain_ctx: None,
         output_deserialization_schema: vec![],
