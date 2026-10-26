@@ -151,9 +151,7 @@ impl PreviousMainnet {
 /// and their `.upgrade()` methods to reflect the deployed state of each network.
 pub(crate) fn migrate(state_bytes: &[u8]) -> Result<MpcContract, Error> {
     if let Ok(current) = MpcContract::try_from_slice(state_bytes) {
-        if borsh::to_vec(&current).is_ok_and(|bytes| bytes == state_bytes) {
-            return Ok(current);
-        }
+        return Ok(current);
     }
 
     if let Ok(previous) = PreviousDevnet::try_from_slice(state_bytes) {
