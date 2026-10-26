@@ -6,7 +6,7 @@
 mod common;
 
 use common::build_raw;
-use mpc_primitives::{CompactMaybe, EvmCalldata, TronTxParams};
+use mpc_primitives::{Calldata, CompactMaybe, TronTxParams};
 use mpc_tron_wire::pb::{
     Message, RawTransaction, Transaction, TriggerSmartContract, TRIGGER_SMART_CONTRACT_TYPE_URL,
 };
@@ -128,7 +128,7 @@ fn tron_tx_params_rebuild_the_recorded_raw_byte_identically() {
             call_value: trigger.call_value as u64,
             calldata: CompactMaybe {
                 is_some: true,
-                value: EvmCalldata {
+                value: Calldata {
                     selector: data[..4].try_into().unwrap(),
                     no_words: ((data.len() - 4) / 32) as u16,
                     words: data[4..]

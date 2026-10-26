@@ -8,8 +8,8 @@ use midnight_storage::DefaultDB;
 use crate::hashing::compute_request_id;
 use crate::records::{SignBidirectionalEventNotification, SignBidirectionalRecord};
 use mpc_primitives::{
-    CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams, TronTxParams, TxParams,
-    TX_PARAM_TYPE_EVM_TYPE2, TX_PARAM_TYPE_TRON,
+    Calldata, CompactMaybe, EvmAccessListEntry, EvmType2TxParams, TronTxParams, TxParamType,
+    TxParams,
 };
 
 /// Atoms of an evmType2 record excluding its capacity-scaled vectors. The calldata
@@ -168,13 +168,14 @@ enum ParamsLayout {
 
 /// Read `tx_param_type` before capacity recovery, which is param-type specific:
 /// an unknown type must fail by name here, not as capacity arithmetic.
-fn read_tx_param_type(cell: &AlignedValue) -> anyhow::Result<u8> {
+fn read_tx_param_type(cell: &AlignedValue) -> anyhow::Result<TxParamType> {
     let atom = cell
         .value
         .0
         .get(TX_PARAM_TYPE_ATOM)
         .ok_or_else(|| anyhow::anyhow!("request record ends before tx_param_type"))?;
-    u8::try_from(atom).map_err(|err| anyhow::anyhow!("tx_param_type: {err}"))
+    let byte = u8::try_from(atom).map_err(|err| anyhow::anyhow!("tx_param_type: {err}"))?;
+    TxParamType::try_from(byte).map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 /// Recover a tron record's one capacity (`#maxCalldataWords`) from the declared
@@ -203,13 +204,10 @@ fn decode_record_cell(cell: &AlignedValue) -> anyhow::Result<SignBidirectionalRe
     let tx_param_type = read_tx_param_type(cell)?;
     let widths = declared_widths(cell, "request record")?;
     let layout = match tx_param_type {
-        TX_PARAM_TYPE_EVM_TYPE2 => ParamsLayout::EvmType2(evm_type2_capacities(&widths)?),
-        TX_PARAM_TYPE_TRON => ParamsLayout::Tron {
+        TxParamType::EvmType2 => ParamsLayout::EvmType2(evm_type2_capacities(&widths)?),
+        TxParamType::Tron => ParamsLayout::Tron {
             max_calldata_words: tron_max_calldata_words(&widths)?,
         },
-        unknown => anyhow::bail!(
-            "unsupported tx_param_type {unknown}: this decoder understands evmType2 (0) and tron (1)"
-        ),
     };
     decode_sign_bidirectional(cell, &widths, &layout)
 }
@@ -577,7 +575,7 @@ fn decode_tx_params(cursor: &mut AtomCursor, layout: &ParamsLayout) -> anyhow::R
 fn decode_calldata(
     cursor: &mut AtomCursor,
     max_calldata_words: usize,
-) -> anyhow::Result<CompactMaybe<EvmCalldata>> {
+) -> anyhow::Result<CompactMaybe<Calldata>> {
     let is_some = boolean(cursor, "calldata.is_some")?;
     let selector = bytes_n::<4>(cursor, "calldata.selector")?;
     let no_words = uint::<u16>(cursor, 2, "calldata.no_words")?;
@@ -587,7 +585,7 @@ fn decode_calldata(
     }
     Ok(CompactMaybe {
         is_some,
-        value: EvmCalldata {
+        value: Calldata {
             selector,
             no_words,
             words,

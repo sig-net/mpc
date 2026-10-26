@@ -14,7 +14,7 @@ use crate::pb::{
 };
 use crate::TronAddress;
 use anyhow::Context as _;
-use mpc_primitives::{CompactMaybe, EvmCalldata, TronTxParams};
+use mpc_primitives::{Calldata, CompactMaybe, TronTxParams};
 use prost_types::Any;
 use sha2::{Digest, Sha256};
 
@@ -152,23 +152,15 @@ pub fn to_unsigned_tron_tx(params: &TronTxParams, owner: TronAddress) -> anyhow:
 }
 
 /// `data = selector ‖ words[..no_words]` when present, empty otherwise.
-fn calldata_bytes(calldata: &CompactMaybe<EvmCalldata>) -> anyhow::Result<Vec<u8>> {
+fn calldata_bytes(calldata: &CompactMaybe<Calldata>) -> anyhow::Result<Vec<u8>> {
     if !calldata.is_some {
         return Ok(Vec::new());
     }
-    let value = &calldata.value;
-    let no_words = usize::from(value.no_words);
-    anyhow::ensure!(
-        no_words <= value.words.len(),
-        "calldata no_words {no_words} overruns the record's {} stored word slots",
-        value.words.len()
-    );
-    let mut data = Vec::with_capacity(4 + 32 * no_words);
-    data.extend_from_slice(&value.selector);
-    for word in &value.words[..no_words] {
-        data.extend_from_slice(word);
-    }
-    Ok(data)
+    calldata.value.data().ok_or_else(|| anyhow::anyhow!(
+        "calldata no_words {} overruns the record's {} stored word slots",
+        calldata.value.no_words,
+        calldata.value.words.len()
+    ))
 }
 
 fn i64_field(value: u64, field: &str) -> anyhow::Result<i64> {
@@ -196,7 +188,7 @@ mod tests {
             call_value: 0,
             calldata: CompactMaybe {
                 is_some: false,
-                value: EvmCalldata {
+                value: Calldata {
                     selector: [0; 4],
                     no_words: 0,
                     words: Vec::new(),

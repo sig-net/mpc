@@ -9,7 +9,7 @@
 use mpc_chain_integration_core::utils::{
     hashing::hash_payload, payload::bidirectional_payload_scalar,
 };
-use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId};
+use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, TxParams};
 
 use crate::records::SignBidirectionalRecord;
 use crate::tx::serialized_transaction;
@@ -71,7 +71,13 @@ pub fn generate_sign_request(
     let requester = hex::encode(read_address);
     let epsilon = mpc_crypto::kdf::derive_epsilon_midnight(key_version, &requester, &path)?;
 
-    let (serialized, target) = serialized_transaction(record, root_pk, epsilon)?;
+    let serialized = serialized_transaction(record, root_pk, epsilon)?;
+    // The wire choice above and the hash choice here read the same discriminant,
+    // so the two cannot drift apart.
+    let target = match &record.tx_params {
+        TxParams::EvmType2(_) => Chain::Ethereum,
+        TxParams::Tron(_) => Chain::Tron,
+    };
     let payload = bidirectional_payload_scalar(target, &serialized)?;
 
     let entropy = hash_payload(&request_id);

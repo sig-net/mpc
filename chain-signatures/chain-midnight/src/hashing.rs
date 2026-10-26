@@ -6,7 +6,7 @@ use midnight_transient_crypto::repr::FieldRepr as _;
 use mpc_compact_hashing::HashDomain;
 
 use crate::records::SignBidirectionalRecord;
-use mpc_primitives::{EvmType2TxParams, TronTxParams, TxParams};
+use mpc_primitives::{Calldata, CompactMaybe, EvmType2TxParams, TronTxParams, TxParams};
 
 /// Hash `RequestIdPreimageV1`, after its domain tag, from an already decoded
 /// record. The transaction enters as its type's digest of used entries,
@@ -22,7 +22,7 @@ pub(crate) fn compute_request_id(record: &SignBidirectionalRecord) -> anyhow::Re
         record.sender,
         record.path,
         record.algo,
-        record.tx_params.discriminant(),
+        record.tx_params.ty() as u8,
         tx_params_digest,
         record.execution_dest,
     )
@@ -35,11 +35,6 @@ pub(crate) fn compute_request_id(record: &SignBidirectionalRecord) -> anyhow::Re
 /// Every hash input starts with its domain tag. Running hashes stay Fields until
 /// the final upgrade to Bytes<32>.
 fn compute_evm_type2_tx_params_digest_v1(tx: &EvmType2TxParams) -> anyhow::Result<[u8; 32]> {
-    let no_words = if tx.calldata.is_some {
-        tx.calldata.value.no_words
-    } else {
-        0
-    };
     let selector = if tx.calldata.is_some {
         tx.calldata.value.selector
     } else {
@@ -54,10 +49,6 @@ fn compute_evm_type2_tx_params_digest_v1(tx: &EvmType2TxParams) -> anyhow::Resul
     anyhow::ensure!(
         tx.access_list.len() <= usize::from(u8::MAX),
         "access-list capacity exceeds the Compact Uint<8> fold counter"
-    );
-    anyhow::ensure!(
-        usize::from(no_words) <= tx.calldata.value.words.len(),
-        "calldata no_words exceeds capacity"
     );
     anyhow::ensure!(
         usize::from(tx.access_list_entry_count) <= tx.access_list.len(),
@@ -76,6 +67,8 @@ fn compute_evm_type2_tx_params_digest_v1(tx: &EvmType2TxParams) -> anyhow::Resul
         );
     }
 
+    let used = folded_words(&tx.calldata)?;
+    let no_words = used.len() as u16;
     let mut hash = transient_hash(
         &(
             HashDomain::EvmType2TxHeader as u8,
@@ -93,7 +86,7 @@ fn compute_evm_type2_tx_params_digest_v1(tx: &EvmType2TxParams) -> anyhow::Resul
         )
             .field_vec(),
     );
-    for word in &tx.calldata.value.words[..usize::from(no_words)] {
+    for word in used {
         hash = transient_hash(&(HashDomain::EvmType2TxWord as u8, hash, *word).field_vec());
     }
     for entry in entries {
@@ -121,11 +114,6 @@ fn compute_evm_type2_tx_params_digest_v1(tx: &EvmType2TxParams) -> anyhow::Resul
 /// per used calldata word, the evmType2 shape over the TriggerSmartContract fields.
 /// There is no access list, so the fold chain ends with the words.
 fn compute_tron_tx_params_digest(tx: &TronTxParams) -> anyhow::Result<[u8; 32]> {
-    let no_words = if tx.calldata.is_some {
-        tx.calldata.value.no_words
-    } else {
-        0
-    };
     let selector = if tx.calldata.is_some {
         tx.calldata.value.selector
     } else {
@@ -135,10 +123,8 @@ fn compute_tron_tx_params_digest(tx: &TronTxParams) -> anyhow::Result<[u8; 32]> 
         tx.calldata.value.words.len() <= usize::from(u16::MAX),
         "calldata capacity exceeds the Compact Uint<16> fold counter"
     );
-    anyhow::ensure!(
-        usize::from(no_words) <= tx.calldata.value.words.len(),
-        "calldata no_words exceeds capacity"
-    );
+    let used = folded_words(&tx.calldata)?;
+    let no_words = used.len() as u16;
     let mut hash = transient_hash(
         &(
             HashDomain::TronTxHeader as u8,
@@ -155,10 +141,24 @@ fn compute_tron_tx_params_digest(tx: &TronTxParams) -> anyhow::Result<[u8; 32]> 
         )
             .field_vec(),
     );
-    for word in &tx.calldata.value.words[..usize::from(no_words)] {
+    for word in used {
         hash = transient_hash(&(HashDomain::TronTxWord as u8, hash, *word).field_vec());
     }
     Ok(upgrade_from_transient(hash).0)
+}
+
+/// The calldata words a digest folds: none when absent, the used prefix
+/// otherwise — both digests read the no_words ≤ capacity invariant here only.
+fn folded_words(calldata: &CompactMaybe<Calldata>) -> anyhow::Result<&[[u8; 32]]> {
+    if !calldata.is_some {
+        return Ok(&[]);
+    }
+    calldata.value.used_words().ok_or_else(|| {
+        anyhow::anyhow!(
+            "calldata no_words {} exceeds capacity",
+            calldata.value.no_words
+        )
+    })
 }
 
 #[cfg(test)]

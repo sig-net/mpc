@@ -8,7 +8,7 @@ use midnight_onchain_state::state::StateValue;
 use midnight_storage::storage::{Array, HashMap};
 use midnight_storage::DefaultDB;
 use mpc_primitives::{
-    CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams, TronTxParams, TxParams,
+    Calldata, CompactMaybe, EvmAccessListEntry, EvmType2TxParams, TronTxParams, TxParams,
 };
 
 use crate::reader::Node;
@@ -100,7 +100,7 @@ pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>
         trim(&record.sender),
         trim(&record.path),
         trim(&[record.algo]),
-        trim(&[record.tx_params.discriminant()]),
+        trim(&[record.tx_params.ty() as u8]),
     ];
     match &record.tx_params {
         TxParams::EvmType2(tx) => {
@@ -140,7 +140,7 @@ pub(crate) fn atoms_from_record(record: &SignBidirectionalRecord) -> Vec<Vec<u8>
     atoms
 }
 
-fn push_calldata_atoms(atoms: &mut Vec<Vec<u8>>, calldata: &CompactMaybe<EvmCalldata>) {
+fn push_calldata_atoms(atoms: &mut Vec<Vec<u8>>, calldata: &CompactMaybe<Calldata>) {
     atoms.push(if calldata.is_some {
         vec![1]
     } else {
@@ -203,7 +203,7 @@ pub(crate) fn widths_from_record(record: &SignBidirectionalRecord) -> Vec<u32> {
     widths
 }
 
-fn push_calldata_widths(widths: &mut Vec<u32>, calldata: &CompactMaybe<EvmCalldata>) {
+fn push_calldata_widths(widths: &mut Vec<u32>, calldata: &CompactMaybe<Calldata>) {
     widths.extend([
         1, // calldata.is_some
         4, // calldata.selector
@@ -332,7 +332,7 @@ pub(crate) fn sample_evm_params() -> EvmType2TxParams {
         value: 5,
         calldata: CompactMaybe {
             is_some: true,
-            value: EvmCalldata {
+            value: Calldata {
                 selector: [0xca, 0x11, 0xab, 0x1e],
                 no_words: 1,
                 words: vec![[0x11; 32]],
@@ -376,7 +376,7 @@ pub(crate) fn sample_tron_params() -> TronTxParams {
         call_value: 0,
         calldata: CompactMaybe {
             is_some: true,
-            value: EvmCalldata {
+            value: Calldata {
                 selector: [0xa9, 0x05, 0x9c, 0xbb],
                 no_words: 1,
                 words: vec![[0x33; 32]],
@@ -432,7 +432,7 @@ pub(crate) fn minimal_record() -> SignBidirectionalRecord {
     let mut record = sample_record();
     record.evm_mut().calldata = CompactMaybe {
         is_some: false,
-        value: EvmCalldata {
+        value: Calldata {
             selector: [0; 4],
             no_words: 0,
             words: Vec::new(),

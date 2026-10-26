@@ -7,7 +7,7 @@ use alloy::primitives::{Address, Bytes, TxKind, B256, U256};
 use crate::records::SignBidirectionalRecord;
 use k256::Scalar;
 use mpc_chain_integration_core::utils::payload::derive_user_address;
-use mpc_primitives::{Chain, CompactMaybe, EvmCalldata, EvmType2TxParams, TxParams};
+use mpc_primitives::{Calldata, CompactMaybe, EvmType2TxParams, TxParams};
 use mpc_tron_wire::{to_unsigned_tron_tx, TronAddress};
 
 fn to_eip1559(params: &EvmType2TxParams) -> anyhow::Result<TxEip1559> {
@@ -40,41 +40,39 @@ pub fn serialized_evm_tx(record: &SignBidirectionalRecord) -> anyhow::Result<Vec
     Ok(to_unsigned_tx(record)?.encoded_for_signing())
 }
 
-/// Serializes the transaction described by the record, dispatching on the record's params:
-/// - evmType2 assembles EIP-1559 RLP for signing.
-/// - tron assembles the protobuf raw with `owner_address` derived from the request's key (§7.4).
+/// Serializes the unsigned transaction the record describes, dispatching on the
+/// record's params:
+/// - evmType2 assembles the EIP-1559 RLP signing payload.
+/// - tron assembles the protobuf raw with `owner_address` derived from the
+///   request's key (§7.4).
 pub fn serialized_transaction(
     record: &SignBidirectionalRecord,
     root_pk: mpc_primitives::PublicKey,
     epsilon: Scalar,
-) -> anyhow::Result<(Vec<u8>, Chain)> {
+) -> anyhow::Result<Vec<u8>> {
     match &record.tx_params {
-        TxParams::EvmType2(_) => Ok((serialized_evm_tx(record)?, Chain::Ethereum)),
+        TxParams::EvmType2(_) => serialized_evm_tx(record),
         TxParams::Tron(params) => {
             let owner = TronAddress::from_evm(derive_user_address(root_pk, epsilon));
-            Ok((to_unsigned_tron_tx(params, owner)?, Chain::Tron))
+            to_unsigned_tron_tx(params, owner)
         }
     }
 }
 
 /// `data = selector || words[..no_words]` when present, empty otherwise.
-fn assemble_calldata(calldata: &CompactMaybe<EvmCalldata>) -> anyhow::Result<Bytes> {
+fn assemble_calldata(calldata: &CompactMaybe<Calldata>) -> anyhow::Result<Bytes> {
     if !calldata.is_some {
         return Ok(Bytes::new());
     }
-    let value = &calldata.value;
-    let no_words = usize::from(value.no_words);
-    anyhow::ensure!(
-        no_words <= value.words.len(),
-        "calldata no_words {no_words} overruns the record's {} stored word slots",
-        value.words.len()
-    );
-    let mut data = Vec::with_capacity(4 + 32 * no_words);
-    data.extend_from_slice(&value.selector);
-    for word in &value.words[..no_words] {
-        data.extend_from_slice(word);
-    }
-    Ok(Bytes::from(data))
+    calldata
+        .value
+        .data()
+        .map(Bytes::from)
+        .ok_or_else(|| anyhow::anyhow!(
+            "calldata no_words {} overruns the record's {} stored word slots",
+            calldata.value.no_words,
+            calldata.value.words.len()
+        ))
 }
 
 /// The count-trimmed access list, per `decodeAccessList`.
