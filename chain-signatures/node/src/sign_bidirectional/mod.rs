@@ -70,11 +70,19 @@ fn derive_epsilon(
 /// it leaves the request id with the Section 7 format.
 pub(crate) const SDK_REQUEST_FIELDS: (&str, &str, &str) = ("ECDSA", "", "");
 
-/// Key version [`LATEST_MPC_KEY_VERSION`] and [`SDK_REQUEST_FIELDS`].
+/// Key version 0 predates bidirectional signing.
+const MIN_BIDIRECTIONAL_KEY_VERSION: u32 = 1;
+
+/// Key version in `MIN_BIDIRECTIONAL_KEY_VERSION..=LATEST_MPC_KEY_VERSION` and [`SDK_REQUEST_FIELDS`].
 fn check_request_fields(event: &SignBidirectionalEvent) -> anyhow::Result<()> {
     anyhow::ensure!(
-        event.key_version == LATEST_MPC_KEY_VERSION,
-        "key version must be {LATEST_MPC_KEY_VERSION}, got {}",
+        event.key_version >= MIN_BIDIRECTIONAL_KEY_VERSION,
+        "key version must be at least {MIN_BIDIRECTIONAL_KEY_VERSION}, got {}",
+        event.key_version
+    );
+    anyhow::ensure!(
+        event.key_version <= LATEST_MPC_KEY_VERSION,
+        "key version must be at most {LATEST_MPC_KEY_VERSION}, got {}",
         event.key_version
     );
     let fields = (

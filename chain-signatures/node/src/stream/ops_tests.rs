@@ -575,7 +575,7 @@ async fn process_sign_request_rejects_key_version_0() {
         .await
         .expect_err("key version 0 should be rejected at ingestion");
     assert!(
-        format!("{err:#}").contains("key version must be 1, got 0"),
+        format!("{err:#}").contains("key version must be at least 1, got 0"),
         "err: {err:#}"
     );
     assert!(backlog.get(Chain::Solana, &sign_id).await.is_none());
