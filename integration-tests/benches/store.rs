@@ -11,11 +11,11 @@ use integration_tests::{cluster::spawner::ClusterSpawner, containers::Redis};
 use k256::Secp256k1;
 use mpc_node::{
     mesh::{Mesh, MeshState},
-    node_client::{self, NodeClient},
+    node_client::NodeClient,
     protocol::{
         contract::{primitives::Participants, RunningContractState},
         presignature::Presignature,
-        sync::{SyncChannel, SyncTask},
+        sync::SyncTask,
         triple::Triple,
         ParticipantInfo, ProtocolState,
     },
@@ -65,7 +65,6 @@ struct SyncEnv {
     _redis: Redis,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
-    _sync_channel: SyncChannel,
 }
 
 fn env() -> (Runtime, SyncEnv) {
@@ -95,7 +94,7 @@ fn env() -> (Runtime, SyncEnv) {
                 .stockpile_triples(&spawner.cfg, &participants, 1)
                 .await;
         }
-        let client = NodeClient::new(&node_client::Options::default());
+        let client = NodeClient::new();
         let (sync_report_tx, sync_report_rx) = mpsc::channel(1024);
         let mesh = Mesh::new(
             &client,
@@ -120,7 +119,7 @@ fn env() -> (Runtime, SyncEnv) {
             }),
         );
 
-        let (sync_channel, _sync) = SyncTask::new(
+        let _sync = SyncTask::new(
             &client,
             triples.clone(),
             presignatures.clone(),
@@ -140,7 +139,6 @@ fn env() -> (Runtime, SyncEnv) {
             _redis: redis,
             triples,
             presignatures,
-            _sync_channel: sync_channel,
         }
     });
 

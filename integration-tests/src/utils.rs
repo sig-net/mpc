@@ -125,6 +125,63 @@ pub async fn vote_leave(
     Ok(())
 }
 
+pub async fn vote_reshare(
+    accounts: &[&Account],
+    mpc_contract: &AccountId,
+    joins: &[&AccountId],
+    kicks: &[&AccountId],
+) -> anyhow::Result<()> {
+    let kick_set: std::collections::HashSet<_> = kicks.iter().copied().collect();
+    let vote_futures = accounts
+        .iter()
+        .filter(|account| !kick_set.contains(account.id()))
+        .map(|account| {
+            account
+                .call(mpc_contract, "vote_reshare")
+                .args_json(serde_json::json!({
+                    "joins": joins,
+                    "kicks": kicks,
+                }))
+                .transact()
+        })
+        .collect::<Vec<_>>();
+
+    let mut reshared = false;
+    let mut errs = Vec::new();
+    for result in futures::future::join_all(vote_futures).await {
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                errs.push(anyhow::anyhow!("workspaces/rpc failed: {err:?}"));
+                continue;
+            }
+        };
+
+        if !outcome.failures().is_empty() {
+            errs.push(anyhow::anyhow!(
+                "contract(vote_reshare) failure: {:?}",
+                outcome.failures()
+            ))
+        } else {
+            reshared = reshared || outcome.json::<bool>().unwrap();
+        }
+    }
+
+    if !errs.is_empty() {
+        let err = format!("failed to vote_reshare: {errs:#?}");
+        tracing::warn!(err);
+        anyhow::bail!(err);
+    }
+
+    if !reshared {
+        let err = "failed to vote_reshare on number of votes";
+        tracing::warn!(err);
+        anyhow::bail!(err);
+    }
+
+    Ok(())
+}
+
 /// Send `vote_threshold` for every participant and verify the contract
 /// transitions into resharing with the new threshold.
 pub async fn vote_threshold(
