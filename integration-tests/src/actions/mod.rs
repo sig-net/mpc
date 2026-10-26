@@ -201,8 +201,7 @@ mod tests {
         let derivation_epsilon: k256::Scalar =
             derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test").unwrap();
         let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
-        let user_address_from_pk =
-            public_key_to_address(&user_pk.to_encoded_point(false));
+        let user_address_from_pk = public_key_to_address(&user_pk.to_encoded_point(false));
 
         // Prepare R ans s signature values
         let big_r = hex::decode(big_r).unwrap();

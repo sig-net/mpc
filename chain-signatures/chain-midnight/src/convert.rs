@@ -9,7 +9,9 @@
 use mpc_chain_integration_core::utils::{
     hashing::hash_payload, payload::bidirectional_payload_scalar,
 };
-use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, TxParams};
+use mpc_primitives::{
+    Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, TxParams,
+};
 
 use crate::records::SignBidirectionalRecord;
 use crate::tx::serialized_transaction;

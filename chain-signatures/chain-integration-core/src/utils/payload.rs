@@ -2,7 +2,9 @@
 //! key derivation the owner binding rests on.
 
 use alloy::primitives::{keccak256, Address};
-use k256::elliptic_curve::{bigint::U256, ops::Reduce, sec1::FromEncodedPoint, sec1::ToEncodedPoint};
+use k256::elliptic_curve::{
+    bigint::U256, ops::Reduce, sec1::FromEncodedPoint, sec1::ToEncodedPoint,
+};
 use k256::{FieldBytes, Scalar};
 use mpc_crypto::derive_key;
 use mpc_primitives::{Chain, ScalarExt};

@@ -156,11 +156,13 @@ fn calldata_bytes(calldata: &CompactMaybe<Calldata>) -> anyhow::Result<Vec<u8>> 
     if !calldata.is_some {
         return Ok(Vec::new());
     }
-    calldata.value.data().ok_or_else(|| anyhow::anyhow!(
-        "calldata no_words {} overruns the record's {} stored word slots",
-        calldata.value.no_words,
-        calldata.value.words.len()
-    ))
+    calldata.value.data().ok_or_else(|| {
+        anyhow::anyhow!(
+            "calldata no_words {} overruns the record's {} stored word slots",
+            calldata.value.no_words,
+            calldata.value.words.len()
+        )
+    })
 }
 
 fn i64_field(value: u64, field: &str) -> anyhow::Result<i64> {
