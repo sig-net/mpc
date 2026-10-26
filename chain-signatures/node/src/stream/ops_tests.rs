@@ -554,31 +554,71 @@ fn bidirectional_event(serialized_transaction: Vec<u8>) -> SignBidirectionalEven
     }
 }
 
+/// Off-spec fields only warn until the applications send the SDK fields.
 #[tokio::test]
-async fn process_sign_request_rejects_key_version_0() {
+async fn process_sign_request_admits_off_spec_fields_for_now() {
     let backlog = Backlog::new();
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+    let root_pk = test_root_pk();
+    let unowned = SignBidirectionalEvent {
+        dest: "ethereum".to_string(),
+        ..tron_bidirectional_event(Vec::new())
+    };
+    let event = SignBidirectionalEvent {
+        serialized_transaction: owned_tron_bytes(root_pk, &unowned),
+        ..unowned
+    };
     let sign_id = SignId::new([24u8; 32]);
     let request = Arc::new(IndexedSignRequest::sign_bidirectional(
         sign_id,
         test_sign_args(24),
         Chain::Solana,
         current_unix_timestamp(),
-        SignBidirectionalEvent {
-            key_version: 0,
-            ..bidirectional_event(legacy_contract_call(1))
-        },
+        event,
     ));
 
-    let err = process_sign_request(request, &ctx, test_root_pk())
+    process_sign_request(request, &ctx, root_pk)
         .await
-        .expect_err("key version 0 should be rejected at ingestion");
-    assert!(
-        format!("{err:#}").contains("key version must be at least 1, got 0"),
-        "err: {err:#}"
-    );
-    assert!(backlog.get(Chain::Solana, &sign_id).await.is_none());
+        .expect("off-spec fields only warn for now");
+    assert!(backlog.get(Chain::Solana, &sign_id).await.is_some());
+}
+
+/// Respond validates entries restored from a checkpoint too, and off-spec fields
+/// only warn there as well: the entry advances instead of being quarantined.
+#[tokio::test]
+async fn process_respond_event_keeps_an_off_spec_bidirectional_entry() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::new([25u8; 32]);
+    let args = test_sign_args(25);
+    backlog
+        .insert(Arc::new(IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            args.clone(),
+            Chain::Solana,
+            current_unix_timestamp(),
+            SignBidirectionalEvent {
+                dest: "ethereum".to_string(),
+                ..bidirectional_event(legacy_contract_call(1))
+            },
+        )))
+        .await;
+
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let event = SignatureRespondedEvent {
+        request_id: sign_id.request_id,
+        signature: mpc_crypto::generate_signature(&root_sk, &args),
+        chain: Chain::Solana,
+    };
+    let public_key = root_sk.public_key().into();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let (ctx, _cp, _mesh, _rpc_rx) =
+        make_test_stream_context(backlog, sign_tx, true, public_key, 1);
+
+    process_respond_event(event, &ctx, public_key)
+        .await
+        .expect("off-spec fields only warn for now");
+    assert!(ctx.backlog.get(Chain::Solana, &sign_id).await.is_some());
 }
 
 /// Recorded mainnet USDT transfer (chain-tron fixture `usdt-transfer-1.json`),

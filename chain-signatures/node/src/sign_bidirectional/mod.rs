@@ -161,7 +161,15 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             target.supports_bidirectional_signing(),
             "unsupported target chain {target}"
         );
-        check_request_fields(self)?;
+        // Only warns until the applications send these fields; refusing them
+        // follows once the warnings stop.
+        if let Err(err) = check_request_fields(self) {
+            tracing::warn!(
+                source_chain = ?self.chain,
+                sender = ?self.sender_string().ok(),
+                "accepting off-spec bidirectional request fields: {err:#}"
+            );
+        }
         self.epsilon().context("cannot derive epsilon")?;
         // TODO(tron): once the record carries structured params, admission
         // must enforce §4.3's expiration bound (future, ≤ 24 h past the
@@ -292,7 +300,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_only_key_version_1_and_the_sdk_fields() {
+    fn validate_accepts_off_spec_fields_for_now() {
+        let mut event = solana_event(Chain::Ethereum);
+        event.algo = "ecdsa".to_string();
+        event.dest = "ethereum".to_string();
+        event.params = "{}".to_string();
+        assert!(super::check_request_fields(&event).is_err());
+        assert!(event.validate().is_ok());
+    }
+
+    #[test]
+    fn check_request_fields_accepts_only_key_version_1_and_the_sdk_fields() {
         type Edit = fn(&mut SignBidirectionalEvent);
         let cases: [(&str, Edit, bool); 15] = [
             ("as the SDKs send it", |_| {}, true),
@@ -346,7 +364,7 @@ mod tests {
         for (case, edit, accepted) in cases {
             let mut event = solana_event(Chain::Ethereum);
             edit(&mut event);
-            assert_eq!(event.validate().is_ok(), accepted, "{case}");
+            assert_eq!(super::check_request_fields(&event).is_ok(), accepted, "{case}");
         }
     }
 
