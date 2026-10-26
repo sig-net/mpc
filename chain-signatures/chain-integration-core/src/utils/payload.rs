@@ -2,15 +2,20 @@
 //! key derivation the owner binding rests on.
 
 use alloy::primitives::{keccak256, Address};
-use k256::elliptic_curve::{bigint::U256, ops::Reduce, sec1::ToEncodedPoint};
+use k256::elliptic_curve::{bigint::U256, ops::Reduce, sec1::FromEncodedPoint, sec1::ToEncodedPoint};
 use k256::{FieldBytes, Scalar};
 use mpc_crypto::derive_key;
 use mpc_primitives::{Chain, ScalarExt};
 use sha2::{Digest, Sha256};
 
-pub fn public_key_to_address(public_key: &[u8]) -> Address {
-    debug_assert_eq!(public_key[0], 0x04);
-    let hash: [u8; 32] = *keccak256(&public_key[1..]);
+/// The 20-byte EVM address of a public key: `keccak256(X ‖ Y)[12..]`. The point
+/// is normalized through its affine form, so any SEC1 encoding of a key names
+/// the same address.
+pub fn public_key_to_address(public_key: &k256::EncodedPoint) -> Address {
+    let affine =
+        Option::<k256::AffinePoint>::from(k256::AffinePoint::from_encoded_point(public_key))
+            .expect("a secp256k1 point");
+    let hash: [u8; 32] = *keccak256(&affine.to_encoded_point(false).as_bytes()[1..]);
 
     Address::from_slice(&hash[12..])
 }
@@ -18,7 +23,7 @@ pub fn public_key_to_address(public_key: &[u8]) -> Address {
 pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Scalar) -> Address {
     let user_pk = derive_key(mpc_pk, derivation_epsilon);
 
-    public_key_to_address(user_pk.to_encoded_point(false).as_bytes())
+    public_key_to_address(&user_pk.to_encoded_point(false))
 }
 
 /// The scalar the MPC signs for a bidirectional request's transaction.
