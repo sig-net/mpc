@@ -57,10 +57,13 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         .midnight
         .as_ref()
         .context("Midnight context was not started")?;
+    let root_pk =
+        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
     let indexer = MidnightIndexer::new(
         midnight.config.clone(),
         MockStateManager::new(),
         NoopChainTelemetry,
+        root_pk,
     )
     .await?;
     let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
@@ -130,9 +133,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         )
         .await
         .context("waiting for the finalized respond entry")?;
-        let root_public_key =
-            mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
-        let expected_sender = derive_user_address(root_public_key, sign_event.epsilon()?);
+        let expected_sender = derive_user_address(root_pk, sign_event.epsilon()?);
         let signed = midnight
             .signed_evm_transaction(request_id, &format!("{expected_sender:#x}"))
             .await?;
