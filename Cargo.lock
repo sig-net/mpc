@@ -7525,6 +7525,7 @@ dependencies = [
  "mpc-crypto",
  "mpc-primitives",
  "rand 0.8.8",
+ "sha2 0.11.0",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -7558,6 +7559,7 @@ dependencies = [
  "mpc-compact-hashing",
  "mpc-crypto",
  "mpc-primitives",
+ "mpc-tron-wire",
  "mpc-utils",
  "serde",
  "serde_json",
@@ -7630,12 +7632,11 @@ version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
- "bs58 0.5.1",
  "hex",
  "k256",
  "mockito",
  "mpc-chain-integration-core",
- "prost 0.14.4",
+ "mpc-tron-wire",
  "prost-types",
  "reqwest 0.12.28",
  "serde",
@@ -7763,6 +7764,7 @@ dependencies = [
  "mpc-crypto",
  "mpc-keys",
  "mpc-primitives",
+ "mpc-tron-wire",
  "mpc-utils",
  "near-account-id",
  "near-crypto",
@@ -7812,6 +7814,23 @@ dependencies = [
  "serde_bytes",
  "sha3 0.10.8",
  "signet-primitives",
+]
+
+[[package]]
+name = "mpc-tron-wire"
+version = "1.21.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "bs58 0.5.1",
+ "hex",
+ "k256",
+ "mpc-primitives",
+ "prost 0.14.4",
+ "prost-types",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

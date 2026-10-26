@@ -869,7 +869,7 @@ async fn spawn_indexers(
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
     backlog: Backlog,
-    contract_watcher: ContractStateWatcher,
+    mut contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
@@ -1028,8 +1028,15 @@ async fn spawn_indexers(
         let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
         // TODO: read-side gating - this indexer's reads don't share the
         // chain's cooldown gate yet
-        match MidnightIndexer::new(midnight_config, backlog.clone(), midnight_telemetry.clone())
-            .await
+        tracing::info!("Midnight indexer waiting for the network public key");
+        let root_pk = contract_watcher.wait_public_key().await;
+        match MidnightIndexer::new(
+            midnight_config,
+            backlog.clone(),
+            midnight_telemetry.clone(),
+            root_pk,
+        )
+        .await
         {
             Ok(midnight_indexer) => {
                 tracing::info!("midnight indexer created successfully");
