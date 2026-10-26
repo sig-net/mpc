@@ -80,6 +80,13 @@ pub fn generate_sign_request(
         TxParams::EvmType2(_) => Chain::Ethereum,
         TxParams::Tron(_) => Chain::Tron,
     };
+
+    // The node admits and signs under the dest's family, via this same mapping;
+    // a record whose params and dest disagree must fail
+    anyhow::ensure!(
+        matches!(Chain::from_caip2_chain_id(&caip2_id), Ok(chain) if chain == target),
+        "execution_dest {caip2_id} does not name {target}, the chain family the record's tx_params assemble for"
+    );
     let payload = bidirectional_payload_scalar(target, &serialized)?;
 
     let entropy = hash_payload(&request_id);
@@ -154,7 +161,42 @@ mod tests {
     const REQUEST_ID: [u8; 32] = [0x77; 32];
     const INDEXED_TS: u64 = 1_753_000_000;
     fn caller_record() -> SignBidirectionalRecord {
-        crate::test_utils::sample_record()
+        let mut record = crate::test_utils::sample_record();
+        // sample_record's dest is pinned by the Compact golden rid vector
+        // (eip155:31337); conversion admits the fixed family id only.
+        record.execution_dest = ascii_padded(b"eip155:1");
+        record
+    }
+
+    #[test]
+    fn generate_sign_request_rejects_params_and_dest_disagreement() {
+        // Both directions: the dest names a family the params do not assemble
+        // for, and an id the node's own mapping cannot resolve at all.
+        let mut tron_record = sample_tron_record();
+        tron_record.execution_dest = ascii_padded(b"eip155:1");
+        let mut evm_record = caller_record();
+        evm_record.execution_dest = ascii_padded(b"tron:mainnet");
+        let mut unknown_dest = caller_record();
+        unknown_dest.execution_dest = ascii_padded(b"eip155:31337");
+        for (record, expected) in [
+            (tron_record, "eip155:1"),
+            (evm_record, "tron:mainnet"),
+            (unknown_dest, "eip155:31337"),
+        ] {
+            let err = generate_sign_request(
+                &record,
+                &READ_ADDRESS,
+                REQUEST_ID,
+                INDEXED_TS,
+                test_root_pk(),
+            )
+            .expect_err("params and dest must agree at conversion")
+            .to_string();
+            assert!(
+                err.contains("execution_dest") && err.contains(expected),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -207,7 +249,7 @@ mod tests {
             crate::tx::serialized_evm_tx(&record).expect("assembles"),
             "the event carries the record's own unsigned transaction bytes"
         );
-        assert_eq!(event.caip2_id, "eip155:31337");
+        assert_eq!(event.caip2_id, "eip155:1");
         assert_eq!(event.key_version, 1);
         assert_eq!(event.deposit, 0, "Midnight V1 has no payment");
         assert_eq!(

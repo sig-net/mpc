@@ -618,8 +618,8 @@ mod tests {
     use crate::emissions::{emissions_in, DecodedTransaction, Emission, EmissionKind};
     use crate::source::{BlockProofSeed, CandidateTransactionEmissions};
     use crate::test_utils::{
-        array_of, cell_from_record, hex_32, key_of, map_of, notification_payload, response_payload,
-        sample_record, test_root_pk,
+        array_of, ascii_padded, cell_from_record, hex_32, key_of, map_of, notification_payload,
+        response_payload, sample_record, test_root_pk,
     };
     use midnight_onchain_state::state::StateValue;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
@@ -757,6 +757,9 @@ mod tests {
 
     fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
         let mut record = sample_record();
+        // sample_record's dest is pinned by the Compact golden rid vector
+        // (eip155:31337); conversion admits the fixed family id only.
+        record.execution_dest = ascii_padded(b"eip155:1");
         record.evm_mut().nonce = nonce;
         let rid = crate::hashing::compute_request_id(&record).unwrap();
         (record, rid)

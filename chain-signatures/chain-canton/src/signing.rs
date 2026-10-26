@@ -68,6 +68,17 @@ impl CantonSignBidirectionalRequestedEvent {
                 TxEip1559::try_from(params)?.encoded_for_signing()
             }
         };
+
+        // The node admits and signs under the dest's family; the params above
+        // assemble for Ethereum, so any other dest must fail
+        anyhow::ensure!(
+            matches!(
+                Chain::from_caip2_chain_id(&raw.caip2_id),
+                Ok(Chain::Ethereum)
+            ),
+            "caip2_id {} does not name ethereum, the chain family the tx_params assemble for",
+            raw.caip2_id
+        );
         let mut sender = [0u8; 32];
         hex::decode_to_slice(&raw.sender, &mut sender)
             .map_err(|e| anyhow::anyhow!("invalid hex in sender: {e}"))?;
