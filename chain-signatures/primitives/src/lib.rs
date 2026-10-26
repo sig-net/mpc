@@ -32,6 +32,6 @@ pub use crypto::{cbor_scalar, SignArgs};
 pub use events::{ChainEvent, ExecutionOutcome, SignatureRespondedEvent};
 pub use requests::{IndexedSignRequest, RequestKind, SignKind};
 pub use tx_params::{
-    Calldata, CompactMaybe, EvmAccessListEntry, EvmType2TxParams, TronTxParams, TxParamType,
-    TxParamTypeError, TxParams,
+    Calldata, CalldataError, CompactMaybe, EvmAccessListEntry, EvmType2TxParams, TronTxParams,
+    TxParamType, TxParamTypeError, TxParams,
 };

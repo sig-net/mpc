@@ -153,12 +153,7 @@ fn folded_words(calldata: &CompactMaybe<Calldata>) -> anyhow::Result<&[[u8; 32]]
     if !calldata.is_some {
         return Ok(&[]);
     }
-    calldata.value.used_words().ok_or_else(|| {
-        anyhow::anyhow!(
-            "calldata no_words {} exceeds capacity",
-            calldata.value.no_words
-        )
-    })
+    Ok(calldata.value.used_words()?)
 }
 
 #[cfg(test)]

@@ -30,6 +30,24 @@ impl std::fmt::Display for TxParamTypeError {
 
 impl std::error::Error for TxParamTypeError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalldataError {
+    NoWordsOverrun { no_words: u16, capacity: usize },
+}
+
+impl std::fmt::Display for CalldataError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoWordsOverrun { no_words, capacity } => write!(
+                f,
+                "calldata no_words {no_words} overruns the record's {capacity} stored word slots"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CalldataError {}
+
 impl TryFrom<u8> for TxParamType {
     type Error = TxParamTypeError;
 
@@ -96,20 +114,25 @@ pub struct Calldata {
 }
 
 impl Calldata {
-    /// The used word prefix `words[..no_words]`, or `None` when `no_words`
-    /// overruns the stored word slots.
-    pub fn used_words(&self) -> Option<&[[u8; 32]]> {
+    /// The used word prefix `words[..no_words]`.
+    pub fn used_words(&self) -> Result<&[[u8; 32]], CalldataError> {
         let no_words = usize::from(self.no_words);
-        (no_words <= self.words.len()).then(|| &self.words[..no_words])
+        if no_words > self.words.len() {
+            return Err(CalldataError::NoWordsOverrun {
+                no_words: self.no_words,
+                capacity: self.words.len(),
+            });
+        }
+        Ok(&self.words[..no_words])
     }
 
-    /// `data = selector ‖ used_words`, or `None` on the same overrun.
-    pub fn data(&self) -> Option<Vec<u8>> {
+    /// `data = selector ‖ used_words`.
+    pub fn data(&self) -> Result<Vec<u8>, CalldataError> {
         let words = self.used_words()?;
         let mut data = Vec::with_capacity(4 + 32 * words.len());
         data.extend_from_slice(&self.selector);
         data.extend(words.iter().flatten());
-        Some(data)
+        Ok(data)
     }
 }
 
@@ -157,17 +180,31 @@ mod tests {
 
     #[test]
     fn used_words_pins_the_used_prefix() {
-        assert_eq!(calldata(0, 2).used_words(), Some(&[][..]));
-        assert_eq!(calldata(2, 3).used_words(), Some(&calldata(2, 2).words[..]));
-        assert_eq!(calldata(3, 2).used_words(), None);
+        assert_eq!(calldata(0, 2).used_words(), Ok(&[][..]));
+        assert_eq!(calldata(2, 3).used_words(), Ok(&calldata(2, 2).words[..]));
+        let err = calldata(2, 1).used_words().unwrap_err();
+        assert_eq!(
+            err,
+            CalldataError::NoWordsOverrun {
+                no_words: 2,
+                capacity: 1
+            }
+        );
+        assert!(err.to_string().contains("calldata no_words 2"));
     }
 
     #[test]
     fn data_concatenates_the_selector_and_used_words() {
         let mut expected = vec![0x0a; 4];
         expected.extend_from_slice(&[0x11; 32]);
-        assert_eq!(calldata(1, 2).data(), Some(expected));
-        assert_eq!(calldata(2, 1).data(), None);
+        assert_eq!(calldata(1, 2).data(), Ok(expected));
+        assert_eq!(
+            calldata(2, 1).data().unwrap_err(),
+            CalldataError::NoWordsOverrun {
+                no_words: 2,
+                capacity: 1
+            }
+        );
     }
 
     #[test]

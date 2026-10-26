@@ -64,13 +64,7 @@ fn assemble_calldata(calldata: &CompactMaybe<Calldata>) -> anyhow::Result<Bytes>
     if !calldata.is_some {
         return Ok(Bytes::new());
     }
-    calldata.value.data().map(Bytes::from).ok_or_else(|| {
-        anyhow::anyhow!(
-            "calldata no_words {} overruns the record's {} stored word slots",
-            calldata.value.no_words,
-            calldata.value.words.len()
-        )
-    })
+    Ok(Bytes::from(calldata.value.data()?))
 }
 
 /// The count-trimmed access list, per `decodeAccessList`.
