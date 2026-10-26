@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::posit::{PositInternalAction, PositRejectReason};
-use crate::protocol::wants_more_stock;
+use crate::protocol::should_generate;
 use crate::protocol::MpcSignProtocol;
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
 use crate::storage::protocol_storage::StockCounts;
@@ -552,7 +552,7 @@ impl PresignatureSpawner {
     /// (`min_presignatures`) and the network-wide total hasn't reached the cap
     /// (`max_presignatures`).
     async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
-        let not_enough = wants_more_stock(
+        if should_generate(
             self.stock,
             self.ongoing.len(),
             self.len_introduced(),
@@ -560,9 +560,7 @@ impl PresignatureSpawner {
             cfg.presignature.max_presignatures as usize,
             cfg.max_concurrent_introduction as usize,
             cfg.max_concurrent_generation as usize,
-        );
-
-        if not_enough {
+        ) {
             tracing::debug!("not enough presignatures, generating");
             self.propose_posit(active).await;
         }

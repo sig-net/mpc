@@ -44,7 +44,7 @@ use crate::storage::protocol_storage::StockCounts;
 /// the network cap not reached counting generations in flight, and both
 /// concurrency caps free. `stock` may be up to a second old, so the floor can
 /// be overshot by at most one second of proposals, bounded by `max_introduced`.
-pub(crate) fn wants_more_stock(
+pub(crate) fn should_generate(
     stock: StockCounts,
     ongoing: usize,
     introduced: usize,
@@ -279,26 +279,26 @@ mod tests {
     }
 
     #[test]
-    fn wants_more_stock_branches() {
+    fn should_generate_branches() {
         let stock = StockCounts {
             mine: 3,
             generated: 10,
         };
-        assert!(wants_more_stock(stock, 2, 1, 5, 100, 10, 128));
+        assert!(should_generate(stock, 2, 1, 5, 100, 10, 128));
         assert!(
-            !wants_more_stock(stock, 2, 1, 3, 100, 10, 128),
+            !should_generate(stock, 2, 1, 3, 100, 10, 128),
             "floor reached"
         );
         assert!(
-            !wants_more_stock(stock, 2, 1, 5, 12, 10, 128),
+            !should_generate(stock, 2, 1, 5, 12, 10, 128),
             "network cap counts in flight"
         );
         assert!(
-            !wants_more_stock(stock, 2, 10, 5, 100, 10, 128),
+            !should_generate(stock, 2, 10, 5, 100, 10, 128),
             "introduction cap"
         );
         assert!(
-            !wants_more_stock(stock, 128, 1, 5, 1000, 10, 128),
+            !should_generate(stock, 128, 1, 5, 1000, 10, 128),
             "generation cap"
         );
     }

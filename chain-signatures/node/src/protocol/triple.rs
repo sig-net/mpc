@@ -3,7 +3,7 @@ use super::posit::{PositAction, PositInternalAction, Posits};
 use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::wants_more_stock;
+use crate::protocol::should_generate;
 use crate::storage::protocol_storage::StockCounts;
 
 use crate::protocol::posit::{PositRejectReason, Positor};
@@ -562,7 +562,7 @@ impl TripleSpawner {
     /// Generate new triples if this node owns fewer than the per-node minimum
     /// (`min_triples`) and the network-wide total hasn't reached the cap (`max_triples`).
     async fn stockpile(&mut self, participants: &[Participant], cfg: &ProtocolConfig) {
-        let not_enough = wants_more_stock(
+        if should_generate(
             self.stock,
             self.ongoing.len(),
             self.len_introduced(),
@@ -570,9 +570,7 @@ impl TripleSpawner {
             cfg.triple.max_triples as usize,
             cfg.max_concurrent_introduction as usize,
             cfg.max_concurrent_generation as usize,
-        );
-
-        if not_enough {
+        ) {
             self.propose_posit(participants).await;
         }
     }
