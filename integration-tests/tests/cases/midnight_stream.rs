@@ -57,8 +57,7 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         .midnight
         .as_ref()
         .context("Midnight context was not started")?;
-    let root_pk =
-        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
+    let root_pk = mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
     let indexer = MidnightIndexer::new(
         midnight.config.clone(),
         MockStateManager::new(),
