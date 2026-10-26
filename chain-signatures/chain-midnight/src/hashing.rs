@@ -163,45 +163,6 @@ fn compute_tron_tx_params_digest(tx: &TronTxParams) -> anyhow::Result<[u8; 32]> 
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn dump_tron_vectors() {
-        let records = [("sample", crate::test_utils::sample_tron_record()), {
-            let mut r = crate::test_utils::sample_tron_record();
-            let mpc_primitives::TxParams::Tron(tx) = &mut r.tx_params else {
-                unreachable!()
-            };
-            tx.calldata.is_some = false;
-            ("plain-transfer", r)
-        }];
-        for (name, record) in records {
-            let digest = super::compute_tron_tx_params_digest(match &record.tx_params {
-                mpc_primitives::TxParams::Tron(tx) => tx,
-                _ => unreachable!(),
-            })
-            .unwrap();
-            println!("ENTRY {}", name);
-            println!(
-                "rid {}",
-                hex::encode(super::compute_request_id(&record).unwrap())
-            );
-            println!("digest {}", hex::encode(digest));
-            println!(
-                "atoms {}",
-                serde_json::to_string(
-                    &crate::test_utils::atoms_from_record(&record)
-                        .iter()
-                        .map(hex::encode)
-                        .collect::<Vec<_>>()
-                )
-                .unwrap()
-            );
-            println!(
-                "widths {}",
-                serde_json::to_string(&crate::test_utils::widths_from_record(&record)).unwrap()
-            );
-        }
-    }
-
     use super::*;
     use crate::test_utils::{
         sample_evm_params, sample_record, sample_record_with_partial_access_list,

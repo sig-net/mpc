@@ -28,7 +28,6 @@ fn to_eip1559(params: &EvmType2TxParams) -> anyhow::Result<TxEip1559> {
 pub fn to_unsigned_tx(record: &SignBidirectionalRecord) -> anyhow::Result<TxEip1559> {
     match &record.tx_params {
         TxParams::EvmType2(params) => to_eip1559(params),
-        // TODO: Implement Tron transaction assembly
         TxParams::Tron(_) => anyhow::bail!(
             "tx_params is tron, which assembles a TriggerSmartContract raw, not an EVM transaction"
         ),
