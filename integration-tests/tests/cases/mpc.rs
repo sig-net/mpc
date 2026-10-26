@@ -1304,6 +1304,9 @@ async fn test_everybody_participate_triple_protocol() {
     let network = MpcFixtureBuilder::default()
         .only_generate_triples()
         .with_node_min_triples(1)
+        // One proposal per node at a time keeps nodes responsive enough that every
+        // posit is accepted by all peers before the proposer stops waiting.
+        .with_max_concurrent_introduction(1)
         .build()
         .await;
 
@@ -1317,6 +1320,9 @@ async fn test_everybody_participate_presignature_protocol() {
     let network = MpcFixtureBuilder::default()
         .only_generate_presignatures()
         .with_node_min_presignatures(1)
+        // One proposal per node at a time keeps nodes responsive enough that every
+        // posit is accepted by all peers before the proposer stops waiting.
+        .with_max_concurrent_introduction(1)
         .build()
         .await;
 
