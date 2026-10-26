@@ -6,25 +6,27 @@
 //!
 //! # Configuration (env vars only)
 //!
-//! - `RPC_URL` (required) — execution-layer RPC endpoint, e.g. an Alchemy URL.
-//! - `CONTRACT_ADDRESS` (required) — contract address to watch, with or
+//! - `MPC_ETH_EXECUTION_RPC_HTTP_URL` (required) — execution-layer RPC
+//!   endpoint, e.g. an Alchemy URL.
+//! - `MPC_ETH_CONTRACT_ADDRESS` (required) — contract address to watch, with or
 //!   without the `0x` prefix.
 //! - `END` (required) — exclusive end of the catchup range (the anchor
 //!   height).
 //! - `START` (optional) — inclusive start of the range. If omitted, only
 //!   the single block `END - 1` is processed.
-//! - `NETWORK` (optional, default `sepolia`).
-//! - `OPTIMISTIC` (optional, default `0`) — production (non-optimistic) path by
-//!   default; the finalized-head watcher drives finality. Set to `1` for the
-//!   demo/soft-tip path (no finality wait).
-//! - `REFRESH_FINALIZED_INTERVAL` (optional, default `10000` ms) — cadence of
-//!   the finalized-head watcher in OPTIMISTIC=0 mode.
+//! - `MPC_ETH_NETWORK` (optional, default `sepolia`).
+//! - `MPC_ETH_OPTIMISTIC_REQUESTS` (optional, default `false`) — production
+//!   (non-optimistic) path by default; the finalized-head watcher drives
+//!   finality. Set to `true` for the demo/soft-tip path (no finality wait).
+//! - `MPC_ETH_REFRESH_FINALIZED_INTERVAL` (optional, default `10000` ms) —
+//!   cadence of the finalized-head watcher in
+//!   `MPC_ETH_OPTIMISTIC_REQUESTS=false` mode.
 //!
 //! # Usage
 //!
 //! ```sh
-//! RPC_URL=https://eth-sepolia.g.alchemy.com/v2/<KEY> \
-//! CONTRACT_ADDRESS=<hex> START=5000000 END=5000100 \
+//! MPC_ETH_EXECUTION_RPC_HTTP_URL=https://eth-sepolia.g.alchemy.com/v2/<KEY> \
+//! MPC_ETH_CONTRACT_ADDRESS=<hex> START=5000000 END=5000100 \
 //! cargo run --example bench_catchup --features bench
 //! ```
 //!

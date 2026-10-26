@@ -746,6 +746,11 @@ fn owned_by_requester_binds_only_tron_targets() {
 
 /// An unsigned legacy contract call on `chain_id`.
 fn legacy_contract_call(chain_id: u64) -> Vec<u8> {
+    legacy_contract_call_on(&chain_id)
+}
+
+/// An unsigned legacy contract call whose chain id field encodes `chain_id`.
+fn legacy_contract_call_on<E: rlp::Encodable>(chain_id: &E) -> Vec<u8> {
     let mut rlp = rlp::RlpStream::new_list(9);
     rlp.append(&0u64); // nonce
     rlp.append(&0u64); // gasPrice
@@ -753,7 +758,7 @@ fn legacy_contract_call(chain_id: u64) -> Vec<u8> {
     rlp.append(&vec![0x11u8; 20]); // to
     rlp.append(&0u64); // value
     rlp.append(&vec![0xa9u8, 0x05, 0x9c, 0xbb]); // data
-    rlp.append(&chain_id);
+    rlp.append(chain_id);
     rlp.append(&0u64);
     rlp.append(&0u64);
     rlp.out().to_vec()
@@ -793,6 +798,9 @@ async fn process_sign_request_rejects_an_unprocessable_output_schema() {
     assert!(backlog.get(Chain::Solana, &admitted).await.is_some());
 }
 
+/// The big-endian chain id 2^64, which `validate` admits and no u64 holds.
+const WIDE_CHAIN_ID: [u8; 9] = [1, 0, 0, 0, 0, 0, 0, 0, 0];
+
 /// `eip155:1` names every Ethereum network, so the transaction's own chain id
 /// decides where it executes: signed for another network, it never executes here.
 #[tokio::test]
@@ -822,6 +830,23 @@ async fn process_sign_request_rejects_another_networks_chain_id() {
     assert!(format!("{err:#}").contains("this node executes on 1"));
     assert!(backlog
         .get(Chain::Solana, &SignId::new([18; 32]))
+        .await
+        .is_none());
+
+    // 2^64: valid on Ethereum, but no network this node can watch.
+    let wide = Arc::new(IndexedSignRequest::sign_bidirectional(
+        SignId::new([20; 32]),
+        test_sign_args(20),
+        Chain::Solana,
+        current_unix_timestamp(),
+        bidirectional_event(legacy_contract_call_on(&WIDE_CHAIN_ID.to_vec())),
+    ));
+    let err = process_sign_request(wide, &ctx, test_root_pk())
+        .await
+        .expect_err("a chain id wider than u64 should be rejected at ingestion");
+    assert!(format!("{err:#}").contains("chain id None"), "{err:#}");
+    assert!(backlog
+        .get(Chain::Solana, &SignId::new([20; 32]))
         .await
         .is_none());
 
@@ -2267,8 +2292,14 @@ fn network_mismatch_reports_only_foreign_chains() {
     let foreign = bidirectional_event(legacy_contract_call(11_155_111));
     assert_eq!(
         network_mismatch(&foreign, Some(1)),
-        Some((11_155_111, 1)),
+        Some((Some(11_155_111), 1)),
         "a foreign chain id is evidence"
+    );
+    let wide = bidirectional_event(legacy_contract_call_on(&WIDE_CHAIN_ID.to_vec()));
+    assert_eq!(
+        network_mismatch(&wide, Some(1)),
+        Some((None, 1)),
+        "an undecodable chain id names no network this node watches"
     );
 
     let local = bidirectional_event(legacy_contract_call(1));
@@ -2432,6 +2463,64 @@ async fn unobserved_response_settles_when_it_verifies() {
             settles,
             "{case}"
         );
+    }
+}
+
+/// The round trip's latency is labelled from the outcome this node recorded, so a successful
+/// output that begins with the failure prefix is still `ok`.
+#[tokio::test]
+async fn final_response_latency_follows_the_recorded_outcome() {
+    let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
+    let count = |status| {
+        crate::metrics::requests::request_latency_count(
+            Chain::Hydration,
+            SignRequestStep::BidirectionalTotal,
+            status,
+            RequestKind::RespondBidirectional,
+        )
+    };
+    // No other test records a Hydration `bidirectional_total` latency, so the counts below
+    // are this test's. The cases share one test for the same reason.
+    for (seed, outcome, status) in [
+        (
+            107,
+            ExecutionOutcome::Success {
+                output: vec![0xde, 0xad, 0xbe, 0xef, 1],
+            },
+            "ok",
+        ),
+        (108, ExecutionOutcome::Failed, "execution_failed"),
+    ] {
+        let tx = test_bidirectional_tx(seed, Chain::Hydration, Chain::Ethereum);
+        let backlog = Backlog::new();
+        backlog.insert_mock_executing(&tx).await;
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
+            .await
+            .unwrap();
+        let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
+            panic!("{status}: the observed outcome must be signed");
+        };
+        let SignKind::RespondBidirectional(own) = &entry.request().kind else {
+            panic!("{status}: the outcome is signed as a response");
+        };
+        let event = RespondBidirectionalEvent {
+            output: Some(own.output.clone()),
+            attestation: None,
+            request_id: tx.request_id,
+            signature: mpc_crypto::generate_signature(&root_sk, &entry.request().args),
+            chain: Chain::Hydration,
+        };
+        let (ok, failed) = (count("ok"), count("execution_failed"));
+
+        process_respond_bidirectional_event(event, &ctx, root_sk.public_key().into())
+            .await
+            .unwrap();
+
+        let recorded = (count("ok") - ok, count("execution_failed") - failed);
+        let expected = if status == "ok" { (1, 0) } else { (0, 1) };
+        assert_eq!(recorded, expected, "{status}");
     }
 }
 

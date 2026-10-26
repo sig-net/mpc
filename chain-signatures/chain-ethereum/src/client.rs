@@ -312,6 +312,16 @@ impl EthereumClient {
         )
     }
 
+    pub async fn get_chain_id(&self) -> anyhow::Result<u64> {
+        retry_rpc!(
+            self.rpc.timeout,
+            self.rpc.retry,
+            self.shared_backoff,
+            "get_chain_id",
+            { self.rpc_client.get_chain_id().await }
+        )
+    }
+
     pub async fn get_transaction_by_hash(
         &self,
         tx_hash: alloy::primitives::B256,

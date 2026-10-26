@@ -101,7 +101,7 @@ async fn test_stream_handles_sign_and_respond() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, _rpc_rx) = test_rpc_channel(4);
 
     // Run the indexer
@@ -217,7 +217,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
     run_supervised(
@@ -298,7 +298,7 @@ async fn test_respond_event_advances_to_pending_execution() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
     run_supervised(
@@ -544,7 +544,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
 
     let run_handle = tokio::spawn(async move {
         run_supervised(
@@ -612,7 +612,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
 
     let run_handle = tokio::spawn(async move {
         run_supervised(
