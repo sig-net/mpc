@@ -135,6 +135,9 @@ mod tests {
     use super::*;
     use crate::records::SignBidirectionalRecord;
     use crate::test_utils::{ascii_padded, sample_tron_record, test_root_pk};
+    use k256::elliptic_curve::bigint::U256;
+    use k256::elliptic_curve::ops::Reduce;
+    use k256::{FieldBytes, Scalar};
     use mpc_chain_integration_core::utils::payload::derive_user_address;
     use mpc_primitives::{Chain, SignKind};
     use mpc_tron_wire::TronAddress;
@@ -170,7 +173,9 @@ mod tests {
         let owner = TronAddress::from_evm(derive_user_address(test_root_pk(), epsilon));
         assert_eq!(raw.owner_address().unwrap(), owner.as_bytes().to_vec());
 
-        let expected = mpc_primitives::ScalarExt::from_non_biased(raw.txid());
+        // payload = reduce(txid): verification is mod n, so this is what
+        // signs the txid itself.
+        let expected = <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::from(raw.txid()));
         assert_eq!(request.args.payload, expected);
     }
 
