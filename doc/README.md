@@ -6,7 +6,8 @@
 - [Posit state machine](posit-state-machine.md): the per-request signing state machine, rounds and timeouts, as implemented.
 - [Bidirectional calls](bidirectional-calls.md): entities, API and properties of a call signed for a target chain whose outcome is reported back to the source chain.
 - [Checkpoints](checkpoints.md): the per-chain backlog, how nodes agree on it at fixed heights through governance votes, and how a joining or lagging node catches up from the agreed checkpoint.
-- [Node specification](node-specification.md): the original design of protocol invocations, artifact lifecycle and peer status. Graph sources are in [graphs/](graphs/).
+- [Mesh](mesh.md): how a node tracks each peer's status (Offline, Inactive, Syncing, Active) and which peers it may propose to.
+- [Node specification](node-specification.md): the original design of protocol invocations, artifact lifecycle and participant selection.
 - [State sync](state-sync.md): how an artifact's owner and its holders repair the share holder directory after one of them lost data, and why that never deletes a share still in use.
 
 ## Keys
