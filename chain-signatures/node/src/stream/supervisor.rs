@@ -152,7 +152,7 @@ pub async fn run_supervised<I: ChainIndexer, T: ChainTelemetry>(
     indexer: I,
     ctx: StreamContext,
     telemetry: T,
-) {
+) -> anyhow::Result<()> {
     run_supervised_with_watchdog(
         indexer,
         ctx,
@@ -179,7 +179,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     mut ctx: StreamContext,
     telemetry: T,
     watchdog_timeout: Duration,
-) {
+) -> anyhow::Result<()> {
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting supervised chain indexer");
     let _clear_caught_up = ClearCaughtUp {
@@ -188,7 +188,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     };
 
     let my_account_id = ctx.contract_watcher.account_id().clone();
-    let root_pk = ctx.contract_watcher.wait_public_key().await;
+    let root_pk = ctx.contract_watcher.wait_public_key().await?;
     let indexer = Arc::new(indexer);
 
     enum Exit {
@@ -352,7 +352,7 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 
         if matches!(exit, Exit::Shutdown) {
             tracing::warn!(%chain, "supervised chain indexer shutting down");
-            return;
+            return Ok(());
         }
     }
 }
@@ -680,7 +680,8 @@ mod tests {
             ),
         )
         .await
-        .expect("supervisor should shut down after the restarted run() exits");
+        .expect("supervisor should shut down after the restarted run() exits")
+        .expect("supervisor should exit cleanly");
         assert!(attempts.load(Ordering::SeqCst) >= 2, "run() was restarted");
 
         let mut voted = Vec::new();
@@ -739,7 +740,8 @@ mod tests {
             run_supervised_with_watchdog(indexer, ctx, NoopChainTelemetry, Duration::from_secs(60)),
         )
         .await
-        .expect("supervisor should shut down after run() exits");
+        .expect("supervisor should shut down after run() exits")
+        .expect("supervisor should exit cleanly");
         assert_eq!(
             attempts.load(Ordering::SeqCst),
             1,
@@ -773,7 +775,8 @@ mod tests {
             ),
         )
         .await
-        .expect("supervisor should shut down after run() exits");
+        .expect("supervisor should shut down after run() exits")
+        .expect("supervisor should exit cleanly");
 
         assert_eq!(
             backlog.get_processed_block(Chain::Ethereum).await,
@@ -802,7 +805,8 @@ mod tests {
             ),
         )
         .await
-        .expect("supervisor should shut down after second run() exits");
+        .expect("supervisor should shut down after second run() exits")
+        .expect("supervisor should exit cleanly");
 
         first_cancel.notified().await;
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -864,7 +868,8 @@ mod tests {
             ),
         )
         .await
-        .expect("supervisor should shut down after the rerun exits");
+        .expect("supervisor should shut down after the rerun exits")
+        .expect("supervisor should exit cleanly");
 
         assert_eq!(attempts.load(Ordering::SeqCst), 2, "run() was restarted");
         assert_eq!(
@@ -983,7 +988,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), task)
             .await
             .expect("supervisor should shut down after second run() exits")
-            .expect("supervisor task should not panic");
+            .expect("supervisor task should not panic")
+            .expect("supervisor should exit cleanly");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
@@ -1050,7 +1056,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), task)
             .await
             .expect("recovery must not wait on peers for a reset")
-            .expect("supervisor task should not panic");
+            .expect("supervisor task should not panic")
+            .expect("supervisor should exit cleanly");
 
         assert_eq!(
             backlog.get_processed_block(chain).await,
@@ -1109,7 +1116,8 @@ mod tests {
             ),
         )
         .await
-        .expect("supervisor should shut down after run() exits");
+        .expect("supervisor should shut down after run() exits")
+        .expect("supervisor should exit cleanly");
 
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }

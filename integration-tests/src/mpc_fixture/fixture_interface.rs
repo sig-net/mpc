@@ -55,7 +55,7 @@ pub struct MpcFixtureNode {
     pub backlog: Backlog,
 
     pub contract: ContractStateWatcher,
-    pub web_handle: Option<tokio::task::JoinHandle<()>>,
+    pub web_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
 /// Logs for reading outputs after a test run for assertions and debugging.

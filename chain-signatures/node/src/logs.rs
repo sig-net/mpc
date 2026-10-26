@@ -267,6 +267,10 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
                 .with_filter(otlp_filter),
         )
         .init();
+    // Panics go through tracing so the line explaining a restart reaches OTLP.
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!(panic = %info, "task panicked");
+    }));
     tracing::info!(gcp_logs = on_gcp, "Set global logging subscriber");
 
     tracing::info!(

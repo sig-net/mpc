@@ -50,6 +50,7 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
 use url::Url;
 
 /// Capacity of the SignCommand channel that feeds chain sign events from the
@@ -352,24 +353,23 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             .await;
 
             tracing::info!("protocol initialized");
-            tokio::spawn(sync_task.run());
-            tokio::spawn(rpc_executor.run(
+            let mut tasks = JoinSet::new();
+            tasks.spawn(sync_task.run());
+            tasks.spawn(rpc_executor.run(
                 backlog.clone(),
                 contract_state_tx,
                 config_tx.clone(),
                 checkpoints_tx,
             ));
-
-            tokio::spawn(mesh.run(contract_watcher.clone()));
+            tasks.spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics().await;
-            let protocol_handle = tokio::spawn(protocol.run(
+            tasks.spawn(protocol.run(
                 node,
                 near_governance_client,
                 contract_watcher.clone(),
                 mesh_state.clone(),
             ));
-            tracing::info!("protocol thread spawned");
-            let web_handle = tokio::spawn(web::run(
+            tasks.spawn(web::run(
                 web_port,
                 message_channel,
                 node_watcher,
@@ -382,6 +382,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             ));
 
             spawn_indexers(
+                &mut tasks,
                 stack,
                 sign_tx,
                 rpc_channel.clone(),
@@ -392,15 +393,20 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 checkpoints_rx,
             )
             .await;
-            tracing::info!("protocol http server spawned");
-            protocol_handle.await?;
-            web_handle.await?;
-            system_handle.abort();
-            tracing::info!("spinning down");
-        }
-    };
+            tracing::info!("node tasks spawned");
 
-    Ok(())
+            // A core task never returns in normal operation, so the first to finish ends the node.
+            let err = match tasks.join_next().await {
+                Some(Ok(Err(err))) => err,
+                Some(Err(join)) => anyhow::Error::from(join),
+                _ => anyhow::anyhow!("core task exited"),
+            };
+            tracing::error!(?err, "core task ended, shutting down");
+            system_handle.abort();
+            tasks.shutdown().await;
+            Err(err)
+        }
+    }
 }
 
 fn configuration_digest(
@@ -865,6 +871,7 @@ impl ProtocolHandles {
 
 #[allow(clippy::too_many_arguments)]
 async fn spawn_indexers(
+    tasks: &mut JoinSet<anyhow::Result<()>>,
     stack: ChainStack,
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
@@ -916,7 +923,7 @@ async fn spawn_indexers(
         {
             Ok(eth_indexer) => {
                 tracing::info!("ethereum indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     eth_indexer,
                     StreamContext::new(
                         backlog.clone(),
@@ -947,7 +954,7 @@ async fn spawn_indexers(
         ) {
             Ok(sol_indexer) => {
                 tracing::info!("solana indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     sol_indexer,
                     StreamContext::new(
                         backlog.clone(),
@@ -975,7 +982,7 @@ async fn spawn_indexers(
         let hydration_indexer =
             HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
         tracing::info!("hydration indexer created successfully");
-        tokio::spawn(run_supervised(
+        tasks.spawn(run_supervised(
             hydration_indexer,
             StreamContext::new(
                 backlog.clone(),
@@ -1003,7 +1010,7 @@ async fn spawn_indexers(
         {
             Ok(canton_indexer) => {
                 tracing::info!("canton indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     canton_indexer,
                     StreamContext::new(
                         backlog.clone(),
@@ -1033,7 +1040,7 @@ async fn spawn_indexers(
         {
             Ok(midnight_indexer) => {
                 tracing::info!("midnight indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     midnight_indexer,
                     StreamContext::new(
                         backlog,

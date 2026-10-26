@@ -117,7 +117,8 @@ async fn test_stream_handles_sign_and_respond() {
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
-    .await;
+    .await
+    .expect("supervisor should exit cleanly");
 
     // We should have received the Request then Completion
     let msg1 = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -232,7 +233,8 @@ async fn test_bidirectional_sign_request_enqueues_command() {
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
-    .await;
+    .await
+    .expect("supervisor should exit cleanly");
 
     // A SignCommand::Request should have been emitted for the bidirectional request
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -313,7 +315,8 @@ async fn test_respond_event_advances_to_pending_execution() {
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
-    .await;
+    .await
+    .expect("supervisor should exit cleanly");
 
     // The respond event should have advanced the entry to PendingExecution and
     // registered an execution watcher for the derived bidirectional tx on the
@@ -559,7 +562,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
             ),
             mpc_chain_integration_core::NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     match timeout(Duration::from_millis(100), sign_rx.recv()).await {
@@ -627,7 +630,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
             ),
             mpc_chain_integration_core::NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     let no_publish = timeout(Duration::from_millis(100), rpc_rx.recv()).await;

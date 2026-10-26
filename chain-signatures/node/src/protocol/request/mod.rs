@@ -587,7 +587,7 @@ impl SignatureSpawner {
         mut self,
         mut sign_rx: mpsc::Receiver<SignCommand>,
         mut cfg: watch::Receiver<Config>,
-    ) {
+    ) -> anyhow::Result<()> {
         let mut posits = self.msg.subscribe_signature_posit().await;
         let mut protocol = cfg.borrow().protocol.clone();
 
@@ -595,7 +595,7 @@ impl SignatureSpawner {
 
         // GUARANTEE: contract is in a running state with valid governance info
         // before we start processing any messages
-        let mut governance = contract_watcher.wait_governance().await;
+        let mut governance = contract_watcher.wait_governance().await?;
 
         loop {
             tokio::select! {
@@ -615,8 +615,8 @@ impl SignatureSpawner {
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
                 }
-                Some(new_governance) = contract_watcher.next_governance(governance.clone()) => {
-                    governance = new_governance;
+                new_governance = contract_watcher.next_governance(governance.clone()) => {
+                    governance = new_governance?;
                     // A governance change invalidates every incarnation — even
                     // running -> running: the watch coalesces fast transitions.
                     self.tasks.abort_all();
@@ -632,6 +632,7 @@ impl SignatureSpawner {
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -668,7 +669,7 @@ impl Drop for SignatureSpawner {
 }
 
 pub struct SignatureSpawnerTask {
-    handle: JoinHandle<()>,
+    handle: JoinHandle<anyhow::Result<()>>,
 }
 
 impl SignatureSpawnerTask {

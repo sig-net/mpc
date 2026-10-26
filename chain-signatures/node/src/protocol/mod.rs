@@ -94,7 +94,7 @@ impl MpcSignProtocol {
         mut gov_client: G,
         contract_state: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
-    ) {
+    ) -> anyhow::Result<()> {
         let _span = tracing::info_span!("running", "{}", self.my_account_id.as_str());
 
         crate::metrics::nodes::NODE_RUNNING.set(1);

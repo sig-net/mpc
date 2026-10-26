@@ -352,25 +352,34 @@ impl ContractStateWatcher {
         self.state()?.governance(&self.account_id)
     }
 
-    pub async fn wait_governance(&mut self) -> GovernanceInfo {
+    /// Waits for the next contract state. A closed channel is an error, not something to wait on.
+    pub async fn changed(&mut self) -> anyhow::Result<()> {
+        self.contract_state
+            .changed()
+            .await
+            .map_err(|_| anyhow::anyhow!("contract state channel closed"))
+    }
+
+    pub async fn wait_governance(&mut self) -> anyhow::Result<GovernanceInfo> {
         loop {
             if let Some(governance) = self.governance() {
-                return governance;
+                return Ok(governance);
             }
-            let _ = self.contract_state.changed().await;
+            self.changed().await?;
         }
     }
 
-    pub async fn next_state(&mut self) -> Option<ProtocolState> {
-        let _ = self.contract_state.changed().await;
-        self.contract_state.borrow_and_update().clone()
+    pub async fn next_state(&mut self) -> anyhow::Result<Option<ProtocolState>> {
+        self.changed().await?;
+        Ok(self.contract_state.borrow_and_update().clone())
     }
 
-    pub async fn next_governance(&mut self, current: GovernanceInfo) -> Option<GovernanceInfo> {
+    pub async fn next_governance(
+        &mut self,
+        current: GovernanceInfo,
+    ) -> anyhow::Result<GovernanceInfo> {
         loop {
-            if self.contract_state.changed().await.is_err() {
-                return None;
-            }
+            self.changed().await?;
             let Some(state) = self.contract_state.borrow_and_update().clone() else {
                 continue;
             };
@@ -381,7 +390,7 @@ impl ContractStateWatcher {
             });
             if next != current {
                 tracing::info!(old = ?current, new = ?next, "signing governance changed");
-                return Some(next);
+                return Ok(next);
             }
         }
     }
@@ -417,12 +426,12 @@ impl ContractStateWatcher {
     }
 
     /// Wait until the public key is available and return it
-    pub async fn wait_public_key(&mut self) -> AffinePoint {
+    pub async fn wait_public_key(&mut self) -> anyhow::Result<AffinePoint> {
         loop {
             if let Some(pk) = self.public_key().await {
-                return pk;
+                return Ok(pk);
             }
-            let _ = self.contract_state.changed().await;
+            self.changed().await?;
         }
     }
 
@@ -440,12 +449,12 @@ impl ContractStateWatcher {
         }
     }
 
-    pub async fn wait_info(&mut self) -> (usize, Participant) {
+    pub async fn wait_info(&mut self) -> anyhow::Result<(usize, Participant)> {
         loop {
             if let Some((threshold, participant)) = self.info().await {
-                return (threshold, participant);
+                return Ok((threshold, participant));
             }
-            let _ = self.contract_state.changed().await;
+            self.changed().await?;
         }
     }
 
@@ -515,7 +524,7 @@ impl RpcExecutor {
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
         checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
-    ) {
+    ) -> anyhow::Result<()> {
         // Checkpoint votes stop once the contract's consensus checkpoint reaches them.
         let consensus = EnumMap::from_fn(|chain| checkpoints[chain].subscribe());
 
@@ -538,6 +547,7 @@ impl RpcExecutor {
             &mut self.action_rx,
         )
         .await;
+        anyhow::bail!("rpc action channel closed")
     }
 
     /// Dispatches incoming RPC actions to the appropriate chain publishers.
@@ -1255,7 +1265,7 @@ mod tests {
 
         // Channel closed.
         drop(tx);
-        assert!(watcher.next_governance(next).await.is_none());
+        assert!(watcher.next_governance(next).await.is_err());
     }
 
     /// A publisher that counts the number of times it has been called.
@@ -1433,7 +1443,7 @@ mod tests {
         };
         tx.send(Some(ProtocolState::Running(running))).unwrap();
 
-        let resumed = watcher.wait_governance().await;
+        let resumed = watcher.wait_governance().await.unwrap();
         assert_eq!(resumed.epoch, 1);
         assert_eq!(resumed.threshold, 2);
         assert_eq!(resumed.me, Participant::from(0));
