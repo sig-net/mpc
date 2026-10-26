@@ -329,6 +329,17 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         .map(|block| block.header.number.saturating_add(1))
     }
 
+    /// The chain id the RPC endpoint serves. Returns `None` on cancellation.
+    async fn sample_chain_id(&self, cancel: &CancellationToken) -> Option<u64> {
+        retry_until_some(
+            cancel,
+            Self::RETRY_DELAY,
+            "ethereum startup chain id sampling",
+            || async { self.client.get_chain_id().await.map(Some) },
+        )
+        .await
+    }
+
     /// Wait until `next` is processable (the head covers it), returning the
     /// ready upper bound. Returns `None` on cancellation.
     async fn wait_processable_bound(
@@ -389,6 +400,26 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         tracing::info!("ethereum indexer started");
+
+        // An endpoint on another network would feed this node that network's
+        // requests and receipts, and admission checks transactions against the
+        // configured network only.
+        if let Some(expected) = self.config.chain_id() {
+            let Some(actual) = self.sample_chain_id(&cancel).await else {
+                tracing::debug!("ethereum indexer cancelled before the chain id was sampled");
+                return Ok(());
+            };
+            anyhow::ensure!(
+                actual == expected,
+                "ethereum RPC serves chain id {actual}, but network {} has chain id {expected}",
+                self.config.network
+            );
+        } else {
+            tracing::warn!(
+                network = %self.config.network,
+                "unknown ethereum network: the RPC's chain id is not checked"
+            );
+        }
 
         // Spawn the finalized head watcher.
         let mut finalized_watcher = self
@@ -510,6 +541,51 @@ mod tests {
             Some(43)
         );
         finalized_mock.assert_async().await;
+    }
+
+    /// An RPC that keeps failing past the client's own retries is retried, not refused.
+    #[tokio::test]
+    async fn sample_chain_id_retries_until_the_rpc_answers() {
+        // The test client makes 3 attempts per call, so this takes 4 sampling rounds.
+        const FAILURES: u64 = 10;
+        let mut server = Server::new_async().await;
+        let calls = AtomicU64::new(0);
+        let chain_id_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_chainId"})))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body().expect("request body")).expect("json body");
+                let id = &body["id"];
+                let reply = if calls.fetch_add(1, Ordering::Relaxed) < FAILURES {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {"code": -32000, "message": "unavailable"}
+                    })
+                } else {
+                    json!({"jsonrpc": "2.0", "id": id, "result": format!("{SEPOLIA_CHAIN_ID:#x}")})
+                };
+                reply.to_string().into_bytes()
+            })
+            .expect(FAILURES as usize + 1)
+            .create_async()
+            .await;
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+
+        let chain_id = tokio::time::timeout(
+            Duration::from_secs(10),
+            indexer.sample_chain_id(&CancellationToken::new()),
+        )
+        .await
+        .expect("the chain id should be sampled once the RPC answers");
+
+        assert_eq!(chain_id, Some(SEPOLIA_CHAIN_ID));
+        chain_id_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -847,7 +923,7 @@ mod tests {
 
         assert!(events_rx.try_recv().is_err());
         // The underlying RPC error propagates
-        assert!(err.to_string().contains("error sending request"));
+        assert!(format!("{err:#}").contains("error sending request"));
     }
 
     #[tokio::test]
@@ -904,6 +980,24 @@ mod tests {
             .into_bytes()
     }
 
+    /// Answers `eth_chainId` with `chain_id`, echoing the request id.
+    async fn mock_chain_id(server: &mut mockito::ServerGuard, chain_id: u64) -> mockito::Mock {
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_chainId"})))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body().expect("request body")).expect("json body");
+                json!({"jsonrpc": "2.0", "id": body["id"], "result": format!("{chain_id:#x}")})
+                    .to_string()
+                    .into_bytes()
+            })
+            .create_async()
+            .await
+    }
+
     /// Fixture for running the indexer in a test with a mock JSON-RPC server.
     /// Holds the mock server, finalized block, and other state for running the indexer in tests.
     struct RunFixture {
@@ -918,6 +1012,7 @@ mod tests {
         async fn spawn(processed: u64, finalized: u64) -> Self {
             let mut server = Server::new_async().await;
             let finalized = Arc::new(AtomicU64::new(finalized));
+            mock_chain_id(&mut server, SEPOLIA_CHAIN_ID).await;
 
             // Anchor sampling + finalized head polling.
             server
@@ -1001,6 +1096,43 @@ mod tests {
                 .expect("run task panicked")
                 .expect("run() should exit Ok on cancel");
         }
+    }
+
+    /// `TestIndexerBuilder` configures sepolia.
+    const SEPOLIA_CHAIN_ID: u64 = 11_155_111;
+
+    #[tokio::test]
+    async fn run_refuses_an_rpc_on_another_network() {
+        let mut server = Server::new_async().await;
+        let chain_id_mock = mock_chain_id(&mut server, 1).await;
+        let blocks_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getBlockByNumber"}),
+            ))
+            .expect(0)
+            .create_async()
+            .await;
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+
+        let (events_tx, _events_rx) = chain_event_channel();
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            indexer.run(events_tx, CancellationToken::new()),
+        )
+        .await
+        .expect("run() should fail without retrying")
+        .expect_err("another network's endpoint should be refused");
+
+        assert!(
+            err.to_string()
+                .contains("chain id 1, but network sepolia has chain id 11155111"),
+            "{err:#}"
+        );
+        chain_id_mock.assert_async().await;
+        blocks_mock.assert_async().await;
     }
 
     #[tokio::test]

@@ -100,7 +100,7 @@ async fn test_stream_handles_sign_and_respond() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, _rpc_rx) = test_rpc_channel(4);
 
     // Run the indexer
@@ -154,7 +154,7 @@ fn build_solana_to_ethereum_bidirectional_request(
     rlp_s.append(&0u64); // nonce
     rlp_s.append(&0u64); // gasPrice
     rlp_s.append(&0u64); // gasLimit
-    rlp_s.append(&Vec::<u8>::new()); // to
+    rlp_s.append(&vec![0x11u8; 20]); // to
     rlp_s.append(&0u64); // value
     rlp_s.append(&Vec::<u8>::new()); // data
     rlp_s.append(&1u64); // chain_id
@@ -216,7 +216,7 @@ async fn test_bidirectional_sign_request_enqueues_command() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
     run_supervised(
@@ -297,7 +297,7 @@ async fn test_respond_event_advances_to_pending_execution() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
     run_supervised(
@@ -543,7 +543,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
 
     let run_handle = tokio::spawn(async move {
         run_supervised(
@@ -611,7 +611,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     );
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
 
     let run_handle = tokio::spawn(async move {
         run_supervised(

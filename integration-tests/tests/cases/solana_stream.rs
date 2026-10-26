@@ -3,8 +3,8 @@ use cait_sith::protocol::Participant;
 use integration_tests::containers::Solana;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{
-    utils::test::ChainIndexerStream, ChainPublisher, NoopChainTelemetry, NoopPublisherTelemetry,
-    PublishAction, StateManager,
+    utils::{retry::SharedBackoff, test::ChainIndexerStream},
+    ChainPublisher, NoopChainTelemetry, NoopPublisherTelemetry, PublishAction, StateManager,
 };
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_node::backlog::mock::{mock_bidi_response_request, mock_signature_output, BacklogTestExt};
@@ -45,7 +45,7 @@ async fn solana_sandbox() -> Result<Solana> {
 fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
     let backlog = Backlog::new();
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     (backlog, mesh_rx, node_client)
 }
 
@@ -58,7 +58,7 @@ async fn run_solana_indexer_with_backlog(
     config: SolConfig,
     backlog: Backlog,
 ) -> Result<ChainIndexerStream> {
-    let indexer = SolanaIndexer::new(config, backlog, NoopChainTelemetry)
+    let indexer = SolanaIndexer::new(config, backlog, NoopChainTelemetry, SharedBackoff::new())
         .context("failed to create SolanaIndexer")?;
     ChainIndexerStream::start(indexer, Duration::from_secs(30)).await
 }
@@ -105,8 +105,13 @@ async fn spawn_supervised_stream(
     config: SolConfig,
     backlog: Backlog,
 ) -> Result<(tokio::task::JoinHandle<()>, mpsc::Receiver<SignCommand>)> {
-    let indexer = SolanaIndexer::new(config, backlog.clone(), NoopChainTelemetry)
-        .context("failed to create SolanaIndexer")?;
+    let indexer = SolanaIndexer::new(
+        config,
+        backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .context("failed to create SolanaIndexer")?;
 
     let (sign_tx, sign_rx) = mpsc::channel::<SignCommand>(16);
     let (rpc_tx, _rpc_rx) = mpsc::channel::<RpcAction>(16);
@@ -127,7 +132,7 @@ async fn spawn_supervised_stream(
         ParticipantInfo::new(0),
     );
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
 
     // We need to forget the tx handles because they are not used after this point
@@ -537,8 +542,13 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     ));
 
     let recovered_backlog = Backlog::persisted(storage);
-    let indexer = SolanaIndexer::new(config, recovered_backlog.clone(), NoopChainTelemetry)
-        .context("failed to create SolanaIndexer")?;
+    let indexer = SolanaIndexer::new(
+        config,
+        recovered_backlog.clone(),
+        NoopChainTelemetry,
+        SharedBackoff::new(),
+    )
+    .context("failed to create SolanaIndexer")?;
 
     let (sign_tx, mut sign_rx) = mpsc::channel::<SignCommand>(4);
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(4);
@@ -559,7 +569,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         ParticipantInfo::new(0),
     );
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
 
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(async move {

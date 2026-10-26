@@ -135,15 +135,14 @@ mod tests {
         assert_eq!(compute_request_id(&sample_record()).unwrap(), expected);
     }
 
-    // The SDK's RECORD_2_1_2 vector from tests/circuits.test.ts at
-    // @sig-net/midnight 0.24.0-rc.4. Every capacity is used, so every
-    // request-side domain tag enters a hash.
+    // The SDK's RECORD_2_1_2 vector from tests/circuits.test.ts. Every capacity
+    // is used, so every request-side domain tag enters a hash.
     #[test]
     fn request_id_and_transaction_digest_match_sdk_domain_vector() {
         let mut record = sample_record();
         record.sender = [0x01; 32];
         record.path = [0x03; 32];
-        record.execution_dest = [0x02; 32];
+        record.execution_dest = [0x02; 64];
         record.output_deserialization_schema = vec![0x07; 34];
         record.respond_serialization_schema = vec![0x08; 34];
         let tx = &mut record.tx_params;
@@ -168,7 +167,7 @@ mod tests {
         );
         assert_eq!(
             hex::encode(compute_request_id(&record).unwrap()),
-            "4c4e839b3257b4d73de4a362aabf435de1a4a137c0b220479d874c6b6b80fd00"
+            "2985be91d1a1191749abaee288eed371d19607e69cec0b43468cb750a9dc8d00"
         );
     }
 

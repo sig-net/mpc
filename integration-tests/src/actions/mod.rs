@@ -103,7 +103,7 @@ pub async fn validate_signature(
 ) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
-    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, account_id, "test");
+    let epsilon = derive_epsilon_near(LATEST_MPC_KEY_VERSION, account_id, "test")?;
     let user_pk = derive_key(mpc_pk, epsilon);
     signature
         .verify(
@@ -199,7 +199,7 @@ mod tests {
 
         let account_id = account_id.parse().unwrap();
         let derivation_epsilon: k256::Scalar =
-            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
+            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test").unwrap();
         let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
         let user_address_from_pk =
             public_key_to_address(user_pk.to_encoded_point(false).as_bytes());
