@@ -10,6 +10,7 @@ alloy.workspace = true
 anyhow.workspace = true
 bs58 = "0.5.1"
 hex.workspace = true
+mpc-primitives.workspace = true
 prost = "0.14.4"
 thiserror.workspace = true
 prost-types = "0.14.4"

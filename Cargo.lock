@@ -7824,6 +7824,7 @@ dependencies = [
  "bs58 0.5.1",
  "hex",
  "k256",
+ "mpc-primitives",
  "prost 0.14.4",
  "prost-types",
  "serde_json",

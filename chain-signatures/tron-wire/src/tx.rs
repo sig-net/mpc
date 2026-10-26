@@ -1,9 +1,9 @@
-//! Transaction validation and signing — the protobuf-binary path: uses
-//! `pb::*` types only, no hand-rolled binary structs.
+//! Transaction validation, assembly, and signing — the protobuf-binary
+//! path: uses `pb::*` types only, no hand-rolled binary structs.
 //!
 //! The bytes the multichain API carries are the bare `raw` message;
-//! nodes assemble them from structured request parameters (§7.4 of
-//! `doc/bidirectional-calls.md`), so this crate ships no assembler.
+//! [`to_unsigned_tron_tx`] assembles them from a tron record's structured
+//! request parameters (§7.4 of `doc/bidirectional-calls.md`).
 //! Derivations are pinned by recorded mainnet fixtures (`tests/fixtures`):
 //! txID = sha256(raw_data), ref-block fields, and the 65-byte
 //! `[r ‖ s ‖ v]` signature with v ∈ {0,1}.
@@ -12,7 +12,10 @@ use crate::pb::{
     Contract, ContractType, Message, RawTransaction, Transaction, TriggerSmartContract,
     TRIGGER_SMART_CONTRACT_TYPE_URL,
 };
+use crate::TronAddress;
 use anyhow::Context as _;
+use mpc_primitives::{CompactMaybe, EvmCalldata, TronTxParams};
+use prost_types::Any;
 use sha2::{Digest, Sha256};
 
 impl RawTransaction {
@@ -109,5 +112,145 @@ impl Contract {
             );
         }
         Ok(())
+    }
+}
+
+/// Assembles the canonical `raw` bytes a tron record names (§7.4): contract
+/// type fixed to `TriggerSmartContract`, `owner_address` from the derived
+/// key, every other field from `params`. Re-validated through
+/// [`RawTransaction::parse`], so the txID names exactly what is returned.
+/// Byte-exact assembly is pinned by the golden fixtures; the
+/// unrepresentable-param branches are unit-tested below.
+pub fn to_unsigned_tron_tx(params: &TronTxParams, owner: TronAddress) -> anyhow::Result<Vec<u8>> {
+    let trigger = TriggerSmartContract {
+        owner_address: owner.as_bytes().to_vec(),
+        contract_address: params.contract_address.to_vec(),
+        call_value: i64_field(params.call_value, "call_value")?,
+        data: calldata_bytes(&params.calldata)?,
+        call_token_value: 0,
+        token_id: 0,
+    };
+    let raw = RawTransaction {
+        ref_block_bytes: params.ref_block_bytes.to_vec(),
+        ref_block_num: 0,
+        ref_block_hash: params.ref_block_hash.to_vec(),
+        expiration: i64_field(params.expiration, "expiration")?,
+        timestamp: i64_field(params.timestamp, "timestamp")?,
+        fee_limit: i64_field(params.fee_limit, "fee_limit")?,
+        contract: vec![Contract {
+            r#type: ContractType::TriggerSmartContract as i32,
+            parameter: Some(Any {
+                type_url: TRIGGER_SMART_CONTRACT_TYPE_URL.to_string(),
+                value: trigger.encode_to_vec(),
+            }),
+            permission_id: 0,
+        }],
+    };
+    let bytes = raw.encode_to_vec();
+    RawTransaction::parse(&bytes).context("assembled raw is not signable")?;
+    Ok(bytes)
+}
+
+/// `data = selector ‖ words[..no_words]` when present, empty otherwise.
+fn calldata_bytes(calldata: &CompactMaybe<EvmCalldata>) -> anyhow::Result<Vec<u8>> {
+    if !calldata.is_some {
+        return Ok(Vec::new());
+    }
+    let value = &calldata.value;
+    let no_words = usize::from(value.no_words);
+    anyhow::ensure!(
+        no_words <= value.words.len(),
+        "calldata no_words {no_words} overruns the record's {} stored word slots",
+        value.words.len()
+    );
+    let mut data = Vec::with_capacity(4 + 32 * no_words);
+    data.extend_from_slice(&value.selector);
+    for word in &value.words[..no_words] {
+        data.extend_from_slice(word);
+    }
+    Ok(data)
+}
+
+fn i64_field(value: u64, field: &str) -> anyhow::Result<i64> {
+    i64::try_from(value)
+        .map_err(|_| anyhow::anyhow!("{field} {value} exceeds the int64 wire field"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::Address;
+
+    fn params() -> TronTxParams {
+        TronTxParams {
+            ref_block_bytes: [0x27, 0x10],
+            ref_block_hash: [0x42; 8],
+            timestamp: 1_728_000_000_000,
+            expiration: 1_728_000_060_000,
+            fee_limit: 50_000_000,
+            contract_address: {
+                let mut address = [0xcd; 21];
+                address[0] = 0x41;
+                address
+            },
+            call_value: 0,
+            calldata: CompactMaybe {
+                is_some: false,
+                value: EvmCalldata {
+                    selector: [0; 4],
+                    no_words: 0,
+                    words: Vec::new(),
+                },
+            },
+        }
+    }
+
+    fn owner() -> TronAddress {
+        TronAddress::from_evm(Address::from_slice(&[0xab; 20]))
+    }
+
+    fn trigger_of(bytes: &[u8]) -> TriggerSmartContract {
+        let raw = RawTransaction::parse(bytes).unwrap();
+        let any = raw.contract[0].parameter.as_ref().unwrap();
+        TriggerSmartContract::decode(any.value.as_slice()).unwrap()
+    }
+
+    #[test]
+    fn absent_calldata_assembles_a_plain_transfer() {
+        let mut params = params();
+        params.call_value = 1_000_000;
+        let trigger = trigger_of(&to_unsigned_tron_tx(&params, owner()).unwrap());
+        assert!(trigger.data.is_empty());
+        assert_eq!(trigger.call_value, 1_000_000);
+        assert_eq!(
+            trigger.owner_address.as_slice(),
+            owner().as_bytes().as_slice()
+        );
+    }
+
+    #[test]
+    fn assembly_rejects_unrepresentable_params() {
+        let mut with_words = params();
+        with_words.calldata.is_some = true;
+        with_words.calldata.value.words = vec![[0x11; 32]; 2];
+        let cases: &[(&str, fn(&mut TronTxParams))] = &[
+            ("calldata no_words", |p| {
+                p.calldata.value.no_words = 3;
+            }),
+            ("exceeds the int64 wire field", |p| {
+                p.expiration = u64::MAX;
+            }),
+            ("missing expiration", |p| {
+                p.expiration = 0;
+            }),
+        ];
+        for (expected, mutate) in cases {
+            let mut params = with_words.clone();
+            mutate(&mut params);
+            let err = to_unsigned_tron_tx(&params, owner())
+                .expect_err("unrepresentable params must not assemble");
+            let err = format!("{err:#}");
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
     }
 }
