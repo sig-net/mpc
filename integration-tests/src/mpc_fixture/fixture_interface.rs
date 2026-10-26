@@ -15,8 +15,9 @@ use mpc_node::protocol::contract::primitives::ParticipantInfo;
 use mpc_node::protocol::message::{MessageError, SignedMessage};
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
-use mpc_node::protocol::sync::{open_reply_for_test, SyncChannel, SyncError, SyncUpdate};
+use mpc_node::protocol::sync::{open_reply_for_test, process_sync_update, SyncError, SyncUpdate};
 use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
+use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_node::types::SignCommand;
 use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest};
@@ -53,7 +54,7 @@ pub struct MpcFixtureNode {
     pub presignature_storage: PresignatureStorage,
     pub backlog: Backlog,
 
-    pub sync_channel: mpc_node::protocol::sync::SyncChannel,
+    pub contract: ContractStateWatcher,
     pub web_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -418,7 +419,7 @@ impl MpcFixtureNode {
         let reply = self
             .try_sync(from.me, &network.sign_sk, &update)
             .await
-            .expect("sync_channel request_update failed");
+            .expect("sync request failed");
         self.open_reply(&reply, &network.cipher_sk)
             .expect("failed to open sync reply")
     }
@@ -445,10 +446,20 @@ impl MpcFixtureNode {
         sign_sk: &near_crypto::SecretKey,
         update: &SyncUpdate,
     ) -> Result<Ciphered, SyncError> {
-        let cipher_pk = self.config.borrow().local.network.cipher_sk.public_key();
+        let network = self.config.borrow().local.network.clone();
+        let cipher_pk = network.cipher_sk.public_key();
         let encrypted = SignedMessage::encrypt(update, claimed, sign_sk, &cipher_pk)
             .expect("failed to encrypt sync update");
-        self.sync_channel.request_update(encrypted).await
+        let participants = self.contract.participant_map().await;
+        process_sync_update(
+            &encrypted,
+            &self.triple_storage,
+            &self.presignature_storage,
+            self.me,
+            &network,
+            &participants,
+        )
+        .await
     }
 
     /// Get the list of triple IDs this node owns in storage (sorted).
@@ -509,7 +520,8 @@ impl MpcFixtureNode {
             self.state.clone(),
             self.triple_storage.clone(),
             self.presignature_storage.clone(),
-            SyncChannel::new().1,
+            self.contract.clone(),
+            self.config.borrow().local.network.clone(),
             account_id,
             self.backlog.clone(),
         );

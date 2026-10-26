@@ -283,6 +283,7 @@ pub async fn emit_events(
                 };
                 ChainEvent::RespondBidirectional(mpc_primitives::RespondBidirectionalEvent {
                     attestation: None,
+                    output: Some(ev.serialized_output),
                     request_id: ev.request_id,
                     signature,
                     chain: Chain::Solana,

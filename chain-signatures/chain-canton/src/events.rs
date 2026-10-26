@@ -105,10 +105,17 @@ pub async fn process_canton_event(
                             return;
                         }
                     };
+                    let Ok(output) = hex::decode(&payload.serialized_output) else {
+                        tracing::warn!(
+                            "invalid serialized_output hex in canton RespondBidirectionalEvent"
+                        );
+                        return;
+                    };
                     if events_tx
                         .send(ChainEvent::RespondBidirectional(
                             RespondBidirectionalEvent {
                                 attestation: None,
+                                output: Some(output),
                                 request_id,
                                 signature,
                                 chain: Chain::Canton,
@@ -363,6 +370,47 @@ mod tests {
             hex::decode(&payload.serialized_output).unwrap(),
             vec![8u8, 9u8]
         );
+    }
+
+    /// Every node must act on the same output, so an event whose output does not decode is dropped.
+    #[tokio::test]
+    async fn process_canton_event_drops_respond_bidirectional_with_invalid_output() {
+        for (serialized_output, expected) in [
+            (hex::encode([8u8, 9u8]), Some(Some(vec![8u8, 9u8]))),
+            ("not hex".to_string(), None),
+        ] {
+            let created = ledger_api::CreatedEvent {
+                contract_id: "cid-respond-bidir".to_string(),
+                template_id: ledger_api::templates::RESPOND_BIDIRECTIONAL_EVENT.to_string(),
+                payload: json!({
+                    "requestId": hex::encode([5u8; 32]),
+                    "responder": "alice",
+                    "serializedOutput": serialized_output,
+                    "signature": sample_canton_signature(),
+                }),
+                created_event_blob: None,
+                signatories: Vec::new(),
+                witness_parties: Vec::new(),
+                node_id: None,
+                package_name: None,
+            };
+            let (events_tx, mut events_rx) = chain_event_channel();
+
+            process_canton_event(
+                &ledger_api::Event::CreatedEvent(created),
+                &[],
+                &events_tx,
+                "signer-contract",
+            )
+            .await;
+
+            let output = match events_rx.try_recv() {
+                Ok(ChainEvent::RespondBidirectional(event)) => Some(event.output),
+                Ok(other) => panic!("expected a RespondBidirectional event, got {other:?}"),
+                Err(_) => None,
+            };
+            assert_eq!(output, expected);
+        }
     }
 
     #[tokio::test]
