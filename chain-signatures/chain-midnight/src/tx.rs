@@ -1,11 +1,8 @@
-//! EVM type-2 transaction assembly and the signing payload scalar.
+//! EVM type-2 transaction assembly for an evmType2 record.
 
 use alloy::consensus::{SignableTransaction as _, TxEip1559};
 use alloy::eips::eip2930::{AccessList, AccessListItem};
 use alloy::primitives::{Address, Bytes, TxKind, B256, U256};
-use k256::Scalar;
-use mpc_chain_integration_core::utils::hashing::hash_payload;
-use mpc_primitives::ScalarExt as _;
 
 use crate::records::SignBidirectionalRecord;
 use mpc_primitives::{CompactMaybe, EvmCalldata, EvmType2TxParams, TxParams};
@@ -36,20 +33,9 @@ pub fn to_unsigned_tx(record: &SignBidirectionalRecord) -> anyhow::Result<TxEip1
 }
 
 /// The RLP-encoded unsigned signing payload (`0x02 ‖ rlp(fields)`): what
-/// `SignBidirectionalEvent.serialized_transaction` carries, and the bytes the payload
-/// scalar is hashed from.
+/// `SignBidirectionalEvent.serialized_transaction` carries.
 pub fn serialized_transaction(record: &SignBidirectionalRecord) -> anyhow::Result<Vec<u8>> {
     Ok(to_unsigned_tx(record)?.encoded_for_signing())
-}
-
-/// The scalar the MPC signs: `keccak256(serialized)` as a field element, bailing when
-/// the hash falls outside the curve order, as Canton does.
-pub fn payload_scalar(serialized: &[u8]) -> anyhow::Result<Scalar> {
-    let unsigned_tx_hash = hash_payload(serialized);
-    let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
-        anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
-    };
-    Ok(payload)
 }
 
 /// `data = selector || words[..no_words]` when present, empty otherwise.

@@ -7559,6 +7559,7 @@ dependencies = [
  "mpc-compact-hashing",
  "mpc-crypto",
  "mpc-primitives",
+ "mpc-tron-wire",
  "mpc-utils",
  "serde",
  "serde_json",
