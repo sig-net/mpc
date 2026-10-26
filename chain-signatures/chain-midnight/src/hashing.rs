@@ -168,6 +168,7 @@ mod tests {
         sample_evm_params, sample_record, sample_record_with_partial_access_list,
         sample_tron_params, tron_record,
     };
+    use crate::tx::serialized_evm_tx;
 
     #[test]
     fn request_id_matches_compact_golden() {
@@ -318,17 +319,14 @@ mod tests {
             .access_list
             .push(record.evm().access_list[0].clone());
         let original = compute_request_id(&record).unwrap();
-        let transaction = crate::tx::serialized_transaction(&record).unwrap();
+        let transaction = serialized_evm_tx(&record).unwrap();
         for (index, changed) in changes.iter().enumerate() {
             assert_eq!(
                 compute_request_id(changed).unwrap(),
                 original,
                 "case {index}"
             );
-            assert_eq!(
-                crate::tx::serialized_transaction(changed).unwrap(),
-                transaction
-            );
+            assert_eq!(serialized_evm_tx(changed).unwrap(), transaction);
         }
         let mut compact = record.clone();
         {
@@ -338,14 +336,11 @@ mod tests {
             tx.access_list[0].storage_keys.truncate(1);
         }
         assert_eq!(compute_request_id(&compact).unwrap(), original);
-        assert_eq!(
-            crate::tx::serialized_transaction(&compact).unwrap(),
-            transaction
-        );
+        assert_eq!(serialized_evm_tx(&compact).unwrap(), transaction);
 
         record.evm_mut().calldata.is_some = false;
         let original = compute_request_id(&record).unwrap();
-        let transaction = crate::tx::serialized_transaction(&record).unwrap();
+        let transaction = serialized_evm_tx(&record).unwrap();
         {
             let tx = record.evm_mut();
             tx.calldata.value.selector = [0xff; 4];
@@ -353,10 +348,7 @@ mod tests {
             tx.calldata.value.words.clear();
         }
         assert_eq!(compute_request_id(&record).unwrap(), original);
-        assert_eq!(
-            crate::tx::serialized_transaction(&record).unwrap(),
-            transaction
-        );
+        assert_eq!(serialized_evm_tx(&record).unwrap(), transaction);
     }
 
     #[test]

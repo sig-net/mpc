@@ -5,7 +5,10 @@ use alloy::eips::eip2930::{AccessList, AccessListItem};
 use alloy::primitives::{Address, Bytes, TxKind, B256, U256};
 
 use crate::records::SignBidirectionalRecord;
-use mpc_primitives::{CompactMaybe, EvmCalldata, EvmType2TxParams, TxParams};
+use k256::Scalar;
+use mpc_chain_integration_core::utils::payload::derive_user_address;
+use mpc_primitives::{Chain, CompactMaybe, EvmCalldata, EvmType2TxParams, TxParams};
+use mpc_tron_wire::{to_unsigned_tron_tx, TronAddress};
 
 fn to_eip1559(params: &EvmType2TxParams) -> anyhow::Result<TxEip1559> {
     Ok(TxEip1559 {
@@ -32,10 +35,27 @@ pub fn to_unsigned_tx(record: &SignBidirectionalRecord) -> anyhow::Result<TxEip1
     }
 }
 
-/// The RLP-encoded unsigned signing payload (`0x02 ‖ rlp(fields)`): what
-/// `SignBidirectionalEvent.serialized_transaction` carries.
-pub fn serialized_transaction(record: &SignBidirectionalRecord) -> anyhow::Result<Vec<u8>> {
+/// The RLP-encoded unsigned signing payload (`0x02 ‖ rlp(fields)`) of an
+/// evmType2 record.
+pub fn serialized_evm_tx(record: &SignBidirectionalRecord) -> anyhow::Result<Vec<u8>> {
     Ok(to_unsigned_tx(record)?.encoded_for_signing())
+}
+
+/// Serializes the transaction described by the record, dispatching on the record's params:
+/// - evmType2 assembles EIP-1559 RLP for signing.
+/// - tron assembles the protobuf raw with `owner_address` derived from the request's key (§7.4).
+pub fn serialized_transaction(
+    record: &SignBidirectionalRecord,
+    root_pk: mpc_primitives::PublicKey,
+    epsilon: Scalar,
+) -> anyhow::Result<(Vec<u8>, Chain)> {
+    match &record.tx_params {
+        TxParams::EvmType2(_) => Ok((serialized_evm_tx(record)?, Chain::Ethereum)),
+        TxParams::Tron(params) => {
+            let owner = TronAddress::from_evm(derive_user_address(root_pk, epsilon));
+            Ok((to_unsigned_tron_tx(params, owner)?, Chain::Tron))
+        }
+    }
 }
 
 /// `data = selector || words[..no_words]` when present, empty otherwise.
@@ -100,7 +120,7 @@ mod tests {
         let mut record = sample_record_with_partial_access_list();
 
         record.evm_mut().calldata.value.no_words = 3; // capacity is 2
-        let err = serialized_transaction(&record)
+        let err = serialized_evm_tx(&record)
             .expect_err("a word count past capacity must error, matching the reference throw")
             .to_string();
         assert!(err.contains("no_words"), "err: {err}");

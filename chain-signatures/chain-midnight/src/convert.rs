@@ -6,14 +6,10 @@
 //! would let a caller sign under another contract's key. The two are asserted
 //! equal.
 
-use mpc_chain_integration_core::utils::hashing::hash_payload;
-use mpc_chain_integration_core::utils::payload::{
-    bidirectional_payload_scalar, derive_user_address,
+use mpc_chain_integration_core::utils::{
+    hashing::hash_payload, payload::bidirectional_payload_scalar,
 };
-use mpc_primitives::{
-    Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, TxParams,
-};
-use mpc_tron_wire::{to_unsigned_tron_tx, TronAddress};
+use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId};
 
 use crate::records::SignBidirectionalRecord;
 use crate::tx::serialized_transaction;
@@ -75,15 +71,7 @@ pub fn generate_sign_request(
     let requester = hex::encode(read_address);
     let epsilon = mpc_crypto::kdf::derive_epsilon_midnight(key_version, &requester, &path)?;
 
-    let (serialized, target) = match &record.tx_params {
-        // Only via the gated path: `serialized_transaction` routes through
-        // `to_unsigned_tx` and inherits its gates.
-        TxParams::EvmType2(_) => (serialized_transaction(record)?, Chain::Ethereum),
-        TxParams::Tron(params) => {
-            let owner = TronAddress::from_evm(derive_user_address(root_pk, epsilon));
-            (to_unsigned_tron_tx(params, owner)?, Chain::Tron)
-        }
-    };
+    let (serialized, target) = serialized_transaction(record, root_pk, epsilon)?;
     let payload = bidirectional_payload_scalar(target, &serialized)?;
 
     let entropy = hash_payload(&request_id);
@@ -147,7 +135,9 @@ mod tests {
     use super::*;
     use crate::records::SignBidirectionalRecord;
     use crate::test_utils::{ascii_padded, sample_tron_record, test_root_pk};
+    use mpc_chain_integration_core::utils::payload::derive_user_address;
     use mpc_primitives::{Chain, SignKind};
+    use mpc_tron_wire::TronAddress;
 
     const READ_ADDRESS: [u8; 32] = [0xab; 32];
     const REQUEST_ID: [u8; 32] = [0x77; 32];
@@ -201,7 +191,7 @@ mod tests {
 
         assert_eq!(
             event.serialized_transaction,
-            crate::tx::serialized_transaction(&record).expect("assembles"),
+            crate::tx::serialized_evm_tx(&record).expect("assembles"),
             "the event carries the record's own unsigned transaction bytes"
         );
         assert_eq!(event.caip2_id, "eip155:31337");
