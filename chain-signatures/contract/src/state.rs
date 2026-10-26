@@ -74,7 +74,7 @@ pub struct RunningContractStateView {
     pub participants: Participants,
     pub threshold: usize,
     pub public_key: PublicKey,
-    /// TODO: Remove in a version or two once all nodes and clients have upgraded.
+    // TODO: Remove in a version or two once all nodes and clients have upgraded. (1.21.0+)
     #[serde(default)]
     pub leave_votes: Votes,
     pub threshold_votes: ThresholdVotes,
