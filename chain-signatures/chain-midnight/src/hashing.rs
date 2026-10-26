@@ -282,6 +282,16 @@ mod tests {
     }
 
     #[test]
+    fn tron_request_identity_rejects_used_counts_beyond_capacity() {
+        let mut params = sample_tron_params();
+        params.calldata.value.no_words = 2; // capacity is 1
+        let err = compute_request_id(&tron_record(params))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("calldata no_words"), "{err}");
+    }
+
+    #[test]
     fn tron_request_identity_binds_every_header_field_and_word() {
         let base = sample_tron_params();
         let original = compute_request_id(&tron_record(base.clone())).unwrap();
