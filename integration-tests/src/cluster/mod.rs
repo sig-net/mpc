@@ -278,26 +278,36 @@ impl Cluster {
         Ok(config)
     }
 
-    /// Kicks multiple nodes out of the network in a single batch resharing vote.
-    pub async fn kick_participants(&self, kicks: &[AccountId]) -> anyhow::Result<()> {
+    /// Reshares the network by voting to join new candidates and/or kick existing participants in a single batch.
+    pub async fn reshare_participants(
+        &self,
+        joins: &[&AccountId],
+        kicks: &[&AccountId],
+    ) -> anyhow::Result<()> {
         let state = self.expect_running().await?;
         let participant_accounts = self.participant_accounts().await?;
-        let kick_set: std::collections::HashSet<_> = kicks.iter().collect();
+        let kick_set: std::collections::HashSet<_> = kicks.iter().copied().collect();
         let voting_accounts: Vec<&Account> = participant_accounts
             .into_iter()
             .filter(|account| !kick_set.contains(account.id()))
             .take(state.threshold)
             .collect();
 
-        let kick_refs: Vec<&AccountId> = kicks.iter().collect();
         tracing::info!(
             ?voting_accounts,
+            ?joins,
             ?kicks,
             at_epoch = state.epoch,
-            "batch kicking participants"
+            "batch resharing participants"
         );
-        vote_reshare(&voting_accounts, self.contract().id(), &[], &kick_refs).await?;
+        vote_reshare(&voting_accounts, self.contract().id(), joins, kicks).await?;
         Ok(())
+    }
+
+    /// Kicks multiple nodes out of the network in a single batch resharing vote.
+    pub async fn kick_participants(&self, kicks: &[AccountId]) -> anyhow::Result<()> {
+        let kick_refs: Vec<&AccountId> = kicks.iter().collect();
+        self.reshare_participants(&[], &kick_refs).await
     }
 
     pub async fn propose_update(&self, args: ProposeUpdateArgs) -> mpc_contract::update::UpdateId {

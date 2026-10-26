@@ -1366,3 +1366,89 @@ async fn test_vote_reshare_rejects_surviving_cohort_below_threshold() -> anyhow:
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_remove_candidacy_clears_ballots_with_kicks() -> anyhow::Result<()> {
+    // 3 participants, threshold 2
+    let (worker, contract, accounts, _) = init_env().await;
+
+    let alice = worker.dev_create_account().await?;
+    assert!(join(&alice, &contract).await?.is_success());
+
+    let kick = accounts[1].id();
+
+    // Voter 0 votes for mixed ballot: join alice and kick accounts[1]
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [alice.id()],
+            "kicks": [kick],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Voter 2 votes for a pure kick ballot: kick accounts[1]
+    let execution = accounts[2]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [],
+            "kicks": [kick],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Verify both ballots are tracked in reshare_votes
+    let state: mpc_contract::ProtocolContractStateView = contract.view("state").await?.json()?;
+    let running = match state {
+        mpc_contract::ProtocolContractStateView::Running(r) => r,
+        other => panic!("expected running state, got {}", other.name()),
+    };
+    assert_eq!(running.reshare_votes.votes.len(), 2);
+    assert!(running.reshare_votes.votes.contains_key(accounts[0].id()));
+    assert!(running.reshare_votes.votes.contains_key(accounts[2].id()));
+
+    // Alice revokes her candidacy
+    let execution = alice
+        .call(contract.id(), "remove_candidacy")
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Verify:
+    // 1. Voter 0's ballot (which had alice in joins + a kick) is cleared
+    // 2. Voter 2's ballot (pure kick without alice) is preserved
+    let state: mpc_contract::ProtocolContractStateView = contract.view("state").await?.json()?;
+    let running = match state {
+        mpc_contract::ProtocolContractStateView::Running(r) => r,
+        other => panic!("expected running state, got {}", other.name()),
+    };
+    assert_eq!(running.reshare_votes.votes.len(), 1);
+    assert!(
+        !running.reshare_votes.votes.contains_key(accounts[0].id()),
+        "voter 0's ballot containing alice in joins must be cleared"
+    );
+    assert!(
+        running.reshare_votes.votes.contains_key(accounts[2].id()),
+        "voter 2's pure kick ballot must be preserved"
+    );
+
+    // Voter 0 can now submit a new pure kick ballot, reaching threshold
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [],
+            "kicks": [kick],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let vote_pass: bool = execution.json()?;
+    assert!(
+        vote_pass,
+        "reshare should trigger once voter 0 and voter 2 agree on kicking accounts[1]"
+    );
+
+    Ok(())
+}

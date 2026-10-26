@@ -474,6 +474,69 @@ async fn test_resharing_possible_with_multiple_kicked_nodes_offline() -> anyhow:
     Ok(())
 }
 
+#[test(tokio::test)]
+async fn test_resharing_batch_join_and_kick() -> anyhow::Result<()> {
+    set_resharing_running_timeout(Duration::from_secs(20));
+
+    // Spawn 3-node cluster with threshold 2.
+    let mut nodes = cluster::spawn()
+        .nodes(3)
+        .threshold(2)
+        .disable_prestockpile()
+        .await?;
+    nodes.wait().signable().await?;
+    let initial_state = nodes.expect_running().await?;
+    assert_eq!(initial_state.participants.len(), 3);
+    assert_eq!(initial_state.threshold, 2);
+
+    // Start a new node that registers as a candidate in the contract
+    let join_account = nodes.start(None).await?;
+    let kick_account = nodes.account_id(0).clone();
+
+    tracing::info!(
+        join = %join_account.id(),
+        kick = %kick_account,
+        "simultaneous join and kick batch reshare"
+    );
+
+    // Vote for batch reshare with 1 join and 1 kick
+    nodes
+        .reshare_participants(&[join_account.id()], &[&kick_account])
+        .await?;
+
+    // Wait for cluster to reach Running state on the next epoch
+    let final_state = nodes
+        .wait()
+        .running_on_epoch(initial_state.epoch + 1)
+        .candidate_missing(join_account.id())
+        .participant_present(join_account.id())
+        .participant_missing(&kick_account)
+        .await?;
+
+    assert_eq!(
+        final_state.participants.len(),
+        3,
+        "total participant count should remain 3 (1 joined, 1 kicked)"
+    );
+    assert_eq!(final_state.threshold, 2, "threshold should remain 2");
+    assert_eq!(
+        initial_state.public_key, final_state.public_key,
+        "public key must stay the same after resharing"
+    );
+    assert!(final_state.participants.contains_key(join_account.id()));
+    assert!(!final_state.participants.contains_key(&kick_account));
+
+    // Stop the kicked node and ensure remaining nodes are running
+    let _ = nodes.stop(&kick_account).await?;
+    nodes.wait().nodes_running().await?;
+
+    // Sign to ensure the new 3-node cohort is fully functional
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
 async fn wait_for_resharing_phase(
     nodes: &cluster::Cluster,
     account_id: &near_workspaces::AccountId,
