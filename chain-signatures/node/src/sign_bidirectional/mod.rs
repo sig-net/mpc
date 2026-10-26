@@ -364,7 +364,11 @@ mod tests {
         for (case, edit, accepted) in cases {
             let mut event = solana_event(Chain::Ethereum);
             edit(&mut event);
-            assert_eq!(super::check_request_fields(&event).is_ok(), accepted, "{case}");
+            assert_eq!(
+                super::check_request_fields(&event).is_ok(),
+                accepted,
+                "{case}"
+            );
         }
     }
 
