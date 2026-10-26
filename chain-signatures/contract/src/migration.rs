@@ -1,3 +1,21 @@
+//! Contract state migration across deployed environments.
+//!
+//! We maintain the three previous network state definitions — [`PreviousDevnet`],
+//! [`PreviousTestnet`], and [`PreviousMainnet`] — so future migrations can be
+//! performed more easily.
+//!
+//! `Previous*` simply refers to the version currently deployed to each respective
+//! network (`dev.sig-net.testnet`, `v1.sig-net.testnet`, and `v1.sig-net.near`).
+//! Any breaking serialization changes align with `tests/network_migration.rs`, which
+//! pulls actual live data from each network and validates migrations so that they
+//! always pass in CI even if earlier breaking changes were introduced.
+//!
+//! Do not change the [`migrate`] function directly; instead, modify each of the individual
+//! `Previous*` structs and their `.upgrade()` methods to reflect the actual deployed schemas.
+//!
+//! This module allows us to keep track of rolling updates to the underlying contract
+//! state as deployments progress.
+
 use crate::config::Config;
 use crate::errors::{Error, InvalidState};
 use crate::primitives::{
@@ -126,6 +144,11 @@ impl PreviousMainnet {
     }
 }
 
+/// Deserializes and upgrades contract state from raw Borsh bytes.
+///
+/// NOTE: Do not change this function directly. Instead, modify each of the individual
+/// `Previous*` structs ([`PreviousDevnet`], [`PreviousTestnet`], [`PreviousMainnet`])
+/// and their `.upgrade()` methods to reflect the deployed state of each network.
 pub(crate) fn migrate(state_bytes: &[u8]) -> Result<MpcContract, Error> {
     if let Ok(current) = MpcContract::try_from_slice(state_bytes) {
         if borsh::to_vec(&current).is_ok_and(|bytes| bytes == state_bytes) {
