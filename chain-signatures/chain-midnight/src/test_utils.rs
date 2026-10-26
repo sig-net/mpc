@@ -79,7 +79,6 @@ pub(crate) fn bidirectional_response_payload(
 /// The `[1; 32]` test secret's public key — the same root key the node
 /// test suites use.
 pub(crate) fn test_root_pk() -> mpc_primitives::PublicKey {
-    use k256::elliptic_curve::PublicKey as _;
     k256::SecretKey::from_slice(&[1; 32])
         .unwrap()
         .public_key()

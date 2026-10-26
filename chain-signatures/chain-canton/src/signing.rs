@@ -6,8 +6,7 @@ use alloy::eips::eip2930::{AccessList, AccessListItem};
 use alloy::primitives::{keccak256, Address, Bytes, TxKind, B256, U256};
 use alloy::sol_types::SolValue;
 use borsh::{BorshDeserialize, BorshSerialize};
-use k256::Scalar;
-use mpc_chain_integration_core::utils::hashing::hash_payload;
+use mpc_chain_integration_core::utils::payload::bidirectional_payload_scalar;
 use mpc_crypto::x_coordinate;
 use mpc_primitives::{
     Chain, IndexedSignRequest, ScalarExt, SignArgs, SignBidirectionalEvent, SignId, Signature,
@@ -108,11 +107,8 @@ impl CantonSignBidirectionalRequestedEvent {
             &self.path,
         )?;
 
-        let unsigned_tx_hash = hash_payload(&self.serialized_transaction);
-
-        let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
-            anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
-        };
+        let target = Chain::from_caip2_chain_id(&self.caip2_id)?;
+        let payload = bidirectional_payload_scalar(target, &self.serialized_transaction)?;
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "canton signature requested");
