@@ -127,12 +127,12 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             "unsupported target chain {target}"
         );
         self.epsilon().context("cannot derive epsilon")?;
-        // TODO(tron): once the record carries structured params, admission
-        // must enforce §4.3's expiration bound (future, ≤ 24 h past the
-        // request's Midnight timestamp); raw bytes carry no request timestamp
-        // to check against. Owner binding (`owned_by_requester`) and duplicate
-        // destination-id rejection already run at ingestion; the expiry→Unviable
-        // scan must cover backlog entries, not just watchers.
+        // TODO(tron): enforce §4.3's bound t_src < expiration ≤ t_src +
+        // 24 h. The raw bytes carry `expiration`; the missing pipe is the
+        // source time (event has none, Midnight reports block_timestamp:
+        // None) — thread indexed_ts into validate or expose block time.
+        // The expiry→Unviable scan must cover backlog entries, not just
+        // watchers.
         let calldata = validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         match calldata {
