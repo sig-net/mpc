@@ -168,8 +168,7 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         })?;
         let epsilon = self.epsilon()?;
         let from_address = derive_user_address(root_pk, epsilon);
-        // TODO(tron): `from_address` is EVM-shaped; Tron consumers need the
-        // derived key's Tron address (same EVM math, 0x41-prefixed form).
+        // EVM-shaped; Tron consumers wrap it with `TronAddress::from_evm`.
         let (signed_tx_hash, nonce) =
             sign_and_hash_transaction(target_chain, &self.serialized_transaction, mpc_sig)?;
 
