@@ -5,8 +5,10 @@ use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::posit::{PositInternalAction, PositRejectReason};
+use crate::protocol::should_generate;
 use crate::protocol::MpcSignProtocol;
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
+use crate::storage::protocol_storage::StockCounts;
 use crate::storage::triple_storage::{TriplesReserved, TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
@@ -308,6 +310,8 @@ pub struct PresignatureSpawner {
     /// Ongoing presignature generation protocols.
     ongoing: JoinMap<PresignatureId, ()>,
     ongoing_owned: HashSet<PresignatureId>,
+    /// Stock counts refreshed on the expiration tick; see [`StockCounts`].
+    stock: StockCounts,
     /// The protocol posits that are currently in progress. The proposer side
     /// holds a reservation on the triple pair: the pair stays in storage until
     /// the posit round succeeds and generation starts, so a failed round does
@@ -349,6 +353,7 @@ impl PresignatureSpawner {
             presignatures: presignatures.clone(),
             ongoing: JoinMap::new(),
             ongoing_owned: HashSet::new(),
+            stock: StockCounts::default(),
             posits: Posits::new(me),
             me,
             threshold,
@@ -393,6 +398,12 @@ impl PresignatureSpawner {
 
     pub fn len_introduced(&self) -> usize {
         self.posits.len_proposed() + self.ongoing_owned.len()
+    }
+
+    /// Read the stock counts from storage. Called once a second from the run
+    /// loop, so the 100 ms stockpile tick decides from memory.
+    async fn refresh_stock(&mut self) {
+        self.stock = self.presignatures.stock_counts(self.me).await;
     }
 
     /// Returns the number of unspent presignatures we will have in the manager once
@@ -541,19 +552,15 @@ impl PresignatureSpawner {
     /// (`min_presignatures`) and the network-wide total hasn't reached the cap
     /// (`max_presignatures`).
     async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
-        let not_enough_presignatures = {
-            // Network-wide cap: stop generating once total potential presignatures reach max.
-            if self.len_potential().await >= cfg.presignature.max_presignatures as usize {
-                false
-            } else {
-                // Per-node floor: generate if this node owns fewer than min_presignatures.
-                self.len_mine().await < cfg.presignature.min_presignatures as usize
-                    && self.len_introduced() < cfg.max_concurrent_introduction as usize
-                    && self.ongoing.len() < cfg.max_concurrent_generation as usize
-            }
-        };
-
-        if not_enough_presignatures {
+        if should_generate(
+            self.stock,
+            self.ongoing.len(),
+            self.len_introduced(),
+            cfg.presignature.min_presignatures as usize,
+            cfg.presignature.max_presignatures as usize,
+            cfg.max_concurrent_introduction as usize,
+            cfg.max_concurrent_generation as usize,
+        ) {
             tracing::debug!("not enough presignatures, generating");
             self.propose_posit(active).await;
         }
@@ -720,11 +727,13 @@ impl PresignatureSpawner {
         let mut stockpile_interval = time::interval(Duration::from_millis(100));
         stockpile_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
+        expiration_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut posits = self.msg.subscribe_presignature_posit().await;
 
         let mut protocol = cfg.borrow().protocol.clone();
         let mut active = mesh_state.borrow().active().keys_vec();
 
+        self.refresh_stock().await;
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
@@ -739,6 +748,11 @@ impl PresignatureSpawner {
                         let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
                         self.start_generation(id, positor, participants, timeout).await;
                     }
+                    self.refresh_stock().await;
+                    crate::metrics::storage::NUM_PRESIGNATURES_MINE.set(self.stock.mine as i64);
+                    crate::metrics::storage::NUM_PRESIGNATURES_TOTAL.set(self.stock.generated as i64);
+                    crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL
+                        .set(self.ongoing.len() as i64);
                 }
                 Some((id, from, action)) = posits.recv() => {
                     let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
@@ -762,12 +776,6 @@ impl PresignatureSpawner {
                         self.stockpile(&active, &protocol).await;
                         let _ = ongoing_gen_tx.send(self.ongoing.len());
 
-                        crate::metrics::storage::NUM_PRESIGNATURES_MINE
-                            .set(self.len_mine().await as i64);
-                        crate::metrics::storage::NUM_PRESIGNATURES_TOTAL
-                            .set(self.len_generated().await as i64);
-                        crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL
-                            .set(self.len_potential().await as i64 - self.len_generated().await as i64);
                     } else if last_active_warn.is_none_or(|i: Instant| i.elapsed() > Duration::from_secs(60)) {
                         tracing::warn!(
                             ?active,

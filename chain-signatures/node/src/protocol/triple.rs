@@ -3,6 +3,8 @@ use super::posit::{PositAction, PositInternalAction, Posits};
 use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
+use crate::protocol::should_generate;
+use crate::storage::protocol_storage::StockCounts;
 
 use crate::protocol::posit::{PositRejectReason, Positor};
 use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
@@ -310,6 +312,8 @@ pub struct TripleSpawner {
 
     /// The set of ongoing triples that are owned by the current node.
     ongoing_owned: HashSet<TripleId>,
+    /// Stock counts refreshed on the expiration tick; see [`StockCounts`].
+    stock: StockCounts,
 
     /// The protocol posits that are currently in progress.
     posits: Posits<TripleId, ()>,
@@ -356,6 +360,7 @@ impl TripleSpawner {
             triple_storage: storage.clone(),
             ongoing: JoinMap::new(),
             ongoing_owned: HashSet::new(),
+            stock: StockCounts::default(),
             posits: Posits::new(me),
             msg,
             node_account_id,
@@ -387,6 +392,12 @@ impl TripleSpawner {
 
     pub fn len_introduced(&self) -> usize {
         self.posits.len_proposed() + self.ongoing_owned.len()
+    }
+
+    /// Read the stock counts from storage. Called once a second from the run
+    /// loop, so the 100 ms stockpile tick decides from memory.
+    async fn refresh_stock(&mut self) {
+        self.stock = self.triple_storage.stock_counts(self.me).await;
     }
 
     /// Returns the number of unspent triples we will have in the manager once
@@ -551,19 +562,15 @@ impl TripleSpawner {
     /// Generate new triples if this node owns fewer than the per-node minimum
     /// (`min_triples`) and the network-wide total hasn't reached the cap (`max_triples`).
     async fn stockpile(&mut self, participants: &[Participant], cfg: &ProtocolConfig) {
-        let not_enough_triples = {
-            // Network-wide cap: stop generating once total potential triples reach max_triples.
-            if self.len_potential().await >= cfg.triple.max_triples as usize {
-                false
-            } else {
-                // Per-node floor: generate if this node owns fewer than min_triples.
-                self.len_mine().await < cfg.triple.min_triples as usize
-                    && self.len_introduced() < cfg.max_concurrent_introduction as usize
-                    && self.ongoing.len() < cfg.max_concurrent_generation as usize
-            }
-        };
-
-        if not_enough_triples {
+        if should_generate(
+            self.stock,
+            self.ongoing.len(),
+            self.len_introduced(),
+            cfg.triple.min_triples as usize,
+            cfg.triple.max_triples as usize,
+            cfg.max_concurrent_introduction as usize,
+            cfg.max_concurrent_generation as usize,
+        ) {
             self.propose_posit(participants).await;
         }
     }
@@ -577,12 +584,14 @@ impl TripleSpawner {
         let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
         stockpile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
+        expiration_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut posits = self.msg.subscribe_triple_posit().await;
 
         let mut active = mesh_state.borrow().active().keys_vec();
         let mut protocol = cfg.borrow().protocol.clone();
         let mut last_active_warn = None;
 
+        self.refresh_stock().await;
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
@@ -593,6 +602,13 @@ impl TripleSpawner {
                         let timeout = Duration::from_millis(protocol.triple.generation_timeout);
                         self.start_generation(id, participants, positor, timeout).await;
                     }
+                    self.refresh_stock().await;
+                    crate::metrics::storage::NUM_TRIPLES_MINE.set(self.stock.mine as i64);
+                    crate::metrics::storage::NUM_TRIPLES_TOTAL.set(self.stock.generated as i64);
+                    crate::metrics::protocols::NUM_TRIPLE_GENERATORS_INTRODUCED
+                        .set(self.len_introduced() as i64);
+                    crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL
+                        .set(self.len_ongoing() as i64);
                 }
                 Some((id, from, action)) = posits.recv() => {
                     let timeout = Duration::from_millis(protocol.triple.generation_timeout);
@@ -616,14 +632,6 @@ impl TripleSpawner {
                         self.stockpile(&active, &protocol).await;
                         let _ = ongoing_gen_tx.send(self.ongoing.len());
 
-                        crate::metrics::storage::NUM_TRIPLES_MINE
-                            .set(self.len_mine().await as i64);
-                        crate::metrics::storage::NUM_TRIPLES_TOTAL
-                            .set(self.triple_storage.len_generated().await as i64);
-                        crate::metrics::protocols::NUM_TRIPLE_GENERATORS_INTRODUCED
-                            .set(self.len_introduced() as i64);
-                        crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL
-                            .set(self.len_ongoing() as i64);
                     } else if last_active_warn.is_none_or(|i: Instant| i.elapsed() > Duration::from_secs(60)) {
                         tracing::warn!(
                             ?active,
