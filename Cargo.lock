@@ -7632,10 +7632,13 @@ version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
+ "async-trait",
+ "futures-util",
  "hex",
  "k256",
  "mockito",
  "mpc-chain-integration-core",
+ "mpc-primitives",
  "mpc-tron-wire",
  "prost-types",
  "reqwest 0.12.28",
@@ -7644,6 +7647,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
 ]

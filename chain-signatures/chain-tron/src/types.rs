@@ -6,6 +6,9 @@
 
 use alloy::primitives::{Log, LogData, B256};
 
+use anyhow::{bail, Context};
+use mpc_primitives::ExecutionOutcome;
+
 pub use mpc_tron_wire::NowBlock;
 
 /// Outcome of `broadcasttransaction`.
@@ -37,5 +40,97 @@ pub struct TronReceipt {
     pub logs: Vec<TronLog>,
 }
 
+impl TronReceipt {
+    /// java-tron `TransactionInfo.code` values (protocol/core/Tron.proto;
+    /// the proto spells success `SUCES`, both providers emit "SUCCESS"),
+    /// carried in `contractRet` (java-tron) or `receipt.result` (TronGrid).
+    /// Anything else is an error rather than an attested guess.
+    pub fn execution_outcome(&self) -> anyhow::Result<ExecutionOutcome> {
+        let result = self
+            .contract_ret
+            .as_deref()
+            .or(self.receipt_result.as_deref())
+            .context("receipt carries no execution result field")?;
+        match result {
+            "SUCCESS" => Ok(ExecutionOutcome::Success { output: Vec::new() }),
+            "FAILED" | "REVERT" | "OUT_OF_ENERGY" | "OUT_OF_TIME" => Ok(ExecutionOutcome::Failed),
+            other => bail!("unclassifiable execution result {other:?}"),
+        }
+    }
+}
+
 /// Receipt logs, EVM-shaped
 pub type TronLog = Log<LogData>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn receipt(contract_ret: Option<&str>, receipt_result: Option<&str>) -> TronReceipt {
+        TronReceipt {
+            id: B256::ZERO,
+            block_number: 1,
+            block_timestamp: 1,
+            fee: 0,
+            contract_ret: contract_ret.map(str::to_string),
+            receipt_result: receipt_result.map(str::to_string),
+            res_message: None,
+            logs: vec![],
+        }
+    }
+
+    /// Every member of java-tron's `TransactionInfo.code` set, in both
+    /// carrier fields, gets a deliberate verdict.
+    #[test]
+    fn execution_outcome_covers_the_proto_code_set() {
+        for (value, expects_failed) in [
+            ("SUCCESS", false),
+            ("FAILED", true),
+            ("REVERT", true),
+            ("OUT_OF_ENERGY", true),
+            ("OUT_OF_TIME", true),
+        ] {
+            for (carrier, receipt) in [
+                ("contractRet", receipt(Some(value), None)),
+                ("receipt.result", receipt(None, Some(value))),
+            ] {
+                let outcome = receipt.execution_outcome();
+                if expects_failed {
+                    assert!(
+                        matches!(outcome, Ok(ExecutionOutcome::Failed)),
+                        "{carrier}={value} must classify Failed, got {outcome:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(&outcome, Ok(ExecutionOutcome::Success { output }) if output.is_empty()),
+                        "{carrier}={value} must classify Success with empty output, got {outcome:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_or_missing_result_is_an_error() {
+        let err = receipt(None, Some("WEIRD"))
+            .execution_outcome()
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unclassifiable"), "{err:#}");
+        let err = receipt(None, None).execution_outcome().unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no execution result"),
+            "{err:#}"
+        );
+    }
+
+    /// java-tron emits both fields; `contractRet` wins, as the live gate's
+    /// settle check reads them.
+    #[test]
+    fn contract_ret_outranks_receipt_result() {
+        let both = receipt(Some("REVERT"), Some("SUCCESS"));
+        assert!(matches!(
+            both.execution_outcome(),
+            Ok(ExecutionOutcome::Failed)
+        ));
+    }
+}
