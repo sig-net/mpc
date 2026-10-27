@@ -51,7 +51,7 @@ gh pr view <pr> --json body --jq .body | sed '/^## Checklist/,$d' | gh release c
 - Release: the commit is the release commit on `develop`, the PR is the release PR.
 - Hotfix: the commit is the merge commit of the hotfix PR on `testnet` or `mainnet`, the PR is the hotfix PR.
 
-Promotion to testnet or mainnet does not create a tag.
+Promotion to testnet or mainnet does not create a tag. The version on a branch is the `version` line of its `Cargo.toml`, e.g. `git show origin/mainnet:Cargo.toml | grep ^version`; the latest release on `develop` is `git describe --tags --abbrev=0 origin/develop`.
 
 ## Release flow
 

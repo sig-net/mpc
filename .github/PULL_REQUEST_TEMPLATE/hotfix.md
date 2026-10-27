@@ -1,3 +1,5 @@
+<!-- A.B.C is the version in the branch's Cargo.toml: `git show origin/testnet:Cargo.toml | grep ^version`. The diff link resolves once X.Y.Z is tagged. -->
+
 Bumps the workspace version from A.B.C to X.Y.Z on `testnet|mainnet`.
 Full diff: https://github.com/sig-net/mpc/compare/A.B.C...X.Y.Z
 
