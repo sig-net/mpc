@@ -289,7 +289,7 @@ The agreement phase before an [instance](#instance), in four messages
 - **START.** The proposer commits the reserved artifact, removing it from the
   pool, and sends the final [participant](#participant) list. Aborting before
   the commit releases the reservation; aborting after it does not
-  (`ArtifactReservation::commit`).
+  (`ArtifactReservation::commit`, `storage/protocol_storage.rs`).
 
 Code: `protocol/posit.rs`, `protocol/request/`. See
 [posit-state-machine.md](posit-state-machine.md).
