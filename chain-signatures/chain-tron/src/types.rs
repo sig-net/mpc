@@ -163,6 +163,7 @@ mod tests {
             succeeded.execution_outcome(schema).unwrap(),
             ExecutionOutcome::ExtractionFailed
         ));
+        assert!(receipt(None, None).execution_outcome(&[]).is_err());
     }
 
     #[test]
