@@ -135,14 +135,16 @@ fixed prefix, the [request id](#request-id) and `big_r`.
 
 ## Digest
 
-The hash that nodes sign or vote on in place of a larger structure. A
-[checkpoint](#checkpoint)'s digest binds the chain, the height and the entries
-over a canonical encoding, and is what nodes vote on (`CheckpointDigest`,
-`chain-signatures/primitives/src/backlog.rs`); see
-[checkpoints.md §2](checkpoints.md#2-digest-and-interfaces). An
-[attestation](#attestation)'s digest commits to its domain tag and output
-length; see [bidirectional-calls.md
-§7.5.2.1](bidirectional-calls.md#7521-attestation-digest).
+A short hash that stands for a larger structure. The docs use two:
+
+- The checkpoint digest, which nodes vote on. It binds a
+  [checkpoint](#checkpoint)'s chain, height and [backlog](#backlog)
+  (`CheckpointDigest`, `chain-signatures/primitives/src/backlog.rs`). See
+  [checkpoints.md §2](checkpoints.md#2-digest-and-interfaces).
+- The attestation digest, which nodes sign. It stands for an
+  [attestation](#attestation), the statement of a [bidirectional
+  request](#bidirectional-request)'s outcome. See [bidirectional-calls.md
+  §7.5.2.1](bidirectional-calls.md#7521-attestation-digest).
 
 ## Entropy
 
