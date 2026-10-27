@@ -41,10 +41,13 @@ pub struct TronReceipt {
 }
 
 impl TronReceipt {
-    /// java-tron `TransactionInfo.code` values (protocol/core/Tron.proto;
-    /// the proto spells success `SUCES`, both providers emit "SUCCESS"),
-    /// carried in `contractRet` (java-tron) or `receipt.result` (TronGrid).
-    /// Anything else is an error rather than an attested guess.
+    /// java-tron `TransactionInfo.code` values (protocol/core/Tron.proto).
+    /// The proto names success `SUCESS` (its own typo, see tron-wire's pb
+    /// notes); TronGrid and TRE are observed emitting "SUCCESS" (recorded
+    /// fixture `receipt-success.json`; live-gate acceptance leg). Both
+    /// spellings classify — `contractRet` outranks `receipt.result`, so a
+    /// build serializing the proto name must not hang the watcher —
+    /// anything else is an error rather than an attested guess.
     pub fn execution_outcome(&self) -> anyhow::Result<ExecutionOutcome> {
         let result = self
             .contract_ret
@@ -52,7 +55,7 @@ impl TronReceipt {
             .or(self.receipt_result.as_deref())
             .context("receipt carries no execution result field")?;
         match result {
-            "SUCCESS" => Ok(ExecutionOutcome::Success { output: Vec::new() }),
+            "SUCCESS" | "SUCESS" => Ok(ExecutionOutcome::Success { output: Vec::new() }),
             "FAILED" | "REVERT" | "OUT_OF_ENERGY" | "OUT_OF_TIME" => Ok(ExecutionOutcome::Failed),
             other => bail!("unclassifiable execution result {other:?}"),
         }
@@ -84,7 +87,10 @@ mod tests {
     #[test]
     fn execution_outcome_covers_the_proto_code_set() {
         for (value, expects_failed) in [
+            // Both spellings of success: the observed "SUCCESS" and the
+            // proto's own `SUCESS` member name.
             ("SUCCESS", false),
+            ("SUCESS", false),
             ("FAILED", true),
             ("REVERT", true),
             ("OUT_OF_ENERGY", true),
