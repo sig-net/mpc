@@ -649,6 +649,7 @@ impl MpcFixtureNodeBuilder {
             checkpoint_tx,
             contract: context.contract_state,
             web_handle: None,
+            sync_freshness: Default::default(),
         };
 
         let _ = node
