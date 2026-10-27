@@ -42,12 +42,10 @@ pub struct TronReceipt {
 
 impl TronReceipt {
     /// java-tron `TransactionInfo.code` values (protocol/core/Tron.proto).
-    /// The proto names success `SUCESS` (its own typo, see tron-wire's pb
-    /// notes); TronGrid and TRE are observed emitting "SUCCESS" (recorded
-    /// fixture `receipt-success.json`; live-gate acceptance leg). Both
-    /// spellings classify — `contractRet` outranks `receipt.result`, so a
-    /// build serializing the proto name must not hang the watcher —
-    /// anything else is an error rather than an attested guess.
+    /// Both success spellings — the observed "SUCCESS" and the proto's
+    /// `SUCESS` — classify: `contractRet` outranks `receipt.result`, so a
+    /// build emitting the proto name must not hang the watcher. Anything
+    /// else is an error rather than an attested guess.
     pub fn execution_outcome(&self) -> anyhow::Result<ExecutionOutcome> {
         let result = self
             .contract_ret
