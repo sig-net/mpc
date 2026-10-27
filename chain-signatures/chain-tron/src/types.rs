@@ -143,8 +143,6 @@ mod tests {
         );
     }
 
-    /// java-tron emits both fields; `contractRet` wins, as the live gate's
-    /// settle check reads them.
     /// The policy mapping every consumer of a receipt agrees on.
     #[test]
     fn execution_outcome_maps_schema_policy() {
@@ -166,6 +164,8 @@ mod tests {
         assert!(receipt(None, None).execution_outcome(&[]).is_err());
     }
 
+    /// java-tron emits both fields; `contractRet` wins, as the live gate's
+    /// settle check reads them.
     #[test]
     fn contract_ret_outranks_receipt_result() {
         let both = receipt(Some("REVERT"), Some("SUCCESS"));
