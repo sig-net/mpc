@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::TronHttp;
 use crate::config::TronConfig;
+use crate::types::TronExecutionResult;
 
 pub struct TronWatcher<S: StateManager, T: ChainTelemetry> {
     client: Arc<TronHttp>,
@@ -78,7 +79,7 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             .ok()??;
 
         let result = receipt
-            .execution_outcome()
+            .execution_result()
             .inspect_err(|err| {
                 tracing::warn!(?tx_id, ?sign_id, "{err:#}");
                 self.telemetry
@@ -87,12 +88,16 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             .ok()?;
 
         let result = match result {
-            ExecutionOutcome::Failed => ExecutionOutcome::Failed,
-            ExecutionOutcome::Success { .. } if tx.output_deserialization_schema.is_empty() => {
-                result
+            TronExecutionResult::Failed => ExecutionOutcome::Failed,
+            TronExecutionResult::Succeeded if tx.output_deserialization_schema.is_empty() => {
+                // Interim: schema-less requests attest an empty output until
+                // receipt-log extraction is defined.
+                ExecutionOutcome::Success { output: Vec::new() }
             }
-            // Any other case with a non-empty schema is considered terminal: we cannot extract the output.
-            _ => {
+            // A non-empty schema asks for output data a Tron receipt cannot
+            // provide — park instead of attesting an empty output no schema
+            // fits. Admission refuses such requests.
+            TronExecutionResult::Succeeded => {
                 self.telemetry
                     .bidirectional_extraction_failed(ExtractionFailureKind::Terminal);
                 tracing::error!(

@@ -12,5 +12,5 @@ mod watcher;
 
 pub use client::TronHttp;
 pub use config::TronConfig;
-pub use types::{BroadcastOutcome, TronLog, TronReceipt};
+pub use types::{BroadcastOutcome, TronExecutionResult, TronLog, TronReceipt};
 pub use watcher::TronWatcher;

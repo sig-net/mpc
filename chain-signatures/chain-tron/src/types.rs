@@ -7,7 +7,6 @@
 use alloy::primitives::{Log, LogData, B256};
 
 use anyhow::{bail, Context};
-use mpc_primitives::ExecutionOutcome;
 
 pub use mpc_tron_wire::NowBlock;
 
@@ -40,21 +39,31 @@ pub struct TronReceipt {
     pub logs: Vec<TronLog>,
 }
 
+/// What a solidified receipt attests about execution. Classification
+/// only; policy (output encoding, parking) lives with the watcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TronExecutionResult {
+    Succeeded,
+    Failed,
+}
+
 impl TronReceipt {
     /// java-tron `TransactionInfo.code` values (protocol/core/Tron.proto).
     /// Both success spellings — the observed "SUCCESS" and the proto's
     /// `SUCESS` — classify: `contractRet` outranks `receipt.result`, so a
     /// build emitting the proto name must not hang the watcher. Anything
     /// else is an error rather than an attested guess.
-    pub fn execution_outcome(&self) -> anyhow::Result<ExecutionOutcome> {
+    pub fn execution_result(&self) -> anyhow::Result<TronExecutionResult> {
         let result = self
             .contract_ret
             .as_deref()
             .or(self.receipt_result.as_deref())
             .context("receipt carries no execution result field")?;
         match result {
-            "SUCCESS" | "SUCESS" => Ok(ExecutionOutcome::Success { output: Vec::new() }),
-            "FAILED" | "REVERT" | "OUT_OF_ENERGY" | "OUT_OF_TIME" => Ok(ExecutionOutcome::Failed),
+            "SUCCESS" | "SUCESS" => Ok(TronExecutionResult::Succeeded),
+            "FAILED" | "REVERT" | "OUT_OF_ENERGY" | "OUT_OF_TIME" => {
+                Ok(TronExecutionResult::Failed)
+            }
             other => bail!("unclassifiable execution result {other:?}"),
         }
     }
@@ -83,44 +92,35 @@ mod tests {
     /// Every member of java-tron's `TransactionInfo.code` set, in both
     /// carrier fields, gets a deliberate verdict.
     #[test]
-    fn execution_outcome_covers_the_proto_code_set() {
-        for (value, expects_failed) in [
+    fn execution_result_covers_the_proto_code_set() {
+        for (value, expected) in [
             // Both spellings of success: the observed "SUCCESS" and the
             // proto's own `SUCESS` member name.
-            ("SUCCESS", false),
-            ("SUCESS", false),
-            ("FAILED", true),
-            ("REVERT", true),
-            ("OUT_OF_ENERGY", true),
-            ("OUT_OF_TIME", true),
+            ("SUCCESS", TronExecutionResult::Succeeded),
+            ("SUCESS", TronExecutionResult::Succeeded),
+            ("FAILED", TronExecutionResult::Failed),
+            ("REVERT", TronExecutionResult::Failed),
+            ("OUT_OF_ENERGY", TronExecutionResult::Failed),
+            ("OUT_OF_TIME", TronExecutionResult::Failed),
         ] {
             for (carrier, receipt) in [
                 ("contractRet", receipt(Some(value), None)),
                 ("receipt.result", receipt(None, Some(value))),
             ] {
-                let outcome = receipt.execution_outcome();
-                if expects_failed {
-                    assert!(
-                        matches!(outcome, Ok(ExecutionOutcome::Failed)),
-                        "{carrier}={value} must classify Failed, got {outcome:?}"
-                    );
-                } else {
-                    assert!(
-                        matches!(&outcome, Ok(ExecutionOutcome::Success { output }) if output.is_empty()),
-                        "{carrier}={value} must classify Success with empty output, got {outcome:?}"
-                    );
-                }
+                assert_eq!(
+                    receipt.execution_result().unwrap(),
+                    expected,
+                    "{carrier}={value}"
+                );
             }
         }
     }
 
     #[test]
     fn unknown_or_missing_result_is_an_error() {
-        let err = receipt(None, Some("WEIRD"))
-            .execution_outcome()
-            .unwrap_err();
+        let err = receipt(None, Some("WEIRD")).execution_result().unwrap_err();
         assert!(format!("{err:#}").contains("unclassifiable"), "{err:#}");
-        let err = receipt(None, None).execution_outcome().unwrap_err();
+        let err = receipt(None, None).execution_result().unwrap_err();
         assert!(
             format!("{err:#}").contains("no execution result"),
             "{err:#}"
@@ -132,9 +132,9 @@ mod tests {
     #[test]
     fn contract_ret_outranks_receipt_result() {
         let both = receipt(Some("REVERT"), Some("SUCCESS"));
-        assert!(matches!(
-            both.execution_outcome(),
-            Ok(ExecutionOutcome::Failed)
-        ));
+        assert_eq!(
+            both.execution_result().unwrap(),
+            TronExecutionResult::Failed
+        );
     }
 }
