@@ -793,6 +793,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let mut state = self.reserved.write().await;
         state.generating.clear();
         state.using.clear();
+        state.pending.clear();
 
         // if the outcome is None, it means the script failed or there was an error.
         outcome.is_some()
