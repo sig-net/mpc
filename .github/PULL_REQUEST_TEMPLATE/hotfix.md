@@ -7,7 +7,7 @@ What was broken and what the fix does, with the develop commit it was
 cherry-picked from. If the fix is only on this branch, say why.
 -->
 
-- **Area:** what was broken and what the fix does (#…, cherry-picked from <sha>)
+- **Area:** what was broken and what the fix does (#…, cherry-picked from `<sha>`)
 
 ## Breaking changes
 
