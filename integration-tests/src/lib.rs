@@ -27,7 +27,7 @@ use mpc_chain_ethereum::EthConfig;
 use mpc_chain_hydration::HydrationConfig;
 use mpc_chain_midnight::MidnightConfig;
 use mpc_chain_solana::SolConfig;
-use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
+use mpc_contract::config::{Config, PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::backlog::Checkpoint;
 use mpc_node::web::CheckpointResponse;
@@ -472,6 +472,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
                 "participants": participants,
                 "threshold": cfg.threshold,
                 "public_key": near_pk,
+                "config": Config { protocol: cfg.protocol.clone(), ..Default::default() },
             }))
             .transact()
             .await?
@@ -483,7 +484,8 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
             .call("init")
             .args_json(json!({
                 "threshold": cfg.threshold,
-                "candidates": candidates
+                "candidates": candidates,
+                "config": Config { protocol: cfg.protocol.clone(), ..Default::default() },
             }))
             .transact()
             .await?

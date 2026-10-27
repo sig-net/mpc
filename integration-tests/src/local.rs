@@ -8,7 +8,6 @@ use anyhow::Context;
 use async_process::Child;
 use mpc_keys::hpke;
 use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs};
-use mpc_node::config::OverrideConfig;
 use near_workspaces::Account;
 use shell_escape::escape;
 
@@ -87,9 +86,6 @@ impl Node {
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
-            override_config: Some(OverrideConfig::new(serde_json::to_value(
-                cfg.protocol.clone(),
-            )?)),
             mesh_options: ctx.mesh_options.clone(),
         };
 
@@ -180,9 +176,6 @@ impl Node {
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
-            override_config: Some(OverrideConfig::new(serde_json::to_value(
-                config.cfg.protocol.clone(),
-            )?)),
             mesh_options: ctx.mesh_options.clone(),
         };
 

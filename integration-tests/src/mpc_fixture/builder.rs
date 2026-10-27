@@ -21,7 +21,7 @@ use mpc_contract::primitives::{
 };
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_node::backlog::Backlog;
-use mpc_node::config::{Config, LocalConfig, NetworkConfig};
+use mpc_node::config::{Config, NetworkConfig};
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
@@ -503,10 +503,7 @@ impl MpcFixtureNodeBuilder {
         };
         let participant_info = ParticipantInfo::from(candidate_info.clone());
 
-        let config = Config::new(LocalConfig {
-            network: NetworkConfig { sign_sk, cipher_sk },
-            ..Default::default()
-        });
+        let config = Config::new(NetworkConfig { sign_sk, cipher_sk });
 
         // Needs to be built ahead of time to create routing table
         let (inbox, outbox, channel) = MessageChannel::new();
@@ -630,7 +627,7 @@ impl MpcFixtureNodeBuilder {
             mesh_rx.clone(),
             context.contract_state.clone(),
             mpc_node::protocol::sync::SyncTask::sync_report_channel().0,
-            config_tx.borrow().local.network.clone(),
+            config_tx.borrow().network.clone(),
         );
         tokio::spawn(sync_task.run());
 
