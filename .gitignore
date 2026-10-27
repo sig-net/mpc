@@ -10,6 +10,7 @@
 !.github/workflows/
 !.github/CODEOWNERS
 !.github/pull_request_template.md
+!.github/PULL_REQUEST_TEMPLATE/
 
 tmp
 *.log

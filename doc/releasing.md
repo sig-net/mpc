@@ -41,11 +41,11 @@ Code moves downstream only.
 
 We use [semantic versioning](https://semver.org/). The version is `version` under `[workspace.package]` in the root `Cargo.toml`. Tags are the bare version, e.g. `1.21.0`.
 
-Every tag has a GitHub release whose notes are the PR description. Release and hotfix PRs replace the template body with **Summary**, and **Breaking changes** (`None`, or each with its type and required action). Right after the PR merges:
+Every tag has a GitHub release whose notes are the PR description. Release and hotfix PRs use the [release](../.github/PULL_REQUEST_TEMPLATE/release.md) and [hotfix](../.github/PULL_REQUEST_TEMPLATE/hotfix.md) PR templates: **Summary**, **Breaking changes** (`None`, or each with its type and required action) and a **Checklist** that is not part of the notes. [1.21.0](https://github.com/sig-net/mpc/pull/1395) is an example. Right after the PR merges:
 
 ```sh
 git tag X.Y.Z <commit> && git push origin X.Y.Z
-gh pr view <pr> --json body --jq .body | gh release create X.Y.Z --verify-tag --notes-file -
+gh pr view <pr> --json body --jq .body | sed '/^## Checklist/,$d' | gh release create X.Y.Z --verify-tag --notes-file -
 ```
 
 - Release: the commit is the release commit on `develop`, the PR is the release PR.
@@ -74,8 +74,11 @@ Every second Tuesday is a **release day**. On it, in this order:
 
 ### Step 2: Cut the release
 
-1. Open a PR against `develop` titled `chore: release X.Y.Z` that bumps the version and runs `cargo check` to update `Cargo.lock`.
-2. Write the release notes in its description, collecting the Breaking changes sections of the merged PRs.
+1. Bump the version, run `cargo check` to update `Cargo.lock`, and open a PR against `develop` titled `chore: release X.Y.Z` from the release template:
+   ```sh
+   gh pr create --base develop --title "chore: release X.Y.Z" --template release.md
+   ```
+2. Write the **Summary** and **Breaking changes**. The breaking changes are those from the Breaking changes sections of the PRs merged since the last release. Tick the **Checklist**.
 3. Merge it. The squash commit on `develop` is the **release commit**; the PR page shows its SHA.
 4. Tag the release commit and publish the GitHub release, see [Versioning](#versioning).
 
@@ -128,8 +131,13 @@ For example, `testnet` has 1.21.0:
    git cherry-pick -x <fix-commit>
    ```
 3. Bump the version to `1.21.1`, run `cargo check` to update `Cargo.lock`, and commit as `fix: release 1.21.1`.
-4. Push the branch, open a PR to `testnet` titled `fix: hotfix 1.21.1 to testnet` with release notes in the description, and merge it with a merge commit.
-5. Tag the merge commit and publish the GitHub release, see [Versioning](#versioning).
+4. Push the branch and open a PR to `testnet` titled `fix: hotfix 1.21.1 to testnet` from the hotfix template:
+   ```sh
+   gh pr create --base testnet --title "fix: hotfix 1.21.1 to testnet" --template hotfix.md
+   ```
+5. Write the **Summary** and **Breaking changes** and tick the **Checklist**.
+6. Merge it with a merge commit.
+7. Tag the merge commit and publish the GitHub release, see [Versioning](#versioning).
 
 If `mainnet` has the same bug and it cannot wait for the next release day, hotfix it too, as below.
 
