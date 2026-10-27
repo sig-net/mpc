@@ -114,7 +114,7 @@ gitGraph
     checkout testnet
     branch hotfix/1.21.1
     cherry-pick id: "fix: b"
-    commit id: "fix: release 1.21.1"
+    commit id: "fix: hotfix 1.21.1"
     checkout testnet
     merge hotfix/1.21.1 tag: "1.21.1"
 ```
@@ -130,7 +130,7 @@ For example, `testnet` has 1.21.0:
    git switch -c hotfix/1.21.1 origin/testnet
    git cherry-pick -x <fix-commit>
    ```
-3. Bump the version to `1.21.1`, run `cargo check` to update `Cargo.lock`, and commit as `fix: release 1.21.1`.
+3. Bump the version to `1.21.1`, run `cargo check` to update `Cargo.lock`, and commit as `fix: hotfix 1.21.1`.
 4. Push the branch and open a PR to `testnet` titled `fix: hotfix 1.21.1 to testnet` from the hotfix template:
    ```sh
    gh pr create --base testnet --title "fix: hotfix 1.21.1 to testnet" --body-file .github/PULL_REQUEST_TEMPLATE/hotfix.md
