@@ -1311,6 +1311,10 @@ mod tests {
         let argv = [
             "mpc-node",
             "start",
+            "--near-rpc",
+            "http://127.0.0.1:3030",
+            "--mpc-contract-id",
+            "mpc.test.near",
             "--account-id",
             "test.near",
             "--account-sk",
