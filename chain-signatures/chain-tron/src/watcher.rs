@@ -12,7 +12,9 @@ use futures_util::stream::{iter, StreamExt};
 use mpc_chain_integration_core::{
     ChainIndexer, ChainTelemetry, ExtractionFailureKind, StateManager,
 };
-use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, SignId};
+use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -79,14 +81,29 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             .execution_outcome()
             .inspect_err(|err| {
                 tracing::warn!(?tx_id, ?sign_id, "{err:#}");
-
-                // Record the retryable extraction failure in telemetry (mirror Ethereum watcher's behavior)
                 self.telemetry
                     .bidirectional_extraction_failed(ExtractionFailureKind::Retryable);
             })
             .ok()?;
 
-        // Success attests an empty output until receipt-log extraction lands.
+        let result = match result {
+            ExecutionOutcome::Failed => ExecutionOutcome::Failed,
+            ExecutionOutcome::Success { .. } if tx.output_deserialization_schema.is_empty() => {
+                result
+            }
+            // Any other case with a non-empty schema is considered terminal: we cannot extract the output.
+            _ => {
+                self.telemetry
+                    .bidirectional_extraction_failed(ExtractionFailureKind::Terminal);
+                tracing::error!(
+                    ?tx_id,
+                    ?sign_id,
+                    "schema-carrying request, but Tron output extraction is undefined; parking"
+                );
+                ExecutionOutcome::ExtractionFailed
+            }
+        };
+
         Some(ChainEvent::ExecutionConfirmed {
             tx_id,
             sign_id,
@@ -198,11 +215,31 @@ mod tests {
         (BidirectionalTxId(id), SignId::new(id), tx)
     }
 
+    /// The same entry carrying a non-empty output schema — what admission
+    /// refuses for Tron targets today; the watcher must still handle it.
+    fn schema_carrying_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
+        let (tx_id, sign_id, tx) = watcher_tx(seed);
+        let mut with_schema = (*tx).clone();
+        with_schema.output_deserialization_schema =
+            br#"[{"name":"output","type":"bool"}]"#.to_vec();
+        (tx_id, sign_id, with_schema.into())
+    }
+
     /// Counts `bidirectional_extraction_failed` calls, the way the Ethereum
     /// watcher tests assert on extraction-failure telemetry.
     #[derive(Clone, Default)]
     struct CountingTelemetry {
-        extraction_failures: Arc<AtomicUsize>,
+        retryable: Arc<AtomicUsize>,
+        terminal: Arc<AtomicUsize>,
+    }
+
+    impl CountingTelemetry {
+        fn retryable_failures(&self) -> usize {
+            self.retryable.load(Ordering::Relaxed)
+        }
+        fn terminal_failures(&self) -> usize {
+            self.terminal.load(Ordering::Relaxed)
+        }
     }
 
     impl ChainTelemetry for CountingTelemetry {
@@ -211,8 +248,12 @@ mod tests {
         fn checkpoint_created(&self, _: u64) {}
         fn request_indexed_at(&self, _: u64, _: RequestKind) {}
         fn request_indexed(&self, _: RequestKind) {}
-        fn bidirectional_extraction_failed(&self, _: ExtractionFailureKind) {
-            self.extraction_failures.fetch_add(1, Ordering::Relaxed);
+        fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind) {
+            match kind {
+                ExtractionFailureKind::Retryable => &self.retryable,
+                ExtractionFailureKind::Terminal => &self.terminal,
+            }
+            .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -443,9 +484,43 @@ mod tests {
         // certifies a completed tick — so ten blocks guarantee twenty
         // counted failures (the next tick may add more while we assert).
         assert!(
-            telemetry.extraction_failures.load(Ordering::Relaxed) >= 20,
+            telemetry.retryable_failures() >= 20,
             "each unclassifiable receipt must count per tick"
         );
+        run.cancel.cancel();
+        run.done.await.unwrap().unwrap();
+    }
+
+    /// A schema-carrying request cannot have its output extracted from a
+    /// Tron receipt, so a successful execution parks rather than attests an
+    /// empty output.
+    #[tokio::test]
+    async fn schema_carrying_success_parks() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        receipt_stub(&mut server, 1, receipt_body(1, "SUCCESS"))
+            .expect(1)
+            .create();
+
+        let state = MockStateManager::new();
+        state
+            .watch_execution(
+                Chain::Tron,
+                schema_carrying_tx(1).1,
+                schema_carrying_tx(1).2,
+            )
+            .await;
+
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
+        first_is_catchup_completed(&mut run).await;
+        let (_, result) = until_confirmed(&mut run, 1).await;
+        assert!(matches!(result, ExecutionOutcome::ExtractionFailed));
+        assert_eq!(telemetry.terminal_failures(), 1);
+        assert_eq!(telemetry.retryable_failures(), 0);
+
         run.cancel.cancel();
         run.done.await.unwrap().unwrap();
     }
@@ -482,7 +557,8 @@ mod tests {
             "the failing watcher must not resolve: {seen:?}"
         );
         // Transport failures only warn, as on Ethereum.
-        assert_eq!(telemetry.extraction_failures.load(Ordering::Relaxed), 0);
+        assert_eq!(telemetry.retryable_failures(), 0);
+        assert_eq!(telemetry.terminal_failures(), 0);
 
         run.cancel.cancel();
         run.done.await.unwrap().unwrap();
