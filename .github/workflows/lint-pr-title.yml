@@ -36,8 +36,8 @@ jobs:
     if: github.event_name == 'pull_request_target'
     steps:
       # The section must have one state: `None`, or one or more types. A ticked
-      # type needs `!` in the title and `None` must not have it. Release and
-      # hotfix PRs use their own templates and are skipped.
+      # type needs `!` in the title and `None` must not have it. Release,
+      # promotion and hotfix PRs use their own templates and are skipped.
       - name: Check the Breaking changes section against the title
         env:
           TITLE: ${{ github.event.pull_request.title }}

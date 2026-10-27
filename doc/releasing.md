@@ -78,7 +78,7 @@ Every second Tuesday is a **release day**. On it, in this order:
    ```sh
    gh pr create --base develop --title "chore: release X.Y.Z" --body-file .github/PULL_REQUEST_TEMPLATE/release.md
    ```
-2. Write the **Summary** and **Breaking changes**. The breaking changes are those from the Breaking changes sections of the PRs merged since the last release. Tick the **Checklist**.
+2. Write the **Summary** and **Breaking changes**. The breaking changes are those from the Breaking changes sections of the PRs merged since the last release, cross-checked against their diffs. Tick the **Checklist**.
 3. Merge it. The squash commit on `develop` is the **release commit**; the PR page shows its SHA.
 4. Tag the release commit and publish the GitHub release, see [Versioning](#versioning).
 
