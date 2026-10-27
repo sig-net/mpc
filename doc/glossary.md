@@ -50,9 +50,9 @@ ends, even when it fails.
 
 A statement ([request id](#request-id), height, [outcome](#outcome)) about a
 [bidirectional request](#bidirectional-request), signed with the attestation
-key of the [request](#request)'s contract at the request's key version, over a
-[digest](#digest) that commits to a domain tag and the output length.
-See [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
+key of the [request](#request)'s contract at the request's key version, over
+its [digest](#digest). See [bidirectional-calls.md
+§2](bidirectional-calls.md#2-vocabulary).
 
 *Code today:* only for requests from Midnight
 ([#1429](https://github.com/sig-net/mpc/issues/1429)).
@@ -103,8 +103,7 @@ contract](#governance-contract) (`Checkpoint`, `backlog/checkpoints.rs`). See
 ## Committee
 
 Membership, [threshold](#threshold) t and [epoch](#epoch) as fixed by the
-[governance contract](#governance-contract), together with the root public key
-and whether the contract is `Running`; each node holds its own snapshot
+[governance contract](#governance-contract); each node holds its own snapshot
 (`GovernanceInfo`, `rpc/mod.rs`). Committee is contract-scoped; compare
 [participant](#participant). See [protocol-properties.md
 §2](protocol-properties.md#2-system-model).
@@ -123,16 +122,6 @@ In a [posit](#posit), a node other than the [proposer](#proposer). It answers
 PROPOSE with ACCEPT or REJECT and joins the [generation](#generation) when
 START lists it. See [posit-state-machine.md](posit-state-machine.md).
 
-## Delta
-
-The public per-request scalar every [participant](#participant) uses to
-re-randomize a [presignature](#presignature), `H(request_id || big_r ||
-entropy)`. See [delta-derivation.md](delta-derivation.md).
-
-*Code:* `derive_delta` (`chain-signatures/crypto/src/kdf.rs`) instantiates H as
-HKDF-SHA3-256 with the [entropy](#entropy) as key material and, as info, a
-fixed prefix, the [request id](#request-id) and `big_r`.
-
 ## Digest
 
 A short hash that stands for a larger structure. The docs use two:
@@ -150,24 +139,16 @@ A short hash that stands for a larger structure. The docs use two:
 
 A value from the block that holds a [request](#request). The requester cannot
 know or influence it before that block is validated. Nodes read it from a final
-block, so every node derives the same [delta](#delta) (`SignArgs::entropy`,
+block, so every node derives the same delta (`SignArgs::entropy`,
 `chain-signatures/primitives/src/crypto.rs`). It also seeds the
 [proposer](#proposer) election. See
 [delta-derivation.md](delta-derivation.md).
 
 ## Epoch
 
-The [committee](#committee)'s version number, fixed by the [governance
-contract](#governance-contract); each completed resharing raises it by one
-(`RunningContractState::epoch`, `chain-signatures/contract/src/state.rs`; each
-node's copy is `GovernanceInfo::epoch`, `rpc/mod.rs`).
-
-## Epsilon
-
-The per-account scalar derived from the key version, chain, sender and
-derivation path, used to derive the account's key from the root key
-(`derive_epsilon`, `derive_key`, `signet-crypto/src/kdf.rs`). See
-[account-derivation.md](account-derivation.md).
+A counter in the [governance contract](#governance-contract) that each
+completed resharing raises by one (`RunningContractState::epoch`,
+`chain-signatures/contract/src/state.rs`).
 
 ## f
 
@@ -308,8 +289,8 @@ the pair's id, not chosen (`hash_as_id`). Abbreviated P.
 ## Proposer
 
 The node that drives a [posit](#posit). For a signature it is elected per
-[round](#round): the [committee](#committee) member at index (entropy[0] + r)
-mod n (`protocol/request/organize.rs`), so every node agrees on it without
+[round](#round) from the request's [entropy](#entropy) and the round number
+(`protocol/request/organize.rs`), so every node agrees on it without
 messaging; for a [triple pair](#triple-pair) or
 [presignature](#presignature) it is the [owner](#owner). See
 [posit-state-machine.md §5](posit-state-machine.md#5-bumping-rounds).
@@ -334,13 +315,8 @@ call accepts it (`IndexedSignRequest`, `SignKind`,
 ## Request id
 
 A deterministic function of a [request](#request), so every node derives the
-same one; for a [bidirectional request](#bidirectional-request), a
-collision-resistant hash of (contract, transaction, target, key) in a
-length-committing encoding (`SignId`, `signet-primitives/src/crypto.rs`). See
+same one (`SignId`, `signet-primitives/src/crypto.rs`). See
 [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
-
-*Code today:* bidirectional request ids are computed this way only for
-Midnight sources ([#1429](https://github.com/sig-net/mpc/issues/1429)).
 
 ## Reservation
 
@@ -409,11 +385,9 @@ executes on (`executionDest` on the wire). See
 ## Threshold
 
 t, the number of nodes needed to sign, set by the [governance
-contract](#governance-contract): ⌊2n/3⌋ + 1 for n ≥ 5 and ⌊n/2⌋ + 1 below.
-A threshold vote cannot take it outside the range [⌊2n/3⌋ + 1, n − 1] of
-`vote_threshold` (`chain-signatures/contract/src/lib.rs`). The floor applies
-on resharing and to threshold votes; the initial value is checked only against
-n. See [protocol-properties.md §2](protocol-properties.md#2-system-model).
+contract](#governance-contract) (`vote_threshold`,
+`chain-signatures/contract/src/lib.rs`). See [protocol-properties.md
+§2](protocol-properties.md#2-system-model).
 
 ## Triple pair
 
