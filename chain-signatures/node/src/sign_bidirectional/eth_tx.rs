@@ -135,9 +135,9 @@ impl EthereumTxRlp {
 pub(crate) fn legacy_tx(chain_id: u64) -> Vec<u8> {
     let mut rlp = EthereumTxRlp::new_list(9);
     // nonce, gas price, gas limit
-    for _ in 0..3 {
-        rlp.append_u64(0);
-    }
+    rlp.append_u64(0);
+    rlp.append_u64(0);
+    rlp.append_u64(21_000);
     rlp.stream.append(&vec![0x11u8; 20]);
     // value, data
     for _ in 0..2 {

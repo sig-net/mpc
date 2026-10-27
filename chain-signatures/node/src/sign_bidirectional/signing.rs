@@ -122,10 +122,10 @@ fn validate_unsigned_ethereum(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
     );
     // Signing copies these fields as they are, so each must already be what
     // Ethereum decodes for its type.
-    let (uints, to_index, data_index) = if eip1559 {
-        (EIP1559_UINTS, 5, 7)
+    let (uints, gas_limit_index, to_index, data_index) = if eip1559 {
+        (EIP1559_UINTS, 4, 5, 7)
     } else {
-        (LEGACY_UINTS, 3, 5)
+        (LEGACY_UINTS, 2, 3, 5)
     };
     for &(index, max_bytes) in uints {
         uint_field(&fields, index, max_bytes)?;
@@ -139,8 +139,12 @@ fn validate_unsigned_ethereum(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
             (priority_fee.len(), priority_fee) <= (max_fee.len(), max_fee),
             "max priority fee above max fee"
         );
-        validate_access_list(&fields.at(8)?)?;
     }
+    let access_list_gas = if eip1559 {
+        validate_access_list(&fields.at(8)?)?
+    } else {
+        0
+    };
     // An empty `to` creates a contract, which extraction refuses, and Ethereum
     // rejects any other length.
     let to = string_field(&fields, to_index)?;
@@ -149,7 +153,24 @@ fn validate_unsigned_ethereum(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
         "`to` is {} bytes, not a 20-byte call target",
         to.len()
     );
-    string_field(&fields, data_index)
+    let data = string_field(&fields, data_index)?;
+    let gas_limit = uint_field(&fields, gas_limit_index, 8)?
+        .iter()
+        .fold(0u64, |acc, byte| acc << 8 | u64::from(*byte));
+    let intrinsic_gas = intrinsic_call_gas(data) + access_list_gas;
+    anyhow::ensure!(
+        gas_limit >= intrinsic_gas,
+        "gas limit {gas_limit} below the intrinsic gas {intrinsic_gas}"
+    );
+    Ok(data)
+}
+
+/// The gas a call pays before it executes on every fork since Istanbul
+/// (EIP-2028), leaving out the access list. Prague's EIP-7623 calldata floor
+/// can ask more, but only on networks that run it.
+fn intrinsic_call_gas(data: &[u8]) -> u64 {
+    let zeros = data.iter().filter(|byte| **byte == 0).count() as u64;
+    21_000 + 4 * zeros + 16 * (data.len() as u64 - zeros)
 }
 
 /// `Rlp::data` also returns a list's payload and accepts a one-byte string
@@ -184,8 +205,10 @@ fn uint_field<'a>(fields: &Rlp<'a>, index: usize, max_bytes: usize) -> anyhow::R
     Ok(data)
 }
 
-/// A list of `[20-byte address, list of 32-byte storage keys]`.
-fn validate_access_list(access_list: &Rlp) -> anyhow::Result<()> {
+/// A list of `[20-byte address, list of 32-byte storage keys]`. Returns its
+/// intrinsic gas (EIP-2930).
+fn validate_access_list(access_list: &Rlp) -> anyhow::Result<u64> {
+    let mut gas = 0;
     anyhow::ensure!(access_list.is_list(), "access list is not an RLP list");
     for (i, entry) in access_list.iter().enumerate() {
         anyhow::ensure!(
@@ -203,6 +226,7 @@ fn validate_access_list(access_list: &Rlp) -> anyhow::Result<()> {
             keys.is_list(),
             "access list entry {i} storage keys are not an RLP list"
         );
+        gas += 2_400 + 1_900 * keys.item_count()? as u64;
         for (k, key) in keys.iter().enumerate() {
             let key = string_atom(&key)
                 .map_err(|error| error.context(format!("access list entry {i} storage key {k}")))?;
@@ -212,7 +236,7 @@ fn validate_access_list(access_list: &Rlp) -> anyhow::Result<()> {
             );
         }
     }
-    Ok(())
+    Ok(gas)
 }
 
 /// Signs `unsigned` for `target`, returning the transaction id the target
@@ -306,6 +330,7 @@ mod tests {
         let eip1559 = |to| {
             TxEip1559 {
                 chain_id: 1,
+                gas_limit: 21_000,
                 to,
                 ..Default::default()
             }
@@ -356,7 +381,7 @@ mod tests {
         let legacy = vec![
             uint(0),
             uint(1),
-            uint(21_000),
+            uint(30_000),
             to.clone(),
             uint(0),
             data.clone(),
@@ -371,7 +396,7 @@ mod tests {
             uint(0),
             uint(1),
             uint(2),
-            uint(21_000),
+            uint(30_000),
             to,
             uint(0),
             data,
@@ -443,6 +468,51 @@ mod tests {
                 assert!(!validate(&tx), "1559: {is_1559}, {case}");
             }
         }
+    }
+
+    /// Ethereum refuses a transaction whose gas limit does not cover what it
+    /// pays before executing: 21000, plus 4 per zero and 16 per other data
+    /// byte, plus 2400 per access list address and 1900 per storage key.
+    #[test]
+    fn validate_rejects_a_gas_limit_below_the_intrinsic_gas() {
+        use alloy::consensus::TxLegacy;
+        use alloy::eips::eip2930::{AccessList, AccessListItem};
+        use alloy::primitives::{Address, Bytes, B256};
+
+        let to = TxKind::Call(Address::repeat_byte(0x11));
+        let input = Bytes::from(vec![0, 0, 1]);
+        let access_list = AccessList(vec![AccessListItem {
+            address: Address::repeat_byte(0x22),
+            storage_keys: vec![B256::ZERO, B256::ZERO],
+        }]);
+        let eip1559 = |gas_limit| {
+            TxEip1559 {
+                chain_id: 1,
+                gas_limit,
+                to,
+                input: input.clone(),
+                access_list: access_list.clone(),
+                ..Default::default()
+            }
+            .encoded_for_signing()
+        };
+        let legacy = |gas_limit| {
+            TxLegacy {
+                chain_id: Some(1),
+                gas_limit,
+                to,
+                input: input.clone(),
+                ..Default::default()
+            }
+            .encoded_for_signing()
+        };
+        let ok = |bytes: &[u8]| validate_unsigned_transaction(Chain::Ethereum, bytes).is_ok();
+        let eip1559_intrinsic = 21_000 + 2 * 4 + 16 + 2_400 + 2 * 1_900;
+        assert!(ok(&eip1559(eip1559_intrinsic)));
+        assert!(!ok(&eip1559(eip1559_intrinsic - 1)));
+        let legacy_intrinsic = 21_000 + 2 * 4 + 16;
+        assert!(ok(&legacy(legacy_intrinsic)));
+        assert!(!ok(&legacy(legacy_intrinsic - 1)));
     }
 
     /// The negated signature verifies too, so it has to name the transaction a

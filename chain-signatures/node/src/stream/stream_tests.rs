@@ -154,7 +154,7 @@ fn build_solana_to_ethereum_bidirectional_request(
     let mut rlp_s = rlp::RlpStream::new_list(9);
     rlp_s.append(&0u64); // nonce
     rlp_s.append(&0u64); // gasPrice
-    rlp_s.append(&0u64); // gasLimit
+    rlp_s.append(&21_000u64); // gasLimit
     rlp_s.append(&vec![0x11u8; 20]); // to
     rlp_s.append(&0u64); // value
     rlp_s.append(&Vec::<u8>::new()); // data

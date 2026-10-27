@@ -425,7 +425,7 @@ async fn process_respond_event_quarantines_invalid_bidirectional_target_chain() 
     let mut rlp_s = rlp::RlpStream::new_list(9);
     rlp_s.append(&0u64);
     rlp_s.append(&0u64);
-    rlp_s.append(&0u64);
+    rlp_s.append(&21_000u64);
     rlp_s.append(&vec![0x11u8; 20]);
     rlp_s.append(&0u64);
     rlp_s.append(&Vec::<u8>::new());
@@ -756,7 +756,7 @@ fn legacy_contract_call_on<E: rlp::Encodable>(chain_id: &E) -> Vec<u8> {
     let mut rlp = rlp::RlpStream::new_list(9);
     rlp.append(&0u64); // nonce
     rlp.append(&0u64); // gasPrice
-    rlp.append(&0u64); // gasLimit
+    rlp.append(&100_000u64); // gasLimit
     rlp.append(&vec![0x11u8; 20]); // to
     rlp.append(&0u64); // value
     rlp.append(&vec![0xa9u8, 0x05, 0x9c, 0xbb]); // data
@@ -1232,7 +1232,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
     let mut rlp_s = rlp::RlpStream::new_list(9);
     rlp_s.append(&0u64);
     rlp_s.append(&0u64);
-    rlp_s.append(&0u64);
+    rlp_s.append(&21_000u64);
     rlp_s.append(&vec![0x11u8; 20]);
     rlp_s.append(&0u64);
     rlp_s.append(&Vec::<u8>::new());
