@@ -9,6 +9,7 @@ pub mod gcs;
 pub mod local;
 pub mod midnight;
 pub mod mpc_fixture;
+pub mod redis_harness;
 pub mod utils;
 
 use std::collections::HashMap;
