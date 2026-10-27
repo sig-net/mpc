@@ -3,7 +3,7 @@ mod args;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::backlog::Backlog;
-use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
+use crate::config::{Config, NetworkConfig};
 use crate::gcp::GcpService;
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
@@ -122,9 +122,6 @@ pub enum Cli {
         /// Logging options
         #[command(flatten)]
         log_options: logs::Options,
-        /// The set of configurations that we will use to override contract configurations.
-        #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
-        override_config: Option<OverrideConfig>,
         #[command(flatten)]
         mesh_options: mesh::Options,
     },
@@ -151,7 +148,6 @@ impl Cli {
                 my_address,
                 storage_options,
                 log_options,
-                override_config,
                 mesh_options,
             } => {
                 let mut args = vec![
@@ -174,12 +170,6 @@ impl Cli {
                 args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
-                }
-                if let Some(override_config) = override_config {
-                    args.extend([
-                        "--override-config".to_string(),
-                        serde_json::to_string(&override_config).unwrap(),
-                    ]);
                 }
 
                 args.extend(["--web-port".to_string(), web_port.to_string()]);
@@ -219,7 +209,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             my_address,
             storage_options,
             log_options,
-            override_config,
             mesh_options,
         } => {
             let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
@@ -343,7 +332,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 checkpoints_rx,
             } = ProtocolHandles::new(
                 &account_id,
-                override_config,
                 network.clone(),
                 sign_rx,
                 &node_client,
@@ -807,7 +795,6 @@ impl ProtocolHandles {
     #[allow(clippy::too_many_arguments)]
     async fn new(
         account_id: &AccountId,
-        override_config: Option<OverrideConfig>,
         network: NetworkConfig,
         sign_rx: mpsc::Receiver<SignCommand>,
         node_client: &NodeClient,
@@ -819,10 +806,7 @@ impl ProtocolHandles {
         rpc_channel: RpcChannel,
         sync_report_tx: SyncReportSender,
     ) -> Self {
-        let config = Config::new(LocalConfig {
-            over: override_config.unwrap_or_default(),
-            network,
-        });
+        let config = Config::new(network);
         let (config_tx, config_rx) = watch::channel(config);
         let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
         let node = Node::new();
