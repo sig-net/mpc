@@ -343,10 +343,9 @@ fn decode_singleton_calls(
                             .partition(|emission| emission.kind == EmissionKind::SignBidirectional),
                         // Holding on this one would let anyone halt the reader: the node checks
                         // a fallible phase's declared effects against its program only when it
-                        // applies the phase. Every other
-                        // failure comes from the proven program, which each singleton circuit
-                        // makes decodable, so only a format change reaches it, and that change
-                        // holds fully applied calls too.
+                        // applies the phase. Every other failure comes from the proven program,
+                        // which each singleton circuit makes decodable, so only a format change
+                        // reaches it, and that change holds fully applied calls too.
                         Err(reason)
                             if reason.downcast_ref::<DeclaredEffectsMismatch>().is_some() =>
                         {
