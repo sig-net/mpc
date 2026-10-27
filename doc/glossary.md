@@ -11,12 +11,12 @@ the tracking issue where there is one.
 ## Active set
 
 A node's local, unreliable guess at which [committee](#committee) members are
-reachable and up to date. No two nodes need the same guess, and a peer stays
-out of the set while the node runs a [state sync](#state-sync) with that peer
+reachable, report the `Running` state and have finished a [state
+sync](#state-sync) with the node. No two nodes need the same guess
 (`MeshState::active`, `mesh/state.rs`). See [protocol-properties.md
 §2](protocol-properties.md#2-system-model).
 
-## Admitted
+## Admitted request
 
 A [request](#request) the network has found authentic and processable and
 added to its [backlog](#backlog). Only an admitted request is ever signed or
@@ -31,11 +31,11 @@ A one-shot input generated ahead of time and consumed by at most one
 `storage/protocol_storage.rs`). Each artifact has a single [owner](#owner) and
 a set of [holders](#holder).
 
-Its states are `Generating` (a [generation](#generation) that will produce it
-is running), `Available` (stored and ready to use) and `Using` (taken by a
-running generation), with implicit `init` and `done`. The explicit states are
-stored and ideally persisted, and the change to `Using` must be persisted as
-soon as the artifact leaves storage. See
+Its states are `Generating` (the [generation](#generation) protocol that
+produces it is still running), `Available` (stored and ready to use) and
+`Using` (taken by a running generation), with implicit `init` and `done`. The
+explicit states are stored and ideally persisted, and the change to `Using`
+must be persisted as soon as the artifact leaves storage. See
 [node-specification.md](node-specification.md) and
 [state-sync.md](state-sync.md).
 
@@ -59,12 +59,13 @@ See [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 ## Backlog
 
 Each node keeps one backlog per [source chain](#source-chain), with one entry
-per [admitted](#admitted) [request](#request) that is not finished. An entry
-holds the [request id](#request-id), the request, the contract that made it
-and, for a [bidirectional request](#bidirectional-request), the signatures for
-it [published](#publish) in final source chain blocks. Only final source chain
-events change it; anything else a node keeps about a request stays out of it
-(`Backlog`, `backlog/`). See [checkpoints.md §1](checkpoints.md#1-background).
+per [admitted](#admitted-request) [request](#request) that is not finished. An
+entry holds the [request id](#request-id), the request, the contract that made
+it and, for a [bidirectional request](#bidirectional-request), the signatures
+for it [published](#publish) in final source chain blocks. Only final source
+chain events change it; anything else a node keeps about a request stays out of
+it (`Backlog`, `backlog/`). See [checkpoints.md
+§1](checkpoints.md#1-background).
 
 *Code today:* `BacklogEntry` holds the request and the node's progress,
 including phases set from what the node read on the [target
