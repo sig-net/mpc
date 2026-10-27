@@ -387,6 +387,71 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 return Ok(drop_entry(reason, height, Some(rid), &detail));
             }
         };
+        // A notification whose segment rolled back can still name a record an earlier
+        // transaction wrote. Only a record new in this block was written by a committed
+        // segment of this block.
+        if let Some(parent_hash) = rolled_back_parent {
+            let parent_tree = match source.contract_state_tree(&caller_hex, parent_hash).await {
+                Ok(ContractState::Tree(tree)) => Some(tree),
+                Ok(ContractState::Absent) => None,
+                Ok(ContractState::Undecodable(err)) => {
+                    return Ok(drop_entry(
+                        "parent-state-undecodable",
+                        height,
+                        Some(rid),
+                        &format!("{caller_hex}: {err:#}"),
+                    ));
+                }
+                Err(err) if is_oversized_contract_state(&err) => {
+                    return Ok(drop_entry(
+                        "parent-state-too-large",
+                        height,
+                        Some(rid),
+                        &format!("{caller_hex}: {err:#}"),
+                    ));
+                }
+                Err(err) => {
+                    return Err(err.context(format!(
+                        "failed to read caller state {caller_hex} at the parent block"
+                    )));
+                }
+            };
+            if let Some(tree) = parent_tree {
+                let field = match signet_field_node_by_path(&tree, &unpacked.requests_path) {
+                    Ok(field) => field,
+                    Err(err) => {
+                        return Ok(drop_entry(
+                            "parent-requests-field-walk",
+                            height,
+                            Some(rid),
+                            &format!("{err:#}"),
+                        ));
+                    }
+                };
+                match resolve_verified_record(field, rid) {
+                    Resolved::Absent => {}
+                    Resolved::Found(_) => {
+                        return Ok(drop_entry(
+                            "request-preexisting",
+                            height,
+                            Some(rid),
+                            &format!(
+                                "{caller_hex} held the record before this block, and this \
+                                 fallible notification of a partial success may have rolled back"
+                            ),
+                        ));
+                    }
+                    Resolved::Dropped { reason, detail } => {
+                        return Ok(drop_entry(
+                            reason,
+                            height,
+                            Some(rid),
+                            &format!("at the parent block: {detail}"),
+                        ));
+                    }
+                }
+            }
+        }
         match generate_sign_request(
             &record,
             &unpacked.caller_address,
@@ -625,7 +690,7 @@ mod tests {
     use crate::source::{BlockProofSeed, CandidateTransactionEmissions};
     use crate::test_utils::{
         array_of, ascii_padded, cell_from_record, hex_32, key_of, map_of, notification_payload,
-        response_payload, sample_record, test_root_pk,
+        response_payload, sample_record, test_root_pk, EventRecorder,
     };
     use midnight_onchain_state::state::StateValue;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
