@@ -1329,8 +1329,13 @@ mod tests {
         assert_eq!(block.candidates[0].calls, expected);
     }
 
-    #[tokio::test]
-    async fn block_reader_skips_an_undecodable_fallible_phase_only_in_a_partial_success() {
+    /// The captured fallible deposit with its singleton call's fallible transcript edited,
+    /// re-encoded with matching `TxApplied` and `TxPartialSuccess` status records.
+    fn edited_fallible_deposit(
+        edit: impl FnOnce(
+            &mut midnight_onchain_runtime::transcript::Transcript<midnight_storage::DefaultDB>,
+        ),
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         use midnight_ledger_v9::structure::ContractAction;
         use midnight_storage::arena::Sp;
 
@@ -1340,8 +1345,7 @@ mod tests {
         let (segment, mut call) = tx.calls().nth(1).unwrap();
         let singleton = call.address.0 .0;
         let mut transcript = call.fallible_transcript.as_deref().unwrap().clone();
-        transcript.effects.unshielded_mints =
-            midnight_storage::storage::HashMap::new().insert(Default::default(), 1);
+        edit(&mut transcript);
         call.fallible_transcript = Some(Sp::new(transcript));
         let DecodedTransaction::Standard(mut tx) = tx else {
             panic!("standard captured transaction");
@@ -1362,6 +1366,15 @@ mod tests {
         applied[7..39].copy_from_slice(&tx.transaction_hash().0 .0);
         let mut partial = applied.clone();
         partial[6] = 7; // TxPartialSuccess in the captured metadata.
+        (bytes, applied, partial)
+    }
+
+    #[tokio::test]
+    async fn block_reader_skips_a_fallible_effects_mismatch_only_in_a_partial_success() {
+        let (bytes, applied, partial) = edited_fallible_deposit(|transcript| {
+            transcript.effects.unshielded_mints =
+                midnight_storage::storage::HashMap::new().insert(Default::default(), 1);
+        });
 
         // Synthetic effects and statuses: this exercises the reader's status policy, not
         // node acceptance of such a transaction.
@@ -1376,7 +1389,7 @@ mod tests {
         let subscriber_guard = tracing::subscriber::set_default(subscriber);
         let block = read_fallible_transaction(encode_status_records(&[partial]), &bytes)
             .await
-            .expect("an undecodable fallible phase of a partial success does not hold")
+            .expect("a fallible effects mismatch in a partial success does not hold")
             .unwrap();
         drop(subscriber_guard);
         assert_eq!(block.candidates.len(), 1);
@@ -1393,13 +1406,30 @@ mod tests {
             panic!("expected one skipped-phase warning, got {skipped:?}");
         };
         assert_eq!(skipped.get("call_index").map(String::as_str), Some("1"));
-        assert!(skipped["error"].contains("expected empty declared effects"));
+        assert!(skipped["error"].contains("declared effects differ"));
 
         let err = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
             .await
             .expect_err("the same phase of a fully applied transaction holds");
         let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
         assert_eq!(hold.reason, "emission-schema-hold");
+    }
+
+    #[tokio::test]
+    async fn block_reader_holds_any_other_undecodable_fallible_phase_in_a_partial_success() {
+        let (bytes, applied, partial) = edited_fallible_deposit(|transcript| {
+            let mut program = Vec::from(&transcript.program);
+            program.push(midnight_onchain_runtime::ops::Op::Pop);
+            transcript.program = program.into();
+        });
+
+        for status in [partial, applied] {
+            let err = read_fallible_transaction(encode_status_records(&[status]), &bytes)
+                .await
+                .expect_err("an unsupported fallible program holds");
+            let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
+            assert_eq!(hold.reason, "emission-schema-hold");
+        }
     }
 
     #[tokio::test]

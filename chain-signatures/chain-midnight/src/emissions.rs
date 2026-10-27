@@ -1,14 +1,15 @@
 //! Singleton contract emissions recovered by executing transaction transcripts with the ledger VM.
 
 use anyhow::Context as _;
-use midnight_base_crypto::fab::{AlignmentAtom, AlignmentSegment};
+use midnight_base_crypto::fab::{AlignedValue, AlignmentAtom, AlignmentSegment, Value};
 use midnight_ledger_v9::structure::{ContractCall, ProofKind, ProofMarker, Signature, Transaction};
-use midnight_onchain_runtime::context::{Effects, QueryContext};
+use midnight_onchain_runtime::context::QueryContext;
 use midnight_onchain_runtime::cost_model::INITIAL_COST_MODEL;
 use midnight_onchain_runtime::ops::{LogEventType, Op, VersionedLogItem};
 use midnight_onchain_runtime::result_mode::ResultModeVerify;
 use midnight_onchain_runtime::state::{ChargedState, StateValue};
 use midnight_onchain_runtime::transcript::Transcript;
+use midnight_storage::arena::Sp;
 use midnight_storage::storage::Array;
 use midnight_storage::DefaultDB;
 
@@ -85,12 +86,12 @@ fn log_items<P: ProofKind<DefaultDB>>(
     call: &ContractCall<P, DefaultDB>,
     transcript: &Transcript<DefaultDB>,
 ) -> anyhow::Result<Vec<VersionedLogItem<DefaultDB>>> {
-    let program = Vec::from(&transcript.program);
+    let program = proven_program(Vec::from(&transcript.program));
     // Live ingestion establishes the node status first; transaction normalization is
     // the ledger's responsibility. Only constrain what we can replay correctly.
     // Noops and checkpoints only consume gas during VM execution; they cannot
     // observe or change the stack, state, effects or logs. Ignore them for shape
-    // validation, but replay the original program, preserving its gas charges.
+    // validation; the replay runs the whole proven program.
     let log_program = program
         .iter()
         .filter(|op| !matches!(op, Op::Noop { .. } | Op::Ckpt))
@@ -103,10 +104,6 @@ fn log_items<P: ProofKind<DefaultDB>>(
                 .all(|pair| matches!(pair, [Op::Push { storage: false, .. }, Op::Log])),
         "unsupported-singleton-transcript: expected literal non-storage Push/Log pairs with Noops and checkpoints"
     );
-    anyhow::ensure!(
-        transcript.effects == Effects::default(),
-        "unsupported-singleton-transcript: expected empty declared effects"
-    );
     // The ledger starts each phase with a fresh query context. The accepted subset
     // cannot observe its omitted contract state, balance or block context.
     let context = QueryContext::new(
@@ -116,12 +113,72 @@ fn log_items<P: ProofKind<DefaultDB>>(
     let result = context
         .query::<ResultModeVerify>(&program, None, &INITIAL_COST_MODEL)
         .context("singleton transcript rejected by the ledger VM")?;
-    anyhow::ensure!(
-        result.context.effects == transcript.effects,
-        "unsupported-singleton-transcript: replayed effects differ from declared effects"
-    );
+    // Push/Log pairs produce no effects, so the ledger fails such a phase in any contract
+    // state, with `EffectsMismatch` if nothing fails it earlier.
+    if result.context.effects != transcript.effects {
+        return Err(DeclaredEffectsMismatch.into());
+    }
     Ok(result.events)
 }
+
+/// The program as its proof covers it. Ledger 9.1.0-rc.3, which this crate pins and Stagenet
+/// runs, accepts `idx []`, which has no field representation, and atoms past a pushed cell's
+/// alignment, which the field representation drops, so a transaction's author can add either
+/// to a proven program. Midnight closed both in 9.1.0-rc.5, so this can go once every
+/// ledger-9 network we read runs rc.5 or later.
+fn proven_program(
+    program: Vec<Op<ResultModeVerify, DefaultDB>>,
+) -> Vec<Op<ResultModeVerify, DefaultDB>> {
+    program
+        .into_iter()
+        .filter(|op| !matches!(op, Op::Idx { path, .. } if path.is_empty()))
+        .map(|op| match op {
+            Op::Push { storage, value } => Op::Push {
+                storage,
+                value: proven_value(&value),
+            },
+            op => op,
+        })
+        .collect()
+}
+
+fn proven_value(value: &StateValue<DefaultDB>) -> StateValue<DefaultDB> {
+    match value {
+        StateValue::Cell(cell) => {
+            let Some((_, surplus)) = cell.alignment.consume(&cell.value) else {
+                return value.clone();
+            };
+            let proven = cell.value.0.len() - surplus.0.len();
+            StateValue::Cell(Sp::new(AlignedValue {
+                value: Value(cell.value.0[..proven].to_vec()),
+                alignment: cell.alignment.clone(),
+            }))
+        }
+        StateValue::Array(items) => StateValue::Array(
+            items
+                .iter()
+                .map(|item| proven_value(&item))
+                .collect::<Vec<_>>()
+                .into(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+/// A transcript declaring effects its program does not produce. The circuit does not
+/// constrain declared effects, so anyone can prove and submit one; the ledger never commits it.
+#[derive(Debug)]
+struct DeclaredEffectsMismatch;
+
+impl std::fmt::Display for DeclaredEffectsMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "unsupported-singleton-transcript: declared effects differ from the replayed effects",
+        )
+    }
+}
+
+impl std::error::Error for DeclaredEffectsMismatch {}
 
 fn emission_from_log_item(item: &VersionedLogItem<DefaultDB>) -> anyhow::Result<Emission> {
     anyhow::ensure!(
@@ -228,8 +285,9 @@ pub fn emissions_in(
 /// which fallible segments committed. Guaranteed phases committed and decode as in
 /// [`emissions_in`]. A fallible phase keeps only its notifications, which the indexer
 /// signs only when the caller's state holds the request and did not at the parent block;
-/// its responses have no such check. A fallible phase that does not decode may never have run, so it is skipped
-/// instead of failing the block.
+/// its responses have no such check. A fallible phase whose declared effects differ from
+/// its program's never committed, so it is skipped; any other decode failure fails the block
+/// as in [`emissions_in`].
 pub fn partial_success_emissions_in(
     tx: &DecodedTransaction,
     singleton: &[u8; 32],
@@ -283,10 +341,19 @@ fn decode_singleton_calls(
                         Ok(emissions) => emissions
                             .into_iter()
                             .partition(|emission| emission.kind == EmissionKind::SignBidirectional),
-                        Err(reason) => {
+                        // Holding on this one would let anyone halt the reader: the node checks
+                        // a fallible phase's declared effects against its program only when it
+                        // applies the phase. Every other
+                        // failure comes from the proven program, which each singleton circuit
+                        // makes decodable, so only a format change reaches it, and that change
+                        // holds fully applied calls too.
+                        Err(reason)
+                            if reason.downcast_ref::<DeclaredEffectsMismatch>().is_some() =>
+                        {
                             skip(reason);
                             continue;
                         }
+                        Err(reason) => return Err(reason),
                     };
                     if !responses.is_empty() {
                         skip(anyhow::anyhow!(
@@ -329,7 +396,7 @@ mod tests {
         ContractAction, ContractCall, Intent, ProofMarker, ProofVersioned, StandardTransaction,
     };
     use midnight_onchain_runtime::context::{ClaimedContractCallsValue, Effects};
-    use midnight_onchain_runtime::ops::{LogEventType, Op, VersionedLogItem};
+    use midnight_onchain_runtime::ops::{Key, LogEventType, Op, VersionedLogItem};
     use midnight_onchain_runtime::result_mode::ResultModeVerify;
     use midnight_onchain_runtime::state::{EntryPointBuf, StateValue};
     use midnight_onchain_runtime::transcript::Transcript;
@@ -814,6 +881,15 @@ mod tests {
                 ops.push(Op::Pop);
                 ops
             },
+            vec![
+                good[0].clone(),
+                Op::Idx {
+                    cached: false,
+                    push_path: false,
+                    path: vec![Key::Stack].into_iter().collect(),
+                },
+                good[1].clone(),
+            ],
         ] {
             for fallible in [false, true] {
                 let call = if fallible {
@@ -839,7 +915,7 @@ mod tests {
                 call.guaranteed_transcript = Some(Sp::new(transcript));
             }
             let error = emissions_in(&transaction(vec![call]), &SINGLETON).unwrap_err();
-            assert!(format!("{error:#}").contains("expected empty declared effects"));
+            assert!(error.downcast_ref::<DeclaredEffectsMismatch>().is_some());
         }
     }
 
@@ -1084,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn a_partial_success_skips_an_undecodable_fallible_phase_but_not_a_guaranteed_one() {
+    fn a_partial_success_skips_a_fallible_phase_only_on_an_effects_mismatch() {
         let mut bad = transcript(emit_ops(SIGN_BIDIRECTIONAL_EVENT, GUARANTEED));
         bad.effects.unshielded_mints = HashMap::new().insert(Default::default(), 1);
         let mut rolled_back = call(SINGLETON, None, None);
@@ -1111,14 +1187,117 @@ mod tests {
             panic!("expected one skipped phase, got {skipped:?}");
         };
         assert_eq!((skipped.call_index, skipped.physical_segment), (0, 1));
-        assert!(format!("{:#}", skipped.reason).contains("expected empty declared effects"));
+        assert!(skipped
+            .reason
+            .downcast_ref::<DeclaredEffectsMismatch>()
+            .is_some());
         assert!(emissions_in(&tx, &SINGLETON).is_err());
 
         let mut committed = call(SINGLETON, None, None);
         committed.guaranteed_transcript = Some(Sp::new(bad));
         let error =
             partial_success_emissions_in(&transaction(vec![committed]), &SINGLETON).unwrap_err();
-        assert!(format!("{error:#}").contains("expected empty declared effects"));
+        assert!(error.downcast_ref::<DeclaredEffectsMismatch>().is_some());
+    }
+
+    /// Programs with the honest program's field representation, each accepted by ledger
+    /// 9.1.0-rc.3.
+    fn malleated_emit_ops(payload: [u8; MISC_PAYLOAD_LEN]) -> Vec<Vec<TestOp>> {
+        let mut data = SIGN_BIDIRECTIONAL_EVENT.to_vec();
+        data.extend_from_slice(&payload);
+        let width = (MISC_NAME_LEN + MISC_PAYLOAD_LEN) as u32;
+        let item = |version: Vec<Vec<u8>>, data: Vec<Vec<u8>>| {
+            logging(array_of(vec![
+                cell_from_atoms(&version, &[4]),
+                cell_from_atoms(&[trim(&[LogEventType::Misc as u8])], &[1]),
+                cell_from_atoms(&data, &[width]),
+            ]))
+        };
+        let version = trim(&LOG_ITEM_VERSION.to_le_bytes());
+        let honest = emit_ops(SIGN_BIDIRECTIONAL_EVENT, payload);
+        let mut programs = vec![
+            item(vec![version.clone()], vec![trim(&data), vec![1]]),
+            item(vec![version, vec![1]], vec![trim(&data)]),
+            [vec![Op::Noop { n: 0 }], honest.clone()].concat(),
+        ];
+        for (cached, push_path) in [(false, false), (true, false), (false, true), (true, true)] {
+            let idx = Op::Idx {
+                cached,
+                push_path,
+                path: Vec::new().into_iter().collect(),
+            };
+            programs.push([vec![idx.clone()], honest.clone()].concat());
+            programs.push(vec![honest[0].clone(), idx, honest[1].clone()]);
+        }
+        programs
+    }
+
+    #[test]
+    fn decodes_the_proven_program_of_a_malleated_transcript() {
+        let expected = vec![Emission {
+            kind: EmissionKind::SignBidirectional,
+            payload: FALLIBLE,
+        }];
+        for program in malleated_emit_ops(FALLIBLE) {
+            for fallible in [false, true] {
+                let call = if fallible {
+                    call(SINGLETON, None, Some(program.clone()))
+                } else {
+                    call(SINGLETON, Some(program.clone()), None)
+                };
+                let tx = transaction(vec![call]);
+                let (decoded, skipped) = partial_success_emissions_in(&tx, &SINGLETON).unwrap();
+                assert!(skipped.is_empty(), "{skipped:?}");
+                assert_eq!(decoded[0].emissions, expected, "{program:?}");
+                assert_eq!(
+                    emissions_in(&tx, &SINGLETON).unwrap()[0].emissions,
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_partial_success_holds_a_vm_rejected_fallible_phase() {
+        let atoms: Vec<Vec<u8>> = (0..24).map(|_| vec![0xff; 30_000]).collect();
+        let oversized_log = logging(cell_from_atoms(&atoms, &[30_000; 24]));
+        let tx = transaction(vec![call(SINGLETON, None, Some(oversized_log))]);
+
+        let error = partial_success_emissions_in(&tx, &SINGLETON).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("rejected by the ledger VM"),
+            "{error:#}"
+        );
+        assert!(error.downcast_ref::<DeclaredEffectsMismatch>().is_none());
+    }
+
+    #[test]
+    fn a_partial_success_fails_on_any_other_undecodable_fallible_phase() {
+        let schema_drift = logging(raw_log_item(
+            2,
+            LogEventType::Misc as u8,
+            data_cell(&SIGN_BIDIRECTIONAL_EVENT, &FALLIBLE, 288),
+        ));
+        for (program, expected) in [
+            (vec![Op::Root, Op::Log], "unsupported-singleton-transcript"),
+            (vec![Op::Log], "unsupported-singleton-transcript"),
+            (schema_drift, "emission-schema"),
+        ] {
+            let tx = transaction(vec![
+                call(
+                    SINGLETON,
+                    None,
+                    Some(emit_ops(SIGN_BIDIRECTIONAL_EVENT, FALLIBLE)),
+                ),
+                call(SINGLETON, None, Some(program)),
+            ]);
+
+            let error = partial_success_emissions_in(&tx, &SINGLETON).unwrap_err();
+
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+            assert!(error.downcast_ref::<DeclaredEffectsMismatch>().is_none());
+        }
     }
 
     #[test]
