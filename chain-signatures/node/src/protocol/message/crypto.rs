@@ -169,7 +169,13 @@ impl SignedMessage {
         }
 
         if !in_window(sent_at, max_age) {
-            tracing::warn!(?from, sent_at, "signed message is outside the time window");
+            let age_ms = now_millis() as i64 - sent_at as i64;
+            tracing::warn!(
+                ?from,
+                sent_at,
+                age_ms,
+                "signed message is outside the time window"
+            );
             return Err(MessageError::Verification(
                 "signed message is outside the accepted time window",
             ));
