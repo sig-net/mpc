@@ -170,3 +170,7 @@ test-canton filter="canton_stream": (setup "")
 # Release compatibility test (needs `just build compat` output)
 test-compat: (setup "")
     ./scripts/test-prod-compat.sh
+
+# Usage: just bench-redis [args] (e.g. just bench-redis, or just bench-redis "--scenario 1")
+bench-redis args="":
+    MPC_SETUP_SKIP=1 cargo run --release -p integration-tests --bin redis-bench -- {{args}}
