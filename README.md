@@ -8,4 +8,4 @@ Sig.Network MPC is a threshold-signature network that lets a smart contract on o
 ### More information:
 - [MPC docs](doc/)
 - [Integration docs](https://docs.sig.network/)
-- [Contributing](./integration-tests/README.md)
+- [Contributing](./CONTRIBUTING.md)

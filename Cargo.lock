@@ -3459,9 +3459,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
 ]
@@ -7525,6 +7525,7 @@ dependencies = [
  "mpc-crypto",
  "mpc-primitives",
  "rand 0.8.8",
+ "sha2 0.11.0",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -7558,6 +7559,7 @@ dependencies = [
  "mpc-compact-hashing",
  "mpc-crypto",
  "mpc-primitives",
+ "mpc-tron-wire",
  "mpc-utils",
  "serde",
  "serde_json",
@@ -7630,12 +7632,11 @@ version = "1.21.0"
 dependencies = [
  "alloy",
  "anyhow",
- "bs58 0.5.1",
  "hex",
  "k256",
  "mockito",
  "mpc-chain-integration-core",
- "prost 0.14.4",
+ "mpc-tron-wire",
  "prost-types",
  "reqwest 0.12.28",
  "serde",
@@ -7763,6 +7764,7 @@ dependencies = [
  "mpc-crypto",
  "mpc-keys",
  "mpc-primitives",
+ "mpc-tron-wire",
  "mpc-utils",
  "near-account-id",
  "near-crypto",
@@ -7791,6 +7793,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-http",
  "tracing",
  "tracing-opentelemetry 0.30.0",
  "tracing-stackdriver",
@@ -7811,6 +7814,23 @@ dependencies = [
  "serde_bytes",
  "sha3 0.10.8",
  "signet-primitives",
+]
+
+[[package]]
+name = "mpc-tron-wire"
+version = "1.21.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "bs58 0.5.1",
+ "hex",
+ "k256",
+ "mpc-primitives",
+ "prost 0.14.4",
+ "prost-types",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -14633,7 +14653,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.2",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -16912,9 +16932,9 @@ dependencies = [
 
 [[package]]
 name = "zstd-sys"
-version = "2.0.15+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb81183ddd97d0c74cedf1d50d85c8d08c1b8b68ee863bdee9e706eedba1a237"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

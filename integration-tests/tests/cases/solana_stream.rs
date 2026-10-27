@@ -45,7 +45,7 @@ async fn solana_sandbox() -> Result<Solana> {
 fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
     let backlog = Backlog::new();
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     (backlog, mesh_rx, node_client)
 }
 
@@ -132,7 +132,7 @@ async fn spawn_supervised_stream(
         ParticipantInfo::new(0),
     );
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
 
     // We need to forget the tx handles because they are not used after this point
@@ -335,14 +335,15 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
     let config = solana.get_config(program_address);
     let mut indexer = run_solana_indexer(config).await?;
 
-    // Submit bidirectional sign request
+    // Submit bidirectional sign request: Ethereum is the target — Solana is a
+    // source chain.
     let serialized_tx = vec![1, 2, 3, 4];
     let callback_program = solana_sdk::pubkey::Pubkey::new_unique();
 
     solana
         .sign_bidirectional(
             &serialized_tx,
-            Chain::Solana.caip2_chain_id(),
+            Chain::Ethereum.caip2_chain_id(),
             LATEST_MPC_KEY_VERSION,
             "test",
             "secp256k1",
@@ -569,7 +570,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         ParticipantInfo::new(0),
     );
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
 
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(async move {

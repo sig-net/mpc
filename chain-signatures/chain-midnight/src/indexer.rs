@@ -21,7 +21,8 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
 use mpc_primitives::{
-    Chain, ChainEvent, IndexedSignRequest, RespondBidirectionalEvent, SignatureRespondedEvent,
+    Chain, ChainEvent, IndexedSignRequest, PublicKey, RespondBidirectionalEvent,
+    SignatureRespondedEvent,
 };
 use mpc_utils::{task::CancellationTokenExt as _, time::current_unix_timestamp};
 use tokio::sync::mpsc;
@@ -69,6 +70,7 @@ pub struct MidnightIndexer<S: StateManager, T: ChainTelemetry> {
     config: MidnightConfig,
     state_manager: S,
     telemetry: T,
+    root_pk: PublicKey,
 }
 
 impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
@@ -76,12 +78,14 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         config: MidnightConfig,
         state_manager: S,
         telemetry: T,
+        root_pk: PublicKey,
     ) -> anyhow::Result<Self> {
         config.validate()?;
         Ok(Self {
             config,
             state_manager,
             telemetry,
+            root_pk,
         })
     }
 }
@@ -383,72 +387,13 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                 return Ok(drop_entry(reason, height, Some(rid), &detail));
             }
         };
-        // A notification whose segment rolled back can still name a record an earlier
-        // transaction wrote. Only a record new in this block was written by a committed
-        // segment of this block.
-        if let Some(parent_hash) = rolled_back_parent {
-            let parent_tree = match source.contract_state_tree(&caller_hex, parent_hash).await {
-                Ok(ContractState::Tree(tree)) => Some(tree),
-                Ok(ContractState::Absent) => None,
-                Ok(ContractState::Undecodable(err)) => {
-                    return Ok(drop_entry(
-                        "parent-state-undecodable",
-                        height,
-                        Some(rid),
-                        &format!("{caller_hex}: {err:#}"),
-                    ));
-                }
-                Err(err) if is_oversized_contract_state(&err) => {
-                    return Ok(drop_entry(
-                        "parent-state-too-large",
-                        height,
-                        Some(rid),
-                        &format!("{caller_hex}: {err:#}"),
-                    ));
-                }
-                Err(err) => {
-                    return Err(err.context(format!(
-                        "failed to read caller state {caller_hex} at the parent block"
-                    )));
-                }
-            };
-            if let Some(tree) = parent_tree {
-                let field = match signet_field_node_by_path(&tree, &unpacked.requests_path) {
-                    Ok(field) => field,
-                    Err(err) => {
-                        return Ok(drop_entry(
-                            "parent-requests-field-walk",
-                            height,
-                            Some(rid),
-                            &format!("{err:#}"),
-                        ));
-                    }
-                };
-                match resolve_verified_record(field, rid) {
-                    Resolved::Absent => {}
-                    Resolved::Found(_) => {
-                        return Ok(drop_entry(
-                            "request-preexisting",
-                            height,
-                            Some(rid),
-                            &format!(
-                                "{caller_hex} held the record before this block, and this \
-                                 fallible notification of a partial success may have rolled back"
-                            ),
-                        ));
-                    }
-                    Resolved::Dropped { reason, detail } => {
-                        return Ok(drop_entry(
-                            reason,
-                            height,
-                            Some(rid),
-                            &format!("at the parent block: {detail}"),
-                        ));
-                    }
-                }
-            }
-        }
-        match generate_sign_request(&record, &unpacked.caller_address, rid, indexed_ts) {
+        match generate_sign_request(
+            &record,
+            &unpacked.caller_address,
+            rid,
+            indexed_ts,
+            self.root_pk,
+        ) {
             Ok(request) => Ok(Some(request)),
             Err(err) => {
                 // Every conversion failure is a per-record data property, so drop with
@@ -676,12 +621,11 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for MidnightIndexer<S, T> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::emissions::{emissions_in, DecodedTransaction, Emission, EmissionKind};
     use crate::source::{BlockProofSeed, CandidateTransactionEmissions};
     use crate::test_utils::{
-        array_of, cell_from_record, hex_32, key_of, map_of, notification_payload, response_payload,
-        sample_record, EventRecorder,
+        array_of, ascii_padded, cell_from_record, hex_32, key_of, map_of, notification_payload,
+        response_payload, sample_record, test_root_pk,
     };
     use midnight_onchain_state::state::StateValue;
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
@@ -780,7 +724,10 @@ mod tests {
 
     fn named_record_and_rid(nonce: u64) -> (crate::records::SignBidirectionalRecord, [u8; 32]) {
         let mut record = sample_record();
-        record.tx_params.nonce = nonce;
+        // sample_record's dest is pinned by the Compact golden rid vector
+        // (eip155:31337); conversion admits the fixed family id only.
+        record.execution_dest = ascii_padded(b"eip155:1");
+        record.evm_mut().nonce = nonce;
         let rid = crate::hashing::compute_request_id(&record).unwrap();
         (record, rid)
     }
@@ -966,9 +913,14 @@ mod tests {
     }
 
     async fn direct_indexer() -> TestIndexer {
-        MidnightIndexer::new(test_config(), MockStateManager::new(), NoopChainTelemetry)
-            .await
-            .expect("indexer constructs")
+        MidnightIndexer::new(
+            test_config(),
+            MockStateManager::new(),
+            NoopChainTelemetry,
+            test_root_pk(),
+        )
+        .await
+        .expect("indexer constructs")
     }
 
     struct RunFixture {
@@ -996,9 +948,10 @@ mod tests {
             state: MockStateManager,
             config: MidnightConfig,
         ) -> Self {
-            let indexer = MidnightIndexer::new(config, state.clone(), NoopChainTelemetry)
-                .await
-                .expect("indexer constructs");
+            let indexer =
+                MidnightIndexer::new(config, state.clone(), NoopChainTelemetry, test_root_pk())
+                    .await
+                    .expect("indexer constructs");
             let (events_tx, events_rx) = chain_event_channel();
             let cancel = CancellationToken::new();
             let handle = tokio::spawn({
@@ -2113,7 +2066,7 @@ mod tests {
     async fn path_walk_and_conversion_failures_drop_only_the_affected_entry() {
         let (good_record, good_rid) = named_record_and_rid(7);
         let mut bad_record = sample_record();
-        bad_record.tx_params.nonce = 8;
+        bad_record.evm_mut().nonce = 8;
         bad_record.algo = 1;
         let bad_rid = crate::hashing::compute_request_id(&bad_record).unwrap();
         let mut source = FixtureSource::default();
@@ -2203,7 +2156,7 @@ mod tests {
         let state = MockStateManager::new();
         state.set_processed_block(Chain::Midnight, 8).await;
         let counted = CountingTelemetry::default();
-        let indexer = MidnightIndexer::new(test_config(), state, counted.clone())
+        let indexer = MidnightIndexer::new(test_config(), state, counted.clone(), test_root_pk())
             .await
             .expect("indexer constructs");
         let (events_tx, mut events_rx) = chain_event_channel();
@@ -2227,11 +2180,17 @@ mod tests {
     async fn midnight_indexer_new_rejects_zero_poll_interval() {
         let mut config = test_config();
         config.indexer.poll_interval = std::time::Duration::ZERO;
-        let err =
-            match MidnightIndexer::new(config, MockStateManager::new(), NoopChainTelemetry).await {
-                Ok(_) => panic!("invalid config must fail"),
-                Err(err) => err,
-            };
+        let err = match MidnightIndexer::new(
+            config,
+            MockStateManager::new(),
+            NoopChainTelemetry,
+            test_root_pk(),
+        )
+        .await
+        {
+            Ok(_) => panic!("invalid config must fail"),
+            Err(err) => err,
+        };
         assert!(err.to_string().contains("poll_interval"));
     }
 }

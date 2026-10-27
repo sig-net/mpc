@@ -9,9 +9,11 @@ mod common;
 use anyhow::{bail, Context};
 use common::build_raw;
 use k256::ecdsa::SigningKey;
-use mpc_chain_tron::pb::{Message, RawTransaction};
-use mpc_chain_tron::{
-    parse_hex, BroadcastOutcome, NowBlock, TronAddress, TronConfig, TronHttp, TronReceipt,
+use mpc_chain_tron::{BroadcastOutcome, TronConfig, TronHttp, TronReceipt};
+use mpc_tron_wire::{
+    parse_hex,
+    pb::{Message, RawTransaction},
+    NowBlock, TronAddress,
 };
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
