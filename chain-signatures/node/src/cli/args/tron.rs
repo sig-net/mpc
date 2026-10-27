@@ -30,19 +30,21 @@ pub struct TronArgs {
 impl TronArgs {
     pub fn into_str_args(self) -> Vec<String> {
         let mut args = Vec::with_capacity(6);
+
+        // Only emit flags if Tron is configured
         if let Some(tron_endpoint) = self.tron_endpoint {
             args.extend(["--tron-endpoint".to_string(), tron_endpoint]);
-        }
-        if let Some(tron_api_key) = self.tron_api_key {
+            if let Some(tron_api_key) = self.tron_api_key {
+                args.extend([
+                    "--tron-api-key".to_string(),
+                    tron_api_key.expose_secret().to_string(),
+                ]);
+            }
             args.extend([
-                "--tron-api-key".to_string(),
-                tron_api_key.expose_secret().to_string(),
+                "--tron-poll-interval-ms".to_string(),
+                self.tron_poll_interval_ms.to_string(),
             ]);
         }
-        args.extend([
-            "--tron-poll-interval-ms".to_string(),
-            self.tron_poll_interval_ms.to_string(),
-        ]);
         args
     }
 
@@ -73,5 +75,15 @@ impl TronArgs {
                 tron_poll_interval_ms: TronConfig::DEFAULT_POLL_INTERVAL_MS,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unconfigured_emits_no_args() {
+        assert!(TronArgs::from_config(None).into_str_args().is_empty());
     }
 }
