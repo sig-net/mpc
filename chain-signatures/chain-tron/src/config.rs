@@ -30,7 +30,7 @@ impl Default for TronConfig {
                 max_times: 5,
                 jitter: true,
             },
-            poll_interval: Duration::from_secs(15),
+            poll_interval: Duration::from_millis(Self::DEFAULT_POLL_INTERVAL_MS),
         }
     }
 }
@@ -49,6 +49,7 @@ impl fmt::Debug for TronConfig {
 }
 
 impl TronConfig {
+    pub const DEFAULT_POLL_INTERVAL_MS: u64 = 15_000;
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url("endpoint", &self.endpoint)?;
         if let Some(api_key) = &self.api_key {

@@ -19,7 +19,11 @@ pub struct TronArgs {
     )]
     pub tron_api_key: Option<SecretString>,
     /// Delay between receipt polls, in milliseconds.
-    #[arg(long, env("MPC_TRON_POLL_INTERVAL_MS"), default_value = "15000")]
+    #[arg(
+        long,
+        env("MPC_TRON_POLL_INTERVAL_MS"),
+        default_value_t = TronConfig::DEFAULT_POLL_INTERVAL_MS
+    )]
     pub tron_poll_interval_ms: u64,
 }
 
@@ -66,7 +70,7 @@ impl TronArgs {
             None => Self {
                 tron_endpoint: None,
                 tron_api_key: None,
-                tron_poll_interval_ms: 15000,
+                tron_poll_interval_ms: TronConfig::DEFAULT_POLL_INTERVAL_MS,
             },
         }
     }
