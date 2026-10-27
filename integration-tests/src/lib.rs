@@ -384,7 +384,8 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     println!("\nAfter run the nodes, please call the following command to init contract: ");
     let args = json!({
         "threshold": cfg.threshold,
-        "candidates": candidates
+        "candidates": candidates,
+        "config": Config { protocol: cfg.protocol.clone(), ..Default::default() },
     })
     .to_string();
     let sk = SecretKey::from_seed(KeyType::ED25519, "testificate");
