@@ -39,11 +39,12 @@ must be persisted as soon as the artifact leaves storage. See
 [node-specification.md](node-specification.md) and
 [state-sync.md](state-sync.md).
 
-*Code today:* `ReservedKind` has `Generating`, `Pending` (picked by the owner
-for a [posit](#posit), still stored) and `Using`; there is no `Available`:
-an artifact in storage with no mark plays that role. The marks live only in
-memory, so a crash loses an artifact in `Using`, and `Using` clears whenever
-the consuming generation ends, even when it fails.
+*Code today:* artifacts are stored in Redis, and their marks `Generating`,
+`Pending` (a [reservation](#reservation)) and `Using` live only in memory
+(`ReservedKind`, `storage/protocol_storage.rs`). There is no `Available`
+mark: an artifact in Redis with no mark plays that role. A crash loses an
+artifact in `Using`, and `Using` clears whenever the consuming generation
+ends, even when it fails.
 
 ## Attestation
 
@@ -156,14 +157,14 @@ block, so every node derives the same [delta](#delta) (`SignArgs::entropy`,
 
 The [committee](#committee)'s version number, fixed by the [governance
 contract](#governance-contract); each completed resharing raises it by one
-(`Epoch`, `types.rs`).
+(`RunningContractState::epoch`, `chain-signatures/contract/src/state.rs`; each
+node's copy is `GovernanceInfo::epoch`, `rpc/mod.rs`).
 
 ## Epsilon
 
-The per-account scalar derived from
-`{EPSILON_DERIVATION_PREFIX}:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}`,
-used to derive the account's key from the root key (`derive_epsilon`,
-`derive_key`, `signet-crypto/src/kdf.rs`). See
+The per-account scalar derived from the key version, chain, sender and
+derivation path, used to derive the account's key from the root key
+(`derive_epsilon`, `derive_key`, `signet-crypto/src/kdf.rs`). See
 [account-derivation.md](account-derivation.md).
 
 ## f
@@ -281,10 +282,10 @@ The agreement phase before an [instance](#instance), in four messages
 (`PositAction`):
 
 - **PROPOSE.** For a signature or a [presignature](#presignature), the
-  [proposer](#proposer) reserves the [artifact](#artifact) to consume and
-  offers it to the artifact's active [holders](#holder). For a [triple
-  pair](#triple-pair), which consumes no artifact, it proposes to every node
-  in its [active set](#active-set).
+  [proposer](#proposer) [reserves](#reservation) the [artifact](#artifact) to
+  consume and offers it to the artifact's active [holders](#holder). For a
+  [triple pair](#triple-pair), which consumes no artifact, it proposes to
+  every node in its [active set](#active-set).
 - **ACCEPT** or **REJECT.** Each [deliberator](#deliberator) agrees, or
   refuses with a reason (`PositRejectReason`).
 - **START.** The proposer commits the reserved artifact, removing it from the
@@ -338,6 +339,18 @@ length-committing encoding (`SignId`, `signet-primitives/src/crypto.rs`). See
 
 *Code today:* bidirectional request ids are computed this way only for
 Midnight sources ([#1429](https://github.com/sig-net/mpc/issues/1429)).
+
+## Reservation
+
+A [proposer](#proposer)'s claim on one of its own stored
+[artifacts](#artifact) for a [posit](#posit), so that its other posits
+running at the same time do not pick the same artifact. The artifact stays
+stored and, in the spec's terms, `Available`. The START commit removes it and
+makes it `Using`; a posit that ends before START releases it. A reservation
+is local to the proposer and kept only in memory, so a restart drops it
+(`ArtifactReservation`, `ReservedKind::Pending`,
+`storage/protocol_storage.rs`). See
+[posit-state-machine.md](posit-state-machine.md).
 
 ## Round
 
