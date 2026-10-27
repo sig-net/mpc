@@ -34,5 +34,6 @@ types that apply; for each, what breaks and what users must do.
 - [ ] Title is `chore: release X.Y.Z`
 - [ ] Every PR merged since A.B.C reviewed and its Breaking changes copied above: `gh pr list --state merged --base develop --search "merged:>YYYY-MM-DD" --limit 200`
 - [ ] Prod Compatibility Tests passed on this PR, or the failure is explained under Node–Node
+- [ ] A pass over the diffs of the merged PRs found no breaking change missing above; disagreements settled with the PR authors
 
 <!-- After merging: tag, publish the release and promote to testnet, see doc/releasing.md. -->

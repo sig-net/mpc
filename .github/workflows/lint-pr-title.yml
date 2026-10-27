@@ -1,4 +1,4 @@
-name: PR Title
+name: PR Title and Breaking Changes
 
 on:
   pull_request_target:
@@ -29,3 +29,30 @@ jobs:
         if: github.event_name == 'pull_request_target'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  breaking-changes:
+    name: Breaking Changes Section
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target'
+    steps:
+      # The section must have one state: `None`, or one or more types. A ticked
+      # type needs `!` in the title and `None` must not have it. Release and
+      # hotfix PRs use their own templates and are skipped.
+      - name: Check the Breaking changes section against the title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          case "$TITLE" in
+            "chore: release "*|"fix: hotfix "*) echo "release or hotfix PR, skipped"; exit 0;;
+          esac
+          section=$(printf '%s\n' "$BODY" | tr -d '\r' | awk '/^## Breaking changes/{f=1;next} /^## /{f=0} f')
+          none=$(printf '%s\n' "$section" | grep -c -E '^- \[[xX]\] None' || true)
+          types=$(printf '%s\n' "$section" | grep -c -E '^- \[[xX]\] (Node.Node|Contract.Node|Contract state|Network.Applications|Operator)' || true)
+          if printf '%s' "$TITLE" | grep -q -E '^[a-z]+(\([^)]*\))?!:'; then bang=1; else bang=0; fi
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$((none + types))" -gt 0 ] || fail "Breaking changes: tick None or every type that applies"
+          [ "$none" -eq 0 ] || [ "$types" -eq 0 ] || fail "Breaking changes: None cannot be ticked together with a type"
+          [ "$types" -eq 0 ] || [ "$bang" -eq 1 ] || fail "Breaking changes ticked: add '!' to the title, e.g. 'feat(node)!: ...'"
+          [ "$bang" -eq 0 ] || [ "$types" -gt 0 ] || fail "Title has '!' but no breaking type is ticked"
+          echo "ok: none=$none types=$types bang=$bang"
