@@ -73,10 +73,14 @@ pub enum Cli {
         /// This node's account id
         #[arg(long, env("MPC_ACCOUNT_ID"))]
         account_id: AccountId,
-        /// Environment this node runs in (e.g. `testnet`, `mainnet`,
-        /// `integration-tests`). Labels logs and telemetry.
+        /// Environment this node runs in (e.g. `testnet`, `mainnet`). Labels logs
+        /// and telemetry.
         #[arg(long, env("MPC_ENV"))]
         env: String,
+        /// Index sign requests from the NEAR contract itself. Only the integration
+        /// tests use NEAR as a source chain.
+        #[arg(long, env("MPC_NEAR_INDEXER"), default_value = "false")]
+        near_indexer: bool,
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
         account_sk: SecretKey,
@@ -134,6 +138,7 @@ impl Cli {
                 near_rpc,
                 account_id,
                 env,
+                near_indexer,
                 mpc_contract_id,
                 account_sk,
                 web_port,
@@ -168,6 +173,9 @@ impl Cli {
                     storage_options.redis_url.to_string(),
                 ];
                 args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
+                if near_indexer {
+                    args.push("--near-indexer".to_string());
+                }
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
                 }
@@ -202,6 +210,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             mpc_contract_id,
             account_id,
             env,
+            near_indexer,
             account_sk,
             cipher_sk,
             sign_sk,
@@ -257,9 +266,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             });
             tracing::info!(%my_address, "address detected");
 
-            // NEAR Indexer is only used for integration tests
-            // TODO: Remove this once we have integration tests built on other chains
-            if env == "integration-tests" {
+            // NEAR as a source chain exists for the integration tests only.
+            if near_indexer {
                 let rpc_client = near_fetch::Client::new(&near_rpc);
                 let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
                 mpc_chain_near::run(
