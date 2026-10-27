@@ -60,15 +60,10 @@ const MAX_SIGN_COMMANDS: usize = 16384;
 pub enum Cli {
     Start {
         /// NEAR RPC address
-        #[arg(
-            long,
-            env("MPC_NEAR_RPC"),
-            default_value("https://rpc.testnet.near.org"),
-            hide_env_values = true
-        )]
+        #[arg(long, env("MPC_NEAR_RPC"), hide_env_values = true)]
         near_rpc: String,
         /// MPC contract id
-        #[arg(long, env("MPC_CONTRACT_ID"), default_value("dev.sig-net.testnet"))]
+        #[arg(long, env("MPC_CONTRACT_ID"))]
         mpc_contract_id: AccountId,
         /// This node's account id
         #[arg(long, env("MPC_ACCOUNT_ID"))]
