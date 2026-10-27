@@ -76,7 +76,7 @@ Every second Tuesday is a **release day**. On it, in this order:
 
 1. Bump the version, run `cargo check` to update `Cargo.lock`, and open a PR against `develop` titled `chore: release X.Y.Z` from the release template:
    ```sh
-   gh pr create --base develop --title "chore: release X.Y.Z" --template release.md
+   gh pr create --base develop --title "chore: release X.Y.Z" --body-file .github/PULL_REQUEST_TEMPLATE/release.md
    ```
 2. Write the **Summary** and **Breaking changes**. The breaking changes are those from the Breaking changes sections of the PRs merged since the last release. Tick the **Checklist**.
 3. Merge it. The squash commit on `develop` is the **release commit**; the PR page shows its SHA.
@@ -133,7 +133,7 @@ For example, `testnet` has 1.21.0:
 3. Bump the version to `1.21.1`, run `cargo check` to update `Cargo.lock`, and commit as `fix: release 1.21.1`.
 4. Push the branch and open a PR to `testnet` titled `fix: hotfix 1.21.1 to testnet` from the hotfix template:
    ```sh
-   gh pr create --base testnet --title "fix: hotfix 1.21.1 to testnet" --template hotfix.md
+   gh pr create --base testnet --title "fix: hotfix 1.21.1 to testnet" --body-file .github/PULL_REQUEST_TEMPLATE/hotfix.md
    ```
 5. Write the **Summary** and **Breaking changes** and tick the **Checklist**.
 6. Merge it with a merge commit.
