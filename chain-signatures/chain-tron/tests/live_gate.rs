@@ -9,14 +9,20 @@ mod common;
 use anyhow::{bail, Context};
 use common::build_raw;
 use k256::ecdsa::SigningKey;
-use mpc_chain_tron::{BroadcastOutcome, TronConfig, TronHttp, TronReceipt};
+use mpc_chain_integration_core::{ChainIndexer, MockStateManager, NoopChainTelemetry};
+use mpc_chain_tron::{BroadcastOutcome, TronConfig, TronHttp, TronReceipt, TronWatcher};
+use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
+};
 use mpc_tron_wire::{
     parse_hex,
     pb::{Message, RawTransaction},
     NowBlock, TronAddress,
 };
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use alloy::primitives::{Address, B256, U256};
@@ -58,6 +64,7 @@ fn transfer_topic() -> B256 {
 struct Gate {
     client: TronHttp,
     endpoint: Url,
+    api_key: Option<String>,
     key: SigningKey,
     owner: TronAddress,
     contract: TronAddress,
@@ -69,6 +76,8 @@ struct Gate {
 struct Broadcast {
     signed: Vec<u8>,
     reference: NowBlock,
+    txid: [u8; 32],
+    receipt: TronReceipt,
 }
 
 /// The node's `deploycontract` build: unsigned raw bytes, their txID,
@@ -154,6 +163,7 @@ impl Gate {
         let gate = Self {
             client,
             endpoint,
+            api_key: config.api_key.clone(),
             key,
             owner,
             contract,
@@ -233,12 +243,100 @@ impl Gate {
         })
     }
 
-    /// Runs the sequence: acceptance, duplicate, codeless.
+    /// Runs the sequence: acceptance, watcher, duplicate, codeless.
     async fn run(&self) -> anyhow::Result<()> {
         println!("[gate] owner {} -> contract {}", self.owner, self.contract);
         let accepted = self.acceptance().await?;
+        self.watcher(&accepted).await?;
         self.duplicate(&accepted.signed).await?;
         self.codeless(&accepted).await
+    }
+
+    /// Watcher leg: run [`TronWatcher`] against the settled acceptance
+    /// tx and require the receipt's own classification back as an event.
+    async fn watcher(&self, accepted: &Broadcast) -> anyhow::Result<()> {
+        let state = MockStateManager::new();
+        let tx = Arc::new(BidirectionalTx {
+            id: BidirectionalTxId(accepted.txid),
+            sender: [0u8; 32],
+            serialized_transaction: vec![],
+            source_chain: Chain::Ethereum,
+            target_chain: Chain::Tron,
+            caip2_id: "tron:mainnet".to_string(),
+            key_version: 0,
+            deposit: 0,
+            path: String::new(),
+            algo: "secp256k1".to_string(),
+            dest: "tron:mainnet".to_string(),
+            params: String::new(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+            request_id: accepted.txid,
+            from_address: [0u8; 20],
+            nonce: 0,
+        });
+        state
+            .watch_execution(Chain::Tron, SignId::new(accepted.txid), tx)
+            .await;
+
+        let config = TronConfig {
+            endpoint: self.endpoint.clone(),
+            api_key: self.api_key.clone(),
+            poll_interval: self.poll,
+            ..TronConfig::default()
+        };
+        let watcher = TronWatcher::new(config, state, NoopChainTelemetry)?;
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
+        let cancel = CancellationToken::new();
+        let done = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { watcher.run(events_tx, cancel).await }
+        });
+
+        let deadline = Instant::now() + self.deadline;
+        let confirmation = loop {
+            let event = tokio::time::timeout_at(deadline.into(), events_rx.recv())
+                .await
+                .context("watcher produced no event before the deadline")?
+                .context("watcher channel closed")?;
+            if let ChainEvent::ExecutionConfirmed { .. } = &event {
+                break event;
+            }
+        };
+        cancel.cancel();
+        done.await??;
+
+        let ChainEvent::ExecutionConfirmed {
+            tx_id,
+            sign_id,
+            block_height,
+            result,
+            ..
+        } = confirmation
+        else {
+            unreachable!()
+        };
+        anyhow::ensure!(tx_id.0 == accepted.txid, "watcher confirmed {tx_id:?}");
+        anyhow::ensure!(sign_id == SignId::new(accepted.txid));
+        anyhow::ensure!(
+            block_height == accepted.receipt.block_number,
+            "watcher height {block_height} != receipt {}",
+            accepted.receipt.block_number
+        );
+        let expected = accepted.receipt.execution_outcome()?;
+        let agrees = match (&expected, &result) {
+            (ExecutionOutcome::Failed, ExecutionOutcome::Failed) => true,
+            (ExecutionOutcome::Success { output: want }, ExecutionOutcome::Success { output }) => {
+                want == output
+            }
+            _ => false,
+        };
+        anyhow::ensure!(
+            agrees,
+            "watcher classified {result:?}, receipt says {expected:?}"
+        );
+        println!("[watcher] confirmed at block {block_height} as {result:?}");
+        Ok(())
     }
 
     /// Acceptance probe: broadcast a USDT transfer, settle it, and check
@@ -302,7 +400,12 @@ impl Gate {
                 receipt.fee, receipt.res_message
             );
         }
-        Ok(Broadcast { signed, reference })
+        Ok(Broadcast {
+            signed,
+            reference,
+            txid,
+            receipt,
+        })
     }
 
     /// Duplicate probe: the identical signed bytes again, rejected by
@@ -513,6 +616,7 @@ async fn relay_sequence_runs_against_recorded_nile_responses() {
     let gate = Gate {
         client: TronHttp::new(&mock_config(endpoint.clone())).unwrap(),
         endpoint,
+        api_key: None,
         key,
         owner,
         contract,

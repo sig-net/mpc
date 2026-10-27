@@ -30,8 +30,9 @@ Core pieces:
 ## Live gate
 
 `tests/live_gate.rs` exercises the full path — assembly, signing,
-broadcast, settlement — against a real network (default Nile via
-TronGrid). The same sequence runs in CI against the recorded responses
+broadcast, settlement, execution watching (`TronWatcher`) — against a real
+network (default Nile via TronGrid). The same sequence runs in CI against
+the recorded responses
 in `tests/fixtures/nile/`, served verbatim except for the receipt `id`
 (the recording's txid belongs to the recording's key).
 
