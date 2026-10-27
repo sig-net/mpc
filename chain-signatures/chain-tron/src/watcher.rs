@@ -9,7 +9,9 @@ use std::sync::Arc;
 use alloy::primitives::B256;
 use anyhow::Context;
 use futures_util::stream::{iter, StreamExt};
-use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
+use mpc_chain_integration_core::{
+    ChainIndexer, ChainTelemetry, ExtractionFailureKind, StateManager,
+};
 use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, SignId};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -72,10 +74,16 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             .await
             .inspect_err(|err| tracing::warn!(?tx_id, ?sign_id, ?err, "receipt poll failed"))
             .ok()??;
-        
+
         let result = receipt
             .execution_outcome()
-            .inspect_err(|err| tracing::warn!(?tx_id, ?sign_id, "{err:#}"))
+            .inspect_err(|err| {
+                tracing::warn!(?tx_id, ?sign_id, "{err:#}");
+
+                // Record the retryable extraction failure in telemetry (mirror Ethereum watcher's behavior)
+                self.telemetry
+                    .bidirectional_extraction_failed(ExtractionFailureKind::Retryable);
+            })
             .ok()?;
 
         // Success attests an empty output until receipt-log extraction lands.
@@ -112,14 +120,16 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
                     head.context("fetching the tron head block")?.number
                 }
             };
-            self.telemetry.block_indexed(head);
-            if events_tx.send(ChainEvent::Block(head)).await.is_err() {
-                return Ok(());
-            }
+            // Polls first, Block last: a Block event certifies a completed tick.
             for event in self.poll_watchers().await {
                 if events_tx.send(event).await.is_err() {
                     return Ok(());
                 }
+            }
+            // Provider head as a liveness gauge; Tron indexes no blocks.
+            self.telemetry.block_indexed(head);
+            if events_tx.send(ChainEvent::Block(head)).await.is_err() {
+                return Ok(());
             }
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
@@ -131,12 +141,15 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use mockito::Matcher;
     use mpc_chain_integration_core::utils::retry::RetryConfig;
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
-    use mpc_primitives::{BidirectionalTx, BidirectionalTxId, ExecutionOutcome, SignId};
+    use mpc_primitives::{
+        BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RequestKind, SignId,
+    };
     use url::Url;
 
     use super::*;
@@ -185,18 +198,40 @@ mod tests {
         (BidirectionalTxId(id), SignId::new(id), tx)
     }
 
+    /// Counts `bidirectional_extraction_failed` calls, the way the Ethereum
+    /// watcher tests assert on extraction-failure telemetry.
+    #[derive(Clone, Default)]
+    struct CountingTelemetry {
+        extraction_failures: Arc<AtomicUsize>,
+    }
+
+    impl ChainTelemetry for CountingTelemetry {
+        fn block_indexed(&self, _: u64) {}
+        fn block_finalized(&self, _: u64) {}
+        fn checkpoint_created(&self, _: u64) {}
+        fn request_indexed_at(&self, _: u64, _: RequestKind) {}
+        fn request_indexed(&self, _: RequestKind) {}
+        fn bidirectional_extraction_failed(&self, _: ExtractionFailureKind) {
+            self.extraction_failures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     struct WatcherRun {
         cancel: CancellationToken,
         events: mpsc::Receiver<ChainEvent>,
         done: tokio::task::JoinHandle<anyhow::Result<()>>,
     }
 
-    fn spawn_watcher(config: TronConfig, state: MockStateManager) -> WatcherRun {
+    fn spawn_watcher(
+        config: TronConfig,
+        state: MockStateManager,
+        telemetry: impl ChainTelemetry + 'static,
+    ) -> WatcherRun {
         let (events_tx, events_rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let run_cancel = cancel.clone();
         let done = tokio::spawn(async move {
-            let watcher = TronWatcher::new(config, state, NoopChainTelemetry)?;
+            let watcher = TronWatcher::new(config, state, telemetry)?;
             watcher.run(events_tx, run_cancel).await
         });
         WatcherRun {
@@ -300,7 +335,7 @@ mod tests {
             .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
             .await;
 
-        let mut run = spawn_watcher(config, state);
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
 
         let (seen1, result1) = until_confirmed(&mut run, 1).await;
@@ -333,7 +368,7 @@ mod tests {
             .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
             .await;
 
-        let mut run = spawn_watcher(config, state);
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
         let (_, result) = until_confirmed(&mut run, 1).await;
         assert!(matches!(result, ExecutionOutcome::Failed));
@@ -360,7 +395,7 @@ mod tests {
             .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
             .await;
 
-        let mut run = spawn_watcher(config, state);
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
         let (_, result) = until_confirmed(&mut run, 1).await;
         assert!(matches!(result, ExecutionOutcome::Success { output } if output.is_empty()));
@@ -371,7 +406,8 @@ mod tests {
 
     /// Unclassifiable or result-less receipts are solidified and immutable:
     /// resolving them would attest a guess, so they must keep polling
-    /// without emitting anything.
+    /// without emitting anything — and count as retryable extraction
+    /// failures, once per watcher per tick.
     #[tokio::test]
     async fn unclassifiable_receipt_resolves_nothing() {
         let server = mockito::Server::new_async().await;
@@ -393,7 +429,8 @@ mod tests {
             .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
             .await;
 
-        let mut run = spawn_watcher(config, state);
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
         first_is_catchup_completed(&mut run).await;
         // Several ticks' worth of Block events without any confirmation.
         for _ in 0..10 {
@@ -402,6 +439,13 @@ mod tests {
                 other => panic!("unexpected event: {other:?}"),
             }
         }
+        // Two unresolved watchers per tick, and each received Block
+        // certifies a completed tick — so ten blocks guarantee twenty
+        // counted failures (the next tick may add more while we assert).
+        assert!(
+            telemetry.extraction_failures.load(Ordering::Relaxed) >= 20,
+            "each unclassifiable receipt must count per tick"
+        );
         run.cancel.cancel();
         run.done.await.unwrap().unwrap();
     }
@@ -425,7 +469,8 @@ mod tests {
             .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
             .await;
 
-        let mut run = spawn_watcher(config, state);
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
         first_is_catchup_completed(&mut run).await;
         let (seen, result) = until_confirmed(&mut run, 2).await;
         assert!(matches!(result, ExecutionOutcome::Success { output } if output.is_empty()));
@@ -436,6 +481,8 @@ mod tests {
             )),
             "the failing watcher must not resolve: {seen:?}"
         );
+        // Transport failures only warn, as on Ethereum.
+        assert_eq!(telemetry.extraction_failures.load(Ordering::Relaxed), 0);
 
         run.cancel.cancel();
         run.done.await.unwrap().unwrap();
@@ -453,7 +500,7 @@ mod tests {
             .with_status(500)
             .create();
 
-        let run = spawn_watcher(config, MockStateManager::new());
+        let run = spawn_watcher(config, MockStateManager::new(), NoopChainTelemetry);
         let result = run.done.await.unwrap().unwrap_err();
         let rendered = format!("{result:#}");
         assert!(
