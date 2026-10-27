@@ -62,7 +62,7 @@ pub(super) fn test_mock_network(
                     match SignedMessage::encrypt(
                         &[msg],
                         *from,
-                        &config.local.network.sign_sk,
+                        &config.network.sign_sk,
                         &receiver_info.cipher_pk,
                     ) {
                         Ok(ciphered) => {

@@ -415,7 +415,7 @@ impl MpcFixtureNode {
             triples,
             presignatures,
         };
-        let network = from.config.borrow().local.network.clone();
+        let network = from.config.borrow().network.clone();
         let reply = self
             .try_sync(from.me, &network.sign_sk, &update)
             .await
@@ -432,7 +432,7 @@ impl MpcFixtureNode {
     ) -> Result<SyncUpdate, MessageError> {
         // Only the signing key is checked.
         let info = ParticipantInfo {
-            sign_pk: self.config.borrow().local.network.sign_sk.public_key(),
+            sign_pk: self.config.borrow().network.sign_sk.public_key(),
             ..ParticipantInfo::new(self.me.into())
         };
         open_reply_for_test(reply, cipher_sk, self.me, &info)
@@ -446,7 +446,7 @@ impl MpcFixtureNode {
         sign_sk: &near_crypto::SecretKey,
         update: &SyncUpdate,
     ) -> Result<Ciphered, SyncError> {
-        let network = self.config.borrow().local.network.clone();
+        let network = self.config.borrow().network.clone();
         let cipher_pk = network.cipher_sk.public_key();
         let encrypted = SignedMessage::encrypt(update, claimed, sign_sk, &cipher_pk)
             .expect("failed to encrypt sync update");
@@ -521,7 +521,7 @@ impl MpcFixtureNode {
             self.triple_storage.clone(),
             self.presignature_storage.clone(),
             self.contract.clone(),
-            self.config.borrow().local.network.clone(),
+            self.config.borrow().network.clone(),
             account_id,
             self.backlog.clone(),
         );
