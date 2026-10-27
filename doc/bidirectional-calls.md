@@ -416,7 +416,8 @@ processable(req): bool
       carries that network's chain id; not required on Tron, which has
       none), has replay protection (Section 3.3), and attaching any
       signature yields a well-formed signed transaction (EVM: whose gas
-      limit covers the intrinsic gas of its data and access list)
+      limit covers both the intrinsic gas of its data and access list and
+      the EIP-7623 calldata floor)
     req.tx's expiry, where target has one, is after the source block's
       time and at most target's cap past it (Tron: `expiration`, 24 h)
     req.schema is well formed: it is empty, or it parses and names only

@@ -130,6 +130,7 @@ fn validate_unsigned_ethereum(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
     for &(index, max_bytes) in uints {
         uint_field(&fields, index, max_bytes)?;
     }
+    let mut access_list_gas = 0;
     if eip1559 {
         let priority_fee = uint_field(&fields, 2, 32)?;
         let max_fee = uint_field(&fields, 3, 32)?;
@@ -139,12 +140,8 @@ fn validate_unsigned_ethereum(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
             (priority_fee.len(), priority_fee) <= (max_fee.len(), max_fee),
             "max priority fee above max fee"
         );
+        access_list_gas = validate_access_list(&fields.at(8)?)?;
     }
-    let access_list_gas = if eip1559 {
-        validate_access_list(&fields.at(8)?)?
-    } else {
-        0
-    };
     // An empty `to` creates a contract, which extraction refuses, and Ethereum
     // rejects any other length.
     let to = string_field(&fields, to_index)?;
@@ -154,23 +151,22 @@ fn validate_unsigned_ethereum(unsigned_rlp: &[u8]) -> anyhow::Result<&[u8]> {
         to.len()
     );
     let data = string_field(&fields, data_index)?;
-    let gas_limit = uint_field(&fields, gas_limit_index, 8)?
-        .iter()
-        .fold(0u64, |acc, byte| acc << 8 | u64::from(*byte));
-    let intrinsic_gas = intrinsic_call_gas(data) + access_list_gas;
+    let gas_limit: u64 = fields.val_at(gas_limit_index)?;
+    let min_gas = min_gas_limit(data, access_list_gas);
     anyhow::ensure!(
-        gas_limit >= intrinsic_gas,
-        "gas limit {gas_limit} below the intrinsic gas {intrinsic_gas}"
+        gas_limit >= min_gas,
+        "gas limit {gas_limit} below the minimum {min_gas}"
     );
     Ok(data)
 }
 
-/// The gas a call pays before it executes on every fork since Istanbul
-/// (EIP-2028), leaving out the access list. Prague's EIP-7623 calldata floor
-/// can ask more, but only on networks that run it.
-fn intrinsic_call_gas(data: &[u8]) -> u64 {
+/// The least gas limit a call is valid with on every watched network, all of
+/// which run Prague: its intrinsic gas (EIP-2028 calldata, EIP-2930 access
+/// list) or the EIP-7623 calldata floor, whichever is higher.
+fn min_gas_limit(data: &[u8], access_list_gas: u64) -> u64 {
     let zeros = data.iter().filter(|byte| **byte == 0).count() as u64;
-    21_000 + 4 * zeros + 16 * (data.len() as u64 - zeros)
+    let tokens = zeros + 4 * (data.len() as u64 - zeros);
+    (21_000 + 4 * tokens + access_list_gas).max(21_000 + 10 * tokens)
 }
 
 /// `Rlp::data` also returns a list's payload and accepts a one-byte string
@@ -470,49 +466,72 @@ mod tests {
         }
     }
 
-    /// Ethereum refuses a transaction whose gas limit does not cover what it
-    /// pays before executing: 21000, plus 4 per zero and 16 per other data
-    /// byte, plus 2400 per access list address and 1900 per storage key.
+    /// Ethereum refuses a transaction whose gas limit is below the larger of
+    /// its intrinsic gas (21000, 4 per zero and 16 per other data byte, 2400
+    /// per access list address, 1900 per storage key) and the EIP-7623
+    /// calldata floor (21000, 10 per zero and 40 per other data byte).
     #[test]
-    fn validate_rejects_a_gas_limit_below_the_intrinsic_gas() {
+    fn validate_rejects_a_gas_limit_below_the_minimum() {
         use alloy::consensus::TxLegacy;
         use alloy::eips::eip2930::{AccessList, AccessListItem};
         use alloy::primitives::{Address, Bytes, B256};
 
-        let to = TxKind::Call(Address::repeat_byte(0x11));
-        let input = Bytes::from(vec![0, 0, 1]);
-        let access_list = AccessList(vec![AccessListItem {
-            address: Address::repeat_byte(0x22),
-            storage_keys: vec![B256::ZERO, B256::ZERO],
-        }]);
-        let eip1559 = |gas_limit| {
-            TxEip1559 {
-                chain_id: 1,
-                gas_limit,
-                to,
-                input: input.clone(),
-                access_list: access_list.clone(),
-                ..Default::default()
-            }
-            .encoded_for_signing()
+        let entry = |byte, keys| AccessListItem {
+            address: Address::repeat_byte(byte),
+            storage_keys: vec![B256::ZERO; keys],
         };
-        let legacy = |gas_limit| {
-            TxLegacy {
-                chain_id: Some(1),
-                gas_limit,
-                to,
-                input: input.clone(),
-                ..Default::default()
+        let tx = |eip1559: bool, input: &[u8], access_list: Vec<AccessListItem>, gas_limit| {
+            let to = TxKind::Call(Address::repeat_byte(0x11));
+            let input = Bytes::copy_from_slice(input);
+            if eip1559 {
+                TxEip1559 {
+                    chain_id: 1,
+                    gas_limit,
+                    to,
+                    input,
+                    access_list: AccessList(access_list),
+                    ..Default::default()
+                }
+                .encoded_for_signing()
+            } else {
+                TxLegacy {
+                    chain_id: Some(1),
+                    gas_limit,
+                    to,
+                    input,
+                    ..Default::default()
+                }
+                .encoded_for_signing()
             }
-            .encoded_for_signing()
         };
         let ok = |bytes: &[u8]| validate_unsigned_transaction(Chain::Ethereum, bytes).is_ok();
-        let eip1559_intrinsic = 21_000 + 2 * 4 + 16 + 2_400 + 2 * 1_900;
-        assert!(ok(&eip1559(eip1559_intrinsic)));
-        assert!(!ok(&eip1559(eip1559_intrinsic - 1)));
-        let legacy_intrinsic = 21_000 + 2 * 4 + 16;
-        assert!(ok(&legacy(legacy_intrinsic)));
-        assert!(!ok(&legacy(legacy_intrinsic - 1)));
+        let cases = [
+            (
+                "intrinsic gas",
+                true,
+                &[0, 0, 1][..],
+                vec![entry(0x22, 2), entry(0x33, 1)],
+                21_000 + 2 * 4 + 16 + 2 * 2_400 + 3 * 1_900,
+            ),
+            (
+                "calldata floor",
+                true,
+                &[0xff; 100][..],
+                vec![],
+                21_000 + 100 * 40,
+            ),
+            (
+                "legacy calldata floor",
+                false,
+                &[0, 0, 1][..],
+                vec![],
+                21_000 + 2 * 10 + 40,
+            ),
+        ];
+        for (case, eip1559, input, access_list, min) in cases {
+            assert!(ok(&tx(eip1559, input, access_list.clone(), min)), "{case}");
+            assert!(!ok(&tx(eip1559, input, access_list, min - 1)), "{case}");
+        }
     }
 
     /// The negated signature verifies too, so it has to name the transaction a
