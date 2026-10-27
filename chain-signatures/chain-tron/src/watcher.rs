@@ -20,7 +20,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::TronHttp;
 use crate::config::TronConfig;
-use crate::types::TronExecutionResult;
 
 pub struct TronWatcher<S: StateManager, T: ChainTelemetry> {
     client: Arc<TronHttp>,
@@ -79,7 +78,7 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             .ok()??;
 
         let result = receipt
-            .execution_result()
+            .execution_outcome(&tx.output_deserialization_schema)
             .inspect_err(|err| {
                 tracing::warn!(?tx_id, ?sign_id, "{err:#}");
                 self.telemetry
@@ -87,27 +86,16 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             })
             .ok()?;
 
-        let result = match result {
-            TronExecutionResult::Failed => ExecutionOutcome::Failed,
-            TronExecutionResult::Succeeded if tx.output_deserialization_schema.is_empty() => {
-                // Interim: schema-less requests attest an empty output until
-                // receipt-log extraction is defined.
-                ExecutionOutcome::Success { output: Vec::new() }
-            }
-            // A non-empty schema asks for output data a Tron receipt cannot
-            // provide — park instead of attesting an empty output no schema
-            // fits. Admission refuses such requests.
-            TronExecutionResult::Succeeded => {
-                self.telemetry
-                    .bidirectional_extraction_failed(ExtractionFailureKind::Terminal);
-                tracing::error!(
-                    ?tx_id,
-                    ?sign_id,
-                    "schema-carrying request, but Tron output extraction is undefined; parking"
-                );
-                ExecutionOutcome::ExtractionFailed
-            }
-        };
+        // The park arm reports terminal telemetry.
+        if matches!(result, ExecutionOutcome::ExtractionFailed) {
+            self.telemetry
+                .bidirectional_extraction_failed(ExtractionFailureKind::Terminal);
+            tracing::error!(
+                ?tx_id,
+                ?sign_id,
+                "schema-carrying request, but Tron output extraction is undefined; parking"
+            );
+        }
 
         Some(ChainEvent::ExecutionConfirmed {
             tx_id,
@@ -148,6 +136,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
                     return Ok(());
                 }
             }
+            // TODO(tron): resolve Executing entries whose expiration passed
+            // as Unviable.
             // Provider head as a liveness gauge; Tron indexes no blocks.
             self.telemetry.block_indexed(head);
             if events_tx.send(ChainEvent::Block(head)).await.is_err() {

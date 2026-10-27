@@ -10,9 +10,7 @@ use anyhow::{bail, Context};
 use common::build_raw;
 use k256::ecdsa::SigningKey;
 use mpc_chain_integration_core::{ChainIndexer, MockStateManager, NoopChainTelemetry};
-use mpc_chain_tron::{
-    BroadcastOutcome, TronConfig, TronExecutionResult, TronHttp, TronReceipt, TronWatcher,
-};
+use mpc_chain_tron::{BroadcastOutcome, TronConfig, TronHttp, TronReceipt, TronWatcher};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
 };
@@ -277,10 +275,14 @@ impl Gate {
             from_address: [0u8; 20],
             nonce: 0,
         });
+
+        let expected = accepted
+            .receipt
+            .execution_outcome(&tx.output_deserialization_schema)?;
+
         state
             .watch_execution(Chain::Tron, SignId::new(accepted.txid), tx)
             .await;
-
         let config = TronConfig {
             endpoint: self.endpoint.clone(),
             api_key: self.api_key.clone(),
@@ -325,11 +327,12 @@ impl Gate {
             "watcher height {block_height} != receipt {}",
             accepted.receipt.block_number
         );
-        let expected = accepted.receipt.execution_result()?;
-        let agrees = match (expected, &result) {
-            (TronExecutionResult::Failed, ExecutionOutcome::Failed) => true,
-            (TronExecutionResult::Succeeded, ExecutionOutcome::Success { output }) => {
-                output.is_empty()
+
+        let agrees = match (&expected, &result) {
+            (ExecutionOutcome::Failed, ExecutionOutcome::Failed)
+            | (ExecutionOutcome::ExtractionFailed, ExecutionOutcome::ExtractionFailed) => true,
+            (ExecutionOutcome::Success { output: want }, ExecutionOutcome::Success { output }) => {
+                want == output
             }
             _ => false,
         };

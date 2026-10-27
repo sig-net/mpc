@@ -7,6 +7,7 @@
 use alloy::primitives::{Log, LogData, B256};
 
 use anyhow::{bail, Context};
+use mpc_primitives::ExecutionOutcome;
 
 pub use mpc_tron_wire::NowBlock;
 
@@ -39,8 +40,8 @@ pub struct TronReceipt {
     pub logs: Vec<TronLog>,
 }
 
-/// What a solidified receipt attests about execution. Classification
-/// only; policy (output encoding, parking) lives with the watcher.
+/// What a solidified receipt attests about execution: classification
+/// only, no policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TronExecutionResult {
     Succeeded,
@@ -48,11 +49,10 @@ pub enum TronExecutionResult {
 }
 
 impl TronReceipt {
-    /// java-tron `TransactionInfo.code` values (protocol/core/Tron.proto).
-    /// Both success spellings — the observed "SUCCESS" and the proto's
-    /// `SUCESS` — classify: `contractRet` outranks `receipt.result`, so a
-    /// build emitting the proto name must not hang the watcher. Anything
-    /// else is an error rather than an attested guess.
+    /// java-tron `TransactionInfo.code` values (protocol/core/Tron.proto),
+    /// carried in `contractRet` (java-tron) or `receipt.result` (TronGrid).
+    /// Both success spellings — observed "SUCCESS", proto `SUCESS` —
+    /// classify; anything else is an error, not an attested guess.
     pub fn execution_result(&self) -> anyhow::Result<TronExecutionResult> {
         let result = self
             .contract_ret
@@ -65,6 +65,22 @@ impl TronReceipt {
                 Ok(TronExecutionResult::Failed)
             }
             other => bail!("unclassifiable execution result {other:?}"),
+        }
+    }
+
+    /// Determine the execution outcome for this receipt given the request's output schema.
+    pub fn execution_outcome(&self, output_schema: &[u8]) -> anyhow::Result<ExecutionOutcome> {
+        match self.execution_result()? {
+            TronExecutionResult::Failed => Ok(ExecutionOutcome::Failed),
+            // Schema-less requests attest an empty output until log
+            // extraction is defined.
+            TronExecutionResult::Succeeded if output_schema.is_empty() => {
+                Ok(ExecutionOutcome::Success { output: Vec::new() })
+            }
+            // Tron receipts carry no extractable output; park rather than
+            // attest an empty one.
+            // TODO(tron): log-based output extraction for these requests.
+            TronExecutionResult::Succeeded => Ok(ExecutionOutcome::ExtractionFailed),
         }
     }
 }
@@ -129,6 +145,26 @@ mod tests {
 
     /// java-tron emits both fields; `contractRet` wins, as the live gate's
     /// settle check reads them.
+    /// The policy mapping every consumer of a receipt agrees on.
+    #[test]
+    fn execution_outcome_maps_schema_policy() {
+        let failed = receipt(Some("REVERT"), None);
+        assert!(matches!(
+            failed.execution_outcome(&[]).unwrap(),
+            ExecutionOutcome::Failed
+        ));
+        let succeeded = receipt(Some("SUCCESS"), None);
+        assert!(matches!(
+            succeeded.execution_outcome(&[]).unwrap(),
+            ExecutionOutcome::Success { output } if output.is_empty()
+        ));
+        let schema = br#"[{"name":"output","type":"bool"}]"#;
+        assert!(matches!(
+            succeeded.execution_outcome(schema).unwrap(),
+            ExecutionOutcome::ExtractionFailed
+        ));
+    }
+
     #[test]
     fn contract_ret_outranks_receipt_result() {
         let both = receipt(Some("REVERT"), Some("SUCCESS"));
