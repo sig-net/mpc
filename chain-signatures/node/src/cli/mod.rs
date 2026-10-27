@@ -911,6 +911,14 @@ async fn spawn_indexers(
         );
     }
 
+    if tron.is_none() {
+        tracing::warn!(
+            "tron endpoint not configured: Tron-targeted requests are admitted and signed, \
+             but nothing watches their execution — they stay Executing until a Tron \
+             endpoint is configured"
+        );
+    }
+
     if let Some(eth_config) = eth {
         let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
         match EthereumIndexer::new(
