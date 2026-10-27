@@ -420,6 +420,9 @@ processable(req): bool
       time and at most target's cap past it (Tron: `expiration`, 24 h)
     req.schema is well formed: it is empty, or it parses and names only
       types the MPC can decode from target and encode for the source chain
+    on Midnight, the caller contract's state at the request's block, which
+      holds the request, decodes to at most `MAX_CALLER_STATE_BYTES`
+      (Section 6)
 
 on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
@@ -667,6 +670,28 @@ a path from B48 through A15; the first at A12 has none.
 
 ## 6. Notes
 
+* The Midnight caller state limit. The *caller state* is the ledger state
+  of the contract that made the request, at the block that holds it; a
+  node reads it over RPC (`ChainSource::contract_state_tree` in
+  `chain-signatures/chain-midnight/src/source.rs`, over
+  `midnight_contractState`) to find the request, and a state the RPC node
+  refuses for its size cannot be read at all. Without a limit of the
+  protocol's own, admission would follow each node's RPC response cap.
+  `processable`
+  therefore bounds the decoded state by `MAX_CALLER_STATE_BYTES`, 7 MiB,
+  chosen below half of the RPC node's default cap of 15 MiB, since the
+  state travels as hex inside JSON. A state the RPC node refuses for its
+  size cannot be measured, so the verdict comes from the cap the refusal
+  names: a cap that fits every admissible state proves the state is over
+  the limit, a drop on every node; a smaller cap is that node's
+  misconfiguration, and it holds the block rather than dropping on its
+  own configuration. The client's cap, `MAX_RESPONSE_SIZE`, is a constant
+  and not a setting, so a response it refuses is over the limit on every
+  node and is a drop. The limit binds admission only; the publisher's read
+  of the central contract's state is not subject to it. The rule has no
+  gate height of the kind the note on agreement below asks for: it applies
+  from the first block a node indexes under it, and all nodes of a network
+  upgrade together, so no two nodes index one block under different rules.
 * Solana with a recent blockhash has no replay protection in the sense of
   Section 3.3. It can be made to work if the MPC remembers completed rids
   for as long as a differently signed copy could still execute, about a

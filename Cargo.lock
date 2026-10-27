@@ -7546,6 +7546,7 @@ dependencies = [
  "google-cloud-storage",
  "hex",
  "http 1.5.0",
+ "http-body-util",
  "jsonrpsee",
  "k256",
  "memchr",
