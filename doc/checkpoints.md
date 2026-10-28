@@ -30,10 +30,11 @@ Requests, signatures, executions, attestations and the source and destination ch
 Vocabulary, per node per source chain:
 
 * **Boundary**: a height at which a checkpoint is due, one every fixed number of heights.
+  A node takes the checkpoint at the first height it processes at or past a boundary, one checkpoint even where that block passes several boundaries.
   Every correct node uses the same interval.
 
 * **Processed height**: the last height whose block the node has finished processing, its events applied to the backlog.
-  The indexer reports every height in order, with all of its events, including heights where nothing happened.
+  The indexer reports heights in order, with all their events; a chain may skip heights where nothing happened, and the indexers of correct nodes report the same heights.
   Apart from the indexer, only a re-index (see Base) or a restart moves it, back or forward.
 
 * **Caught up**: the node has finished processing every block up to the chain's finalised head, the newest block its provider reports as finalised, as in [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3).
@@ -125,7 +126,7 @@ get_checkpoint(chain, height, digest) -> Checkpoint
 **S2 Validity.** Every settled `(chain, height, digest)` was created by at least t - f ≥ 1 correct nodes, each descending from a settled checkpoint below it.
 
 **S3 Containment.** (i) A node neither acts on a source chain's backlog nor casts a new vote while it is missing the newest settled checkpoint it has read from the contract.
-(ii) A node acts and votes only within `MAX_PENDING` boundaries of its base, and votes at every boundary up to there, skipping none.
+(ii) A node acts and votes only while it holds fewer than `MAX_PENDING` checkpoints above its base, and votes each time it passes a boundary up to there, skipping none.
 At that bound it stops acting and creates no new checkpoint, until it rebases onto a newer checkpoint.
 
 **S4 Sufficiency.** A node holding only a settled checkpoint and its key share can do the same as a node that indexed from genesis but didn't participate in signing: join signing rounds, find executions, attest, and vote at the next boundary.
@@ -133,7 +134,7 @@ The exception is attesting Unviable (Section 6).
 
 ### Liveness, during a long-enough synchronous interval
 
-**L1 Settlement.** Checkpoints keep settling, as long as t correct nodes reach the next checkpoint height, agree there, and can store what they vote for.
+**L1 Settlement.** Checkpoints keep settling, as long as t correct nodes pass the next boundary, agree there, and can store what they vote for.
 
 **L2 Convergence.** A node whose backlog disagrees with a settled checkpoint finds out at the next settlement it sees, and ends up holding a settled checkpoint and indexing on from it, given a reachable node holding one.
 
@@ -142,13 +143,13 @@ The exception is attesting Unviable (Section 6).
 Described for one node, one source chain; `backlog` is the node's backlog.
 
 * The node indexes finalised blocks in order.
-  At every boundary it passes, not only the next one above its base, it creates a checkpoint, stores it in `pending` under its height, and votes for it.
+  At every boundary it passes, not only the next one above its base, it creates a checkpoint at the height it reached, stores it in `pending` under that height, and votes for it.
 * It polls the contract for the settled checkpoint, and one of three things follows.
   * Nothing new has settled: the node does nothing.
   * The settled checkpoint is the one the node stored at that height: it becomes the base and the node carries on.
   * The settled checkpoint is another one: the node stops indexing, fetches it from a peer, makes it the base, drops all of `pending` and re-indexes from it.
 * On a restart the node resumes from the newest checkpoint in `pending`, or the base if there is none, and votes again for every checkpoint in `pending`, since a vote in flight at the crash may have been lost.
-* A node is *at the cap* when its processed height is `MAX_PENDING` boundaries above its base.
+* A node is *at the cap* when `pending` holds `MAX_PENDING` checkpoints.
   There it processes no block and waits for a settlement, caught up or not.
   This bounds how far the network signs from state nobody has agreed to.
 * It acts only while it is caught up, is not at the cap, and is not missing a settled checkpoint it has read (`want` below).
@@ -164,8 +165,7 @@ Checkpoint = (Height, Digest, snapshot of backlog)
 
 persistent:
     base      Checkpoint               // the settled checkpoint we index from
-    pending   {Height -> Checkpoint}   // the checkpoints we created above base,
-                                       // one per boundary
+    pending   {Height -> Checkpoint}   // the checkpoints we created above base
     local     RequestId -> Local       // node-local, as in
                                        // bidirectional-calls.md
 
@@ -187,12 +187,13 @@ on start:
 ```
 Indexing
 ```
-on block b finalised at height processed_height + 1:
+on the next finalised block b above processed_height:
   if want is set or at the cap:           // leave b unprocessed; indexing
     return                                // resumes at b after a rebase
+  passed = a boundary is in (processed_height, height(b)]
   backlog.update(b)                       // add/change/remove entries
   processed_height = height(b)
-  if processed_height is a boundary:
+  if passed:
     d = digest(processed_height, backlog)
     c = (processed_height, d, backlog)
     pending[c.height] = c ; persist       // store so we hold what we vote for;
@@ -295,7 +296,7 @@ So S1's induction has its base.
 ### *S3, nodes act and vote inside a window around settled height.*
 For (i): when a poll reads a settled checkpoint the node does not hold, it sets `want`.
 The indexing handler does nothing while `want` is set, and the rule on acting covers the time between blocks, so the node neither indexes, starts to act nor casts a new vote until it holds that checkpoint.
-For (ii): a node stops at the cap, `MAX_PENDING` boundaries above its base, so it neither acts nor creates a checkpoint beyond it.
+For (ii): a node stops at the cap, when `pending` holds `MAX_PENDING` checkpoints, so it neither acts nor creates a checkpoint beyond it.
 The base is a settled height, so the distance is measured from agreement rather than from wherever the node started.
 A rebase lifts both waits.
 
@@ -329,7 +330,7 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 ### Inside the model
 
 * Settlement stalls when fewer than t nodes reach a boundary and vote.
-  At t = n - f one correct node down while the others index `MAX_PENDING` boundaries past the base is enough.
+  At t = n - f one correct node down while the others create `MAX_PENDING` checkpoints above the base is enough.
   The nodes that are up run to the cap and wait for a settlement.
 * Signing stalls while more than n - t nodes are faulty or not acting: catching up, at the cap, or missing a settled checkpoint.
 * A fetch slower than the time between two settlements never completes.
@@ -348,7 +349,7 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 ### Outside the model: nodes build different backlogs
 
 * No digest reaches t.
-  Nodes run to the cap, about two hours on Ethereum and four on Solana at today's settings, and stop.
+  Nodes run to the cap and stop.
   There is no in-band way out.
   A restart resumes from the checkpoints built with the bug, so the release with the fix must also drop `pending`.
   The nodes then build the same checkpoints from the base again, and the next settlement realigns them.
