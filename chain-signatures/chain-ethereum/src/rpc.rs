@@ -7,6 +7,7 @@ use alloy::rpc::types::{Block, BlockId, Log, Transaction, TransactionReceipt};
 use serde_json::json;
 
 use anyhow::Context as _;
+use mpc_chain_integration_core::utils::retry::RpcFailure;
 
 #[cfg(feature = "bench")]
 use crate::bench;
@@ -204,6 +205,18 @@ impl RpcEthereumClient {
         Ok(nonce.to::<u64>())
     }
 
+    pub async fn get_chain_id(&self) -> anyhow::Result<u64> {
+        #[cfg(feature = "bench")]
+        bench::rpc_inc("eth_chainId");
+
+        let chain_id: alloy::primitives::U64 = self
+            .client
+            .request_noparams("eth_chainId")
+            .await
+            .context("failed to get chain id")?;
+        Ok(chain_id.to::<u64>())
+    }
+
     pub async fn get_transaction_by_hash(
         &self,
         tx_hash: B256,
@@ -314,17 +327,18 @@ fn trace_output_to_bytes(
             .and_then(serde_json::Value::as_str)
             .filter(|r| !r.is_empty());
         match revert_reason {
-            Some(reason) => anyhow::bail!(
-                "debug_traceTransaction reports transaction {:#x} reverted: {} ({})",
-                tx_hash,
-                error,
-                reason
-            ),
-            None => anyhow::bail!(
-                "debug_traceTransaction reports transaction {:#x} errored: {}",
-                tx_hash,
-                error
-            ),
+            // tracer-side inconsistency (the receipt succeeded): retryable
+            // verdict matching the watcher's never-resolve-from-one policy
+            Some(reason) => {
+                return Err(anyhow::Error::new(RpcFailure::retryable(format!(
+                    "debug_traceTransaction reports transaction {tx_hash:#x} reverted: {error} ({reason})"
+                ))))
+            }
+            None => {
+                return Err(anyhow::Error::new(RpcFailure::retryable(format!(
+                    "debug_traceTransaction reports transaction {tx_hash:#x} errored: {error}"
+                ))))
+            }
         }
     }
 
@@ -347,6 +361,7 @@ mod tests {
     use alloy::primitives::B256;
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
+    use mpc_chain_integration_core::utils::retry::is_retryable;
     use serde_json::json;
 
     #[tokio::test]
@@ -639,6 +654,26 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("execution reverted"));
         assert!(msg.contains("InsufficientBalance"));
+        // tracer-side inconsistency: retryable by policy
+        assert!(
+            is_retryable(&err),
+            "trace revert must stay retryable: {err:#}"
+        );
+    }
+
+    #[test]
+    fn bails_retryable_on_errored_frame_without_reason() {
+        let frame = json!({
+            "type": "CALL",
+            "error": "out of gas: intrinsic gas too low",
+        });
+        let err = trace_output_to_bytes(B256::ZERO, &frame).expect_err("should bail");
+        let msg = format!("{err}");
+        assert!(msg.contains("out of gas"));
+        assert!(
+            is_retryable(&err),
+            "trace error must stay retryable: {err:#}"
+        );
     }
 
     #[test]

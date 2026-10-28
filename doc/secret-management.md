@@ -49,6 +49,9 @@ act (`expose_secret()`), never an accidental `#[derive(Debug)]` or `{:?}`.
 7. **Process boundaries.** Secrets enter via env vars or files, never argv, in
    production — argv is world-readable. The test harness's argv spawning is
    local-only and never used with real keys.
+   Any CLI argument reading an env var (`env = "..."`) for keys, credentials,
+   or authenticated URLs must set `hide_env_values = true` to prevent `--help`
+   from dumping exported environment values to stdout.
 
 ## Planned enforcement automation
 
@@ -69,6 +72,9 @@ Each rule gets a mechanical check; discipline is the fallback, not the plan.
 - **Redaction unit tests**: for every secret-bearing type, construct it with a
   known key and assert `{:?}` prints `"<hidden>"` and never the key material —
   in raw, hex, or base58 form (rules 2, 4).
+- **CLI help redaction tests**: assert that `arg.is_hide_env_values_set()` is true
+  for all secret, credential, and authenticated URL arguments in the Clap command
+  graph so that `--help` never exposes exported environment values (rule 7).
 - **Integration log tripwire**: the test harness knows every key it generates;
   scan spawned-node output for any of them in any encoding and fail the run on
   a hit. Catches leaks through dependencies that no type-level control sees

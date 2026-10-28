@@ -10,6 +10,7 @@ alloy.workspace = true
 backon.workspace = true
 http.workspace = true
 anyhow.workspace = true
+sha2 = "0.11.0"
 async-trait.workspace = true
 cait-sith.workspace = true
 thiserror.workspace = true
@@ -20,3 +21,7 @@ rand.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+mockito.workspace = true

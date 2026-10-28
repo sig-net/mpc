@@ -3459,9 +3459,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "fe3e9d21d39e6f39ff46e03d5b621424f88ee23d8a1672c6bfc9ccc7f2da4f6a"
 dependencies = [
  "cmov",
 ]
@@ -5526,7 +5526,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 0.26.9",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -7434,7 +7434,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-canton"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7461,7 +7461,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-ethereum"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7469,6 +7469,7 @@ dependencies = [
  "borsh",
  "futures-util",
  "hex",
+ "http 1.5.0",
  "k256",
  "mockito",
  "mpc-chain-integration-core",
@@ -7487,7 +7488,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-hydration"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7512,7 +7513,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-integration-core"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7521,9 +7522,12 @@ dependencies = [
  "cait-sith",
  "http 1.5.0",
  "k256",
+ "mockito",
  "mpc-crypto",
  "mpc-primitives",
  "rand 0.8.8",
+ "reqwest 0.12.28",
+ "sha2 0.11.0",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -7532,7 +7536,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-midnight"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7541,6 +7545,7 @@ dependencies = [
  "google-cloud-auth",
  "google-cloud-storage",
  "hex",
+ "http 1.5.0",
  "jsonrpsee",
  "k256",
  "memchr",
@@ -7556,6 +7561,7 @@ dependencies = [
  "mpc-compact-hashing",
  "mpc-crypto",
  "mpc-primitives",
+ "mpc-tron-wire",
  "mpc-utils",
  "serde",
  "serde_json",
@@ -7569,7 +7575,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-near"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7591,7 +7597,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-solana"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anchor-client",
@@ -7624,16 +7630,15 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-tron"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
- "bs58 0.5.1",
  "hex",
  "k256",
  "mockito",
  "mpc-chain-integration-core",
- "prost 0.14.4",
+ "mpc-tron-wire",
  "prost-types",
  "reqwest 0.12.28",
  "serde",
@@ -7647,7 +7652,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-compact-hashing"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "hex",
  "midnight-transient-crypto 3.0.0",
@@ -7657,7 +7662,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-contract"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "anyhow",
  "borsh",
@@ -7682,7 +7687,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-crypto"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7699,7 +7704,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-keys"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "hex",
  "hpke",
@@ -7709,7 +7714,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-midnight-respond-codec"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7721,7 +7726,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-node"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7761,6 +7766,7 @@ dependencies = [
  "mpc-crypto",
  "mpc-keys",
  "mpc-primitives",
+ "mpc-tron-wire",
  "mpc-utils",
  "near-account-id",
  "near-crypto",
@@ -7789,6 +7795,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-http",
  "tracing",
  "tracing-opentelemetry 0.30.0",
  "tracing-stackdriver",
@@ -7798,7 +7805,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-primitives"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "borsh",
  "ciborium",
@@ -7812,8 +7819,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-tron-wire"
+version = "1.22.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "bs58 0.5.1",
+ "hex",
+ "k256",
+ "mpc-primitives",
+ "prost 0.14.4",
+ "prost-types",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "mpc-utils"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -10201,7 +10225,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -10512,7 +10536,7 @@ dependencies = [
  "rustls-webpki",
  "security-framework 3.7.0",
  "security-framework-sys",
- "webpki-root-certs 0.26.9",
+ "webpki-root-certs 0.26.11",
  "windows-sys 0.59.0",
 ]
 
@@ -10533,7 +10557,7 @@ dependencies = [
  "rustls-webpki",
  "security-framework 3.7.0",
  "security-framework-sys",
- "webpki-root-certs 1.0.6",
+ "webpki-root-certs 1.0.10",
  "windows-sys 0.61.2",
 ]
 
@@ -10554,7 +10578,7 @@ dependencies = [
  "rustls-webpki",
  "security-framework 3.7.0",
  "security-framework-sys",
- "webpki-root-certs 1.0.6",
+ "webpki-root-certs 1.0.10",
  "windows-sys 0.61.2",
 ]
 
@@ -11401,7 +11425,7 @@ dependencies = [
 
 [[package]]
 name = "signet-crypto"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "getrandom 0.2.16",
  "hex",
@@ -11422,7 +11446,7 @@ dependencies = [
 
 [[package]]
 name = "signet-primitives"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "borsh",
  "enum-map",
@@ -14631,7 +14655,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.2",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -14916,7 +14940,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite 0.28.0",
- "webpki-roots 0.26.9",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -14932,7 +14956,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite 0.29.0",
- "webpki-roots 0.26.9",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -15384,7 +15408,7 @@ dependencies = [
  "sha1",
  "thiserror 2.0.19",
  "utf-8",
- "webpki-roots 0.26.9",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -15587,7 +15611,7 @@ dependencies = [
  "serde_json",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -16241,36 +16265,36 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "0.26.9"
+version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "180d2741b6115c3d906577e6533ad89472d48d96df00270fccb78233073d77f7"
+checksum = "75c7f0ef91146ebfb530314f5f1d24528d7f0767efbfd31dce919275413e393e"
 dependencies = [
- "rustls-pki-types",
+ "webpki-root-certs 1.0.10",
 ]
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.6"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "804f18a4ac2676ffb4e8b5b5fa9ae38af06df08162314f96a68d2a363e21a8ca"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "0.26.9"
+version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29aad86cec885cafd03e8305fd727c418e970a521322c91688414d5b8efba16b"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "rustls-pki-types",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.7"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -16910,9 +16934,9 @@ dependencies = [
 
 [[package]]
 name = "zstd-sys"
-version = "2.0.15+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb81183ddd97d0c74cedf1d50d85c8d08c1b8b68ee863bdee9e706eedba1a237"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

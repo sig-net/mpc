@@ -46,35 +46,77 @@ async function withDeadline<T>(work: Promise<T>, ms: number, timeoutError: Error
 }
 
 let publisherPromise: Promise<Publisher> | undefined;
+// The settled value of `publisherPromise`, for callers that must not wait on a sync.
+let openedPublisher: Publisher | undefined;
+// Handed over by `ready`; every wallet this process opens resumes from it.
+let walletSnapshot: string | undefined;
 
 async function buildPublisher(config: Config): Promise<Publisher> {
   const endpoints = config.endpoints;
   return {
     proveTx: (tx, proofBudgetMs) => proveTransaction(endpoints.proofServerUrl, tx, proofBudgetMs),
-    wallet: await openFundingWallet(config.accountKeys, config.networkId, endpoints),
+    wallet: await openFundingWallet(
+      config.accountKeys,
+      config.networkId,
+      endpoints,
+      walletSnapshot,
+    ),
   };
+}
+
+function remember(pending: Promise<Publisher>): Promise<Publisher> {
+  publisherPromise = pending;
+  void pending.then(
+    (ready) => {
+      if (publisherPromise === pending) openedPublisher = ready;
+    },
+    () => undefined,
+  );
+  return pending;
 }
 
 // Memoized even while pending, so a hung indexer costs one wallet facade, not one per retry.
 function publisher(config: Config): Promise<Publisher> {
-  publisherPromise ??= buildPublisher(config).catch((error: unknown) => {
-    publisherPromise = undefined;
-    throw error;
-  });
-  return publisherPromise;
+  return (
+    publisherPromise ??
+    remember(
+      buildPublisher(config).catch((error: unknown) => {
+        publisherPromise = undefined;
+        throw error;
+      }),
+    )
+  );
 }
 
-export function warmupPublisher(config: Config): void {
+export function warmupPublisher(config: Config, snapshot?: string): void {
+  walletSnapshot = snapshot;
   void publisher(config).catch(() => undefined);
 }
 
 export function primePublisher(ready: Promise<Publisher>): void {
-  publisherPromise = ready;
+  void remember(ready);
+}
+
+/** The opened wallet's snapshot; refused while it syncs or a submit still owns it or its coins. */
+export async function snapshotWallet(): Promise<string> {
+  if (inFlightId !== undefined) {
+    throw new PublisherError(
+      "wallet_busy",
+      `a submit for request ${inFlightId} holds the funding wallet; snapshot after it settles`,
+    );
+  }
+  const wallet = openedPublisher?.wallet;
+  if (wallet === undefined) {
+    throw new PublisherError("wallet_unsynced", "the funding wallet has not finished syncing");
+  }
+  return wallet.snapshot();
 }
 
 export async function closePublisher(): Promise<void> {
   const pending = publisherPromise;
   publisherPromise = undefined;
+  openedPublisher = undefined;
+  walletSnapshot = undefined;
   inFlightId = undefined;
   if (pending === undefined) return;
   await pending.then((ready) => ready.wallet.close()).catch(() => undefined);
@@ -149,6 +191,36 @@ export async function handleSubmit(
   id: number,
   intent: Uint8Array,
 ): Promise<Landed> {
+  try {
+    return await submitOnce(config, id, intent);
+  } catch (error) {
+    throw await withWalletState(error);
+  }
+}
+
+// The parent retires this process after most refused submits, so the refusal is the only
+// record left of the wallet that caused it.
+async function withWalletState(error: unknown): Promise<PublisherError> {
+  const failure = asPublisherError(error);
+  const wallet = openedPublisher?.wallet;
+  if (wallet === undefined || failure.code === "bad_request") return failure;
+  return new PublisherError(failure.code, failure.message, {
+    cause: failure.cause,
+    walletState: await wallet.describe(),
+    walletUsed: failure.walletUsed,
+  });
+}
+
+// Only a failure from here on can say anything about the wallet a snapshot restored.
+function walletFailure(error: unknown): PublisherError {
+  const failure = asPublisherError(error);
+  return new PublisherError(failure.code, failure.message, {
+    cause: failure.cause,
+    walletUsed: true,
+  });
+}
+
+async function submitOnce(config: Config, id: number, intent: Uint8Array): Promise<Landed> {
   const deadline = performance.now() + SUBMIT_TIMEOUT_MS;
 
   // Before the gate: a malformed intent must not cost the next caller its turn.
@@ -180,6 +252,9 @@ export async function handleSubmit(
   } catch (error) {
     throw asPublisherError(error);
   }
+  // Before the spend: once balanced, the wallet's single coin reads as spent until the
+  // change confirms.
+  const dustBalance = await ready.wallet.dustBalance();
 
   const provingTimeout = new PublisherError(
     "proving_timeout",
@@ -213,6 +288,11 @@ export async function handleSubmit(
   // spending; the caller has to learn its post may land anyway.
   const timeout = ambiguousSubmit(`submit exceeded the ${SUBMIT_TIMEOUT_MS} ms deadline`);
   const answerBudgetMs = remaining();
-  if (answerBudgetMs <= 0) throw timeout;
-  return withDeadline(work, answerBudgetMs, timeout);
+  try {
+    if (answerBudgetMs <= 0) throw timeout;
+    const landed = await withDeadline(work, answerBudgetMs, timeout);
+    return { ...landed, dustBalance };
+  } catch (error) {
+    throw walletFailure(error);
+  }
 }

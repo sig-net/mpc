@@ -93,6 +93,7 @@ pub fn test_canton_sign_bidirectional_request(
 pub fn respond_event(sign_id: SignId, signature: Signature) -> RespondBidirectionalEvent {
     RespondBidirectionalEvent {
         attestation: None,
+        output: None,
         request_id: sign_id.request_id,
         signature,
         chain: Chain::Solana,
@@ -116,6 +117,14 @@ pub fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>
     (RpcChannel { tx }, rx)
 }
 
+/// Mark the stream, and every chain in its backlog, caught up or not.
+fn set_caught_up(ctx: &mut StreamContext, caught_up: bool) {
+    ctx.caught_up = caught_up;
+    for chain in Chain::iter() {
+        ctx.backlog.set_caught_up(chain, caught_up);
+    }
+}
+
 /// Build a test [`StreamContext`] and return the checkpoint / mesh watch
 /// senders so callers can drive them. `threshold` is the contract-watcher's
 /// signing threshold.
@@ -136,7 +145,7 @@ pub fn make_test_stream_context(
         ContractStateWatcher::with_running(&account_id, root_pk, threshold, Default::default());
     let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let (cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, rpc_rx) = test_rpc_channel(8);
     let mut ctx = StreamContext::new(
         backlog,
@@ -147,7 +156,7 @@ pub fn make_test_stream_context(
         node_client,
         cp_rx,
     );
-    ctx.caught_up = caught_up;
+    set_caught_up(&mut ctx, caught_up);
     (ctx, cp_tx, mesh_tx, rpc_rx)
 }
 
@@ -162,7 +171,7 @@ pub fn make_test_stream_context_with_rpc(
         ContractStateWatcher::with_running(&account_id, root_pk, 1, Default::default());
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, rpc_rx) = test_rpc_channel(8);
     let mut ctx = StreamContext::new(
         backlog,
@@ -173,7 +182,7 @@ pub fn make_test_stream_context_with_rpc(
         node_client,
         cp_rx,
     );
-    ctx.caught_up = caught_up;
+    set_caught_up(&mut ctx, caught_up);
     (ctx, rpc_rx)
 }
 
@@ -235,7 +244,7 @@ pub async fn run_stream_with_two_node_mesh<I: ChainIndexer>(
     }
     let (_mesh_state_tx, mesh_state_rx) = watch::channel(mesh_state);
     let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
+    let node_client = NodeClient::new();
     let (rpc, _rpc_rx) = test_rpc_channel(8);
 
     run_supervised(

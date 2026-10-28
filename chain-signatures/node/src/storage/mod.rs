@@ -1,4 +1,5 @@
 pub mod checkpoint_storage;
+pub mod midnight_wallet_storage;
 pub mod presignature_storage;
 pub mod protocol_storage;
 pub mod secret_storage;
@@ -6,6 +7,7 @@ pub mod triple_storage;
 
 use cait_sith::protocol::Participant;
 pub use checkpoint_storage::CheckpointStorage;
+pub use midnight_wallet_storage::MidnightWalletStorage;
 pub use presignature_storage::PresignatureStorage;
 pub use protocol_storage::StorageError;
 pub use triple_storage::TripleStorage;
@@ -26,7 +28,7 @@ pub struct Options {
     /// Mostly for integration tests.
     #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"))]
     pub sk_share_local_path: Option<String>,
-    #[arg(long, env("MPC_REDIS_URL"))]
+    #[arg(long, env("MPC_REDIS_URL"), hide_env_values = true)]
     pub redis_url: String,
 }
 

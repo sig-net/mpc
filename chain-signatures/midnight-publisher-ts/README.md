@@ -8,13 +8,14 @@ It is TypeScript because the pieces it wraps are: the Compact compiler emits the
 
 The process speaks newline-delimited JSON (NDJSON) over stdio, with exactly one JSON object per line in each direction. `stdout` is reserved for protocol replies; startup and failure diagnostics go to `stderr`. Every usable request `id` is echoed in its reply, and requests are handled sequentially so replies cannot overtake one another.
 
-Protocol generation 2 uses an explicit readiness handshake. Rust must send `{"id":0,"op":"ready","protocolVersion":2}` and require an `ok` reply that echoes the same `id` and contains `"ready":true` and the exact same `"protocolVersion":2`. A missing, differently typed, older, or newer version is rejected rather than negotiated.
+Protocol generation 3 uses an explicit readiness handshake. Rust must send `{"id":0,"op":"ready","protocolVersion":3}`, optionally with a `walletSnapshot` string, and require an `ok` reply that echoes the same `id` and contains `"ready":true` and the exact same `"protocolVersion":3`. A missing, differently typed, older, or newer version is rejected rather than negotiated.
 
 Operations are:
 
-- `ready`: validates protocol compatibility, starts background construction and synchronization of the memoized funding wallet, and returns without waiting for wallet readiness. The reply also advertises `submitTimeoutMs` and `recipeTtlMs`.
+- `ready`: validates protocol compatibility, starts background construction and synchronization of the memoized funding wallet, and returns without waiting for wallet readiness. The reply also advertises `submitTimeoutMs` and `recipeTtlMs`. A `walletSnapshot` makes the wallet resume from it (see [Wallet snapshots](#wallet-snapshots)).
 - `build`: runs the selected `respond` circuit and returns a serialized ledger intent. It does not open, synchronize, or use the funding wallet.
-- `submit`: deserializes and proves the intent, DUST-balances it with the funding wallet, finalizes it, posts it, and returns the transaction ID.
+- `submit`: deserializes and proves the intent, DUST-balances it with the funding wallet, finalizes it, posts it, and returns the transaction ID. When the wallet can say, the reply also carries its spendable DUST before the spend, as decimal SPECK (`dustBalance`), for the node's balance metric.
+- `snapshot`: returns `walletSnapshot`, the funding wallet's encoded sub-wallet states. It is refused with `wallet_unsynced` until the wallet has fully synced and with `wallet_busy` while a submit still owns the wallet or any submitted transaction or coin is still in flight.
 
 `build` and `submit` are separate operations so that the intent is built from the contract state Rust has already read and verified for the request, rather than from state a wallet SDK would fetch on its own, and so that only `submit` ever touches the funding wallet.
 
@@ -22,13 +23,13 @@ The process memoizes one wallet facade, including while it is starting. A single
 
 ## Supported event transactions
 
-The MPC reader processes events from finalized transactions with one unambiguous `TxApplied` (full success) status and a matching transaction hash. It reads both guaranteed and fallible transcripts of calls to the configured Signet singleton, processing all guaranteed phases before fallible phases in ledger execution order.
+The MPC reader processes events from finalized transactions with one unambiguous `TxApplied` (full success) or `TxPartialSuccess` status and a matching transaction hash. It reads both guaranteed and fallible transcripts of calls to the configured Signet singleton, processing all guaranteed phases before fallible phases in ledger execution order.
 
-A `TxPartialSuccess` result causes the reader to skip every event from that transaction, including guaranteed events and events from successful fallible segments. This does not undo any effects committed by Midnight. Other candidates without `TxApplied` are also logged and skipped. Malformed status data, duplicate `TxApplied` or `TxPartialSuccess` events, conflicting statuses, and transaction hash mismatches stop processing at that block.
+A `TxPartialSuccess` status does not say which fallible segments committed. The reader keeps every guaranteed event, since the guaranteed section committed, but from fallible transcripts only `SignBidirectionalEvent` notifications: a request is signed only when the caller's state holds its record at that block and did not hold it at the parent block, since a rolled-back segment never wrote it but may name a record an earlier transaction wrote. State cannot say which segment wrote a new record, so a record written in that block by a call that did not notify is signed when a rolled-back notification names it, and a record removed and written again within that block is not signed. Response events in fallible transcripts are skipped with a warning, and so is a fallible transcript whose declared effects differ from the ones its program produces: the node accepts such a transcript and the ledger never commits it, so holding on it would let anyone stop the reader. Candidates without either status are logged and skipped. Malformed status data, duplicate `TxApplied` or `TxPartialSuccess` events, conflicting statuses, and transaction hash mismatches stop processing at that block.
 
-Supported singleton programs consist of literal, non-storage `Push`/`Log` pairs: `Push` places the encoded event on the execution stack, and `Log` emits it. `Noop` (no-op) and `Ckpt` (checkpoint) instructions may appear before, between or after those instructions. During VM execution, they only charge gas and do not change the recovered events. The reader ignores them when checking the instruction pattern, but replays the original program.
+Supported singleton programs consist of literal, non-storage `Push`/`Log` pairs: `Push` places the encoded event on the execution stack, and `Log` emits it. `Noop` (no-op) and `Ckpt` (checkpoint) instructions may appear before, between or after those instructions. During VM execution, they only charge gas and do not change the recovered events. The reader ignores them when checking the instruction pattern, but keeps them in the program it replays.
 
-The node validates the transaction structure; the reader checks whether it can reconstruct events without the original contract state. Declared effects must be empty, and events must use a supported Signet schema. Unsupported instructions or event schemas stop processing at that block. A fallible transcript alone is not a reason to reject a call: it is supported when the whole transaction succeeds. Caller record and signature validation still apply after decoding.
+The node validates the transaction structure; the reader checks whether it can reconstruct events without the original contract state. Declared effects must match the replayed (empty) effects, and events must use a supported Signet schema. The reader decodes each program as its proof covers it, dropping `idx []` instructions and atoms past a cell's alignment: their field representation is empty, so ledgers before 9.1.0-rc.5 let a transaction's author add them to a proven program. Unsupported instructions, VM failures or event schemas in that program stop processing at that block, in either phase of either status: every singleton circuit proves a decodable program, so only a format change reaches them. A fallible transcript alone is not a reason to reject a call. Caller record and signature validation still apply after decoding.
 
 ## Midnight attestation API
 
@@ -50,6 +51,14 @@ Four errors have especially important retry semantics:
 - `proving_timeout`: base proving exhausted the remaining submit deadline. No wallet operation started, so retrying is safe.
 - `state_conflict`: the node refused the transaction, so nothing was posted. Either it rejected the transaction as invalid, which is how a stale contract read, an expired TTL, or any other pool rejection surfaces (the node does not say which), or it could not validate the transaction at all (RPC error `1002`), which another node may still accept. Rebuild the intent against fresh contract state and retry.
 - `ambiguous_submit`: the absolute deadline expired after wallet-critical work may have started. The transaction can still land in the background, and the MPC retries automatically, so it may publish the response more than once. Duplicate response events are acceptable and require no operator reconciliation.
+
+Rust replaces this process after every refused submit except `wallet_unsynced`, whose wallet a new process would only start syncing over. A refused submit's reply therefore carries `walletState`, a one-line account of the wallet's coins and sync progress that would otherwise be lost with the process. It is a separate field because retry and throttle detection scan the message for HTTP status codes, which counts could mimic. A refusal raised once the submit had started balancing with the wallet also carries `"walletUsed":true`; one raised before, while reading the wallet's readiness or proving, does not.
+
+## Wallet snapshots
+
+A fresh funding wallet replays the chain's ledger events before it can pay a fee, which takes minutes and grows with the chain. Rust asks for a snapshot before each publish, at most every five minutes, keeps the latest in memory and in the node's Redis namespace, and passes it to every new process in `ready`. A restored wallet replays only the events since its snapshot. Only a synced wallet with nothing in flight is snapshotted, after waiting up to five seconds for the transaction a submit just returned for to settle, so a restore never brings back a coin held by an earlier process's transaction.
+
+The snapshot holds the wallet SDK's serialized states, which carry public keys and local wallet state but no secret key, plus the network id, the wallet's unshielded address, and when it was taken. A snapshot for another network or another funding wallet, one that fails to restore, or one whose wallet is not synced within three minutes is discarded, and the wallet syncs from the start. A process about to be replaced is never asked for one. When three processes in a row that were handed a snapshot die, or are refused with `walletUsed`, with no submit landing in between, Rust drops the latest snapshot from memory and Redis, so the next process syncs from the start.
 
 ## Configuration
 
@@ -84,4 +93,4 @@ npm test
 
 The runtime image for this sidecar must include the built `dist/` tree, production Node.js dependencies, and the managed contract proving assets (`keys/` and `zkir/`) shipped by `@sig-net/midnight-contract`; proving resolves those assets through the installed package at runtime.
 
-The Rust node spawns this process from that image with the six publisher values above and must send and require protocol version 2 in the `ready` handshake before any build or submit traffic.
+The Rust node spawns this process from that image with the six publisher values above and must send and require protocol version 3 in the `ready` handshake before any build or submit traffic.

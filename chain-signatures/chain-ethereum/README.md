@@ -24,11 +24,11 @@ plumbed through from the node's config, not constructed by hand.
 
 | field                     | env var             | required? | notes |
 |---------------------------|---------------------|-----------|-------|
-| `execution_rpc_http_url`  | `RPC_URL`           | yes       | execution-layer JSON-RPC endpoint (Alchemy, Infura, OnFinality, …) |
-| `contract_address`        | `CONTRACT_ADDRESS`  | yes       | MPC contract address, with or without the `0x` prefix |
-| `network`                 | `NETWORK`           | no        | default `sepolia` |
-| `refresh_finalized_interval` | —                | no        | milliseconds between finalized-head watcher polls (production) |
-| `optimistic_requests`     | `OPTIMISTIC`        | no        | default off (production waits for finality via the finalized-head watcher); set `1` for the demo/soft-tip path |
+| `execution_rpc_http_url`  | `MPC_ETH_EXECUTION_RPC_HTTP_URL` | yes | execution-layer JSON-RPC endpoint (Alchemy, Infura, OnFinality, …) |
+| `contract_address`        | `MPC_ETH_CONTRACT_ADDRESS` | yes | MPC contract address, with or without the `0x` prefix |
+| `network`                 | `MPC_ETH_NETWORK` | no | default `sepolia`; `run()` fails unless the RPC serves this network's chain id. Every node of a deployment must name the same network, since admission checks transactions against it |
+| `refresh_finalized_interval` | `MPC_ETH_REFRESH_FINALIZED_INTERVAL` | no | milliseconds between finalized-head watcher polls (production) |
+| `optimistic_requests`     | `MPC_ETH_OPTIMISTIC_REQUESTS` | no | default off (production waits for finality via the finalized-head watcher); set `true` for the demo/soft-tip path |
 
 ### Stall budget
 
@@ -36,7 +36,7 @@ plumbed through from the node's config, not constructed by hand.
 finality plus a 5-minute buffer) is the supervisor watchdog budget: restart
 the indexer when no `ChainEvent::Block` is dispatched within it. Sibling
 chains expose the same knob; see `ChainConfig` in
-`mpc-primitives/src/chain.rs`.
+`chain-signatures/primitives/src/chain.rs`.
 
 ### Catchup fetch tuning
 
@@ -65,8 +65,8 @@ over the same `[START, END)` range read from Redis.
 ```sh
 docker compose -f bench/docker-compose.bench.yml up -d
 
-RPC_URL=http://localhost:4000/sepolia/evm/11155111 \
-CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
+MPC_ETH_EXECUTION_RPC_HTTP_URL=http://localhost:4000/sepolia/evm/11155111 \
+MPC_ETH_CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
 START=11214938 END=11215038 \
 RUST_LOG=mpc_chain_ethereum::bench=info \
 cargo run --example bench_catchup --features bench
@@ -74,12 +74,12 @@ cargo run --example bench_catchup --features bench
 docker compose -f bench/docker-compose.bench.yml down -v   # clear cache
 ```
 
-Alternatively point `RPC_URL` directly at a public Sepolia endpoint (slower,
-noisier):
+Alternatively point `MPC_ETH_EXECUTION_RPC_HTTP_URL` directly at a public
+Sepolia endpoint (slower, noisier):
 
 ```sh
-RPC_URL=https://eth-sepolia.api.onfinality.io/public \
-CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
+MPC_ETH_EXECUTION_RPC_HTTP_URL=https://eth-sepolia.api.onfinality.io/public \
+MPC_ETH_CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
 START=11214938 END=11215038 \
 RUST_LOG=mpc_chain_ethereum::bench=info \
 cargo run --example bench_catchup --features bench
@@ -88,8 +88,8 @@ cargo run --example bench_catchup --features bench
 ### Reference numbers
 
 Current catchup baseline for a 100-block catchup over an already-finalized
-range (`START=11214938 END=11215038`, `OPTIMISTIC=0`, default
-`REFRESH_FINALIZED_INTERVAL`).
+range (`START=11214938 END=11215038`, `MPC_ETH_OPTIMISTIC_REQUESTS=false`, default
+`MPC_ETH_REFRESH_FINALIZED_INTERVAL`).
 
 #### Provider cost
 
@@ -128,8 +128,8 @@ rate-limit the RPC. Dummy watchers (with `nonce = u64::MAX`, i.e. never
 executable) are injected into a `MockStateManager` before catchup starts.
 
 ```sh
-RPC_URL=http://localhost:4000/sepolia/evm/11155111 \
-CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
+MPC_ETH_EXECUTION_RPC_HTTP_URL=http://localhost:4000/sepolia/evm/11155111 \
+MPC_ETH_CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
 START=11214938 END=11215038 WATCHERS=1000 \
 RUST_LOG=mpc_chain_ethereum::bench=info \
 cargo run --example bench_watchers --features bench
@@ -139,13 +139,13 @@ cargo run --example bench_watchers --features bench
 
 | var              | required? | description |
 |------------------|-----------|-------------|
-| `RPC_URL`        | yes       | execution-layer RPC endpoint (eRPC URL or direct) |
-| `CONTRACT_ADDRESS` | yes     | contract to watch (with/without `0x`) |
+| `MPC_ETH_EXECUTION_RPC_HTTP_URL` | yes | execution-layer RPC endpoint (eRPC URL or direct) |
+| `MPC_ETH_CONTRACT_ADDRESS` | yes | contract to watch (with/without `0x`) |
 | `END`            | yes       | exclusive end of the range |
 | `START`          | no        | inclusive start; if omitted only `END-1` is processed |
-| `NETWORK`        | no        | default `sepolia` |
-| `OPTIMISTIC`     | no        | `0` (default, production) waits for finality via the watcher; `1` enables the demo/soft-tip path |
-| `WATCHERS`       | no        | `bench_watchers` only — number of pending dummy watchers to simulate (default `50`) |
+| `MPC_ETH_NETWORK` | no       | default `sepolia` |
+| `MPC_ETH_OPTIMISTIC_REQUESTS` | no | `false` (default, production) waits for finality via the watcher; `true` enables the demo/soft-tip path |
+| `WATCHERS`       | no        | `bench_watchers` only — number of pending dummy watchers to simulate (default `1000`) |
 | `RUST_LOG`       | no        | tracing filter — `mpc_chain_ethereum::bench=info` for just the report |
 
 ## Features
