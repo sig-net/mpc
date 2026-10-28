@@ -351,17 +351,18 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 
 ### Outside the model: nodes build different backlogs
 
+* A node whose own checkpoint at a settled height differs from the settled one is the sign of a bug and worth alerting on.
 * No digest reaches t.
   Nodes run to the cap and stop.
   There is no in-band way out.
   A restart resumes from the checkpoints built with the bug, so the release with the fix must also drop `pending`.
   The nodes then build the same checkpoints from the base again, and the next settlement realigns them.
 * A node that wrongly takes a request for finished deletes its record, with the signatures it issued.
+* A node that rebases onto a checkpoint it does not hold drops all of `pending`, also checkpoints above that height it voted for.
+  Such a vote can settle a checkpoint no node holds, and every node that wants it then stalls.
+  Keeping the dropped checkpoints for serving (see Options) would close this at any threshold.
 * Every copy of a settled checkpoint may be lost.
   Retention (Section 5, L2) makes it unlikely; rebuilding it by indexing (Options) is the way out.
-* A node that rebuilds a checkpoint at a height and gets a different one is the sign of such a bug.
-  It stores and votes for the new one; nothing here stops it, but it is worth alerting on.
-  An earlier vote of the node for the old one can still settle it, with no node holding it any more.
 
 ### Options
 
@@ -375,8 +376,12 @@ Each closes one of the limits above, at a price.
   It also covers losing every copy of a settled checkpoint: a node with an older base rebuilds it, and a node without any base starts from the genesis checkpoint, given providers that serve blocks back to the chain's start height and the time to index them.
   A node whose backlog differs builds a different digest and still needs a peer.
 * One vote per node and height in the contract, the newest replacing an older one.
-  A vote in flight at a restart can then not settle a digest its node no longer holds, and faulty nodes cannot inflate a tally.
+  Faulty nodes then cannot inflate a tally, and a node that votes again at a height after a rebase replaces its vote for the checkpoint it dropped.
   The price is a contract change.
+* Keep the checkpoints a rebase drops in a separate durable store, for serving only, until a checkpoint at or above their height settles.
+  If one of them settles, the node rebases onto it as onto one fetched from a peer.
+  Every correct voter of a settled checkpoint then still holds it when it settles, at any threshold.
+  The price is a second store per chain.
 * Re-index at the cap: a node at the cap that sees, in a view of the vote counts, more than 2f votes at the first boundary above its base settling nothing re-indexes from its base, on a backoff that grows each time and resets on a rebase.
   For a correct node in the model this changes nothing, it builds the same checkpoints again.
   It gives a second attempt, without an operator, where building the backlog again can come out differently, and not where a node repeats the same result.
