@@ -1599,6 +1599,8 @@ mod tests {
             "midnight_proof_server_url",
             "midnight_indexer_url",
             "midnight_indexer_ws_url",
+            "tron_endpoint",
+            "tron_api_key",
         ];
 
         for arg_id in sensitive_arg_ids {

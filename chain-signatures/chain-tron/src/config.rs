@@ -103,6 +103,48 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_each_rule_violation() {
+        fn variant(mutate: impl FnOnce(&mut TronConfig)) -> TronConfig {
+            let mut config = TronConfig::default();
+            mutate(&mut config);
+            config
+        }
+        let cases = [
+            (
+                "non-http scheme",
+                variant(|c| c.endpoint = Url::parse("ftp://h").unwrap()),
+            ),
+            (
+                "path",
+                variant(|c| c.endpoint = Url::parse("https://h/v1").unwrap()),
+            ),
+            (
+                "query",
+                variant(|c| c.endpoint = Url::parse("https://h/?k=1").unwrap()),
+            ),
+            (
+                "fragment",
+                variant(|c| c.endpoint = Url::parse("https://h/#f").unwrap()),
+            ),
+            (
+                "blank api key",
+                variant(|c| c.api_key = Some("  ".to_string())),
+            ),
+            (
+                "zero request timeout",
+                variant(|c| c.request_timeout = Duration::ZERO),
+            ),
+            (
+                "zero poll interval",
+                variant(|c| c.poll_interval = Duration::ZERO),
+            ),
+        ];
+        for (rule, config) in cases {
+            assert!(config.validate().is_err(), "validate accepted: {rule}");
+        }
+    }
+
+    #[test]
     fn debug_redacts_the_api_key() {
         let key = "secret-trongrid-key";
         let config = TronConfig {

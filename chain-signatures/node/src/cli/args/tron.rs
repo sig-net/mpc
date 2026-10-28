@@ -81,9 +81,62 @@ impl TronArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use url::Url;
 
     #[test]
     fn unconfigured_emits_no_args() {
         assert!(TronArgs::from_config(None).into_str_args().is_empty());
+    }
+
+    #[test]
+    fn unconfigured_yields_no_config() {
+        assert!(TronArgs::from_config(None).into_config().unwrap().is_none());
+    }
+
+    #[test]
+    fn into_config_parses_and_from_config_round_trips() {
+        let args = TronArgs {
+            tron_endpoint: Some("https://api.trongrid.io".to_string()),
+            tron_api_key: Some("tron-key".to_string().into()),
+            tron_poll_interval_ms: 250,
+        };
+        let config = args
+            .clone()
+            .into_config()
+            .unwrap()
+            .expect("configured chain");
+        assert_eq!(
+            config.endpoint,
+            Url::parse("https://api.trongrid.io").unwrap()
+        );
+        assert_eq!(config.api_key.as_deref(), Some("tron-key"));
+        assert_eq!(config.poll_interval, Duration::from_millis(250));
+
+        let round_tripped = TronArgs::from_config(Some(config.clone()))
+            .into_config()
+            .unwrap()
+            .expect("round trip keeps the chain configured");
+        assert_eq!(round_tripped, config);
+    }
+
+    #[test]
+    fn into_config_rejects_an_invalid_endpoint() {
+        let args = TronArgs {
+            tron_endpoint: Some("not a url".to_string()),
+            ..TronArgs::from_config(None)
+        };
+        assert!(args.into_config().is_err());
+    }
+
+    /// `validate` gates what enters the node's wiring — a config it
+    /// accepted is what `spawn_indexers` builds the watcher from.
+    #[test]
+    fn into_config_runs_config_validation() {
+        let args = TronArgs {
+            tron_endpoint: Some("https://api.trongrid.io".to_string()),
+            tron_api_key: None,
+            tron_poll_interval_ms: 0,
+        };
+        assert!(args.into_config().is_err());
     }
 }
