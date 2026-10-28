@@ -15,7 +15,7 @@ pub trait ChainConfig {
     fn checkpoint_interval(&self) -> Option<u64>;
     fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)>;
     /// `ChainEvent::Block` silence budget before the supervisor restarts
-    /// the indexer. Env-overridable for indexed chains.
+    /// the indexer.
     fn stall_timeout_secs(&self) -> u64;
     /// Budget for the chain-local feed detector (Canton: WS silence;
     /// Solana: frozen anchor). Env-overridable
@@ -67,21 +67,14 @@ impl ChainConfig for Chain {
             .expected_finality_time_secs()
             .saturating_add(BUFFER_SECS)
             .max(FLOOR_SECS);
-        let (key, default) = match self {
+        match self {
             // ~20 missed blocks at ~6s cadence; headroom for slow catchup
             // blocks (large contract-state reads).
-            Chain::Midnight => ("STALL_TIMEOUT_MIDNIGHT", 120),
+            Chain::Midnight => 120,
             // ~10x the 12s finality cadence.
-            Chain::Hydration => ("STALL_TIMEOUT_HYDRATION", 120),
-            Chain::Canton => ("STALL_TIMEOUT_CANTON", derived),
-            Chain::Ethereum => ("STALL_TIMEOUT_ETHEREUM", derived),
-            Chain::Solana => ("STALL_TIMEOUT_SOLANA", derived),
-            Chain::NEAR | Chain::Bitcoin | Chain::Tron => return derived,
-        };
-
-        std::env::var(key)
-            .map(|param| param.parse::<u64>().unwrap_or(default))
-            .unwrap_or(default)
+            Chain::Hydration => 120,
+            _ => derived,
+        }
     }
 
     fn feed_stall_timeout_secs(&self) -> u64 {
