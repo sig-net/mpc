@@ -34,7 +34,7 @@ Vocabulary, per node per source chain:
 
 * **Processed height**: the last height whose block the node has finished processing, its events applied to the backlog.
   The indexer reports every height in order, with all of its events, including heights where nothing happened.
-  Apart from the indexer, only a re-index (see Base) moves it, back or forward.
+  Apart from the indexer, only a re-index (see Base) or a restart moves it, back or forward.
 
 * **Caught up**: the node has finished processing every block up to the chain's finalised head, the newest block its provider reports as finalised, as in [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3).
   Acting waits for it, so that a node behind the head does not spend presignatures, posit rounds and peer messages on requests the chain has already answered.
@@ -145,11 +145,9 @@ Described for one node, one source chain; `backlog` is the node's backlog.
   At every boundary it passes, not only the next one above its base, it creates a checkpoint, stores it in `pending` under its height, and votes for it.
 * It polls the contract for the settled checkpoint, and one of three things follows.
   * Nothing new has settled: the node does nothing.
-  * The settled checkpoint is the one the node stored at that height: it becomes the base.
-    If the node has processed up to that height or past it, it carries on.
-    If it is still below that height, it re-indexes from the checkpoint it stored in `pending` at that height, and so jumps forward without fetching anything.
-    This happens after a restart, for instance, since a restart re-indexes from the older base.
+  * The settled checkpoint is the one the node stored at that height: it becomes the base and the node carries on.
   * The settled checkpoint is another one: the node stops indexing, fetches it from a peer, makes it the base, drops all of `pending` and re-indexes from it.
+* On a restart the node resumes from the newest checkpoint in `pending`, or the base if there is none, and votes again for every checkpoint in `pending`, since a vote in flight at the crash may have been lost.
 * A node is *at the cap* when its processed height is `MAX_PENDING` boundaries above its base.
   There it processes no block and waits for a settlement, caught up or not.
   This bounds how far the network signs from state nobody has agreed to.
@@ -183,7 +181,9 @@ in memory:
 ```
 on start:
   base = the one held, or the genesis checkpoint
-  re_index()
+  top = the newest checkpoint in pending, or base
+  backlog, processed_height = top.backlog, top.height
+  for c in pending: vote(c)
 ```
 Indexing
 ```
@@ -314,7 +314,7 @@ Correct nodes agree (S1), so what is left is how many are up:
 * t votes out of the n - f correct nodes leaves n - f - t of them free to be down, none at t = n - f.
 * Votes persist until the height settles, so nodes need not be up together.
 * A node catching up votes at every boundary it passes rather than waiting for the head.
-* A vote is retried until the contract has it, and after a restart the node casts it again when it passes that boundary.
+* A vote is retried until the contract has it, and after a restart the node casts its votes for `pending` again.
 
 ### *L2, a node that disagrees with a settled checkpoint ends up holding one.*
 Rebasing replaces the backlog wholesale rather than reconciling entry by entry, so a node behind and a node that diverged both take the settled checkpoint and index on from it.
@@ -332,7 +332,6 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
   At t = n - f one correct node down while the others index `MAX_PENDING` boundaries past the base is enough.
   The nodes that are up run to the cap and wait for a settlement.
 * Signing stalls while more than n - t nodes are faulty or not acting: catching up, at the cap, or missing a settled checkpoint.
-* A restart re-indexes from the base without acting until the first poll, which finds the newest settled checkpoint in `pending` and jumps to it; the blocks above that are replayed.
 * A fetch slower than the time between two settlements never completes.
   Holders drop a checkpoint when they rebase onto the next one.
 * Nothing bounds the size of a checkpoint.
@@ -351,7 +350,8 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 * No digest reaches t.
   Nodes run to the cap, about two hours on Ethereum and four on Solana at today's settings, and stop.
   There is no in-band way out.
-  Nodes restarted with the fix build the same checkpoints from the base again, and the next settlement realigns them.
+  A restart resumes from the checkpoints built with the bug, so the release with the fix must also drop `pending`.
+  The nodes then build the same checkpoints from the base again, and the next settlement realigns them.
 * A node that wrongly takes a request for finished deletes its record, with the signatures it issued.
 * Every copy of a settled checkpoint may be lost.
   Retention (Section 5, L2) makes it unlikely; rebuilding it by indexing (Options) is the way out.
@@ -363,10 +363,6 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 
 Each closes one of the limits above, at a price.
 
-* Resume after a restart from the checkpoint created last, instead of re-indexing from the base.
-  This needs the creation order across heights, for instance a counter stored with each checkpoint.
-  On start the node sets its backlog and processed height to the checkpoint with the highest counter and casts its vote for it again, since a vote in flight at the crash is lost.
-  A restart then replays at most one interval instead of everything above the newest settled checkpoint.
 * Settle at f+1 instead of t, the smallest threshold with a correct voter behind every settled digest.
   Settlement then needs the fewest nodes up and agreeing: n - 2f - 1 correct nodes may be down.
 * Index to a settled checkpoint instead of only fetching it: a node whose processed height is below `want` keeps indexing from its base, without acting or voting, and holds the settled checkpoint once it reaches that height with the same digest (S1).
