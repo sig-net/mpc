@@ -62,7 +62,7 @@ Vocabulary, per node per source chain:
     *Rebasing* onto a checkpoint makes it the base.
     *Re-indexing* sets the backlog and the processed height to the base and indexes on from there.
 
-  * **Genesis checkpoint**: the checkpoint with an empty backlog at the chain's start height.
+  * **Genesis checkpoint**: the checkpoint with an empty backlog at the chain's start height, which the governance contract holds.
     Every node builds this checkpoint locally instead of fetching it from a peer.
     Until the contract settles its first checkpoint, nodes treat the genesis checkpoint as settled.
 
