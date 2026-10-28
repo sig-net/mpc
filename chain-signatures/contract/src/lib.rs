@@ -32,7 +32,7 @@ use primitives::{
 use signet_primitives::{Chain, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use crate::config::Config;
+use crate::config::ProtocolConfig;
 use crate::errors::Error;
 use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
 use crate::utils::compute_threshold;
@@ -72,7 +72,7 @@ pub struct MpcContract {
     protocol_state: ProtocolContractState,
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
-    config: Config,
+    config: ProtocolConfig,
     latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
     checkpoint_votes: CheckpointVotes,
 }
@@ -732,7 +732,7 @@ impl MpcContract {
     pub fn init(
         threshold: usize,
         candidates: BTreeMap<AccountId, CandidateInfo>,
-        config: Option<Config>,
+        config: Option<ProtocolConfig>,
     ) -> Result<Self, Error> {
         log!(
             "init: signer={}, threshold={}, candidates={}, config={:?}",
@@ -774,7 +774,7 @@ impl MpcContract {
         participants: Participants,
         threshold: usize,
         public_key: PublicKey,
-        config: Option<Config>,
+        config: Option<ProtocolConfig>,
         checkpoints: Option<BTreeMap<Chain, CheckpointDigest>>,
     ) -> Result<Self, Error> {
         log!(
@@ -847,7 +847,7 @@ impl MpcContract {
         }
     }
 
-    pub fn config(&self) -> &Config {
+    pub fn config(&self) -> &ProtocolConfig {
         &self.config
     }
 
@@ -879,7 +879,7 @@ impl MpcContract {
 
         for read in reads {
             let view = match read {
-                Read::State => View::State(self.state()),
+                Read::State => View::State(Box::new(self.state())),
                 Read::Config => View::Config(self.config().clone()),
                 Read::Checkpoints => View::Checkpoints(
                     Chain::iter()
@@ -1102,7 +1102,7 @@ impl MpcContract {
     }
 
     #[private]
-    pub fn update_config(&mut self, config: Config) {
+    pub fn update_config(&mut self, config: ProtocolConfig) {
         self.config = config;
     }
 
@@ -1300,10 +1300,10 @@ mod tests {
 
         // 1. Serialize and write the previous contract state to storage
         let previous_contract = migration::PreviousDevnet {
-            protocol_state: migration::PreviousProtocolContractState::NotInitialized,
+            protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
-            config: Config::default(),
+            config: ProtocolConfig::default().into(),
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
         };
@@ -1355,7 +1355,7 @@ mod tests {
             protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
-            config: Config::default(),
+            config: ProtocolConfig::default(),
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
         };
@@ -1425,7 +1425,7 @@ mod tests {
             }),
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
-            config: Config::default(),
+            config: ProtocolConfig::default(),
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
         }
@@ -1437,7 +1437,7 @@ mod tests {
             protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
-            config: Config::default(),
+            config: ProtocolConfig::default(),
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
         };
