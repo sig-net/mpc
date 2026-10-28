@@ -5,23 +5,18 @@ Full diff: https://github.com/sig-net/mpc/compare/A.B.C...X.Y.Z
 
 ## Summary
 
-<!--
-What was broken and what the fix does, with the develop commit it was
-cherry-picked from. If the fix is only on this branch, say why.
--->
-
-- **Area:** what was broken and what the fix does (#…, cherry-picked from `<sha>`)
+- **Area:** what was broken and what the fix does (#…, cherry-picked from `<sha>`; if the fix is only on this branch, say why)
 
 ## Breaking changes
 
-<!-- `None`, or each type that applies with what breaks and what users must do. -->
+<!-- Tick `None` or every type that applies, with what breaks and what users must do. Unticked lines are stripped from the release notes. -->
 
-- None
-- **Node–Node:** …
-- **Contract–Node:** …
-- **Contract state:** …
-- **Network–Applications:** …
-- **Operator** (flags, env vars, config, storage migration): …
+- [ ] None
+- [ ] **Node–Node:** …
+- [ ] **Contract–Node:** …
+- [ ] **Contract state:** …
+- [ ] **Network–Applications:** …
+- [ ] **Operator** (flags, env vars, config, storage migration): …
 
 ## Checklist
 
@@ -31,6 +26,5 @@ cherry-picked from. If the fix is only on this branch, say why.
 - [ ] Cherry-picked with `-x`
 - [ ] Patch version bumped and `cargo check` run on this branch only; `develop` untouched
 - [ ] The `regression` issue this closes, if any, is linked
-- [ ] Title is `fix: hotfix X.Y.Z to testnet` or `fix: hotfix X.Y.Z to mainnet`
 
 <!-- After merging: tag and publish the release, then hotfix the other branch if it has the bug, see doc/releasing.md. -->

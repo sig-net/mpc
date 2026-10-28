@@ -41,11 +41,11 @@ Code moves downstream only.
 
 We use [semantic versioning](https://semver.org/). The version is `version` under `[workspace.package]` in the root `Cargo.toml`. Tags are the bare version, e.g. `1.21.0`.
 
-Every tag has a GitHub release whose notes are the PR description. Release and hotfix PRs use the [release](../.github/PULL_REQUEST_TEMPLATE/release.md) and [hotfix](../.github/PULL_REQUEST_TEMPLATE/hotfix.md) PR templates: **Summary**, **Breaking changes** (`None`, or each with its type and required action) and a **Checklist** that is not part of the notes. [1.21.0](https://github.com/sig-net/mpc/pull/1395) is an example. Right after the PR merges:
+Every tag has a GitHub release whose notes are the PR description. Release and hotfix PRs use the [release](../.github/PULL_REQUEST_TEMPLATE/release.md) and [hotfix](../.github/PULL_REQUEST_TEMPLATE/hotfix.md) PR templates: **Summary**, **Breaking changes** (tick `None`, or each type that applies with what breaks and the required action) and a **Checklist**. The notes exclude the checklist and the unticked breaking-change types. Right after the PR merges:
 
 ```sh
 git tag X.Y.Z <commit> && git push origin X.Y.Z
-gh pr view <pr> --json body --jq .body | sed '/^## Checklist/,$d' | gh release create X.Y.Z --verify-tag --notes-file -
+gh pr view <pr> --json body --jq .body | sed -e '/^## Checklist/,$d' -e '/^- \[ \] /d' -e 's/^- \[[xX]\] /- /' | gh release create X.Y.Z --verify-tag --notes-file -
 ```
 
 - Release: the commit is the release commit on `develop`, the PR is the release PR.
@@ -70,7 +70,11 @@ Every second Tuesday is a **release day**. On it, in this order:
    git switch -c promote/X.Y.Z-mainnet origin/testnet
    git push origin promote/X.Y.Z-mainnet
    ```
-2. Open a PR from `promote/X.Y.Z-mainnet` to `mainnet` titled `chore: release X.Y.Z to mainnet` and merge it with a merge commit. Never promote from `develop` or open the PR from `testnet` directly, so `mainnet` gets exactly what was soaked. If the version line conflicts with a hotfix bump, take the version from the promote branch.
+2. Open a PR from `promote/X.Y.Z-mainnet` to `mainnet` from the [promotion template](../.github/PULL_REQUEST_TEMPLATE/promotion.md), tick its checklist and merge it with a merge commit:
+   ```sh
+   gh pr create --base mainnet --title "chore: release X.Y.Z to mainnet" --body-file .github/PULL_REQUEST_TEMPLATE/promotion.md
+   ```
+   Never promote from `develop` or open the PR from `testnet` directly, so `mainnet` gets exactly what was soaked. If the version line conflicts with a hotfix bump, take the version from the promote branch.
 
 ### Step 2: Cut the release
 
@@ -90,7 +94,11 @@ Every second Tuesday is a **release day**. On it, in this order:
    git switch -c promote/X.Y.Z X.Y.Z
    git push origin promote/X.Y.Z
    ```
-2. Open a PR from `promote/X.Y.Z` to `testnet` titled `chore: release X.Y.Z to testnet` and merge it with a merge commit. Don't open it from `develop`: the PR would pick up anything merged to `develop` while it is open. If the version line conflicts with a hotfix bump, take the version from the promote branch.
+2. Open a PR from `promote/X.Y.Z` to `testnet` from the [promotion template](../.github/PULL_REQUEST_TEMPLATE/promotion.md), tick its checklist and merge it with a merge commit:
+   ```sh
+   gh pr create --base testnet --title "chore: release X.Y.Z to testnet" --body-file .github/PULL_REQUEST_TEMPLATE/promotion.md
+   ```
+   Don't open it from `develop`: the PR would pick up anything merged to `develop` while it is open. If the version line conflicts with a hotfix bump, take the version from the promote branch.
 
 ### Step 4: Soak
 
