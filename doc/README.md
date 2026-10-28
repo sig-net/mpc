@@ -1,5 +1,7 @@
 # MPC docs
 
+[Glossary](glossary.md): the terms used across these docs and the code types behind them.
+
 ## Protocol
 
 - [Protocol properties](protocol-properties.md): safety, liveness and efficiency properties of the coordination layer, and how the code enforces them.
