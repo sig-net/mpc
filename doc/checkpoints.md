@@ -37,7 +37,7 @@ Vocabulary, per node per source chain:
   The indexer reports heights in order, with all their events; a chain may skip heights where nothing happened, and the indexers of correct nodes report the same heights.
   Apart from the indexer, only a re-index (see Base) or a restart moves it, back or forward.
 
-* **Caught up**: the node has finished processing every block up to the chain's finalised head, the newest block its provider reports as finalised, as in [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3).
+* **Caught up**: the node has processed every block up to the finalised head its provider reported when the node started or last re-indexed.
   Acting waits for it, so that a node behind the head does not spend presignatures, posit rounds and peer messages on requests the chain has already answered.
 
 * **Backlog**: one *entry* per request admitted and not *finished*, that is, not yet removed by a finalised source-chain event.
@@ -172,6 +172,8 @@ persistent:
 in memory:
     backlog           RequestId -> Entry
     processed_height  Height
+    caught_up_at      Height             // the newest finalised height read
+                                         // on start and on every re-index
     want              (Height, Digest)?  // a settled checkpoint we have read
                                          // and do not hold; unset on start
 ```
@@ -184,6 +186,7 @@ on start:
   top = the newest checkpoint in pending, or base
   backlog, processed_height = top.backlog, top.height
   for c in pending: vote(c)
+  caught_up_at = the newest finalised height (head) the provider reports
 ```
 Indexing
 ```
@@ -199,7 +202,7 @@ on the next finalised block b above processed_height:
     pending[c.height] = c ; persist       // store so we hold what we vote for;
                                           // a different one there is a bug
     vote(c)
-  if b is the finalised head:             // caught up
+  if processed_height >= caught_up_at:   // caught up
     delete local[rid] where rid not in backlog
     act on backlog
 ```
@@ -250,6 +253,7 @@ rebase(c):                                        // c settled, above base
 
 re_index():                                       // start over from base
   backlog, processed_height = base.backlog, base.height
+  caught_up_at = the newest finalised height (head) the provider reports
 ```
 
 ### Asking peers
