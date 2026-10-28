@@ -16,7 +16,7 @@ These rules apply to the pages under [`doc/`](doc/).
 - What is not implemented is marked: design options sit under a heading that says so, and a gap names the issue or PR that tracks it.
 - Don't copy lists the code already produces. Flags, env vars and metrics are in `--help` and `/metrics`; the doc says where to look and explains only what that output does not (sources, precedence, semantics).
 - Diagrams are Mermaid, not generated images.
-- A term is defined once, in the doc that introduces it, and other pages link to that definition. The [glossary](doc/glossary.md) collects all terms. Protocol actors are nodes, not parties.
+- A term is defined once, in the doc that introduces it, and other pages link to that definition. The [glossary](doc/glossary.md) collects all terms.
 - A property is stated once, in the doc of the mechanism that enforces it. Its ID is local to that doc; another doc cites it with the doc's name and a link (checkpoints S1).
 - It is good practice for a design doc to mention the alternatives it considered and why they were rejected.
 
