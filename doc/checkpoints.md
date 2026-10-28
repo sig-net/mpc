@@ -149,14 +149,14 @@ Described for one node, one source chain; `backlog` is the node's backlog.
     If the node has processed up to that height or past it, it carries on.
     If it is still below that height, it re-indexes from the checkpoint it stored in `pending` at that height, and so jumps forward without fetching anything.
     This happens after a restart, for instance, since a restart re-indexes from the older base.
-  * The settled checkpoint is another one: the node stops indexing, fetches it from a peer, makes it the base and re-indexes from it.
+  * The settled checkpoint is another one: the node stops indexing, fetches it from a peer, makes it the base, drops all of `pending` and re-indexes from it.
 * A node is *at the cap* when its processed height is `MAX_PENDING` boundaries above its base.
   There it processes no block and waits for a settlement, caught up or not.
   This bounds how far the network signs from state nobody has agreed to.
 * It acts only while it is caught up, is not at the cap, and is not missing a settled checkpoint it has read (`want` below).
   This holds for everything acting covers, between blocks too.
 
-`persist` writes durably and is retried until it succeeds.
+`persist` writes `base` and `pending` durably in one step and is retried until it succeeds.
 `vote(c)` calls `vote_checkpoint` with c's chain, height and digest, and is retried until the contract has recorded the vote or has settled that height or a later one.
 
 ### Per-chain node state
@@ -240,8 +240,10 @@ If the node takes a stale head for the real head, it deletes the record of a req
 rebase(c):                                        // c settled, above base
   aligned = pending[c.height] has c's digest      // backlog descends from c
             and processed_height >= c.height
-  base = c ; persist                              // store base, then prune
-  pending.drop_up_to(c.height) ; persist
+  base = c
+  if aligned: pending.drop_up_to(c.height)
+  else: pending = {}
+  persist
   want = none
   if not aligned: re_index()
 
