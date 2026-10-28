@@ -173,30 +173,29 @@ impl SecretNodeStorageVariant {
     }
 }
 
-/// Initializes the appropriate `SecretNodeStorageVariant` based on the provided options and GCP service.
+/// Opens the key-share store the options name. Clap admits exactly one, and
+/// pairs the Secret Manager id with a GCP project, so `gcp_service` is present
+/// whenever `sk_share_secret_id` is.
 pub fn init(
     gcp_service: Option<&GcpService>,
     opts: &Options,
     account_id: &AccountId,
 ) -> SecretNodeStorageVariant {
-    match gcp_service {
-        Some(gcp) if opts.sk_share_secret_id.is_some() => {
-            tracing::info!("using SecretManagerNodeStorage");
-            SecretNodeStorageVariant::Gcp(SecretManagerNodeStorage::new(
-                &gcp.secret_manager.clone(),
-                opts.sk_share_secret_id.clone().unwrap(),
-            ))
-        }
-        _ => {
-            if let Some(sk_share_local_path) = &opts.sk_share_local_path {
-                let path = format!("{sk_share_local_path}-{account_id}");
-                tracing::info!("using DiskNodeStorage with path: {}", path);
-                SecretNodeStorageVariant::Disk(DiskNodeStorage::new(&path))
-            } else {
-                tracing::info!("using MemoryNodeStorage");
-                SecretNodeStorageVariant::Memory(MemoryNodeStorage::default())
-            }
-        }
+    if let Some(secret_id) = &opts.sk_share_secret_id {
+        let gcp = gcp_service.expect("Secret Manager storage needs a GCP service");
+        tracing::info!("using SecretManagerNodeStorage");
+        SecretNodeStorageVariant::Gcp(SecretManagerNodeStorage::new(
+            &gcp.secret_manager,
+            secret_id.clone(),
+        ))
+    } else if let Some(sk_share_local_path) = &opts.sk_share_local_path {
+        let path = format!("{sk_share_local_path}-{account_id}");
+        tracing::info!("using DiskNodeStorage with path: {}", path);
+        SecretNodeStorageVariant::Disk(DiskNodeStorage::new(&path))
+    } else {
+        // `--sk-share-in-memory`, which only test builds accept.
+        tracing::warn!("using MemoryNodeStorage: the key share is lost on restart");
+        SecretNodeStorageVariant::Memory(MemoryNodeStorage::default())
     }
 }
 
@@ -305,7 +304,9 @@ mod tests {
         let opts = Options {
             sk_share_secret_id: None,
             sk_share_local_path: None,
-            gcp_project_id: "test-project".to_string(),
+            #[cfg(feature = "test-feature")]
+            sk_share_in_memory: true,
+            gcp_project_id: None,
             redis_url: "redis://localhost".to_string(),
         };
 
@@ -319,7 +320,9 @@ mod tests {
         let opts = Options {
             sk_share_local_path: Some("/tmp/share".into()),
             sk_share_secret_id: None,
-            gcp_project_id: "test-project".to_string(),
+            #[cfg(feature = "test-feature")]
+            sk_share_in_memory: false,
+            gcp_project_id: None,
             redis_url: "redis://localhost".to_string(),
         };
 
@@ -333,11 +336,13 @@ mod tests {
         let opts = Options {
             sk_share_secret_id: Some("secret-id".to_string()),
             sk_share_local_path: None,
-            gcp_project_id: "test-project".to_string(),
+            #[cfg(feature = "test-feature")]
+            sk_share_in_memory: false,
+            gcp_project_id: Some("test-project".to_string()),
             redis_url: "redis://localhost".to_string(),
         };
         let account_id = make_test_account_id();
-        let gcp_service = GcpService::init(&opts).await.unwrap();
+        let gcp_service = GcpService::init("test-project").await.unwrap();
 
         let storage = init(Some(&gcp_service), &opts, &account_id);
 

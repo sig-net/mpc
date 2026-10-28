@@ -15,26 +15,43 @@ pub use triple_storage::TripleStorage;
 // Can be used to "clear" redis storage in case of a breaking change
 pub const STORAGE_VERSION: &str = "v12";
 
-/// Configures storage.
+/// Configures storage. Exactly one key-share store must be chosen.
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "storage_options")]
+#[command(group(clap::ArgGroup::new("sk_share").required(true)))]
 pub struct Options {
-    /// GCP project ID.
+    /// GCP project of the Secret Manager holding the key share.
     #[arg(long, env("MPC_GCP_PROJECT_ID"))]
-    pub gcp_project_id: String,
-    /// GCP Secret Manager ID that will be used to load/store the node's secret key share.
-    #[arg(long, env("MPC_SK_SHARE_SECRET_ID"))]
+    pub gcp_project_id: Option<String>,
+    /// Keep the key share in GCP Secret Manager under this secret id.
+    #[arg(
+        long,
+        env("MPC_SK_SHARE_SECRET_ID"),
+        group = "sk_share",
+        requires = "gcp_project_id"
+    )]
     pub sk_share_secret_id: Option<String>,
-    /// Mostly for integration tests.
-    #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"))]
+    /// Keep the key share in a file at this path, suffixed with the account id.
+    #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"), group = "sk_share")]
     pub sk_share_local_path: Option<String>,
+    /// Keep the key share in memory only; it is lost on restart.
+    #[cfg(feature = "test-feature")]
+    #[arg(long, group = "sk_share")]
+    pub sk_share_in_memory: bool,
     #[arg(long, env("MPC_REDIS_URL"), hide_env_values = true)]
     pub redis_url: String,
 }
 
 impl Options {
     pub fn into_str_args(self) -> Vec<String> {
-        let mut opts = vec!["--gcp-project-id".to_string(), self.gcp_project_id];
+        let mut opts = Vec::new();
+        if let Some(gcp_project_id) = self.gcp_project_id {
+            opts.extend(["--gcp-project-id".to_string(), gcp_project_id]);
+        }
+        #[cfg(feature = "test-feature")]
+        if self.sk_share_in_memory {
+            opts.push("--sk-share-in-memory".to_string());
+        }
         if let Some(sk_share_secret_id) = self.sk_share_secret_id {
             opts.extend(vec!["--sk-share-secret-id".to_string(), sk_share_secret_id]);
         }
@@ -51,4 +68,41 @@ impl Options {
 
 fn owner_key(base: &str, owner: Participant) -> String {
     format!("{base}:p{}", Into::<u32>::into(owner))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Options;
+    use clap::Parser as _;
+
+    fn parse(extra: &[&str]) -> Result<Options, clap::Error> {
+        Options::try_parse_from(
+            ["test", "--redis-url", "redis://localhost"]
+                .into_iter()
+                .chain(extra.iter().copied()),
+        )
+    }
+
+    #[test]
+    fn exactly_one_key_share_store() {
+        assert!(parse(&[]).is_err(), "a store must be chosen");
+        assert!(parse(&["--sk-share-local-path", "/tmp/share"]).is_ok());
+        assert!(
+            parse(&["--sk-share-secret-id", "s"]).is_err(),
+            "Secret Manager needs a project"
+        );
+        assert!(parse(&["--sk-share-secret-id", "s", "--gcp-project-id", "p"]).is_ok());
+        assert!(
+            parse(&[
+                "--sk-share-secret-id",
+                "s",
+                "--gcp-project-id",
+                "p",
+                "--sk-share-local-path",
+                "/tmp/share",
+            ])
+            .is_err(),
+            "two stores are rejected"
+        );
+    }
 }

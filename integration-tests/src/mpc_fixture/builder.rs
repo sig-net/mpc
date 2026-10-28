@@ -667,9 +667,10 @@ impl MpcFixtureNodeBuilder {
             secret_storage::init(
                 None,
                 &Options {
-                    gcp_project_id: "-".to_owned(),
+                    gcp_project_id: None,
                     sk_share_secret_id: None,
                     sk_share_local_path: None,
+                    sk_share_in_memory: true,
                     redis_url: ".".to_owned(),
                 },
                 &self.participant_info.account_id,

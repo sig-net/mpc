@@ -5,8 +5,6 @@ use base64::Engine as _;
 use google_cloud_auth::credentials::AccessTokenCredentials;
 use serde::{Deserialize, Serialize};
 
-use crate::storage;
-
 pub type SecretResult<T> = std::result::Result<T, error::SecretStorageError>;
 
 const SECRET_MANAGER_ENDPOINT: &str = "https://secretmanager.googleapis.com";
@@ -115,7 +113,7 @@ pub struct GcpService {
 }
 
 impl GcpService {
-    pub async fn init(storage_options: &storage::Options) -> anyhow::Result<Self> {
+    pub async fn init(project_id: &str) -> anyhow::Result<Self> {
         let credentials = google_cloud_auth::credentials::Builder::default()
             .with_scopes([CLOUD_PLATFORM_SCOPE])
             .build_access_token_credentials()?;
@@ -125,7 +123,7 @@ impl GcpService {
             secret_manager: SecretManagerService {
                 http,
                 credentials,
-                project_id: storage_options.gcp_project_id.clone(),
+                project_id: project_id.to_string(),
             },
         })
     }

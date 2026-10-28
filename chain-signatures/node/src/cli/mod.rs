@@ -748,9 +748,15 @@ impl StorageHandles {
         account_id: &AccountId,
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
-        let gcp_service = GcpService::init(storage_options).await?;
+        let gcp_service = match (
+            &storage_options.sk_share_secret_id,
+            &storage_options.gcp_project_id,
+        ) {
+            (Some(_), Some(project_id)) => Some(GcpService::init(project_id).await?),
+            _ => None,
+        };
         let key_storage =
-            storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
+            storage::secret_storage::init(gcp_service.as_ref(), storage_options, account_id);
         let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
@@ -1311,6 +1317,8 @@ mod tests {
             "unit-tests",
             "--gcp-project-id",
             "project",
+            "--sk-share-local-path",
+            "/tmp/share",
             "--redis-url",
             "redis://127.0.0.1:6379",
             "--midnight-node-url",

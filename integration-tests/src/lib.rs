@@ -297,9 +297,12 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     }
 
     let storage_options = mpc_node::storage::Options {
-        gcp_project_id: spawner.gcp_project_id.clone(),
+        // Unused with disk storage; the latest release still demands it, and
+        // the compat test runs that binary.
+        gcp_project_id: Some(spawner.gcp_project_id.clone()),
         sk_share_secret_id: None,
         sk_share_local_path: Some(sk_share_local_path),
+        sk_share_in_memory: false,
         redis_url: redis.internal_address.clone(),
     };
 
