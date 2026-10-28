@@ -98,9 +98,7 @@ fn env() -> (Runtime, SyncEnv) {
         let (sync_report_tx, sync_report_rx) = mpsc::channel(1024);
         let mesh = Mesh::new(
             &client,
-            mpc_node::mesh::Options {
-                ping_interval: 1000,
-            },
+            mpc_node::mesh::PING_INTERVAL,
             &node_id,
             sync_report_rx,
         );

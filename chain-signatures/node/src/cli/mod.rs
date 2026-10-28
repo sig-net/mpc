@@ -114,8 +114,6 @@ pub enum Cli {
         /// Logging options
         #[command(flatten)]
         log_options: logs::Options,
-        #[command(flatten)]
-        mesh_options: mesh::Options,
     },
 }
 
@@ -139,7 +137,6 @@ impl Cli {
                 my_address,
                 storage_options,
                 log_options,
-                mesh_options,
             } => {
                 let mut args = vec![
                     "start".to_string(),
@@ -172,7 +169,6 @@ impl Cli {
                 args.extend(midnight.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(log_options.into_str_args());
-                args.extend(mesh_options.into_str_args());
                 args
             }
         }
@@ -198,7 +194,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             my_address,
             storage_options,
             log_options,
-            mesh_options,
         } => {
             let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
@@ -262,7 +257,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher,
                 contract_state_tx,
                 sync_report_tx,
-            } = MeshHandles::new(mesh_options, &account_id);
+            } = MeshHandles::new(&account_id);
 
             let stack = ChainStack::new(ChainConfigs::from_args(
                 eth, sol, hydration, canton, midnight,
@@ -651,10 +646,15 @@ struct MeshHandles {
 }
 
 impl MeshHandles {
-    fn new(mesh_options: mesh::Options, account_id: &AccountId) -> Self {
+    fn new(account_id: &AccountId) -> Self {
         let node_client = NodeClient::new();
         let (sync_report_tx, sync_report_rx) = SyncTask::sync_report_channel();
-        let mesh = Mesh::new(&node_client, mesh_options, account_id, sync_report_rx);
+        let mesh = Mesh::new(
+            &node_client,
+            mesh::PING_INTERVAL,
+            account_id,
+            sync_report_rx,
+        );
         let mesh_state = mesh.watch();
         let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(account_id);
         Self {
