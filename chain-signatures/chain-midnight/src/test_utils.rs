@@ -480,3 +480,41 @@ pub(crate) fn sample_record_with_partial_access_list() -> SignBidirectionalRecor
     ];
     record
 }
+
+pub(crate) type RecordedFields = std::collections::HashMap<&'static str, String>;
+
+/// A tracing layer that keeps every event's fields, each formatted with `Debug`.
+#[derive(Clone, Default)]
+pub(crate) struct EventRecorder {
+    events: std::sync::Arc<std::sync::Mutex<Vec<RecordedFields>>>,
+}
+
+impl EventRecorder {
+    pub(crate) fn snapshot(&self) -> Vec<RecordedFields> {
+        self.events.lock().expect("recorded events").clone()
+    }
+}
+
+struct FieldRecorder<'a> {
+    fields: &'a mut RecordedFields,
+}
+
+impl tracing::field::Visit for FieldRecorder<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.fields.insert(field.name(), format!("{value:?}"));
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventRecorder {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut fields = RecordedFields::new();
+        event.record(&mut FieldRecorder {
+            fields: &mut fields,
+        });
+        self.events.lock().expect("recorded events").push(fields);
+    }
+}
