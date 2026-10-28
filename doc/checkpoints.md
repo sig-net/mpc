@@ -12,6 +12,8 @@ The contract settles that height once t nodes, the signing threshold, have voted
 Every node polls for what settled and rebases onto it, from its own store if it created that checkpoint and from a peer if not, so everything it indexes from then on descends from it.
 A node that has run as far ahead of its base as it may stops and waits for a settlement.
 
+*Status: partly implemented (Section 7).*
+
 ## 1. Background
 
 The model, n nodes of which at most f are faulty, crash-recovery, and the signing threshold t, is that of [protocol-properties.md](protocol-properties.md).
@@ -389,3 +391,47 @@ Each closes one of the limits above, at a price.
 * Settle through communication with peers instead of the contract: a node asks all peers for the digests they hold and takes a height as settled once it has heard 2f+1 matching answers, its own counted.
   This drops the vote loop, and any answer that differs from the node's own digest is a faulty node or a bug and can be alerted on.
   The price: a node that restarts behind the others needs 2f+1 peers up at once that hold a common height above its base, not the chain and one peer, and there is no shared record of what settled when.
+
+## 7. Implementation status
+
+The code, checked at `65b8d41b`, differs from the design as listed below, grouped by component.
+Each item says what the code does now and what the design asks for instead.
+
+Code under `chain-signatures/`: the contract in `contract/src/lib.rs`; the node in `node/src/`, mainly `backlog/checkpoints.rs`, `backlog/consensus.rs`, `storage/checkpoint_storage.rs`, `stream/supervisor.rs` and `stream/recovery.rs`.
+`MAX_PENDING` is `MAX_PENDING_CHECKPOINTS` there and the poll period is `UPDATE_INTERVAL`.
+The interval is `checkpoint_interval`, a default per chain that `CHECKPOINT_INTERVAL_*` overrides per node, so every node must set the same override.
+
+### Contract
+
+1. Start height (§1 Genesis checkpoint, [#777](https://github.com/sig-net/mpc/issues/777)).
+   Now: the contract holds no start height, and a node with nothing stored starts indexing at the first block it reads (Canton at the start of the ledger).
+   Design: the contract holds each chain's start height, and a node with nothing stored builds the genesis checkpoint there and indexes from it.
+2. Resetting checkpoints (§2).
+   Now: the contract account can call `reset_checkpoints`, which settles an empty checkpoint without votes.
+   Design: on mainnet there must not be a reset option.
+
+### Node: backlog and digest
+
+3. Entries (§1 Backlog, [#1428](https://github.com/sig-net/mpc/issues/1428), which [bidirectional-calls.md](bidirectional-calls.md) also needs).
+   Now: an entry is the request and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
+   There is no `local` store and no `signatures` list.
+   Design: an entry holds the rid, the request, the contract and `signatures`, and the node's own progress is node-local in `local`, outside checkpoints.
+4. Digest (§2).
+   Now: the digest covers the rids and one status tag per entry.
+   Design: it also covers each entry's request, contract and `signatures`, in the canonical encoding of Section 2.
+
+### Node: indexing
+
+5. Hydration (§1 Processed height, [#1431](https://github.com/sig-net/mpc/issues/1431)).
+   Now: Hydration indexes only the blocks it receives live, with no backfill.
+   It loses the events of a block it cannot fetch or verify, and of the blocks between its stored height and the head on every restart or reconnect.
+   It reports catching up as done before it processes any block.
+   Design: every indexer processes every finalised block in order from its processed height.
+6. Catching up (§4, §5 L1).
+   Now: while catching up, a node does not move its processed height, creates no checkpoints and casts no new votes.
+   Once caught up, it creates one checkpoint at the height it reached, so the cap does not stop it while it catches up.
+   Design: a node catching up indexes as usual and creates and votes for a checkpoint each time it passes a boundary, up to the cap; only acting waits until it is caught up.
+7. At the cap (§4).
+   Now: the indexer makes no progress at the cap, so the stall watchdog restarts it again and again, and each restart makes the node not caught up.
+   Until a settlement takes it below the cap, the node holds second-leg publishes and queues no second-leg sign requests.
+   Design: at the cap the node keeps its caught-up state and keeps acting on the requests it holds.
