@@ -33,7 +33,7 @@ consumed by the node's stream supervisor — not `SolConfig` fields:
 
 | env var | default | trips on |
 |---|---|---|
-| `FEED_STALL_TIMEOUT_SOLANA` | 60s | observed anchor slot frozen (lagging/frozen RPC replica) — fails `run()` immediately |
+| `feed_stall_timeout_secs` | 60s | observed anchor slot frozen (lagging/frozen RPC replica) — fails `run()` immediately |
 | `STALL_TIMEOUT_SOLANA` | 315s | no `ChainEvent::Block` dispatched — supervisor watchdog restart |
 
 Restarts back off exponentially (1s → 30s). 
