@@ -6,7 +6,8 @@ use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_lang::Discriminator;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
-use mpc_chain_integration_core::utils::hashing::{compute_request_id, hash_payload};
+use mpc_chain_integration_core::utils::hashing::compute_request_id;
+use mpc_chain_integration_core::utils::payload::bidirectional_payload_scalar;
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
@@ -112,13 +113,15 @@ impl SolanaSignEvent {
                         )
                     })
                     .ok()?;
-                let unsigned_tx_hash = hash_payload(&ev.serialized_transaction);
-                let payload = Scalar::from_bytes(unsigned_tx_hash)?;
-
-                if payload > *MAX_SECP256K1_SCALAR {
-                    tracing::warn!(?payload, "payload exceeds secp256k1 curve order");
-                    return None;
-                }
+                let target = Chain::from_caip2_chain_id(&ev.caip2_id).ok()?;
+                let payload = match bidirectional_payload_scalar(target, &ev.serialized_transaction)
+                {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        tracing::info!(?sign_id, ?target, "dropping: {err:#}");
+                        return None;
+                    }
+                };
 
                 Some(IndexedSignRequest::sign_bidirectional(
                     sign_id,
@@ -283,6 +286,7 @@ pub async fn emit_events(
                 };
                 ChainEvent::RespondBidirectional(mpc_primitives::RespondBidirectionalEvent {
                     attestation: None,
+                    output: Some(ev.serialized_output),
                     request_id: ev.request_id,
                     signature,
                     chain: Chain::Solana,

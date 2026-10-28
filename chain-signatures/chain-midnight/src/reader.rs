@@ -6,11 +6,11 @@ use midnight_onchain_state::state::StateValue;
 use midnight_storage::DefaultDB;
 
 use crate::hashing::compute_request_id;
-use crate::records::{
-    CompactMaybe, EvmAccessListEntry, EvmCalldata, EvmType2TxParams,
-    SignBidirectionalEventNotification, SignBidirectionalRecord,
+use crate::records::{SignBidirectionalEventNotification, SignBidirectionalRecord};
+use mpc_primitives::{
+    Calldata, CompactMaybe, EvmAccessListEntry, EvmType2TxParams, TronTxParams, TxParamType,
+    TxParams,
 };
-use crate::tx::TX_PARAM_TYPE_EVM_TYPE2;
 
 /// Atoms of an evmType2 record excluding its capacity-scaled vectors. The calldata
 /// `Maybe`'s three atoms count even when `is_some` is false.
@@ -21,6 +21,16 @@ const EVM_TYPE2_HEAD_ATOMS: usize = 15;
 
 /// `execution_dest`, reserved destination/params, and the two schemas.
 const EVM_TYPE2_TAIL_ATOMS: usize = 5;
+
+/// Atoms of a tron record excluding its capacity-scaled calldata words.
+const TRON_FIXED_ATOMS: usize = 20;
+
+/// `key_version` through `calldata.no_words`; the same head shape as evmType2's,
+/// by a different route: five record atoms and ten `TronTxParams` atoms.
+const TRON_HEAD_ATOMS: usize = 15;
+
+/// `execution_dest`, reserved destination/params, and the two schemas.
+const TRON_TAIL_ATOMS: usize = 5;
 
 /// `tx_param_type`'s fixed position: fifth field of `SignBidirectionalEventV1`.
 const TX_PARAM_TYPE_ATOM: usize = 4;
@@ -149,29 +159,57 @@ fn evm_type2_capacities(widths: &[u32]) -> anyhow::Result<EvmType2Capacities> {
     })
 }
 
-/// Reject a foreign `tx_param_type` before capacity recovery, which is evmType2
-/// specific: a future param type must fail by name here, not as capacity arithmetic.
-fn ensure_evm_type2_param_type(cell: &AlignedValue) -> anyhow::Result<()> {
+/// The sizing a `tx_params` decoder needs, recovered from the declared widths of
+/// the discriminant the record names.
+enum ParamsLayout {
+    EvmType2(EvmType2Capacities),
+    Tron { max_calldata_words: usize },
+}
+
+/// Read `tx_param_type` before capacity recovery, which is param-type specific:
+/// an unknown type must fail by name here, not as capacity arithmetic.
+fn read_tx_param_type(cell: &AlignedValue) -> anyhow::Result<TxParamType> {
     let atom = cell
         .value
         .0
         .get(TX_PARAM_TYPE_ATOM)
         .ok_or_else(|| anyhow::anyhow!("request record ends before tx_param_type"))?;
-    let tx_param_type =
-        u8::try_from(atom).map_err(|err| anyhow::anyhow!("tx_param_type: {err}"))?;
+    let byte = u8::try_from(atom).map_err(|err| anyhow::anyhow!("tx_param_type: {err}"))?;
+    TxParamType::try_from(byte).map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+/// Recover a tron record's one capacity (`#maxCalldataWords`) from the declared
+/// widths: every atom between the fixed head and the fixed tail is a `Bytes<32>`
+/// calldata-word slot, so the tail anchor alone pins the boundary.
+fn tron_max_calldata_words(widths: &[u32]) -> anyhow::Result<usize> {
     anyhow::ensure!(
-        tx_param_type == TX_PARAM_TYPE_EVM_TYPE2,
-        "unsupported tx_param_type {tx_param_type}: this decoder understands evmType2 (0)"
+        widths.len() >= TRON_FIXED_ATOMS,
+        "request record has {} value atoms, fewer than the {TRON_FIXED_ATOMS} its \
+         fixed fields need",
+        widths.len()
     );
-    Ok(())
+    let tail = widths.len() - TRON_TAIL_ATOMS;
+    anyhow::ensure!(
+        widths[TRON_HEAD_ATOMS..tail]
+            .iter()
+            .all(|width| *width == 32),
+        "the tron record's calldata-word region holds a non-Bytes<32> atom"
+    );
+    Ok(tail - TRON_HEAD_ATOMS)
 }
 
 /// Decode a borrowed request-record cell in one pass, refusing declared widths that
 /// do not describe a signet record.
 fn decode_record_cell(cell: &AlignedValue) -> anyhow::Result<SignBidirectionalRecord> {
-    ensure_evm_type2_param_type(cell)?;
+    let tx_param_type = read_tx_param_type(cell)?;
     let widths = declared_widths(cell, "request record")?;
-    decode_sign_bidirectional(cell, &widths, &evm_type2_capacities(&widths)?)
+    let layout = match tx_param_type {
+        TxParamType::EvmType2 => ParamsLayout::EvmType2(evm_type2_capacities(&widths)?),
+        TxParamType::Tron => ParamsLayout::Tron {
+            max_calldata_words: tron_max_calldata_words(&widths)?,
+        },
+    };
+    decode_sign_bidirectional(cell, &widths, &layout)
 }
 
 /// Decode a stored request record in one pass, refusing a cell whose declared widths
@@ -485,7 +523,7 @@ fn bounded_enum(cursor: &mut AtomCursor, what: &'static str) -> anyhow::Result<u
 fn decode_sign_bidirectional(
     cell: &AlignedValue,
     widths: &[u32],
-    capacities: &EvmType2Capacities,
+    layout: &ParamsLayout,
 ) -> anyhow::Result<SignBidirectionalRecord> {
     let cursor = &mut AtomCursor {
         atoms: &cell.value.0,
@@ -494,15 +532,17 @@ fn decode_sign_bidirectional(
     };
     // Each call consumes the next atom in Signet.compact's SignBidirectionalEventV1
     // declaration order. Width checks alone cannot detect swapped same-width fields.
-    // `decode_tx_params` likewise mirrors `EvmType2TxParams`.
+    // `decode_tx_params` likewise mirrors the layout the discriminant names.
     let record = SignBidirectionalRecord {
         key_version: uint::<u8>(cursor, 1, "key_version")?,
         sender: bytes_n::<32>(cursor, "sender")?,
         path: bytes_n::<32>(cursor, "path")?,
         algo: bounded_enum(cursor, "algo")?,
-        // Width-checked only: `ensure_evm_type2_param_type` already pinned the value.
-        tx_param_type: uint::<u8>(cursor, 1, "tx_param_type")?,
-        tx_params: decode_tx_params(cursor, capacities)?,
+        tx_params: {
+            // Consume the tx_param_type atom (not used here)
+            let _ = uint::<u8>(cursor, 1, "tx_param_type")?;
+            decode_tx_params(cursor, layout)?
+        },
         execution_dest: bytes_n::<64>(cursor, "execution_dest")?,
         signature_dest: bounded_enum(cursor, "signature_dest")?,
         params: bytes_n::<64>(cursor, "params")?,
@@ -519,7 +559,41 @@ fn decode_sign_bidirectional(
     Ok(record)
 }
 
-fn decode_tx_params(
+fn decode_tx_params(cursor: &mut AtomCursor, layout: &ParamsLayout) -> anyhow::Result<TxParams> {
+    match layout {
+        ParamsLayout::EvmType2(capacities) => {
+            decode_evm_type2_tx_params(cursor, capacities).map(TxParams::EvmType2)
+        }
+        ParamsLayout::Tron { max_calldata_words } => {
+            decode_tron_tx_params(cursor, *max_calldata_words).map(TxParams::Tron)
+        }
+    }
+}
+
+/// The flag does not gate the atoms: selector, no_words and every word slot are
+/// consumed either way.
+fn decode_calldata(
+    cursor: &mut AtomCursor,
+    max_calldata_words: usize,
+) -> anyhow::Result<CompactMaybe<Calldata>> {
+    let is_some = boolean(cursor, "calldata.is_some")?;
+    let selector = bytes_n::<4>(cursor, "calldata.selector")?;
+    let no_words = uint::<u16>(cursor, 2, "calldata.no_words")?;
+    let mut words = Vec::with_capacity(max_calldata_words);
+    for _ in 0..max_calldata_words {
+        words.push(bytes_n::<32>(cursor, "calldata word")?);
+    }
+    Ok(CompactMaybe {
+        is_some,
+        value: Calldata {
+            selector,
+            no_words,
+            words,
+        },
+    })
+}
+
+fn decode_evm_type2_tx_params(
     cursor: &mut AtomCursor,
     &EvmType2Capacities {
         max_calldata_words,
@@ -534,16 +608,7 @@ fn decode_tx_params(
     let gas_limit = uint::<u64>(cursor, 8, "gas_limit")?;
     let to = bytes_n::<20>(cursor, "to")?;
     let value = uint::<u128>(cursor, 16, "value")?;
-
-    // The flag does not gate the atoms: selector, no_words and every word slot are
-    // consumed either way.
-    let is_some = boolean(cursor, "calldata.is_some")?;
-    let selector = bytes_n::<4>(cursor, "calldata.selector")?;
-    let no_words = uint::<u16>(cursor, 2, "calldata.no_words")?;
-    let mut word_slots = Vec::with_capacity(max_calldata_words);
-    for _ in 0..max_calldata_words {
-        word_slots.push(bytes_n::<32>(cursor, "calldata word")?);
-    }
+    let calldata = decode_calldata(cursor, max_calldata_words)?;
 
     let access_list_entry_count = uint::<u8>(cursor, 1, "access_list_entry_count")?;
     let mut access_list = Vec::with_capacity(max_access_list_entries);
@@ -569,16 +634,33 @@ fn decode_tx_params(
         gas_limit,
         to,
         value,
-        calldata: CompactMaybe {
-            is_some,
-            value: EvmCalldata {
-                selector,
-                no_words,
-                words: word_slots,
-            },
-        },
+        calldata,
         access_list_entry_count,
         access_list,
+    })
+}
+
+fn decode_tron_tx_params(
+    cursor: &mut AtomCursor,
+    max_calldata_words: usize,
+) -> anyhow::Result<TronTxParams> {
+    let ref_block_bytes = bytes_n::<2>(cursor, "ref_block_bytes")?;
+    let ref_block_hash = bytes_n::<8>(cursor, "ref_block_hash")?;
+    let timestamp = uint::<u64>(cursor, 8, "timestamp")?;
+    let expiration = uint::<u64>(cursor, 8, "expiration")?;
+    let fee_limit = uint::<u64>(cursor, 8, "fee_limit")?;
+    let contract_address = bytes_n::<21>(cursor, "contract_address")?;
+    let call_value = uint::<u64>(cursor, 8, "call_value")?;
+    let calldata = decode_calldata(cursor, max_calldata_words)?;
+    Ok(TronTxParams {
+        ref_block_bytes,
+        ref_block_hash,
+        timestamp,
+        expiration,
+        fee_limit,
+        contract_address,
+        call_value,
+        calldata,
     })
 }
 
@@ -591,7 +673,7 @@ mod tests {
         aligned_cell, alignment_of, array_of, atoms_from_record, cell_from_atoms, cell_from_record,
         hex_32, key_of, map_of, minimal_record, sample_record,
         sample_record_with_partial_access_list, sample_record_with_unused_access_list,
-        widths_from_record,
+        sample_tron_record, widths_from_record,
     };
     use midnight_base_crypto::fab::Alignment;
 
@@ -998,12 +1080,48 @@ mod tests {
 
     #[test]
     fn decode_record_rejects_a_foreign_tx_param_type_by_name() {
-        let mut record = sample_record();
-        record.tx_param_type = 1;
-        let err = decode_record(&cell_from_record(&record))
-            .expect_err("a reserved tx_param_type must fail by name, not as capacity arithmetic")
+        let record = sample_record();
+        let mut atoms = atoms_from_record(&record);
+        atoms[TX_PARAM_TYPE_ATOM] = vec![2];
+        let err = decode_record(&cell_from_atoms(&atoms, &widths_from_record(&record)))
+            .expect_err("an unknown tx_param_type must fail by name, not as capacity arithmetic")
             .to_string();
-        assert!(err.contains("tx_param_type 1"), "err: {err}");
+        assert!(err.contains("tx_param_type 2"), "err: {err}");
+    }
+
+    #[test]
+    fn decode_record_round_trips_a_tron_record() {
+        let record = sample_tron_record();
+        assert_eq!(decode_record(&cell_from_record(&record)).unwrap(), record);
+    }
+
+    #[test]
+    fn decode_record_recovers_the_tron_calldata_capacity() {
+        // One extra unused word slot: the decode must consume it and the record must
+        // carry it, or the trailing atoms would shift under the fixed tail.
+        let mut record = sample_tron_record();
+        let TxParams::Tron(tx) = &mut record.tx_params else {
+            panic!("expected a tron record")
+        };
+        tx.calldata.value.words.push([0x77; 32]);
+        let decoded = decode_record(&cell_from_record(&record)).unwrap();
+        let TxParams::Tron(decoded_tx) = &decoded.tx_params else {
+            panic!("expected a tron record")
+        };
+        assert_eq!(decoded_tx.calldata.value.words.len(), 2);
+        assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn decode_record_rejects_a_non_word_atom_between_tron_head_and_tail() {
+        let record = sample_tron_record();
+        let mut widths = widths_from_record(&record);
+        let word_region = TRON_HEAD_ATOMS..widths.len() - TRON_TAIL_ATOMS;
+        widths[word_region.clone()].fill(31);
+        let err = decode_record(&cell_from_atoms(&atoms_from_record(&record), &widths))
+            .expect_err("the word region is all Bytes<32>")
+            .to_string();
+        assert!(err.contains("calldata-word region"), "err: {err}");
     }
 
     #[test]
@@ -1203,9 +1321,9 @@ mod tests {
         let record = sample_record_with_partial_access_list();
         let rid = compute_request_id(&record).unwrap();
         let mut invalid_records = vec![record.clone(); 3];
-        invalid_records[0].tx_params.calldata.value.no_words = 3;
-        invalid_records[1].tx_params.access_list_entry_count = 3;
-        invalid_records[2].tx_params.access_list[0].storage_key_count = 4;
+        invalid_records[0].evm_mut().calldata.value.no_words = 3;
+        invalid_records[1].evm_mut().access_list_entry_count = 3;
+        invalid_records[2].evm_mut().access_list[0].storage_key_count = 4;
         for invalid in invalid_records {
             let cell = cell_from_record(&invalid);
             assert!(decode_record(&cell).is_ok(), "the field types remain valid");
@@ -1223,16 +1341,15 @@ mod tests {
     #[test]
     fn resolve_verified_record_ignores_absent_body_and_unused_entries() {
         let mut record = sample_record_with_partial_access_list();
-        record.tx_params.calldata.is_some = false;
+        record.evm_mut().calldata.is_some = false;
         let rid = compute_request_id(&record).unwrap();
-        record.tx_params.calldata.value.no_words = u16::MAX;
-        record.tx_params.calldata.value.selector = [0xff; 4];
-        record.tx_params.calldata.value.words.fill([0xee; 32]);
-        record.tx_params.access_list[1].storage_key_count = u8::MAX;
-        record.tx_params.access_list[1].address = [0xdd; 20];
-        record.tx_params.access_list[1]
-            .storage_keys
-            .fill([0xcc; 32]);
+        let tx = record.evm_mut();
+        tx.calldata.value.no_words = u16::MAX;
+        tx.calldata.value.selector = [0xff; 4];
+        tx.calldata.value.words.fill([0xee; 32]);
+        tx.access_list[1].storage_key_count = u8::MAX;
+        tx.access_list[1].address = [0xdd; 20];
+        tx.access_list[1].storage_keys.fill([0xcc; 32]);
         let map = map_of(vec![(key_of(rid), cell_from_record(&record))]);
         assert_eq!(
             resolve_verified_record(&map, rid),

@@ -28,6 +28,10 @@ ignore = [
     { id = "RUSTSEC-2026-0363", reason = "wasmtime 45 component-model handle tables capped only per instance; component model disabled in near-vm-runner 0.37.x (component_model=false, core wasm only), same dev-only chain; no patched 45.x release (fixed in 48.0.6+)" },
     { id = "RUSTSEC-2026-0379", reason = "wasmtime 45 Cranelift aarch64 can jump to the wrong target on a large br_table; same dev-only chain as RUSTSEC-2026-0222 (near-sdk unit-testing, wasmtime ^45 pinned by near-vm-runner 0.37.x); no patched 45.x release (fixed in 48.0.7+)" },
     { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.103.13 accepts certificate paths through distrusted emSign intermediates; fix 0.103.16 requires aws-lc-rs ^1.18, blocked by near-crypto 0.37.x aws-lc-rs =1.16.2 pin (same chain as RUSTSEC-2026-0285); bundled root stores are emSign-free (webpki-roots/webpki-root-certs 1.0.10 and 0.26.11), platform-verifier paths bypass webpki; residual exposure only via OS trust stores still carrying emSign roots" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 constant-time operations can branch on secret values; required as crypto-bigint 0.5 by elliptic-curve 0.13 (k256, ecdsa, p256, alloy-signer, cait-sith), fix 0.7.6 needs the RustCrypto curve major upgrade tracked in https://github.com/sig-net/mpc/issues/1513" },
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13 `with_context` streams carry data over from an abandoned stream; near-primitives 0.37.x is the only zstd user and pins ^0.13 (fix 0.14.3), and it builds its streams with `Encoder::new`/`Decoder::new`, never `with_context`" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7 `Seekable::decompress` overruns a Vec; the `seekable` feature is not enabled anywhere in the graph; fix 8.2.0 needs zstd 0.14, blocked by near-primitives 0.37.x" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7 legacy-frame streaming decompression can expose uninitialized memory; only near-primitives 0.37.x decompresses zstd (state parts, compressed data) and the node never calls those decoders; fix 8.2.0 needs zstd 0.14, blocked by near-primitives 0.37.x" },
 ]
 
 [licenses]

@@ -15,6 +15,8 @@ pub enum HashDomain {
     EvmType2TxAccessEntry = 4,
     EvmType2TxStorageKey = 5,
     AttestedOutput = 6,
+    TronTxHeader = 7,
+    TronTxWord = 8,
 }
 
 /// Matches the SDK's `calculateAttestedOutputHashV1` tuple:

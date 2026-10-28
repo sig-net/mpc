@@ -7,10 +7,9 @@ use url::Url;
 
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
 
-use crate::address::{parse_hex, TronAddress};
 use crate::config::TronConfig;
-use crate::encoding::decode_bytes;
 use crate::types::{BroadcastOutcome, NowBlock, TronLog, TronReceipt};
+use mpc_tron_wire::{encoding::decode_bytes, parse_hex, TronAddress};
 
 /// Tron HTTP client for interacting with the Tron blockchain.
 pub struct TronHttp {
