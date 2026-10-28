@@ -18,7 +18,7 @@ pub trait ChainConfig {
     /// the indexer.
     fn stall_timeout_secs(&self) -> u64;
     /// Budget for the chain-local feed detector (Canton: WS silence;
-    /// Solana: frozen anchor). Env-overridable
+    /// Solana: frozen anchor).
     fn feed_stall_timeout_secs(&self) -> u64;
     fn expected_finality_time_secs(&self) -> u64;
     /// From publishing a response until it is final on chain.
@@ -78,16 +78,7 @@ impl ChainConfig for Chain {
     }
 
     fn feed_stall_timeout_secs(&self) -> u64 {
-        const DEFAULT_SECS: u64 = 60;
-        let (key, default) = match self {
-            Chain::Canton => ("FEED_STALL_TIMEOUT_CANTON", DEFAULT_SECS),
-            Chain::Solana => ("FEED_STALL_TIMEOUT_SOLANA", DEFAULT_SECS),
-            _ => return DEFAULT_SECS,
-        };
-
-        std::env::var(key)
-            .map(|param| param.parse::<u64>().unwrap_or(default))
-            .unwrap_or(default)
+        60
     }
 
     fn expected_finality_time_secs(&self) -> u64 {
