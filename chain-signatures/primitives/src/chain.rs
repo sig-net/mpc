@@ -12,8 +12,9 @@ pub enum SerDeserFormat {
 /// these are operational knobs of this node implementation, not part of the
 /// public interface.
 pub trait ChainConfig {
+    /// Blocks between checkpoints, or `None` for chains without one. Test
+    /// builds use a short cadence so checkpoint tests finish in seconds.
     fn checkpoint_interval(&self) -> Option<u64>;
-    fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)>;
     /// `ChainEvent::Block` silence budget before the supervisor restarts
     /// the indexer. Env-overridable for indexed chains.
     fn stall_timeout_secs(&self) -> u64;
@@ -31,30 +32,16 @@ pub trait ChainConfig {
 
 impl ChainConfig for Chain {
     fn checkpoint_interval(&self) -> Option<u64> {
-        let (key, default) = match self {
+        let test = cfg!(feature = "test-feature");
+        let (production, test_cadence) = match self {
             Chain::NEAR | Chain::Bitcoin | Chain::Tron => return None,
-            Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
-            Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 1200),
-            Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
-            Chain::Canton => ("CHECKPOINT_INTERVAL_CANTON", 50),
-            Chain::Midnight => ("CHECKPOINT_INTERVAL_MIDNIGHT", 120),
+            Chain::Ethereum => (20, 2),
+            Chain::Solana => (1200, 5),
+            Chain::Hydration => (240, 5),
+            Chain::Canton => (50, 5),
+            Chain::Midnight => (120, 5),
         };
-
-        let interval = std::env::var(key)
-            .map(|param| param.parse::<u64>().unwrap_or(default))
-            .unwrap_or(default);
-
-        Some(interval)
-    }
-
-    fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
-            ("CHECKPOINT_INTERVAL_SOLANA", "5"),
-            ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
-            ("CHECKPOINT_INTERVAL_CANTON", "5"),
-            ("CHECKPOINT_INTERVAL_MIDNIGHT", "5"),
-        ]
+        Some(if test { test_cadence } else { production })
     }
 
     fn stall_timeout_secs(&self) -> u64 {

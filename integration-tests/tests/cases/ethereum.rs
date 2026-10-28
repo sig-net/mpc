@@ -162,10 +162,6 @@ async fn test_signature_ethereum() -> Result<()> {
 /// Test that checkpoints are properly cleaned up after responses are observed
 #[test(tokio::test)]
 async fn test_proper_indexer_checkpoint() -> Result<()> {
-    for (name, value) in Chain::checkpoint_env_vars() {
-        std::env::set_var(name, value);
-    }
-
     let cluster = cluster::spawn().ethereum().await?;
     cluster.wait().signable().await?;
 
