@@ -5,6 +5,13 @@
 .vscode
 .claude
 
+.github/*
+!.github/ISSUE_TEMPLATE/
+!.github/PULL_REQUEST_TEMPLATE/
+!.github/workflows/
+!.github/CODEOWNERS
+!.github/pull_request_template.md
+
 tmp
 *.log
 *.log.*.gz
