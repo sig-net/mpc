@@ -3,10 +3,11 @@
 Tron integration for the MPC chain-signatures stack. Tron is a
 **destination chain** for bidirectional signing (see
 `doc/bidirectional-calls.md`): requests originate on the source chain,
-nodes assemble and sign `TriggerSmartContract` transactions, and a
-relayer broadcasts them. There is no Tron indexer and no Tron contract —
-this crate is the RPC client: broadcast and settlement polling. The
-transaction format itself — protobuf messages, canonical parsing,
+nodes assemble and sign `TriggerSmartContract` transactions, a
+relayer broadcasts them, and `TronWatcher` confirms execution by
+polling solidified receipts. There is no Tron source indexer and no
+Tron contract — the crate is the RPC client plus that execution
+watcher. The transaction format itself — protobuf messages, canonical parsing,
 signing derivations, address forms — lives in [`mpc-tron-wire`](../tron-wire),
 pinned against recorded mainnet fixtures: `RawTransaction::parse`
 (admission-shaped validation), `sign_and_hash(r, s, v)` with the 65-byte
@@ -26,6 +27,21 @@ Core pieces:
 | `broadcast_transaction` | `/wallet/broadcasthex` | `Accepted` / `AlreadyKnown` (`DUP_TRANSACTION_ERROR`) / `Rejected`; congestion errors retry |
 | `get_account_balance` | `/wallet/getaccount` | sun; `{}` for accounts the chain has never seen reads as 0 |
 | `get_transaction_info_solidity` | `/walletsolidity/gettransactioninfobyid` | `Ok(None)` = not solidified yet |
+
+- `TronWatcher` — execution watcher for Tron targets: polls solidified receipts by txID. Implements `ChainIndexer` purely as the supervision vehicle (no block scanning, no catchup).
+
+## Configuration
+
+`TronConfig` fields, populated from the node's `--tron-*` flags or their
+environment variables:
+
+| field | env var | required? | notes |
+|---|---|---|---|
+| `endpoint` | `MPC_TRON_ENDPOINT` | to watch execution | wallet/solidity base URL; without it the node admits and signs Tron targets but nothing confirms execution |
+| `api_key` | `MPC_TRON_API_KEY` | no | `TRON-PRO-API-KEY` when the provider is TronGrid; requires the endpoint |
+| `poll_interval` | `MPC_TRON_POLL_INTERVAL_MS` | no | milliseconds between receipt polls, default `15000` |
+
+`request_timeout` (10s) and the HTTP `retry` backoff are fixed defaults.
 
 ## Live gate
 
