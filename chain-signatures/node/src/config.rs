@@ -12,21 +12,11 @@ pub type ContractConfig = HashMap<String, Value>;
 pub struct Config {
     /// Protocol parameters mirrored from the contract.
     pub protocol: ProtocolConfig,
-    /// This node's own keys, never shared with anyone else.
-    pub network: NetworkConfig,
 }
 
 impl Config {
-    pub fn channel(network: NetworkConfig) -> (watch::Sender<Self>, watch::Receiver<Self>) {
-        let config = Self::new(network);
-        watch::channel(config)
-    }
-
-    pub fn new(network: NetworkConfig) -> Self {
-        Self {
-            protocol: ProtocolConfig::default(),
-            network,
-        }
+    pub fn channel() -> (watch::Sender<Self>, watch::Receiver<Self>) {
+        watch::channel(Self::default())
     }
 
     /// Returns whether the protocol config actually changed, so that the
@@ -80,7 +70,7 @@ impl Default for NetworkConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ContractConfig, NetworkConfig};
+    use super::{Config, ContractConfig};
     use mpc_contract::config::ProtocolConfig;
 
     fn contract_config(protocol: &ProtocolConfig) -> ContractConfig {
@@ -92,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_update_returns_whether_protocol_changed() {
-        let mut config = Config::new(NetworkConfig::default());
+        let mut config = Config::default();
 
         // Same config as current => no change, no notification.
         assert!(!config.update(contract_config(&ProtocolConfig::default())));

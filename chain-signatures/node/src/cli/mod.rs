@@ -794,14 +794,14 @@ impl ProtocolHandles {
         rpc_channel: RpcChannel,
         sync_report_tx: SyncReportSender,
     ) -> Self {
-        let config = Config::new(network);
-        let (config_tx, config_rx) = watch::channel(config);
+        let (config_tx, config_rx) = Config::channel();
         let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
         let node = Node::new();
         let node_watcher = node.watch();
 
         let message_channel = MessageChannel::spawn(
             node_client.clone(),
+            network,
             config_rx.clone(),
             contract_watcher.clone(),
         )

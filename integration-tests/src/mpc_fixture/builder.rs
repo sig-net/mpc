@@ -59,6 +59,7 @@ struct MpcFixtureNodeBuilder {
     candidate_info: CandidateInfo,
     participant_info: ParticipantInfo,
     config: Config,
+    network: NetworkConfig,
     messaging: NodeMessagingBuilder,
     key_info: Option<NodeKeyInfo>,
     mock_streams: HashMap<Chain, MockStream>,
@@ -503,7 +504,8 @@ impl MpcFixtureNodeBuilder {
         };
         let participant_info = ParticipantInfo::from(candidate_info.clone());
 
-        let config = Config::new(NetworkConfig { sign_sk, cipher_sk });
+        let config = Config::default();
+        let network = NetworkConfig { sign_sk, cipher_sk };
 
         // Needs to be built ahead of time to create routing table
         let (inbox, outbox, channel) = MessageChannel::new();
@@ -519,6 +521,7 @@ impl MpcFixtureNodeBuilder {
             candidate_info,
             participant_info,
             config,
+            network,
             messaging,
             key_info: None,
             mock_streams: Default::default(),
@@ -560,11 +563,10 @@ impl MpcFixtureNodeBuilder {
         // We have to start the inbox job before calling
         // `MpcSignProtocol::new_test` or else subscribing to messages will
         // await the subscription response forever.
-        let _inbox_handle = tokio::spawn(
-            self.messaging
-                .inbox
-                .run(config_rx.clone(), context.contract_state.clone()),
-        );
+        let _inbox_handle = tokio::spawn(self.messaging.inbox.run(
+            self.network.cipher_sk.clone(),
+            context.contract_state.clone(),
+        ));
 
         let backlog = Backlog::new();
 
@@ -613,7 +615,7 @@ impl MpcFixtureNodeBuilder {
             self.messaging.outbox,
             rpc_rx,
             mesh_tx.clone(),
-            config_tx.clone(),
+            self.network.sign_sk.clone(),
             self.messaging.filter,
             mock_chain,
         );
@@ -627,7 +629,7 @@ impl MpcFixtureNodeBuilder {
             mesh_rx.clone(),
             context.contract_state.clone(),
             mpc_node::protocol::sync::SyncTask::sync_report_channel().0,
-            config_tx.borrow().network.clone(),
+            self.network.clone(),
         );
         tokio::spawn(sync_task.run());
 
@@ -637,6 +639,7 @@ impl MpcFixtureNodeBuilder {
             state: node_state,
             mesh: mesh_tx,
             config: config_tx,
+            network: self.network,
             sign_tx,
             msg_channel: self.messaging.channel,
             mock_streams: self.mock_streams,

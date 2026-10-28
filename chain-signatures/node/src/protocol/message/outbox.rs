@@ -191,6 +191,7 @@ impl MessageOutbox {
     async fn publish(
         &mut self,
         client: &NodeClient,
+        sign_sk: &near_crypto::SecretKey,
         config: &watch::Receiver<Config>,
         contract: &ContractStateWatcher,
     ) {
@@ -199,7 +200,7 @@ impl MessageOutbox {
         };
         let config = config.borrow().clone();
         let compacted = self.compact();
-        let encrypted = self.encrypt(&config.network.sign_sk, &participants, compacted);
+        let encrypted = self.encrypt(sign_sk, &participants, compacted);
         self.send(client, &participants, &config.protocol, encrypted)
             .await;
     }
@@ -207,6 +208,7 @@ impl MessageOutbox {
     pub async fn run(
         mut self,
         client: NodeClient,
+        sign_sk: near_crypto::SecretKey,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) {
@@ -220,7 +222,7 @@ impl MessageOutbox {
                     entry.push((message, queued_at));
                 }
                 _ = interval.tick() => {
-                    self.publish(&client, &config, &contract).await;
+                    self.publish(&client, &sign_sk, &config, &contract).await;
                 }
             }
         }
