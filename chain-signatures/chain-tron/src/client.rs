@@ -98,7 +98,7 @@ impl TronHttp {
                         block_number: response.block_number,
                         block_timestamp: response.block_timestamp,
                         fee: response.fee,
-                        contract_ret: response.contract_ret,
+                        result: response.result,
                         res_message: response.res_message.as_deref().map(decode_hex_ascii),
                         receipt_result: response.receipt.result,
                         logs: response.log,
@@ -254,8 +254,8 @@ struct TransactionInfoResponse {
     block_timestamp: u64,
     #[serde(default)]
     fee: u64,
-    #[serde(default, rename = "contractRet")]
-    contract_ret: Option<String>,
+    #[serde(default)]
+    result: Option<String>,
     #[serde(default, rename = "resMessage")]
     res_message: Option<String>,
     #[serde(default)]
@@ -264,9 +264,8 @@ struct TransactionInfoResponse {
     log: Vec<TronLog>,
 }
 
-/// Receipt `result` classification; recorded Nile receipts carry the
-/// outcome here (no `contractRet` field) alongside usage counters the
-/// parser leaves unread (`energy_usage_total`, `net_fee`, …).
+/// `receipt.result` classification; Nile receipts carry the verdict here
+/// alongside usage counters the parser leaves unread.
 #[derive(Deserialize, Default)]
 struct ReceiptUsage {
     #[serde(default)]
@@ -573,7 +572,7 @@ mod tests {
         assert_eq!(receipt.block_number, 71896097);
         assert_eq!(receipt.fee, 472800);
         // Recorded receipts carry the outcome in receipt.result only.
-        assert_eq!(receipt.contract_ret, None);
+        assert_eq!(receipt.result, None);
         assert_eq!(receipt.receipt_result.as_deref(), Some("SUCCESS"));
         assert_eq!(receipt.res_message, None);
 

@@ -232,7 +232,7 @@ impl Gate {
         }
         let receipt = self.settle(&txid).await?;
         let result = receipt
-            .contract_ret
+            .result
             .as_deref()
             .or(receipt.receipt_result.as_deref());
         anyhow::ensure!(result == Some("SUCCESS"), "deploy executed {result:?}");
@@ -379,7 +379,7 @@ impl Gate {
             "receipt id must equal the txID"
         );
         let result = receipt
-            .contract_ret
+            .result
             .as_deref()
             .or(receipt.receipt_result.as_deref());
         anyhow::ensure!(

@@ -303,8 +303,9 @@ mod tests {
     fn receipt_body(seed: u8, result_field: &str) -> String {
         let tx_id = watcher_tx(seed).0;
         match result_field {
-            "contractRet" => format!(
-                r#"{{ "id": "{}", "blockNumber": 71896097, "fee": 472800, "contractRet": "SUCCESS" }}"#,
+            // java-tron's top-level form, in code's own spelling.
+            "result" => format!(
+                r#"{{ "id": "{}", "blockNumber": 71896097, "fee": 472800, "result": "SUCESS" }}"#,
                 hex::encode(tx_id.0)
             ),
             other => format!(
@@ -353,13 +354,13 @@ mod tests {
         let server = mockito::Server::new_async().await;
         let config = test_config(server.url().parse().unwrap());
         let mut server = server;
-        // One watcher per provider form: TronGrid's nested receipt and
-        // java-tron's contractRet.
+        // One watcher per provider form: TronGrid's nested receipt.result
+        // and java-tron's top-level result.
         nowblock_mock(&mut server);
         receipt_stub(&mut server, 1, receipt_body(1, "SUCCESS"))
             .expect(1)
             .create();
-        receipt_stub(&mut server, 2, receipt_body(2, "contractRet"))
+        receipt_stub(&mut server, 2, receipt_body(2, "result"))
             .expect(1)
             .create();
 
