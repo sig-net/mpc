@@ -11,15 +11,10 @@ Full diff: https://github.com/sig-net/mpc/compare/A.B.C...X.Y.Z
 
 ## Breaking changes
 
-<!--
-Collect the Breaking changes sections of the merged PRs. Tick `None` or every
-type that applies; for each, what breaks and what users must do. Code behind
-an `unstable-*` feature or a disabled gate is not breaking. Unticked lines can
-stay or go; they are stripped from the release notes.
--->
+<!-- Tick `None` or every type that applies, with what breaks and what users must do. Unticked lines can stay or go; they are stripped from the release notes. -->
 
 - [ ] None
-- [ ] **Node–Node:** A.B.C and X.Y.Z nodes handle some requests differently, so while both versions run those requests may not complete: …
+- [ ] **Node–Node:** …
 - [ ] **Contract–Node:** …
 - [ ] **Contract state:** …
 - [ ] **Network–Applications:** …
