@@ -9,7 +9,7 @@ Full diff: https://github.com/sig-net/mpc/compare/A.B.C...X.Y.Z
 
 ## Breaking changes
 
-<!-- Tick `None` or every type that applies, with what breaks and what users must do. Unticked lines are stripped from the release notes. -->
+<!-- Tick `None` or every type that applies, with what breaks and what users must do. Unticked lines can stay or go; they are stripped from the release notes. -->
 
 - [ ] None
 - [ ] **Node–Node:** …
@@ -22,7 +22,9 @@ Full diff: https://github.com/sig-net/mpc/compare/A.B.C...X.Y.Z
 
 <!-- Everything from here on is stripped from the release notes. -->
 
-- [ ] Fix merged on `develop`, or the Summary says why the bug no longer exists there
+- The fix (tick one):
+  - [ ] is merged on `develop`
+  - [ ] has no counterpart there because the bug no longer exists on `develop`, and the Summary says why
 - [ ] Cherry-picked with `-x`
 - [ ] Patch version bumped and `cargo check` run on this branch only; `develop` untouched
 - [ ] The `regression` issue this closes, if any, is linked
