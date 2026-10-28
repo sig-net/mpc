@@ -6,11 +6,15 @@
 //! would let a caller sign under another contract's key. The two are asserted
 //! equal.
 
-use mpc_chain_integration_core::utils::hashing::hash_payload;
-use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId};
+use mpc_chain_integration_core::utils::{
+    hashing::hash_payload, payload::bidirectional_payload_scalar,
+};
+use mpc_primitives::{
+    Chain, IndexedSignRequest, SignArgs, SignBidirectionalEvent, SignId, TxParams,
+};
 
 use crate::records::SignBidirectionalRecord;
-use crate::tx::{payload_scalar, serialized_transaction};
+use crate::tx::serialized_transaction;
 
 /// `MPCSignatureAlgorithm::ecdsa`, the only real variant (1 is reserved).
 const ALGO_ECDSA: u8 = 0;
@@ -18,12 +22,15 @@ const ALGO_ECDSA: u8 = 0;
 const DEST_UNUSED: u8 = 0;
 
 /// Converts a verified record into the [`IndexedSignRequest`] the signing pipeline
-/// consumes (kind `SignBidirectional`).
+/// consumes (kind `SignBidirectional`). `root_pk` is the network's public
+/// root key: a tron record's `owner_address` is derived from it (§7.4),
+/// never carried by the record.
 pub fn generate_sign_request(
     record: &SignBidirectionalRecord,
     read_address: &[u8; 32],
     request_id: [u8; 32],
     indexed_ts: u64,
+    root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<IndexedSignRequest> {
     // The security gate, first: `sender` is caller-controlled record data, so it may
     // only confirm the read address, never substitute for it.
@@ -66,14 +73,26 @@ pub fn generate_sign_request(
         hex::encode(record.params)
     );
 
-    // Only via the gated path: `serialized_transaction` routes through `to_unsigned_tx`
-    // and inherits its gates.
-    let serialized = serialized_transaction(record)?;
-    let payload = payload_scalar(&serialized)?;
-
     // The one render of the requester.
     let requester = hex::encode(read_address);
     let epsilon = mpc_crypto::kdf::derive_epsilon_midnight(key_version, &requester, &path)?;
+
+    let serialized = serialized_transaction(record, root_pk, epsilon)?;
+    // The wire choice above and the hash choice here read the same discriminant,
+    // so the two cannot drift apart.
+    let target = match &record.tx_params {
+        TxParams::EvmType2(_) => Chain::Ethereum,
+        TxParams::Tron(_) => Chain::Tron,
+    };
+
+    // The node admits and signs under the dest's family, via this same mapping;
+    // a record whose params and dest disagree must fail
+    anyhow::ensure!(
+        matches!(Chain::from_caip2_chain_id(&caip2_id), Ok(chain) if chain == target),
+        "execution_dest {caip2_id} does not name {target}, the chain family the record's tx_params assemble for"
+    );
+    let payload = bidirectional_payload_scalar(target, &serialized)?;
+
     let entropy = hash_payload(&request_id);
 
     Ok(IndexedSignRequest::sign_bidirectional(
@@ -134,32 +153,107 @@ fn render_padded_ascii(bytes: &[u8], field: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
     use crate::records::SignBidirectionalRecord;
-    use crate::test_utils::ascii_padded;
+    use crate::test_utils::{ascii_padded, sample_tron_record, test_root_pk};
+    use k256::elliptic_curve::bigint::U256;
+    use k256::elliptic_curve::ops::Reduce;
+    use k256::{FieldBytes, Scalar};
+    use mpc_chain_integration_core::utils::payload::derive_user_address;
     use mpc_primitives::{Chain, SignKind};
+    use mpc_tron_wire::TronAddress;
 
     const READ_ADDRESS: [u8; 32] = [0xab; 32];
     const REQUEST_ID: [u8; 32] = [0x77; 32];
     const INDEXED_TS: u64 = 1_753_000_000;
-
     fn caller_record() -> SignBidirectionalRecord {
-        crate::test_utils::sample_record()
+        let mut record = crate::test_utils::sample_record();
+        // sample_record's dest is pinned by the Compact golden rid vector
+        // (eip155:31337); conversion admits the fixed family id only.
+        record.execution_dest = ascii_padded(b"eip155:1");
+        record
+    }
+
+    #[test]
+    fn generate_sign_request_rejects_params_and_dest_disagreement() {
+        // Both directions: the dest names a family the params do not assemble
+        // for, and an id the node's own mapping cannot resolve at all.
+        let mut tron_record = sample_tron_record();
+        tron_record.execution_dest = ascii_padded(b"eip155:1");
+        let mut evm_record = caller_record();
+        evm_record.execution_dest = ascii_padded(b"tron:mainnet");
+        let mut unknown_dest = caller_record();
+        unknown_dest.execution_dest = ascii_padded(b"eip155:31337");
+        for (record, expected) in [
+            (tron_record, "eip155:1"),
+            (evm_record, "tron:mainnet"),
+            (unknown_dest, "eip155:31337"),
+        ] {
+            let err = generate_sign_request(
+                &record,
+                &READ_ADDRESS,
+                REQUEST_ID,
+                INDEXED_TS,
+                test_root_pk(),
+            )
+            .expect_err("params and dest must agree at conversion")
+            .to_string();
+            assert!(
+                err.contains("execution_dest") && err.contains(expected),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn tron_record_assembles_owned_raw_and_signs_its_txid() {
+        let record = sample_tron_record();
+        let request = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect("the tron record converts");
+        let mpc_primitives::SignKind::SignBidirectional(event) = request.kind else {
+            panic!("expected SignBidirectional kind");
+        };
+
+        let raw = mpc_tron_wire::pb::RawTransaction::parse(&event.serialized_transaction).unwrap();
+        // `owned_by_requester` recomputes the owner from the same public
+        // inputs; pinning it here keeps the two crates on one formula.
+        let epsilon =
+            mpc_crypto::kdf::derive_epsilon_midnight(1, &hex::encode(READ_ADDRESS), &event.path)
+                .unwrap();
+        let owner = TronAddress::from_evm(derive_user_address(test_root_pk(), epsilon));
+        assert_eq!(raw.owner_address().unwrap(), owner.as_bytes().to_vec());
+
+        // payload = reduce(txid): verification is mod n, so this is what
+        // signs the txid itself.
+        let expected = <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::from(raw.txid()));
+        assert_eq!(request.args.payload, expected);
     }
 
     #[test]
     fn generate_sign_request_maps_every_event_field() {
         let record = caller_record();
-        let request = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
-            .expect("the caller record converts");
+        let request = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect("the caller record converts");
         let SignKind::SignBidirectional(event) = request.kind else {
             panic!("expected SignBidirectional kind");
         };
 
         assert_eq!(
             event.serialized_transaction,
-            crate::tx::serialized_transaction(&record).expect("assembles"),
+            crate::tx::serialized_evm_tx(&record).expect("assembles"),
             "the event carries the record's own unsigned transaction bytes"
         );
-        assert_eq!(event.caip2_id, "eip155:31337");
+        assert_eq!(event.caip2_id, "eip155:1");
         assert_eq!(event.key_version, 1);
         assert_eq!(event.deposit, 0, "Midnight V1 has no payment");
         assert_eq!(
@@ -189,13 +283,25 @@ mod tests {
         let reserved = "midnight response key";
         let mut record = caller_record();
         record.path = ascii_padded(reserved.as_bytes());
-        let error = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
-            .expect_err("SDK constructor reserves the exact padded response key path");
+        let error = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect_err("SDK constructor reserves the exact padded response key path");
         assert!(error.to_string().contains("path is reserved"));
 
         record.path[31] = 1;
-        let request =
-            generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS).unwrap();
+        let request = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .unwrap();
         assert_eq!(request.args.path, hex::encode(record.path));
         assert_ne!(request.args.path, reserved);
         assert_ne!(
@@ -219,8 +325,14 @@ mod tests {
             [respond_json.as_slice(), b"\0nonzero-suffix\0"].concat();
         let request_id_before = crate::hashing::compute_request_id(&record).unwrap();
 
-        let request = generate_sign_request(&record, &READ_ADDRESS, request_id_before, INDEXED_TS)
-            .expect("the caller record converts");
+        let request = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            request_id_before,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect("the caller record converts");
         let mut forwarded_record = record.clone();
         forwarded_record.output_deserialization_schema = output_json.clone();
         forwarded_record.respond_serialization_schema = respond_json.clone();
@@ -252,9 +364,10 @@ mod tests {
         // derived key space follows the requester.
         let record = caller_record();
         let elsewhere = [0xcd; 32];
-        let err = generate_sign_request(&record, &elsewhere, REQUEST_ID, INDEXED_TS)
-            .expect_err("a sender mismatch must drop the request")
-            .to_string();
+        let err =
+            generate_sign_request(&record, &elsewhere, REQUEST_ID, INDEXED_TS, test_root_pk())
+                .expect_err("a sender mismatch must drop the request")
+                .to_string();
         assert!(
             err.contains(&"ab".repeat(32)) && err.contains(&"cd".repeat(32)),
             "the drop must name both addresses, got: {err}"
@@ -265,16 +378,28 @@ mod tests {
     fn generate_sign_request_bounds_key_versions() {
         let mut record = caller_record();
         record.key_version = 0;
-        let err = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
-            .expect_err("key_version 0 predates bidirectional signing")
-            .to_string();
+        let err = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect_err("key_version 0 predates bidirectional signing")
+        .to_string();
         assert!(err.contains("key_version"), "err: {err}");
 
         let mut record = caller_record();
         record.key_version = 2;
-        let err = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
-            .expect_err("a key_version above LATEST must be rejected")
-            .to_string();
+        let err = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect_err("a key_version above LATEST must be rejected")
+        .to_string();
         assert!(err.contains("key_version"), "err: {err}");
     }
 
@@ -283,15 +408,27 @@ mod tests {
         // A raw commitment hash is the common path; it must convert, not drop.
         let mut record = caller_record();
         record.path = [0xff; 32];
-        let request = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
-            .expect("opaque path bytes convert");
+        let request = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect("opaque path bytes convert");
         assert_eq!(request.args.path, "ff".repeat(32));
 
         // No trimming: an all-NUL path is 64 zeros, distinct from any trimmed twin.
         let mut record = caller_record();
         record.path = [0u8; 32];
-        let request = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
-            .expect("all-NUL path converts");
+        let request = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect("all-NUL path converts");
         assert_eq!(request.args.path, "00".repeat(32));
     }
 
@@ -314,9 +451,15 @@ mod tests {
     fn generate_sign_request_requires_blank_params() {
         let mut record = caller_record();
         record.params[0] = 1;
-        let err = generate_sign_request(&record, &READ_ADDRESS, REQUEST_ID, INDEXED_TS)
-            .expect_err("params is reserved: non-blank bytes must fail closed")
-            .to_string();
+        let err = generate_sign_request(
+            &record,
+            &READ_ADDRESS,
+            REQUEST_ID,
+            INDEXED_TS,
+            test_root_pk(),
+        )
+        .expect_err("params is reserved: non-blank bytes must fail closed")
+        .to_string();
         assert!(err.contains("params"), "err: {err}");
     }
 }

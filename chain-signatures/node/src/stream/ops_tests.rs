@@ -24,11 +24,13 @@ use cait_sith::protocol::Participant;
 use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
-use mpc_chain_tron::pb::{Message as _, RawTransaction, TriggerSmartContract};
-use mpc_chain_tron::TronAddress;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ChainConfig as _, IndexedSignRequest, SignArgs,
     SignBidirectionalEvent, SignKind, Signature,
+};
+use mpc_tron_wire::{
+    pb::{Message as _, RawTransaction, TriggerSmartContract},
+    TronAddress,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;

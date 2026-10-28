@@ -23,7 +23,7 @@ use subxt::utils::H256;
 use subxt::SubstrateConfig;
 
 use crate::config::{MidnightConfig, RpcConfig};
-use crate::emissions::{emissions_in, DecodedTransaction};
+use crate::emissions::{emissions_in, partial_success_emissions_in, DecodedTransaction};
 use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
 
@@ -210,11 +210,17 @@ impl subxt::events::StaticEvent for TxPartialSuccess {
     const EVENT: &'static str = "TxPartialSuccess";
 }
 
-/// Accept only one unambiguous full-success status from this extrinsic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppliedStatus {
+    Applied,
+    PartialSuccess,
+}
+
+/// Accept only one unambiguous applied status from this extrinsic, with its ledger hash.
 /// These are RPC-reported events; this check does not verify their inclusion.
-fn fully_applied_hash(
+fn applied_status(
     events: &subxt::blocks::ExtrinsicEvents<SubstrateConfig>,
-) -> anyhow::Result<Option<[u8; 32]>> {
+) -> anyhow::Result<Option<([u8; 32], AppliedStatus)>> {
     let mut applied = None;
     let mut partial = None;
     for event in events.iter() {
@@ -236,7 +242,9 @@ fn fully_applied_hash(
         applied.is_none() || partial.is_none(),
         "conflicting Midnight statuses"
     );
-    Ok(applied)
+    Ok(applied
+        .map(|hash| (hash, AppliedStatus::Applied))
+        .or(partial.map(|hash| (hash, AppliedStatus::PartialSuccess))))
 }
 
 fn decode_applied_transaction(
@@ -247,7 +255,7 @@ fn decode_applied_transaction(
         .context("candidate ledger transaction did not decode")?;
     anyhow::ensure!(
         tx.transaction_hash().0 .0 == expected_hash,
-        "TxApplied hash does not match the candidate ledger transaction"
+        "status hash does not match the candidate ledger transaction"
     );
     Ok(tx)
 }
@@ -433,18 +441,16 @@ impl MidnightRpc {
             scale_system_events
                 .get_or_insert_with(|| events.all_events_in_block().bytes().to_vec());
 
-            let applied = fully_applied_hash(&events)
+            let applied = applied_status(&events)
                 .map_err(|err| BlockHold::new("emission-schema-hold", height, err))?;
-            let Some(ledger_tx_hash) = applied else {
-                let partial = events.find_first::<TxPartialSuccess>()?;
+            let Some((ledger_tx_hash, status)) = applied else {
                 tracing::warn!(
                     reason = "unsupported-midnight-status",
-                    status = if partial.is_some() { "TxPartialSuccess" } else { "NoTxApplied" },
-                    tx_hash = partial.map(|event| hex::encode(event.0.tx_hash)),
+                    status = "NoTxApplied",
                     height,
                     block_hash = %block_ref.hash,
                     extrinsic_index = found.details.index(),
-                    "midnight transaction skipped: only TxApplied is supported"
+                    "midnight transaction skipped: it has no applied status"
                 );
                 continue;
             };
@@ -461,9 +467,7 @@ impl MidnightRpc {
                     )
                 },
             )?;
-            // TxApplied covers both logical phases. Partial results cannot identify
-            // committed fallible segments through this node's status events.
-            let calls = emissions_in(&tx, singleton).map_err(|err| {
+            let schema_hold = |err: anyhow::Error| {
                 BlockHold::new(
                     "emission-schema-hold",
                     height,
@@ -473,10 +477,32 @@ impl MidnightRpc {
                         hex::encode(ledger_tx_hash)
                     )),
                 )
-            })?;
+            };
+            let calls = match status {
+                AppliedStatus::Applied => emissions_in(&tx, singleton).map_err(schema_hold)?,
+                AppliedStatus::PartialSuccess => {
+                    let (calls, skipped) =
+                        partial_success_emissions_in(&tx, singleton).map_err(schema_hold)?;
+                    for skipped in skipped {
+                        tracing::warn!(
+                            reason = "partial-success-fallible-skipped",
+                            tx_hash = %hex::encode(ledger_tx_hash),
+                            height,
+                            block_hash = %block_ref.hash,
+                            extrinsic_index = found.details.index(),
+                            call_index = skipped.call_index,
+                            physical_segment = skipped.physical_segment,
+                            error = %format_args!("{:#}", skipped.reason),
+                            "midnight fallible singleton phase skipped in a partial success"
+                        );
+                    }
+                    calls
+                }
+            };
             decoded_candidates.push(CandidateTransactionEmissions {
                 ledger_tx_hash,
                 extrinsic_index: found.details.index(),
+                partial_success: status == AppliedStatus::PartialSuccess,
                 calls,
             });
         }
@@ -914,12 +940,13 @@ mod tests {
     }
 
     #[test]
-    fn full_success_gate_uses_the_captured_extrinsic_status() {
+    fn status_gate_uses_the_captured_extrinsic_status() {
         let raw = include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec();
         let events = captured_status_events(raw.clone(), 4);
-        let hash = fully_applied_hash(&events)
+        let (hash, status) = applied_status(&events)
             .expect("valid status")
             .expect("TxApplied");
+        assert_eq!(status, AppliedStatus::Applied);
         let tx = decode_applied_transaction(
             include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
             hash,
@@ -934,7 +961,7 @@ mod tests {
         assert_eq!(calls[0].physical_segment, 49592);
         assert_eq!(calls[0].emissions.len(), 1);
         assert_eq!(
-            fully_applied_hash(&captured_status_events(raw, 0)).unwrap(),
+            applied_status(&captured_status_events(raw, 0)).unwrap(),
             None
         );
         let mut wrong_hash = hash;
@@ -949,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn full_success_gate_rejects_partial_and_ambiguous_statuses() {
+    fn status_gate_reads_partial_success_and_rejects_ambiguous_statuses() {
         let events = captured_status_events(
             include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
             4,
@@ -970,16 +997,18 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let mut applied_hash = [0u8; 32];
+        applied_hash.copy_from_slice(&applied.bytes()[7..39]);
         assert_eq!(
-            fully_applied_hash(&captured_status_events(
+            applied_status(&captured_status_events(
                 encode_status_records(&[partial.clone()]),
                 4,
             ))
             .unwrap(),
-            None
+            Some((applied_hash, AppliedStatus::PartialSuccess))
         );
         assert_eq!(
-            fully_applied_hash(&captured_status_events(encode_status_records(&[]), 4,)).unwrap(),
+            applied_status(&captured_status_events(encode_status_records(&[]), 4,)).unwrap(),
             None
         );
         for records in [
@@ -988,13 +1017,13 @@ mod tests {
             vec![partial.clone(), partial],
         ] {
             assert!(
-                fully_applied_hash(&captured_status_events(encode_status_records(&records), 4,))
+                applied_status(&captured_status_events(encode_status_records(&records), 4,))
                     .is_err(),
                 "ambiguous outcome must hold"
             );
         }
         assert!(
-            fully_applied_hash(&captured_status_events(
+            applied_status(&captured_status_events(
                 encode_status_records(&[applied.bytes()[..12].to_vec()]),
                 4,
             ))
@@ -1300,21 +1329,142 @@ mod tests {
         assert_eq!(block.candidates[0].calls, expected);
     }
 
+    /// The captured fallible deposit with its singleton call's fallible transcript edited,
+    /// re-encoded with matching `TxApplied` and `TxPartialSuccess` status records.
+    fn edited_fallible_deposit(
+        edit: impl FnOnce(
+            &mut midnight_onchain_runtime::transcript::Transcript<midnight_storage::DefaultDB>,
+        ),
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        use midnight_ledger_v9::structure::ContractAction;
+        use midnight_storage::arena::Sp;
+
+        let bytes = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
+        let tx: DecodedTransaction =
+            midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
+        let (segment, mut call) = tx.calls().nth(1).unwrap();
+        let singleton = call.address.0 .0;
+        let mut transcript = call.fallible_transcript.as_deref().unwrap().clone();
+        edit(&mut transcript);
+        call.fallible_transcript = Some(Sp::new(transcript));
+        let DecodedTransaction::Standard(mut tx) = tx else {
+            panic!("standard captured transaction");
+        };
+        let mut intent = (*tx.intents.get(&segment).unwrap()).clone();
+        let mut actions = Vec::from(&intent.actions);
+        let action = actions
+            .iter_mut()
+            .find(|action| matches!(action, ContractAction::Call(call) if call.address.0 .0 == singleton))
+            .unwrap();
+        *action = ContractAction::Call(Sp::new(call));
+        intent.actions = actions.into();
+        tx.intents = tx.intents.insert(segment, intent);
+        let tx = DecodedTransaction::Standard(tx);
+        let mut bytes = Vec::new();
+        midnight_serialize::tagged_serialize(&tx, &mut bytes).unwrap();
+        let mut applied = captured_applied_status_record();
+        applied[7..39].copy_from_slice(&tx.transaction_hash().0 .0);
+        let mut partial = applied.clone();
+        partial[6] = 7; // TxPartialSuccess in the captured metadata.
+        (bytes, applied, partial)
+    }
+
     #[tokio::test]
-    async fn block_reader_skips_partial_success_and_other_extrinsics_statuses() {
+    async fn block_reader_skips_a_fallible_effects_mismatch_only_in_a_partial_success() {
+        let (bytes, applied, partial) = edited_fallible_deposit(|transcript| {
+            transcript.effects.unshielded_mints =
+                midnight_storage::storage::HashMap::new().insert(Default::default(), 1);
+        });
+
+        // Synthetic effects and statuses: this exercises the reader's status policy, not
+        // node acceptance of such a transaction.
+        let recorder = crate::test_utils::EventRecorder::default();
+        // Keep a second scoped dispatch registered so callsites first reached by a
+        // parallel test register against the live dispatches, not that thread's default.
+        let _registration_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::layer::SubscriberExt::with(
+            tracing_subscriber::registry(),
+            recorder.clone(),
+        );
+        let subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let block = read_fallible_transaction(encode_status_records(&[partial]), &bytes)
+            .await
+            .expect("a fallible effects mismatch in a partial success does not hold")
+            .unwrap();
+        drop(subscriber_guard);
+        assert_eq!(block.candidates.len(), 1);
+        assert!(block.candidates[0].calls.is_empty());
+        let skipped = recorder
+            .snapshot()
+            .into_iter()
+            .filter(|fields| {
+                fields.get("reason").map(String::as_str)
+                    == Some("\"partial-success-fallible-skipped\"")
+            })
+            .collect::<Vec<_>>();
+        let [skipped] = skipped.as_slice() else {
+            panic!("expected one skipped-phase warning, got {skipped:?}");
+        };
+        assert_eq!(skipped.get("call_index").map(String::as_str), Some("1"));
+        assert!(skipped["error"].contains("declared effects differ"));
+
+        let err = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
+            .await
+            .expect_err("the same phase of a fully applied transaction holds");
+        let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
+        assert_eq!(hold.reason, "emission-schema-hold");
+    }
+
+    #[tokio::test]
+    async fn block_reader_holds_any_other_undecodable_fallible_phase_in_a_partial_success() {
+        let (bytes, applied, partial) = edited_fallible_deposit(|transcript| {
+            let mut program = Vec::from(&transcript.program);
+            program.push(midnight_onchain_runtime::ops::Op::Pop);
+            transcript.program = program.into();
+        });
+
+        for status in [partial, applied] {
+            let err = read_fallible_transaction(encode_status_records(&[status]), &bytes)
+                .await
+                .expect_err("an unsupported fallible program holds");
+            let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
+            assert_eq!(hold.reason, "emission-schema-hold");
+        }
+    }
+
+    #[tokio::test]
+    async fn block_reader_reads_partial_success_and_skips_other_extrinsics_statuses() {
         let applied = captured_applied_status_record();
         assert_eq!(&applied[..7], &[0, 4, 0, 0, 0, 5, 2]);
+        let fully_applied =
+            read_fallible_capture(encode_status_records(std::slice::from_ref(&applied)))
+                .await
+                .unwrap()
+                .unwrap();
         let mut partial = applied.clone();
         partial[6] = 7; // TxPartialSuccess in the captured metadata.
         let mut other_extrinsic = applied;
         other_extrinsic[1..5].copy_from_slice(&0u32.to_le_bytes());
-        for records in [vec![partial.clone()], vec![other_extrinsic, partial]] {
+        for records in [
+            vec![partial.clone()],
+            vec![other_extrinsic.clone(), partial],
+        ] {
             let block = read_fallible_capture(encode_status_records(&records))
                 .await
-                .expect("unsupported outcome is skipped")
+                .expect("a partial success is read")
                 .expect("candidate is present in the block body");
-            assert!(block.candidates.is_empty());
+            // The capture's only singleton phase is a fallible notification, which a
+            // partial success keeps.
+            let mut expected = fully_applied.candidates.clone();
+            assert!(!expected[0].partial_success);
+            expected[0].partial_success = true;
+            assert_eq!(block.candidates, expected);
         }
+        let block = read_fallible_capture(encode_status_records(&[other_extrinsic]))
+            .await
+            .expect("an unapplied candidate is skipped")
+            .expect("candidate is present in the block body");
+        assert!(block.candidates.is_empty());
     }
 
     #[tokio::test]

@@ -430,7 +430,7 @@ impl MessageInbox {
                     let config = config.borrow().clone();
                     let participants = contract.participant_map().await;
                     let me = contract.me().await;
-                    let cipher_sk = config.local.network.cipher_sk;
+                    let cipher_sk = config.network.cipher_sk;
 
                     let batch = self.decrypt(&encrypted, &cipher_sk, &participants);
                     let messages = Self::verify_senders(batch, me);
@@ -457,7 +457,7 @@ impl MessageInbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
+    use crate::config::{Config, NetworkConfig};
     use crate::protocol::contract::primitives::Participants;
     use crate::protocol::message::{MessageChannel, SignedMessage};
     use crate::protocol::ParticipantInfo;
@@ -502,12 +502,9 @@ mod tests {
             }
             map
         };
-        let (_config_tx, config_rx) = Config::channel(LocalConfig {
-            over: OverrideConfig::default(),
-            network: NetworkConfig {
-                sign_sk: sign_sk.clone(),
-                cipher_sk,
-            },
+        let (_config_tx, config_rx) = Config::channel(NetworkConfig {
+            sign_sk: sign_sk.clone(),
+            cipher_sk,
         });
         let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
             &node_id,
@@ -825,12 +822,9 @@ mod tests {
                 account_id: "node1".parse().unwrap(),
             },
         );
-        let (_config_tx, config_rx) = Config::channel(LocalConfig {
-            over: OverrideConfig::default(),
-            network: NetworkConfig {
-                sign_sk: sign_sk.clone(),
-                cipher_sk,
-            },
+        let (_config_tx, config_rx) = Config::channel(NetworkConfig {
+            sign_sk: sign_sk.clone(),
+            cipher_sk,
         });
         let (contract_watcher, contract_tx) = ContractStateWatcher::new(&"node0".parse().unwrap());
         let (inbox, _outbox, channel) = MessageChannel::new();

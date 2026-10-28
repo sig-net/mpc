@@ -3459,9 +3459,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.5"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
+checksum = "fe3e9d21d39e6f39ff46e03d5b621424f88ee23d8a1672c6bfc9ccc7f2da4f6a"
 dependencies = [
  "cmov",
 ]
@@ -7434,7 +7434,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-canton"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7461,7 +7461,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-ethereum"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7488,7 +7488,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-hydration"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7513,7 +7513,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-integration-core"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7522,9 +7522,12 @@ dependencies = [
  "cait-sith",
  "http 1.5.0",
  "k256",
+ "mockito",
  "mpc-crypto",
  "mpc-primitives",
  "rand 0.8.8",
+ "reqwest 0.12.28",
+ "sha2 0.11.0",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -7533,7 +7536,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-midnight"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7558,6 +7561,7 @@ dependencies = [
  "mpc-compact-hashing",
  "mpc-crypto",
  "mpc-primitives",
+ "mpc-tron-wire",
  "mpc-utils",
  "serde",
  "serde_json",
@@ -7571,7 +7575,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-near"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7593,7 +7597,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-solana"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anchor-client",
@@ -7626,16 +7630,15 @@ dependencies = [
 
 [[package]]
 name = "mpc-chain-tron"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
- "bs58 0.5.1",
  "hex",
  "k256",
  "mockito",
  "mpc-chain-integration-core",
- "prost 0.14.4",
+ "mpc-tron-wire",
  "prost-types",
  "reqwest 0.12.28",
  "serde",
@@ -7649,7 +7652,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-compact-hashing"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "hex",
  "midnight-transient-crypto 3.0.0",
@@ -7659,7 +7662,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-contract"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "anyhow",
  "borsh",
@@ -7684,7 +7687,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-crypto"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7701,7 +7704,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-keys"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "hex",
  "hpke",
@@ -7711,7 +7714,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-midnight-respond-codec"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7723,7 +7726,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-node"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -7763,6 +7766,7 @@ dependencies = [
  "mpc-crypto",
  "mpc-keys",
  "mpc-primitives",
+ "mpc-tron-wire",
  "mpc-utils",
  "near-account-id",
  "near-crypto",
@@ -7801,7 +7805,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-primitives"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "borsh",
  "ciborium",
@@ -7815,8 +7819,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-tron-wire"
+version = "1.22.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "bs58 0.5.1",
+ "hex",
+ "k256",
+ "mpc-primitives",
+ "prost 0.14.4",
+ "prost-types",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "mpc-utils"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -11404,7 +11425,7 @@ dependencies = [
 
 [[package]]
 name = "signet-crypto"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "getrandom 0.2.16",
  "hex",
@@ -11425,7 +11446,7 @@ dependencies = [
 
 [[package]]
 name = "signet-primitives"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "borsh",
  "enum-map",

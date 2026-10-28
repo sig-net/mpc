@@ -1,5 +1,7 @@
 # MPC docs
 
+[Glossary](glossary.md): the terms used across these docs and the code types behind them.
+
 How to write and update these docs: [Documentation conventions](../CONTRIBUTING.md#documentation).
 
 ## Protocol

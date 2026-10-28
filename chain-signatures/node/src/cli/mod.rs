@@ -3,7 +3,7 @@ mod args;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::backlog::Backlog;
-use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
+use crate::config::{Config, NetworkConfig};
 use crate::gcp::GcpService;
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
@@ -60,21 +60,16 @@ const MAX_SIGN_COMMANDS: usize = 16384;
 pub enum Cli {
     Start {
         /// NEAR RPC address
-        #[arg(
-            long,
-            env("MPC_NEAR_RPC"),
-            default_value("https://rpc.testnet.near.org"),
-            hide_env_values = true
-        )]
+        #[arg(long, env("MPC_NEAR_RPC"), hide_env_values = true)]
         near_rpc: String,
         /// MPC contract id
-        #[arg(long, env("MPC_CONTRACT_ID"), default_value("dev.sig-net.testnet"))]
+        #[arg(long, env("MPC_CONTRACT_ID"))]
         mpc_contract_id: AccountId,
         /// This node's account id
         #[arg(long, env("MPC_ACCOUNT_ID"))]
         account_id: AccountId,
-        /// Environment this node runs in (e.g. `testnet`, `mainnet`,
-        /// `integration-tests`). Labels logs and telemetry.
+        /// Environment this node runs in (e.g. `testnet`, `mainnet`). Labels logs
+        /// and telemetry.
         #[arg(long, env("MPC_ENV"))]
         env: String,
         /// This node's account ed25519 secret key
@@ -119,9 +114,6 @@ pub enum Cli {
         /// Logging options
         #[command(flatten)]
         log_options: logs::Options,
-        /// The set of configurations that we will use to override contract configurations.
-        #[arg(long, env("MPC_OVERRIDE_CONFIG"), value_parser = clap::value_parser!(OverrideConfig))]
-        override_config: Option<OverrideConfig>,
         #[command(flatten)]
         mesh_options: mesh::Options,
     },
@@ -147,7 +139,6 @@ impl Cli {
                 my_address,
                 storage_options,
                 log_options,
-                override_config,
                 mesh_options,
             } => {
                 let mut args = vec![
@@ -170,12 +161,6 @@ impl Cli {
                 args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
                 if let Some(my_address) = my_address {
                     args.extend(["--my-address".to_string(), my_address.to_string()]);
-                }
-                if let Some(override_config) = override_config {
-                    args.extend([
-                        "--override-config".to_string(),
-                        serde_json::to_string(&override_config).unwrap(),
-                    ]);
                 }
 
                 args.extend(["--web-port".to_string(), web_port.to_string()]);
@@ -213,7 +198,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             my_address,
             storage_options,
             log_options,
-            override_config,
             mesh_options,
         } => {
             let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
@@ -257,9 +241,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             });
             tracing::info!(%my_address, "address detected");
 
-            // NEAR Indexer is only used for integration tests
-            // TODO: Remove this once we have integration tests built on other chains
-            if env == "integration-tests" {
+            // NEAR as a source chain exists for the integration tests only, and the
+            // test harness builds this binary with `test-feature`.
+            if cfg!(feature = "test-feature") {
                 let rpc_client = near_fetch::Client::new(&near_rpc);
                 let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
                 mpc_chain_near::run(
@@ -337,7 +321,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 checkpoints_rx,
             } = ProtocolHandles::new(
                 &account_id,
-                override_config,
                 network.clone(),
                 sign_rx,
                 &node_client,
@@ -800,7 +783,6 @@ impl ProtocolHandles {
     #[allow(clippy::too_many_arguments)]
     async fn new(
         account_id: &AccountId,
-        override_config: Option<OverrideConfig>,
         network: NetworkConfig,
         sign_rx: mpsc::Receiver<SignCommand>,
         node_client: &NodeClient,
@@ -812,10 +794,7 @@ impl ProtocolHandles {
         rpc_channel: RpcChannel,
         sync_report_tx: SyncReportSender,
     ) -> Self {
-        let config = Config::new(LocalConfig {
-            over: override_config.unwrap_or_default(),
-            network,
-        });
+        let config = Config::new(network);
         let (config_tx, config_rx) = watch::channel(config);
         let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
         let node = Node::new();
@@ -869,7 +848,7 @@ async fn spawn_indexers(
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
     backlog: Backlog,
-    contract_watcher: ContractStateWatcher,
+    mut contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
@@ -1028,8 +1007,15 @@ async fn spawn_indexers(
         let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
         // TODO: read-side gating - this indexer's reads don't share the
         // chain's cooldown gate yet
-        match MidnightIndexer::new(midnight_config, backlog.clone(), midnight_telemetry.clone())
-            .await
+        tracing::info!("Midnight indexer waiting for the network public key");
+        let root_pk = contract_watcher.wait_public_key().await;
+        match MidnightIndexer::new(
+            midnight_config,
+            backlog.clone(),
+            midnight_telemetry.clone(),
+            root_pk,
+        )
+        .await
         {
             Ok(midnight_indexer) => {
                 tracing::info!("midnight indexer created successfully");
@@ -1309,6 +1295,10 @@ mod tests {
         let argv = [
             "mpc-node",
             "start",
+            "--near-rpc",
+            "http://127.0.0.1:3030",
+            "--mpc-contract-id",
+            "mpc.test.near",
             "--account-id",
             "test.near",
             "--account-sk",

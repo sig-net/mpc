@@ -199,7 +199,7 @@ impl MessageOutbox {
         };
         let config = config.borrow().clone();
         let compacted = self.compact();
-        let encrypted = self.encrypt(&config.local.network.sign_sk, &participants, compacted);
+        let encrypted = self.encrypt(&config.network.sign_sk, &participants, compacted);
         self.send(client, &participants, &config.protocol, encrypted)
             .await;
     }

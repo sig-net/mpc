@@ -138,7 +138,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         .unwrap();
 
         // start recovering the address and compare them:
-        let user_addr = public_key_to_address(user_pk.to_encoded_point(false).as_bytes());
+        let user_addr = public_key_to_address(&user_pk.to_encoded_point(false));
         let r = x_coordinate(&multichain_sig.big_r);
         let s = multichain_sig.s;
         let signature_for_recovery: [u8; 64] = {
