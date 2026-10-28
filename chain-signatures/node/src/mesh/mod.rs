@@ -24,14 +24,7 @@ pub struct Options {
     pub ping_interval: u64,
 }
 
-impl Options {
-    pub fn into_str_args(self) -> Vec<String> {
-        vec![
-            "--ping-interval".to_string(),
-            self.ping_interval.to_string(),
-        ]
-    }
-}
+impl Options {}
 
 /// Set of connections to participants in the network. Each participant is pinged at regular
 /// intervals to check their aliveness. The connections can be dropped and reconnected at any time.
