@@ -554,7 +554,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             .await;
 
         let actions = network
-            .assert_actions(completed as usize + 1, Duration::from_secs(30))
+            .assert_publish_actions(completed as usize + 1, Duration::from_secs(30))
             .await;
         assert_eq!(actions.len(), completed as usize + 1);
     } else {
