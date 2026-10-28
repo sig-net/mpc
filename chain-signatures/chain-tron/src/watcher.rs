@@ -118,8 +118,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
     ) -> anyhow::Result<()> {
         tracing::info!("tron execution watcher started");
         // No catchup: receipts are direct txID lookups and the supervisor's
-        // recovery rebuilds the watcher map. Without this event the respond
-        // leg stays gated on `caught_up`.
+        // recovery rebuilds the watcher map. The event only marks Tron
+        // caught up per the indexer contract.
         if events_tx.send(ChainEvent::CatchupCompleted).await.is_err() {
             return Ok(());
         }
