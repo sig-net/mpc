@@ -41,7 +41,7 @@ Code moves downstream only.
 
 We use [semantic versioning](https://semver.org/). The version is `version` under `[workspace.package]` in the root `Cargo.toml`. Tags are the bare version, e.g. `1.21.0`.
 
-Every tag has a GitHub release. Its notes are the release or hotfix PR description without the checklist and the unticked breaking-change types, followed by the list of PRs merged since the previous version A.B.C, which GitHub generates. Right after the PR merges:
+Every tag has a GitHub release. Its notes are the PR description up to the Checklist, followed by the list of PRs merged since the previous version A.B.C, which GitHub generates. Right after the PR merges:
 
 ```sh
 git tag X.Y.Z <commit> && git push origin X.Y.Z
