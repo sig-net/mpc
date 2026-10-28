@@ -183,8 +183,6 @@ pub struct EthConfig {
     pub contract_address: Address,
     /// must be one of sepolia, mainnet, anvil
     pub network: String,
-    /// refresh finalized block interval in milliseconds
-    pub refresh_finalized_interval: u64,
     /// Emit requests without waiting for block finality. Only for demos and
     /// integration tests on dev chains (anvil never reports finalized blocks
     /// and never reorgs); must stay `false` on live networks.
@@ -219,10 +217,6 @@ impl fmt::Debug for EthConfig {
             .field("execution_rpc_http_url", &self.execution_rpc_http_url)
             .field("contract_address", &self.contract_address)
             .field("network", &self.network)
-            .field(
-                "refresh_finalized_interval",
-                &self.refresh_finalized_interval,
-            )
             .field("optimistic_requests", &self.optimistic_requests)
             .field("rpc", &self.rpc)
             .field("gas", &self.gas)

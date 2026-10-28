@@ -41,19 +41,6 @@ pub struct EthArgs {
         value_parser = ["sepolia", "mainnet", "anvil"],
     )]
     pub eth_network: String,
-
-    // -- Behaviour --
-    /// Refresh finalized block interval in milliseconds
-    #[arg(
-        long,
-        env("MPC_ETH_REFRESH_FINALIZED_INTERVAL"),
-        default_value = "10000"
-    )]
-    pub eth_refresh_finalized_interval: u64,
-    /// Emit requests without waiting for block finality. FOR DEV/DEMO USE ONLY:
-    /// on live networks a reorg can orphan already-emitted sign requests.
-    #[arg(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
-    pub eth_optimistic_requests: bool,
 }
 
 impl EthArgs {
@@ -75,25 +62,11 @@ impl EthArgs {
             args.extend(["--eth-contract-address".to_string(), eth_contract_address]);
         }
         args.extend(["--eth-network".to_string(), self.eth_network]);
-        args.extend([
-            "--eth-refresh-finalized-interval".to_string(),
-            self.eth_refresh_finalized_interval.to_string(),
-        ]);
-        if self.eth_optimistic_requests {
-            args.push("--eth-optimistic-requests".to_string());
-        }
         args
     }
 
     pub fn into_config(self) -> anyhow::Result<Option<EthConfig>> {
         let network = self.eth_network;
-        if self.eth_optimistic_requests && network == "mainnet" {
-            tracing::warn!(
-                "eth optimistic requests enabled on mainnet: emitted requests are NOT \
-                 reorg-safe; this flag is intended for dev/demo use only"
-            );
-        }
-
         let Some(account_sk) = self.eth_account_sk else {
             return Ok(None);
         };
@@ -116,9 +89,9 @@ impl EthArgs {
             account_sk, // this is safe because EthConfig has custom Debug implementation that redacts the account_sk field
             execution_rpc_http_url,
             contract_address,
-            optimistic_requests: self.eth_optimistic_requests || network == "anvil", // anvil never reports finalized blocks, so requests are emitted without waiting for finality
+            // anvil never reports finalized blocks, so requests are emitted without waiting for finality
+            optimistic_requests: network == "anvil",
             network,
-            refresh_finalized_interval: self.eth_refresh_finalized_interval,
             // TODO: currently we only have Ethereum and Sepolia, so defaults
             // are fine. Make these configurable when we add more chains.
             rpc: Default::default(),
@@ -135,16 +108,12 @@ impl EthArgs {
                 eth_execution_rpc_http_url: Some(config.execution_rpc_http_url.to_string()),
                 eth_contract_address: Some(config.contract_address.to_string()),
                 eth_network: config.network,
-                eth_refresh_finalized_interval: config.refresh_finalized_interval,
-                eth_optimistic_requests: config.optimistic_requests,
             },
             _ => Self {
                 eth_account_sk: None,
                 eth_execution_rpc_http_url: None,
                 eth_contract_address: None,
                 eth_network: DEFAULT_ETH_NETWORK.to_string(),
-                eth_refresh_finalized_interval: 0,
-                eth_optimistic_requests: false,
             },
         }
     }

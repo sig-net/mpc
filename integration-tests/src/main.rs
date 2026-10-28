@@ -23,8 +23,6 @@ enum Cli {
         eth_account_sk: String,
         #[arg(long, default_value = "anvil")]
         eth_network: String,
-        #[arg(long, default_value = "10000")]
-        eth_refresh_finalized_interval: u64,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
@@ -42,7 +40,6 @@ async fn main() -> anyhow::Result<()> {
             eth_contract_address,
             eth_account_sk,
             eth_network,
-            eth_refresh_finalized_interval,
         } => {
             println!("Setting up an environment with {nodes} nodes, {threshold} threshold ...");
             let config = NodeConfig {
@@ -60,7 +57,6 @@ async fn main() -> anyhow::Result<()> {
                         .map_err(|e| anyhow::anyhow!("invalid eth contract address: {e}"))?,
                     optimistic_requests: eth_network == "anvil",
                     network: eth_network,
-                    refresh_finalized_interval: eth_refresh_finalized_interval,
                     gas: Default::default(),
                     indexer: Default::default(),
                     publisher: Default::default(),

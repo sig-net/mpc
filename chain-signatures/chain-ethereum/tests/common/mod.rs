@@ -70,7 +70,6 @@ impl EthTestEnv {
             execution_rpc_http_url: endpoint.parse()?,
             contract_address,
             network: "anvil".to_string(),
-            refresh_finalized_interval: 1000,
             optimistic_requests: false,
             rpc: Default::default(),
             gas: Default::default(),
