@@ -404,8 +404,9 @@ the same pair reuses the id.
   from the owner of a live entry starts the generation; without one it is
   answered with a `REJECT`, which the owner, already generating, cannot act on.
 - **Checks.** Only a `PROPOSE` is answered after checks (already generating or
-  stored; for presignatures also the id and whether the pair is held), with a
-  `REJECT` if one fails. `START` relies on the generation-start refusal below.
+  stored; for presignatures also the id and whether the pair is held; then
+  load: more generations running than the network's cap allows, or more in
+  the pool than its floors need), with a `REJECT` if one fails. `START` relies on the generation-start refusal below.
   `ACCEPT` and `REJECT` are never answered.
 
 Every node listed in `START` must contribute. If one does not, the generation runs

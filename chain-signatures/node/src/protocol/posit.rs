@@ -69,6 +69,10 @@ pub enum PositRejectReason {
     /// The message's round is behind the rejector's current round, which is
     /// carried in the payload so the sender can catch up in one bump.
     StaleRound(usize),
+    /// The pool holds more of this artifact than the network's floors need.
+    Overstocked,
+    /// The deliberator runs more generations than the network's cap allows.
+    Saturated,
 }
 
 impl PositAction {

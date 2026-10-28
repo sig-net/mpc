@@ -5,8 +5,8 @@ use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::posit::{PositInternalAction, PositRejectReason};
-use crate::protocol::should_generate;
 use crate::protocol::MpcSignProtocol;
+use crate::protocol::{should_generate, AcceptLimits};
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
 use crate::storage::protocol_storage::StockCounts;
 use crate::storage::triple_storage::{TriplesReserved, TriplesTaken, TriplesTakenDropper};
@@ -419,6 +419,7 @@ impl PresignatureSpawner {
         &self,
         id: FullPresignatureId,
         from: Participant,
+        limits: AcceptLimits,
     ) -> Option<PositRejectReason> {
         if !id.validate() {
             tracing::error!(
@@ -430,6 +431,22 @@ impl PresignatureSpawner {
         } else if self.contains_ongoing(id.id) {
             tracing::warn!(?id, ?from, "presignature already generating");
             Some(PositRejectReason::AlreadyGenerating)
+        } else if self.len_ongoing() >= limits.ongoing {
+            tracing::warn!(
+                ?id,
+                ?from,
+                ongoing = self.len_ongoing(),
+                "presignature generations saturated"
+            );
+            Some(PositRejectReason::Saturated)
+        } else if self.stock.generated >= limits.generated {
+            tracing::warn!(
+                ?id,
+                ?from,
+                generated = self.stock.generated,
+                "presignature pool overstocked"
+            );
+            Some(PositRejectReason::Overstocked)
         } else if self.contains(id.id).await {
             tracing::warn!(?id, ?from, "presignature already generated");
             Some(PositRejectReason::AlreadyGenerating)
@@ -455,8 +472,9 @@ impl PresignatureSpawner {
         from: Participant,
         action: PositAction,
         timeout: Duration,
+        limits: AcceptLimits,
     ) {
-        self.process_posit(id, from, action, timeout).await;
+        self.process_posit(id, from, action, timeout, limits).await;
     }
 
     async fn process_posit(
@@ -465,9 +483,10 @@ impl PresignatureSpawner {
         from: Participant,
         action: PositAction,
         timeout: Duration,
+        limits: AcceptLimits,
     ) {
         let rejection = match action {
-            PositAction::Propose => self.propose_rejection(id, from).await,
+            PositAction::Propose => self.propose_rejection(id, from, limits).await,
             _ => None,
         };
         let internal_action = if let Some(reason) = rejection {
@@ -715,6 +734,7 @@ impl PresignatureSpawner {
 
     async fn run(
         mut self,
+        num_nodes: usize,
         mut mesh_state: watch::Receiver<MeshState>,
         mut cfg: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
@@ -729,6 +749,7 @@ impl PresignatureSpawner {
         let mut protocol = cfg.borrow().protocol.clone();
         let timeout = cfg.borrow().timeouts.presignature_generation;
         let mut active = mesh_state.borrow().active().keys_vec();
+        let mut limits = accept_limits(&protocol, num_nodes);
 
         self.refresh_stock().await;
         loop {
@@ -751,7 +772,7 @@ impl PresignatureSpawner {
                         .set(self.ongoing.len() as i64);
                 }
                 Some((id, from, action)) = posits.recv() => {
-                    self.process_posit(id, from, action, timeout).await;
+                    self.process_posit(id, from, action, timeout, limits).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
@@ -782,6 +803,7 @@ impl PresignatureSpawner {
                 }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
+                    limits = accept_limits(&protocol, num_nodes);
                 }
                 Ok(()) = mesh_state.changed() => {
                     active = mesh_state.borrow().active().keys_vec();
@@ -789,6 +811,14 @@ impl PresignatureSpawner {
             }
         }
     }
+}
+
+fn accept_limits(protocol: &ProtocolConfig, num_nodes: usize) -> AcceptLimits {
+    AcceptLimits::new(
+        protocol.min_mine_presignatures as usize,
+        protocol.max_mine_generations as usize,
+        num_nodes,
+    )
 }
 
 impl Drop for PresignatureSpawner {
@@ -816,6 +846,7 @@ impl PresignatureSpawnerTask {
     pub fn run(
         me: Participant,
         threshold: usize,
+        num_nodes: usize,
         epoch: u64,
         ctx: &MpcSignProtocol,
         private_share: &SecretKeyShare,
@@ -837,6 +868,7 @@ impl PresignatureSpawnerTask {
         Self {
             ongoing_gen_rx,
             handle: tokio::spawn(spawner.run(
+                num_nodes,
                 ctx.mesh_state.clone(),
                 ctx.config.clone(),
                 ongoing_gen_tx,
