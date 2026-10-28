@@ -114,8 +114,11 @@ async fn spawn_supervised_stream(
     .context("failed to create SolanaIndexer")?;
 
     let (sign_tx, sign_rx) = mpsc::channel::<SignCommand>(16);
-    let (rpc_tx, _rpc_rx) = mpsc::channel::<RpcAction>(16);
+    let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(16);
     let rpc = RpcChannel { tx: rpc_tx };
+    // Checkpoint votes go out on this channel; drain it so a restart can
+    // resubmit the votes it recovers instead of failing on a closed channel.
+    tokio::spawn(async move { while rpc_rx.recv().await.is_some() {} });
 
     let account_id: AccountId = "test.near".parse().unwrap();
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
