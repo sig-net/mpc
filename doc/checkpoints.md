@@ -112,8 +112,8 @@ At t = n - f this is every correct node (Section 6).
 ### Peer
 
 ```
-get_checkpoint(chain, height, digest) -> Checkpoint
-  // reply with the Checkpoint matching the chain, height and digest, if
+get_checkpoint(chain, digest) -> Checkpoint
+  // reply with the Checkpoint matching the chain and digest, if
   // held as `base` or in `pending`
 ```
 
@@ -258,7 +258,7 @@ re_index():                                       // start over from base
 
 ### Asking peers
 
-While `want` is set the node keeps asking peers for `get_checkpoint(chain, want)`.
+While `want` is set the node keeps asking peers for `get_checkpoint(chain, d)`, with d the digest in `want`.
 Asking for a height below the settled one comes back without a checkpoint, since holders drop it on rebasing onto a later one.
 The next poll overwrites `want` with whatever is settled then, so the poll period bounds how long the node asks for the wrong checkpoint.
 
