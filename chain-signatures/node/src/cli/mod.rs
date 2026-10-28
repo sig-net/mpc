@@ -73,8 +73,8 @@ pub enum Cli {
         /// This node's account id
         #[arg(long, env("MPC_ACCOUNT_ID"))]
         account_id: AccountId,
-        /// Environment this node runs in (e.g. `testnet`, `mainnet`,
-        /// `integration-tests`). Labels logs and telemetry.
+        /// Environment this node runs in (e.g. `testnet`, `mainnet`). Labels logs
+        /// and telemetry.
         #[arg(long, env("MPC_ENV"))]
         env: String,
         /// This node's account ed25519 secret key
@@ -246,9 +246,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             });
             tracing::info!(%my_address, "address detected");
 
-            // NEAR Indexer is only used for integration tests
-            // TODO: Remove this once we have integration tests built on other chains
-            if env == "integration-tests" {
+            // NEAR as a source chain exists for the integration tests only, and the
+            // test harness builds this binary with `test-feature`.
+            if cfg!(feature = "test-feature") {
                 let rpc_client = near_fetch::Client::new(&near_rpc);
                 let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
                 mpc_chain_near::run(
