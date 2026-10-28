@@ -45,9 +45,13 @@ pub(crate) const MAX_CALLER_STATE_BYTES: usize = 7 * 1024 * 1024;
 const MAX_RESPONSE_SIZE: u32 = 32 * 1024 * 1024;
 
 /// Generous bound on the JSON around the hex state in a `midnight_contractState`
-/// response. A cap of at least twice the limit plus this fits every admissible
-/// state, so a refusal under such a cap proves the state is over the limit.
+/// response.
 const RESPONSE_ENVELOPE_BYTES: usize = 1024;
+
+/// Smallest RPC node response cap that fits every admissible state: the hex doubles
+/// the bytes, plus the envelope. A size refusal under a cap at least this large
+/// proves the state is over the limit.
+const MIN_PROVING_RESPONSE_CAP: usize = 2 * MAX_CALLER_STATE_BYTES + RESPONSE_ENVELOPE_BYTES;
 
 const STATE_TOO_LARGE: &str = "midnight contract state exceeds the protocol limit";
 
@@ -692,7 +696,11 @@ async fn publisher_contract_state(
 
     match classify_contract_state_reply(response)? {
         ContractStateReply::State(state) => Ok(state),
-        ContractStateReply::TooLarge(err) => Err(anyhow::Error::new(err)),
+        // Not an admission verdict: the central contract is exempt from the limit.
+        ContractStateReply::TooLarge(err) => Err(anyhow::Error::new(err).context(
+            "midnight_contractState refused the central contract's state for its size; \
+             the central contract is exempt from the admission limit, raise the cap",
+        )),
         ContractStateReply::Other(err) => {
             Err(anyhow::Error::new(err).context("midnight_contractState failed"))
         }
@@ -740,7 +748,7 @@ fn classify_contract_state_reply(
         // is held like any other read failure.
         Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
             match server_response_cap(&reply) {
-                Some(cap) if cap >= 2 * MAX_CALLER_STATE_BYTES + RESPONSE_ENVELOPE_BYTES => {
+                Some(cap) if cap >= MIN_PROVING_RESPONSE_CAP => {
                     ContractStateReply::TooLarge(OversizedContractState {
                         detail: format!("response over the rpc node's cap of {cap} bytes"),
                         source: Some(RawRpcError::User(reply)),
@@ -750,8 +758,7 @@ fn classify_contract_state_reply(
                     tracing::warn!(
                         ?cap,
                         "the midnight rpc node's response cap refused a contract state; the \
-                         cap must be at least {} bytes",
-                        2 * MAX_CALLER_STATE_BYTES + RESPONSE_ENVELOPE_BYTES
+                         cap must be at least {MIN_PROVING_RESPONSE_CAP} bytes"
                     );
                     ContractStateReply::Other(RawRpcError::User(reply))
                 }
