@@ -664,10 +664,13 @@ async fn midnight_indexes_notifications_by_transcript_placement() -> anyhow::Res
         .midnight
         .as_ref()
         .context("Midnight context was not started")?;
+    let root_public_key =
+        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
     let indexer = MidnightIndexer::new(
         midnight.config.clone(),
         MockStateManager::new(),
         NoopChainTelemetry,
+        root_public_key,
     )
     .await?;
     let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
@@ -822,8 +825,6 @@ async fn midnight_indexes_notifications_by_transcript_placement() -> anyhow::Res
         expected.iter().map(hex::encode).collect::<Vec<_>>()
     );
 
-    let root_public_key =
-        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
     let SignKind::SignBidirectional(sign_event) = &observed.sign_requests[0].kind else {
         anyhow::bail!("expected a bidirectional request");
     };
@@ -898,15 +899,16 @@ async fn midnight_vault_operations_complete_with_real_mpc() -> anyhow::Result<()
         .ethereum
         .as_ref()
         .context("Ethereum context was not started")?;
+    let root_public_key =
+        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
     let indexer = MidnightIndexer::new(
         midnight.config.clone(),
         MockStateManager::new(),
         NoopChainTelemetry,
+        root_public_key,
     )
     .await?;
     let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
-    let root_public_key =
-        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
     let mpc_public_key = format!(
         "0x{}",
         hex::encode(root_public_key.to_encoded_point(false).as_bytes())
@@ -1012,10 +1014,13 @@ async fn midnight_partial_success_review_shapes() -> anyhow::Result<()> {
         .midnight
         .as_ref()
         .context("Midnight context was not started")?;
+    let root_public_key =
+        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
     let indexer = MidnightIndexer::new(
         midnight.config.clone(),
         MockStateManager::new(),
         NoopChainTelemetry,
+        root_public_key,
     )
     .await?;
     let mut events = ChainIndexerStream::start(indexer, EVENT_TIMEOUT).await?;
@@ -1029,8 +1034,6 @@ async fn midnight_partial_success_review_shapes() -> anyhow::Result<()> {
     let target = Address::repeat_byte(0x61);
     let mut argument = [0; 32];
     argument[31] = 6;
-    let root_public_key =
-        mpc_crypto::near_public_key_to_affine_point(cluster.root_public_key().await?);
     let mut heights = BTreeMap::new();
     let mut observed = Observed::default();
     let mut placed = Vec::new();

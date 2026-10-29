@@ -1260,7 +1260,8 @@ mod tests {
         let record_from = |sender: [u8; 32], nonce: u64| {
             let mut record = sample_record();
             record.sender = sender;
-            record.tx_params.nonce = nonce;
+            record.execution_dest = ascii_padded(b"eip155:1");
+            record.evm_mut().nonce = nonce;
             let rid = crate::hashing::compute_request_id(&record).unwrap();
             (record, rid)
         };

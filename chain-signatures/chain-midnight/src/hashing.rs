@@ -535,7 +535,7 @@ mod tests {
                 vector["name"]
             );
             assert_eq!(
-                hex::encode(crate::tx::serialized_transaction(&record).unwrap()),
+                hex::encode(crate::tx::serialized_evm_tx(&record).unwrap()),
                 vector["serializedTransaction"].as_str().unwrap(),
                 "{} ({})",
                 vector["name"],
