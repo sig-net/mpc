@@ -300,7 +300,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         gcp_project_id: None,
         sk_share_secret_id: None,
         sk_share_local_path: Some(sk_share_local_path),
-        sk_share_in_memory: false,
         redis_url: redis.internal_address.clone(),
     };
 

@@ -36,10 +36,6 @@ pub struct Options {
     #[cfg(feature = "test-feature")]
     #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"), group = "sk_share")]
     pub sk_share_local_path: Option<String>,
-    /// Keep the key share in memory only; it is lost on restart.
-    #[cfg(feature = "test-feature")]
-    #[arg(long, group = "sk_share")]
-    pub sk_share_in_memory: bool,
     #[arg(long, env("MPC_REDIS_URL"), hide_env_values = true)]
     pub redis_url: String,
 }
@@ -49,10 +45,6 @@ impl Options {
         let mut opts = Vec::new();
         if let Some(gcp_project_id) = self.gcp_project_id {
             opts.extend(["--gcp-project-id".to_string(), gcp_project_id]);
-        }
-        #[cfg(feature = "test-feature")]
-        if self.sk_share_in_memory {
-            opts.push("--sk-share-in-memory".to_string());
         }
         if let Some(sk_share_secret_id) = self.sk_share_secret_id {
             opts.extend(vec!["--sk-share-secret-id".to_string(), sk_share_secret_id]);

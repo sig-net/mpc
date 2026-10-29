@@ -33,7 +33,8 @@ use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
-use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
+use mpc_node::storage::secret_storage::{self, MemoryNodeStorage, SecretNodeStorageVariant};
+use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::stream::StreamContext;
 use mpc_primitives::Chain;
 use near_sdk::AccountId;
@@ -661,20 +662,9 @@ impl MpcFixtureNodeBuilder {
         context: &MockedNodeContext,
         fixture_input: &mut Option<FixtureInput>,
     ) -> protocol::test_setup::TestProtocolStorage {
-        let secret_storage = if let Some(key) = &self.key_info {
-            secret_storage::test_store(0, key.private_share, key.public_key)
-        } else {
-            secret_storage::init(
-                None,
-                &Options {
-                    gcp_project_id: None,
-                    sk_share_secret_id: None,
-                    sk_share_local_path: None,
-                    sk_share_in_memory: true,
-                    redis_url: ".".to_owned(),
-                },
-                &self.participant_info.account_id,
-            )
+        let secret_storage = match &self.key_info {
+            Some(key) => secret_storage::test_store(0, key.private_share, key.public_key),
+            None => SecretNodeStorageVariant::Memory(MemoryNodeStorage::default()),
         };
 
         let triple_storage =

@@ -18,12 +18,14 @@ pub trait SecretNodeStorage {
     async fn load(&self) -> SecretResult<Option<PersistentNodeData>>;
 }
 
-/// In-memory implementation of `SecretNodeStorage`.
+/// In-memory implementation of `SecretNodeStorage`, for in-process tests.
+#[cfg(any(test, feature = "test-feature"))]
 #[derive(Default)]
 pub struct MemoryNodeStorage {
     node_data: Option<PersistentNodeData>,
 }
 
+#[cfg(any(test, feature = "test-feature"))]
 #[async_trait]
 impl SecretNodeStorage for MemoryNodeStorage {
     async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
@@ -145,7 +147,8 @@ impl SecretNodeStorage for DiskNodeStorage {
 
 /// Enum representing the different variants of secret node storage.
 pub enum SecretNodeStorageVariant {
-    /// In-memory storage variant, primarily for testing or ephemeral use cases.
+    /// In-memory storage for in-process tests.
+    #[cfg(any(test, feature = "test-feature"))]
     Memory(MemoryNodeStorage),
     /// Google Cloud Secret Manager storage variant
     Gcp(SecretManagerNodeStorage),
@@ -157,6 +160,7 @@ impl SecretNodeStorageVariant {
     /// Stores the given `PersistentNodeData` using the underlying storage mechanism.
     pub async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
         match self {
+            #[cfg(any(test, feature = "test-feature"))]
             SecretNodeStorageVariant::Memory(s) => s.store(data).await,
             SecretNodeStorageVariant::Gcp(s) => s.store(data).await,
             SecretNodeStorageVariant::Disk(s) => s.store(data).await,
@@ -166,6 +170,7 @@ impl SecretNodeStorageVariant {
     /// Loads the `PersistentNodeData` from the underlying storage mechanism, if it exists.
     pub async fn load(&self) -> SecretResult<Option<PersistentNodeData>> {
         match self {
+            #[cfg(any(test, feature = "test-feature"))]
             SecretNodeStorageVariant::Memory(s) => s.load().await,
             SecretNodeStorageVariant::Gcp(s) => s.load().await,
             SecretNodeStorageVariant::Disk(s) => s.load().await,
@@ -175,21 +180,12 @@ impl SecretNodeStorageVariant {
 
 /// Opens the key-share store the options name. Production builds know only
 /// Secret Manager; clap pairs its id with a GCP project, so `gcp_service` is
-/// present whenever `sk_share_secret_id` is. Test builds may name a file or
-/// the in-memory store instead.
+/// present whenever `sk_share_secret_id` is. Test builds may name a file.
 pub fn init(
     gcp_service: Option<&GcpService>,
     opts: &Options,
     account_id: &AccountId,
 ) -> SecretNodeStorageVariant {
-    if let Some(secret_id) = &opts.sk_share_secret_id {
-        let gcp = gcp_service.expect("Secret Manager storage needs a GCP service");
-        tracing::info!("using SecretManagerNodeStorage");
-        return SecretNodeStorageVariant::Gcp(SecretManagerNodeStorage::new(
-            &gcp.secret_manager,
-            secret_id.clone(),
-        ));
-    }
     #[cfg(feature = "test-feature")]
     if let Some(sk_share_local_path) = &opts.sk_share_local_path {
         let path = format!("{sk_share_local_path}-{account_id}");
@@ -198,9 +194,16 @@ pub fn init(
     }
     #[cfg(not(feature = "test-feature"))]
     let _ = account_id;
-    // `--sk-share-in-memory`, which only test builds accept.
-    tracing::warn!("using MemoryNodeStorage: the key share is lost on restart");
-    SecretNodeStorageVariant::Memory(MemoryNodeStorage::default())
+    let secret_id = opts
+        .sk_share_secret_id
+        .as_ref()
+        .expect("clap requires a key-share store");
+    let gcp = gcp_service.expect("Secret Manager storage needs a GCP service");
+    tracing::info!("using SecretManagerNodeStorage");
+    SecretNodeStorageVariant::Gcp(SecretManagerNodeStorage::new(
+        &gcp.secret_manager,
+        secret_id.clone(),
+    ))
 }
 
 #[cfg(feature = "test-feature")]
@@ -304,31 +307,12 @@ mod tests {
     }
 
     #[cfg(feature = "test-feature")]
-    #[test]
-    fn init_uses_memory_when_no_storage_configured() {
-        let opts = Options {
-            sk_share_secret_id: None,
-            #[cfg(feature = "test-feature")]
-            sk_share_local_path: None,
-            #[cfg(feature = "test-feature")]
-            sk_share_in_memory: true,
-            gcp_project_id: None,
-            redis_url: "redis://localhost".to_string(),
-        };
-
-        let storage = init(None, &opts, &make_test_account_id());
-
-        assert!(matches!(storage, SecretNodeStorageVariant::Memory(_)));
-    }
-
     #[cfg(feature = "test-feature")]
     #[test]
     fn init_uses_disk_when_local_path_provided() {
         let opts = Options {
             sk_share_local_path: Some("/tmp/share".into()),
             sk_share_secret_id: None,
-            #[cfg(feature = "test-feature")]
-            sk_share_in_memory: false,
             gcp_project_id: None,
             redis_url: "redis://localhost".to_string(),
         };
@@ -344,8 +328,6 @@ mod tests {
             sk_share_secret_id: Some("secret-id".to_string()),
             #[cfg(feature = "test-feature")]
             sk_share_local_path: None,
-            #[cfg(feature = "test-feature")]
-            sk_share_in_memory: false,
             gcp_project_id: Some("test-project".to_string()),
             redis_url: "redis://localhost".to_string(),
         };
