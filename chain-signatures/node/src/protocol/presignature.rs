@@ -400,12 +400,6 @@ impl PresignatureSpawner {
         self.posits.len_proposed() + self.ongoing_owned.len()
     }
 
-    /// Generations this node runs or has promised to join: a PROPOSE it
-    /// accepted commits it before the START arrives.
-    fn len_committed(&self) -> usize {
-        self.ongoing.len() + self.posits.len()
-    }
-
     /// Read the stock counts from storage. Called once a second from the run
     /// loop, so the 100 ms stockpile tick decides from memory.
     async fn refresh_stock(&mut self) {
@@ -427,6 +421,9 @@ impl PresignatureSpawner {
         from: Participant,
         limits: AcceptLimits,
     ) -> Option<PositRejectReason> {
+        // Generations this node runs or has promised to join: a PROPOSE it
+        // accepted commits it before the START arrives.
+        let committed = self.ongoing.len() + self.posits.len();
         if !id.validate() {
             tracing::error!(
                 ?id,
@@ -437,13 +434,8 @@ impl PresignatureSpawner {
         } else if self.contains_ongoing(id.id) {
             tracing::warn!(?id, ?from, "presignature already generating");
             Some(PositRejectReason::AlreadyGenerating)
-        } else if self.len_committed() >= limits.ongoing {
-            tracing::warn!(
-                ?id,
-                ?from,
-                committed = self.len_committed(),
-                "presignature generations saturated"
-            );
+        } else if committed >= limits.ongoing {
+            tracing::warn!(?id, ?from, committed, "presignature generations saturated");
             Some(PositRejectReason::Saturated)
         } else if self.stock.generated >= limits.generated {
             tracing::warn!(
