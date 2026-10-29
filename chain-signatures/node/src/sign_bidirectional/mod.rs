@@ -14,6 +14,7 @@ use mpc_primitives::LATEST_MPC_KEY_VERSION;
 pub use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
 };
+use mpc_primitives::{IndexedSignRequest, SignKind};
 
 pub use eth_tx::{derive_user_address, public_key_to_address};
 pub use progress::{BidirectionalProgress, SignProgress, SignStatus};
@@ -74,6 +75,29 @@ pub(crate) const SDK_PARAMS: &str = "";
 
 /// Key version 0 predates bidirectional signing.
 const MIN_BIDIRECTIONAL_KEY_VERSION: u32 = 1;
+
+/// Reserved for bidirectional paths where plain `sign` shares their keys, so plain
+/// sign cannot use up a bidirectional request's nonce.
+pub(crate) const BIDIRECTIONAL_PATH_PREFIX: &str = "bidirectional/";
+
+/// The prefix bidirectional paths on `chain` must start with, where plain `sign`
+/// derives the same key from the same sender, path and key version.
+fn bidirectional_namespace(chain: Chain) -> Option<&'static str> {
+    matches!(chain, Chain::Solana | Chain::Hydration).then_some(BIDIRECTIONAL_PATH_PREFIX)
+}
+
+/// Whether `request` is a plain sign request naming a path reserved for bidirectional
+/// requests.
+pub(crate) fn claims_bidirectional_namespace(request: &IndexedSignRequest) -> bool {
+    matches!(request.kind, SignKind::Sign)
+        && bidirectional_namespace(request.chain)
+            .is_some_and(|prefix| request.args.path.starts_with(prefix))
+}
+
+/// Whether `event`'s path lies in its chain's namespace. True where there is none.
+pub(crate) fn path_in_namespace(event: &SignBidirectionalEvent) -> bool {
+    bidirectional_namespace(event.chain).is_none_or(|prefix| event.path.starts_with(prefix))
+}
 
 /// Key version in `MIN_BIDIRECTIONAL_KEY_VERSION..=LATEST_MPC_KEY_VERSION`, and
 /// [`SDK_ALGO`], [`SDK_DEST`] and [`SDK_PARAMS`].
@@ -268,8 +292,8 @@ impl BidirectionalTxExt for BidirectionalTx {
 mod tests {
     use super::eth_tx::legacy_tx;
     use super::{
-        SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature, LATEST_MPC_KEY_VERSION,
-        SDK_ALGO, SDK_DEST, SDK_PARAMS,
+        SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature,
+        BIDIRECTIONAL_PATH_PREFIX, LATEST_MPC_KEY_VERSION, SDK_ALGO, SDK_DEST, SDK_PARAMS,
     };
     use crate::protocol::Chain;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -287,7 +311,7 @@ mod tests {
             caip2_id: target.caip2_chain_id().to_string(),
             key_version: LATEST_MPC_KEY_VERSION,
             deposit: 0,
-            path: "m/0".to_string(),
+            path: format!("{BIDIRECTIONAL_PATH_PREFIX}m/0"),
             algo: SDK_ALGO.to_string(),
             params: SDK_PARAMS.to_string(),
             chain: Chain::Solana,
@@ -309,15 +333,22 @@ mod tests {
         event.algo = "ecdsa".to_string();
         event.dest = "ethereum".to_string();
         event.params = "{}".to_string();
+        event.path = "m/0".to_string();
         assert!(super::check_request_fields(&event).is_err());
+        assert!(!super::path_in_namespace(&event));
         assert!(event.validate().is_ok());
     }
 
     #[test]
     fn check_request_fields_accepts_only_key_version_1_and_the_sdk_fields() {
         type Edit = fn(&mut SignBidirectionalEvent);
-        let cases: [(&str, Edit, bool); 15] = [
-            ("as the SDKs send it", |_| {}, true),
+        let cases: [(&str, Edit, bool); 16] = [
+            ("on spec", |_| {}, true),
+            (
+                "path outside the namespace",
+                |e| e.path = "m/0".to_string(),
+                true,
+            ),
             ("from Hydration", |e| e.chain = Chain::Hydration, true),
             (
                 "from Hydration at key version 0",
@@ -373,6 +404,25 @@ mod tests {
                 accepted,
                 "{case}"
             );
+        }
+    }
+
+    #[test]
+    fn path_in_namespace_only_where_plain_sign_shares_keys() {
+        let cases = [
+            (Chain::Solana, "bidirectional/m/0", true),
+            (Chain::Solana, "m/0", false),
+            (Chain::Solana, "bidirectional", false),
+            (Chain::Hydration, "bidirectional/m/0", true),
+            (Chain::Hydration, "m/0", false),
+            (Chain::Canton, "m/0", true),
+            (Chain::Midnight, "m/0", true),
+        ];
+        for (chain, path, inside) in cases {
+            let mut event = solana_event(Chain::Ethereum);
+            event.chain = chain;
+            event.path = path.to_string();
+            assert_eq!(super::path_in_namespace(&event), inside, "{chain} {path}");
         }
     }
 

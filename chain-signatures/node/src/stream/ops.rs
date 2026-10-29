@@ -8,12 +8,12 @@ use crate::backlog::{
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
-    claims_attestation_key, published_failure, published_midnight_payload,
+    claims_reserved_path, published_failure, published_midnight_payload,
     published_midnight_signing_args, published_output_payload, published_output_signing_args,
 };
 use crate::sign_bidirectional::{
-    owned_by_requester, transaction_chain_id, BidirectionalProgress, BidirectionalTxId,
-    SignBidirectionalEventExt, SignStatus,
+    owned_by_requester, path_in_namespace, transaction_chain_id, BidirectionalProgress,
+    BidirectionalTxId, SignBidirectionalEventExt, SignStatus, BIDIRECTIONAL_PATH_PREFIX,
 };
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -57,6 +57,15 @@ pub(crate) async fn process_sign_request(
             event.validate().with_context(|| {
                 format!("rejecting bidirectional sign request {:?}", sign_request.id)
             })?;
+            // Only warns until the senders move their paths into the namespace.
+            if !path_in_namespace(event) {
+                tracing::warn!(
+                    sign_id = ?sign_request.id,
+                    source_chain = ?event.chain,
+                    path = %event.path,
+                    "accepting a bidirectional path outside {BIDIRECTIONAL_PATH_PREFIX:?}"
+                );
+            }
             if let Some((actual, expected)) = network_mismatch(event, ctx.ethereum_chain_id) {
                 anyhow::bail!(
                     "rejecting bidirectional sign request {:?}: chain id {actual:?}, \
@@ -82,13 +91,13 @@ pub(crate) async fn process_sign_request(
         SignKind::Sign => {}
     }
 
-    // The attestation key is derived from the requesting contract under a fixed
-    // path, so a request naming that path forges a response to itself. Here
-    // rather than in `validate`, which plain `sign` never reaches.
+    // The attestation path forges a response from the requesting contract; the namespace keeps
+    // plain sign off bidirectional nonces. Here because plain `sign` never reaches `validate`.
     anyhow::ensure!(
-        !claims_attestation_key(&sign_request),
-        "rejecting sign request {:?} on the reserved attestation path",
-        sign_request.id
+        !claims_reserved_path(&sign_request),
+        "rejecting sign request {:?} on reserved path {:?}",
+        sign_request.id,
+        sign_request.args.path
     );
 
     let sign_id = sign_request.id;

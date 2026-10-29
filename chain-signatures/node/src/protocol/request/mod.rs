@@ -11,7 +11,7 @@ use crate::protocol::presignature::PresignatureId;
 use crate::protocol::signature::{GenerateCtx, SignError, SignGenerator};
 use crate::protocol::sync::{SyncKind, SyncReportSender};
 use crate::protocol::Chain;
-use crate::respond_bidirectional::claims_attestation_key;
+use crate::respond_bidirectional::claims_reserved_path;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureReservation, PresignatureTaken};
 use crate::storage::PresignatureStorage;
@@ -554,14 +554,15 @@ impl SignatureSpawner {
 
                 // Every route into signing passes here, checkpoint recovery included (it skips
                 // admission). After the duplicate guard, so a refusal can't retire a tracked request.
-                if claims_attestation_key(entry.request()) {
+                if claims_reserved_path(entry.request()) {
                     tracing::error!(
                         ?sign_id,
                         chain = %entry.chain(),
-                        "refusing to sign on the reserved attestation path"
+                        path = %entry.request().args.path,
+                        "refusing to sign on a reserved path"
                     );
                     // Drop posits peers sent ahead of the request, and any that arrive later across all kinds.
-                    self.retire_all(sign_id, "refused attestation path");
+                    self.retire_all(sign_id, "refused reserved path");
                     return;
                 }
 
@@ -1019,6 +1020,31 @@ mod tests {
         let entry = backlog::SignEntry::generating(leg_two, &spawner.backlog);
         spawner.request(entry);
         assert!(spawner.test_tasks_contains(leg_two_id, RequestKind::RespondBidirectional));
+    }
+
+    /// Checkpoint recovery skips admission, so a plain sign request in the bidirectional
+    /// namespace is refused here too, while a bidirectional request on that path is not.
+    #[tokio::test]
+    async fn test_refuses_plain_sign_in_the_bidirectional_namespace() {
+        let mut spawner = setup();
+
+        for (n, chain) in [Chain::Solana, Chain::Hydration].into_iter().enumerate() {
+            let plain_id = SignId::new([13 + 2 * n as u8; 32]);
+            let mut plain = crate::backlog::mock::mock_sign_request(plain_id, chain);
+            Arc::make_mut(&mut plain).args.path = "bidirectional/m/0".to_string();
+            spawner.request(backlog::SignEntry::generating(plain, &spawner.backlog));
+            assert!(!spawner.test_requests_contains(&plain_id), "{chain}");
+            assert!(
+                !spawner.test_tasks_contains(plain_id, RequestKind::Sign),
+                "{chain}"
+            );
+        }
+
+        let bidi_id = SignId::new([16u8; 32]);
+        let mut bidi = crate::backlog::mock::mock_bidi_request(bidi_id, Chain::Solana);
+        Arc::make_mut(&mut bidi).args.path = "bidirectional/m/0".to_string();
+        spawner.request(backlog::SignEntry::generating(bidi, &spawner.backlog));
+        assert!(spawner.test_requests_contains(&bidi_id));
     }
 
     /// The duplicate guard admits a next leg over the leg it supersedes, while

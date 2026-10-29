@@ -929,7 +929,7 @@ async fn process_sign_request_rejects_the_reserved_attestation_path() {
     let err = process_sign_request(reserved, &ctx, test_root_pk())
         .await
         .expect_err("a sign request on the attestation path must be rejected");
-    assert!(err.to_string().contains("reserved attestation path"));
+    assert!(err.to_string().contains("reserved path"));
     assert_eq!(
         backlog.len(),
         0,
@@ -946,6 +946,39 @@ async fn process_sign_request_rejects_the_reserved_attestation_path() {
         .await
         .expect("another chain's attestation path must still be admitted");
     assert!(backlog.get(Chain::Solana, &foreign_id).await.is_some());
+}
+
+/// Plain `sign` on Solana and Hydration derives a bidirectional request's key from
+/// the same sender and path, so a path in the namespace could use up its nonce.
+#[tokio::test]
+async fn process_sign_request_rejects_the_bidirectional_namespace() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
+
+    for (n, chain) in [Chain::Solana, Chain::Hydration].into_iter().enumerate() {
+        let mut reserved = mock_sign_request(SignId::new([33 + n as u8; 32]), chain);
+        Arc::make_mut(&mut reserved).args.path = "bidirectional/m/0".to_string();
+        let err = process_sign_request(reserved, &ctx, test_root_pk())
+            .await
+            .expect_err("a sign request in the namespace must be rejected");
+        assert!(err.to_string().contains("reserved path"), "{chain}");
+    }
+    assert_eq!(
+        backlog.len(),
+        0,
+        "a rejected request must not reach the backlog"
+    );
+
+    // Plain sign on other chains derives keys of its own chain, which no
+    // bidirectional request shares.
+    let ethereum_id = SignId::new([35u8; 32]);
+    let mut ethereum = mock_sign_request(ethereum_id, Chain::Ethereum);
+    Arc::make_mut(&mut ethereum).args.path = "bidirectional/m/0".to_string();
+    process_sign_request(ethereum, &ctx, test_root_pk())
+        .await
+        .expect("the namespace is reserved on Solana and Hydration only");
+    assert!(backlog.get(Chain::Ethereum, &ethereum_id).await.is_some());
 }
 
 #[tokio::test]
