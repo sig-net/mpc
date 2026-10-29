@@ -31,9 +31,11 @@ Requests, signatures, executions, attestations and the source and destination ch
 
 Vocabulary, per node per source chain:
 
-* **Boundary**: a height at which a checkpoint is due, one every fixed number of heights.
-  A node takes the checkpoint at the first height it processes at or past a boundary, one checkpoint even where that block passes several boundaries.
+* **Boundary**: heights fall into intervals of a fixed length; a boundary is where a new interval starts.
   Every correct node uses the same interval.
+
+* **Checkpoint height**: the first processed height in a new interval, so the boundary itself unless the chain skipped that height.
+  Correct nodes process the same heights, so they agree on it.
 
 * **Processed height**: the last height whose block the node has finished processing, its events applied to the backlog.
   The indexer reports heights in order, with all their events; a chain may skip heights where nothing happened, and the indexers of correct nodes report the same heights.
