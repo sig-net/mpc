@@ -104,6 +104,6 @@ default = []
 # utilized for benchmarking the node:
 bench = []
 # utilized by "integration-tests" package:
-test-feature = ["mpc-chain-midnight/sandbox"]
+test-feature = ["mpc-chain-midnight/sandbox", "mpc-chain-ethereum/test-feature"]
 # Show a debug page
 debug-page = ["maud"]

@@ -39,8 +39,7 @@ pub fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
 
 /// Build an [`EthConfig`] from the standard set of benchmark env vars
 /// (`MPC_ETH_EXECUTION_RPC_HTTP_URL`, `MPC_ETH_CONTRACT_ADDRESS`,
-/// `MPC_ETH_NETWORK`, `MPC_ETH_OPTIMISTIC_REQUESTS`,
-/// `MPC_ETH_REFRESH_FINALIZED_INTERVAL`).
+/// `MPC_ETH_NETWORK`, `MPC_ETH_OPTIMISTIC_REQUESTS`).
 pub fn make_config() -> anyhow::Result<EthConfig> {
     Ok(EthConfig {
         // The bench only indexes; the signer is never used.
@@ -54,9 +53,6 @@ pub fn make_config() -> anyhow::Result<EthConfig> {
             .parse()
             .map_err(|e| anyhow!("invalid MPC_ETH_CONTRACT_ADDRESS: {e}"))?,
         network: std::env::var("MPC_ETH_NETWORK").unwrap_or_else(|_| "sepolia".to_string()),
-        // Production finality-watch cadence; the watcher drives finality in
-        // MPC_ETH_OPTIMISTIC_REQUESTS=false mode.
-        refresh_finalized_interval: env_u64("MPC_ETH_REFRESH_FINALIZED_INTERVAL", Some(10_000))?,
         // Default to the production (non-optimistic) path;
         optimistic_requests: env_bool("MPC_ETH_OPTIMISTIC_REQUESTS", false)?,
         rpc: Default::default(),

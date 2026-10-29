@@ -131,12 +131,20 @@ impl FinalizedHeadWatcher {
     }
 }
 
+/// How often the head watcher polls the RPC. Test builds poll fast so
+/// finality-gated tests finish in seconds.
+pub const REFRESH_INTERVAL: Duration = if cfg!(any(test, feature = "test-feature")) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(10)
+};
+
 impl FinalizedHeadTracker {
     pub fn new(eth: &EthConfig) -> Self {
         Self {
             head: watch::channel(None).0,
             optimistic: eth.optimistic_requests,
-            refresh_interval: Duration::from_millis(eth.refresh_finalized_interval),
+            refresh_interval: REFRESH_INTERVAL,
             stall_rewarn_secs: eth.indexer.stall_rewarn_secs,
         }
     }

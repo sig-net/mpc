@@ -1,5 +1,4 @@
 use mpc_chain_solana::{SolConfig, SolIndexerConfig};
-use std::time::Duration;
 
 /// Configures Solana indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -24,9 +23,6 @@ pub struct SolArgs {
     /// The program address to watch
     #[arg(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]
     pub sol_program_address: Option<String>,
-    /// Polling interval for the Solana indexer in milliseconds
-    #[arg(long, env("MPC_SOL_POLL_INTERVAL_MS"), default_value = "1000")]
-    pub sol_poll_interval_ms: u64,
 }
 
 impl SolArgs {
@@ -41,10 +37,6 @@ impl SolArgs {
         if let Some(sol_program_address) = self.sol_program_address {
             args.extend(["--sol-program-address".to_string(), sol_program_address]);
         }
-        args.extend([
-            "--sol-poll-interval-ms".to_string(),
-            self.sol_poll_interval_ms.to_string(),
-        ]);
         args
     }
 
@@ -53,9 +45,7 @@ impl SolArgs {
             account_sk: self.sol_account_sk?,
             rpc_http_url: self.sol_rpc_http_url?,
             program_address: self.sol_program_address?,
-            indexer: SolIndexerConfig {
-                poll_interval: Duration::from_millis(self.sol_poll_interval_ms),
-            },
+            indexer: SolIndexerConfig::default(),
         })
     }
 
@@ -65,13 +55,11 @@ impl SolArgs {
                 sol_account_sk: Some(config.account_sk),
                 sol_rpc_http_url: Some(config.rpc_http_url),
                 sol_program_address: Some(config.program_address),
-                sol_poll_interval_ms: config.indexer.poll_interval.as_millis() as u64,
             },
             None => SolArgs {
                 sol_account_sk: None,
                 sol_rpc_http_url: None,
                 sol_program_address: None,
-                sol_poll_interval_ms: SolIndexerConfig::default().poll_interval.as_millis() as u64,
             },
         }
     }

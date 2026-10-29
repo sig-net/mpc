@@ -271,7 +271,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                 .parse()
                 .context("invalid deployed contract address")?,
             network: "anvil".to_string(),
-            refresh_finalized_interval: 1_000,
             optimistic_requests: true,
             gas: Default::default(),
             indexer: Default::default(),
