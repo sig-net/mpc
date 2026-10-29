@@ -2250,9 +2250,14 @@ mod tests {
             .await
             .expect_err("the server refuses the response");
         assert!(!is_oversized_contract_state(&err), "{err:#}");
+        let rendered = format!("{err:#}");
         assert!(
-            format!("{err:#}").contains("exempt from the admission limit"),
-            "{err:#}"
+            rendered.contains("exempt from the admission limit"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("rpc node's cap of 15728640 bytes"),
+            "{rendered}"
         );
     }
 
