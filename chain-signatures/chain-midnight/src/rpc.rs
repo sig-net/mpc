@@ -37,7 +37,7 @@ const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
 /// node serves the state as hex inside JSON, so the response is a little over twice
 /// this; the limit must sit below half the RPC node's response cap (15 MiB by
 /// default) and well below half of [`MAX_RESPONSE_SIZE`].
-pub(crate) const MAX_CALLER_STATE_BYTES: usize = 7 * 1024 * 1024;
+const MAX_CALLER_STATE_BYTES: usize = 7 * 1024 * 1024;
 
 /// The client's own response cap. A constant rather than a config field: a response
 /// the client refuses is over 16 MiB of state, so over [`MAX_CALLER_STATE_BYTES`],
@@ -52,6 +52,9 @@ const RESPONSE_ENVELOPE_BYTES: usize = 1024;
 /// the bytes, plus the envelope. A size refusal under a cap at least this large
 /// proves the state is over the limit.
 const MIN_PROVING_RESPONSE_CAP: usize = 2 * MAX_CALLER_STATE_BYTES + RESPONSE_ENVELOPE_BYTES;
+
+// The client's own refusal proves excess only if the client admits every proving cap.
+const _: () = assert!(MIN_PROVING_RESPONSE_CAP <= MAX_RESPONSE_SIZE as usize);
 
 const STATE_TOO_LARGE: &str = "midnight contract state exceeds the protocol limit";
 
@@ -696,11 +699,18 @@ async fn publisher_contract_state(
 
     match classify_contract_state_reply(response)? {
         ContractStateReply::State(state) => Ok(state),
-        // Not an admission verdict: the central contract is exempt from the limit.
-        ContractStateReply::TooLarge(err) => Err(anyhow::Error::new(err).context(
-            "midnight_contractState refused the central contract's state for its size; \
-             the central contract is exempt from the admission limit, raise the cap",
-        )),
+        // Not an admission verdict, so the marker type stays out of the chain. The
+        // detail names the cap that refused, the rpc node's or the client's.
+        ContractStateReply::TooLarge(OversizedContractState { detail, source }) => {
+            let cause = match source {
+                Some(source) => anyhow::Error::new(source).context(detail),
+                None => anyhow::anyhow!(detail),
+            };
+            Err(cause.context(
+                "the central contract's state was refused for its size; it is exempt from \
+                 the admission limit, so the refusing cap is too small for it",
+            ))
+        }
         ContractStateReply::Other(err) => {
             Err(anyhow::Error::new(err).context("midnight_contractState failed"))
         }
@@ -755,11 +765,14 @@ fn classify_contract_state_reply(
                     })
                 }
                 cap => {
-                    tracing::warn!(
-                        ?cap,
-                        "the midnight rpc node's response cap refused a contract state; the \
-                         cap must be at least {MIN_PROVING_RESPONSE_CAP} bytes"
-                    );
+                    if let Some(count) = mpc_utils::throttle::check("midnight:rpc-cap-refusal") {
+                        tracing::warn!(
+                            count,
+                            ?cap,
+                            min_cap = MIN_PROVING_RESPONSE_CAP,
+                            "the midnight rpc node's response cap refused a contract state"
+                        );
+                    }
                     ContractStateReply::Other(RawRpcError::User(reply))
                 }
             }
@@ -2181,6 +2194,66 @@ mod tests {
                 "cap {server_cap}"
             );
         }
+    }
+
+    /// A state both caps let through is still bounded by the decoded length.
+    #[tokio::test]
+    async fn a_state_over_the_limit_but_under_both_caps_is_a_drop() {
+        let server = ServerBuilder::default()
+            .max_response_body_size(MAX_RESPONSE_SIZE)
+            .build("127.0.0.1:0")
+            .await
+            .expect("bind HTTP rpc server");
+        let address = server.local_addr().expect("HTTP rpc server address");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("midnight_contractState", |_, _, _| {
+                "ab".repeat(MAX_CALLER_STATE_BYTES + 1)
+            })
+            .expect("register state method");
+        let _handle = server.start(module);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = CountingRpc {
+            inner: connect_http(&http_config(address)).expect("build transport"),
+            calls: calls.clone(),
+        };
+        let reads = Reads::new(RpcClient::new(counted), READ_TIMEOUT, attempts(2));
+        let err = reads
+            .contract_state(ADDRESS, AT_HASH)
+            .await
+            .expect_err("one byte over the limit");
+        assert!(is_oversized_contract_state(&err), "{err:#}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a drop is not retried");
+    }
+
+    /// The publisher reads the central contract through the same classifier, but a
+    /// size refusal there is a read failure, never an admission drop.
+    #[tokio::test]
+    async fn a_size_refusal_on_the_publisher_read_is_not_an_admission_drop() {
+        let server = ServerBuilder::default()
+            .max_response_body_size(15 * 1024 * 1024)
+            .build("127.0.0.1:0")
+            .await
+            .expect("bind HTTP rpc server");
+        let address = server.local_addr().expect("HTTP rpc server address");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("midnight_contractState", |_, _, _| {
+                "ab".repeat(8 * 1024 * 1024)
+            })
+            .expect("register state method");
+        let _handle = server.start(module);
+
+        let rpc = connect_http(&http_config(address)).expect("build transport");
+        let err = publisher_contract_state(&rpc, ADDRESS, AT_HASH)
+            .await
+            .expect_err("the server refuses the response");
+        assert!(!is_oversized_contract_state(&err), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("exempt from the admission limit"),
+            "{err:#}"
+        );
     }
 
     /// A body without `Content-Length` overflows the client cap while streaming,

@@ -421,7 +421,9 @@ processable(req): bool
     req.schema is well formed: it is empty, or it parses and names only
       types the MPC can decode from target and encode for the source chain
     on Midnight, the caller contract's state at the request's block, which
-      holds the request, decodes to at most `MAX_CALLER_STATE_BYTES`
+      holds the request, is at most `MAX_CALLER_STATE_BYTES` once
+      hex-decoded, and so is its state at the parent block when the
+      notification comes from a partially successful transaction
       (Section 6)
 
 on Signature { rid, signature } finalised on the source chain:
