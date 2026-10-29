@@ -403,16 +403,16 @@ pub(crate) fn plan_fee(
 ) -> Result<FeePlan, SubmitError> {
     let mut candidates: Vec<(QualifiedDustOutput, u128)> = Vec::new();
     let mut held = 0usize;
+    let mut held_value: u128 = 0;
     for utxo in local.utxos() {
-        if reserved.contains(&utxo.nullifier(key)) {
-            held += 1;
-            continue;
-        }
         let Some(generation) = local.generation_info(&utxo) else {
             continue;
         };
         let value = DustOutput::from(utxo).updated_value(&generation, ctime, &local.params);
-        if value > 0 {
+        if reserved.contains(&utxo.nullifier(key)) {
+            held += 1;
+            held_value = held_value.saturating_add(value);
+        } else if value > 0 {
             candidates.push((utxo, value));
         }
     }
@@ -424,7 +424,10 @@ pub(crate) fn plan_fee(
     let mut required: u128 = 0;
     for _ in 0..FEE_PASSES {
         if required > available {
-            return Err(if held > 0 {
+            // Held DUST comes back as the in-flight submit's change, or whole if it
+            // never lands; a fee it could not cover either way is unfunded.
+            let busy = held > 0 && required <= available.saturating_add(held_value);
+            return Err(if busy {
                 SubmitError::WalletBusy(format!(
                     "{held} DUST UTXO(s) are held by a submit still in flight; the free ones \
                      hold {available} of the {required} SPECKS this fee needs"
@@ -660,6 +663,44 @@ pub(crate) mod tests {
         .err()
         .expect("every UTXO is held");
         assert!(matches!(error, SubmitError::WalletBusy(_)), "{error}");
+    }
+
+    #[test]
+    fn a_fee_the_held_dust_could_not_cover_either_is_unfunded() {
+        let local = replayed();
+        let key = funded_key();
+        let first: Vec<DustNullifier> = local
+            .utxos()
+            .map(|utxo| utxo.nullifier(&key))
+            .take(1)
+            .collect();
+        let ctime = local.sync_time;
+        let ttl = Timestamp::from_secs(ctime.to_secs() + 180);
+        let mut rng = StdRng::seed_from_u64(5);
+        let base = base(&mut rng, ttl);
+        // A price no amount of this wallet's DUST pays.
+        let mut parameters = INITIAL_PARAMETERS.clone();
+        parameters.fee_prices.overall_price =
+            midnight_base_crypto::cost_model::FixedPoint::from_u64_div(1 << 40, 1);
+        let plan = |reserved: &[DustNullifier], rng: &mut StdRng| {
+            plan_fee(
+                &key,
+                &local,
+                reserved,
+                &base,
+                &parameters,
+                ctime,
+                ttl,
+                "undeployed",
+                rng,
+            )
+            .err()
+            .expect("the fee outprices the wallet")
+        };
+        for reserved in [&[][..], &first[..]] {
+            let error = plan(reserved, &mut rng);
+            assert!(matches!(error, SubmitError::WalletUnfunded(_)), "{error}");
+        }
     }
 
     #[test]

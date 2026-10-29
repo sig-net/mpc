@@ -16,7 +16,7 @@ pub(crate) enum SubmitError {
     /// The DUST replay has not caught up. Nothing was posted.
     #[error("[wallet_unsynced] {0}")]
     WalletUnsynced(String),
-    /// Every spendable UTXO is held by a submit that may still land. Nothing was posted.
+    /// The fee needs UTXOs held by a submit that may still land. Nothing was posted.
     #[error("[wallet_busy] {0}")]
     WalletBusy(String),
     /// The wallet cannot pay the fee. Nothing was posted.
