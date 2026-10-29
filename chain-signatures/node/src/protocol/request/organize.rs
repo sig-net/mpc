@@ -7,6 +7,14 @@ use super::*;
 /// Organizing phase — see [`super::task::SignPhase::Organizing`].
 pub struct OrganizingPhase;
 
+/// Leaves the round when its deliberators do, without holding a slot, so this
+/// node's next round does not start ahead of theirs.
+async fn wait_out_round(state: &mut SignState, reason: &str) -> SignPhase {
+    state.permit = None;
+    tokio::time::sleep(state.budget.remaining()).await;
+    state.reorganize(reason)
+}
+
 impl OrganizingPhase {
     /// Seeded by request entropy so all nodes pick the same proposer.
     ///
@@ -104,20 +112,27 @@ impl OrganizingPhase {
             (active, proposer, is_proposer)
         };
 
+        // Past this the proposer stops waiting for a slot or a presignature: the
+        // posit needs a round's minimum time, or the deliberators give up first.
+        let remaining = state.budget.remaining();
+        let prepare_deadline = Instant::now() + remaining.saturating_sub(ROUND_TIMEOUT_FLOOR);
+
         if is_proposer {
-            let remaining = state.budget.remaining();
+            let slot_wait = prepare_deadline.saturating_duration_since(Instant::now());
             tracing::info!(
                 ?sign_id,
                 round = ?state.round(),
-                timeout = ?remaining,
+                ?remaining,
+                timeout = ?slot_wait,
                 limit = ctx.limiter.limit(),
                 "proposer waiting for concurrency slot"
             );
 
-            let permit = match ctx.limiter.acquire(remaining).await {
+            let permit = match ctx.limiter.acquire(slot_wait).await {
                 Ok(permit) => permit,
                 Err(SignLimitError::Timeout) => {
-                    return state.reorganize("proposer timeout waiting for concurrency slot");
+                    return wait_out_round(state, "proposer timeout waiting for concurrency slot")
+                        .await;
                 }
                 Err(SignLimitError::Closed) => {
                     tracing::error!(?sign_id, "proposer semaphore closed");
@@ -135,8 +150,8 @@ impl OrganizingPhase {
         let (presignature_id, presignature, active) = if is_proposer {
             tracing::info!(?sign_id, round = ?state.round(), "proposer waiting for presignature");
             let active = active.iter().copied().collect::<Vec<_>>();
-            let remaining = state.budget.remaining();
-            let fetch = tokio::time::timeout(remaining, async {
+            let fetch_wait = prepare_deadline.saturating_duration_since(Instant::now());
+            let fetch = tokio::time::timeout(fetch_wait, async {
                 // IDs that were found unsuitable this round (kept in redis, skipped next peek)
                 let mut local_skip: Vec<PresignatureId> = Vec::new();
                 loop {
@@ -166,7 +181,8 @@ impl OrganizingPhase {
             let (reservation, participants) = match fetch {
                 Ok(value) => value,
                 Err(_) => {
-                    return state.reorganize("proposer timeout waiting for presignature");
+                    return wait_out_round(state, "proposer timeout waiting for presignature")
+                        .await;
                 }
             };
 
@@ -275,5 +291,95 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Time the test proposer gets on top of the posit floor to find a slot
+    /// and a presignature.
+    const PREPARE: Duration = Duration::from_millis(300);
+
+    /// A lone proposer with a round budget of the floor plus [`PREPARE`]. Its
+    /// storage has no owner set, so every presignature peek finds nothing.
+    fn sole_proposer() -> super::super::posit::tests::TestSetup {
+        use crate::mesh::connection::NodeStatus;
+        use crate::protocol::ParticipantInfo;
+
+        let me = Participant::from(0);
+        let mut t = super::super::posit::tests::setup(me, me, 1);
+        let mut mesh = MeshState::default();
+        mesh.update(me, NodeStatus::Active, ParticipantInfo::new(0));
+        let (_mesh_tx, mesh_rx) = watch::channel(mesh);
+        t.state.mesh_state = mesh_rx;
+        t.state.budget.reset(ROUND_TIMEOUT_FLOOR + PREPARE);
+        t
+    }
+
+    /// Whether `limiter` has a free slot `after` from now; released at once.
+    fn probe_slot(limiter: SignLimiter, after: Duration) -> tokio::task::JoinHandle<bool> {
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            limiter.acquire(Duration::ZERO).await.is_ok()
+        })
+    }
+
+    /// A slot freed after the proposer's deadline stays free: taking it then
+    /// would start a posit the deliberators leave before it can finish.
+    #[tokio::test]
+    async fn proposer_leaves_a_slot_freed_after_its_deadline() {
+        let mut t = sole_proposer();
+        let held = t.ctx.limiter.acquire(Duration::ZERO).await.unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(PREPARE + Duration::from_millis(100)).await;
+            drop(held);
+        });
+        let probe = probe_slot(t.ctx.limiter.clone(), PREPARE + Duration::from_millis(300));
+
+        let phase = OrganizingPhase.advance(&mut t.ctx, &mut t.state).await;
+
+        assert!(matches!(phase, SignPhase::Organizing(_)));
+        assert!(
+            probe.await.unwrap(),
+            "the proposer took a slot it could no longer use"
+        );
+    }
+
+    /// A proposer that found no slot still leaves the round when the
+    /// deliberators do, so its next round starts in step with theirs.
+    #[tokio::test]
+    async fn proposer_sits_out_the_round_after_a_slot_timeout() {
+        let mut t = sole_proposer();
+        let _held = t.ctx.limiter.acquire(Duration::ZERO).await.unwrap();
+
+        let started = Instant::now();
+        let phase = OrganizingPhase.advance(&mut t.ctx, &mut t.state).await;
+        let waited = started.elapsed();
+
+        assert!(matches!(phase, SignPhase::Organizing(_)));
+        assert_eq!(t.state.round(), 1);
+        assert!(
+            waited >= ROUND_TIMEOUT_FLOOR,
+            "left the round after {waited:?}, ahead of its deliberators"
+        );
+    }
+
+    /// A proposer that got a slot but no presignature by its deadline gives
+    /// the slot back then, instead of holding it until the round ends.
+    #[tokio::test]
+    async fn proposer_releases_its_slot_when_no_presignature_comes_in_time() {
+        let mut t = sole_proposer();
+        let probe = probe_slot(t.ctx.limiter.clone(), PREPARE + Duration::from_millis(500));
+
+        let started = Instant::now();
+        let phase = OrganizingPhase.advance(&mut t.ctx, &mut t.state).await;
+        let waited = started.elapsed();
+
+        assert!(matches!(phase, SignPhase::Organizing(_)));
+        assert!(
+            probe.await.unwrap(),
+            "the proposer kept its slot past the deadline"
+        );
+        assert!(
+            waited >= ROUND_TIMEOUT_FLOOR,
+            "left the round after {waited:?}, ahead of its deliberators"
+        );
     }
 }
