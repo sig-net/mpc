@@ -26,33 +26,7 @@ Each round of a request tries to establish a signature instance; since the [arti
 
 ## 2\. System model
 
-* On-chain information
-  * Entities: n nodes; membership, threshold t, and epoch are fixed by the governance contract. 
-    * Together with the public keys and whether the contract is `Running`, they form the **committee** a node operates under (`GovernanceInfo` in code).
-    * Each node holds its own local, read-only snapshot of it, refreshed on contract update. Throughout, *committee* and *committee member* are contract-scoped, while *participant* and *participant list* always refer to one instance.
-    * The floor for t is ⌊2n/3⌋ \+ 1 for n ≥ 5 and ⌊n/2⌋ \+ 1 for n \< 5.
-      Every join and kick resets t to the floor, and a threshold vote can set it to any value from the floor to n − 1.
-      The value given at initialization must be at most n, but nothing checks that it is at least the floor, so a network can start outside the model.
-      At the floor, t meets the conditions on f under the *Hybrid fault model* for every f with n ≥ 3f \+ 1; a value above n − f gives up liveness.  
-  * Request and response (per supported chain): 
-  
-  (i) all nodes observe the same finalized sequence of requests and committee states, possibly at different times;  
-  (ii) nodes act only on finalized state (finalization definition may differ per chain).  
-* Hybrid fault model.  
-  * Liveness is argued under crash-recovery: correct nodes may halt and restart (otherwise never deviating). After restart the node's durable storage is assumed to be intact.  
-  * Safety must hold against f arbitrarily corrupted nodes, with n ≥ 3f \+ 1.
-    Three conditions bound f.
-    * f \< t keeps the adversary from assembling a signing quorum out of its own key shares; with f ≥ t it holds one and all bets are off. 
-    * f \< 2t − n makes any two participant lists share at least one honest member, which is what stops one artifact being consumed by two otherwise disjoint lists.
-    * t ≤ n − f lets the correct nodes sign on their own; liveness needs it, safety does not.
-* Network  
-  * Safety is guaranteed under asynchrony (no bounds on message delivery), while liveness is guaranteed for the periods where the network is synchronous (messages between honest nodes arrive within some bound δ, not assumed known) for long enough.  
-    * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T in \[a, b\] reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling. Liveness is therefore argued for δ up to a fraction of the ceiling, not for arbitrary finite δ (details in L1)  
-  * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is effectively reliable and timely.
-  * Channels are authenticated and encrypted: a node accepts a message only from a current committee member, signed by that member (details in *Authenticated channels* in the appendix).
-* Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
-* Chain state reaches a node only through its RPC provider. Different nodes can use different RPC providers. A node its provider misleads is faulty, one of the f, so the model holds only if the nodes served by misleading providers and all other faulty nodes are at most f together.  
-* The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active), a subset of the committee. It may be wrong, and no two nodes ever need the same guess; §6 D2 governs what may be derived from it. A reachable peer is additionally kept *out* of the active set while a state sync runs (a transient Syncing state), whether that sync is the initial one, a post-reconnect one, or one triggered by the peer's `MissingArtifact` reject of a presignature we list it as holding (only when the rejects end the round), so "active" is strictly narrower than "reachable".
+Moved to [system-model.md](system-model.md).
 
 ## 3\. Safety properties
 
@@ -61,7 +35,7 @@ Each round of a request tries to establish a signature instance; since the [arti
 * **S3. Membership and epochs change only on-chain:** No honest node adopts a committee other than from finalized contract state, and no node processes requests under a non-Running state. 
 * **S4. Instance-local agreement:** Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
 
-Violating any of these is unacceptable in any execution within §2's fault bound. See Appendix for more details, including enforcing mechanisms.
+Violating any of these is unacceptable in any execution within the fault bound of [system-model.md](system-model.md). See Appendix for more details, including enforcing mechanisms.
 
 ## 4\. Liveness
 
@@ -103,7 +77,7 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Enforcement*: ensured by the single-writer rule of §D3, applied locally at every holder and needing no agreement. Only the artifact's recorded owner can open an instance on it, which each holder checks itself rather than trusting the proposer, though only when it takes its share (§S4). Taking is what burns it: when generation starts the proposer removes the artifact from storage and every [deliberator](glossary.md#deliberator) takes its own share, so a later attempt finds nothing at any holder that already served one, and the removal must reach durable storage before anything derived from the artifact is sent or a crash resurrects the share. Every message names its instance and is fed only to the instance it names, so an attempt cannot pick up shares meant for another (§D4).
 
-Per-holder deletion is enough because lists intersect. Two **disjoint** sets of honest holders could otherwise each serve their own first request on one artifact. Both instances need a participant list of at least t (the posit phase starts an instance only once t nodes including the proposer have accepted), any two such lists share at least 2t − n members, and f \< 2t − n (§2) leaves at least one of those shared members honest. That holder burned the artifact on the first instance and refuses the second, which therefore never reaches t shares. Consuming one artifact twice would take f ≥ 2t − n, outside the model.
+Per-holder deletion is enough because lists intersect. Two **disjoint** sets of honest holders could otherwise each serve their own first request on one artifact. Both instances need a participant list of at least t (the posit phase starts an instance only once t nodes including the proposer have accepted), any two such lists share at least 2t − n members, and f \< 2t − n ([system-model.md](system-model.md)) leaves at least one of those shared members honest. That holder burned the artifact on the first instance and refuses the second, which therefore never reaches t shares. Consuming one artifact twice would take f ≥ 2t − n, outside the model.
 
 ### S2. Only indexed requests are signed
 
@@ -181,7 +155,7 @@ The `1 + d` cost is what a failover pays when the failover response lands, since
 
 ### Authenticated channels
 
-*Assumption* (§2). A message a node accepts was sent by the committee member it names.
+*Assumption* ([system-model.md](system-model.md)). A message a node accepts was sent by the committee member it names.
 
 *Enforcement*: every batch of peer messages is encrypted to the recipient's key and signed by the sender. The inbox decrypts it and checks the signature against the sender's key in the participant map built from the node's contract state. A batch from a sender outside that map is dropped, not kept for later, so peers cannot grow the inbox (§D5).
 
