@@ -349,9 +349,10 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
     }
 
     /// Posts a paid transaction and waits for it: the UTXOs it spends stay reserved
-    /// until it lands, the node refuses it, or a minute past its TTL. An ambiguous
-    /// outcome comes no earlier than that minute, so the retry may plan the same
-    /// UTXOs; if this transaction landed after all, the node refuses that spend.
+    /// until it lands, the node refuses or never receives it, or a minute past its
+    /// TTL. An ambiguous outcome comes no earlier than that minute, so the retry may
+    /// plan the same UTXOs; if this transaction landed after all, the node refuses
+    /// that spend.
     async fn post(
         &self,
         bytes: &[u8],
@@ -372,6 +373,12 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
                 self.wallet.release(spent);
                 return Err(SubmitError::StateConflict(format!(
                     "the node refused the transaction: {reason}; nothing was posted"
+                )));
+            }
+            Err(SubmitRefusal::Unsent(error)) => {
+                self.wallet.release(spent);
+                return Err(SubmitError::Internal(format!(
+                    "the transaction could not be sent: {error:#}; nothing was posted"
                 )));
             }
             Err(SubmitRefusal::Unanswered(error)) => {
@@ -1087,6 +1094,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+        assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+        assert!(client.chain.landing_reads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unsent_transaction_releases_its_utxos_without_blaming_the_chain() {
+        let client = client_over(
+            &managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, None)
+                .refusing(SubmitRefusal::Unsent(anyhow::anyhow!("connection refused"))),
+        );
+        let error = client
+            .post(
+                b"tx",
+                TX_HASH,
+                &spent(),
+                10,
+                Timestamp::from_secs(5000),
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SubmitError::Internal(_)), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
         assert!(client.chain.landing_reads.lock().unwrap().is_empty());
     }

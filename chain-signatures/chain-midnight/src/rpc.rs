@@ -688,6 +688,9 @@ pub(crate) enum SubmitRefusal {
     Refused(String),
     /// No answer arrived; the transaction may be in the pool.
     Unanswered(anyhow::Error),
+    /// The transaction was never sent: the node's runtime could not be read, or
+    /// the call does not match its metadata.
+    Unsent(anyhow::Error),
 }
 
 /// The pool's "already imported" answer: the transaction is in it.
@@ -769,7 +772,7 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
         let client = self
             .client_at(None)
             .await
-            .map_err(|error| SubmitRefusal::Refused(format!("nothing was sent: {error:#}")))?;
+            .map_err(|error| SubmitRefusal::Unsent(error.context("reading the node's runtime")))?;
         let extrinsic = client
             .tx()
             .create_unsigned(&subxt::dynamic::tx(
@@ -778,7 +781,7 @@ impl crate::native::SubmitChain for MidnightPublisherRpc {
                 vec![subxt::dynamic::Value::from_bytes(transaction)],
             ))
             .map_err(|error| {
-                SubmitRefusal::Refused(format!(
+                SubmitRefusal::Unsent(anyhow::anyhow!(
                     "send_mn_transaction did not match metadata: {error}"
                 ))
             })?;
