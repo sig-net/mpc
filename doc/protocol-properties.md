@@ -30,23 +30,28 @@ Each round of a request tries to establish a signature instance; since the [arti
   * Entities: n nodes; membership, threshold t, and epoch are fixed by the governance contract. 
     * Together with the public keys and whether the contract is `Running`, they form the **committee** a node operates under (`GovernanceInfo` in code).
     * Each node holds its own local, read-only snapshot of it, refreshed on contract update. Throughout, *committee* and *committee member* are contract-scoped, while *participant* and *participant list* always refer to one instance.
+    * The floor for t is ⌊2n/3⌋ \+ 1 for n ≥ 5 and ⌊n/2⌋ \+ 1 for n \< 5.
+      Every join and kick resets t to the floor, and a threshold vote can set it to any value from the floor to n − 1.
+      The value given at initialization must be at most n, but nothing checks that it is at least the floor, so a network can start outside the model.
+      At the floor, t meets the conditions on f under the *Hybrid fault model* for every f with n ≥ 3f \+ 1; a value above n − f gives up liveness.  
   * Request and response (per supported chain): 
   
   (i) all nodes observe the same finalized sequence of requests and committee states, possibly at different times;  
   (ii) nodes act only on finalized state (finalization definition may differ per chain).  
 * Hybrid fault model.  
   * Liveness is argued under crash-recovery: correct nodes may halt and restart (otherwise never deviating). After restart the node's durable storage is assumed to be intact.  
-  * Safety must hold against f arbitrarily corrupted nodes.
-    Two conditions bound f. 
+  * Safety must hold against f arbitrarily corrupted nodes, with n ≥ 3f \+ 1.
+    Three conditions bound f.
     * f \< t keeps the adversary from assembling a signing quorum out of its own key shares; with f ≥ t it holds one and all bets are off. 
-    * f \< 2t − n makes any two participant lists share at least one honest member, which is what stops one artifact being consumed by two otherwise disjoint lists. The contract sizes t at ⌊2n/3⌋ \+ 1 for n ≥ 5 and thus works for every f up to n − t; a threshold vote can only raise t further, since the contract clamps a proposed threshold to \[⌊2n/3⌋ \+ 1, n − 1\], and both conditions get easier as t grows, so that floor is what keeps the model intact. Below n \= 5 it falls back to a simple majority (⌊n/2⌋ \+ 1), which does not: at n \= 3 that gives 2t − n \= 1, so only f \= 0 is inside the model. The floor is applied on resharing and by threshold votes, not to the value passed at contract initialization, which is checked only against n, so a network can also be deployed outside the model.  
+    * f \< 2t − n makes any two participant lists share at least one honest member, which is what stops one artifact being consumed by two otherwise disjoint lists.
+    * t ≤ n − f lets the correct nodes sign on their own; liveness needs it, safety does not.
 * Network  
   * Safety is guaranteed under asynchrony (no bounds on message delivery), while liveness is guaranteed for the periods where the network is synchronous (messages between honest nodes arrive within some bound δ, not assumed known) for long enough.  
     * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T in \[a, b\] reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling. Liveness is therefore argued for δ up to a fraction of the ceiling, not for arbitrary finite δ (details in L1)  
   * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is effectively reliable and timely.
   * Channels are authenticated and encrypted: a node accepts a message only from a current committee member, signed by that member (details in *Authenticated channels* in the appendix).
 * Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
-* Chain state reaches a node only through its RPC provider. Different nodes can use different RPC providers. The current security model assumes that the number of nodes using a specific RPC provider is below t.  
+* Chain state reaches a node only through its RPC provider. Different nodes can use different RPC providers. A node its provider misleads is faulty, one of the f, so the model holds only if the nodes served by misleading providers and all other faulty nodes are at most f together.  
 * The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active), a subset of the committee. It may be wrong, and no two nodes ever need the same guess; §6 D2 governs what may be derived from it. A reachable peer is additionally kept *out* of the active set while a state sync runs (a transient Syncing state), whether that sync is the initial one, a post-reconnect one, or one triggered by the peer's `MissingArtifact` reject of a presignature we list it as holding (only when the rejects end the round), so "active" is strictly narrower than "reachable".
 
 ## 3\. Safety properties
@@ -63,8 +68,8 @@ Violating any of these is unacceptable in any execution within §2's fault bound
 Progress is guaranteed during a sufficiently long synchronous interval, never at a fixed time. The precise bounds and the enforcing mechanisms are in the Appendix.
 
 * **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature ([owner](glossary.md#owner) and [holders](glossary.md#holder) online), and ≥ t of that presignature's holders having indexed the request, the request produces a signature within bounded time (O(f \+ p)·∆timeout \+ one generation round, where p counts the members that are offline or own no usable presignature). That such a presignature keeps existing is L2.  
-* **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor and under the network-wide cap eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).   
-* **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain.  
+* **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).   
+* **L3. Settlement:** once a signature is produced, it is eventually accepted on-chain.  
 * **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable committee member (re)enters each correct node's active set within bounded time. 
 
 ## 5\. Efficiency targets
@@ -146,14 +151,12 @@ Three caveats remain: (i) organizing waits for the local active set to reach t (
 
 ### L2. Artifact supply.
 
-*Property.* During a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor and under the network-wide cap eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).
-
-A node under its own floor still generates nothing while the network-wide potential is at the cap. That is intended, the pool being full, but it means the floor alone does not entail progress.
+*Property.* During a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).
 
 *Rationale.* L1 assumes a usable presignature is there to consume, so without supply that precondition eventually fails and signing stops while the network is otherwise perfectly healthy.
 
 *Enforcement*: 
-A node re-proposes every 100 ms while it is below its floor (`min_mine_triple_pairs` for triple pairs, `min_mine_presignatures` for presignatures); concurrency counters free themselves as generation tasks finish and as proposals expire.  
+A node re-proposes every 100 ms while it is below its floor (`min_mine_triple_pairs` for triple pairs, `min_mine_presignatures` for presignatures) and runs fewer than `max_mine_generations` generations of its own; concurrency counters free themselves as generation tasks finish and as proposals expire.  
 Generation is skipped entirely while \< t nodes are in the active set, so the failure detector gates supply though never correctness.
 
 ### L3. Settlement
@@ -174,7 +177,7 @@ The `1 + d` cost is what a failover pays when the failover response lands, since
 
 *Rationale.* Without it a reconnecting node never resumes work, so an ordinary restart becomes an indefinite local outage instead of a transient one.
 
-*Enforcement.* A peer reporting Running waits in Syncing, outside the active set, until a sync round-trip succeeds; for a correct, reachable peer in a synchronous interval it does, so the property holds. The bound is the poll interval, the round-trip, and the batch it rides in: syncs run concurrently but report as one group capped by `BROADCAST_TIMEOUT` (120 s), so a fast peer activates at the slowest peer's pace. A peer that becomes reachable just after a batch starts is not picked up by it either, since only one batch runs at a time, which puts the worst case at roughly two `BROADCAST_TIMEOUT`s. Per-peer reporting would cut that to the peer's own round-trip.
+*Enforcement.* A peer reporting Running waits in Syncing, outside the active set, until a sync round-trip succeeds; for a correct, reachable peer in a synchronous interval it does, so the property holds. The bound is the poll interval, the round-trip, and the batch it rides in: syncs run concurrently but report as one group, each call bounded by `SYNC_TIMEOUT`, so a fast peer activates at the slowest peer's pace. A peer that becomes reachable just after a batch starts is not picked up by it either, since only one batch runs at a time, which puts the worst case at roughly two `SYNC_TIMEOUT`s. Per-peer reporting would cut that to the peer's own round-trip.
 
 ### Authenticated channels
 
