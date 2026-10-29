@@ -32,8 +32,6 @@ pub struct Options {
     pub redis_url: String,
 }
 
-impl Options {}
-
 fn owner_key(base: &str, owner: Participant) -> String {
     format!("{base}:p{}", Into::<u32>::into(owner))
 }

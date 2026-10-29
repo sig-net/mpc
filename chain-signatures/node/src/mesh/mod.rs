@@ -24,8 +24,6 @@ pub struct Options {
     pub ping_interval: u64,
 }
 
-impl Options {}
-
 /// Set of connections to participants in the network. Each participant is pinged at regular
 /// intervals to check their aliveness. The connections can be dropped and reconnected at any time.
 pub struct Mesh {
