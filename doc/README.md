@@ -2,6 +2,8 @@
 
 [Glossary](glossary.md): the terms used across these docs and the code types behind them.
 
+How to write and update these docs: [Documentation conventions](../CONTRIBUTING.md#documentation).
+
 ## Protocol
 
 - [Protocol properties](protocol-properties.md): safety, liveness and efficiency properties of the coordination layer, and how the code enforces them.

@@ -248,7 +248,7 @@ pub struct SignTask {
     pub presignatures: PresignatureStorage,
     pub msg: MessageChannel,
     pub rpc: RpcChannel,
-    pub cfg: ProtocolConfig,
+    pub signature_timeout: Duration,
     pub is_proposer: Arc<AtomicBool>,
     /// Posit round, shared with `SignEntry` so it survives a respawn.
     pub round: Arc<AtomicUsize>,
@@ -333,7 +333,7 @@ impl SignTask {
         GenerateCtx {
             governance: self.governance.clone(),
             msg: self.msg.clone(),
-            cfg: self.cfg.clone(),
+            signature_timeout: self.signature_timeout,
             node_account_id: self.node_account_id.clone(),
         }
     }

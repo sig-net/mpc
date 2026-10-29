@@ -7,7 +7,7 @@ use crate::execute::executable;
 use anyhow::Context;
 use async_process::Child;
 use mpc_keys::hpke;
-use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs};
+use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs, TronArgs};
 use near_workspaces::Account;
 use shell_escape::escape;
 
@@ -83,6 +83,7 @@ impl Node {
             hydration,
             canton,
             midnight,
+            tron: TronArgs::from_config(None),
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
@@ -173,6 +174,7 @@ impl Node {
             hydration,
             canton,
             midnight,
+            tron: TronArgs::from_config(None),
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),

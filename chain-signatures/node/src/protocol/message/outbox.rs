@@ -11,7 +11,6 @@ use crate::rpc::ContractStateWatcher;
 use crate::protocol::message::types::Message;
 
 use cait_sith::protocol::Participant;
-use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::Ciphered;
 use tokio::sync::{mpsc, watch};
 
@@ -132,11 +131,10 @@ impl MessageOutbox {
         &mut self,
         client: &NodeClient,
         participants: &Participants,
-        cfg: &ProtocolConfig,
+        timeout: Duration,
         encrypted: HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>>,
     ) {
         let start = Instant::now();
-        let timeout = Duration::from_millis(cfg.message_timeout);
 
         for ((_from, to), encrypted) in encrypted {
             for (encrypted_partition, timestamp, message_len) in encrypted {
@@ -201,7 +199,7 @@ impl MessageOutbox {
         let config = config.borrow().clone();
         let compacted = self.compact();
         let encrypted = self.encrypt(sign_sk, &participants, compacted);
-        self.send(client, &participants, &config.protocol, encrypted)
+        self.send(client, &participants, config.timeouts.message, encrypted)
             .await;
     }
 
