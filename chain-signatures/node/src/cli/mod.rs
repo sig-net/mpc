@@ -1030,7 +1030,15 @@ async fn spawn_indexers(
         // TODO: read-side gating - this indexer's reads don't share the
         // chain's cooldown gate yet
         tracing::info!("Midnight indexer waiting for the network public key");
-        let root_pk = contract_watcher.wait_public_key().await;
+        // Fails only when the contract watcher is gone, and then the process
+        // is already ending.
+        let root_pk = match contract_watcher.wait_public_key().await {
+            Ok(pk) => pk,
+            Err(err) => {
+                tracing::error!(?err, "midnight indexer: no network public key");
+                return;
+            }
+        };
         match MidnightIndexer::new(
             midnight_config,
             backlog.clone(),
