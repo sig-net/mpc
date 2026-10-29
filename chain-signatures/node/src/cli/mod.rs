@@ -1464,6 +1464,28 @@ mod tests {
         assert!(publishers.contains_key(&Chain::NEAR));
     }
 
+    /// A configured Tron must survive `from_args` into `ChainConfigs``
+    #[test]
+    fn from_args_routes_a_configured_tron() {
+        let chains = ChainConfigs::from_args(
+            EthArgs::from_config(None),
+            SolArgs::from_config(None),
+            HydrationArgs::from_config(None),
+            CantonArgs::from_config(None),
+            MidnightArgs::from_config(None),
+            TronArgs::from_config(Some(TronConfig {
+                endpoint: Url::parse("https://api.trongrid.io").unwrap(),
+                ..TronConfig::default()
+            })),
+        )
+        .unwrap();
+
+        let tron = chains
+            .tron
+            .expect("configured TronArgs must produce a TronConfig");
+        assert_eq!(tron.endpoint.as_str(), "https://api.trongrid.io/");
+    }
+
     /// A Midnight node that is unreachable at startup must not leave the node without a
     /// Midnight publisher for its lifetime: the publisher registers and connects later.
     #[tokio::test]
