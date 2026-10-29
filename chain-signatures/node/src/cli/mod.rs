@@ -757,7 +757,7 @@ impl StorageHandles {
     ) -> anyhow::Result<Self> {
         let gcp_service = GcpService::init(storage_options).await?;
         let key_storage =
-            storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
+            storage::secret_storage::init(Some(&gcp_service), storage_options, account_id)?;
         let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
