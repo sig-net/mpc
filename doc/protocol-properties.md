@@ -154,7 +154,7 @@ A node under its own floor still generates nothing while the pool is full or eve
 
 *Enforcement*: 
 A node re-proposes every 100 ms while it is below its floor (`min_mine_triple_pairs` for triple pairs, `min_mine_presignatures` for presignatures); concurrency counters free themselves as generation tasks finish and as proposals expire.  
-A deliberator refuses any proposal while the pool holds more than the network's floors need, or while it runs more generations than the network's cap (`max_mine_generations` per node) allows, each with a margin for stale counts and both judged from cached counts, so one node cannot push work onto the rest without bound.  
+A deliberator refuses any proposal while the pool holds more than the network's floors need, or while it runs or has accepted more generations than the network's cap (`max_mine_generations` per node) allows, each with a margin for stale counts and both judged from cached counts, so one node cannot push work onto the rest without bound.  
 Generation is skipped entirely while \< t nodes are in the active set, so the failure detector gates supply though never correctness.
 
 ### L3. Settlement

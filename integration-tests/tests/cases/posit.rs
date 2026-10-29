@@ -276,5 +276,23 @@ async fn test_generation_posits_reject_on_load() -> anyhow::Result<()> {
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), vec![PositAction::Accept]);
 
+    // An accepted PROPOSE counts before its START: with room for one more
+    // generation, the first proposal is accepted and the next refused.
+    let one_more = AcceptLimits {
+        ongoing: triple_spawner.len_ongoing() + 2,
+        generated: usize::MAX,
+    };
+    triple_spawner
+        .process_posit_for_test(5, node1, PositAction::Propose, timeout, one_more)
+        .await;
+    assert_eq!(drain_posit_replies(&mut outbox), vec![PositAction::Accept]);
+    triple_spawner
+        .process_posit_for_test(6, node1, PositAction::Propose, timeout, one_more)
+        .await;
+    assert_eq!(
+        drain_posit_replies(&mut outbox),
+        reject(PositRejectReason::Saturated)
+    );
+
     Ok(())
 }

@@ -71,7 +71,8 @@ pub enum PositRejectReason {
     StaleRound(usize),
     /// The pool holds more of this artifact than the network's floors need.
     Overstocked,
-    /// The deliberator runs more generations than the network's cap allows.
+    /// The deliberator runs or has accepted more generations than the
+    /// network's cap allows.
     Saturated,
 }
 

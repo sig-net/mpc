@@ -405,7 +405,7 @@ the same pair reuses the id.
   answered with a `REJECT`, which the owner, already generating, cannot act on.
 - **Checks.** Only a `PROPOSE` is answered after checks (already generating or
   stored; for presignatures also the id and whether the pair is held; then
-  load: more generations running than the network's cap allows, or more in
+  load: more generations running or accepted than the network's cap allows, or more in
   the pool than its floors need), with a `REJECT` if one fails. `START` relies on the generation-start refusal below.
   `ACCEPT` and `REJECT` are never answered.
 

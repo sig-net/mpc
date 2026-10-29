@@ -57,8 +57,8 @@ pub(crate) fn should_generate(
 /// Sized by the whole participant set with headroom for counts a tick behind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AcceptLimits {
-    /// Refuse once this node runs this many generations: a margin above the
-    /// network's cap.
+    /// Refuse once this node runs or has accepted this many generations: a
+    /// margin above the network's cap.
     pub ongoing: usize,
     /// Refuse once the pool holds this many: a margin above the network's floors.
     pub generated: usize,
