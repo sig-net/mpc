@@ -460,8 +460,9 @@ fn submit_failed(at_hash: &str, elapsed: Duration) -> String {
     )
 }
 
-/// The intent's expiry, as absolute unix seconds: one publish's build and submit
-/// budgets summed. It bounds how late a transaction whose outcome is unknown can land.
+/// The respond intent's expiry, as absolute unix seconds: one publish's build and
+/// submit budgets summed. The fee intent the submit adds expires first, so its TTL
+/// is the one that bounds how late the transaction can land.
 fn ttl_seconds(config: &PublisherConfig, now: u64) -> u64 {
     now.saturating_add(config.request_timeout.as_secs())
         .saturating_add(config.submit_timeout.as_secs())

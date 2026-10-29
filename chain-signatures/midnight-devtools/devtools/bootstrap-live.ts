@@ -1,6 +1,5 @@
-// Deploy path, never shipped: `tsconfig.build.json` keeps `devtools/` out of `dist/`. Makes
-// the deployer wallet fee-ready and deploys a fresh signet singleton; the LAST line printed
-// is the contract address.
+// Deploy path, never shipped. Makes the deployer wallet fee-ready and deploys a fresh signet
+// singleton; the LAST line printed is the contract address.
 
 import {
   deploySignetContract,

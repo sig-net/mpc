@@ -10,9 +10,9 @@ The node posts every finished Midnight response itself: one transaction per sign
 
 **Prove.** The call is proven in process under the packaged prover key, with zkir v3. Nothing runs out of process and no proof server is involved.
 
-**Pay.** The fee is a second intent, at the first segment the respond leaves free, whose DUST actions spend the funding wallet's UTXOs. The fee is priced the way the Midnight wallet SDK prices it, `fees_with_margin(parameters, 5)` at the head's parameters, but over the real respond proof: each pass merges a mock-proven fee intent, which the ledger documents as fee-accurate, and adds the remaining deficit, until the merged transaction balances. The fee intent is then proven with the ledger's zkir v2 prover, both halves are sealed separately and merged, and the merged transaction must still cover its fee before it is posted.
+**Pay.** The fee is a second intent, at the first segment the respond leaves free, whose DUST actions spend the funding wallet's UTXOs. The fee is priced the way the Midnight wallet SDK prices it, `fees_with_margin(parameters, 5)` at the parameters of the finalized head read once the respond is proven, but over the real respond proof: each pass merges a mock-proven fee intent, which the ledger documents as fee-accurate, and adds the remaining deficit, until the merged transaction balances. The fee intent is then proven with the ledger's zkir v2 prover, both halves are sealed separately and merged, and the merged transaction must still cover its fee before it is posted.
 
-**Post.** The transaction goes to the node through `author_submitExtrinsic` as an unsigned `Midnight::send_mn_transaction`. The publisher then scans every finalized block after the pinned head for the transaction's ledger hash:
+**Post.** The transaction goes to the node through `author_submitExtrinsic` as an unsigned `Midnight::send_mn_transaction`. The publisher then scans every finalized block after that head for the transaction's ledger hash:
 
 - `TxApplied` answers the publish with the ledger transaction hash.
 - `TxPartialSuccess` fails it: readers skip every event of a partially successful transaction.
@@ -24,7 +24,7 @@ The wallet's DUST key is account 0, index 0 of the funding seed, derived the way
 
 A DUST spend proves against the DUST commitment and generation roots, which the chain looks up by the spend's `ctime`, so the fee names a time the replay has fully seen: the earlier of the finalized head's and the indexer's newest block's time, or the newest replayed event's time when that is later.
 
-A submitted transaction reserves the UTXOs it spends. The reservation ends when the chain spends them, when the node refuses the transaction, or one minute after the fee intent's TTL (three minutes, less when the budget is short), when the transaction can no longer land. A publish finding every UTXO reserved fails as `wallet_busy` and the publish loop retries it.
+A submitted transaction reserves the UTXOs it spends. The reservation ends when the chain spends them, when the node refuses or never receives the transaction, or one minute after the fee intent's TTL (three minutes, less when the budget is short), when the transaction can no longer land. A publish whose fee needs reserved UTXOs fails as `wallet_busy` and the publish loop retries it.
 
 The indexer is trusted for liveness only. A replay that disagrees with the chain produces spends whose proofs or nullifiers the node rejects, so a lying indexer can stop the node from paying, not make it post something else.
 
@@ -37,7 +37,7 @@ A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for 
 | `bad_request` | The request or intent is malformed. |
 | `contract_mismatch` | The deployed contract or the packaged artifacts are not the ones this node proves for. |
 | `wallet_unsynced` | The DUST replay has not caught up. Nothing was posted. |
-| `wallet_busy` | Every spendable UTXO is held by a submit that may still land. Nothing was posted. |
+| `wallet_busy` | The fee needs UTXOs held by a submit that may still land. Nothing was posted. |
 | `wallet_unfunded` | The wallet cannot pay the fee. Nothing was posted. |
 | `proving_timeout` | Proving outlasted the budget. Nothing was posted. |
 | `state_conflict` | The node refused the transaction, it expired unlanded, or it landed partially. The retry rebuilds against fresh state. |
