@@ -18,6 +18,8 @@ use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{open_reply_for_test, process_sync_update, SyncError, SyncUpdate};
 use mpc_node::protocol::{Governance, MessageChannel, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
+use mpc_node::storage::presignature_storage::Presignature;
+use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_node::types::SignCommand;
 use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest};
@@ -518,8 +520,8 @@ impl MpcFixtureNode {
             web_port,
             self.msg_channel.clone(),
             self.state.clone(),
-            self.triple_storage.clone(),
-            self.presignature_storage.clone(),
+            TriplePair::storage(self.triple_storage.pool(), &self.account_id),
+            Presignature::storage(self.presignature_storage.pool(), &self.account_id),
             self.contract.clone(),
             self.config.borrow().network.clone(),
             account_id,

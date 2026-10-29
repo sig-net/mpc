@@ -121,8 +121,8 @@ fn env() -> (Runtime, SyncEnv) {
 
         let _sync = SyncTask::new(
             &client,
-            triples.clone(),
-            presignatures.clone(),
+            TriplePair::storage(&redis.pool(), &node_id),
+            Presignature::storage(&redis.pool(), &node_id),
             mesh.watch(),
             contract_watcher,
             sync_report_tx,

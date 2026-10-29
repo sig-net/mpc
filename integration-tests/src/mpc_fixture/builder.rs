@@ -640,8 +640,8 @@ impl MpcFixtureNodeBuilder {
             sign_tx,
             msg_channel: self.messaging.channel,
             mock_streams: self.mock_streams,
-            triple_storage,
-            presignature_storage,
+            triple_storage: triple_storage.to_ready(self.me),
+            presignature_storage: presignature_storage.to_ready(self.me),
             backlog,
             checkpoint_tx,
             contract: context.contract_state,
@@ -678,12 +678,12 @@ impl MpcFixtureNodeBuilder {
 
         let triple_storage =
             TriplePair::storage(&context.redis_pool, &self.participant_info.account_id);
-        triple_storage.set_me(self.me);
 
         if fixture_input
             .as_ref()
             .is_some_and(|i| !i.triples.is_empty())
         {
+            let ready_storage = triple_storage.to_ready(self.me);
             let my_shares = fixture_input
                 .as_mut()
                 .unwrap()
@@ -696,7 +696,7 @@ impl MpcFixtureNodeBuilder {
                     if pair.holders.is_none() {
                         pair.holders = Some(pair.triple0.public.participants.clone());
                     }
-                    let mut slot = triple_storage.create_slot(pair_id, owner).await.unwrap();
+                    let mut slot = ready_storage.create_slot(pair_id, owner).await.unwrap();
                     slot.insert(pair, owner).await;
                 }
             }
@@ -704,12 +704,12 @@ impl MpcFixtureNodeBuilder {
 
         let presignature_storage =
             Presignature::storage(&context.redis_pool, &self.participant_info.account_id);
-        presignature_storage.set_me(self.me);
 
         if fixture_input
             .as_ref()
             .is_some_and(|i| !i.presignatures.is_empty())
         {
+            let ready_storage = presignature_storage.to_ready(self.me);
             let my_shares = fixture_input
                 .as_mut()
                 .unwrap()
@@ -721,7 +721,7 @@ impl MpcFixtureNodeBuilder {
                     if presignature_share.holders.is_none() {
                         presignature_share.holders = Some(presignature_share.participants.clone());
                     }
-                    let mut slot = presignature_storage
+                    let mut slot = ready_storage
                         .create_slot(presignature_share.id, owner)
                         .await
                         .unwrap();

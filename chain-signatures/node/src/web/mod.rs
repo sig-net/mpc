@@ -14,7 +14,7 @@ use crate::protocol::state::{NodeStateWatcher, NodeStatus};
 use crate::protocol::sync::{self, SyncError};
 use crate::protocol::{Chain, MessageChannel};
 use crate::rpc::ContractStateWatcher;
-use crate::storage::{PresignatureStorage, TripleStorage};
+use crate::storage::{Initializing, PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;
 
@@ -56,9 +56,9 @@ struct AxumState {
     node: NodeStateWatcher,
     /// Only used by the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
-    triple_storage: TripleStorage,
+    triple_storage: TripleStorage<Initializing>,
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
-    presignature_storage: PresignatureStorage,
+    presignature_storage: PresignatureStorage<Initializing>,
     contract: ContractStateWatcher,
     network: NetworkConfig,
     msg_channel: MessageChannel,
@@ -73,8 +73,8 @@ pub async fn run(
     port: u16,
     msg_channel: MessageChannel,
     node: NodeStateWatcher,
-    triple_storage: TripleStorage,
-    presignature_storage: PresignatureStorage,
+    triple_storage: TripleStorage<Initializing>,
+    presignature_storage: PresignatureStorage<Initializing>,
     contract: ContractStateWatcher,
     network: NetworkConfig,
     my_account_id: AccountId,

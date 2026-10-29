@@ -671,7 +671,7 @@ impl TripleSpawnerTask {
             me,
             threshold,
             epoch,
-            &ctx.triple_storage,
+            &ctx.triple_storage.to_ready(me),
             ctx.msg_channel.clone(),
             ctx.my_account_id.to_string(),
         );

@@ -30,6 +30,7 @@ use crate::rpc::ContractStateWatcher;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::TripleStorage;
+use crate::storage::Initializing;
 
 use near_account_id::AccountId;
 use semver::Version;
@@ -62,8 +63,8 @@ pub(crate) fn should_generate(
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
     pub(crate) secret_storage: SecretNodeStorageVariant,
-    pub(crate) triple_storage: TripleStorage,
-    pub(crate) presignature_storage: PresignatureStorage,
+    pub(crate) triple_storage: TripleStorage<Initializing>,
+    pub(crate) presignature_storage: PresignatureStorage<Initializing>,
     pub(crate) sign_task: SignatureSpawnerTask,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,

@@ -338,9 +338,7 @@ impl Redis {
         id: &AccountId,
         me: Participant,
     ) -> mpc_node::storage::TripleStorage {
-        let storage = TriplePair::storage(&self.pool(), id);
-        storage.set_me(me);
-        storage
+        TriplePair::ready_storage(&self.pool(), id, me)
     }
 
     pub fn presignature_storage(
@@ -348,9 +346,7 @@ impl Redis {
         id: &AccountId,
         me: Participant,
     ) -> mpc_node::storage::PresignatureStorage {
-        let storage = Presignature::storage(&self.pool(), id);
-        storage.set_me(me);
-        storage
+        Presignature::ready_storage(&self.pool(), id, me)
     }
 
     pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
@@ -365,8 +361,7 @@ impl Redis {
                         .get(account_id)
                         .unwrap(),
                 );
-                let storage = TriplePair::storage(&pool, account_id);
-                storage.set_me(me);
+                let storage = TriplePair::ready_storage(&pool, account_id, me);
                 (me, storage)
             })
             .collect::<HashMap<_, _>>();

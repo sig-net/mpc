@@ -833,8 +833,8 @@ impl PresignatureSpawnerTask {
             epoch,
             private_share,
             public_key,
-            &ctx.triple_storage,
-            &ctx.presignature_storage,
+            &ctx.triple_storage.to_ready(me),
+            &ctx.presignature_storage.to_ready(me),
             ctx.msg_channel.clone(),
             ctx.my_account_id.to_string(),
         );
