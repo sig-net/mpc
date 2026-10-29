@@ -30,10 +30,11 @@ pub struct TronReceipt {
     pub block_timestamp: u64,
     /// Total fee in sun.
     pub fee: u64,
-    /// Top-level `result` — `TransactionInfo.code` (SUCESS|FAILED); absent
-    /// on TronGrid.
+    /// Top-level `result` — `TransactionInfo.code` (SUCESS|FAILED); proto3
+    /// omits the zero `SUCESS`, so java-tron prints it only on failure.
     pub result: Option<String>,
-    /// `receipt.result` — `ResourceReceipt`'s contractResult.
+    /// `receipt.result` — `ResourceReceipt`'s contractResult, printed on
+    /// every executed receipt.
     pub receipt_result: Option<String>,
     /// Revert reason, hex-decoded when present.
     pub res_message: Option<String>,
@@ -189,7 +190,8 @@ mod tests {
         assert!(receipt(None, None).execution_outcome(&[]).is_err());
     }
 
-    /// java-tron emits both fields; the top-level `result` is canonical.
+    /// Only failure prints both (top-level FAILED, nested member) — never
+    /// disagreeing; the synthetic clash still pins which carrier wins.
     #[test]
     fn top_level_result_outranks_receipt_result() {
         let both = receipt(Some("REVERT"), Some("SUCCESS"));

@@ -264,8 +264,9 @@ struct TransactionInfoResponse {
     log: Vec<TronLog>,
 }
 
-/// `receipt.result` classification; Nile receipts carry the verdict here
-/// alongside usage counters the parser leaves unread.
+/// `receipt.result` classification; success carries its verdict here alone
+/// (the top-level `code` is proto3-zero-omitted), failure alongside the
+/// top-level `FAILED`. Usage counters stay unread.
 #[derive(Deserialize, Default)]
 struct ReceiptUsage {
     #[serde(default)]

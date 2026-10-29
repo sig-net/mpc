@@ -302,20 +302,29 @@ mod tests {
             .with_body(body)
     }
 
-    fn receipt_body(seed: u8, result_field: &str) -> String {
+    /// Proto3 omits the zero `SUCESS`, so success prints only the nested
+    /// verdict.
+    fn success_body(seed: u8) -> String {
+        receipt_body(seed, "", "SUCCESS")
+    }
+
+    /// Failure prints `FAILED` above the specific member.
+    fn failure_body(seed: u8, member: &str) -> String {
+        receipt_body(seed, r#", "result": "FAILED""#, member)
+    }
+
+    /// Synthetic: a real failure always carries the top-level `FAILED`,
+    /// which would classify; the unknown member must stand alone.
+    fn unclassifiable_body(seed: u8) -> String {
+        receipt_body(seed, "", "WEIRD")
+    }
+
+    fn receipt_body(seed: u8, top_level: &str, nested: &str) -> String {
         let tx_id = watcher_tx(seed).0;
-        match result_field {
-            // java-tron's top-level form, in code's own spelling.
-            "result" => format!(
-                r#"{{ "id": "{}", "blockNumber": 71896097, "fee": 472800, "result": "SUCESS" }}"#,
-                hex::encode(tx_id.0)
-            ),
-            other => format!(
-                r#"{{ "id": "{}", "blockNumber": 71896097, "fee": 472800, "receipt": {{ "result": "{}" }} }}"#,
-                hex::encode(tx_id.0),
-                other
-            ),
-        }
+        format!(
+            r#"{{ "id": "{}", "blockNumber": 71896097, "fee": 472800{top_level}, "receipt": {{ "result": "{nested}" }} }}"#,
+            hex::encode(tx_id.0)
+        )
     }
 
     /// Waits for `seed`'s `ExecutionConfirmed`, returning it with the
@@ -356,13 +365,11 @@ mod tests {
         let server = mockito::Server::new_async().await;
         let config = test_config(server.url().parse().unwrap());
         let mut server = server;
-        // One watcher per provider form: TronGrid's nested receipt.result
-        // and java-tron's top-level result.
         nowblock_mock(&mut server);
-        receipt_stub(&mut server, 1, receipt_body(1, "SUCCESS"))
+        receipt_stub(&mut server, 1, success_body(1))
             .expect(1)
             .create();
-        receipt_stub(&mut server, 2, receipt_body(2, "result"))
+        receipt_stub(&mut server, 2, success_body(2))
             .expect(1)
             .create();
 
@@ -398,7 +405,7 @@ mod tests {
         let config = test_config(server.url().parse().unwrap());
         let mut server = server;
         nowblock_mock(&mut server);
-        receipt_stub(&mut server, 1, receipt_body(1, "REVERT"))
+        receipt_stub(&mut server, 1, failure_body(1, "REVERT"))
             .expect(1)
             .create();
 
@@ -427,7 +434,7 @@ mod tests {
         receipt_stub(&mut server, 1, "{}".to_string())
             .expect(1)
             .create();
-        receipt_stub(&mut server, 1, receipt_body(1, "SUCCESS")).create();
+        receipt_stub(&mut server, 1, success_body(1)).create();
 
         let state = MockStateManager::new();
         state
@@ -452,7 +459,7 @@ mod tests {
         let config = test_config(server.url().parse().unwrap());
         let mut server = server;
         nowblock_mock(&mut server);
-        receipt_stub(&mut server, 1, receipt_body(1, "WEIRD")).create();
+        receipt_stub(&mut server, 1, unclassifiable_body(1)).create();
         let resultless = format!(
             r#"{{ "id": "{}", "blockNumber": 1 }}"#,
             hex::encode(watcher_tx(2).0 .0)
@@ -496,7 +503,7 @@ mod tests {
         let config = test_config(server.url().parse().unwrap());
         let mut server = server;
         nowblock_mock(&mut server);
-        receipt_stub(&mut server, 1, receipt_body(1, "SUCCESS"))
+        receipt_stub(&mut server, 1, success_body(1))
             .expect(1)
             .create();
 
@@ -539,7 +546,7 @@ mod tests {
         };
         let mut server = server;
         nowblock_mock(&mut server);
-        receipt_stub(&mut server, 1, receipt_body(1, "SUCCESS"))
+        receipt_stub(&mut server, 1, success_body(1))
             .expect(1)
             .create();
         let tx2 = watcher_tx(2).0;
@@ -592,7 +599,7 @@ mod tests {
         receipt_stub(&mut server, 1, "{}".to_string())
             .with_status(500)
             .create();
-        receipt_stub(&mut server, 2, receipt_body(2, "SUCCESS")).create();
+        receipt_stub(&mut server, 2, success_body(2)).create();
 
         let state = MockStateManager::new();
         state
