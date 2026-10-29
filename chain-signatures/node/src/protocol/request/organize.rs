@@ -114,8 +114,14 @@ impl OrganizingPhase {
 
         // Past this the proposer stops waiting for a slot or a presignature: the
         // posit needs a round's minimum time, or the deliberators give up first.
+        // A round no longer than that minimum splits its budget instead.
         let remaining = state.budget.remaining();
-        let prepare_deadline = Instant::now() + remaining.saturating_sub(ROUND_TIMEOUT_FLOOR);
+        let reserve = if remaining > ROUND_TIMEOUT_FLOOR {
+            ROUND_TIMEOUT_FLOOR
+        } else {
+            remaining / 2
+        };
+        let prepare_deadline = Instant::now() + remaining.saturating_sub(reserve);
 
         if is_proposer {
             let slot_wait = prepare_deadline.saturating_duration_since(Instant::now());
@@ -380,6 +386,28 @@ mod tests {
         assert!(
             waited >= ROUND_TIMEOUT_FLOOR,
             "left the round after {waited:?}, ahead of its deliberators"
+        );
+    }
+
+    /// A round as short as the floor still leaves the proposer time to take a
+    /// slot that frees early in the round.
+    #[tokio::test]
+    async fn proposer_keeps_a_prepare_window_in_a_floor_length_round() {
+        let mut t = sole_proposer();
+        t.state.budget.reset(ROUND_TIMEOUT_FLOOR);
+        let held = t.ctx.limiter.acquire(Duration::ZERO).await.unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            drop(held);
+        });
+        let probe = probe_slot(t.ctx.limiter.clone(), Duration::from_millis(500));
+
+        let phase = OrganizingPhase.advance(&mut t.ctx, &mut t.state).await;
+
+        assert!(matches!(phase, SignPhase::Organizing(_)));
+        assert!(
+            !probe.await.unwrap(),
+            "the proposer gave up before the slot freed"
         );
     }
 }
