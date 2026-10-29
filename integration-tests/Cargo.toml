@@ -92,6 +92,14 @@ async-process = "2"
 tokio.workspace = true
 
 
+[[bin]]
+name = "integration-tests"
+path = "src/main.rs"
+
+[[bin]]
+name = "redis-bench"
+path = "src/bin/redis_bench.rs"
+
 [[bench]]
 name = "sign"
 path = "benches/sign.rs"
