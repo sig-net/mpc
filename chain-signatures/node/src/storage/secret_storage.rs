@@ -1,5 +1,8 @@
+#[cfg(any(test, feature = "test-feature"))]
 use std::path::PathBuf;
+#[cfg(any(test, feature = "test-feature"))]
 use tokio::fs::{self, File};
+#[cfg(any(test, feature = "test-feature"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::gcp::{GcpService, SecretResult};
@@ -78,11 +81,13 @@ impl SecretNodeStorage for SecretManagerNodeStorage {
     }
 }
 
-/// Local disk storage implementation of `SecretNodeStorage`.
+/// File implementation of `SecretNodeStorage`, for the test harness.
+#[cfg(any(test, feature = "test-feature"))]
 pub struct DiskNodeStorage {
     path: PathBuf,
 }
 
+#[cfg(any(test, feature = "test-feature"))]
 impl DiskNodeStorage {
     pub fn new(path: &str) -> Self {
         Self {
@@ -91,6 +96,7 @@ impl DiskNodeStorage {
     }
 }
 
+#[cfg(any(test, feature = "test-feature"))]
 #[async_trait]
 impl SecretNodeStorage for DiskNodeStorage {
     async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
@@ -152,7 +158,8 @@ pub enum SecretNodeStorageVariant {
     Memory(MemoryNodeStorage),
     /// Google Cloud Secret Manager storage variant
     Gcp(SecretManagerNodeStorage),
-    /// Local disk storage variant, storing secrets in a file on the local filesystem.
+    /// File storage for the test harness.
+    #[cfg(any(test, feature = "test-feature"))]
     Disk(DiskNodeStorage),
 }
 
@@ -163,6 +170,7 @@ impl SecretNodeStorageVariant {
             #[cfg(any(test, feature = "test-feature"))]
             SecretNodeStorageVariant::Memory(s) => s.store(data).await,
             SecretNodeStorageVariant::Gcp(s) => s.store(data).await,
+            #[cfg(any(test, feature = "test-feature"))]
             SecretNodeStorageVariant::Disk(s) => s.store(data).await,
         }
     }
@@ -173,6 +181,7 @@ impl SecretNodeStorageVariant {
             #[cfg(any(test, feature = "test-feature"))]
             SecretNodeStorageVariant::Memory(s) => s.load().await,
             SecretNodeStorageVariant::Gcp(s) => s.load().await,
+            #[cfg(any(test, feature = "test-feature"))]
             SecretNodeStorageVariant::Disk(s) => s.load().await,
         }
     }
@@ -184,7 +193,7 @@ impl SecretNodeStorageVariant {
 pub fn init(
     gcp_service: Option<&GcpService>,
     opts: &Options,
-    account_id: &AccountId,
+    #[cfg_attr(not(feature = "test-feature"), allow(unused_variables))] account_id: &AccountId,
 ) -> SecretNodeStorageVariant {
     #[cfg(feature = "test-feature")]
     if let Some(sk_share_local_path) = &opts.sk_share_local_path {
@@ -192,8 +201,6 @@ pub fn init(
         tracing::info!("using DiskNodeStorage with path: {}", path);
         return SecretNodeStorageVariant::Disk(DiskNodeStorage::new(&path));
     }
-    #[cfg(not(feature = "test-feature"))]
-    let _ = account_id;
     let secret_id = opts
         .sk_share_secret_id
         .as_ref()
