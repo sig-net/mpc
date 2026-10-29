@@ -314,7 +314,6 @@ mod tests {
     }
 
     #[cfg(feature = "test-feature")]
-    #[cfg(feature = "test-feature")]
     #[test]
     fn init_uses_disk_when_local_path_provided() {
         let opts = Options {
