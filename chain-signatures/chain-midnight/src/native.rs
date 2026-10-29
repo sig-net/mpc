@@ -399,13 +399,10 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             "midnight: respond settled"
         );
         match landing {
-            Ok(Landing::Applied) => Ok(hex::encode(tx_hash)),
-            // The DUST spends sit in the guaranteed segment, so they were applied:
-            // the reservation ends when the replay sees them spent.
-            Ok(Landing::PartialSuccess) => Err(SubmitError::StateConflict(format!(
-                "transaction {} landed with a failed segment, which readers skip",
-                hex::encode(tx_hash)
-            ))),
+            // The respond and the DUST spends sit in guaranteed segments, which a
+            // partial success commits and readers read; the reservation ends when the
+            // replay sees the spends.
+            Ok(Landing::Applied | Landing::PartialSuccess) => Ok(hex::encode(tx_hash)),
             Ok(Landing::Expired) => {
                 self.wallet.release(spent);
                 Err(SubmitError::StateConflict(format!(
@@ -1144,12 +1141,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_partial_success_is_a_conflict_the_retry_rebuilds() {
+    async fn a_partial_success_answers_the_publish() {
         let client = client_over(
             &managed_dir(|_, bytes| bytes),
             ScriptedChain::new(10, 20, Some((12, Landing::PartialSuccess))),
         );
-        let error = client
+        let landed = client
             .post(
                 b"tx",
                 TX_HASH,
@@ -1159,8 +1156,8 @@ mod tests {
                 deadline(),
             )
             .await
-            .unwrap_err();
-        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+            .unwrap();
+        assert_eq!(landed, hex::encode(TX_HASH));
         assert!(
             client.wallet.released.lock().unwrap().is_empty(),
             "the guaranteed segment spent the DUST; the replay ends the reservation"

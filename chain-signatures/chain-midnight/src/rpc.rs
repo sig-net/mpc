@@ -750,7 +750,7 @@ impl PinnedReads for MidnightPublisherRpc {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Landing {
     Applied,
-    /// Applied but for a fallible segment; readers skip every event it carries.
+    /// Applied but for a fallible segment; readers still read its guaranteed events.
     PartialSuccess,
     /// A finalized block is past the transaction's TTL, so it can no longer land.
     Expired,

@@ -15,7 +15,7 @@ The node posts every finished Midnight response itself: one transaction per sign
 **Post.** The transaction goes to the node through `author_submitExtrinsic` as an unsigned `Midnight::send_mn_transaction`. The publisher then scans every finalized block after that head for the transaction's ledger hash:
 
 - `TxApplied` answers the publish with the ledger transaction hash.
-- `TxPartialSuccess` fails it: readers skip every event of a partially successful transaction.
+- `TxPartialSuccess` answers it too: the respond sits in a guaranteed segment, which a partial success commits and readers read.
 - A finalized block past the fee intent's TTL without the transaction means it can never land.
 
 ## The funding wallet
@@ -40,7 +40,7 @@ A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for 
 | `wallet_busy` | The fee needs UTXOs held by a submit that may still land. Nothing was posted. |
 | `wallet_unfunded` | The wallet cannot pay the fee. Nothing was posted. |
 | `proving_timeout` | Proving outlasted the budget. Nothing was posted. |
-| `state_conflict` | The node refused the transaction, it expired unlanded, or it landed partially. The retry rebuilds against fresh state. |
+| `state_conflict` | The node refused the transaction or it expired unlanded. The retry rebuilds against fresh state. |
 | `ambiguous_submit` | The transaction was not seen finalized within the budget and may still land. A retry may post the response again; duplicate responses are harmless. |
 | `internal` | Anything else. |
 
@@ -57,13 +57,13 @@ Every download in the image is pinned by its SHA-256. Test builds take `--midnig
 
 ## Events the reader supports
 
-The MPC reader processes events from finalized transactions with one unambiguous `TxApplied` (full success) status and a matching transaction hash. It reads both guaranteed and fallible transcripts of calls to the configured Signet singleton, processing all guaranteed phases before fallible phases in ledger execution order.
+The MPC reader processes events from finalized transactions with one unambiguous `TxApplied` (full success) or `TxPartialSuccess` status and a matching transaction hash. It reads both guaranteed and fallible transcripts of calls to the configured Signet singleton, processing all guaranteed phases before fallible phases in ledger execution order.
 
-A `TxPartialSuccess` result causes the reader to skip every event from that transaction, including guaranteed events and events from successful fallible segments. This does not undo any effects committed by Midnight. Other candidates without `TxApplied` are also logged and skipped. Malformed status data, duplicate `TxApplied` or `TxPartialSuccess` events, conflicting statuses, and transaction hash mismatches stop processing at that block.
+A `TxPartialSuccess` status does not say which fallible segments committed. The reader keeps every guaranteed event, since the guaranteed section committed, but from fallible transcripts only `SignBidirectionalEvent` notifications: a request is signed only when the caller's state holds its record at that block and did not hold it at the parent block, since a rolled-back segment never wrote it but may name a record an earlier transaction wrote. State cannot say which segment wrote a new record, so a record written in that block by a call that did not notify is signed when a rolled-back notification names it, and a record removed and written again within that block is not signed. Response events in fallible transcripts are skipped with a warning, and so is a fallible transcript whose declared effects differ from the ones its program produces: the node accepts such a transcript and the ledger never commits it, so holding on it would let anyone stop the reader. Candidates without either status are logged and skipped. Malformed status data, duplicate `TxApplied` or `TxPartialSuccess` events, conflicting statuses, and transaction hash mismatches stop processing at that block.
 
-Supported singleton programs consist of literal, non-storage `Push`/`Log` pairs: `Push` places the encoded event on the execution stack, and `Log` emits it. `Noop` (no-op) and `Ckpt` (checkpoint) instructions may appear before, between or after those instructions. During VM execution, they only charge gas and do not change the recovered events. The reader ignores them when checking the instruction pattern, but replays the original program.
+Supported singleton programs consist of literal, non-storage `Push`/`Log` pairs: `Push` places the encoded event on the execution stack, and `Log` emits it. `Noop` (no-op) and `Ckpt` (checkpoint) instructions may appear before, between or after those instructions. During VM execution, they only charge gas and do not change the recovered events. The reader ignores them when checking the instruction pattern, but keeps them in the program it replays.
 
-The node validates the transaction structure; the reader checks whether it can reconstruct events without the original contract state. Declared effects must be empty, and events must use a supported Signet schema. Unsupported instructions or event schemas stop processing at that block. A fallible transcript alone is not a reason to reject a call: it is supported when the whole transaction succeeds. Caller record and signature validation still apply after decoding.
+The node validates the transaction structure; the reader checks whether it can reconstruct events without the original contract state. Declared effects must match the replayed (empty) effects, and events must use a supported Signet schema. The reader decodes each program as its proof covers it, dropping `idx []` instructions and atoms past a cell's alignment: their field representation is empty, so ledgers before 9.1.0-rc.5 let a transaction's author add them to a proven program. Unsupported instructions, VM failures or event schemas in that program stop processing at that block, in either phase of either status: every singleton circuit proves a decodable program, so only a format change reaches them. A fallible transcript alone is not a reason to reject a call. Caller record and signature validation still apply after decoding.
 
 ## Attestations
 

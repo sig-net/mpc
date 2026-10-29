@@ -263,8 +263,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let stack = ChainStack::new(ChainConfigs::from_args(
                 eth, sol, hydration, canton, midnight, tron,
-            )?)
-            .with_midnight_wallet(midnight_wallet);
+            )?);
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
                 near_crypto::Signer::InMemory(s) => s,
@@ -1579,8 +1578,6 @@ mod tests {
             "canton_json_api_ws_url",
             "canton_oidc_token_url",
             "midnight_node_url",
-            "midnight_proof_server_url",
-            "midnight_indexer_url",
             "midnight_indexer_ws_url",
             "tron_endpoint",
             "tron_api_key",

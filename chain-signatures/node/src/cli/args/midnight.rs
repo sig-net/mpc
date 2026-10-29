@@ -35,36 +35,9 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_funding_seed: Option<SecretString>,
-    /// argv of the intent builder child process, JSON-encoded:
-    /// `["node","dist/main.js"]`. One clap value rather than a multi-value
-    /// flag, whose forms stop at anything flag-shaped; JSON escapes instead
-    /// of terminating, so every argv survives the round trip.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_INTENT_GEN_COMMAND"),
-        requires = "midnight_node_url"
-    )]
-    pub midnight_intent_gen_command: Option<String>,
-    /// Proof server URL. Required to respond: these contracts are zkir-v3 and
-    /// cannot be proven in process.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_PROOF_SERVER_URL"),
-        hide_env_values = true,
-        requires = "midnight_node_url"
-    )]
-    pub midnight_proof_server_url: Option<String>,
-    /// Indexer GraphQL URL. Required to respond: the funding wallet's spendable
-    /// DUST is only derivable from the ledger events the indexer serves.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_INDEXER_URL"),
-        hide_env_values = true,
-        requires = "midnight_node_url"
-    )]
-    pub midnight_indexer_url: Option<String>,
-    /// Indexer GraphQL subscription URL: the wallet catches up over the URL
-    /// above and follows over this one.
+    /// Indexer GraphQL subscription URL. Required to respond: the funding
+    /// wallet's spendable DUST is only derivable from the ledger events the
+    /// indexer serves.
     #[arg(
         long,
         env("MPC_MIDNIGHT_INDEXER_WS_URL"),
