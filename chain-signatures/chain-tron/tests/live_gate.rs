@@ -10,7 +10,9 @@ use anyhow::{bail, Context};
 use common::build_raw;
 use k256::ecdsa::SigningKey;
 use mpc_chain_integration_core::{ChainIndexer, MockStateManager, NoopChainTelemetry};
-use mpc_chain_tron::{BroadcastOutcome, TronConfig, TronHttp, TronReceipt, TronWatcher};
+use mpc_chain_tron::{
+    BroadcastOutcome, TronConfig, TronExecutionResult, TronHttp, TronReceipt, TronWatcher,
+};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
 };
@@ -378,32 +380,25 @@ impl Gate {
             receipt.id == B256::from(txid),
             "receipt id must equal the txID"
         );
-        let result = receipt
-            .result
-            .as_deref()
-            .or(receipt.receipt_result.as_deref());
-        anyhow::ensure!(
-            matches!(result, Some("SUCCESS") | Some("REVERT")),
-            "execution result {result:?}"
-        );
-        if result == Some("SUCCESS") {
-            anyhow::ensure!(
-                receipt
-                    .logs
-                    .first()
-                    .is_some_and(|log| log.topics().first() == Some(&transfer_topic())),
-                "expected the Transfer event"
-            );
-            println!(
-                "[broadcast] settled, fee {} sun, {} log(s)",
-                receipt.fee,
-                receipt.logs.len()
-            );
-        } else {
-            println!(
-                "[broadcast] reverted, fee {} sun, resMessage {:?}",
+        match receipt.execution_result()? {
+            TronExecutionResult::Succeeded => {
+                anyhow::ensure!(
+                    receipt
+                        .logs
+                        .first()
+                        .is_some_and(|log| log.topics().first() == Some(&transfer_topic())),
+                    "expected the Transfer event"
+                );
+                println!(
+                    "[broadcast] settled, fee {} sun, {} log(s)",
+                    receipt.fee,
+                    receipt.logs.len()
+                );
+            }
+            TronExecutionResult::Failed => println!(
+                "[broadcast] failed, fee {} sun, resMessage {:?}",
                 receipt.fee, receipt.res_message
-            );
+            ),
         }
         Ok(Broadcast {
             signed,
