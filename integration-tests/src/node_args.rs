@@ -10,7 +10,7 @@ use mpc_chain_ethereum::EthConfig;
 use mpc_chain_hydration::HydrationConfig;
 use mpc_chain_midnight::MidnightConfig;
 use mpc_chain_solana::SolConfig;
-use mpc_node::{logs, mesh, storage};
+use mpc_node::{logs, storage};
 
 /// The `start` command line for one node.
 pub fn start(ctx: &Context, node: &NodeEnvConfig) -> Vec<String> {
@@ -26,7 +26,6 @@ pub fn start(ctx: &Context, node: &NodeEnvConfig) -> Vec<String> {
     args.chains(&node.cfg);
     args.storage(&ctx.storage_options);
     args.logs(&ctx.log_options);
-    args.mesh(&ctx.mesh_options);
     args.0
 }
 
@@ -152,9 +151,5 @@ impl Args {
         self.flag("--opentelemetry-level", logs.opentelemetry_level);
         self.flag("--otlp-endpoint", &logs.otlp_endpoint);
         self.switch("--disable-gcp-logs", logs.disable_gcp_logs);
-    }
-
-    fn mesh(&mut self, mesh: &mesh::Options) {
-        self.flag("--ping-interval", mesh.ping_interval);
     }
 }

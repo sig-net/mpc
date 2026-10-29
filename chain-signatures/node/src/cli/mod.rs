@@ -117,8 +117,6 @@ pub enum Cli {
         /// Logging options
         #[command(flatten)]
         log_options: logs::Options,
-        #[command(flatten)]
-        mesh_options: mesh::Options,
     },
 }
 
@@ -142,7 +140,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             my_address,
             storage_options,
             log_options,
-            mesh_options,
         } => {
             let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
@@ -206,7 +203,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher,
                 contract_state_tx,
                 sync_report_tx,
-            } = MeshHandles::new(mesh_options, &account_id);
+            } = MeshHandles::new(&account_id);
 
             let stack = ChainStack::new(ChainConfigs::from_args(
                 eth, sol, hydration, canton, midnight, tron,
@@ -596,10 +593,15 @@ struct MeshHandles {
 }
 
 impl MeshHandles {
-    fn new(mesh_options: mesh::Options, account_id: &AccountId) -> Self {
+    fn new(account_id: &AccountId) -> Self {
         let node_client = NodeClient::new();
         let (sync_report_tx, sync_report_rx) = SyncTask::sync_report_channel();
-        let mesh = Mesh::new(&node_client, mesh_options, account_id, sync_report_rx);
+        let mesh = Mesh::new(
+            &node_client,
+            mesh::PING_INTERVAL,
+            account_id,
+            sync_report_rx,
+        );
         let mesh_state = mesh.watch();
         let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(account_id);
         Self {
@@ -739,14 +741,14 @@ impl ProtocolHandles {
         rpc_channel: RpcChannel,
         sync_report_tx: SyncReportSender,
     ) -> Self {
-        let config = Config::new(network);
-        let (config_tx, config_rx) = watch::channel(config);
+        let (config_tx, config_rx) = Config::channel();
         let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
         let node = Node::new();
         let node_watcher = node.watch();
 
         let message_channel = MessageChannel::spawn(
             node_client.clone(),
+            network,
             config_rx.clone(),
             contract_watcher.clone(),
         )

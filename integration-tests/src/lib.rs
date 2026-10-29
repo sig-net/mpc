@@ -32,7 +32,7 @@ use mpc_contract::config::ProtocolConfig;
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::backlog::Checkpoint;
 use mpc_node::web::CheckpointResponse;
-use mpc_node::{logs, mesh, storage};
+use mpc_node::{logs, storage};
 use mpc_primitives::Chain;
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{KeyType, SecretKey};
@@ -222,7 +222,6 @@ pub struct Context {
     pub env: String,
     pub storage_options: storage::Options,
     pub log_options: logs::Options,
-    pub mesh_options: mesh::Options,
     pub ethereum: Option<EthereumContext>,
 }
 
@@ -296,10 +295,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     let log_options = logs::Options::test();
 
-    let mesh_options = mpc_node::mesh::Options {
-        ping_interval: 1000,
-    };
-
     // If using pregenerated keys, inject them into storage before nodes start
     if spawner.pregenerated_keys.is_enabled() {
         tracing::info!("injecting pregenerated keyshares into storage...");
@@ -338,7 +333,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         env: spawner.env.clone(),
         storage_options,
         log_options,
-        mesh_options,
         ethereum,
     })
 }
