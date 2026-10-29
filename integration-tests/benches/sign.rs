@@ -78,10 +78,8 @@ fn main() {
     let (nodes, accounts) = rt.block_on(async {
         let nodes = cluster::spawn()
             .with_config(|cfg| {
-                cfg.protocol.triple.min_triples = SIGNATURE_AMOUNT as u32 * 4;
-                cfg.protocol.triple.max_triples = SIGNATURE_AMOUNT as u32 * 16;
-                cfg.protocol.presignature.min_presignatures = SIGNATURE_AMOUNT as u32;
-                cfg.protocol.presignature.max_presignatures = SIGNATURE_AMOUNT as u32 * 4;
+                cfg.protocol.min_mine_triple_pairs = SIGNATURE_AMOUNT as u32 * 4;
+                cfg.protocol.min_mine_presignatures = SIGNATURE_AMOUNT as u32;
             })
             .await
             .unwrap();

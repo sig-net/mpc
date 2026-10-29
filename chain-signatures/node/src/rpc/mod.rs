@@ -652,7 +652,7 @@ async fn update_contract_data(
 
     for view in views {
         match view {
-            View::State(s) => state_view = Some(s),
+            View::State(s) => state_view = Some(*s),
             View::Config(c) => config_view = Some(c),
             View::Checkpoints(cp) => checkpoints_view = Some(cp),
         }
@@ -673,13 +673,7 @@ async fn update_contract_data(
     }
 
     if let Some(contract_config) = config_view {
-        if let Ok(config_val) = serde_json::to_value(contract_config) {
-            if let Ok(node_config) =
-                serde_json::from_value::<crate::config::ContractConfig>(config_val)
-            {
-                config.send_if_modified(|c| c.update(node_config));
-            }
-        }
+        config.send_if_modified(|c| c.update(contract_config));
     }
 
     if let Some(signed_checkpoints) = checkpoints_view {
