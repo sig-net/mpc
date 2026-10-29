@@ -77,8 +77,7 @@ fn env() -> (Runtime, SyncEnv) {
     let env = rt.block_on(async move {
         let spawner = ClusterSpawner::default()
             .with_config(|cfg| {
-                cfg.protocol.triple.min_triples = 3 * 1024;
-                cfg.protocol.triple.max_triples = 1000000;
+                cfg.protocol.min_mine_triple_pairs = 3 * 1024;
             })
             .network("bench-protocol-sync")
             .init_network()

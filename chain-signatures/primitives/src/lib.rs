@@ -13,6 +13,7 @@ mod chain;
 mod crypto;
 mod events;
 mod requests;
+mod tx_params;
 
 pub use signet_primitives::*;
 
@@ -30,3 +31,7 @@ pub use chain::{ChainConfig, SerDeserFormat};
 pub use crypto::{cbor_scalar, SignArgs};
 pub use events::{ChainEvent, ExecutionOutcome, SignatureRespondedEvent};
 pub use requests::{IndexedSignRequest, RequestKind, SignKind};
+pub use tx_params::{
+    Calldata, CalldataError, CompactMaybe, EvmAccessListEntry, EvmType2TxParams, TronTxParams,
+    TxParamType, TxParamTypeError, TxParams,
+};

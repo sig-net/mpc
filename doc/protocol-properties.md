@@ -15,30 +15,14 @@ Not all of the below is implemented. Where a property or invariant is only partl
 ## 1\. Request lifecycle and its objects
 
 * Sign request flow  
-  1. request is finalized on-chain 
+  1. request is finalized on the [source chain](glossary.md#source-chain) 
   2. indexed by each node's own indexer; the request\_id is a deterministic function of the request, so every node derives the same one  
-  3. a per-node task organizes rounds (attempts) until one generation instance produces a signature  
-  4. the signature is submitted on-chain
+  3. a per-node task organizes rounds (attempts) until one generation [instance](glossary.md#instance) produces a signature  
+  4. the signature is submitted to the [signet contract](glossary.md#signet-contract) on the source chain
   5. the contract emits an event for the submission without checking anything  
   6. downstream process is responsible for event verification and exactly once semantics 
 
-Both artifacts below have a single owner, the node that coordinated their generation, which simplifies statesync and coordination, and a set of holders, the nodes storing their shares.
-
-* Triple pair (artifact): two secret-shared random triples, produced in the background and stored, owned and consumed as a single artifact under one id, spent to build one presignature.
-
-* Presignature (artifact): pre-computed, secret-shared ECDSA nonce (big\_r, and shares k, sigma).
-
-* Posit: prepare phase leading up to an instance
-  * proposer sends Propose message to each peer  
-  * peers answer Accept/Reject  
-  * proposer sends Start carrying the final participant list to each accepter  
-  * the proposer reserves its artifact when proposing and commits it, removing it from the pool, before sending Start; aborting before the commit releases the reservation, aborting after does not  
-
-* Instance: one attempt to run the protocol to completion over a specific artifact, named by that artifact
-  * Signature: (sign\_id, presignature\_id) (the code's SignId wraps the request\_id above, same 32 bytes)  
-  * Triple pair/presignature: identified by artifact id. A triple pair's id is drawn at random by its proposer; a presignature's id is derived from the pair it consumes (hash of the pair id), not chosen.  
-
-  A request's round tries to establish a signature instance; since the artifact tentatively picked for this round can differ round to round, rounds are usually different instances. If a round is not successful, a new proposer is chosen deterministically (rotating over the nodes). Only posit messages name the round; generation messages name only (sign\_id, presignature\_id), so two rounds that re-pick the same presignature, possible when the first aborted before committing it, share one name.
+Each round of a request tries to establish a signature instance; since the [artifact](glossary.md#artifact) tentatively picked for this round can differ round to round, rounds are usually different instances. If a round is not successful, a new [proposer](glossary.md#proposer) is chosen deterministically (rotating over the nodes). Only [posit](glossary.md#posit) messages name the round; generation messages name only (sign\_id, presignature\_id), so two rounds that re-pick the same [presignature](glossary.md#presignature) (possible when the first aborted before committing it) share one name.
 
 ## 2\. System model
 
@@ -60,14 +44,14 @@ Both artifacts below have a single owner, the node that coordinated their genera
   * Safety is guaranteed under asynchrony (no bounds on message delivery), while liveness is guaranteed for the periods where the network is synchronous (messages between honest nodes arrive within some bound δ, not assumed known) for long enough.  
     * Formally (see e.g., Shoup, DISC 2024): the network is δ-synchronous over \[a, b+δ\] if every message an honest node sends at time T in \[a, b\] reaches its honest recipient by T+δ ; liveness needs such an interval lasting longer than the current timeout. With unknown δ, the classic technique is to increase timeouts until progress is observed (DLS 1988, used as view-timeout doubling in PBFT and as a linear per-round schedule in Tendermint; the Simplex family instead assumes a known bound and fixes ∆timeout ≥ 3δ per slot). This implementation sits in between: the per-round schedule `round_timeout(r)` grows only up to a hard ceiling. Liveness is therefore argued for δ up to a fraction of the ceiling, not for arbitrary finite δ (details in L1)  
   * Links are fair-lossy (may drop messages), which every phase compensates for by timeout-and-retry, so during a synchronous interval, communication between live nodes is effectively reliable and timely.
-  * Channels are authenticated and encrypted. 
+  * Channels are authenticated and encrypted: a node accepts a message only from a current committee member, signed by that member (details in *Authenticated channels* in the appendix).
 * Each node runs its own chain indexers and eventually observes every finalized request (assumption; liveness depends on it, safety does not).  
 * Chain state reaches a node only through its RPC provider. Different nodes can use different RPC providers. The current security model assumes that the number of nodes using a specific RPC provider is below t.  
 * The mesh active set is a local, unreliable failure detector: each node's own guess at which members are currently reachable and up-to-date (active), a subset of the committee. It may be wrong, and no two nodes ever need the same guess; §6 D2 governs what may be derived from it. A reachable peer is additionally kept *out* of the active set while a state sync runs (a transient Syncing state), whether that sync is the initial one, a post-reconnect one, or one triggered by the peer's `MissingArtifact` reject of a presignature we list it as holding (only when the rejects end the round), so "active" is strictly narrower than "reachable".
 
 ## 3\. Safety properties
 
-* **S1. One-shot artifacts are consumed at most once:** No presignature is used in signature shares for more than one signature generation, and no triple pair for more than one presignature.
+* **S1. One-shot artifacts are consumed at most once:** No presignature is used in signature shares for more than one signature generation, and no [triple pair](glossary.md#triple-pair) for more than one presignature.
 * **S2. Only indexed requests are signed:** An honest node contributes a signature share only to requests its own indexer delivered from a finalized chain state.  
 * **S3. Membership and epochs change only on-chain:** No honest node adopts a committee other than from finalized contract state, and no node processes requests under a non-Running state. 
 * **S4. Instance-local agreement:** Any two honest participants that reach the generating phase of the same instance use the same participant list or they abort.
@@ -78,7 +62,7 @@ Violating any of these is unacceptable in any execution within §2's fault bound
 
 Progress is guaranteed during a sufficiently long synchronous interval, never at a fixed time. The precise bounds and the enforcing mechanisms are in the Appendix.
 
-* **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature (owner and holders online), and ≥ t of that presignature's holders having indexed the request, the request produces a signature within bounded time (O(f \+ p)·∆timeout \+ one generation round, where p counts the members that are offline or own no usable presignature). That such a presignature keeps existing is L2.  
+* **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature ([owner](glossary.md#owner) and [holders](glossary.md#holder) online), and ≥ t of that presignature's holders having indexed the request, the request produces a signature within bounded time (O(f \+ p)·∆timeout \+ one generation round, where p counts the members that are offline or own no usable presignature). That such a presignature keeps existing is L2.  
 * **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor and under the network-wide cap eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).   
 * **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain.  
 * **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable committee member (re)enters each correct node's active set within bounded time. 
@@ -112,7 +96,7 @@ Incomplete list of general, implementation-independent rules (the *how*) that ke
 
 *Rationale.* Two ECDSA signatures on one nonce are two equations in the two unknowns (k, x): the private key follows. The per-request re-randomization does not change that, since the delta is public and both signatures share the same underlying k; it only makes the two *derived* signatures distinct, which is why even two requests with equal payloads count as different.
 
-*Enforcement*: ensured by the single-writer rule of §D3, applied locally at every holder and needing no agreement. Only the artifact's recorded owner can open an instance on it, which each holder checks itself rather than trusting the proposer, though only when it takes its share (§S4). Taking is what burns it: when generation starts the proposer removes the artifact from storage and every deliberator takes its own share, so a later attempt finds nothing at any holder that already served one, and the removal must reach durable storage before anything derived from the artifact is sent or a crash resurrects the share. Every message names its instance and is fed only to the instance it names, so an attempt cannot pick up shares meant for another (§D4).
+*Enforcement*: ensured by the single-writer rule of §D3, applied locally at every holder and needing no agreement. Only the artifact's recorded owner can open an instance on it, which each holder checks itself rather than trusting the proposer, though only when it takes its share (§S4). Taking is what burns it: when generation starts the proposer removes the artifact from storage and every [deliberator](glossary.md#deliberator) takes its own share, so a later attempt finds nothing at any holder that already served one, and the removal must reach durable storage before anything derived from the artifact is sent or a crash resurrects the share. Every message names its instance and is fed only to the instance it names, so an attempt cannot pick up shares meant for another (§D4).
 
 Per-holder deletion is enough because lists intersect. Two **disjoint** sets of honest holders could otherwise each serve their own first request on one artifact. Both instances need a participant list of at least t (the posit phase starts an instance only once t nodes including the proposer have accepted), any two such lists share at least 2t − n members, and f \< 2t − n (§2) leaves at least one of those shared members honest. That holder burned the artifact on the first instance and refuses the second, which therefore never reaches t shares. Consuming one artifact twice would take f ≥ 2t − n, outside the model.
 
@@ -169,7 +153,7 @@ A node under its own floor still generates nothing while the network-wide potent
 *Rationale.* L1 assumes a usable presignature is there to consume, so without supply that precondition eventually fails and signing stops while the network is otherwise perfectly healthy.
 
 *Enforcement*: 
-A node re-proposes every 100 ms while it is below its floor (`min_triples` / `min_presignatures`) and the network-wide potential is under the cap (`max_triples` / `max_presignatures`); concurrency counters free themselves as generation tasks finish and as proposals expire.  
+A node re-proposes every 100 ms while it is below its floor (`min_mine_triple_pairs` for triple pairs, `min_mine_presignatures` for presignatures); concurrency counters free themselves as generation tasks finish and as proposals expire.  
 Generation is skipped entirely while \< t nodes are in the active set, so the failure detector gates supply though never correctness.
 
 ### L3. Settlement
@@ -191,3 +175,14 @@ The `1 + d` cost is what a failover pays when the failover response lands, since
 *Rationale.* Without it a reconnecting node never resumes work, so an ordinary restart becomes an indefinite local outage instead of a transient one.
 
 *Enforcement.* A peer reporting Running waits in Syncing, outside the active set, until a sync round-trip succeeds; for a correct, reachable peer in a synchronous interval it does, so the property holds. The bound is the poll interval, the round-trip, and the batch it rides in: syncs run concurrently but report as one group capped by `BROADCAST_TIMEOUT` (120 s), so a fast peer activates at the slowest peer's pace. A peer that becomes reachable just after a batch starts is not picked up by it either, since only one batch runs at a time, which puts the worst case at roughly two `BROADCAST_TIMEOUT`s. Per-peer reporting would cut that to the peer's own round-trip.
+
+### Authenticated channels
+
+*Assumption* (§2). A message a node accepts was sent by the committee member it names.
+
+*Enforcement*: every batch of peer messages is encrypted to the recipient's key and signed by the sender. The inbox decrypts it and checks the signature against the sender's key in the participant map built from the node's contract state. A batch from a sender outside that map is dropped, not kept for later, so peers cannot grow the inbox (§D5).
+
+Two cases need a message from a sender the node does not know yet:
+
+* Key generation sends each message once, and a peer can start it before this node has read any contract state. The inbox therefore leaves messages in its channel until the first contract state arrives. Candidates cannot change while the contract is initializing, so from then on every key generation sender is known.
+* In a resharing, a peer that has not seen the resharing yet drops a new participant's Ready. Ready repeats every 10 s, and a node sends it once more when it starts the protocol, so no peer waits for the resharing timeout because of a dropped Ready.

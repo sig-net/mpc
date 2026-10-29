@@ -1,11 +1,10 @@
 //! Ethereum wire encoding for signing: re-encoding unsigned payloads with
-//! the signature fields appended, and EVM address derivation.
+//! the signature fields appended.
 
-use alloy::primitives::{keccak256, Address};
-use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use k256::{AffinePoint, Scalar};
-use mpc_crypto::derive_key;
+use alloy::primitives::keccak256;
 use rlp::{Rlp, RlpStream};
+
+pub use mpc_chain_integration_core::utils::payload::{derive_user_address, public_key_to_address};
 
 pub(crate) fn sign_and_hash_eip1559_from_unsigned(
     unsigned: &[u8], // may be 0x02||RLP(body) or just RLP(body)
@@ -127,19 +126,6 @@ impl EthereumTxRlp {
     pub(crate) fn into_vec(self) -> Vec<u8> {
         self.stream.out().to_vec()
     }
-}
-
-pub fn public_key_to_address(public_key: &[u8]) -> Address {
-    debug_assert_eq!(public_key[0], 0x04);
-    let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key[1..]);
-
-    Address::from_slice(&hash[12..])
-}
-
-pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Scalar) -> Address {
-    let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
-
-    public_key_to_address(user_pk.to_encoded_point(false).as_bytes())
 }
 
 /// An unsigned EIP-1559 legacy-shaped RLP body with a 20-byte call target

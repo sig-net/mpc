@@ -3,24 +3,21 @@
 Tron integration for the MPC chain-signatures stack. Tron is a
 **destination chain** for bidirectional signing (see
 `doc/bidirectional-calls.md`): requests originate on the source chain,
-nodes assemble and sign `TriggerSmartContract` transactions, and a
-relayer broadcasts them. There is no Tron indexer and no Tron contract —
-this crate is the transaction format: protobuf parsing, signing, and
-broadcast.
+nodes assemble and sign `TriggerSmartContract` transactions, a
+relayer broadcasts them, and `TronWatcher` confirms execution by
+polling solidified receipts. There is no Tron source indexer and no
+Tron contract — the crate is the RPC client plus that execution
+watcher. The transaction format itself — protobuf messages, canonical parsing,
+signing derivations, address forms — lives in [`mpc-tron-wire`](../tron-wire),
+pinned against recorded mainnet fixtures: `RawTransaction::parse`
+(admission-shaped validation), `sign_and_hash(r, s, v)` with the 65-byte
+`[r ‖ s ‖ v]` signature, `txID = sha256(raw_data)` (the signature is
+outside the preimage), `NowBlock::reference_fields` (`ref_block_bytes`
+is the block height's low two bytes big-endian, `ref_block_hash` is the
+block ID's bytes 8..16).
 
 Core pieces:
 
-- `pb::*` — hand-declared protobuf messages (`Contract`, `RawTransaction`,
-  `Transaction`, `TriggerSmartContract`), pinned against recorded mainnet
-  fixtures.
-- `RawTransaction::parse` — admission-shaped validation: one contract,
-  type pinned `TriggerSmartContract`, ref-block fields present,
-  `expiration > 0`. `sign_and_hash(r, s, v)` appends the 65-byte
-  `[r ‖ s ‖ v]` signature and returns the signed transaction with its
-  txID; `txID = sha256(raw_data)` — the signature is outside the preimage.
-- `NowBlock::reference_fields` — `ref_block_bytes` is the block height's
-  low two bytes big-endian, `ref_block_hash` is the block ID's bytes
-  8..16. Pinned against recorded mainnet fixtures.
 - `TronHttp` — wallet and solidity routers, with retry and TronGrid
   API-key support:
 
@@ -31,11 +28,27 @@ Core pieces:
 | `get_account_balance` | `/wallet/getaccount` | sun; `{}` for accounts the chain has never seen reads as 0 |
 | `get_transaction_info_solidity` | `/walletsolidity/gettransactioninfobyid` | `Ok(None)` = not solidified yet |
 
+- `TronWatcher` — execution watcher for Tron targets: polls solidified receipts by txID. Implements `ChainIndexer` purely as the supervision vehicle (no block scanning, no catchup).
+
+## Configuration
+
+`TronConfig` fields, populated from the node's `--tron-*` flags or their
+environment variables:
+
+| field | env var | required? | notes |
+|---|---|---|---|
+| `endpoint` | `MPC_TRON_ENDPOINT` | to watch execution | wallet/solidity base URL; without it the node admits and signs Tron targets but nothing confirms execution |
+| `api_key` | `MPC_TRON_API_KEY` | no | `TRON-PRO-API-KEY` when the provider is TronGrid; requires the endpoint |
+| `poll_interval` | `MPC_TRON_POLL_INTERVAL_MS` | no | milliseconds between receipt polls, default `15000` |
+
+`request_timeout` (10s) and the HTTP `retry` backoff are fixed defaults.
+
 ## Live gate
 
 `tests/live_gate.rs` exercises the full path — assembly, signing,
-broadcast, settlement — against a real network (default Nile via
-TronGrid). The same sequence runs in CI against the recorded responses
+broadcast, settlement, execution watching (`TronWatcher`) — against a real
+network (default Nile via TronGrid). The same sequence runs in CI against
+the recorded responses
 in `tests/fixtures/nile/`, served verbatim except for the receipt `id`
 (the recording's txid belongs to the recording's key).
 
@@ -74,7 +87,7 @@ rest: mempool admission, signature checks, execution.
 
 ## Tests
 
-Unit tests live with the code. `tests/golden.rs` replays recorded
-mainnet USDT transfers; `tests/live_gate.rs` replays the recorded Nile
-responses above (the client's receipt unit test embeds the same
-recording).
+Unit tests live with the code. `mpc-tron-wire`'s `tests/golden.rs` replays
+recorded mainnet USDT transfers; this crate's `tests/live_gate.rs` replays
+the recorded Nile responses above (the client's receipt unit test embeds
+the same recording).

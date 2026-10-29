@@ -1,5 +1,6 @@
 use cait_sith::protocol::Participant;
 use deadpool_redis::redis::AsyncCommands;
+use integration_tests::mpc_fixture::fixture_interface::MpcFixtureNode;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
 use integration_tests::mpc_fixture::{MpcFixture, MpcFixtureBuilder};
@@ -7,6 +8,7 @@ use mpc_node::backlog::{Backlog, SignEntry};
 use mpc_node::protocol::message::SendMessage;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::ProtocolState;
+use mpc_node::storage::protocol_storage::{ProtocolArtifact, ProtocolStorage};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::types::SignCommand;
 use mpc_primitives::Chain;
@@ -96,7 +98,7 @@ async fn test_basic_generate_triples() {
     };
     let network = MpcFixtureBuilder::default()
         .only_generate_triples()
-        .with_node_min_triples(N)
+        .with_min_mine_triple_pairs(N)
         .build()
         .await;
 
@@ -118,7 +120,7 @@ async fn test_basic_generate_presignature() {
     };
     let network = MpcFixtureBuilder::default()
         .only_generate_presignatures()
-        .with_node_min_presignatures(N)
+        .with_min_mine_presignatures(N)
         .build()
         .await;
 
@@ -236,8 +238,8 @@ async fn test_threshold_change_via_mpc_governance() {
         .with_preshared_key()
         .with_preshared_triples()
         .with_preshared_presignatures()
-        .with_node_min_triples(1)
-        .with_node_min_presignatures(1)
+        .with_min_mine_triple_pairs(1)
+        .with_min_mine_presignatures(1)
         .build()
         .await;
 
@@ -344,13 +346,13 @@ async fn test_presignature_timeout() {
         // configure network ready to generate presignatures immediately
         .only_generate_presignatures()
         // set presignature generation target (each node generates at least 5)
-        .with_node_min_presignatures(5)
+        .with_min_mine_presignatures(5)
         // apply message filter to all nodes
         .with_outgoing_message_filter(0, create_filter())
         .with_outgoing_message_filter(1, create_filter())
         .with_outgoing_message_filter(2, create_filter())
         // speed up timeout
-        .with_presignature_timeout_ms(2000)
+        .with_timeouts(|t| t.presignature_generation = Duration::from_secs(2))
         .build()
         .await;
 
@@ -508,9 +510,9 @@ async fn test_sign_requests_wait_for_presignatures() {
         .with_preshared_triples()
         .with_preshared_presignatures()
         // Disable triple generation since we're using preshared triples
-        .with_node_min_triples(0)
+        .with_min_mine_triple_pairs(0)
         // Enable presignature generation for second batch
-        .with_node_min_presignatures(5)
+        .with_min_mine_presignatures(5)
         .build()
         .await;
 
@@ -607,10 +609,9 @@ async fn test_sign_contention_5_nodes() {
     // Use low concurrency limits to stress contention with 5 nodes.
     let network = MpcFixtureBuilder::new(NUM_NODES, THRESHOLD)
         .with_preshared_key()
-        .with_node_min_triples(NODE_MIN_ARTIFACTS)
-        .with_node_min_presignatures(NODE_MIN_ARTIFACTS)
-        .with_max_concurrent_introduction(8)
-        .with_max_concurrent_generation(8 * NUM_NODES * 4)
+        .with_min_mine_triple_pairs(NODE_MIN_ARTIFACTS)
+        .with_min_mine_presignatures(NODE_MIN_ARTIFACTS)
+        .with_max_mine_generations(8)
         .build()
         .await;
 
@@ -895,7 +896,7 @@ async fn test_presignature_no_triple_waste() {
     let network = MpcFixtureBuilder::default()
         .only_generate_presignatures()
         // Set a high target so nodes keep generating until triple pairs run out
-        .with_node_min_presignatures(1000)
+        .with_min_mine_presignatures(1000)
         .build()
         .await;
 
@@ -1249,4 +1250,83 @@ fn test_truncate_per_owner_insufficient() {
     let mut data = BTreeMap::new();
     data.insert(p, BTreeMap::from([(p, vec![dummy_pair(1)])]));
     truncate_per_owner(data, 2);
+}
+
+/// Assert that every artifact owned by any node lists all nodes as holders and
+/// participants, and that every other node stores it too.
+async fn assert_full_participation<A: ProtocolArtifact>(
+    network: &MpcFixture,
+    label: &str,
+    storage: impl Fn(&MpcFixtureNode) -> &ProtocolStorage<A>,
+) {
+    let all_participants = network.sorted_participants();
+
+    for node in &network.nodes {
+        let owned = storage(node).fetch_owned().await.unwrap();
+        for id in owned {
+            let holders = storage(node).fetch_holders(id).await;
+            assert_eq!(
+                holders, all_participants,
+                "{label} {id} on {:?} should have all participants as holders",
+                node.me
+            );
+
+            let participants = storage(node).fetch_participants(id).await;
+            assert_eq!(
+                participants, all_participants,
+                "{label} {id} on {:?} should list all nodes as participants",
+                node.me
+            );
+
+            // Peers finish the protocol independently of the owner, so give them time.
+            for peer in network.nodes.iter().filter(|peer| peer.me != node.me) {
+                tokio::time::timeout(Duration::from_secs(20), async {
+                    while !storage(peer).contains_by_owner(id, node.me).await {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{label} {id} owned by {:?} should be present on {:?}",
+                        node.me, peer.me
+                    )
+                });
+            }
+        }
+    }
+}
+
+/// Generate triples with all nodes available and verify everybody participated.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_everybody_participate_triple_protocol() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_triples()
+        .with_min_mine_triple_pairs(1)
+        // One proposal per node at a time keeps nodes responsive enough that every
+        // posit is accepted by all peers before the proposer stops waiting.
+        .with_max_mine_generations(1)
+        .build()
+        .await;
+
+    network.assert_triples(1, Duration::from_secs(180)).await;
+    assert_full_participation(&network, "triple", |node| &node.triple_storage).await;
+}
+
+/// Generate presignatures with all nodes available and verify everybody participated.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_everybody_participate_presignature_protocol() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_presignatures()
+        .with_min_mine_presignatures(1)
+        // One proposal per node at a time keeps nodes responsive enough that every
+        // posit is accepted by all peers before the proposer stops waiting.
+        .with_max_mine_generations(1)
+        .build()
+        .await;
+
+    network
+        .assert_presignatures(1, Duration::from_secs(180))
+        .await;
+    assert_full_participation(&network, "presignature", |node| &node.presignature_storage).await;
 }

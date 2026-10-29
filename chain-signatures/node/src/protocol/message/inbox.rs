@@ -22,9 +22,8 @@ use mpc_primitives::SignId;
 use near_crypto::Signature;
 use tokio::sync::{mpsc, watch};
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::time::{Duration, Instant};
 
 /// Size of the dedup caches. This is roughly determined by the max number of
 /// protocols that can be within our system. It's not an upper bound but merely
@@ -50,11 +49,6 @@ const SIGNATURE_TASK_LABEL: &str = "sign_task";
 /// Receiving half of the message system: accepts encrypted messages from peers,
 /// decrypts and dedups them, and routes each to its subscriber channel.
 pub struct MessageInbox {
-    /// Received messages staged for decryption, with arrival time. A message
-    /// from an unknown participant (e.g. mid-resharing) is retried on later
-    /// passes until `expire` drops it.
-    pending_decrypt: VecDeque<(Ciphered, Instant)>,
-
     /// This idempotent checker is used to check that the same batch of messages does not make
     /// it back in the system somehow. Uses the signature to make this check.
     idempotent: lru::LruCache<Signature, ()>,
@@ -101,7 +95,6 @@ impl MessageInbox {
         subscribe_rx: mpsc::Receiver<SubscribeRequest>,
     ) -> Self {
         Self {
-            pending_decrypt: VecDeque::new(),
             idempotent: lru::LruCache::new(MAX_CACHE_SIZE),
             finished: lru::LruCache::new(MAX_CACHE_SIZE),
             inbox_tx,
@@ -204,53 +197,45 @@ impl MessageInbox {
         }
     }
 
-    fn expire(&mut self, timeout: Duration) {
-        self.pending_decrypt
-            .retain(|(_, timestamp)| timestamp.elapsed() < timeout);
-    }
-
-    /// Decrypt and dedup pending batches, returning each alongside its
-    /// authenticated sender.
+    /// Decrypt and dedup a batch, returning it alongside its authenticated
+    /// sender.
     fn decrypt(
         &mut self,
+        encrypted: &Ciphered,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
-    ) -> Vec<(Participant, Vec<Message>)> {
-        let mut retry = Vec::new();
+    ) -> Option<(Participant, Vec<Message>)> {
+        let decrypted = SignedMessage::decrypt_with(encrypted, cipher_sk, participants, |sig| {
+            if self.idempotent.put(sig.clone(), ()).is_some() {
+                Err(MessageError::Idempotent)
+            } else {
+                Ok(())
+            }
+        });
 
-        let mut batches = Vec::new();
-        while let Some((encrypted, timestamp)) = self.pending_decrypt.pop_front() {
-            let decrypted: Result<(Participant, Vec<Message>), _> =
-                SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, |sig| {
-                    if self.idempotent.put(sig.clone(), ()).is_some() {
-                        Err(MessageError::Idempotent)
-                    } else {
-                        Ok(())
-                    }
-                });
-
-            match decrypted {
-                Ok(batch) => batches.push(batch),
-                // Sender is not in our participant map yet; keep the batch and
-                // retry once the map catches up.
-                Err(MessageError::UnknownParticipant(_)) => retry.push((encrypted, timestamp)),
-                // A batch we have already ingested, resent because the peer's
-                // outbox retried a send that had in fact landed.
-                Err(MessageError::Idempotent) => {
-                    tracing::debug!("inbox: dropped duplicate message batch");
-                }
-                Err(err) => tracing::warn!(?err, "inbox: failed to decrypt/verify messages"),
-            };
-        }
-
-        self.pending_decrypt.extend(retry);
-        batches
+        match decrypted {
+            Ok(batch) => return Some(batch),
+            // Unverifiable, so dropped. An honest sender is unknown only if it is
+            // a new resharing participant, which resends Ready every 10 seconds,
+            // or if our contract view went back to an older epoch, which already
+            // takes this node out of Running.
+            Err(MessageError::UnknownParticipant(from)) => {
+                tracing::debug!(?from, "inbox: dropped batch from unknown participant");
+            }
+            // A batch we have already ingested, resent because the peer's
+            // outbox retried a send that had in fact landed.
+            Err(MessageError::Idempotent) => {
+                tracing::debug!("inbox: dropped duplicate message batch");
+            }
+            Err(err) => tracing::warn!(?err, "inbox: failed to decrypt/verify messages"),
+        };
+        None
     }
 
     /// Drop messages whose claimed sender differs from the authenticated
     /// envelope sender, and whole batches we sent to ourselves.
     fn verify_senders(
-        batches: Vec<(Participant, Vec<Message>)>,
+        batches: impl IntoIterator<Item = (Participant, Vec<Message>)>,
         me: Option<Participant>,
     ) -> Vec<Message> {
         let mut messages = Vec::new();
@@ -424,25 +409,31 @@ impl MessageInbox {
         }
     }
 
-    pub async fn run(mut self, config: watch::Receiver<Config>, contract: ContractStateWatcher) {
+    pub async fn run(
+        mut self,
+        config: watch::Receiver<Config>,
+        mut contract: ContractStateWatcher,
+    ) {
         loop {
+            // Without a contract state we know no participant and could verify
+            // nothing. Messages wait in the channel until the first one arrives,
+            // since key generation sends each of its messages only once.
+            let has_state = contract.borrow_state().is_some();
             tokio::select! {
                 Some(sub) = self.subscribe_rx.recv() => {
                     set_channel_capacity_tx("subscribe", &self.subscribe_tx);
                     self.process_subscribe(sub);
                 }
-                Some(encrypted) = self.inbox_rx.recv() => {
+                _ = contract.next_state(), if !has_state => {}
+                Some(encrypted) = self.inbox_rx.recv(), if has_state => {
                     set_channel_capacity_tx("incoming", &self.inbox_tx);
                     let config = config.borrow().clone();
-                    let expiration = Duration::from_millis(config.protocol.message_timeout);
                     let participants = contract.participant_map().await;
                     let me = contract.me().await;
-                    let cipher_sk = config.local.network.cipher_sk;
+                    let cipher_sk = config.network.cipher_sk;
 
-                    self.expire(expiration);
-                    self.pending_decrypt.push_back((encrypted, Instant::now()));
-                    let batches = self.decrypt(&cipher_sk, &participants);
-                    let messages = Self::verify_senders(batches, me);
+                    let batch = self.decrypt(&encrypted, &cipher_sk, &participants);
+                    let messages = Self::verify_senders(batch, me);
 
                     // Apply queued (un)subscribes before fanning out, so a
                     // message for an instance that just finished is dropped
@@ -466,7 +457,7 @@ impl MessageInbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
+    use crate::config::{Config, NetworkConfig};
     use crate::protocol::contract::primitives::Participants;
     use crate::protocol::message::{MessageChannel, SignedMessage};
     use crate::protocol::ParticipantInfo;
@@ -511,12 +502,9 @@ mod tests {
             }
             map
         };
-        let (_config_tx, config_rx) = Config::channel(LocalConfig {
-            over: OverrideConfig::default(),
-            network: NetworkConfig {
-                sign_sk: sign_sk.clone(),
-                cipher_sk,
-            },
+        let (_config_tx, config_rx) = Config::channel(NetworkConfig {
+            sign_sk: sign_sk.clone(),
+            cipher_sk,
         });
         let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
             &node_id,
@@ -745,8 +733,7 @@ mod tests {
         // Envelope signed by `peer`, inner messages claiming `me`: forged.
         let spoofed = triple_batch(0, me);
         let encrypted = SignedMessage::encrypt(&spoofed, peer, &peer_sign_sk, &cipher_pk).unwrap();
-        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
-        let batches = inbox.decrypt(&cipher_sk, &participants);
+        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants);
         assert!(MessageInbox::verify_senders(batches, Some(me)).is_empty());
 
         // Mixed batch: only the forged message is dropped.
@@ -768,8 +755,7 @@ mod tests {
             Message::Unknown(HashMap::new()),
         ];
         let encrypted = SignedMessage::encrypt(&mixed, peer, &peer_sign_sk, &cipher_pk).unwrap();
-        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
-        let batches = inbox.decrypt(&cipher_sk, &participants);
+        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants);
         let survivors = MessageInbox::verify_senders(batches, Some(me));
         assert_eq!(survivors.len(), 2);
         assert!(matches!(&survivors[0], Message::Triple(msg) if msg.id == 5));
@@ -778,8 +764,7 @@ mod tests {
         // Self-signed batch: dropped whole.
         let self_sent = triple_batch(1, me);
         let encrypted = SignedMessage::encrypt(&self_sent, me, &my_sign_sk, &cipher_pk).unwrap();
-        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
-        let batches = inbox.decrypt(&cipher_sk, &participants);
+        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants);
         assert!(MessageInbox::verify_senders(batches, Some(me)).is_empty());
 
         // Wrong signing key: rejected at signature verification already, and it
@@ -790,9 +775,10 @@ mod tests {
         let forged_envelope = triple_batch(3, peer);
         let encrypted =
             SignedMessage::encrypt(&forged_envelope, peer, &my_sign_sk, &cipher_pk).unwrap();
-        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
         let cached = inbox.idempotent.len();
-        assert!(inbox.decrypt(&cipher_sk, &participants).is_empty());
+        assert!(inbox
+            .decrypt(&encrypted, &cipher_sk, &participants)
+            .is_none());
         assert_eq!(
             inbox.idempotent.len(),
             cached,
@@ -802,9 +788,70 @@ mod tests {
         // Control: consistent sender passes through.
         let valid = triple_batch(2, peer);
         let encrypted = SignedMessage::encrypt(&valid, peer, &peer_sign_sk, &cipher_pk).unwrap();
-        inbox.pending_decrypt.push_back((encrypted, Instant::now()));
-        let batches = inbox.decrypt(&cipher_sk, &participants);
+        let batches = inbox.decrypt(&encrypted, &cipher_sk, &participants);
         assert_eq!(MessageInbox::verify_senders(batches, Some(me)).len(), 3);
+
+        // Unknown sender: dropped at once, leaving nothing behind.
+        let unknown = triple_batch(4, peer);
+        let encrypted = SignedMessage::encrypt(&unknown, peer, &peer_sign_sk, &cipher_pk).unwrap();
+        let cached = inbox.idempotent.len();
+        assert!(inbox
+            .decrypt(&encrypted, &cipher_sk, &ParticipantMap::Zero)
+            .is_none());
+        assert_eq!(inbox.idempotent.len(), cached);
+    }
+
+    /// Messages that arrive before the first contract state are not lost: they
+    /// wait and are delivered once the participants are known. Key generation
+    /// depends on it, as it sends each message only once.
+    #[tokio::test]
+    async fn test_inbox_waits_for_first_contract_state() {
+        let peer = Participant::from(1);
+        let (cipher_sk, cipher_pk) = hpke::generate();
+        let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt1");
+        let mut participants = Participants::default();
+        participants.insert(
+            &peer,
+            ParticipantInfo {
+                sign_pk: sign_sk.public_key(),
+                cipher_pk: cipher_pk.clone(),
+                id: peer.into(),
+                url: "http://localhost:3030".to_string(),
+                account_id: "node1".parse().unwrap(),
+            },
+        );
+        let (_config_tx, config_rx) = Config::channel(NetworkConfig {
+            sign_sk: sign_sk.clone(),
+            cipher_sk,
+        });
+        let (contract_watcher, contract_tx) = ContractStateWatcher::new(&"node0".parse().unwrap());
+        let (inbox, _outbox, channel) = MessageChannel::new();
+        let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
+
+        let batch = triple_batch(0, peer);
+        let encrypted = SignedMessage::encrypt(&batch, peer, &sign_sk, &cipher_pk).unwrap();
+        channel.send_inbox(encrypted).await;
+        // Subscriptions are served while messages wait.
+        let mut recv = channel.subscribe_triple(1).await;
+        let early = tokio::time::timeout(Duration::from_millis(200), recv.recv()).await;
+        assert!(early.is_err(), "delivered without a contract state");
+
+        let (_, state) = ContractStateWatcher::with_running(
+            &"node0".parse().unwrap(),
+            root_sk.public_key().into_affine_point(),
+            2,
+            participants,
+        );
+        contract_tx.send(state.borrow().clone()).unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(2), recv.recv())
+            .await
+            .expect("not delivered after the first contract state")
+            .unwrap();
+        assert_eq!(message.id, 1);
+
+        inbox.abort();
     }
 
     #[tokio::test]

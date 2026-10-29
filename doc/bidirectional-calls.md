@@ -420,6 +420,11 @@ processable(req): bool
       time and at most target's cap past it (Tron: `expiration`, 24 h)
     req.schema is well formed: it is empty, or it parses and names only
       types the MPC can decode from target and encode for the source chain
+    on Midnight, the caller contract's state at the request's block, which
+      holds the request, is at most `MAX_CALLER_STATE_BYTES` once
+      hex-decoded, and so is its state at the parent block when the
+      notification comes from a partially successful transaction
+      (Section 6)
 
 on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
@@ -667,6 +672,14 @@ a path from B48 through A15; the first at A12 has none.
 
 ## 6. Notes
 
+* The Midnight caller state limit. A node reads the caller state, the
+  requesting contract's ledger state, to find the request. `processable`
+  bounds its decoded size by `MAX_CALLER_STATE_BYTES`, so admission does
+  not follow each node's RPC response cap. A read the RPC node refuses for
+  size is a drop only if the refusing cap fits every state within the
+  limit; a smaller cap is that node's misconfiguration and holds the block.
+  The limit binds admission only; the publisher's read of the central
+  contract is exempt.
 * Solana with a recent blockhash has no replay protection in the sense of
   Section 3.3. It can be made to work if the MPC remembers completed rids
   for as long as a differently signed copy could still execute, about a
@@ -761,6 +774,8 @@ The single append-only enum has at most 256 variants and assigns these indices:
 | `evmType2TxAccessEntry` | 4 |
 | `evmType2TxStorageKey` | 5 |
 | `attestedOutput` | 6 |
+| `tronTxHeader` | 7 |
+| `tronTxWord` | 8 |
 
 `E` must preserve the leading tag: inputs with different tags must have
 different encodings, including when their remaining tuple shapes differ.
@@ -802,7 +817,7 @@ stay out.
 | `respondSerializationSchema` | `bytes` | no | no longer used where the MPC derives the response encoding from `outputDeserializationSchema` and the source chain's types; integrations not yet migrated still read it |
 
 Enums: `MPCSignatureAlgorithm { ecdsa, reserved }`,
-`MPCDestination { unused, reserved }`, `TxParamType { evmType2, reserved }`.
+`MPCDestination { unused, reserved }`, `TxParamType { evmType2, tron }`.
 
 `RequestId` is `bytes(32)`. `Signature` is the MPC's ECDSA signature:
 `bigR`, an affine point `{ x: bytes(32), y: bytes(32) }`, `s: bytes(32)`
@@ -924,8 +939,57 @@ request's derived key. They neither fill nor refresh any field and read
 nothing from Tron. The signed digest is sha256 of those bytes, which is
 also the transaction ID (Section 2).
 
-`txParamType` is `tron`. Not yet specified: the field types and the
-digest `D_tron`.
+The transaction for `txParamType = tron`, a `TriggerSmartContract` call.
+
+| field | type | meaning |
+|---|---|---|
+| `refBlockBytes` | `bytes(2)` | the reference block height's low two bytes, big-endian |
+| `refBlockHash` | `bytes(8)` | the reference block id's bytes 8..16 |
+| `timestamp` | `u64` | milliseconds |
+| `expiration` | `u64` | milliseconds |
+| `feeLimit` | `u64` | sun |
+| `contractAddress` | `bytes(21)` | the target contract, `0x41` followed by its 20-byte address |
+| `callValue` | `u64` | sun |
+| `calldata` | optional `{ selector: bytes(4), noWords: u16, words: bytes(32)[w] }` | absent for a plain transfer; `words` are canonical ABI words, `noWords` of them used |
+
+The variable-length part is one capacity, `w` calldata words, plus a count
+of how many leading slots are used.
+
+The digest `D_tron(txParams)`:
+
+```
+noWords  = calldata present ? calldata.noWords  : 0
+selector = calldata present ? calldata.selector : bytes(4) of zero
+require noWords <= w
+
+acc = H(E[
+    HashDomain.tronTxHeader: u8,
+    refBlockBytes: bytes(2),
+    refBlockHash: bytes(8),
+    timestamp: u64,
+    expiration: u64,
+    feeLimit: u64,
+    contractAddress: bytes(21),
+    callValue: u64,
+    calldata present: bool,
+    selector: bytes(4),
+    noWords: u16
+])
+
+for each calldata word at index < noWords, in order:
+    acc = H(E[
+        HashDomain.tronTxWord: u8,
+        acc: hash,
+        word: bytes(32)
+    ])
+
+D = bytes32(acc)
+```
+
+The request id of a Tron request is 7.2 with
+`txParamsDigest = D_tron(txParams)`. `txParamType` names the type of
+`txParams`, so a request whose `txParams` is a `TronTxParams` must have
+`txParamType = tron`, and is refused otherwise.
 
 ### 7.5 Responses
 
