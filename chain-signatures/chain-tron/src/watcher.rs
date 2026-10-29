@@ -29,8 +29,7 @@ pub struct TronWatcher<S: StateManager, T: ChainTelemetry> {
 }
 
 impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
-    /// Bounded so a slow provider delays the tick, not the watchdog;
-    /// mirrors the Ethereum watcher's default.
+    /// Caps how many polls one slow response can delay; Ethereum's default.
     const MAX_CONCURRENT_RECEIPT_POLLS: usize = 8;
 
     pub fn new(config: TronConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
@@ -42,24 +41,18 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
         })
     }
 
-    /// One poll tick: resolve each pending watcher's solidified receipt
-    /// into an event. Unresolved watchers — pending, fetch failure,
-    /// unclassifiable result — produce nothing and retry on the next tick.
-    async fn poll_watchers(&self) -> Vec<ChainEvent> {
+    /// Yields per resolved receipt, in resolution order; pending, failed
+    /// fetch, and unclassifiable receipts yield nothing and retry next
+    /// tick. Resolution order is load-bearing: immediate sends keep a
+    /// pass that outlasts the stall timeout from losing confirmations.
+    async fn poll_watchers(&self) -> impl futures_util::Stream<Item = ChainEvent> + '_ {
         let watchers = self.state_manager.get_execution_watchers(Chain::Tron).await;
-        if watchers.is_empty() {
-            return Vec::new();
-        }
         tracing::debug!(watchers = watchers.len(), "polling tron execution watchers");
 
         iter(watchers)
             .map(|(tx_id, (sign_id, tx))| self.resolve(tx_id, sign_id, tx))
             .buffer_unordered(Self::MAX_CONCURRENT_RECEIPT_POLLS)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .flatten()
-            .collect()
+            .filter_map(std::future::ready)
     }
 
     /// Resolve one watcher from its solidified receipt: `None` = pending,
@@ -130,8 +123,18 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
                     head.context("fetching the tron head block")?.number
                 }
             };
-            // Polls first, Block last: a Block event certifies a completed tick.
-            for event in self.poll_watchers().await {
+            // Block last: it certifies the tick. Per-resolution sends mean
+            // a pass outlasting the stall timeout restarts with the map
+            // already shrunk.
+            let mut polls = self.poll_watchers().await;
+            loop {
+                let event = tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    event = polls.next() => match event {
+                        Some(event) => event,
+                        None => break,
+                    },
+                };
                 if events_tx.send(event).await.is_err() {
                     return Ok(());
                 }
@@ -516,6 +519,68 @@ mod tests {
         assert!(matches!(result, ExecutionOutcome::ExtractionFailed));
         assert!(telemetry.terminal_failures() >= 1);
         assert_eq!(telemetry.retryable_failures(), 0);
+
+        run.cancel.cancel();
+        run.done.await.unwrap().unwrap();
+    }
+
+    /// A receipt must confirm while a slower poll is in flight: a batched
+    /// pass outlasting the stall timeout would discard it on restart.
+    #[tokio::test]
+    async fn confirms_stream_while_a_slow_poll_is_in_flight() {
+        let server = mockito::Server::new_async().await;
+        // Seed 2 retries a 429 on a 300ms cadence — in flight well past
+        // the assert window below.
+        let config = TronConfig {
+            retry: RetryConfig {
+                min_delay: Duration::from_millis(300),
+                max_delay: Duration::from_millis(300),
+                max_times: 5,
+                jitter: false,
+            },
+            ..test_config(server.url().parse().unwrap())
+        };
+        let mut server = server;
+        nowblock_mock(&mut server);
+        receipt_stub(&mut server, 1, receipt_body(1, "SUCCESS"))
+            .expect(1)
+            .create();
+        let tx2 = watcher_tx(2).0;
+        server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "value": hex::encode(tx2.0)
+            })))
+            .with_status(429)
+            .expect_at_least(1)
+            .create();
+
+        let state = MockStateManager::new();
+        state
+            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
+            .await;
+        state
+            .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
+            .await;
+
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+
+        let (seen, result) =
+            tokio::time::timeout(Duration::from_millis(600), until_confirmed(&mut run, 1))
+                .await
+                .expect("seed 1 must confirm while seed 2's poll is still in flight");
+        assert!(
+            matches!(result, ExecutionOutcome::Success { output } if output.is_empty()),
+            "seen before seed 1: {seen:?}"
+        );
+        // Block certifies a completed pass — seed 2 is still retrying.
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, ChainEvent::Block(_))),
+            "Block must not precede the pass's end: {seen:?}"
+        );
 
         run.cancel.cancel();
         run.done.await.unwrap().unwrap();
