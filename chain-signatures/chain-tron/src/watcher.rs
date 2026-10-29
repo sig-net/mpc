@@ -1,8 +1,7 @@
-//! Execution watcher for Tron targets: polls solidified receipts by txID.
-//! Tron is a target-only chain, so [`ChainIndexer`](mpc_chain_integration_core::ChainIndexer)
-//! is implemented purely as the supervision vehicle — no block scanning,
-//! no catchup; the watcher map is rebuilt from backlog checkpoints on
-//! restart.
+//! Watches Tron-targeted transactions by polling solidified receipts by txID.
+//! Target-only, so [`ChainIndexer`](mpc_chain_integration_core::ChainIndexer)
+//! is the supervision vehicle alone: no scanning, no catchup — restart
+//! rebuilds the map from the backlog.
 
 use std::sync::Arc;
 
@@ -50,14 +49,14 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
         tracing::debug!(watchers = watchers.len(), "polling tron execution watchers");
 
         iter(watchers)
-            .map(|(tx_id, (sign_id, tx))| self.resolve(tx_id, sign_id, tx))
+            .map(|(tx_id, (sign_id, tx))| self.resolve_watcher_from_receipt(tx_id, sign_id, tx))
             .buffer_unordered(Self::MAX_CONCURRENT_RECEIPT_POLLS)
             .filter_map(std::future::ready)
     }
 
-    /// Resolve one watcher from its solidified receipt: `None` = pending,
-    /// fetch failure, or unclassifiable result — all retried on the next tick.
-    async fn resolve(
+    /// `None` — pending;
+    /// Failed fetch or unclassifiable — retries next tick.
+    async fn resolve_watcher_from_receipt(
         &self,
         tx_id: BidirectionalTxId,
         sign_id: SignId,
@@ -110,9 +109,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         tracing::info!("tron execution watcher started");
-        // No catchup: receipts are direct txID lookups and the supervisor's
-        // recovery rebuilds the watcher map. The event only marks Tron
-        // caught up per the indexer contract.
+        // No catchup — txID lookups need none; recovery rebuilds the map.
+        // The respond leg gates on the source chain's flag, so this event
+        // only satisfies the indexer contract.
         if events_tx.send(ChainEvent::CatchupCompleted).await.is_err() {
             return Ok(());
         }
@@ -139,8 +138,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
                     return Ok(());
                 }
             }
-            // TODO(tron): resolve Executing entries whose expiration passed
-            // as Unviable.
+            // TODO(tron): h_exp-expired entries resolve as Unviable, via
+            // a backlog-keyed scan.
             // Provider head as a liveness gauge; Tron indexes no blocks.
             self.telemetry.block_indexed(head);
             if events_tx.send(ChainEvent::Block(head)).await.is_err() {
@@ -186,8 +185,8 @@ mod tests {
         }
     }
 
-    /// A Tron-target watcher entry whose txID is the first 32 bytes of the
-    /// seed; the request id mirrors it, as `to_bidirectional_tx` builds it.
+    /// Watcher entry keyed by the seed (txID's first byte); the request id
+    /// mirrors it, as `to_bidirectional_tx` builds it.
     fn watcher_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
         let mut id = [0u8; 32];
         *id.first_mut().unwrap() = seed;
@@ -213,8 +212,8 @@ mod tests {
         (BidirectionalTxId(id), SignId::new(id), tx)
     }
 
-    /// The same entry carrying a non-empty output schema — what admission
-    /// refuses for Tron targets today; the watcher must still handle it.
+    /// The same entry carrying a non-empty output schema — admission
+    /// refuses these today; the watcher must still handle it.
     fn schema_carrying_tx(seed: u8) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
         let (tx_id, sign_id, tx) = watcher_tx(seed);
         let mut with_schema = (*tx).clone();
@@ -223,8 +222,8 @@ mod tests {
         (tx_id, sign_id, with_schema.into())
     }
 
-    /// Counts `bidirectional_extraction_failed` calls, the way the Ethereum
-    /// watcher tests assert on extraction-failure telemetry.
+    /// Counts `bidirectional_extraction_failed`, as the Ethereum watcher
+    /// tests do.
     #[derive(Clone, Default)]
     struct CountingTelemetry {
         retryable: Arc<AtomicUsize>,
@@ -319,8 +318,8 @@ mod tests {
         }
     }
 
-    /// Collects events until an `ExecutionConfirmed` for `seed` arrives
-    /// (or the deadline passes), returning it with everything seen before.
+    /// Waits for `seed`'s `ExecutionConfirmed`, returning it with the
+    /// events seen first.
     async fn until_confirmed(
         run: &mut WatcherRun,
         seed: u8,
@@ -444,10 +443,9 @@ mod tests {
         run.done.await.unwrap().unwrap();
     }
 
-    /// Unclassifiable or result-less receipts are solidified and immutable:
-    /// resolving them would attest a guess, so they must keep polling
-    /// without emitting anything — and count as retryable extraction
-    /// failures, once per watcher per tick.
+    /// Immutable receipts: an unclassifiable result can never change, so
+    /// attesting a guess is forbidden — poll on, counting one retryable
+    /// extraction failure per watcher per tick.
     #[tokio::test]
     async fn unclassifiable_receipt_resolves_nothing() {
         let server = mockito::Server::new_async().await;
@@ -490,9 +488,8 @@ mod tests {
         run.done.await.unwrap().unwrap();
     }
 
-    /// A schema-carrying request cannot have its output extracted from a
-    /// Tron receipt, so a successful execution parks rather than attests an
-    /// empty output.
+    /// A successful receipt can't yield a schema-carrying request's
+    /// output: park rather than attest an empty one.
     #[tokio::test]
     async fn schema_carrying_success_parks() {
         let server = mockito::Server::new_async().await;
