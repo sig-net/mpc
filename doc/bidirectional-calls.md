@@ -1,5 +1,7 @@
 # Bidirectional calls: entities, API, properties
 
+*Status: partly implemented (Section 8).*
+
 ## TL;DR
 
 A contract on the source chain asks for a transaction to be signed and
@@ -19,6 +21,7 @@ Organization:
 * Section 5 argues that Section 4 delivers Section 3.
 * Section 6 collects notes: limits of the design and what is still open.
 * Section 7 gives the canonical structures on the wire.
+* Section 8 says which of it is implemented.
 
 ## 1. Entities and happy path
 
@@ -252,7 +255,8 @@ before the contract upgraded to this library.
   never execute. So the same bytes, however often they are signed, execute
   at most once, and a different transaction using the same nonce blocks
   ours for good. A Solana transaction with a recent blockhash has no such
-  protection; see Section 6. Tron rejects a transaction whose ID is already
+  protection; see Section 6. Solana is not a target today, it appears as a
+  design case in this doc. Tron rejects a transaction whose ID is already
   on chain, and accepts one only while its `expiration` is ahead of the head
   block and its reference block is on the chain. UTXO target chains are out
   of scope: their replay protection is a set of outputs, and M4 would need
@@ -1081,3 +1085,20 @@ Whichever route supplies the bytes, they remain untrusted until the
 application contract's library recomputes the attestation digest and
 verifies the signature against the attestation key (Section 4.1). Incorrect
 or forged bytes fail verification.
+
+## 8. Implementation status
+
+Target chains are Ethereum and Tron (`Chain::supports_bidirectional_signing`).
+Source chains are Midnight, Solana, Hydration and Canton.
+
+Checked against `develop` at `1d823c4e`. Still to change:
+
+* Unviable from another request's response.
+* Finding nonce siblings, and executions under every published signature.
+* Refusing non-canonical request fields, and the reserved paths on every
+  source.
+* One key per key version, before a second version.
+* Catch-up for Hydration.
+* Tron: Unviable at expiry, expiry bound at admission, output
+  schemas.
+* Solana, Hydration and Canton: structures of Section 7, and Unviable.
