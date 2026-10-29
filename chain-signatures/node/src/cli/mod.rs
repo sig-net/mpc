@@ -32,7 +32,6 @@ pub use args::{
 use clap::Parser;
 use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
-use k256::sha2::Sha256;
 use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
@@ -47,8 +46,7 @@ use mpc_chain_tron::TronConfig;
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
-use near_crypto::{InMemorySigner, PublicKey, SecretKey};
-use sha3::Digest;
+use near_crypto::{InMemorySigner, SecretKey};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
@@ -213,16 +211,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let cipher_pk_hex = hex::encode(cipher_sk.public_key().to_bytes());
 
-            let digest = configuration_digest(
-                mpc_contract_id.clone(),
-                account_id.clone(),
-                account_sk.clone(),
-                cipher_pk_hex.clone(),
-                sign_sk.clone(),
-                eth.clone(),
-            );
-            crate::metrics::nodes::CONFIGURATION_DIGEST.set(digest);
-
             // SignCommand channel: sign requests and completions from the
             // indexers/streams into the SignatureSpawner.
             let (sign_tx, sign_rx) = mpsc::channel(MAX_SIGN_COMMANDS);
@@ -273,6 +261,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 near_crypto::Signer::InMemory(s) => s,
                 _ => unreachable!(),
             };
+            let account_pk = signer.public_key();
 
             let RpcHandles {
                 near_client,
@@ -301,9 +290,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             );
 
             log_startup(
-                digest,
                 &mpc_contract_id,
                 &account_id,
+                &account_pk,
                 &my_address,
                 &cipher_pk_hex,
                 &network,
@@ -384,63 +373,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
     };
 
     Ok(())
-}
-
-fn configuration_digest(
-    mpc_contract_id: AccountId,
-    account_id: AccountId,
-    account_sk: SecretKey,
-    cipher_pk: String,
-    sign_sk: SecretKey,
-    eth: EthArgs,
-) -> i64 {
-    let eth_contract_address = eth.eth_contract_address.unwrap_or_default();
-    calculate_digest(
-        mpc_contract_id,
-        account_id,
-        account_sk.public_key(),
-        cipher_pk,
-        sign_sk.public_key(),
-        eth_contract_address,
-    )
-}
-
-fn calculate_digest(
-    mpc_contract_id: AccountId,
-    account_id: AccountId,
-    account_pk: PublicKey,
-    cipher_pk: String,
-    sign_pk: PublicKey,
-    eth_contract_address: String,
-) -> i64 {
-    let mpc_contract_id_str = mpc_contract_id.to_string();
-    let account_id_str = account_id.to_string();
-    let account_pk_str = account_pk.to_string();
-    let sign_pk_str = sign_pk.to_string();
-
-    tracing::info!(
-        %mpc_contract_id_str,
-        %account_id_str,
-        %account_pk_str,
-        %cipher_pk,
-        %sign_pk_str,
-        eth_contract_address = %eth_contract_address,
-        "digest hash inputs (exact strings)"
-    );
-
-    let mut hasher = Sha256::new();
-    hasher.update(&mpc_contract_id_str);
-    hasher.update(&account_id_str);
-    hasher.update(&account_pk_str);
-    hasher.update(&cipher_pk);
-    hasher.update(&sign_pk_str);
-    hasher.update(&eth_contract_address);
-
-    let result = hasher.finalize();
-    // Convert the first 8 bytes of the hash to an i64
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&result[..8]);
-    i64::from_le_bytes(bytes)
 }
 
 #[allow(clippy::type_complexity)]
@@ -603,9 +535,9 @@ impl ChainStack {
 /// and which chains it is configured to index.
 #[allow(clippy::too_many_arguments)]
 fn log_startup(
-    digest: i64,
     mpc_contract_id: &AccountId,
     account_id: &AccountId,
+    account_pk: &near_crypto::PublicKey,
     my_address: &Url,
     cipher_pk_hex: &str,
     network: &NetworkConfig,
@@ -617,9 +549,9 @@ fn log_startup(
     let hydration_signer_address = chains.hydration.as_ref().and_then(|c| c.signer_address());
 
     tracing::info!(
-        %digest,
         %mpc_contract_id,
         %account_id,
+        %account_pk,
         %my_address,
         cipher_pk_hex = %cipher_pk_hex,
         version = %crate::metrics::version(),
@@ -1050,8 +982,6 @@ mod tests {
 
     use super::*;
 
-    const ETH_CONTRACT_ADDRESS: &str = "f8bdC0612361a1E49a8E01423d4C0cFc5dF4791A";
-
     /// A listener that never replies stands in for a stalled Redis.
     #[tokio::test]
     async fn redis_pool_fails_instead_of_hanging_on_a_stalled_server() {
@@ -1068,189 +998,6 @@ mod tests {
             matches!(result, Ok(Err(_))),
             "expected a timeout error, got {result:?}"
         );
-    }
-
-    #[test]
-    fn test_digest_staking() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("sig.stakin.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:B1vW5HddtmV526QjtwHwBDupKH9A7mgsVttYvE6sZP59").unwrap();
-        let cipher_pk = "395418b55b73977f16dfa0fe8a1c488fb6935451deaaa20c51cb5f542ec9c118";
-        let sign_pk =
-            PublicKey::from_str("ed25519:7dqefRWCwt4XsxnMpgj4pBSXWuzoFjEVQadarZ7GydpU").unwrap();
-        let _eth_account_pk = "04f92c9a55c73db4f916fa017b747a3b3bc14b100f4b40e1d67bbf913c6795563b101b8554db46f4206a3a8640e5baff935b7a4df30fe2719e59c1bb9cd7c97ba9";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, -1051225187120159684);
-    }
-
-    #[test]
-    fn test_digest_taxistake() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("taxistake-sig.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:5gEt9Aqo1hXwK3Ym6Fqw2zxgzHCEyMyZbJMH1C6irBam").unwrap();
-        let cipher_pk = "472a3f1d0c34b89f45d589949e5f907cc10b1ffdced34012a9b0a7244ae01124";
-        let sign_pk =
-            PublicKey::from_str("ed25519:7LY7SA8g2HamrdBNnQwadrjb2wfVRy5cbVaY8wyurxk8").unwrap();
-        let _eth_account_pk = "0452ef3e306b9aae7f8a9e5fe15824b367e34315e26be7bcafc676182a9c45d95714d3e7c8a29a2e3a12adcdc430ad56956e6fc0a8a0c1bd25a195dd2973d47714";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, -4992003418219576839);
-    }
-
-    #[test]
-    fn test_digest_staking_for_all() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("sig-mpc-staking4all-01.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:9FfqwhurgHnRqbfQoekYZbqWUSiPokS7vF5akysmbSmL").unwrap();
-        let cipher_pk = "7983950637824082c17d45fb4d84111b872f537223bb26a54521b5ddf84b7417";
-        let sign_pk =
-            PublicKey::from_str("ed25519:2NxYvtbMRncbtEoX7963FweMUJ6TaWjyBeKxeCi1EMnd").unwrap();
-        let _eth_account_pk = "046cb1cbe5bab2e5b0de7068bbcd976a8370c54f0583ca26e8308994690dedb8933e8729b39a31cf72bab122165cfaafc2daf12a55c9b6b2e6dd61a4667725fd35";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, -930268115875971858);
-    }
-
-    #[test]
-    fn test_digest_lifted() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("lifted-sig.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:Ds7DppCJ84399g7oskRRTNbBLsm61CJJn7j5837JikiT").unwrap();
-        let cipher_pk = "196e53521c601145b5280c06468393ce41fd307276b574471401fad3d449480b";
-        let sign_pk =
-            PublicKey::from_str("ed25519:48AtaVmpT7r2Bo6AV6nRU27ioNe7NWwfYnZFgm8mU8T5").unwrap();
-        let _eth_account_pk = "042c56cb509a7a1381155b25fc2bc2ce97930e0aad1508485189235e63838fcf01b0b0cc678d52ca6911bf24344e5ab223a07750c4bfd5f3cf8c3c8224eaece3fc";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        // Grafan value: -1056529302944347500
-        assert_eq!(digest, -1056529302944347488);
-    }
-
-    #[test]
-    fn test_digest_piertwo() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("sig-piertwo.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:4w4vtSWsRwCdRhnwDG6YqXM5SfYn4d8AcN5d3qnPnjQD").unwrap();
-        let cipher_pk = "65171d682c0ed98eeb0797940c752ae8fafb9c9939533f42f0dbc9f7201ad409";
-        let sign_pk =
-            PublicKey::from_str("ed25519:nATG1EmJTTeEo9m7BGpcd49Zx3BxpaqazGohYSyQTt4").unwrap();
-        let _eth_account_pk = "04f92c9a55c73db4f916fa017b747a3b3bc14b100f4b40e1d67bbf913c6795563b101b8554db46f4206a3a8640e5baff935b7a4df30fe2719e59c1bb9cd7c97ba9";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, 695826193095166746);
-    }
-
-    #[test]
-    fn test_digest_natsai() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("natsai-bp.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:5eRSDpU4qyULkCsMVT2ghLhwR6VQb68K7pBAZFZDT9U6").unwrap();
-        let cipher_pk = "f11d23a6dff8823853e1777041d1bf60d185b63564536e9a5a7c94110cc1563a";
-        let sign_pk =
-            PublicKey::from_str("ed25519:9v1215AcbHrWhC3muPvUu5EPY93o7AYcSvcxMUeRYDx6").unwrap();
-        let _eth_account_pk = "04ced0dc6ededb6a19aaa42c46544ff81fbb984673ea4285b8b4e147a807292a43d82595588ae9c86382bac2921a8b5006c43bc993ce0f02a268dbda477b9f0b8c";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, -8209029844787147492);
-    }
-
-    #[test]
-    fn test_digest_fountain_labs() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("node.sig-net.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:JQJSjyqF35rHsGrNLSEUVYNdeSANiZNDNNjheN2kszq").unwrap();
-        let cipher_pk = "756111207e38f2518bfdcbda746eafa0ec3a340baeecc02084a75f2240f48651";
-        let sign_pk =
-            PublicKey::from_str("ed25519:6jGbVGEGPqz8QZD5qKJYYxGZCV56tgcRKD9pM55Uey7A").unwrap();
-        let _eth_account_pk = "04ced0dc6ededb6a19aaa42c46544ff81fbb984673ea4285b8b4e147a807292a43d82595588ae9c86382bac2921a8b5006c43bc993ce0f02a268dbda477b9f0b8c";
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-        assert_eq!(digest, -4889179067099199685);
-    }
-
-    #[test]
-    fn test_digest_blacksand() {
-        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
-        let account_id = AccountId::from_str("blacksandtech-sig.near").unwrap();
-        let account_pk =
-            PublicKey::from_str("ed25519:67w2feimgcV21ZgEegvGhHTxyd9DR4yRxguqP8MctyJE").unwrap();
-        let cipher_pk = "231f6ddc22796c076dcc11a90b92c23e54071b1673abd2743fb84d5a1fc53f61";
-        let sign_pk =
-            PublicKey::from_str("ed25519:D5Pccv8i88AuDGXuXQoNSVGAZLfuHCZw2TQmoZxi2tEM").unwrap();
-
-        let digest = calculate_digest(
-            mpc_contract_id,
-            account_id,
-            account_pk,
-            cipher_pk.to_string(),
-            sign_pk,
-            ETH_CONTRACT_ADDRESS.to_string(),
-        );
-
-        assert_eq!(digest, -6950551088322443092);
     }
 
     /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
