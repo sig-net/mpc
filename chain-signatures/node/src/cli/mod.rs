@@ -4,7 +4,6 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::backlog::Backlog;
 use crate::config::{Config, NetworkConfig};
-use crate::gcp::GcpService;
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
 use crate::node_client::NodeClient;
@@ -748,15 +747,7 @@ impl StorageHandles {
         account_id: &AccountId,
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
-        let gcp_service = match (
-            &storage_options.sk_share_secret_id,
-            &storage_options.gcp_project_id,
-        ) {
-            (Some(_), Some(project_id)) => Some(GcpService::init(project_id).await?),
-            _ => None,
-        };
-        let key_storage =
-            storage::secret_storage::init(gcp_service.as_ref(), storage_options, account_id);
+        let key_storage = storage::secret_storage::init(storage_options, account_id).await?;
         let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);

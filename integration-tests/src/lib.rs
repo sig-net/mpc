@@ -315,11 +315,8 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         for (i, account) in spawner.accounts.iter().enumerate() {
             let participant = Participant::from(i as u32);
             if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
-                let mut secret_storage = storage::secret_storage::init(
-                    None, // No GCP service for tests
-                    &storage_options,
-                    account.id(),
-                );
+                let mut secret_storage =
+                    storage::secret_storage::init(&storage_options, account.id()).await?;
 
                 let persistent_data = mpc_node::protocol::state::PersistentNodeData {
                     epoch: 0,
