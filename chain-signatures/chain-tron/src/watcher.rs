@@ -28,7 +28,8 @@ pub struct TronWatcher<S: StateManager, T: ChainTelemetry> {
 }
 
 impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
-    /// Caps how many polls one slow response can delay; Ethereum's default.
+    /// Bounds in-flight receipt requests to the provider; Ethereum's
+    /// default.
     const MAX_CONCURRENT_RECEIPT_POLLS: usize = 8;
 
     pub fn new(config: TronConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
