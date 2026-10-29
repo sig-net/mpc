@@ -30,7 +30,7 @@ impl Default for TronConfig {
                 max_times: 5,
                 jitter: true,
             },
-            poll_interval: Duration::from_secs(15),
+            poll_interval: Duration::from_millis(Self::DEFAULT_POLL_INTERVAL_MS),
         }
     }
 }
@@ -49,6 +49,7 @@ impl fmt::Debug for TronConfig {
 }
 
 impl TronConfig {
+    pub const DEFAULT_POLL_INTERVAL_MS: u64 = 15_000;
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url("endpoint", &self.endpoint)?;
         if let Some(api_key) = &self.api_key {
@@ -99,6 +100,48 @@ mod tests {
         assert_eq!(config.request_timeout, Duration::from_secs(10));
         assert_eq!(config.poll_interval, Duration::from_secs(15));
         config.validate().expect("defaults are valid");
+    }
+
+    #[test]
+    fn validate_rejects_each_rule_violation() {
+        fn variant(mutate: impl FnOnce(&mut TronConfig)) -> TronConfig {
+            let mut config = TronConfig::default();
+            mutate(&mut config);
+            config
+        }
+        let cases = [
+            (
+                "non-http scheme",
+                variant(|c| c.endpoint = Url::parse("ftp://h").unwrap()),
+            ),
+            (
+                "path",
+                variant(|c| c.endpoint = Url::parse("https://h/v1").unwrap()),
+            ),
+            (
+                "query",
+                variant(|c| c.endpoint = Url::parse("https://h/?k=1").unwrap()),
+            ),
+            (
+                "fragment",
+                variant(|c| c.endpoint = Url::parse("https://h/#f").unwrap()),
+            ),
+            (
+                "blank api key",
+                variant(|c| c.api_key = Some("  ".to_string())),
+            ),
+            (
+                "zero request timeout",
+                variant(|c| c.request_timeout = Duration::ZERO),
+            ),
+            (
+                "zero poll interval",
+                variant(|c| c.poll_interval = Duration::ZERO),
+            ),
+        ];
+        for (rule, config) in cases {
+            assert!(config.validate().is_err(), "validate accepted: {rule}");
+        }
     }
 
     #[test]

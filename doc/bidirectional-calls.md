@@ -420,6 +420,11 @@ processable(req): bool
       time and at most target's cap past it (Tron: `expiration`, 24 h)
     req.schema is well formed: it is empty, or it parses and names only
       types the MPC can decode from target and encode for the source chain
+    on Midnight, the caller contract's state at the request's block, which
+      holds the request, is at most `MAX_CALLER_STATE_BYTES` once
+      hex-decoded, and so is its state at the parent block when the
+      notification comes from a partially successful transaction
+      (Section 6)
 
 on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
@@ -667,6 +672,14 @@ a path from B48 through A15; the first at A12 has none.
 
 ## 6. Notes
 
+* The Midnight caller state limit. A node reads the caller state, the
+  requesting contract's ledger state, to find the request. `processable`
+  bounds its decoded size by `MAX_CALLER_STATE_BYTES`, so admission does
+  not follow each node's RPC response cap. A read the RPC node refuses for
+  size is a drop only if the refusing cap fits every state within the
+  limit; a smaller cap is that node's misconfiguration and holds the block.
+  The limit binds admission only; the publisher's read of the central
+  contract is exempt.
 * Solana with a recent blockhash has no replay protection in the sense of
   Section 3.3. It can be made to work if the MPC remembers completed rids
   for as long as a differently signed copy could still execute, about a

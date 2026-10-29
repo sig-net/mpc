@@ -958,9 +958,7 @@ mod tests {
             let key = (address_64hex.to_string(), at_hash.to_string());
             if self.oversized_states.contains(&key) {
                 return Err(crate::rpc::oversized_contract_state(
-                    subxt::ext::subxt_rpcs::Error::Client(Box::new(std::io::Error::other(
-                        "fixture oversized contract state",
-                    ))),
+                    "fixture oversized contract state",
                 ));
             }
             if let Some(message) = self.state_errors.get(&key) {
