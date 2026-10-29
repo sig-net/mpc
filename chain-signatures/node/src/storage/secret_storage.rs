@@ -173,9 +173,10 @@ impl SecretNodeStorageVariant {
     }
 }
 
-/// Opens the key-share store the options name. Clap admits exactly one, and
-/// pairs the Secret Manager id with a GCP project, so `gcp_service` is present
-/// whenever `sk_share_secret_id` is.
+/// Opens the key-share store the options name. Production builds know only
+/// Secret Manager; clap pairs its id with a GCP project, so `gcp_service` is
+/// present whenever `sk_share_secret_id` is. Test builds may name a file or
+/// the in-memory store instead.
 pub fn init(
     gcp_service: Option<&GcpService>,
     opts: &Options,
@@ -184,19 +185,22 @@ pub fn init(
     if let Some(secret_id) = &opts.sk_share_secret_id {
         let gcp = gcp_service.expect("Secret Manager storage needs a GCP service");
         tracing::info!("using SecretManagerNodeStorage");
-        SecretNodeStorageVariant::Gcp(SecretManagerNodeStorage::new(
+        return SecretNodeStorageVariant::Gcp(SecretManagerNodeStorage::new(
             &gcp.secret_manager,
             secret_id.clone(),
-        ))
-    } else if let Some(sk_share_local_path) = &opts.sk_share_local_path {
+        ));
+    }
+    #[cfg(feature = "test-feature")]
+    if let Some(sk_share_local_path) = &opts.sk_share_local_path {
         let path = format!("{sk_share_local_path}-{account_id}");
         tracing::info!("using DiskNodeStorage with path: {}", path);
-        SecretNodeStorageVariant::Disk(DiskNodeStorage::new(&path))
-    } else {
-        // `--sk-share-in-memory`, which only test builds accept.
-        tracing::warn!("using MemoryNodeStorage: the key share is lost on restart");
-        SecretNodeStorageVariant::Memory(MemoryNodeStorage::default())
+        return SecretNodeStorageVariant::Disk(DiskNodeStorage::new(&path));
     }
+    #[cfg(not(feature = "test-feature"))]
+    let _ = account_id;
+    // `--sk-share-in-memory`, which only test builds accept.
+    tracing::warn!("using MemoryNodeStorage: the key share is lost on restart");
+    SecretNodeStorageVariant::Memory(MemoryNodeStorage::default())
 }
 
 #[cfg(feature = "test-feature")]
@@ -299,10 +303,12 @@ mod tests {
         assert_eq!(loaded, Some(expected));
     }
 
+    #[cfg(feature = "test-feature")]
     #[test]
     fn init_uses_memory_when_no_storage_configured() {
         let opts = Options {
             sk_share_secret_id: None,
+            #[cfg(feature = "test-feature")]
             sk_share_local_path: None,
             #[cfg(feature = "test-feature")]
             sk_share_in_memory: true,
@@ -315,6 +321,7 @@ mod tests {
         assert!(matches!(storage, SecretNodeStorageVariant::Memory(_)));
     }
 
+    #[cfg(feature = "test-feature")]
     #[test]
     fn init_uses_disk_when_local_path_provided() {
         let opts = Options {
@@ -335,6 +342,7 @@ mod tests {
     async fn init_uses_gcp_when_secret_id_present() {
         let opts = Options {
             sk_share_secret_id: Some("secret-id".to_string()),
+            #[cfg(feature = "test-feature")]
             sk_share_local_path: None,
             #[cfg(feature = "test-feature")]
             sk_share_in_memory: false,
