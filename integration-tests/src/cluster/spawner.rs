@@ -59,7 +59,6 @@ fn thread_network_name(docker: &DockerClient) -> String {
     })
 }
 
-const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
 ///
@@ -153,7 +152,6 @@ pub struct ClusterSpawner {
     pub docker: DockerClient,
     pub release: bool,
     pub env: String,
-    pub gcp_project_id: String,
     pub network: String,
     pub accounts: Vec<Account>,
     pub participants: Vec<Participant>,
@@ -195,7 +193,6 @@ impl Default for ClusterSpawner {
             docker,
             release: true,
             env: ENV.to_string(),
-            gcp_project_id: GCP_PROJECT_ID.to_string(),
             network,
             accounts: Vec::with_capacity(cfg.nodes),
             participants: Vec::with_capacity(cfg.nodes),
@@ -309,11 +306,6 @@ impl ClusterSpawner {
 
     pub fn env(mut self, env: &str) -> Self {
         self.env = env.to_string();
-        self
-    }
-
-    pub fn gcp_project_id(mut self, gcp_project_id: &str) -> Self {
-        self.gcp_project_id = gcp_project_id.to_string();
         self
     }
 
