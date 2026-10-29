@@ -26,7 +26,7 @@ pub struct Options {
     /// Mostly for integration tests.
     #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"))]
     pub sk_share_local_path: Option<String>,
-    #[arg(long, env("MPC_REDIS_URL"))]
+    #[arg(long, env("MPC_REDIS_URL"), hide_env_values = true)]
     pub redis_url: String,
 }
 

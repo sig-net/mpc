@@ -77,8 +77,7 @@ fn env() -> (Runtime, SyncEnv) {
     let env = rt.block_on(async move {
         let spawner = ClusterSpawner::default()
             .with_config(|cfg| {
-                cfg.protocol.triple.min_triples = 3 * 1024;
-                cfg.protocol.triple.max_triples = 1000000;
+                cfg.protocol.min_mine_triple_pairs = 3 * 1024;
             })
             .network("bench-protocol-sync")
             .init_network()
@@ -98,9 +97,7 @@ fn env() -> (Runtime, SyncEnv) {
         let (sync_report_tx, sync_report_rx) = mpsc::channel(1024);
         let mesh = Mesh::new(
             &client,
-            mpc_node::mesh::Options {
-                ping_interval: 1000,
-            },
+            mpc_node::mesh::PING_INTERVAL,
             &node_id,
             sync_report_rx,
         );

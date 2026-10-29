@@ -316,6 +316,19 @@ mod tests {
     }
 
     #[test]
+    fn from_created_rejects_a_dest_the_params_do_not_assemble_for() {
+        let mut raw = sample_sign_event();
+        raw.caip2_id = Chain::Tron.caip2_chain_id().to_string();
+        let err = CantonSignBidirectionalRequestedEvent::from_created("cid-1".to_string(), raw)
+            .expect_err("tx_params assemble for ethereum, not the named family")
+            .to_string();
+        assert!(
+            err.contains("caip2_id") && err.contains("tron:mainnet"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn parse_signature_responded_event_rejects_invalid_hex() {
         let created = ledger_api::CreatedEvent {
             contract_id: "cid-respond".to_string(),

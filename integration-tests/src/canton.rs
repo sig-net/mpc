@@ -170,7 +170,7 @@ pub fn test_sign_request_event(
         caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
         key_version: LATEST_MPC_KEY_VERSION,
         path: sandbox.requester_party.clone(),
-        algo: String::new(),
+        algo: "ECDSA".to_string(),
         dest: String::new(),
         params: String::new(),
         output_deserialization_schema: EVM_TYPE2_BOOL_OUTPUT_SCHEMA.to_string(),

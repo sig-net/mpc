@@ -6,10 +6,11 @@
 mod common;
 
 use common::build_raw;
-use mpc_chain_tron::pb::{
+use mpc_primitives::{Calldata, CompactMaybe, TronTxParams};
+use mpc_tron_wire::pb::{
     Message, RawTransaction, Transaction, TriggerSmartContract, TRIGGER_SMART_CONTRACT_TYPE_URL,
 };
-use mpc_chain_tron::{parse_hex, NowBlock, TronAddress};
+use mpc_tron_wire::{parse_hex, to_unsigned_tron_tx, NowBlock, TronAddress};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
@@ -96,6 +97,57 @@ fn built_transaction_matches_recorded_bytes() {
         hex::encode(built.encode_to_vec()),
         tx["raw_data_hex"].as_str().unwrap()
     );
+}
+
+#[test]
+fn tron_tx_params_rebuild_the_recorded_raw_byte_identically() {
+    for path in FIXTURES {
+        let tx = fixture(path);
+        let raw_bytes = hex::decode(tx["raw_data_hex"].as_str().unwrap()).unwrap();
+        let raw = RawTransaction::parse(&raw_bytes).unwrap();
+        let contract = &raw.contract[0];
+        let trigger =
+            TriggerSmartContract::decode(contract.parameter.as_ref().unwrap().value.as_slice())
+                .unwrap();
+        // One recorded transfer is permission-gated (`permission_id`), which
+        // the §7.4 record does not name.
+        if contract.permission_id != 0 || trigger.call_token_value != 0 || trigger.token_id != 0 {
+            assert_eq!(path, "tests/fixtures/usdt-transfer-3.json");
+            continue;
+        }
+        let data = trigger.data.clone();
+        assert_eq!((data.len() - 4) % 32, 0, "{path}: non-word calldata");
+
+        let params = TronTxParams {
+            ref_block_bytes: raw.ref_block_bytes.clone().try_into().unwrap(),
+            ref_block_hash: raw.ref_block_hash.clone().try_into().unwrap(),
+            timestamp: raw.timestamp as u64,
+            expiration: raw.expiration as u64,
+            fee_limit: raw.fee_limit as u64,
+            contract_address: trigger.contract_address.clone().try_into().unwrap(),
+            call_value: trigger.call_value as u64,
+            calldata: CompactMaybe {
+                is_some: true,
+                value: Calldata {
+                    selector: data[..4].try_into().unwrap(),
+                    no_words: ((data.len() - 4) / 32) as u16,
+                    words: data[4..]
+                        .chunks(32)
+                        .map(|word| word.try_into().unwrap())
+                        .collect(),
+                },
+            },
+        };
+        let owner = TronAddress::from_evm(alloy::primitives::Address::from_slice(
+            &trigger.owner_address[1..],
+        ));
+        let assembled = to_unsigned_tron_tx(&params, owner).unwrap();
+        assert_eq!(
+            hex::encode(&assembled),
+            hex::encode(&raw_bytes),
+            "{path}: §7.4 params rebuild the raw byte-identically"
+        );
+    }
 }
 
 #[test]

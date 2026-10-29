@@ -10,6 +10,7 @@ use crate::protocol::Chain;
 use anyhow::Context as _;
 use k256::Scalar;
 use mpc_primitives::ChainConfig as _;
+use mpc_primitives::LATEST_MPC_KEY_VERSION;
 pub use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ChainFromError, SignBidirectionalEvent, Signature,
 };
@@ -62,6 +63,44 @@ fn derive_epsilon(
     }
 }
 
+/// The only `algo`, `dest` and `params` a request may carry (Section 7.1 of
+/// doc/bidirectional-calls.md). The node signs ECDSA whatever they say, but they
+/// enter the request id, so any other value would give one execution a second
+/// request id (G2). `dest` is deprecated: it has no meaning and stays blank until
+/// it leaves the request id with the Section 7 format.
+pub(crate) const SDK_ALGO: &str = "ECDSA";
+pub(crate) const SDK_DEST: &str = "";
+pub(crate) const SDK_PARAMS: &str = "";
+
+/// Key version 0 predates bidirectional signing.
+const MIN_BIDIRECTIONAL_KEY_VERSION: u32 = 1;
+
+/// Key version in `MIN_BIDIRECTIONAL_KEY_VERSION..=LATEST_MPC_KEY_VERSION`, and
+/// [`SDK_ALGO`], [`SDK_DEST`] and [`SDK_PARAMS`].
+fn check_request_fields(event: &SignBidirectionalEvent) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        event.key_version >= MIN_BIDIRECTIONAL_KEY_VERSION,
+        "key version must be at least {MIN_BIDIRECTIONAL_KEY_VERSION}, got {}",
+        event.key_version
+    );
+    anyhow::ensure!(
+        event.key_version <= LATEST_MPC_KEY_VERSION,
+        "key version must be at most {LATEST_MPC_KEY_VERSION}, got {}",
+        event.key_version
+    );
+    let fields = (
+        event.algo.as_str(),
+        event.dest.as_str(),
+        event.params.as_str(),
+    );
+    let expected = (SDK_ALGO, SDK_DEST, SDK_PARAMS);
+    anyhow::ensure!(
+        fields == expected,
+        "(algo, dest, params) must be {expected:?}, got {fields:?}"
+    );
+    Ok(())
+}
+
 /// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
 pub trait SignBidirectionalEventExt {
     fn sender_string(&self) -> anyhow::Result<String>;
@@ -77,7 +116,8 @@ pub trait SignBidirectionalEventExt {
     /// request, and the schema checks output extraction applies to whatever the
     /// target chain returns. Shared between admission (reject before the backlog)
     /// and the respond path's failure handling (quarantine): both must agree on
-    /// what "can never advance" means.
+    /// what "can never advance" means. Off-spec reserved request fields are only
+    /// logged for now.
     fn validate(&self) -> anyhow::Result<()>;
 
     /// Construct a [`BidirectionalTx`] from this event, the response signature, and the MPC root key.
@@ -126,13 +166,22 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             target.supports_bidirectional_signing(),
             "unsupported target chain {target}"
         );
+        // Only warns until the applications send these fields; refusing them
+        // follows once the warnings stop.
+        if let Err(err) = check_request_fields(self) {
+            tracing::warn!(
+                source_chain = ?self.chain,
+                sender = ?self.sender_string().ok(),
+                "accepting off-spec bidirectional request fields: {err:#}"
+            );
+        }
         self.epsilon().context("cannot derive epsilon")?;
-        // TODO(tron): once the record carries structured params, admission
-        // must enforce §4.3's expiration bound (future, ≤ 24 h past the
-        // request's Midnight timestamp); raw bytes carry no request timestamp
-        // to check against. Owner binding (`owned_by_requester`) and duplicate
-        // destination-id rejection already run at ingestion; the expiry→Unviable
-        // scan must cover backlog entries, not just watchers.
+        // TODO(tron): enforce §4.3's bound t_src < expiration ≤ t_src +
+        // 24 h. The raw bytes carry `expiration`; the missing pipe is the
+        // source time (event has none, Midnight reports block_timestamp:
+        // None) — thread indexed_ts into validate or expose block time.
+        // The expiry→Unviable scan must cover backlog entries, not just
+        // watchers.
         let calldata = validate_unsigned_transaction(target, &self.serialized_transaction)
             .context("undecodable serialized_transaction")?;
         match calldata {
@@ -168,8 +217,7 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         })?;
         let epsilon = self.epsilon()?;
         let from_address = derive_user_address(root_pk, epsilon);
-        // TODO(tron): `from_address` is EVM-shaped; Tron consumers need the
-        // derived key's Tron address (same EVM math, 0x41-prefixed form).
+        // EVM-shaped; Tron consumers wrap it with `TronAddress::from_evm`.
         let (signed_tx_hash, nonce) =
             sign_and_hash_transaction(target_chain, &self.serialized_transaction, mpc_sig)?;
 
@@ -219,7 +267,10 @@ impl BidirectionalTxExt for BidirectionalTx {
 #[cfg(test)]
 mod tests {
     use super::eth_tx::legacy_tx;
-    use super::{SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature};
+    use super::{
+        SignBidirectionalEvent, SignBidirectionalEventExt as _, Signature, LATEST_MPC_KEY_VERSION,
+        SDK_ALGO, SDK_DEST, SDK_PARAMS,
+    };
     use crate::protocol::Chain;
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, EncodedPoint};
@@ -228,25 +279,101 @@ mod tests {
     const RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a154120eb85916a10d2c6542613e4c9517b5e99b2dee9121541a614f803b6fd780986a42c78ec9c7f77e6ded13c2244a9059cbb000000000000000000000000d9e02baf48ed306afc63cfa816a2b6be8442036a0000000000000000000000000000000000000000000000000000000008f428f870bad8e2a49134900180e1eb17";
     const TXID_HEX: &str = "d3741faef8cd6594923d7d827b610b12ce9bc80f65822c827c8fd7a612570540";
 
-    #[test]
-    fn validate_rejects_unsupported_target_chain() {
-        let event = |target: Chain| SignBidirectionalEvent {
+    fn solana_event(target: Chain) -> SignBidirectionalEvent {
+        SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: legacy_tx(1),
-            dest: String::new(),
+            dest: SDK_DEST.to_string(),
             caip2_id: target.caip2_chain_id().to_string(),
-            key_version: 0,
+            key_version: LATEST_MPC_KEY_VERSION,
             deposit: 0,
             path: "m/0".to_string(),
-            algo: "ECDSA".to_string(),
-            params: "{}".to_string(),
+            algo: SDK_ALGO.to_string(),
+            params: SDK_PARAMS.to_string(),
             chain: Chain::Solana,
             chain_ctx: None,
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"ok","type":"bool"}]"#.to_vec(),
-        };
-        assert!(event(Chain::Ethereum).validate().is_ok());
-        assert!(event(Chain::Solana).validate().is_err());
+        }
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_target_chain() {
+        assert!(solana_event(Chain::Ethereum).validate().is_ok());
+        assert!(solana_event(Chain::Solana).validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_off_spec_fields_for_now() {
+        let mut event = solana_event(Chain::Ethereum);
+        event.algo = "ecdsa".to_string();
+        event.dest = "ethereum".to_string();
+        event.params = "{}".to_string();
+        assert!(super::check_request_fields(&event).is_err());
+        assert!(event.validate().is_ok());
+    }
+
+    #[test]
+    fn check_request_fields_accepts_only_key_version_1_and_the_sdk_fields() {
+        type Edit = fn(&mut SignBidirectionalEvent);
+        let cases: [(&str, Edit, bool); 15] = [
+            ("as the SDKs send it", |_| {}, true),
+            ("from Hydration", |e| e.chain = Chain::Hydration, true),
+            (
+                "from Hydration at key version 0",
+                |e| {
+                    e.chain = Chain::Hydration;
+                    e.key_version = 0;
+                },
+                false,
+            ),
+            (
+                "from Hydration, algo lowercase",
+                |e| {
+                    e.chain = Chain::Hydration;
+                    e.algo = "ecdsa".to_string();
+                },
+                false,
+            ),
+            ("from Canton", |e| e.chain = Chain::Canton, true),
+            ("key version 0", |e| e.key_version = 0, false),
+            ("key version 2", |e| e.key_version = 2, false),
+            (
+                "algo secp256k1",
+                |e| e.algo = "secp256k1".to_string(),
+                false,
+            ),
+            ("algo lowercase", |e| e.algo = "ecdsa".to_string(), false),
+            ("dest ethereum", |e| e.dest = "ethereum".to_string(), false),
+            ("dest tron", |e| e.dest = "tron".to_string(), false),
+            ("params {}", |e| e.params = "{}".to_string(), false),
+            ("from Midnight", |e| e.chain = Chain::Midnight, true),
+            (
+                "from Midnight, algo lowercase",
+                |e| {
+                    e.chain = Chain::Midnight;
+                    e.algo = "ecdsa".to_string();
+                },
+                false,
+            ),
+            (
+                "from Midnight at key version 0",
+                |e| {
+                    e.chain = Chain::Midnight;
+                    e.key_version = 0;
+                },
+                false,
+            ),
+        ];
+        for (case, edit, accepted) in cases {
+            let mut event = solana_event(Chain::Ethereum);
+            edit(&mut event);
+            assert_eq!(
+                super::check_request_fields(&event).is_ok(),
+                accepted,
+                "{case}"
+            );
+        }
     }
 
     fn tron_event(bytes: Vec<u8>) -> SignBidirectionalEvent {
@@ -255,11 +382,11 @@ mod tests {
             serialized_transaction: bytes,
             dest: String::new(),
             caip2_id: Chain::Tron.caip2_chain_id().to_string(),
-            key_version: 0,
+            key_version: 1,
             deposit: 0,
             path: "m/0".to_string(),
             algo: "ECDSA".to_string(),
-            params: "{}".to_string(),
+            params: String::new(),
             chain: Chain::Midnight,
             chain_ctx: None,
             output_deserialization_schema: vec![],
@@ -330,7 +457,7 @@ mod tests {
 
     #[test]
     fn to_bidirectional_tx_pins_the_tron_placeholder() {
-        const FROM_ADDRESS_HEX: &str = "e8f25ab4ae5101ae4de86bdeafc113bff28b4a68";
+        const FROM_ADDRESS_HEX: &str = "f0e7701dff7663ad180b34ff9f32b937a166f481";
 
         let mpc_key = hex::decode("045b4fa179e005361fd858f8a6f896d7afc23a53d3f95d6566a88cde954e7b2f1cb77c554705c35d4ffced67aeafbcda46d9d89d6f200c3a3d109f92872863b3dc").unwrap();
         let encoded = EncodedPoint::from_bytes(mpc_key).unwrap();

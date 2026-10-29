@@ -6,8 +6,7 @@ use alloy::eips::eip2930::{AccessList, AccessListItem};
 use alloy::primitives::{keccak256, Address, Bytes, TxKind, B256, U256};
 use alloy::sol_types::SolValue;
 use borsh::{BorshDeserialize, BorshSerialize};
-use k256::Scalar;
-use mpc_chain_integration_core::utils::hashing::hash_payload;
+use mpc_chain_integration_core::utils::payload::bidirectional_payload_scalar;
 use mpc_crypto::x_coordinate;
 use mpc_primitives::{
     Chain, IndexedSignRequest, ScalarExt, SignArgs, SignBidirectionalEvent, SignId, Signature,
@@ -69,6 +68,17 @@ impl CantonSignBidirectionalRequestedEvent {
                 TxEip1559::try_from(params)?.encoded_for_signing()
             }
         };
+
+        // The node admits and signs under the dest's family; the params above
+        // assemble for Ethereum, so any other dest must fail
+        anyhow::ensure!(
+            matches!(
+                Chain::from_caip2_chain_id(&raw.caip2_id),
+                Ok(Chain::Ethereum)
+            ),
+            "caip2_id {} does not name ethereum, the chain family the tx_params assemble for",
+            raw.caip2_id
+        );
         let mut sender = [0u8; 32];
         hex::decode_to_slice(&raw.sender, &mut sender)
             .map_err(|e| anyhow::anyhow!("invalid hex in sender: {e}"))?;
@@ -108,11 +118,8 @@ impl CantonSignBidirectionalRequestedEvent {
             &self.path,
         )?;
 
-        let unsigned_tx_hash = hash_payload(&self.serialized_transaction);
-
-        let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
-            anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
-        };
+        let target = Chain::from_caip2_chain_id(&self.caip2_id)?;
+        let payload = bidirectional_payload_scalar(target, &self.serialized_transaction)?;
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "canton signature requested");

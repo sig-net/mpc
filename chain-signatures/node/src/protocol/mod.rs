@@ -38,6 +38,21 @@ use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
 use tokio::sync::{mpsc, watch};
 
+use crate::storage::protocol_storage::StockCounts;
+
+/// Whether a spawner should propose another generation: below its own floor
+/// and with a generation slot free. `stock` may be up to a second old, so
+/// the floor can be overshot by at most one second of proposals, bounded by
+/// `max_mine_generations`.
+pub(crate) fn should_generate(
+    stock: StockCounts,
+    mine_generations: usize,
+    min: usize,
+    max_mine_generations: usize,
+) -> bool {
+    stock.mine < min && mine_generations < max_mine_generations
+}
+
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
     pub(crate) secret_storage: SecretNodeStorageVariant,
@@ -255,5 +270,16 @@ mod tests {
     fn test_parse_node_version_invalid() {
         assert_eq!(parse_node_version("bad_version"), 999999999000);
         assert_eq!(parse_node_version(""), 999999999000);
+    }
+
+    #[test]
+    fn should_generate_branches() {
+        let stock = StockCounts {
+            mine: 3,
+            generated: 10,
+        };
+        assert!(should_generate(stock, 1, 5, 10));
+        assert!(!should_generate(stock, 1, 3, 10), "floor reached");
+        assert!(!should_generate(stock, 10, 5, 10), "generation cap");
     }
 }

@@ -41,17 +41,17 @@ Code moves downstream only.
 
 We use [semantic versioning](https://semver.org/). The version is `version` under `[workspace.package]` in the root `Cargo.toml`. Tags are the bare version, e.g. `1.21.0`.
 
-Every tag has a GitHub release whose notes are the PR description. Release and hotfix PRs replace the template body with **Summary**, and **Breaking changes** (`None`, or each with its type and required action). Right after the PR merges:
+Every tag has a GitHub release whose notes are the PR description. Release and hotfix PRs use the [release](../.github/PULL_REQUEST_TEMPLATE/release.md) and [hotfix](../.github/PULL_REQUEST_TEMPLATE/hotfix.md) PR templates: **Summary**, **Breaking changes** (tick `None`, or each type that applies with what breaks and the required action) and a **Checklist**. The notes exclude the checklist and the unticked breaking-change types. Right after the PR merges:
 
 ```sh
 git tag X.Y.Z <commit> && git push origin X.Y.Z
-gh pr view <pr> --json body --jq .body | gh release create X.Y.Z --verify-tag --notes-file -
+gh pr view <pr> --json body --jq .body | sed -e '/^## Checklist/,$d' -e '/^- \[ \] /d' -e 's/^- \[[xX]\] /- /' | gh release create X.Y.Z --verify-tag --notes-file -
 ```
 
 - Release: the commit is the release commit on `develop`, the PR is the release PR.
 - Hotfix: the commit is the merge commit of the hotfix PR on `testnet` or `mainnet`, the PR is the hotfix PR.
 
-Promotion to testnet or mainnet does not create a tag.
+Promotion to testnet or mainnet does not create a tag. The version on a branch is the `version` line of its `Cargo.toml`, e.g. `git show origin/mainnet:Cargo.toml | grep ^version`; the latest release on `develop` is `git describe --tags --abbrev=0 origin/develop`.
 
 ## Release flow
 
@@ -70,12 +70,19 @@ Every second Tuesday is a **release day**. On it, in this order:
    git switch -c promote/X.Y.Z-mainnet origin/testnet
    git push origin promote/X.Y.Z-mainnet
    ```
-2. Open a PR from `promote/X.Y.Z-mainnet` to `mainnet` titled `chore: release X.Y.Z to mainnet` and merge it with a merge commit. Never promote from `develop` or open the PR from `testnet` directly, so `mainnet` gets exactly what was soaked. If the version line conflicts with a hotfix bump, take the version from the promote branch.
+2. Open a PR from `promote/X.Y.Z-mainnet` to `mainnet` from the [promotion template](../.github/PULL_REQUEST_TEMPLATE/promotion.md), tick its checklist and merge it with a merge commit:
+   ```sh
+   gh pr create --base mainnet --title "chore: release X.Y.Z to mainnet" --body-file .github/PULL_REQUEST_TEMPLATE/promotion.md
+   ```
+   Never promote from `develop` or open the PR from `testnet` directly, so `mainnet` gets exactly what was soaked. If the version line conflicts with a hotfix bump, take the version from the promote branch.
 
 ### Step 2: Cut the release
 
-1. Open a PR against `develop` titled `chore: release X.Y.Z` that bumps the version and runs `cargo check` to update `Cargo.lock`.
-2. Write the release notes in its description, collecting the Breaking changes sections of the merged PRs.
+1. Bump the version, run `cargo check` to update `Cargo.lock`, and open a PR against `develop` titled `chore: release X.Y.Z` from the release template:
+   ```sh
+   gh pr create --base develop --title "chore: release X.Y.Z" --body-file .github/PULL_REQUEST_TEMPLATE/release.md
+   ```
+2. Write the **Summary** and **Breaking changes**. The breaking changes are those from the Breaking changes sections of the PRs merged since the last release, cross-checked against their diffs. Tick the **Checklist**.
 3. Merge it. The squash commit on `develop` is the **release commit**; the PR page shows its SHA.
 4. Tag the release commit and publish the GitHub release, see [Versioning](#versioning).
 
@@ -87,7 +94,11 @@ Every second Tuesday is a **release day**. On it, in this order:
    git switch -c promote/X.Y.Z X.Y.Z
    git push origin promote/X.Y.Z
    ```
-2. Open a PR from `promote/X.Y.Z` to `testnet` titled `chore: release X.Y.Z to testnet` and merge it with a merge commit. Don't open it from `develop`: the PR would pick up anything merged to `develop` while it is open. If the version line conflicts with a hotfix bump, take the version from the promote branch.
+2. Open a PR from `promote/X.Y.Z` to `testnet` from the [promotion template](../.github/PULL_REQUEST_TEMPLATE/promotion.md), tick its checklist and merge it with a merge commit:
+   ```sh
+   gh pr create --base testnet --title "chore: release X.Y.Z to testnet" --body-file .github/PULL_REQUEST_TEMPLATE/promotion.md
+   ```
+   Don't open it from `develop`: the PR would pick up anything merged to `develop` while it is open. If the version line conflicts with a hotfix bump, take the version from the promote branch.
 
 ### Step 4: Soak
 
@@ -111,7 +122,7 @@ gitGraph
     checkout testnet
     branch hotfix/1.21.1
     cherry-pick id: "fix: b"
-    commit id: "fix: release 1.21.1"
+    commit id: "fix: hotfix 1.21.1"
     checkout testnet
     merge hotfix/1.21.1 tag: "1.21.1"
 ```
@@ -127,9 +138,14 @@ For example, `testnet` has 1.21.0:
    git switch -c hotfix/1.21.1 origin/testnet
    git cherry-pick -x <fix-commit>
    ```
-3. Bump the version to `1.21.1`, run `cargo check` to update `Cargo.lock`, and commit as `fix: release 1.21.1`.
-4. Push the branch, open a PR to `testnet` titled `fix: hotfix 1.21.1 to testnet` with release notes in the description, and merge it with a merge commit.
-5. Tag the merge commit and publish the GitHub release, see [Versioning](#versioning).
+3. Bump the version to `1.21.1`, run `cargo check` to update `Cargo.lock`, and commit as `fix: hotfix 1.21.1`.
+4. Push the branch and open a PR to `testnet` titled `fix: hotfix 1.21.1 to testnet` from the hotfix template:
+   ```sh
+   gh pr create --base testnet --title "fix: hotfix 1.21.1 to testnet" --body-file .github/PULL_REQUEST_TEMPLATE/hotfix.md
+   ```
+5. Write the **Summary** and **Breaking changes** and tick the **Checklist**.
+6. Merge it with a merge commit.
+7. Tag the merge commit and publish the GitHub release, see [Versioning](#versioning).
 
 If `mainnet` has the same bug and it cannot wait for the next release day, hotfix it too, as below.
 

@@ -379,11 +379,12 @@ impl Redis {
         let (public, shares): (TriplePub<Secp256k1>, Vec<TripleShare<Secp256k1>>) =
             cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
 
-        // - first/second loop add at least min_triples per node
+        // - first/second loop add at least the triple-pair floor per node
         // - third loop: for each pair, store the shares as pairs per node
         let mut num_pairs = 0;
         for owner in &participant_ids {
-            for _ in 0..(cfg.protocol.triple.min_triples * mul / 2) {
+            let floor = cfg.protocol.min_mine_triple_pairs as usize;
+            for _ in 0..(floor * mul as usize) {
                 num_pairs += 1;
                 let pair_id = rand::random();
                 for ((me, triple0), triple1) in participant_ids

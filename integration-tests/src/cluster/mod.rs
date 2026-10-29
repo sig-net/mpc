@@ -14,7 +14,7 @@ use crate::actions::sign::SignAction;
 use crate::actions::wait::WaitAction;
 use crate::containers;
 use crate::local::NodeEnvConfig;
-use crate::utils::{self, vote_join, vote_leave};
+use crate::utils::{self, vote_join, vote_reshare};
 use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
@@ -248,15 +248,8 @@ impl Cluster {
         let kick = kick
             .unwrap_or_else(|| participant_accounts.last().unwrap().id())
             .clone();
-        let voting_accounts = participant_accounts
-            .iter()
-            .filter(|account| account.id() != &kick)
-            .take(state.threshold)
-            .cloned()
-            .collect::<Vec<_>>();
 
-        tracing::info!(?voting_accounts, %kick, at_epoch = state.epoch, "kicking participant");
-        vote_leave(&voting_accounts, self.contract().id(), &kick).await?;
+        self.kick_participants(std::slice::from_ref(&kick)).await?;
 
         let new_state = self
             .wait()
@@ -283,6 +276,38 @@ impl Cluster {
         // Wait for the node to be offline then check all running nodes for running:
         self.wait().nodes_running().await?;
         Ok(config)
+    }
+
+    /// Reshares the network by voting to join new candidates and/or kick existing participants in a single batch.
+    pub async fn reshare_participants(
+        &self,
+        joins: &[&AccountId],
+        kicks: &[&AccountId],
+    ) -> anyhow::Result<()> {
+        let state = self.expect_running().await?;
+        let participant_accounts = self.participant_accounts().await?;
+        let kick_set: std::collections::HashSet<_> = kicks.iter().copied().collect();
+        let voting_accounts: Vec<&Account> = participant_accounts
+            .into_iter()
+            .filter(|account| !kick_set.contains(account.id()))
+            .take(state.threshold)
+            .collect();
+
+        tracing::info!(
+            ?voting_accounts,
+            ?joins,
+            ?kicks,
+            at_epoch = state.epoch,
+            "batch resharing participants"
+        );
+        vote_reshare(&voting_accounts, self.contract().id(), joins, kicks).await?;
+        Ok(())
+    }
+
+    /// Kicks multiple nodes out of the network in a single batch resharing vote.
+    pub async fn kick_participants(&self, kicks: &[AccountId]) -> anyhow::Result<()> {
+        let kick_refs: Vec<&AccountId> = kicks.iter().collect();
+        self.reshare_participants(&[], &kick_refs).await
     }
 
     pub async fn propose_update(&self, args: ProposeUpdateArgs) -> mpc_contract::update::UpdateId {
@@ -375,10 +400,10 @@ impl Cluster {
             .await;
     }
 
-    /// Waits until every node owns `min_presignatures` presignatures.
+    /// Waits until every node owns `min_mine_presignatures` presignatures.
     pub async fn wait_stockpiled(&self) {
         self.wait()
-            .min_mine_presignatures(self.cfg.protocol.presignature.min_presignatures as usize)
+            .min_mine_presignatures(self.cfg.protocol.min_mine_presignatures as usize)
             .await
             .unwrap();
     }
