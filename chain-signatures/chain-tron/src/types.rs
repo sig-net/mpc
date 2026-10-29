@@ -82,18 +82,17 @@ impl TronReceipt {
         }
     }
 
-    /// Determine the execution outcome for this receipt given the request's output schema.
+    /// The attested outcome for a request carrying `output_schema` — the
+    /// one policy site; watcher and live gate read it and cannot drift.
     pub fn execution_outcome(&self, output_schema: &[u8]) -> anyhow::Result<ExecutionOutcome> {
         match self.execution_result()? {
             TronExecutionResult::Failed => Ok(ExecutionOutcome::Failed),
-            // Schema-less requests attest an empty output until log
-            // extraction is defined.
+            // Schema-less: empty output until log extraction is defined.
             TronExecutionResult::Succeeded if output_schema.is_empty() => {
                 Ok(ExecutionOutcome::Success { output: Vec::new() })
             }
-            // Tron receipts carry no extractable output; park rather than
-            // attest an empty one.
-            // TODO(tron): log-based output extraction for these requests.
+            // No extractable output: park rather than attest an empty one.
+            // TODO(tron): log-based output extraction.
             TronExecutionResult::Succeeded => Ok(ExecutionOutcome::ExtractionFailed),
         }
     }

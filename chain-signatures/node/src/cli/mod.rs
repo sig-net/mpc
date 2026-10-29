@@ -1060,8 +1060,8 @@ async fn spawn_indexers(
         }
     }
 
-    // Target-only chain: no source indexer, just the execution watcher
-    // driving receipts for Tron-targeted requests from every source.
+    // Target-only: no source indexer — the watcher serves every source
+    // chain's Tron-targeted requests.
     if let Some(tron_config) = tron {
         let tron_telemetry = NodeTelemetry::new(Chain::Tron);
         match TronWatcher::new(tron_config, backlog.clone(), tron_telemetry.clone()) {

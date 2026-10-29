@@ -31,7 +31,8 @@ impl TronArgs {
     pub fn into_str_args(self) -> Vec<String> {
         let mut args = Vec::with_capacity(6);
 
-        // Only emit flags if Tron is configured
+        // Unconfigured emits nothing: the compat harness forwards these to
+        // a release binary that may not know the flags.
         if let Some(tron_endpoint) = self.tron_endpoint {
             args.extend(["--tron-endpoint".to_string(), tron_endpoint]);
             if let Some(tron_api_key) = self.tron_api_key {
@@ -128,8 +129,7 @@ mod tests {
         assert!(args.into_config().is_err());
     }
 
-    /// `validate` gates what enters the node's wiring — a config it
-    /// accepted is what `spawn_indexers` builds the watcher from.
+    /// `validate` gates what `spawn_indexers` builds the watcher from.
     #[test]
     fn into_config_runs_config_validation() {
         let args = TronArgs {

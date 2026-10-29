@@ -252,8 +252,8 @@ impl Gate {
         self.codeless(&accepted).await
     }
 
-    /// Watcher leg: run [`TronWatcher`] against the settled acceptance
-    /// tx and require the receipt's own classification back as an event.
+    /// Watcher leg: run [`TronWatcher`] on the settled tx; the event
+    /// must match the receipt's own classification.
     async fn watcher(&self, accepted: &Broadcast) -> anyhow::Result<()> {
         let state = MockStateManager::new();
         let tx = Arc::new(BidirectionalTx {
