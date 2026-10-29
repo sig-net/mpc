@@ -32,11 +32,16 @@ pub struct Options {
     )]
     pub sk_share_secret_id: Option<String>,
     /// Keep the key share in a file at this path, suffixed with the account id.
-    #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"), group = "sk_share")]
+    #[arg(
+        long,
+        env("MPC_SK_SHARE_LOCAL_PATH"),
+        group = "sk_share",
+        conflicts_with = "gcp_project_id"
+    )]
     pub sk_share_local_path: Option<String>,
     /// Keep the key share in memory only; it is lost on restart.
     #[cfg(feature = "test-feature")]
-    #[arg(long, group = "sk_share")]
+    #[arg(long, group = "sk_share", conflicts_with = "gcp_project_id")]
     pub sk_share_in_memory: bool,
     #[arg(long, env("MPC_REDIS_URL"), hide_env_values = true)]
     pub redis_url: String,
@@ -92,6 +97,16 @@ mod tests {
             "Secret Manager needs a project"
         );
         assert!(parse(&["--sk-share-secret-id", "s", "--gcp-project-id", "p"]).is_ok());
+        assert!(
+            parse(&[
+                "--sk-share-local-path",
+                "/tmp/share",
+                "--gcp-project-id",
+                "p"
+            ])
+            .is_err(),
+            "a project without Secret Manager is a misconfiguration"
+        );
         assert!(
             parse(&[
                 "--sk-share-secret-id",
