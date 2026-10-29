@@ -405,7 +405,7 @@ The interval is `checkpoint_interval`, a default per chain that `CHECKPOINT_INTE
 
 ### Contract
 
-1. Start height (§1 Genesis checkpoint, [#777](https://github.com/sig-net/mpc/issues/777)).
+1. Start height (§1 Genesis checkpoint).
    Now: the contract holds no start height, and a node with nothing stored starts indexing at the first block it reads (Canton at the start of the ledger).
    Design: the contract holds each chain's start height, and a node with nothing stored builds the genesis checkpoint there and indexes from it.
 2. Resetting checkpoints (§2).
@@ -414,7 +414,7 @@ The interval is `checkpoint_interval`, a default per chain that `CHECKPOINT_INTE
 
 ### Node: backlog and digest
 
-3. Entries (§1 Backlog, [#1428](https://github.com/sig-net/mpc/issues/1428), which [bidirectional-calls.md](bidirectional-calls.md) also needs).
+3. Entries (§1 Backlog, which [bidirectional-calls.md](bidirectional-calls.md) also needs).
    Now: an entry is the request and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
    There is no `local` store and no `signatures` list.
    Design: an entry holds the rid, the request, the contract and `signatures`, and the node's own progress is node-local in `local`, outside checkpoints.
@@ -424,7 +424,7 @@ The interval is `checkpoint_interval`, a default per chain that `CHECKPOINT_INTE
 
 ### Node: indexing
 
-5. Hydration (§1 Processed height, [#1431](https://github.com/sig-net/mpc/issues/1431)).
+5. Hydration (§1 Processed height).
    Now: Hydration indexes only the blocks it receives live, with no backfill.
    It loses the events of a block it cannot fetch or verify, and of the blocks between its stored height and the head on every restart or reconnect.
    It reports catching up as done before it processes any block.
