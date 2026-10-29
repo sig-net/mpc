@@ -27,11 +27,11 @@ use mpc_chain_ethereum::EthConfig;
 use mpc_chain_hydration::HydrationConfig;
 use mpc_chain_midnight::MidnightConfig;
 use mpc_chain_solana::SolConfig;
-use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
+use mpc_contract::config::{Config, PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::backlog::Checkpoint;
 use mpc_node::web::CheckpointResponse;
-use mpc_node::{logs, mesh, node_client, storage};
+use mpc_node::{logs, mesh, storage};
 use mpc_primitives::Chain;
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{KeyType, SecretKey};
@@ -232,7 +232,6 @@ pub struct Context {
     pub storage_options: storage::Options,
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
-    pub message_options: node_client::Options,
     pub ethereum: Option<EthereumContext>,
 }
 
@@ -310,12 +309,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         ping_interval: 1000,
     };
 
-    let message_options = node_client::Options {
-        timeout: 1000,
-        state_timeout: 1000,
-        sync_timeout: 60000,
-    };
-
     // If using pregenerated keys, inject them into storage before nodes start
     if spawner.pregenerated_keys.is_enabled() {
         tracing::info!("injecting pregenerated keyshares into storage...");
@@ -355,7 +348,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         storage_options,
         log_options,
         mesh_options,
-        message_options,
         ethereum,
     })
 }
@@ -392,7 +384,8 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     println!("\nAfter run the nodes, please call the following command to init contract: ");
     let args = json!({
         "threshold": cfg.threshold,
-        "candidates": candidates
+        "candidates": candidates,
+        "config": Config { protocol: cfg.protocol.clone(), ..Default::default() },
     })
     .to_string();
     let sk = SecretKey::from_seed(KeyType::ED25519, "testificate");
@@ -458,6 +451,13 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
             candidates: candidates.clone().into_iter().collect(),
         };
         let participants = mpc_contract::primitives::Participants::from(candidates_struct);
+        // Stockpile before the contract runs: once it does, each node's first state
+        // sync with a peer can prune triples still being inserted.
+        if let Some(prestockpile) = spawner.host_prestockpile() {
+            ctx.redis
+                .stockpile_triples(cfg, &participants, prestockpile.multiplier)
+                .await;
+        }
         // Convert secp256k1 public key to NEAR public key format (secp256k1)
         use k256::elliptic_curve::sec1::ToEncodedPoint;
         let near_pk = near_crypto::PublicKey::SECP256K1(
@@ -473,6 +473,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
                 "participants": participants,
                 "threshold": cfg.threshold,
                 "public_key": near_pk,
+                "config": Config { protocol: cfg.protocol.clone(), ..Default::default() },
             }))
             .transact()
             .await?
@@ -484,7 +485,8 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
             .call("init")
             .args_json(json!({
                 "threshold": cfg.threshold,
-                "candidates": candidates
+                "candidates": candidates,
+                "config": Config { protocol: cfg.protocol.clone(), ..Default::default() },
             }))
             .transact()
             .await?

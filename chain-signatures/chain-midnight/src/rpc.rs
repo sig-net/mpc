@@ -32,25 +32,57 @@ const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters"
 /// The connected runtime is the canonical owner of the wallet network identity.
 const NETWORK_ID_ENTRY: &str = "MidnightRuntimeApi_get_network_id";
 
-pub(crate) const STATE_TOO_LARGE: &str = "midnight contract state exceeds the rpc response cap";
+/// Largest caller contract state the protocol admits, in decoded bytes. Every node
+/// applies the same limit, so admission does not depend on any node's RPC cap. The
+/// node serves the state as hex inside JSON, so the response is a little over twice
+/// this; the limit must sit below half the RPC node's response cap (15 MiB by
+/// default) and well below half of [`MAX_RESPONSE_SIZE`].
+const MAX_CALLER_STATE_BYTES: usize = 7 * 1024 * 1024;
+
+/// The client's own response cap. A constant rather than a config field: a response
+/// the client refuses is over 16 MiB of state, so over [`MAX_CALLER_STATE_BYTES`],
+/// and that verdict is only safe if every node refuses at the same size.
+const MAX_RESPONSE_SIZE: u32 = 32 * 1024 * 1024;
+
+/// Generous bound on the JSON around the hex state in a `midnight_contractState`
+/// response.
+const RESPONSE_ENVELOPE_BYTES: usize = 1024;
+
+/// Smallest RPC node response cap that fits every admissible state: the hex doubles
+/// the bytes, plus the envelope. A size refusal under a cap at least this large
+/// proves the state is over the limit.
+const MIN_PROVING_RESPONSE_CAP: usize = 2 * MAX_CALLER_STATE_BYTES + RESPONSE_ENVELOPE_BYTES;
+
+// The client's own refusal proves excess only if the client admits every proving cap.
+const _: () = assert!(MIN_PROVING_RESPONSE_CAP <= MAX_RESPONSE_SIZE as usize);
+
+const STATE_TOO_LARGE: &str = "midnight contract state exceeds the protocol limit";
 
 #[derive(Debug)]
-struct OversizedContractState(RawRpcError);
+struct OversizedContractState {
+    detail: String,
+    source: Option<RawRpcError>,
+}
 
 impl std::fmt::Display for OversizedContractState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{STATE_TOO_LARGE}: {}", self.0)
+        write!(formatter, "{STATE_TOO_LARGE}: {}", self.detail)
     }
 }
 
 impl std::error::Error for OversizedContractState {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
+        self.source
+            .as_ref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
     }
 }
 
-pub(crate) fn oversized_contract_state(source: RawRpcError) -> anyhow::Error {
-    anyhow::Error::new(OversizedContractState(source))
+pub(crate) fn oversized_contract_state(detail: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(OversizedContractState {
+        detail: detail.into(),
+        source: None,
+    })
 }
 
 pub(crate) fn is_oversized_contract_state(err: &anyhow::Error) -> bool {
@@ -75,16 +107,29 @@ impl ToRpcParams for Params {
 struct HttpRpcClient {
     node_url: String,
     config: RpcConfig,
+    max_response_size: u32,
     /// The client plus a generation, so concurrent failures replace it once.
     current: std::sync::RwLock<(u64, HttpClient)>,
 }
 
 impl HttpRpcClient {
     fn new(node_url: &str, config: &RpcConfig) -> anyhow::Result<Self> {
+        Self::with_response_cap(node_url, config, MAX_RESPONSE_SIZE)
+    }
+
+    fn with_response_cap(
+        node_url: &str,
+        config: &RpcConfig,
+        max_response_size: u32,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
-            current: std::sync::RwLock::new((0, build_http_client(node_url, config)?)),
+            current: std::sync::RwLock::new((
+                0,
+                build_http_client(node_url, config, max_response_size)?,
+            )),
             node_url: node_url.to_owned(),
             config: config.clone(),
+            max_response_size,
         })
     }
 
@@ -102,7 +147,7 @@ impl HttpRpcClient {
         if self.current().0 != failed {
             return;
         }
-        let client = match build_http_client(&self.node_url, &self.config) {
+        let client = match build_http_client(&self.node_url, &self.config, self.max_response_size) {
             Ok(client) => client,
             Err(error) => {
                 tracing::warn!(
@@ -129,9 +174,13 @@ impl HttpRpcClient {
     }
 }
 
-fn build_http_client(node_url: &str, config: &RpcConfig) -> anyhow::Result<HttpClient> {
+fn build_http_client(
+    node_url: &str,
+    config: &RpcConfig,
+    max_response_size: u32,
+) -> anyhow::Result<HttpClient> {
     HttpClientBuilder::default()
-        .max_response_size(config.max_response_size)
+        .max_response_size(max_response_size)
         .request_timeout(config.request_timeout)
         .build(node_url)
         .context("failed to build the midnight HTTP RPC client")
@@ -650,7 +699,19 @@ async fn publisher_contract_state(
 
     match classify_contract_state_reply(response)? {
         ContractStateReply::State(state) => Ok(state),
-        ContractStateReply::TooLarge(err) | ContractStateReply::Other(err) => {
+        // Not an admission verdict, so the marker type stays out of the chain. The
+        // detail names the cap that refused, the rpc node's or the client's.
+        ContractStateReply::TooLarge(OversizedContractState { detail, source }) => {
+            let cause = match source {
+                Some(source) => anyhow::Error::new(source).context(detail),
+                None => anyhow::anyhow!(detail),
+            };
+            Err(cause.context(
+                "the central contract's state was refused for its size; it is exempt from \
+                 the admission limit, so the refusing cap is too small for it",
+            ))
+        }
+        ContractStateReply::Other(err) => {
             Err(anyhow::Error::new(err).context("midnight_contractState failed"))
         }
     }
@@ -662,9 +723,9 @@ async fn publisher_contract_state(
 enum ContractStateReply {
     /// The state bytes, or `None` when the contract is not present at that block.
     State(Option<Vec<u8>>),
-    /// State beyond the rpc response cap, reachable because our cap sits above the
-    /// server's: definitive, since retrying cannot shrink a contract's state.
-    TooLarge(RawRpcError),
+    /// State over [`MAX_CALLER_STATE_BYTES`]: definitive, since retrying cannot
+    /// shrink a contract's state.
+    TooLarge(OversizedContractState),
     /// Anything else; the transport's own policy decides.
     Other(RawRpcError),
 }
@@ -683,11 +744,83 @@ fn classify_contract_state_reply(
         {
             ContractStateReply::State(None)
         }
+        // The client refuses a response over MAX_RESPONSE_SIZE before it sees the
+        // bytes; that is over 16 MiB of state, so over the limit on every node.
+        Err(err) if is_response_too_large(&err) => {
+            ContractStateReply::TooLarge(OversizedContractState {
+                detail: format!("response over the client cap of {MAX_RESPONSE_SIZE} bytes"),
+                source: Some(err),
+            })
+        }
+        // The RPC node refused the response for its size. Under a cap that fits every
+        // admissible state the state is over the limit on every node; under a
+        // smaller cap the verdict would be that node's configuration, so the block
+        // is held like any other read failure.
         Err(RawRpcError::User(reply)) if reply.code == OVERSIZED_RESPONSE_CODE => {
-            ContractStateReply::TooLarge(RawRpcError::User(reply))
+            match server_response_cap(&reply) {
+                Some(cap) if cap >= MIN_PROVING_RESPONSE_CAP => {
+                    ContractStateReply::TooLarge(OversizedContractState {
+                        detail: format!("response over the rpc node's cap of {cap} bytes"),
+                        source: Some(RawRpcError::User(reply)),
+                    })
+                }
+                cap => {
+                    if let Some(count) = mpc_utils::throttle::check("midnight:rpc-cap-refusal") {
+                        tracing::warn!(
+                            count,
+                            ?cap,
+                            min_cap = MIN_PROVING_RESPONSE_CAP,
+                            "the midnight rpc node's response cap refused a contract state"
+                        );
+                    }
+                    ContractStateReply::Other(RawRpcError::User(reply))
+                }
+            }
         }
         Err(err) => ContractStateReply::Other(err),
     })
+}
+
+/// The cap a jsonrpsee server names in its oversized-response error, whose data is
+/// the string `Exceeded max limit of <bytes>` (jsonrpsee-core 0.24.10,
+/// `server/method_response.rs`).
+fn server_response_cap(reply: &UserError) -> Option<usize> {
+    let data: String = serde_json::from_str(reply.data.as_ref()?.get()).ok()?;
+    data.strip_prefix("Exceeded max limit of ")?.parse().ok()
+}
+
+/// The indexer's limit on a caller state it did receive. The publisher reads the
+/// central contract through the same classifier and is not bound by it.
+fn admit_caller_state(state: Option<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>> {
+    match state {
+        Some(state) if state.len() > MAX_CALLER_STATE_BYTES => Err(oversized_contract_state(
+            format!("{} bytes, limit {MAX_CALLER_STATE_BYTES}", state.len()),
+        )),
+        state => Ok(state),
+    }
+}
+
+/// Whether the jsonrpsee HTTP transport refused the response body for its size:
+/// up front on a `Content-Length` over the cap, or while streaming a body without
+/// one.
+fn is_response_too_large(error: &RawRpcError) -> bool {
+    use jsonrpsee::core::http_helpers::HttpError;
+
+    let RawRpcError::Client(client_error) = error else {
+        return false;
+    };
+    let Some(JsonrpseeClientError::Transport(transport_error)) =
+        client_error.downcast_ref::<JsonrpseeClientError>()
+    else {
+        return false;
+    };
+    match transport_error.downcast_ref::<jsonrpsee::http_client::transport::Error>() {
+        Some(jsonrpsee::http_client::transport::Error::Http(HttpError::TooLarge)) => true,
+        Some(jsonrpsee::http_client::transport::Error::Http(HttpError::Stream(stream))) => {
+            stream.is::<http_body_util::LengthLimitError>()
+        }
+        _ => false,
+    }
 }
 
 /// The bare payload of the ledger-parameters `Result<Vec<u8>, _>` runtime-API answer
@@ -872,8 +1005,8 @@ impl Reads {
                     .await;
 
                 match classify_contract_state_reply(response)? {
-                    ContractStateReply::State(state) => Ok(state),
-                    ContractStateReply::TooLarge(err) => Err(oversized_contract_state(err)),
+                    ContractStateReply::State(state) => admit_caller_state(state),
+                    ContractStateReply::TooLarge(err) => Err(anyhow::Error::new(err)),
                     ContractStateReply::Other(err) => {
                         Err(anyhow::Error::new(err).context("midnight_contractState failed"))
                     }
@@ -1329,8 +1462,13 @@ mod tests {
         assert_eq!(block.candidates[0].calls, expected);
     }
 
-    #[tokio::test]
-    async fn block_reader_skips_an_undecodable_fallible_phase_only_in_a_partial_success() {
+    /// The captured fallible deposit with its singleton call's fallible transcript edited,
+    /// re-encoded with matching `TxApplied` and `TxPartialSuccess` status records.
+    fn edited_fallible_deposit(
+        edit: impl FnOnce(
+            &mut midnight_onchain_runtime::transcript::Transcript<midnight_storage::DefaultDB>,
+        ),
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         use midnight_ledger_v9::structure::ContractAction;
         use midnight_storage::arena::Sp;
 
@@ -1340,8 +1478,7 @@ mod tests {
         let (segment, mut call) = tx.calls().nth(1).unwrap();
         let singleton = call.address.0 .0;
         let mut transcript = call.fallible_transcript.as_deref().unwrap().clone();
-        transcript.effects.unshielded_mints =
-            midnight_storage::storage::HashMap::new().insert(Default::default(), 1);
+        edit(&mut transcript);
         call.fallible_transcript = Some(Sp::new(transcript));
         let DecodedTransaction::Standard(mut tx) = tx else {
             panic!("standard captured transaction");
@@ -1362,6 +1499,15 @@ mod tests {
         applied[7..39].copy_from_slice(&tx.transaction_hash().0 .0);
         let mut partial = applied.clone();
         partial[6] = 7; // TxPartialSuccess in the captured metadata.
+        (bytes, applied, partial)
+    }
+
+    #[tokio::test]
+    async fn block_reader_skips_a_fallible_effects_mismatch_only_in_a_partial_success() {
+        let (bytes, applied, partial) = edited_fallible_deposit(|transcript| {
+            transcript.effects.unshielded_mints =
+                midnight_storage::storage::HashMap::new().insert(Default::default(), 1);
+        });
 
         // Synthetic effects and statuses: this exercises the reader's status policy, not
         // node acceptance of such a transaction.
@@ -1376,7 +1522,7 @@ mod tests {
         let subscriber_guard = tracing::subscriber::set_default(subscriber);
         let block = read_fallible_transaction(encode_status_records(&[partial]), &bytes)
             .await
-            .expect("an undecodable fallible phase of a partial success does not hold")
+            .expect("a fallible effects mismatch in a partial success does not hold")
             .unwrap();
         drop(subscriber_guard);
         assert_eq!(block.candidates.len(), 1);
@@ -1393,13 +1539,30 @@ mod tests {
             panic!("expected one skipped-phase warning, got {skipped:?}");
         };
         assert_eq!(skipped.get("call_index").map(String::as_str), Some("1"));
-        assert!(skipped["error"].contains("expected empty declared effects"));
+        assert!(skipped["error"].contains("declared effects differ"));
 
         let err = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
             .await
             .expect_err("the same phase of a fully applied transaction holds");
         let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
         assert_eq!(hold.reason, "emission-schema-hold");
+    }
+
+    #[tokio::test]
+    async fn block_reader_holds_any_other_undecodable_fallible_phase_in_a_partial_success() {
+        let (bytes, applied, partial) = edited_fallible_deposit(|transcript| {
+            let mut program = Vec::from(&transcript.program);
+            program.push(midnight_onchain_runtime::ops::Op::Pop);
+            transcript.program = program.into();
+        });
+
+        for status in [partial, applied] {
+            let err = read_fallible_transaction(encode_status_records(&[status]), &bytes)
+                .await
+                .expect_err("an unsupported fallible program holds");
+            let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
+            assert_eq!(hold.reason, "emission-schema-hold");
+        }
     }
 
     #[tokio::test]
@@ -1949,8 +2112,8 @@ mod tests {
             })
             .expect("register parked method");
         module
-            .register_method("large", |_, _, _| "x".repeat(4096))
-            .expect("register large method");
+            .register_method("midnight_contractState", |_, _, _| "ab".repeat(4096))
+            .expect("register state method");
         let _handle = server.start(module);
 
         let mut timeout_config = http_config(address);
@@ -1968,20 +2131,245 @@ mod tests {
             "unexpected timeout error: {timeout_error}"
         );
 
-        let mut capped_config = http_config(address);
-        capped_config.rpc.max_response_size = 128;
-        let capped_rpc = connect_http(&capped_config).expect("build capped transport");
-        let capped_error = capped_rpc
-            .request::<String>("large", rpc_params![])
+        // A response over the client cap is the real jsonrpsee refusal, classified as
+        // a definitive oversized state and not retried.
+        let capped_config = http_config(address);
+        let capped_rpc = RpcClient::new(
+            HttpRpcClient::with_response_cap(&capped_config.node_url, &capped_config.rpc, 128)
+                .expect("build capped transport"),
+        );
+        let reads = Reads::new(capped_rpc, READ_TIMEOUT, attempts(2));
+        let capped_error = reads
+            .contract_state(ADDRESS, AT_HASH)
             .await
             .expect_err("oversized response must be refused");
-        let capped_detail = format!("{capped_error:#}").to_ascii_lowercase();
         assert!(
-            capped_detail.contains("too big")
-                || capped_detail.contains("too large")
-                || capped_detail.contains("limit"),
+            is_oversized_contract_state(&capped_error),
             "unexpected response cap error: {capped_error:#}"
         );
+    }
+
+    /// A real jsonrpsee server refuses a response over its cap. Under a cap that
+    /// fits every admissible state that proves the state is over the limit; under
+    /// a smaller cap it is the node's configuration, so the read is retried.
+    #[tokio::test]
+    async fn server_response_cap_refusal_is_a_drop_only_under_an_admissible_cap() {
+        for (server_cap, state_bytes, expected_drop, expected_attempts) in [
+            (15 * 1024 * 1024, 8 * 1024 * 1024, true, 1),
+            (64 * 1024, 100 * 1024, false, 3),
+        ] {
+            let server = ServerBuilder::default()
+                .max_response_body_size(server_cap)
+                .build("127.0.0.1:0")
+                .await
+                .expect("bind HTTP rpc server");
+            let address = server.local_addr().expect("HTTP rpc server address");
+            let mut module = RpcModule::new(());
+            module
+                .register_method("midnight_contractState", move |_, _, _| {
+                    "ab".repeat(state_bytes)
+                })
+                .expect("register state method");
+            let _handle = server.start(module);
+
+            let config = http_config(address);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let counted = CountingRpc {
+                inner: connect_http(&config).expect("build transport"),
+                calls: calls.clone(),
+            };
+            let reads = Reads::new(RpcClient::new(counted), READ_TIMEOUT, attempts(2));
+            let err = reads
+                .contract_state(ADDRESS, AT_HASH)
+                .await
+                .expect_err("the server refuses the response");
+            assert_eq!(
+                is_oversized_contract_state(&err),
+                expected_drop,
+                "cap {server_cap}: {err:#}"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                expected_attempts,
+                "cap {server_cap}"
+            );
+        }
+    }
+
+    /// A state both caps let through is still bounded by the decoded length.
+    #[tokio::test]
+    async fn a_state_over_the_limit_but_under_both_caps_is_a_drop() {
+        let server = ServerBuilder::default()
+            .max_response_body_size(MAX_RESPONSE_SIZE)
+            .build("127.0.0.1:0")
+            .await
+            .expect("bind HTTP rpc server");
+        let address = server.local_addr().expect("HTTP rpc server address");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("midnight_contractState", |_, _, _| {
+                "ab".repeat(MAX_CALLER_STATE_BYTES + 1)
+            })
+            .expect("register state method");
+        let _handle = server.start(module);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = CountingRpc {
+            inner: connect_http(&http_config(address)).expect("build transport"),
+            calls: calls.clone(),
+        };
+        let reads = Reads::new(RpcClient::new(counted), READ_TIMEOUT, attempts(2));
+        let err = reads
+            .contract_state(ADDRESS, AT_HASH)
+            .await
+            .expect_err("one byte over the limit");
+        assert!(is_oversized_contract_state(&err), "{err:#}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a drop is not retried");
+    }
+
+    /// The publisher reads the central contract through the same classifier, but a
+    /// size refusal there is a read failure, never an admission drop.
+    #[tokio::test]
+    async fn a_size_refusal_on_the_publisher_read_is_not_an_admission_drop() {
+        let server = ServerBuilder::default()
+            .max_response_body_size(15 * 1024 * 1024)
+            .build("127.0.0.1:0")
+            .await
+            .expect("bind HTTP rpc server");
+        let address = server.local_addr().expect("HTTP rpc server address");
+        let mut module = RpcModule::new(());
+        module
+            .register_method("midnight_contractState", |_, _, _| {
+                "ab".repeat(8 * 1024 * 1024)
+            })
+            .expect("register state method");
+        let _handle = server.start(module);
+
+        let rpc = connect_http(&http_config(address)).expect("build transport");
+        let err = publisher_contract_state(&rpc, ADDRESS, AT_HASH)
+            .await
+            .expect_err("the server refuses the response");
+        assert!(!is_oversized_contract_state(&err), "{err:#}");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("exempt from the admission limit"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("rpc node's cap of 15728640 bytes"),
+            "{rendered}"
+        );
+    }
+
+    /// A body without `Content-Length` overflows the client cap while streaming,
+    /// a different jsonrpsee error from the up-front refusal; both are drops.
+    #[tokio::test]
+    async fn chunked_response_over_the_client_cap_is_a_drop() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind raw HTTP server");
+        let address = listener.local_addr().expect("raw HTTP server address");
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept HTTP request");
+                read_http_request(&mut stream).await;
+                let body = format!(
+                    r#"{{"jsonrpc":"2.0","id":0,"result":"{}"}}"#,
+                    "ab".repeat(4096)
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+                     {:x}\r\n{body}\r\n0\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write chunked response");
+            }
+        });
+
+        let config = http_config(address);
+        let rpc = RpcClient::new(
+            HttpRpcClient::with_response_cap(&config.node_url, &config.rpc, 128)
+                .expect("build capped transport"),
+        );
+        let reads = Reads::new(rpc, READ_TIMEOUT, attempts(2));
+        let err = reads
+            .contract_state(ADDRESS, AT_HASH)
+            .await
+            .expect_err("the streamed body overflows the client cap");
+        assert!(
+            is_oversized_contract_state(&err),
+            "unexpected streaming cap error: {err:#}"
+        );
+        server.abort();
+    }
+
+    /// Reads one HTTP request to its end, so closing the socket after the reply
+    /// sends FIN rather than an RST that could discard the reply.
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) {
+        let mut request = Vec::new();
+        let mut byte = [0; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream
+                .read_exact(&mut byte)
+                .await
+                .expect("read HTTP header");
+            request.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&request).to_ascii_lowercase();
+        let body_len: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .map_or(0, |value| value.trim().parse().expect("content-length"));
+        let mut body = vec![0; body_len];
+        stream.read_exact(&mut body).await.expect("read HTTP body");
+    }
+
+    /// Counts requests through a real transport, for attempt assertions.
+    #[derive(Clone)]
+    struct CountingRpc {
+        inner: RpcClient,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RpcClientT for CountingRpc {
+        fn request_raw<'a>(
+            &'a self,
+            method: &'a str,
+            params: Option<Box<RawValue>>,
+        ) -> RawRpcFuture<'a, Box<RawValue>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { self.inner.request_raw(method, params).await })
+        }
+
+        fn subscribe_raw<'a>(
+            &'a self,
+            _sub: &'a str,
+            _params: Option<Box<RawValue>>,
+            _unsub: &'a str,
+        ) -> RawRpcFuture<'a, RawRpcSubscription> {
+            Box::pin(async { panic!("these tests never subscribe") })
+        }
+    }
+
+    #[test]
+    fn contract_state_limit_is_on_the_decoded_length() {
+        let at_limit = vec![0xab; MAX_CALLER_STATE_BYTES];
+        assert_eq!(
+            admit_caller_state(Some(at_limit.clone()))
+                .expect("a state at the limit is admitted")
+                .map(|state| state.len()),
+            Some(MAX_CALLER_STATE_BYTES)
+        );
+        assert_eq!(admit_caller_state(None).expect("absence is a value"), None);
+
+        let mut over = at_limit;
+        over.push(0xcd);
+        let err = admit_caller_state(Some(over)).expect_err("one byte over is too large");
+        assert!(is_oversized_contract_state(&err));
     }
 
     fn hash_of_byte(byte: u8) -> String {
@@ -2033,6 +2421,7 @@ mod tests {
         User(i32, &'static str),
         UserWithData(i32, &'static str, &'static str),
         ClientErr,
+        ClientTooLarge,
     }
 
     impl Canned {
@@ -2054,6 +2443,13 @@ mod tests {
                 Self::ClientErr => RawRpcError::Client(Box::new(JsonrpseeClientError::Transport(
                     "connection reset by peer".into(),
                 ))),
+                Self::ClientTooLarge => {
+                    RawRpcError::Client(Box::new(JsonrpseeClientError::Transport(Box::new(
+                        jsonrpsee::http_client::transport::Error::Http(
+                            jsonrpsee::core::http_helpers::HttpError::TooLarge,
+                        ),
+                    ))))
+                }
             }
         }
     }
@@ -2161,17 +2557,38 @@ mod tests {
                 false,
                 3,
             ),
+            // a refusal that does not name its cap is held
             (
                 Canned::UserWithData(
                     OVERSIZED_RESPONSE_CODE,
                     "state exceeds the response limit",
                     DATA,
                 ),
+                false,
+                3,
+            ),
+            (Canned::UserWithData(12345, STATE_TOO_LARGE, DATA), false, 3),
+            // the cap the refusal names decides: admissible cap proves the size
+            (
+                Canned::UserWithData(
+                    OVERSIZED_RESPONSE_CODE,
+                    "Response is too big",
+                    r#""Exceeded max limit of 15728640""#,
+                ),
                 true,
                 1,
             ),
-            (Canned::UserWithData(12345, STATE_TOO_LARGE, DATA), false, 3),
+            (
+                Canned::UserWithData(
+                    OVERSIZED_RESPONSE_CODE,
+                    "Response is too big",
+                    r#""Exceeded max limit of 65536""#,
+                ),
+                false,
+                3,
+            ),
             (Canned::ClientErr, false, 3),
+            (Canned::ClientTooLarge, true, 1),
         ] {
             let (reads, calls) = stub_reads(reply, attempts(2));
             let err = reads
@@ -2190,7 +2607,7 @@ mod tests {
                     assert_eq!(user.message, message);
                     assert_eq!(user.data.as_deref().map(RawValue::get), Some(data));
                 }
-                (Canned::ClientErr, RawRpcError::Client(_)) => {}
+                (Canned::ClientErr | Canned::ClientTooLarge, RawRpcError::Client(_)) => {}
                 _ => panic!("unexpected structured cause: {cause:?}"),
             }
             assert_eq!(
