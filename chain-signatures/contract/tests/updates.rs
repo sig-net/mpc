@@ -1,9 +1,7 @@
 pub mod common;
 use common::{contract_file_path, init_env, vote_update_till_completion, INVALID_CONTRACT};
 
-use std::collections::HashMap;
-
-use mpc_contract::config::{Config, ProtocolConfig};
+use mpc_contract::config::ProtocolConfig;
 use mpc_contract::errors;
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
 
@@ -82,12 +80,9 @@ async fn test_propose_update_config() {
         .contains(&errors::VoteError::VoterNotParticipant.to_string()));
 
     // have each participant propose a new update:
-    let new_config = Config {
-        protocol: ProtocolConfig {
-            max_concurrent_generation: 10000,
-            ..ProtocolConfig::default()
-        },
-        ..Config::default()
+    let new_config = ProtocolConfig {
+        max_mine_generations: 10000,
+        ..ProtocolConfig::default()
     };
 
     let mut proposals = Vec::with_capacity(accounts.len());
@@ -144,17 +139,6 @@ async fn test_propose_update_config() {
     // check that the proposal executed since the threshold got changed.
     let config: serde_json::Value = contract.view("config").await.unwrap().json().unwrap();
     assert_ne!(config, old_config);
-    assert_eq!(config, new_config);
-
-    // Check that we can partially set hardcoded configs, while leaving other configs as dynamic values:
-    #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-    pub struct LocalConfig {
-        pub protocol: ProtocolConfig,
-        #[serde(flatten)]
-        other: HashMap<String, serde_json::Value>,
-    }
-    let config: LocalConfig = serde_json::from_value(config).unwrap();
-    let new_config: LocalConfig = serde_json::from_value(new_config).unwrap();
     assert_eq!(config, new_config);
 }
 

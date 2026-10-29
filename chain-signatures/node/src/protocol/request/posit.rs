@@ -474,7 +474,7 @@ pub(crate) mod tests {
             presignatures,
             msg: msg_channel,
             rpc: RpcChannel { tx: rpc_tx },
-            cfg: ProtocolConfig::default(),
+            signature_timeout: crate::config::Timeouts::default().signature_generation,
             is_proposer: Arc::new(AtomicBool::new(false)),
             round: Arc::new(AtomicUsize::new(0)),
             limiter: SignLimiter::new(1),

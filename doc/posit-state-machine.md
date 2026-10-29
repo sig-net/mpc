@@ -381,13 +381,13 @@ Generations are agreed on by a simpler posit: no rounds, no rotating proposer.
 Each of the two pipelines runs its posits in one serial loop (`triple.rs`,
 `presignature.rs`) that handles incoming posit messages, a stockpile tick and an
 expiry tick. On the stockpile tick, the owner of the new artifact proposes at
-most one generation, while it owns fewer than `min_triples` or
-`min_presignatures`. The counts that decide this are read from storage on the
+most one generation, while it owns fewer than its floor: `min_mine_triple_pairs`
+triple pairs or `min_mine_presignatures` presignatures. The counts that decide this are read from storage on the
 expiry tick, and cached; the stockpile tick itself touches storage only when it
 proposes, so a node at its CPU quota is not starved of the loop by its own
 bookkeeping. The floor and cap are judged on counts up to one expiry tick old,
 so a node can overshoot its floor by at most one tick of proposals, bounded by
-`max_concurrent_introduction`. A triple is proposed to all active nodes. A
+`max_mine_generations`. A triple is proposed to all active nodes. A
 presignature uses a triple pair the owner holds, reserved in memory, and is
 proposed to the pair's active holders; its id is the pair's hash, so a retry of
 the same pair reuses the id.
@@ -409,6 +409,6 @@ the same pair reuses the id.
   `ACCEPT` and `REJECT` are never answered.
 
 Every node listed in `START` must contribute. If one does not, the generation runs
-to its `generation_timeout` (contract config) and its inputs are consumed. A node
+to its generation timeout (a node constant) and its inputs are consumed. A node
 refuses to start a generation for an id that is already running or stored, and
 the pair is taken from storage atomically when the generation starts.
