@@ -17,7 +17,9 @@ use alloy::network::TransactionResponse;
 use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Block, BlockId, BlockTransactions, TransactionReceipt};
 use futures_util::{stream, StreamExt};
-use mpc_chain_integration_core::{ChainTelemetry, ExtractionFailureKind, StateManager};
+use mpc_chain_integration_core::{
+    unexecutable_outcome, ChainTelemetry, ExtractionFailureKind, StateManager,
+};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
     SignId,
@@ -561,12 +563,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                 replacement_block = block_number,
                 "transaction replaced by a watched sibling tx"
             );
-            // Other source chains cannot encode Unviable yet; their applications refund on Failed.
-            let result = if tx.source_chain == Chain::Midnight {
-                ExecutionOutcome::Unviable
-            } else {
-                ExecutionOutcome::Failed
-            };
+            let result = unexecutable_outcome(tx.source_chain);
             events.push(ChainEvent::ExecutionConfirmed {
                 tx_id,
                 sign_id,
