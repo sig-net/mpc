@@ -18,6 +18,11 @@ pub trait StateManager: Send + Sync + Clone + 'static {
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>;
 
+    /// All `Executing` backlog entries targeting `chain`, from every source
+    /// chain. A superset of [`StateManager::get_execution_watchers`]: entries
+    /// whose watch a duplicate destination id displaced are included.
+    async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)>;
+
     /// Set the processed block height for a specific chain.
     async fn set_processed_block(&self, chain: Chain, height: u64);
 }
@@ -34,6 +39,7 @@ type Watchers =
 pub struct MockStateManager {
     processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
     watchers: Watchers,
+    pending: Arc<RwLock<Vec<Arc<BidirectionalTx>>>>,
 }
 
 #[async_trait::async_trait]
@@ -54,6 +60,16 @@ impl StateManager for MockStateManager {
             .unwrap_or_default()
     }
 
+    async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+        self.pending
+            .read()
+            .await
+            .iter()
+            .filter(|tx| tx.target_chain == chain)
+            .map(|tx| (tx.sign_id(), Arc::clone(tx)))
+            .collect()
+    }
+
     async fn set_processed_block(&self, chain: Chain, height: u64) {
         self.processed_blocks.write().await.insert(chain, height);
     }
@@ -72,5 +88,12 @@ impl MockStateManager {
             .entry(chain)
             .or_default()
             .insert(tx.id, (sign_id, tx));
+    }
+
+    /// Register an `Executing` backlog entry targeting `tx.target_chain`.
+    /// Independent of [`MockStateManager::watch_execution`]: an entry can be
+    /// pending with no watch.
+    pub async fn add_pending_execution(&self, tx: Arc<BidirectionalTx>) {
+        self.pending.write().await.push(tx);
     }
 }

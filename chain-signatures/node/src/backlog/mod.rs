@@ -15,6 +15,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 
 use enum_map::EnumMap;
+use futures_util::StreamExt;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
@@ -94,6 +95,17 @@ impl PendingRequests {
             .collect()
     }
 
+    fn executing_targeting(&self, target: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+        self.requests
+            .values()
+            .filter_map(|entry| {
+                entry
+                    .execution_tx()
+                    .filter(|tx| tx.target_chain == target)
+                    .map(|tx| (entry.sign_id(), Arc::clone(tx)))
+            })
+            .collect()
+    }
     /// Get the processed block height for this chain
     fn processed_block_height(&self) -> Option<u64> {
         self.processed_block_height
@@ -346,6 +358,18 @@ impl Backlog {
         pending.pending_executions(chain, self)
     }
 
+    /// Returns all backlog entries currently in destination-chain execution targeting the specified chain.
+    async fn pending_executions_targeting(
+        &self,
+        target: Chain,
+    ) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+        futures_util::stream::iter(self.requests.values())
+            .then(|pending| async move { pending.read().await.executing_targeting(target) })
+            .collect::<Vec<_>>()
+            .await
+            .concat()
+    }
+
     /// Returns the number of pending requests for a specific chain
     pub async fn len_by_chain(&self, chain: Chain) -> usize {
         self.pending(&chain).read().await.len()
@@ -577,6 +601,10 @@ impl StateManager for Backlog {
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers(&chain).read().await.all()
+    }
+
+    async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+        self.pending_executions_targeting(chain).await
     }
 }
 
