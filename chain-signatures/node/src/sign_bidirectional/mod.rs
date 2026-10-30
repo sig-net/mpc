@@ -95,7 +95,7 @@ pub(crate) fn claims_bidirectional_namespace(request: &IndexedSignRequest) -> bo
 }
 
 /// Whether `event`'s path lies in its chain's namespace. True where there is none.
-pub(crate) fn path_in_namespace(event: &SignBidirectionalEvent) -> bool {
+fn path_in_namespace(event: &SignBidirectionalEvent) -> bool {
     bidirectional_namespace(event.chain).is_none_or(|prefix| event.path.starts_with(prefix))
 }
 
@@ -197,6 +197,15 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
                 source_chain = ?self.chain,
                 sender = ?self.sender_string().ok(),
                 "accepting off-spec bidirectional request fields: {err:#}"
+            );
+        }
+        // Only warns until the senders move their paths into the namespace.
+        if !path_in_namespace(self) {
+            tracing::warn!(
+                source_chain = ?self.chain,
+                sender = ?self.sender_string().ok(),
+                path = %self.path,
+                "accepting a bidirectional path outside {BIDIRECTIONAL_PATH_PREFIX:?}"
             );
         }
         self.epsilon().context("cannot derive epsilon")?;
@@ -342,13 +351,8 @@ mod tests {
     #[test]
     fn check_request_fields_accepts_only_key_version_1_and_the_sdk_fields() {
         type Edit = fn(&mut SignBidirectionalEvent);
-        let cases: [(&str, Edit, bool); 16] = [
+        let cases: [(&str, Edit, bool); 15] = [
             ("on spec", |_| {}, true),
-            (
-                "path outside the namespace",
-                |e| e.path = "m/0".to_string(),
-                true,
-            ),
             ("from Hydration", |e| e.chain = Chain::Hydration, true),
             (
                 "from Hydration at key version 0",
@@ -411,6 +415,7 @@ mod tests {
     fn path_in_namespace_only_where_plain_sign_shares_keys() {
         let cases = [
             (Chain::Solana, "bidirectional/m/0", true),
+            (Chain::Solana, "bidirectional/", true),
             (Chain::Solana, "m/0", false),
             (Chain::Solana, "bidirectional", false),
             (Chain::Hydration, "bidirectional/m/0", true),

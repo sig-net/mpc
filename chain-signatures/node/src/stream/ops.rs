@@ -12,8 +12,8 @@ use crate::respond_bidirectional::{
     published_midnight_signing_args, published_output_payload, published_output_signing_args,
 };
 use crate::sign_bidirectional::{
-    owned_by_requester, path_in_namespace, transaction_chain_id, BidirectionalProgress,
-    BidirectionalTxId, SignBidirectionalEventExt, SignStatus, BIDIRECTIONAL_PATH_PREFIX,
+    owned_by_requester, transaction_chain_id, BidirectionalProgress, BidirectionalTxId,
+    SignBidirectionalEventExt, SignStatus,
 };
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -57,15 +57,6 @@ pub(crate) async fn process_sign_request(
             event.validate().with_context(|| {
                 format!("rejecting bidirectional sign request {:?}", sign_request.id)
             })?;
-            // Only warns until the senders move their paths into the namespace.
-            if !path_in_namespace(event) {
-                tracing::warn!(
-                    sign_id = ?sign_request.id,
-                    source_chain = ?event.chain,
-                    path = %event.path,
-                    "accepting a bidirectional path outside {BIDIRECTIONAL_PATH_PREFIX:?}"
-                );
-            }
             if let Some((actual, expected)) = network_mismatch(event, ctx.ethereum_chain_id) {
                 anyhow::bail!(
                     "rejecting bidirectional sign request {:?}: chain id {actual:?}, \
