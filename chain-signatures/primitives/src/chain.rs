@@ -12,8 +12,8 @@ pub enum SerDeserFormat {
 /// these are operational knobs of this node implementation, not part of the
 /// public interface.
 pub trait ChainConfig {
+    /// Blocks between checkpoints, or `None` for chains without one.
     fn checkpoint_interval(&self) -> Option<u64>;
-    fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)>;
     /// `ChainEvent::Block` silence budget before the supervisor restarts
     /// the indexer.
     fn stall_timeout_secs(&self) -> u64;
@@ -29,32 +29,36 @@ pub trait ChainConfig {
     fn supports_bidirectional_signing(&self) -> bool;
 }
 
+/// Blocks between checkpoints. Every node of a network must use the same
+/// value: nodes vote on the digest at each boundary, and a node on its own
+/// cadence would vote at boundaries nobody else has.
+fn production_checkpoint_interval(chain: &Chain) -> Option<u64> {
+    match chain {
+        Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,
+        Chain::Ethereum => Some(20),
+        Chain::Solana => Some(1200),
+        Chain::Hydration => Some(240),
+        Chain::Canton => Some(50),
+        Chain::Midnight => Some(120),
+    }
+}
+
+/// Short cadence so checkpoint tests finish in seconds.
+fn test_checkpoint_interval(chain: &Chain) -> Option<u64> {
+    match chain {
+        Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,
+        Chain::Ethereum => Some(2),
+        Chain::Solana | Chain::Hydration | Chain::Canton | Chain::Midnight => Some(5),
+    }
+}
+
 impl ChainConfig for Chain {
     fn checkpoint_interval(&self) -> Option<u64> {
-        let (key, default) = match self {
-            Chain::NEAR | Chain::Bitcoin | Chain::Tron => return None,
-            Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
-            Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 1200),
-            Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
-            Chain::Canton => ("CHECKPOINT_INTERVAL_CANTON", 50),
-            Chain::Midnight => ("CHECKPOINT_INTERVAL_MIDNIGHT", 120),
-        };
-
-        let interval = std::env::var(key)
-            .map(|param| param.parse::<u64>().unwrap_or(default))
-            .unwrap_or(default);
-
-        Some(interval)
-    }
-
-    fn checkpoint_env_vars() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
-            ("CHECKPOINT_INTERVAL_SOLANA", "5"),
-            ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
-            ("CHECKPOINT_INTERVAL_CANTON", "5"),
-            ("CHECKPOINT_INTERVAL_MIDNIGHT", "5"),
-        ]
+        if cfg!(feature = "test-feature") {
+            test_checkpoint_interval(self)
+        } else {
+            production_checkpoint_interval(self)
+        }
     }
 
     fn stall_timeout_secs(&self) -> u64 {

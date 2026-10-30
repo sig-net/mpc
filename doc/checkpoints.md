@@ -30,7 +30,8 @@ Requests, signatures, executions, attestations and the source and destination ch
 Vocabulary, per node per source chain:
 
 * **Boundary**: a height at which a checkpoint is due, one every fixed number of heights.
-  Every correct node uses the same interval.
+  Every correct node uses the same interval: it is a per-chain constant in the node (`ChainConfig::checkpoint_interval`), never a per-node setting, since a node on its own interval would vote at boundaries nobody else has.
+  Changing it for a network would belong in the contract config, which every node reads.
 
 * **Processed height**: the last height whose block the node has finished processing, its events applied to the backlog.
   The indexer reports every height in order, with all of its events, including heights where nothing happened.

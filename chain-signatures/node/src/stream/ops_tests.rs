@@ -1547,7 +1547,7 @@ async fn catchup_blocks_do_not_consume_checkpoint_slots() {
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
 
     // Process 33 checkpoint intervals at caught_up=false
-    let interval = chain.checkpoint_interval().unwrap(); // 100 for Ethereum
+    let interval = chain.checkpoint_interval().unwrap();
     for i in 1..=33 {
         process_block_event(chain, i * interval, &ctx, &telemetry)
             .await

@@ -78,7 +78,7 @@ mpc-node = { path = "../chain-signatures/node", default-features = false, featur
     "test-feature",
     "debug-page",
 ] }
-mpc-primitives.workspace = true
+mpc-primitives = { workspace = true, features = ["test-feature"] }
 mpc-utils.workspace = true
 
 [dev-dependencies]
