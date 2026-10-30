@@ -32,23 +32,6 @@ pub struct Options {
     pub redis_url: String,
 }
 
-impl Options {
-    pub fn into_str_args(self) -> Vec<String> {
-        let mut opts = vec!["--gcp-project-id".to_string(), self.gcp_project_id];
-        if let Some(sk_share_secret_id) = self.sk_share_secret_id {
-            opts.extend(vec!["--sk-share-secret-id".to_string(), sk_share_secret_id]);
-        }
-        if let Some(sk_share_local_path) = self.sk_share_local_path {
-            opts.extend(vec![
-                "--sk-share-local-path".to_string(),
-                sk_share_local_path,
-            ]);
-        }
-
-        opts
-    }
-}
-
 fn owner_key(base: &str, owner: Participant) -> String {
     format!("{base}:p{}", Into::<u32>::into(owner))
 }
