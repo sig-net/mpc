@@ -50,11 +50,24 @@ impl TronHttp {
                 let response: NowBlockResponse = self
                     .post_json("wallet/getnowblock", &serde_json::json!({}))
                     .await?;
-                Ok(NowBlock {
-                    block_id: response.block_id.parse().context("blockID")?,
-                    number: response.block_header.raw_data.number,
-                    timestamp: response.block_header.raw_data.timestamp,
-                })
+                response.into_now_block()
+            }
+        )
+    }
+
+    /// `POST /walletsolidity/getnowblock` — the solidified head; used for the
+    /// expiration check.
+    pub async fn get_now_block_solidity(&self) -> anyhow::Result<NowBlock> {
+        retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            self.gate,
+            "get_now_block_solidity",
+            {
+                let response: NowBlockResponse = self
+                    .post_json("walletsolidity/getnowblock", &serde_json::json!({}))
+                    .await?;
+                response.into_now_block()
             }
         )
     }
@@ -200,6 +213,16 @@ struct NowBlockHeader {
 struct NowBlockRawData {
     number: u64,
     timestamp: u64,
+}
+
+impl NowBlockResponse {
+    fn into_now_block(self) -> anyhow::Result<NowBlock> {
+        Ok(NowBlock {
+            block_id: self.block_id.parse().context("blockID")?,
+            number: self.block_header.raw_data.number,
+            timestamp: self.block_header.raw_data.timestamp,
+        })
+    }
 }
 
 /// Response structure for `getaccount`; `{}` for unseen accounts.
@@ -380,6 +403,25 @@ mod tests {
         assert_eq!(block.number, 3035019);
         assert_eq!(block.timestamp, 1730000000000);
         assert_eq!(block.block_id, block_hash);
+    }
+
+    #[tokio::test]
+    async fn solidity_head_parses_the_recorded_nile_body() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        // Recorded 2026-10-30 off nile.trongrid.io
+        server
+            .mock("POST", "/walletsolidity/getnowblock")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!(
+                "../tests/fixtures/nile/nowblock-solidity.json"
+            ))
+            .create_async()
+            .await;
+
+        let block = client.get_now_block_solidity().await.unwrap();
+        assert_eq!(block.number, 72_266_582);
+        assert_eq!(block.timestamp, 1_793_335_731_000);
     }
 
     #[test]
