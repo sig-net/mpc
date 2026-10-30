@@ -1,4 +1,4 @@
-use crate::sign_bidirectional::BidirectionalTxExt;
+use crate::sign_bidirectional::{claims_bidirectional_namespace, BidirectionalTxExt};
 use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
@@ -56,9 +56,15 @@ fn respond_bidirectional_path(chain: Chain) -> Option<&'static str> {
     }
 }
 
+/// Whether `request` names a path it may not: its chain's attestation key, or as a
+/// plain sign request the bidirectional namespace.
+pub(crate) fn claims_reserved_path(request: &IndexedSignRequest) -> bool {
+    claims_attestation_key(request) || claims_bidirectional_namespace(request)
+}
+
 /// Whether `request` asks for its chain's attestation key without being the leg-2
 /// attestation the respond path builds. False on chains `respond_bidirectional_path` omits.
-pub(crate) fn claims_attestation_key(request: &IndexedSignRequest) -> bool {
+fn claims_attestation_key(request: &IndexedSignRequest) -> bool {
     !matches!(request.kind, SignKind::RespondBidirectional(_))
         && respond_bidirectional_path(request.chain) == Some(request.args.path.as_str())
 }
