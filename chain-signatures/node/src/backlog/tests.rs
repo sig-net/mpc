@@ -1159,6 +1159,37 @@ async fn respond_observed_at_survives_the_unwatch_lookup() {
 }
 
 #[tokio::test]
+async fn executing_entry_for_resolves_the_displaced_watch_by_backlog_key() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::new([77; 32]), Chain::Solana);
+    backlog.insert_mock_executing(&tx).await;
+    backlog.unwatch_execution(tx.target_chain, &tx.id).await;
+
+    let entry = backlog
+        .executing_entry_for(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .await
+        .expect("displaced watch must fall back to the backlog entry");
+    assert_eq!(
+        entry.awaiting_execution(),
+        None,
+        "no watch survived to measure the wait from"
+    );
+
+    assert!(
+        backlog
+            .executing_entry_for(
+                tx.target_chain,
+                &tx.id,
+                tx.source_chain,
+                &SignId::new([1; 32]),
+            )
+            .await
+            .is_none(),
+        "the fallback is keyed by sign id, not the flat tx id"
+    );
+}
+
+#[tokio::test]
 async fn plain_lookup_cannot_measure_the_execution_wait() {
     let backlog = Backlog::new();
     let tx = mock_bidirectional_tx(SignId::new([75; 32]), Chain::Solana);

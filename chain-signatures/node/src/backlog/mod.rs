@@ -402,6 +402,22 @@ impl Backlog {
             .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
     }
 
+    /// The executing entry a confirmation attests:
+    /// by its watch, or by source and sign id from the backlog.
+    pub async fn executing_entry_for(
+        &self,
+        target_chain: Chain,
+        tx_id: &BidirectionalTxId,
+        source_chain: Chain,
+        sign_id: &SignId,
+    ) -> Option<SignEntry<Bidirectional<Executing>>> {
+        if let Some(entry) = self.unwatch_execution(target_chain, tx_id).await {
+            return Some(entry);
+        }
+        self.get_by::<Bidirectional<Executing>>(source_chain, sign_id)
+            .await
+    }
+
     /// Set the processed block height for a specific chain.
     /// Returns Some(Checkpoint) if a checkpoint should be created and submitted at this block height.
     pub async fn set_processed_block(&self, chain: Chain, height: u64) -> Option<Checkpoint> {

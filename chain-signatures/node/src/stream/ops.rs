@@ -518,6 +518,8 @@ fn execution_status(failed: bool) -> &'static str {
 /// The target chain is the chain where the execution was observed.
 pub async fn process_execution_confirmed(
     tx_id: mpc_primitives::BidirectionalTxId,
+    sign_id: SignId,
+    source_chain: Chain,
     block_height: u64,
     result: ExecutionOutcome,
     ctx: &StreamContext,
@@ -525,14 +527,20 @@ pub async fn process_execution_confirmed(
 ) -> anyhow::Result<()> {
     tracing::debug!(
         ?tx_id,
+        ?sign_id,
         ?target_chain,
         block_height,
         "received execution confirmation event"
     );
 
-    let Some(entry) = ctx.backlog.unwatch_execution(target_chain, &tx_id).await else {
+    let Some(entry) = ctx
+        .backlog
+        .executing_entry_for(target_chain, &tx_id, source_chain, &sign_id)
+        .await
+    else {
         tracing::warn!(
             ?tx_id,
+            ?sign_id,
             "executing bidirectional entry not found (maybe already processed)"
         );
         return Ok(());
