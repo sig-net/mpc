@@ -743,8 +743,10 @@ class VaultRun {
   }
 
   /**
-   * CertiK SNA-07's shape on the real vault: a stranger sends a user's flushed deposit in one
-   * intent, beside a flush proven before the deposit was flushed, which fails when applied.
+   * CertiK SNA-07's shape on the real vault: the user's own wallet sends their flushed deposit
+   * in one intent, beside a flush proven before the deposit was flushed, which fails when
+   * applied. `sendDeposit` lets anyone send a flushed entry, and the reader's check does not
+   * depend on the sender.
    * The send commits, so the transaction partially succeeds, and a second send of the same
    * entry is refused.
    */

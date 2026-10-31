@@ -85,7 +85,7 @@ then build the MPC contract and host node and run the ignored tests:
 ```bash
 just build midnight
 just setup
-just test-midnight                   # all three tests
+just test-midnight                   # all four tests
 just test-midnight <test>            # one test from cases::midnight_stream
 ```
 

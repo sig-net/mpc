@@ -1119,8 +1119,8 @@ async fn midnight_partial_success_review_shapes() -> anyhow::Result<()> {
     );
     heights.insert("sameTxReplay".into(), same_tx.block_height);
 
-    // SNA-07 against the real vault: a stranger sends a user's flushed deposit in an intent
-    // that commits, beside a stale flush that fails.
+    // SNA-07 against the real vault: the user sends their flushed deposit in an intent that
+    // commits, beside a stale flush that fails.
     let mpc_public_key = format!(
         "0x{}",
         hex::encode(root_public_key.to_encoded_point(false).as_bytes())
