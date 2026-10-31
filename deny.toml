@@ -32,6 +32,7 @@ ignore = [
     { id = "RUSTSEC-2026-0391", reason = "zstd 0.13 `with_context` streams carry data over from an abandoned stream; near-primitives 0.37.x is the only zstd user and pins ^0.13 (fix 0.14.3), and it builds its streams with `Encoder::new`/`Decoder::new`, never `with_context`" },
     { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7 `Seekable::decompress` overruns a Vec; the `seekable` feature is not enabled anywhere in the graph; fix 8.2.0 needs zstd 0.14, blocked by near-primitives 0.37.x" },
     { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7 legacy-frame streaming decompression can expose uninitialized memory; only near-primitives 0.37.x decompresses zstd (state parts, compressed data) and the node never calls those decoders; fix 8.2.0 needs zstd 0.14, blocked by near-primitives 0.37.x" },
+    { id = "RUSTSEC-2026-0424", reason = "wasmtime 45 component-model borrowed-resource handles grow untracked host memory (DoS); component model disabled in near-vm-runner 0.37.x (component_model=false, core wasm only), same dev-only chain as RUSTSEC-2026-0222 (near-sdk unit-testing, wasmtime ^45 pinned by near-vm-runner 0.37.x); no patched 45.x release (fixed in 48.0.8+)" },
 ]
 
 [licenses]
