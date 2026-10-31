@@ -59,7 +59,8 @@ fn is_window_closed(head: &SolidifiedNowBlock, tx: &BidirectionalTx) -> bool {
 }
 
 /// The M6 attestation for one expired, unexecuted entry: the unexecutable
-/// outcome at the solidified head's height.
+/// outcome at the scan-time solidified head, not the lowest block past
+/// the expiry.
 fn expired_event(sign_id: SignId, tx: &BidirectionalTx, head: &SolidifiedNowBlock) -> ChainEvent {
     ChainEvent::ExecutionConfirmed {
         tx_id: tx.id,

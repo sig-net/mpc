@@ -117,8 +117,8 @@ Happy path:
   chain's own numbering (a slot on Solana),
   of the final block that holds the transaction the outcome describes:
   req.tx for Executed and Failed, the transaction that used up its replay
-  protection for Unviable, or for an expired req.tx the first final block
-  past its expiry.
+  protection for Unviable, or for an expired req.tx the attesting node's
+  final scan head past the expiry, not necessarily the lowest such block.
 * *Response*: an attestation delivered to the contract that made rid's
   request.
 
@@ -451,8 +451,7 @@ on target chain block at height h finalised on chain target:
                 local[rid].outcome = Parked, log why        // M3
         else if txid ignores the signature on target
           and block h is past e.req.tx's expiry:            // M6
-            h_exp = lowest final height past e.req.tx's expiry
-            attest(rid, (h_exp, Unviable, empty))
+            attest(rid, (h, Unviable, empty))
 
 attest(rid, att):
     e = backlog[rid]
@@ -542,7 +541,8 @@ Properties:
 * M6 The MPC attests Unviable for an expired request only where the
   transaction ID does not depend on the signature, and only if no block
   up to the first final block past the expiry includes req.tx. It
-  attests at that block's height.
+  attests at the node's scan head — a final block at or above that
+  first one.
 
 ## 5. Why the guarantees hold (sketch)
 
@@ -665,9 +665,13 @@ a path from B48 through A15; the first at A12 has none.
   the response (C3).
 
   G5 (b): every correct node sees, without a signature (M6), that no
-  block up to the first one past the expiry includes req.tx, and attests
-  Unviable at that block's height, so they agree. That block became
-  final after req was made, so the library accepts the response (C3).
+  block up to the first one past the expiry includes req.tx, and
+  attests Unviable at its own scan head. Heads can differ by a poll
+  interval, so nodes need not attest at one height; each attestation
+  describes only final state at its height (M5), and the response is
+  whichever one the threshold signature covers. Its height is past
+  the expiry, a block final after req was made, so the library
+  accepts the response (C3).
   The premise needs the chains' clocks roughly in step: admission only
   places the expiry after the source block's time.
 

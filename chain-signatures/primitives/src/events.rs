@@ -95,7 +95,8 @@ pub enum ExecutionOutcome {
     /// A finalized different transaction consumed this transaction's replay
     /// protection, or its validity window closed without inclusion (M6).
     /// Emitted for Midnight only; the height is the replacement block's, or
-    /// the first final block strictly past the expiry's.
+    /// a final block past the expiry at the observing node's scan head,
+    /// not the lowest one.
     Unviable,
 }
 
