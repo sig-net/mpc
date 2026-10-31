@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use alloy::primitives::B256;
 use anyhow::Context;
-use futures_util::stream::{empty, iter, once, Stream, StreamExt};
+use futures_util::stream::{iter, StreamExt};
 use mpc_chain_integration_core::{
     unexecutable_outcome, ChainIndexer, ChainTelemetry, ExtractionFailureKind, StateManager,
 };
@@ -163,50 +163,49 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
     }
 
     /// M6 resolutions for `Executing` entries whose validity window
-    /// closed — backlog-keyed, displaced watches included. Failures
-    /// defer to the next tick.
-    fn expired_resolutions(&self) -> impl Stream<Item = ChainEvent> + Unpin + '_ {
-        once(async move {
-            let pending = self.state_manager.get_pending_executions(Chain::Tron).await;
-            if pending.is_empty() {
-                return empty().boxed();
+    /// closed — backlog-keyed, displaced watches included. Probes run
+    /// concurrently so a large deferred backlog cannot outrun the stall
+    /// budget; failures defer to the next tick.
+    async fn expired_resolutions(&self) -> Vec<ChainEvent> {
+        let pending = self.state_manager.get_pending_executions(Chain::Tron).await;
+        if pending.is_empty() {
+            return Vec::new();
+        }
+        let head = match self.client.get_now_block_solidity().await {
+            Ok(head) => head,
+            Err(err) => {
+                tracing::warn!(?err, "solidity head fetch failed; expiry scan deferred");
+                return Vec::new();
             }
-            let head = match self.client.get_now_block_solidity().await {
-                Ok(head) => head,
-                Err(err) => {
-                    tracing::warn!(?err, "solidity head fetch failed; expiry scan deferred");
-                    return empty().boxed();
-                }
-            };
-            iter(pending)
-                .filter(move |(_, tx)| ready(is_window_closed(&head, tx)))
-                .then(move |(sign_id, tx)| async move {
-                    match self.expiry_probe(&tx).await {
-                        Ok(ExpiryProbe::Included) => {
-                            tracing::info!(?sign_id, ?tx.id,
-                                "expired window with inclusion; re-registered for the receipt arm");
-                            self.state_manager
-                                .watch_execution(Chain::Tron, Arc::clone(&tx))
-                                .await;
-                            None
-                        }
-                        Ok(ExpiryProbe::Unavailable) => {
-                            tracing::info!(?sign_id, ?tx.id, source = ?tx.source_chain,
-                                height = head.number,
-                                "validity window closed without inclusion; attesting unexecutable");
-                            Some(expired_event(sign_id, &tx, &head))
-                        }
-                        Err(err) => {
-                            tracing::warn!(?sign_id, ?tx.id, ?err, "expiry receipt lookup failed");
-                            None
-                        }
+        };
+        iter(pending)
+            .filter(move |(_, tx)| ready(is_window_closed(&head, tx)))
+            .map(move |(sign_id, tx)| async move {
+                match self.expiry_probe(&tx).await {
+                    Ok(ExpiryProbe::Included) => {
+                        tracing::info!(?sign_id, ?tx.id,
+                            "expired window with inclusion; re-registered for the receipt arm");
+                        self.state_manager
+                            .watch_execution(Chain::Tron, Arc::clone(&tx))
+                            .await;
+                        None
                     }
-                })
-                .filter_map(ready)
-                .boxed()
-        })
-        .flatten()
-        .boxed()
+                    Ok(ExpiryProbe::Unavailable) => {
+                        tracing::info!(?sign_id, ?tx.id, source = ?tx.source_chain,
+                            height = head.number,
+                            "validity window closed without inclusion; attesting unexecutable");
+                        Some(expired_event(sign_id, &tx, &head))
+                    }
+                    Err(err) => {
+                        tracing::warn!(?sign_id, ?tx.id, ?err, "expiry receipt lookup failed");
+                        None
+                    }
+                }
+            })
+            .buffer_unordered(Self::MAX_CONCURRENT_RECEIPT_POLLS)
+            .filter_map(ready)
+            .collect()
+            .await
     }
 }
 
@@ -233,15 +232,15 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
                     head.context("fetching the tron head block")?.number
                 }
             };
-            // Block last: it certifies the tick. Per-resolution sends mean
-            // a pass outlasting the stall timeout restarts with the map
-            // already shrunk.
-            let mut pass = self.poll_watchers().await.chain(self.expired_resolutions());
-
+            // Block last: it certifies the tick; a pass outlasting the
+            // stall timeout restarts with the map already shrunk. Polls
+            // drain first so a receipt found by either arm wins over
+            // the closed window.
+            let mut polls = self.poll_watchers().await;
             loop {
                 let event = tokio::select! {
                     _ = cancel.cancelled() => return Ok(()),
-                    event = pass.next() => match event {
+                    event = polls.next() => match event {
                         Some(event) => event,
                         None => break,
                     },
@@ -250,6 +249,16 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
                     return Ok(());
                 }
             }
+
+            for event in self.expired_resolutions().await {
+                if tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    sent = events_tx.send(event) => sent.is_err(),
+                } {
+                    return Ok(());
+                }
+            }
+
             // Provider head as a liveness gauge; Tron indexes no blocks.
             self.telemetry.block_indexed(head);
             if events_tx.send(ChainEvent::Block(head)).await.is_err() {
