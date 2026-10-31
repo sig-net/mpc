@@ -25,8 +25,8 @@ pub(crate) enum SubmitError {
     /// Proving outlasted the submit budget. Nothing was posted.
     #[error("[proving_timeout] {0}")]
     ProvingTimeout(String),
-    /// The node refused the transaction, it expired unlanded, or it landed with
-    /// a failed segment. The retry rebuilds against fresh state.
+    /// The node refused the transaction or it expired unlanded. The retry
+    /// rebuilds against fresh state.
     #[error("[state_conflict] {0}")]
     StateConflict(String),
     /// The transaction may still land.

@@ -15,7 +15,7 @@ The node posts every finished Midnight response itself: one transaction per sign
 **Post.** The transaction goes to the node through `author_submitExtrinsic` as an unsigned `Midnight::send_mn_transaction`. The publisher then scans every finalized block after that head for the transaction's ledger hash:
 
 - `TxApplied` answers the publish with the ledger transaction hash.
-- `TxPartialSuccess` answers it too: the respond sits in a guaranteed segment, which a partial success commits and readers read.
+- `TxPartialSuccess` answers it too: the respond's only transcript is guaranteed, which a partial success commits and readers read.
 - A finalized block past the fee intent's TTL without the transaction means it can never land.
 
 ## The funding wallet

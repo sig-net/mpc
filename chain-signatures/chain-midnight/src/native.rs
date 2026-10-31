@@ -399,9 +399,9 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             "midnight: respond settled"
         );
         match landing {
-            // The respond and the DUST spends sit in guaranteed segments, which a
-            // partial success commits and readers read; the reservation ends when the
-            // replay sees the spends.
+            // The respond's only transcript and the DUST spends are guaranteed, which
+            // a partial success commits and readers read; the reservation ends when
+            // the replay sees the spends.
             Ok(Landing::Applied | Landing::PartialSuccess) => Ok(hex::encode(tx_hash)),
             Ok(Landing::Expired) => {
                 self.wallet.release(spent);
