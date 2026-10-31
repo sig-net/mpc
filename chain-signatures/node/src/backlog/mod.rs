@@ -106,6 +106,7 @@ impl PendingRequests {
             })
             .collect()
     }
+
     /// Get the processed block height for this chain
     fn processed_block_height(&self) -> Option<u64> {
         self.processed_block_height

@@ -529,39 +529,6 @@ impl Gate {
         Ok(())
     }
 
-    /// Whether the network has a (not necessarily solidified) receipt;
-    /// the plain-visibility route, which the client does not expose.
-    async fn packed(&self, txid: &[u8; 32]) -> anyhow::Result<bool> {
-        #[derive(serde::Deserialize)]
-        struct Info {
-            #[serde(default)]
-            id: Option<String>,
-        }
-        let info: Info = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .context("expiry probe http client")?
-            .post(
-                self.endpoint
-                    .join("wallet/gettransactioninfobyid")
-                    .context("joining probe path")?,
-            )
-            .header(
-                "TRON-PRO-API-KEY",
-                self.api_key.as_deref().unwrap_or_default(),
-            )
-            .json(&serde_json::json!({ "value": hex::encode(txid) }))
-            .send()
-            .await
-            .context("probe request")?
-            .error_for_status()
-            .context("probe status")?
-            .json()
-            .await
-            .context("probe response")?;
-        Ok(info.id.is_some())
-    }
-
     /// Duplicate probe: the identical signed bytes again, rejected by
     /// txID — replay protection without a nonce, and an id the network
     /// never derives from the signature.
