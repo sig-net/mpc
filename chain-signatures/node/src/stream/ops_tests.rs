@@ -2140,7 +2140,7 @@ async fn published_midnight_response(
         .await;
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
-    confirm_execution(&tx, height, outcome, &ctx).await.unwrap();
+    confirm_execution(tx, height, outcome, &ctx).await.unwrap();
     let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
         panic!("the observed outcome must be signed");
     };

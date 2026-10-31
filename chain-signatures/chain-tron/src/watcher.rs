@@ -70,6 +70,12 @@ fn expired_event(sign_id: SignId, tx: &BidirectionalTx, head: &SolidifiedNowBloc
     }
 }
 
+/// The receipt read for one expired entry.
+enum ExpiryProbe {
+    Included,
+    Unavailable,
+}
+
 impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
     /// Bounds in-flight receipt requests to the provider; Ethereum's
     /// default.
@@ -142,10 +148,22 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
         })
     }
 
+    async fn expiry_probe(&self, tx: &BidirectionalTx) -> anyhow::Result<ExpiryProbe> {
+        Ok(
+            match self
+                .client
+                .get_transaction_info_solidity(&B256::from(tx.id.0))
+                .await?
+            {
+                Some(_) => ExpiryProbe::Included,
+                None => ExpiryProbe::Unavailable,
+            },
+        )
+    }
+
     /// M6 resolutions for `Executing` entries whose validity window
-    /// closed. Backlog-keyed: an entry whose watch a duplicate flat id
-    /// displaced has no other resolution path. Failures defer to the
-    /// next tick.
+    /// closed — backlog-keyed, displaced watches included. Failures
+    /// defer to the next tick.
     fn expired_resolutions(&self) -> impl Stream<Item = ChainEvent> + Unpin + '_ {
         once(async move {
             let pending = self.state_manager.get_pending_executions(Chain::Tron).await;
@@ -162,17 +180,16 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             iter(pending)
                 .filter(move |(_, tx)| ready(is_window_closed(&head, tx)))
                 .then(move |(sign_id, tx)| async move {
-                    match self
-                        .client
-                        .get_transaction_info_solidity(&B256::from(tx.id.0))
-                        .await
-                    {
-                        Ok(Some(_)) => {
-                            tracing::debug!(?sign_id, ?tx.id,
-                                "expired window but executed; M6 premise fails, receipt-keyed resolution deferred");
+                    match self.expiry_probe(&tx).await {
+                        Ok(ExpiryProbe::Included) => {
+                            tracing::info!(?sign_id, ?tx.id,
+                                "expired window with inclusion; re-registered for the receipt arm");
+                            self.state_manager
+                                .watch_execution(Chain::Tron, Arc::clone(&tx))
+                                .await;
                             None
                         }
-                        Ok(None) => {
+                        Ok(ExpiryProbe::Unavailable) => {
                             tracing::info!(?sign_id, ?tx.id, source = ?tx.source_chain,
                                 height = head.number,
                                 "validity window closed without inclusion; attesting unexecutable");
@@ -252,7 +269,7 @@ mod tests {
 
     use mockito::Matcher;
     use mpc_chain_integration_core::utils::retry::RetryConfig;
-    use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
+    use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry, StateManager};
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RequestKind, SignId, TronTxParams,
     };
@@ -468,12 +485,8 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
-        state
-            .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
+        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -504,9 +517,7 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -531,9 +542,7 @@ mod tests {
         receipt_stub(&mut server, 1, success_body(1)).create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -561,12 +570,8 @@ mod tests {
         receipt_stub(&mut server, 2, resultless).create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
-        state
-            .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
+        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
 
         let telemetry = CountingTelemetry::default();
         let mut run = spawn_watcher(config, state, telemetry.clone());
@@ -603,11 +608,7 @@ mod tests {
 
         let state = MockStateManager::new();
         state
-            .watch_execution(
-                Chain::Tron,
-                schema_carrying_tx(1).1,
-                schema_carrying_tx(1).2,
-            )
+            .watch_execution(Chain::Tron, schema_carrying_tx(1).2)
             .await;
 
         let telemetry = CountingTelemetry::default();
@@ -654,12 +655,8 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
-        state
-            .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
+        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -696,12 +693,8 @@ mod tests {
         receipt_stub(&mut server, 2, success_body(2)).create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
-        state
-            .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
+        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
 
         let telemetry = CountingTelemetry::default();
         let mut run = spawn_watcher(config, state, telemetry.clone());
@@ -760,6 +753,13 @@ mod tests {
                 SOLIDITY_TS
             ))
             .create();
+    }
+
+    fn success_receipt(id: &BidirectionalTxId) -> String {
+        format!(
+            r#"{{ "id": "{}", "blockNumber": 71896097, "fee": 472800, "receipt": {{ "result": "SUCCESS" }} }}"#,
+            hex::encode(id.0)
+        )
     }
 
     fn receipt_for(server: &mut mockito::ServerGuard, id: &BidirectionalTxId, body: String) {
@@ -895,9 +895,9 @@ mod tests {
         nowblock_mock(&mut server);
         solidity_nowblock_mock(&mut server);
         let state = MockStateManager::new();
-        let (id, sign_id, tx) =
+        let (id, _, tx) =
             pending_expiry_entry(&state, 3, Chain::Midnight, SOLIDITY_TS - 40_000).await;
-        state.watch_execution(Chain::Tron, sign_id, tx).await;
+        state.watch_execution(Chain::Tron, tx).await;
         receipt_for(&mut server, &id, "{}".to_string());
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
@@ -910,11 +910,10 @@ mod tests {
         run.done.await.unwrap().unwrap();
     }
 
-    /// M6's premise fails — the id has a solidified receipt (a displaced
-    /// duplicate of an executed transaction) — so the expiry arm attests
-    /// nothing; receipt-keyed resolution is deferred with output schemas.
+    /// M6's premise fails — a solidified receipt exists — so the arm
+    /// re-registers rather than attests.
     #[tokio::test]
-    async fn expired_but_executed_is_left_for_receipt_keyed_resolution() {
+    async fn expired_but_executed_re_registers_for_receipt_resolution() {
         let server = mockito::Server::new_async().await;
         let config = test_config(server.url().parse().unwrap());
         let mut server = server;
@@ -923,25 +922,74 @@ mod tests {
         let state = MockStateManager::new();
         let (id, _, _) =
             pending_expiry_entry(&state, 4, Chain::Midnight, SOLIDITY_TS - 40_000).await;
-        receipt_for(
-            &mut server,
-            &id,
-            format!(
-                r#"{{ "id": "{}", "blockNumber": 71896097, "fee": 472800, "receipt": {{ "result": "SUCCESS" }} }}"#,
-                hex::encode(id.0)
-            ),
-        );
+        receipt_for(&mut server, &id, success_receipt(&id));
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
-        let seen = until_blocks(&mut run, 3).await;
-        assert!(
-            !seen.iter().any(|event| matches!(
-                event,
-                ChainEvent::ExecutionConfirmed { tx_id, .. } if *tx_id == id
-            )),
-            "expiry arm must not attest an included transaction"
-        );
+        let (height, _, result) = until_tx_confirmed(&mut run, &id).await;
+        assert_eq!(height, 71896097);
+        assert!(matches!(result, ExecutionOutcome::Success { .. }));
+
+        run.cancel.cancel();
+        run.done.await.unwrap().unwrap();
+    }
+
+    /// Two requests share the flat txID; both must resolve through the
+    /// one receipt.
+    #[tokio::test]
+    async fn duplicate_flat_id_entries_both_resolve_through_the_receipt_arm() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        solidity_nowblock_mock(&mut server);
+        let state = MockStateManager::new();
+        let (id, displacing, tx) =
+            pending_expiry_entry(&state, 5, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        let mut displaced_tx = (*tx).clone();
+        displaced_tx.request_id = [0x7f; 32];
+        let displaced = displaced_tx.sign_id();
+        let displaced_tx: Arc<BidirectionalTx> = displaced_tx.into();
+        state.add_pending_execution(Arc::clone(&displaced_tx)).await;
+        state.watch_execution(Chain::Tron, tx).await;
+        state.watch_execution(Chain::Tron, displaced_tx).await;
+        receipt_for(&mut server, &id, success_receipt(&id));
+
+        let confirmed_state = state.clone();
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+        let confirmations = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut seen: Vec<(SignId, u64, ExecutionOutcome)> = Vec::new();
+            loop {
+                let event = run.events.recv().await.expect("watcher channel open");
+                if let ChainEvent::ExecutionConfirmed {
+                    tx_id,
+                    sign_id,
+                    block_height,
+                    result,
+                    ..
+                } = event
+                {
+                    if tx_id == id {
+                        confirmed_state.remove_pending_execution(sign_id).await;
+                        if !seen.iter().any(|(sign, ..)| *sign == sign_id) {
+                            seen.push((sign_id, block_height, result));
+                            if seen.len() == 2 {
+                                return seen;
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("both flat-id entries must confirm"));
+
+        for (sign, height, result) in confirmations {
+            assert!(sign == displacing || sign == displaced, "unknown sign id");
+            assert_eq!(height, 71896097);
+            assert!(matches!(result, ExecutionOutcome::Success { .. }));
+        }
 
         run.cancel.cancel();
         run.done.await.unwrap().unwrap();

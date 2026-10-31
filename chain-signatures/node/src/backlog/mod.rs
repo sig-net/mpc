@@ -624,6 +624,13 @@ impl StateManager for Backlog {
     async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
         self.pending_executions_targeting(chain).await
     }
+
+    async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
+        self.watchers(&chain)
+            .write()
+            .await
+            .insert(ExecutionWatch::new(tx, None));
+    }
 }
 
 /// Errors that can occur when working with Backlog

@@ -809,7 +809,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .watch_execution_as(Chain::Ethereum, sign_id, tx)
             .await;
 
         // Construct mock block at height 10 (triggers modulo 10 check)
@@ -895,7 +895,7 @@ mod tests {
 
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([0; 32]),
                 test_watcher_tx(tx_hash_0, from_address, 0),
@@ -903,7 +903,7 @@ mod tests {
             .await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([1; 32]),
                 test_watcher_tx(tx_hash_1, from_address, 1),
@@ -911,7 +911,7 @@ mod tests {
             .await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([2; 32]),
                 test_watcher_tx(tx_hash_2, from_address, 2),
@@ -990,7 +990,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .watch_execution_as(Chain::Ethereum, sign_id, tx)
             .await;
 
         // Block height 5 (NOT a modulo 10 block), but contains tx_hash in block.transactions
@@ -1064,7 +1064,7 @@ mod tests {
 
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([1; 32]),
                 test_watcher_tx(tx_hash_ok, from_address, 0),
@@ -1072,7 +1072,7 @@ mod tests {
             .await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([2; 32]),
                 test_watcher_tx(tx_hash_err, from_address, 0),
@@ -1147,7 +1147,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(Chain::Ethereum, SignId::new([3; 32]), tx)
+            .watch_execution_as(Chain::Ethereum, SignId::new([3; 32]), tx)
             .await;
 
         // Block height 10 triggers the throttled nonce check
@@ -1228,7 +1228,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([4; 32]),
                 Arc::new(BidirectionalTx {
@@ -1321,7 +1321,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([5; 32]),
                 Arc::new(BidirectionalTx {
@@ -1435,7 +1435,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([6; 32]),
                 Arc::new(BidirectionalTx {
@@ -1697,7 +1697,7 @@ mod tests {
                 Arc::make_mut(&mut tx).source_chain = source_chain;
                 harness
                     .state_manager
-                    .watch_execution(Chain::Ethereum, SignId::new([0xcc; 32]), tx)
+                    .watch_execution_as(Chain::Ethereum, SignId::new([0xcc; 32]), tx)
                     .await;
                 let mut block: Block = Block::default();
                 block.header.number = 5;
@@ -1924,7 +1924,7 @@ mod tests {
                 tx_fields.serialized_transaction = hash.to_vec();
                 harness
                     .state_manager
-                    .watch_execution(Chain::Ethereum, SignId::new(hash.0), tx)
+                    .watch_execution_as(Chain::Ethereum, SignId::new(hash.0), tx)
                     .await;
             }
             let mut block: Block = Block::default();
@@ -2068,7 +2068,7 @@ mod tests {
                 tx_fields.serialized_transaction = hash.to_vec();
                 harness
                     .state_manager
-                    .watch_execution(Chain::Ethereum, SignId::new(hash.0), tx)
+                    .watch_execution_as(Chain::Ethereum, SignId::new(hash.0), tx)
             };
             let collect = |number: u64, mined: Vec<alloy::primitives::B256>| {
                 let mut block: Block = Block::default();
@@ -2218,7 +2218,7 @@ mod tests {
                 }
                 harness
                     .state_manager
-                    .watch_execution(Chain::Ethereum, SignId::new(hash.0), tx)
+                    .watch_execution_as(Chain::Ethereum, SignId::new(hash.0), tx)
                     .await;
             }
             let mut block: Block = Block::default();
@@ -2357,7 +2357,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([9; 32]),
                 empty_output_schema_tx(tx_hash, from_address),
@@ -2455,7 +2455,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([0xaa; 32]),
                 empty_output_schema_tx(tx_hash, from_address),
@@ -2618,7 +2618,7 @@ mod tests {
         let harness = test_utils::WatcherHarness::new(&server.url()).await;
         harness
             .state_manager
-            .watch_execution(
+            .watch_execution_as(
                 Chain::Ethereum,
                 SignId::new([0xbb; 32]),
                 empty_output_schema_tx(tx_hash, from_address),
@@ -2746,11 +2746,11 @@ mod tests {
 
             harness
                 .state_manager
-                .watch_execution(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
+                .watch_execution_as(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
                 .await;
             harness
                 .state_manager
-                .watch_execution(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
+                .watch_execution_as(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
                 .await;
 
             let mut block4: Block = Block::default();
