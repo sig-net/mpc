@@ -57,7 +57,7 @@ impl TronHttp {
 
     /// `POST /walletsolidity/getnowblock` — the solidified head; used for the
     /// expiration check.
-    pub async fn get_now_block_solidity(&self) -> anyhow::Result<NowBlock> {
+    pub async fn get_now_block_solidity(&self) -> anyhow::Result<SolidifiedNowBlock> {
         retry_rpc!(
             self.request_timeout,
             self.retry,
@@ -67,7 +67,7 @@ impl TronHttp {
                 let response: NowBlockResponse = self
                     .post_json("walletsolidity/getnowblock", &serde_json::json!({}))
                     .await?;
-                response.into_now_block()
+                response.into_now_block().map(SolidifiedNowBlock)
             }
         )
     }
@@ -192,6 +192,18 @@ fn decode_hex_ascii(s: &str) -> String {
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_else(|| s.to_string())
+}
+
+/// The `/walletsolidity` view's head — only it may reach the expiry
+/// attestation.
+#[derive(Debug, Clone, Copy)]
+pub struct SolidifiedNowBlock(pub(crate) NowBlock);
+
+impl std::ops::Deref for SolidifiedNowBlock {
+    type Target = NowBlock;
+    fn deref(&self) -> &NowBlock {
+        &self.0
+    }
 }
 
 /// Response structure for the `now` block query.

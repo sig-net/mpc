@@ -26,8 +26,10 @@ Core pieces:
 - `TronWatcher` — polls solidified receipts by txID and resolves
   `Executing` entries whose validity window closed as unexecutable,
   keyed off the backlog so a duplicate flat txID that displaced a watch
-  still resolves. Implements `ChainIndexer` purely as the supervision
-  vehicle (no block scanning, no catchup).
+  still resolves. The head and receipt reads hit separately routed
+  solidity instances, so the attestation requires the head past the
+  window by a read-skew margin (3 slots). Implements `ChainIndexer`
+  purely as the supervision vehicle (no block scanning, no catchup).
 
 ## Configuration
 

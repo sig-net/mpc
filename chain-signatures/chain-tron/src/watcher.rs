@@ -16,12 +16,11 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
 };
 use mpc_tron_wire::pb::RawTransaction;
-use mpc_tron_wire::NowBlock;
 use std::future::ready;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::TronHttp;
+use crate::client::{SolidifiedNowBlock, TronHttp};
 use crate::config::TronConfig;
 
 pub struct TronWatcher<S: StateManager, T: ChainTelemetry> {
@@ -31,14 +30,22 @@ pub struct TronWatcher<S: StateManager, T: ChainTelemetry> {
     telemetry: T,
 }
 
-/// Solidified head strictly past `expiration`: java-tron rejects packaging
-/// at `expiration <= headBlockTime`, validated against the *parent* head
-/// (`Manager.validateCommon`, java-tron b33eed89a6a4) — strict, because a
-/// block one 3 s slot past the expiration can still carry the transaction.
-fn is_window_closed(head: &NowBlock, tx: &BidirectionalTx) -> bool {
+/// Head and receipt reads hit separately routed solidity instances that
+/// can disagree by a couple of 3 s slots; without this margin, a receipt
+/// read lagging the head reads the boundary block's inclusion as absence
+/// (three slots: two of skew, one of pack grace — `is_window_closed`).
+const EXPIRY_ATTEST_GRACE_MS: u64 = 9_000;
+
+/// Solidified head strictly past `expiration` + [`EXPIRY_ATTEST_GRACE_MS`]:
+/// java-tron (`Manager.validateCommon`, b33eed89a6a4) rejects packaging at
+/// `expiration <= headBlockTime` against the *parent* head — a block one
+/// 3 s slot past the expiration can still carry the transaction.
+fn is_window_closed(head: &SolidifiedNowBlock, tx: &BidirectionalTx) -> bool {
     RawTransaction::parse(&tx.serialized_transaction)
         .map(|raw| {
-            u64::try_from(raw.expiration).is_ok_and(|expiration| head.timestamp > expiration)
+            u64::try_from(raw.expiration).is_ok_and(|expiration| {
+                head.timestamp > expiration.saturating_add(EXPIRY_ATTEST_GRACE_MS)
+            })
         })
         .unwrap_or_else(|err| {
             tracing::warn!(
@@ -53,7 +60,7 @@ fn is_window_closed(head: &NowBlock, tx: &BidirectionalTx) -> bool {
 
 /// The M6 attestation for one expired, unexecuted entry: the unexecutable
 /// outcome at the solidified head's height.
-fn expired_event(sign_id: SignId, tx: &BidirectionalTx, head: &NowBlock) -> ChainEvent {
+fn expired_event(sign_id: SignId, tx: &BidirectionalTx, head: &SolidifiedNowBlock) -> ChainEvent {
     ChainEvent::ExecutionConfirmed {
         tx_id: tx.id,
         sign_id,
@@ -249,6 +256,7 @@ mod tests {
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RequestKind, SignId, TronTxParams,
     };
+    use mpc_tron_wire::NowBlock;
     use mpc_tron_wire::{to_unsigned_tron_tx, TronAddress};
     use url::Url;
 
@@ -962,14 +970,24 @@ mod tests {
 
     #[test]
     fn window_closes_strictly_past_the_expiration() {
-        let head = |timestamp| NowBlock {
-            block_id: B256::from([0x9u8; 32]),
-            number: 41,
-            timestamp,
+        let head = |timestamp| {
+            SolidifiedNowBlock(NowBlock {
+                block_id: B256::from([0x9u8; 32]),
+                number: 41,
+                timestamp,
+            })
         };
         let tx = |expiration| expiry_tx(1, Chain::Midnight, expiration).2;
         assert!(!is_window_closed(&head(1_000), &tx(1_000)));
-        assert!(is_window_closed(&head(1_001), &tx(1_000)));
+        assert!(!is_window_closed(
+            &head(1_000 + EXPIRY_ATTEST_GRACE_MS),
+            &tx(1_000)
+        ));
+        assert!(is_window_closed(
+            &head(1_000 + EXPIRY_ATTEST_GRACE_MS + 1),
+            &tx(1_000)
+        ));
+        assert!(is_window_closed(&head(u64::MAX), &tx(i64::MAX as u64)));
         let mut unparsable = (*tx(1_000)).clone();
         unparsable.serialized_transaction = vec![0xff];
         assert!(!is_window_closed(&head(2_000), &unparsable));
@@ -977,11 +995,11 @@ mod tests {
 
     #[test]
     fn expired_event_attests_by_source_policy() {
-        let head = NowBlock {
+        let head = SolidifiedNowBlock(NowBlock {
             block_id: B256::from([0x9u8; 32]),
             number: 41,
             timestamp: 1_000,
-        };
+        });
         let midnight = expiry_tx(1, Chain::Midnight, 900).2;
         let canton = expiry_tx(2, Chain::Canton, 900).2;
         let assert_event = |tx: &BidirectionalTx, unviable: bool| {
