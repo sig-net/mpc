@@ -1059,6 +1059,37 @@ async fn test_pending_executions_typestate() {
 }
 
 #[tokio::test]
+async fn pending_executions_targeting_spans_sources() {
+    let backlog = Backlog::new();
+    let mut tx1 = mock_tx(31);
+    tx1.source_chain = Chain::Ethereum;
+    tx1.target_chain = Chain::Tron;
+    let mut tx2 = mock_tx(32);
+    tx2.source_chain = Chain::Solana;
+    tx2.target_chain = Chain::Tron;
+    let mut tx3 = mock_tx(33);
+    tx3.source_chain = Chain::Ethereum;
+    tx3.target_chain = Chain::Solana;
+
+    backlog.insert_mock_executing(&tx1).await;
+    backlog.insert_mock_executing(&tx2).await;
+    backlog.insert_mock_executing(&tx3).await;
+    backlog
+        .insert_mock_sign(SignId::from_u8(99), Chain::Ethereum)
+        .await;
+
+    let mut tron = backlog.get_pending_executions(Chain::Tron).await;
+    tron.sort_by_key(|(id, _)| id.request_id);
+    assert_eq!(tron.len(), 2);
+    assert_eq!(tron[0], (tx1.sign_id(), Arc::new(tx1.clone())));
+    assert_eq!(tron[1], (tx2.sign_id(), Arc::new(tx2.clone())));
+    assert!(backlog
+        .get_pending_executions(Chain::Hydration)
+        .await
+        .is_empty());
+}
+
+#[tokio::test]
 async fn test_advance_rejects_invalid_publish_transition() {
     let backlog = Backlog::new();
     let sign_id = SignId::from_u8(77);
@@ -1124,6 +1155,37 @@ async fn respond_observed_at_survives_the_unwatch_lookup() {
     assert!(
         measured < std::time::Duration::from_secs(60),
         "a freshly published entry has barely been waiting, got {measured:?}"
+    );
+}
+
+#[tokio::test]
+async fn executing_entry_for_resolves_the_displaced_watch_by_backlog_key() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::new([77; 32]), Chain::Solana);
+    backlog.insert_mock_executing(&tx).await;
+    backlog.unwatch_execution(tx.target_chain, &tx.id).await;
+
+    let entry = backlog
+        .executing_entry_for(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .await
+        .expect("displaced watch must fall back to the backlog entry");
+    assert_eq!(
+        entry.awaiting_execution(),
+        None,
+        "no watch survived to measure the wait from"
+    );
+
+    assert!(
+        backlog
+            .executing_entry_for(
+                tx.target_chain,
+                &tx.id,
+                tx.source_chain,
+                &SignId::new([1; 32]),
+            )
+            .await
+            .is_none(),
+        "the fallback is keyed by sign id, not the flat tx id"
     );
 }
 

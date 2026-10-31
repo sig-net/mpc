@@ -1,23 +1,26 @@
-//! Watches Tron-targeted transactions by polling solidified receipts by txID.
+//! Watches Tron-targeted transactions by polling solidified receipts by
+//! txID, and resolves M6 expiry over the `Executing` backlog.
 //! Target-only, so [`ChainIndexer`](mpc_chain_integration_core::ChainIndexer)
-//! is the supervision vehicle alone: no scanning, no catchup — restart
+//! is the supervision vehicle alone: no block scanning, no catchup — restart
 //! rebuilds the map from the backlog.
 
 use std::sync::Arc;
 
 use alloy::primitives::B256;
 use anyhow::Context;
-use futures_util::stream::{iter, StreamExt};
+use futures_util::stream::{empty, iter, once, Stream, StreamExt};
 use mpc_chain_integration_core::{
-    ChainIndexer, ChainTelemetry, ExtractionFailureKind, StateManager,
+    unexecutable_outcome, ChainIndexer, ChainTelemetry, ExtractionFailureKind, StateManager,
 };
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
 };
+use mpc_tron_wire::pb::RawTransaction;
+use std::future::ready;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::TronHttp;
+use crate::client::{SolidifiedNowBlock, TronHttp};
 use crate::config::TronConfig;
 
 pub struct TronWatcher<S: StateManager, T: ChainTelemetry> {
@@ -25,6 +28,52 @@ pub struct TronWatcher<S: StateManager, T: ChainTelemetry> {
     config: TronConfig,
     state_manager: S,
     telemetry: T,
+}
+
+/// Head and receipt reads hit separately routed solidity instances that
+/// can disagree by a couple of 3 s slots; without this margin, a receipt
+/// read lagging the head reads the boundary block's inclusion as absence
+/// (three slots: two of skew, one of pack grace — `is_window_closed`).
+const EXPIRY_ATTEST_GRACE_MS: u64 = 9_000;
+
+/// Solidified head strictly past `expiration` + [`EXPIRY_ATTEST_GRACE_MS`]:
+/// java-tron (`Manager.validateCommon`, b33eed89a6a4) rejects packaging at
+/// `expiration <= headBlockTime` against the *parent* head — a block one
+/// 3 s slot past the expiration can still carry the transaction.
+fn is_window_closed(head: &SolidifiedNowBlock, tx: &BidirectionalTx) -> bool {
+    RawTransaction::parse(&tx.serialized_transaction)
+        .map(|raw| {
+            u64::try_from(raw.expiration).is_ok_and(|expiration| {
+                head.timestamp > expiration.saturating_add(EXPIRY_ATTEST_GRACE_MS)
+            })
+        })
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                sign_id = ?tx.sign_id(),
+                ?tx.id,
+                ?err,
+                "cannot parse serialized_transaction; admission validated these bytes"
+            );
+            false
+        })
+}
+
+/// The M6 attestation for one expired, unexecuted entry: the unexecutable
+/// outcome at the solidified head's height.
+fn expired_event(sign_id: SignId, tx: &BidirectionalTx, head: &SolidifiedNowBlock) -> ChainEvent {
+    ChainEvent::ExecutionConfirmed {
+        tx_id: tx.id,
+        sign_id,
+        source_chain: tx.source_chain,
+        block_height: head.number,
+        result: unexecutable_outcome(tx.source_chain),
+    }
+}
+
+/// The receipt read for one expired entry.
+enum ExpiryProbe {
+    Included,
+    Unavailable,
 }
 
 impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
@@ -45,7 +94,7 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
     /// fetch, and unclassifiable receipts yield nothing and retry next
     /// tick. Resolution order is load-bearing: immediate sends keep a
     /// pass that outlasts the stall timeout from losing confirmations.
-    async fn poll_watchers(&self) -> impl futures_util::Stream<Item = ChainEvent> + '_ {
+    async fn poll_watchers(&self) -> impl futures_util::Stream<Item = ChainEvent> + Unpin + '_ {
         let watchers = self.state_manager.get_execution_watchers(Chain::Tron).await;
         tracing::debug!(watchers = watchers.len(), "polling tron execution watchers");
 
@@ -98,6 +147,66 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             result,
         })
     }
+
+    async fn expiry_probe(&self, tx: &BidirectionalTx) -> anyhow::Result<ExpiryProbe> {
+        Ok(
+            match self
+                .client
+                .get_transaction_info_solidity(&B256::from(tx.id.0))
+                .await?
+            {
+                Some(_) => ExpiryProbe::Included,
+                None => ExpiryProbe::Unavailable,
+            },
+        )
+    }
+
+    /// M6 resolutions for `Executing` entries whose validity window
+    /// closed — backlog-keyed, displaced watches included. Failures
+    /// defer to the next tick.
+    fn expired_resolutions(&self) -> impl Stream<Item = ChainEvent> + Unpin + '_ {
+        once(async move {
+            let pending = self.state_manager.get_pending_executions(Chain::Tron).await;
+            if pending.is_empty() {
+                return empty().boxed();
+            }
+            let head = match self.client.get_now_block_solidity().await {
+                Ok(head) => head,
+                Err(err) => {
+                    tracing::warn!(?err, "solidity head fetch failed; expiry scan deferred");
+                    return empty().boxed();
+                }
+            };
+            iter(pending)
+                .filter(move |(_, tx)| ready(is_window_closed(&head, tx)))
+                .then(move |(sign_id, tx)| async move {
+                    match self.expiry_probe(&tx).await {
+                        Ok(ExpiryProbe::Included) => {
+                            tracing::info!(?sign_id, ?tx.id,
+                                "expired window with inclusion; re-registered for the receipt arm");
+                            self.state_manager
+                                .watch_execution(Chain::Tron, Arc::clone(&tx))
+                                .await;
+                            None
+                        }
+                        Ok(ExpiryProbe::Unavailable) => {
+                            tracing::info!(?sign_id, ?tx.id, source = ?tx.source_chain,
+                                height = head.number,
+                                "validity window closed without inclusion; attesting unexecutable");
+                            Some(expired_event(sign_id, &tx, &head))
+                        }
+                        Err(err) => {
+                            tracing::warn!(?sign_id, ?tx.id, ?err, "expiry receipt lookup failed");
+                            None
+                        }
+                    }
+                })
+                .filter_map(ready)
+                .boxed()
+        })
+        .flatten()
+        .boxed()
+    }
 }
 
 #[async_trait::async_trait]
@@ -126,11 +235,12 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
             // Block last: it certifies the tick. Per-resolution sends mean
             // a pass outlasting the stall timeout restarts with the map
             // already shrunk.
-            let mut polls = self.poll_watchers().await;
+            let mut pass = self.poll_watchers().await.chain(self.expired_resolutions());
+
             loop {
                 let event = tokio::select! {
                     _ = cancel.cancelled() => return Ok(()),
-                    event = polls.next() => match event {
+                    event = pass.next() => match event {
                         Some(event) => event,
                         None => break,
                     },
@@ -139,8 +249,6 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
                     return Ok(());
                 }
             }
-            // TODO(tron): h_exp-expired entries resolve as Unviable, via
-            // a backlog-keyed scan.
             // Provider head as a liveness gauge; Tron indexes no blocks.
             self.telemetry.block_indexed(head);
             if events_tx.send(ChainEvent::Block(head)).await.is_err() {
@@ -161,10 +269,12 @@ mod tests {
 
     use mockito::Matcher;
     use mpc_chain_integration_core::utils::retry::RetryConfig;
-    use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
+    use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry, StateManager};
     use mpc_primitives::{
-        BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RequestKind, SignId,
+        BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RequestKind, SignId, TronTxParams,
     };
+    use mpc_tron_wire::NowBlock;
+    use mpc_tron_wire::{to_unsigned_tron_tx, TronAddress};
     use url::Url;
 
     use super::*;
@@ -375,12 +485,8 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
-        state
-            .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
+        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -411,9 +517,7 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -438,9 +542,7 @@ mod tests {
         receipt_stub(&mut server, 1, success_body(1)).create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -468,12 +570,8 @@ mod tests {
         receipt_stub(&mut server, 2, resultless).create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
-        state
-            .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
+        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
 
         let telemetry = CountingTelemetry::default();
         let mut run = spawn_watcher(config, state, telemetry.clone());
@@ -510,11 +608,7 @@ mod tests {
 
         let state = MockStateManager::new();
         state
-            .watch_execution(
-                Chain::Tron,
-                schema_carrying_tx(1).1,
-                schema_carrying_tx(1).2,
-            )
+            .watch_execution(Chain::Tron, schema_carrying_tx(1).2)
             .await;
 
         let telemetry = CountingTelemetry::default();
@@ -561,12 +655,8 @@ mod tests {
             .create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
-        state
-            .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
+        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -603,12 +693,8 @@ mod tests {
         receipt_stub(&mut server, 2, success_body(2)).create();
 
         let state = MockStateManager::new();
-        state
-            .watch_execution(Chain::Tron, watcher_tx(1).1, watcher_tx(1).2)
-            .await;
-        state
-            .watch_execution(Chain::Tron, watcher_tx(2).1, watcher_tx(2).2)
-            .await;
+        state.watch_execution(Chain::Tron, watcher_tx(1).2).await;
+        state.watch_execution(Chain::Tron, watcher_tx(2).2).await;
 
         let telemetry = CountingTelemetry::default();
         let mut run = spawn_watcher(config, state, telemetry.clone());
@@ -649,5 +735,343 @@ mod tests {
             rendered.contains("getnowblock"),
             "unexpected error: {rendered}"
         );
+    }
+
+    /// Solidified-head timestamp the expiry tests pin against; its block
+    /// number (41) sits behind the live head's 42, so an attestation at 41
+    /// proves the scan reads solidified state.
+    const SOLIDITY_TS: u64 = 1_728_000_100_000;
+
+    fn solidity_nowblock_mock(server: &mut mockito::ServerGuard) {
+        server
+            .mock("POST", "/walletsolidity/getnowblock")
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{ "blockID": "{}",
+                     "block_header": {{ "raw_data": {{ "number": 41, "timestamp": {} }} }} }}"#,
+                hex::encode([0x9u8; 32]),
+                SOLIDITY_TS
+            ))
+            .create();
+    }
+
+    fn success_receipt(id: &BidirectionalTxId) -> String {
+        format!(
+            r#"{{ "id": "{}", "blockNumber": 71896097, "fee": 472800, "receipt": {{ "result": "SUCCESS" }} }}"#,
+            hex::encode(id.0)
+        )
+    }
+
+    fn receipt_for(server: &mut mockito::ServerGuard, id: &BidirectionalTxId, body: String) {
+        server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "value": hex::encode(id.0)
+            })))
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create();
+    }
+
+    /// An entry whose serialized bytes carry `expiration`; the id is
+    /// those bytes' txID, as admission derives it.
+    fn expiry_tx(
+        seed: u8,
+        source: Chain,
+        expiration: u64,
+    ) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
+        let params = TronTxParams {
+            ref_block_bytes: [0x27, 0x10],
+            ref_block_hash: [0x42; 8],
+            timestamp: 1_728_000_000_000 + seed as u64,
+            expiration,
+            contract_address: {
+                let mut address = [0xcd; 21];
+                address[0] = 0x41;
+                address
+            },
+            ..TronTxParams::default()
+        };
+        let owner = TronAddress::from_evm(alloy::primitives::Address::from_slice(&[0xab; 20]));
+        let raw = to_unsigned_tron_tx(&params, owner).unwrap();
+        let (_, sign_id, base) = watcher_tx(seed);
+        let mut tx = (*base).clone();
+        tx.id = BidirectionalTxId(RawTransaction::parse(&raw).unwrap().txid());
+        tx.serialized_transaction = raw;
+        tx.source_chain = source;
+        (tx.id, sign_id, Arc::new(tx))
+    }
+
+    /// Registers an `expiry_tx` as an `Executing` backlog entry.
+    async fn pending_expiry_entry(
+        state: &MockStateManager,
+        seed: u8,
+        source: Chain,
+        expiration: u64,
+    ) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
+        let entry = expiry_tx(seed, source, expiration);
+        state.add_pending_execution(Arc::clone(&entry.2)).await;
+        entry
+    }
+
+    /// Waits for `id`'s confirmation, returning its height, source, outcome.
+    async fn until_tx_confirmed(
+        run: &mut WatcherRun,
+        id: &BidirectionalTxId,
+    ) -> (u64, Chain, ExecutionOutcome) {
+        let deadline = Duration::from_secs(5);
+        tokio::time::timeout(deadline, async {
+            loop {
+                let event = run.events.recv().await.expect("watcher channel open");
+                if let ChainEvent::ExecutionConfirmed {
+                    tx_id,
+                    source_chain,
+                    block_height,
+                    result,
+                    ..
+                } = event
+                {
+                    if tx_id == *id {
+                        return (block_height, source_chain, result);
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no ExecutionConfirmed for {id:?} within {deadline:?}"))
+    }
+
+    /// Collects until `n` `Block` events pass, returning every event seen.
+    async fn until_blocks(run: &mut WatcherRun, n: usize) -> Vec<ChainEvent> {
+        let deadline = Duration::from_secs(5);
+        tokio::time::timeout(deadline, async {
+            let mut seen = Vec::new();
+            let mut blocks = 0;
+            while blocks < n {
+                let event = run.events.recv().await.expect("watcher channel open");
+                if matches!(event, ChainEvent::Block(_)) {
+                    blocks += 1;
+                }
+                seen.push(event);
+            }
+            seen
+        })
+        .await
+        .unwrap_or_else(|_| panic!("fewer than {n} blocks within {deadline:?}"))
+    }
+
+    /// M6 with the watch displaced by a duplicate id and the window
+    /// closed.
+    #[tokio::test]
+    async fn expired_displaced_entry_attests_unviable() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        solidity_nowblock_mock(&mut server);
+        let state = MockStateManager::new();
+        let (id, _, _) =
+            pending_expiry_entry(&state, 1, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        receipt_for(&mut server, &id, "{}".to_string());
+
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+        let (height, source, result) = until_tx_confirmed(&mut run, &id).await;
+        assert_eq!(height, 41);
+        assert_eq!(source, Chain::Midnight);
+        assert!(matches!(result, ExecutionOutcome::Unviable));
+
+        run.cancel.cancel();
+        run.done.await.unwrap().unwrap();
+    }
+
+    /// A watched entry expires too: the receipt poll finds nothing, and the
+    /// scan answers at the solidified head.
+    #[tokio::test]
+    async fn expired_watched_entry_resolves_through_the_scan() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        solidity_nowblock_mock(&mut server);
+        let state = MockStateManager::new();
+        let (id, _, tx) =
+            pending_expiry_entry(&state, 3, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        state.watch_execution(Chain::Tron, tx).await;
+        receipt_for(&mut server, &id, "{}".to_string());
+
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+        let (height, _, result) = until_tx_confirmed(&mut run, &id).await;
+        assert_eq!(height, 41);
+        assert!(matches!(result, ExecutionOutcome::Unviable));
+
+        run.cancel.cancel();
+        run.done.await.unwrap().unwrap();
+    }
+
+    /// M6's premise fails — a solidified receipt exists — so the arm
+    /// re-registers rather than attests.
+    #[tokio::test]
+    async fn expired_but_executed_re_registers_for_receipt_resolution() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        solidity_nowblock_mock(&mut server);
+        let state = MockStateManager::new();
+        let (id, _, _) =
+            pending_expiry_entry(&state, 4, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        receipt_for(&mut server, &id, success_receipt(&id));
+
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+        let (height, _, result) = until_tx_confirmed(&mut run, &id).await;
+        assert_eq!(height, 71896097);
+        assert!(matches!(result, ExecutionOutcome::Success { .. }));
+
+        run.cancel.cancel();
+        run.done.await.unwrap().unwrap();
+    }
+
+    /// Two requests share the flat txID; both must resolve through the
+    /// one receipt.
+    #[tokio::test]
+    async fn duplicate_flat_id_entries_both_resolve_through_the_receipt_arm() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        solidity_nowblock_mock(&mut server);
+        let state = MockStateManager::new();
+        let (id, displacing, tx) =
+            pending_expiry_entry(&state, 5, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        let mut displaced_tx = (*tx).clone();
+        displaced_tx.request_id = [0x7f; 32];
+        let displaced = displaced_tx.sign_id();
+        let displaced_tx: Arc<BidirectionalTx> = displaced_tx.into();
+        state.add_pending_execution(Arc::clone(&displaced_tx)).await;
+        state.watch_execution(Chain::Tron, tx).await;
+        state.watch_execution(Chain::Tron, displaced_tx).await;
+        receipt_for(&mut server, &id, success_receipt(&id));
+
+        let confirmed_state = state.clone();
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+        let confirmations = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut seen: Vec<(SignId, u64, ExecutionOutcome)> = Vec::new();
+            loop {
+                let event = run.events.recv().await.expect("watcher channel open");
+                if let ChainEvent::ExecutionConfirmed {
+                    tx_id,
+                    sign_id,
+                    block_height,
+                    result,
+                    ..
+                } = event
+                {
+                    if tx_id == id {
+                        confirmed_state.remove_pending_execution(sign_id).await;
+                        if !seen.iter().any(|(sign, ..)| *sign == sign_id) {
+                            seen.push((sign_id, block_height, result));
+                            if seen.len() == 2 {
+                                return seen;
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("both flat-id entries must confirm"));
+
+        for (sign, height, result) in confirmations {
+            assert!(sign == displacing || sign == displaced, "unknown sign id");
+            assert_eq!(height, 71896097);
+            assert!(matches!(result, ExecutionOutcome::Success { .. }));
+        }
+
+        run.cancel.cancel();
+        run.done.await.unwrap().unwrap();
+    }
+
+    /// No `Executing` entries: the solidified head is never fetched.
+    #[tokio::test]
+    async fn empty_backlog_skips_the_solidity_head() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        let solidity = server
+            .mock("POST", "/walletsolidity/getnowblock")
+            .expect(0)
+            .create();
+
+        let mut run = spawn_watcher(config, MockStateManager::new(), NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+        until_blocks(&mut run, 3).await;
+        solidity.assert_async().await;
+
+        run.cancel.cancel();
+        run.done.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn window_closes_strictly_past_the_expiration() {
+        let head = |timestamp| {
+            SolidifiedNowBlock(NowBlock {
+                block_id: B256::from([0x9u8; 32]),
+                number: 41,
+                timestamp,
+            })
+        };
+        let tx = |expiration| expiry_tx(1, Chain::Midnight, expiration).2;
+        assert!(!is_window_closed(&head(1_000), &tx(1_000)));
+        assert!(!is_window_closed(
+            &head(1_000 + EXPIRY_ATTEST_GRACE_MS),
+            &tx(1_000)
+        ));
+        assert!(is_window_closed(
+            &head(1_000 + EXPIRY_ATTEST_GRACE_MS + 1),
+            &tx(1_000)
+        ));
+        assert!(is_window_closed(&head(u64::MAX), &tx(i64::MAX as u64)));
+        let mut unparsable = (*tx(1_000)).clone();
+        unparsable.serialized_transaction = vec![0xff];
+        assert!(!is_window_closed(&head(2_000), &unparsable));
+    }
+
+    #[test]
+    fn expired_event_attests_by_source_policy() {
+        let head = SolidifiedNowBlock(NowBlock {
+            block_id: B256::from([0x9u8; 32]),
+            number: 41,
+            timestamp: 1_000,
+        });
+        let midnight = expiry_tx(1, Chain::Midnight, 900).2;
+        let canton = expiry_tx(2, Chain::Canton, 900).2;
+        let assert_event = |tx: &BidirectionalTx, unviable: bool| {
+            let ChainEvent::ExecutionConfirmed {
+                tx_id,
+                sign_id,
+                source_chain,
+                block_height,
+                result,
+            } = expired_event(tx.sign_id(), tx, &head)
+            else {
+                panic!("expected an ExecutionConfirmed")
+            };
+            assert_eq!(tx_id, tx.id);
+            assert_eq!(sign_id, tx.sign_id());
+            assert_eq!(source_chain, tx.source_chain);
+            assert_eq!(block_height, 41);
+            assert_eq!(
+                matches!(result, ExecutionOutcome::Unviable),
+                unviable,
+                "midnight attests unviable, legacy sources refund failed"
+            );
+        };
+        assert_event(&midnight, true);
+        assert_event(&canton, false);
     }
 }

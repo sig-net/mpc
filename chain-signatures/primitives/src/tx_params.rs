@@ -95,7 +95,7 @@ pub struct EvmType2TxParams {
 
 /// Compact's `Maybe<T>`, which is not `Option<T>`: `value` carries a full `T` even
 /// when `is_some` is false, so vector capacities stay inferable from the record.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct CompactMaybe<T> {
     pub is_some: bool,
     pub value: T,
@@ -103,7 +103,7 @@ pub struct CompactMaybe<T> {
 
 /// Calldata as both targets define it (§7.3, §7.4): a 4-byte selector plus its
 /// canonical ABI word arguments.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Calldata {
     pub selector: [u8; 4],
     /// `Uint<16>`: number of used words when calldata is present.
@@ -147,7 +147,7 @@ pub struct EvmAccessListEntry {
 /// `txParams` for `txParamType = tron` (§7.4), a `TriggerSmartContract` call.
 /// `owner_address` is derived from the request's key and the contract type is
 /// fixed, so neither is a record field.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct TronTxParams {
     /// the reference block height's low two bytes, big-endian
     pub ref_block_bytes: [u8; 2],

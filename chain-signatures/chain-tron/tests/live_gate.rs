@@ -9,7 +9,9 @@ mod common;
 use anyhow::{bail, Context};
 use common::build_raw;
 use k256::ecdsa::SigningKey;
-use mpc_chain_integration_core::{ChainIndexer, MockStateManager, NoopChainTelemetry};
+use mpc_chain_integration_core::{
+    ChainIndexer, MockStateManager, NoopChainTelemetry, StateManager,
+};
 use mpc_chain_tron::{
     BroadcastOutcome, TronConfig, TronExecutionResult, TronHttp, TronReceipt, TronWatcher,
 };
@@ -282,9 +284,7 @@ impl Gate {
             .receipt
             .execution_outcome(&tx.output_deserialization_schema)?;
 
-        state
-            .watch_execution(Chain::Tron, SignId::new(accepted.txid), tx)
-            .await;
+        state.watch_execution(Chain::Tron, tx).await;
         let config = TronConfig {
             endpoint: self.endpoint.clone(),
             api_key: self.api_key.clone(),
@@ -406,6 +406,161 @@ impl Gate {
             txid,
             receipt,
         })
+    }
+
+    /// M6 from a refused broadcast — the one reproducible never-included
+    /// id (accepted broadcasts pack within their window, sweep-pinned).
+    /// The entry registers with no watch: the backlog scan resolves it.
+    /// Any accepted transaction produces a block on a demand-driven
+    /// chain (TRE).
+    async fn push_block(&self) -> anyhow::Result<()> {
+        let reference = self.client.get_now_block().await?;
+        let raw = common::build_raw(
+            &self.owner,
+            &self.contract,
+            &usdt_transfer_calldata(&self.owner, 1),
+            &reference,
+            reference.timestamp as i64,
+        );
+        let (signed, _) = sign(&self.key, &raw.encode_to_vec())?;
+        self.client.broadcast_transaction(&signed).await?;
+        Ok(())
+    }
+
+    async fn expiry(&self) -> anyhow::Result<()> {
+        let reference = self.client.get_now_block().await?;
+        let expiration = reference.timestamp as i64 + 3_000;
+        let raw = common::build_raw_expiring(
+            &self.owner,
+            &self.contract,
+            &usdt_transfer_calldata(&self.owner, 1),
+            &reference,
+            reference.timestamp as i64,
+            expiration,
+        );
+        let raw_bytes = raw.encode_to_vec();
+        let (signed, txid) = sign(&self.key, &raw_bytes)?;
+        // The refusal comes from the chain's clock, not the wall's:
+        // advance the served head past the window by a slot — the
+        // sweep-pinned rejection pocket — pushing when it stalls.
+        let start = Instant::now();
+        let mut last_live = self.client.get_now_block().await?.timestamp;
+        loop {
+            let live = self.client.get_now_block().await?;
+            if live.timestamp as i64 > expiration + 3_000 {
+                break;
+            }
+            anyhow::ensure!(
+                start.elapsed() < self.deadline,
+                "live head did not pass the window within {:?}",
+                self.deadline
+            );
+            if live.timestamp == last_live {
+                self.push_block().await?;
+            }
+            last_live = live.timestamp;
+            tokio::time::sleep(self.poll).await;
+        }
+        match self.client.broadcast_transaction(&signed).await? {
+            BroadcastOutcome::Rejected { code, .. } => {
+                println!("[expiry] refused as expected: {code}")
+            }
+            other => bail!("[expiry] wanted the expiry refusal, got {other:?}"),
+        }
+
+        // TRE produces blocks only on demand; a stalled chain never
+        // carries the solidified head past the window, so the leg keeps
+        // one moving. Settled chains (Nile) never stall.
+        let solid_at_refusal = self.client.get_now_block_solidity().await?;
+        let state = MockStateManager::new();
+        state
+            .add_pending_execution(Arc::new(BidirectionalTx {
+                id: BidirectionalTxId(txid),
+                sender: [0u8; 32],
+                serialized_transaction: raw_bytes,
+                source_chain: Chain::Midnight,
+                target_chain: Chain::Tron,
+                caip2_id: "tron:nile".to_string(),
+                key_version: 0,
+                deposit: 0,
+                path: String::new(),
+                algo: "secp256k1".to_string(),
+                dest: "tron:nile".to_string(),
+                params: String::new(),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: vec![],
+                request_id: txid,
+                from_address: [0u8; 20],
+                nonce: 0,
+            }))
+            .await;
+        let config = TronConfig {
+            endpoint: self.endpoint.clone(),
+            api_key: self.api_key.clone(),
+            poll_interval: self.poll,
+            ..TronConfig::default()
+        };
+        let watcher = TronWatcher::new(config, state, NoopChainTelemetry)?;
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
+        let cancel = CancellationToken::new();
+        let done = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { watcher.run(events_tx, cancel).await }
+        });
+        let mut last_live = 0;
+        let confirmation = loop {
+            tokio::select! {
+                event = events_rx.recv() => {
+                    let event = event.context("watcher channel closed")?;
+                    if let ChainEvent::ExecutionConfirmed { .. } = event {
+                        break event;
+                    }
+                }
+                _ = tokio::time::sleep(self.poll) => {
+                    anyhow::ensure!(
+                        start.elapsed() < self.deadline,
+                        "no attestation within {:?}",
+                        self.deadline
+                    );
+                    let live = self.client.get_now_block().await?;
+                    if live.timestamp == last_live {
+                        self.push_block().await?;
+                    }
+                    last_live = live.timestamp;
+                }
+            }
+        };
+        cancel.cancel();
+        done.await??;
+
+        let ChainEvent::ExecutionConfirmed {
+            tx_id,
+            sign_id,
+            block_height,
+            result,
+            ..
+        } = confirmation
+        else {
+            unreachable!()
+        };
+        anyhow::ensure!(tx_id.0 == txid, "[expiry] attested {tx_id:?}");
+        anyhow::ensure!(sign_id == SignId::new(txid));
+        anyhow::ensure!(
+            matches!(result, ExecutionOutcome::Unviable),
+            "[expiry] attested {result:?}, want Unviable"
+        );
+        anyhow::ensure!(
+            block_height >= solid_at_refusal.number,
+            "[expiry] attested at {block_height}, before the refusal head {}",
+            solid_at_refusal.number
+        );
+        println!(
+            "[expiry] attested Unviable at solidified block {block_height} \
+             (broadcast reference {}, {:.1?} after the refusal)",
+            reference.number,
+            start.elapsed()
+        );
+        Ok(())
     }
 
     /// Duplicate probe: the identical signed bytes again, rejected by
@@ -630,4 +785,10 @@ async fn relay_sequence_runs_against_recorded_nile_responses() {
 #[ignore = "live network: TRON_ENDPOINT, TRON_PRIVATE_KEY"]
 async fn live_gate() -> anyhow::Result<()> {
     Gate::from_env().await?.run().await
+}
+
+#[tokio::test]
+#[ignore = "live network: TRON_ENDPOINT, TRON_PRIVATE_KEY"]
+async fn live_gate_expiry() -> anyhow::Result<()> {
+    Gate::from_env().await?.expiry().await
 }

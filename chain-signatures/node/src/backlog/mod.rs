@@ -15,6 +15,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 
 use enum_map::EnumMap;
+use futures_util::StreamExt;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
@@ -90,6 +91,18 @@ impl PendingRequests {
                     })
                 }
                 _ => None,
+            })
+            .collect()
+    }
+
+    fn executing_targeting(&self, target: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+        self.requests
+            .values()
+            .filter_map(|entry| {
+                entry
+                    .execution_tx()
+                    .filter(|tx| tx.target_chain == target)
+                    .map(|tx| (entry.sign_id(), Arc::clone(tx)))
             })
             .collect()
     }
@@ -337,13 +350,26 @@ impl Backlog {
         publishable
     }
 
-    /// Returns all backlog entries currently in destination-chain execution for a specific chain.
+    /// Entries in destination-chain execution on `chain`, the chain that
+    /// owns them.
     pub async fn pending_executions(
         &self,
         chain: Chain,
     ) -> Vec<SignEntry<Bidirectional<Executing>>> {
         let pending = self.pending(&chain).read().await;
         pending.pending_executions(chain, self)
+    }
+
+    /// `Executing` entries targeting `target`, from every owning chain.
+    async fn pending_executions_targeting(
+        &self,
+        target: Chain,
+    ) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+        futures_util::stream::iter(self.requests.values())
+            .then(|pending| async move { pending.read().await.executing_targeting(target) })
+            .collect::<Vec<_>>()
+            .await
+            .concat()
     }
 
     /// Returns the number of pending requests for a specific chain
@@ -376,6 +402,22 @@ impl Backlog {
         self.get_by::<Bidirectional<Executing>>(watch.tx.source_chain, &watch.tx.sign_id())
             .await
             .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
+    }
+
+    /// The executing entry a confirmation attests:
+    /// by its watch, or by source and sign id from the backlog.
+    pub async fn executing_entry_for(
+        &self,
+        target_chain: Chain,
+        tx_id: &BidirectionalTxId,
+        source_chain: Chain,
+        sign_id: &SignId,
+    ) -> Option<SignEntry<Bidirectional<Executing>>> {
+        if let Some(entry) = self.unwatch_execution(target_chain, tx_id).await {
+            return Some(entry);
+        }
+        self.get_by::<Bidirectional<Executing>>(source_chain, sign_id)
+            .await
     }
 
     /// Set the processed block height for a specific chain.
@@ -577,6 +619,17 @@ impl StateManager for Backlog {
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers(&chain).read().await.all()
+    }
+
+    async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+        self.pending_executions_targeting(chain).await
+    }
+
+    async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
+        self.watchers(&chain)
+            .write()
+            .await
+            .insert(ExecutionWatch::new(tx, None));
     }
 }
 

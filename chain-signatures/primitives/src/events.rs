@@ -92,8 +92,10 @@ pub enum ExecutionOutcome {
     /// The transaction executed, but its output could not be interpreted against
     /// the request's own schemas.
     ExtractionFailed,
-    /// A finalized different transaction consumed this transaction's nonce.
-    /// Emitted for Midnight only, at the observed replacement block's height.
+    /// A finalized different transaction consumed this transaction's replay
+    /// protection, or its validity window closed without inclusion (M6).
+    /// Emitted for Midnight only; the height is the replacement block's, or
+    /// the first final block strictly past the expiry's.
     Unviable,
 }
 

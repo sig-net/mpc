@@ -10,7 +10,7 @@ mod config;
 mod types;
 mod watcher;
 
-pub use client::TronHttp;
+pub use client::{SolidifiedNowBlock, TronHttp};
 pub use config::TronConfig;
 pub use types::{BroadcastOutcome, TronExecutionResult, TronLog, TronReceipt};
 pub use watcher::TronWatcher;
