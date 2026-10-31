@@ -115,14 +115,15 @@ impl Args {
             midnight.central_address.to_hex(),
         );
         self.flag("--midnight-funding-seed", &publisher.funding_seed);
-        self.flag(
-            "--midnight-intent-gen-command",
-            serde_json::to_string(&publisher.intent_gen_command)
-                .expect("a Vec<String> always serializes"),
-        );
-        self.flag("--midnight-proof-server-url", &publisher.proof_server_url);
-        self.flag("--midnight-indexer-url", &publisher.indexer_url);
         self.flag("--midnight-indexer-ws-url", &publisher.indexer_ws_url);
+        self.flag(
+            "--midnight-contract-artifacts-dir",
+            publisher.contract_artifacts_dir.display(),
+        );
+        self.flag(
+            "--midnight-zk-params-dir",
+            publisher.zk_params_dir.display(),
+        );
         if let Some(storage) = &publisher.output_storage {
             self.flag("--midnight-output-storage-bucket", &storage.bucket);
             self.flag("--midnight-output-storage-prefix", &storage.prefix);

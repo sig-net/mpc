@@ -727,8 +727,6 @@ mod tests {
             central_address: crate::MidnightAddress::from_bytes(SINGLETON),
             publisher: crate::PublisherConfig {
                 funding_seed: "ab".repeat(32),
-                proof_server_url: "http://127.0.0.1:1".to_string(),
-                indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
                 indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
                 ..Default::default()
             },

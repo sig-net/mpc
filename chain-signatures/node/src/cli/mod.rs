@@ -17,7 +17,6 @@ use crate::protocol::sync::{SyncReportSender, SyncTask};
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
-use crate::storage::midnight_wallet_storage::MidnightWalletStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
@@ -38,9 +37,7 @@ use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher, GatedPublisher};
-use mpc_chain_midnight::{
-    MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher, WalletSnapshotStore,
-};
+use mpc_chain_midnight::{MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher};
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
 use mpc_chain_tron::{TronConfig, TronWatcher};
@@ -173,7 +170,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage,
                 presignature_storage,
                 backlog,
-                midnight_wallet,
             } = StorageHandles::new(&account_id, &storage_options).await?;
 
             let my_address = my_address.unwrap_or_else(|| {
@@ -207,8 +203,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let stack = ChainStack::new(ChainConfigs::from_args(
                 eth, sol, hydration, canton, midnight, tron,
-            )?)
-            .with_midnight_wallet(midnight_wallet);
+            )?);
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
                 near_crypto::Signer::InMemory(s) => s,
@@ -431,8 +426,6 @@ struct ChainStack {
     /// One 429 cooldown gate per chain, shared by that chain's indexer and
     /// publisher (they hit the same RPC endpoint).
     gates: EnumMap<Chain, SharedBackoff>,
-    /// Where the Midnight publisher's funding wallet resumes from across restarts.
-    midnight_wallet: Option<Arc<dyn WalletSnapshotStore>>,
 }
 
 impl ChainStack {
@@ -440,13 +433,7 @@ impl ChainStack {
         Self {
             configs,
             gates: EnumMap::from_fn(|_| SharedBackoff::new()),
-            midnight_wallet: None,
         }
-    }
-
-    fn with_midnight_wallet(mut self, store: Arc<dyn WalletSnapshotStore>) -> Self {
-        self.midnight_wallet = Some(store);
-        self
     }
 
     fn gate(&self, chain: Chain) -> SharedBackoff {
@@ -521,12 +508,7 @@ impl ChainStack {
         if let Some(midnight) = &self.configs.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
             let awaiter = Arc::new(rpc::BacklogAwaiter::new(backlog));
-            match RecoveringMidnightPublisher::start(
-                midnight,
-                telemetry,
-                awaiter,
-                self.midnight_wallet.clone(),
-            ) {
+            match RecoveringMidnightPublisher::start(midnight, telemetry, awaiter) {
                 Ok(client) => {
                     publishers.insert(
                         Chain::Midnight,
@@ -670,7 +652,6 @@ struct StorageHandles {
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     backlog: Backlog,
-    midnight_wallet: Arc<dyn WalletSnapshotStore>,
 }
 
 const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -705,13 +686,11 @@ impl StorageHandles {
             redis_pool.clone(),
             account_id.clone(),
         ));
-        let midnight_wallet = Arc::new(MidnightWalletStorage::new(redis_pool, account_id));
         Ok(Self {
             key_storage,
             triple_storage,
             presignature_storage,
             backlog,
-            midnight_wallet,
         })
     }
 }
@@ -800,7 +779,7 @@ async fn spawn_indexers(
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
 ) {
-    let ChainStack { configs, gates, .. } = stack;
+    let ChainStack { configs, gates } = stack;
     let ChainConfigs {
         eth,
         sol,
@@ -1246,9 +1225,6 @@ mod tests {
             "MPC_MIDNIGHT_NODE_URL",
             "MPC_MIDNIGHT_CENTRAL_ADDRESS",
             "MPC_MIDNIGHT_FUNDING_SEED",
-            "MPC_MIDNIGHT_INTENT_GEN_COMMAND",
-            "MPC_MIDNIGHT_PROOF_SERVER_URL",
-            "MPC_MIDNIGHT_INDEXER_URL",
             "MPC_MIDNIGHT_INDEXER_WS_URL",
             "MPC_MIDNIGHT_OUTPUT_STORAGE_BUCKET",
             "MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX",
@@ -1338,8 +1314,6 @@ mod tests {
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
                     funding_seed: "ab".repeat(32),
-                    proof_server_url: "http://127.0.0.1:1".to_string(),
-                    indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
                     indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
                     ..Default::default()
                 },
@@ -1455,8 +1429,6 @@ mod tests {
             "canton_json_api_ws_url",
             "canton_oidc_token_url",
             "midnight_node_url",
-            "midnight_proof_server_url",
-            "midnight_indexer_url",
             "midnight_indexer_ws_url",
             "tron_endpoint",
             "tron_api_key",
