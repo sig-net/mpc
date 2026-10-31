@@ -27,6 +27,9 @@ pub trait ChainConfig {
     fn respond_serialization_format(&self) -> SerDeserFormat;
     /// Whether bidirectional requests can target this chain.
     fn supports_bidirectional_signing(&self) -> bool;
+    /// Whether this source's respond encoding can carry `Unviable`
+    /// attestations; the rest refund via `Failed`.
+    fn encodes_unviable(&self) -> bool;
 }
 
 impl ChainConfig for Chain {
@@ -124,6 +127,21 @@ impl ChainConfig for Chain {
 
     fn supports_bidirectional_signing(&self) -> bool {
         matches!(self, Chain::Ethereum | Chain::Tron)
+    }
+
+    /// Whether this source's respond encoding can carry `Unviable`
+    /// attestations; the rest refund via `Failed`.
+    fn encodes_unviable(&self) -> bool {
+        match self {
+            Chain::Midnight => true,
+            Chain::NEAR
+            | Chain::Ethereum
+            | Chain::Solana
+            | Chain::Bitcoin
+            | Chain::Hydration
+            | Chain::Canton
+            | Chain::Tron => false,
+        }
     }
 }
 
