@@ -3033,6 +3033,38 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn a_submit_whose_runtime_cannot_be_read_is_never_sent() {
+        use crate::native::SubmitChain as _;
+
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let transport = connect_http(&http_config(server.local_addr().unwrap())).unwrap();
+        let submits = Arc::new(AtomicUsize::new(0));
+        let counted = submits.clone();
+        // No chain_getBlockHash, so the node cannot name the runtime to build against.
+        let mut module = RpcModule::new(());
+        module
+            .register_method("author_submitExtrinsic", move |_, _, _| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                hash_of_byte(0x01)
+            })
+            .unwrap();
+        let _handle = server.start(module);
+        let rpc = MidnightPublisherRpc {
+            rpc: transport.clone(),
+            legacy: LegacyRpcMethods::<SubstrateConfig>::new(transport),
+            genesis_hash: H256([0x11; 32]),
+            clients: Default::default(),
+            network_id: "undeployed".to_string(),
+        };
+
+        match rpc.submit(&[0x00]).await {
+            Err(SubmitRefusal::Unsent(_)) => {}
+            other => panic!("expected an unsent submit, got {other:?}"),
+        }
+        assert_eq!(submits.load(Ordering::SeqCst), 0);
+    }
+
     /// Serves the captured block 432 as `0x43`, whose parent `0x42` runs the
     /// captured runtime, with `events` as its `System::Events` and
     /// `Timestamp::Now` at `millis`.
