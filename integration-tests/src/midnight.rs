@@ -61,6 +61,130 @@ struct BootstrapResult {
     publisher_seed: String,
 }
 
+/// Where the ledger runs one contract call of a submitted transaction, as the driver read
+/// it from the transaction it built.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallPlacement {
+    pub segment: u16,
+    pub action: u32,
+    pub address: String,
+    pub entry_point: String,
+    pub guaranteed: bool,
+    pub fallible: bool,
+    /// Request ids, hex, of the singleton notifications each transcript emits.
+    pub guaranteed_notifications: Vec<String>,
+    pub fallible_notifications: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmittedRequest {
+    pub request_id: String,
+    pub placement: Vec<CallPlacement>,
+}
+
+/// Transaction shapes the caller builds to place singleton notifications in guaranteed and
+/// fallible transcripts; see `fallible.ts` in the real-stack driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlacementScenario {
+    FallibleOnly,
+    GuaranteedTranscriptPair,
+    FallibleTranscriptPair,
+    GuaranteedThenFallibleSegments,
+    FallibleSegmentPair,
+    PartialSuccess,
+    FallibleThenFailing,
+    RolledBackReplay,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlacementOutcome {
+    /// The indexer's status for the transaction: `SucceedEntirely` or `FailFallible`.
+    pub status: String,
+    /// Request ids, hex, in the order of the scenario's calls.
+    pub requests: Vec<String>,
+    /// Notified request ids in ledger application order.
+    pub notifications: Vec<String>,
+    /// Requests the caller's ledger holds after the transaction.
+    pub committed: Vec<String>,
+    pub placement: Vec<CallPlacement>,
+    /// The indexer's per-segment results, `transactionResult.segments`.
+    pub segments: Vec<(u16, String)>,
+    pub block_height: u64,
+    pub tx_hash: String,
+}
+
+/// Partially successful shapes from the partial-success review; see `adversarial.ts` in the
+/// real-stack driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AdversarialScenario {
+    WriteThenRolledBackNotify,
+    SameTxReplay,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdversarialOutcome {
+    pub status: String,
+    pub request_id: String,
+    /// Whether the caller's ledger holds the request after the transaction.
+    pub committed: bool,
+    pub notifications: Vec<String>,
+    pub placement: Vec<CallPlacement>,
+    /// The indexer's per-segment results.
+    pub segments: Vec<(u16, String)>,
+    pub block_height: u64,
+    pub tx_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedTwin {
+    pub request_id: String,
+    pub block_height: u64,
+    pub placement: Vec<CallPlacement>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultPartialSend {
+    pub vault_address: String,
+    pub request_id: String,
+    pub status: String,
+    pub segments: Vec<(u16, String)>,
+    pub block_height: u64,
+    pub tx_hash: String,
+    pub placement: Vec<CallPlacement>,
+    /// Whether the vault's deposit map holds the request after the transaction.
+    pub committed: bool,
+    /// Whether a later send of the same entry fails with "Request already sent".
+    pub retry_rejected: bool,
+    pub retry_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultOperation {
+    pub operation: String,
+    pub request_id: String,
+    pub placement: Vec<CallPlacement>,
+    pub evm_transaction: String,
+    pub evm_block_height: u64,
+    pub output: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultRunResult {
+    pub vault_address: String,
+    pub targets: serde_json::Value,
+    pub operations: Vec<VaultOperation>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedEvmTransaction {
@@ -153,9 +277,9 @@ impl MidnightContext {
         target: [u8; 20],
         argument: [u8; 32],
         output_type: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<SubmittedRequest> {
         let mut driver = self.driver.lock().await;
-        let _: serde_json::Value = driver
+        driver
             .request(&serde_json::json!({
                 "op": "submitIsEven",
                 "nonce": nonce.to_string(),
@@ -163,8 +287,152 @@ impl MidnightContext {
                 "argument": hex::encode(argument),
                 "outputType": output_type,
             }))
+            .await
+    }
+
+    /// Submit with raw output schema bytes, which the driver NUL-pads to the caller's
+    /// 64-byte field.
+    pub async fn submit_is_even_with_schema(
+        &self,
+        nonce: u64,
+        target: [u8; 20],
+        argument: [u8; 32],
+        output_schema: &[u8],
+    ) -> anyhow::Result<SubmittedRequest> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "submitIsEven",
+                "nonce": nonce.to_string(),
+                "target": hex::encode(target),
+                "argument": hex::encode(argument),
+                "outputSchema": hex::encode(output_schema),
+            }))
+            .await
+    }
+
+    /// Build, check and submit one placement scenario of Boolean isEven requests, each
+    /// given as its EVM nonce and target.
+    pub async fn submit_placement(
+        &self,
+        scenario: PlacementScenario,
+        calls: &[(u64, [u8; 20])],
+        argument: [u8; 32],
+    ) -> anyhow::Result<PlacementOutcome> {
+        let calls = calls
+            .iter()
+            .map(|(nonce, target)| {
+                serde_json::json!({
+                    "nonce": nonce.to_string(),
+                    "target": hex::encode(target),
+                    "argument": hex::encode(argument),
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "submitPlacement",
+                "scenario": scenario,
+                "calls": calls,
+            }))
+            .await
+    }
+
+    /// Build and submit one partial-success review shape for a Boolean isEven request.
+    pub async fn submit_adversarial(
+        &self,
+        scenario: AdversarialScenario,
+        call: (u64, [u8; 20]),
+        argument: [u8; 32],
+    ) -> anyhow::Result<AdversarialOutcome> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "submitAdversarial",
+                "scenario": scenario,
+                "call": placement_call(call, argument),
+            }))
+            .await
+    }
+
+    /// File and notify `call`'s request in a guaranteed transcript: a twin's original.
+    pub async fn prepare_twin(
+        &self,
+        call: (u64, [u8; 20]),
+        argument: [u8; 32],
+    ) -> anyhow::Result<PreparedTwin> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "prepareTwin",
+                "call": placement_call(call, argument),
+            }))
+            .await
+    }
+
+    /// Remove the original, `call`'s request, and file its twin with the same id in one
+    /// call, beside a fallible call for `failing` that fails when applied.
+    pub async fn fire_twin(
+        &self,
+        request_id: [u8; 32],
+        call: (u64, [u8; 20]),
+        failing: (u64, [u8; 20]),
+        argument: [u8; 32],
+    ) -> anyhow::Result<AdversarialOutcome> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "fireTwin",
+                "requestId": format!("0x{}", hex::encode(request_id)),
+                "call": placement_call(call, argument),
+                "failing": placement_call(failing, argument),
+            }))
+            .await
+    }
+
+    /// Deploy the ERC20 vault, queue and flush a deposit, then send it in a partially
+    /// successful transaction (CertiK SNA-07's shape).
+    pub async fn run_vault_partial_send(
+        &self,
+        mpc_public_key: &str,
+        evm_rpc_url: &str,
+        evm_funder_key: &str,
+    ) -> anyhow::Result<VaultPartialSend> {
+        let mut driver = self.driver.lock().await;
+        driver
+            .request(&serde_json::json!({
+                "op": "runVaultPartialSend",
+                "mpcPublicKey": mpc_public_key,
+                "evmRpcUrl": evm_rpc_url,
+                "evmFunderKey": evm_funder_key,
+            }))
+            .await
+    }
+
+    /// Deploy the ERC20 vault and its local EVM targets, then run every request kind it
+    /// sends through the MPC and settle each on Midnight.
+    pub async fn run_vault(
+        &self,
+        mpc_public_key: &str,
+        evm_rpc_url: &str,
+        evm_funder_key: &str,
+    ) -> anyhow::Result<VaultRunResult> {
+        let mut driver = self.driver.lock().await;
+        let result: VaultRunResult = driver
+            .request(&serde_json::json!({
+                "op": "runVault",
+                "mpcPublicKey": mpc_public_key,
+                "evmRpcUrl": evm_rpc_url,
+                "evmFunderKey": evm_funder_key,
+            }))
             .await?;
-        Ok(())
+        std::fs::write(
+            self._stack.artifact_dir.join("vault-result.json"),
+            serde_json::to_vec_pretty(&result)?,
+        )
+        .context("saving the vault operation results")?;
+        Ok(result)
     }
 
     /// Have a second caller contract notify the central Signet contract naming the real
@@ -236,6 +504,14 @@ impl MidnightContext {
             .await?;
         Ok(())
     }
+}
+
+fn placement_call((nonce, target): (u64, [u8; 20]), argument: [u8; 32]) -> serde_json::Value {
+    serde_json::json!({
+        "nonce": nonce.to_string(),
+        "target": hex::encode(target),
+        "argument": hex::encode(argument),
+    })
 }
 
 #[derive(Serialize)]
