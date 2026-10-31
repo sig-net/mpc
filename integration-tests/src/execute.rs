@@ -61,7 +61,7 @@ pub fn spawn_node_with_binary(
     binary_path: Option<PathBuf>,
     release: bool,
     node: &str,
-    cli: mpc_node::cli::Cli,
+    args: Vec<String>,
 ) -> anyhow::Result<Child> {
     let executable = match binary_path {
         Some(path) => path,
@@ -70,7 +70,7 @@ pub fn spawn_node_with_binary(
     };
 
     async_process::Command::new(&executable)
-        .args(cli.into_str_args())
+        .args(args)
         .env("RUST_LOG", "info,workspaces=warn")
         .envs(Chain::checkpoint_env_vars())
         .envs(std::env::vars())

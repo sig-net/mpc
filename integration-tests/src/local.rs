@@ -1,13 +1,12 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::{execute, utils, NodeConfig};
+use crate::{execute, node_args, utils, NodeConfig};
 
 use crate::execute::executable;
 use anyhow::Context;
 use async_process::Child;
 use mpc_keys::hpke;
-use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs, TronArgs};
 use near_workspaces::Account;
 use shell_escape::escape;
 
@@ -56,42 +55,24 @@ impl Node {
         cfg: &NodeConfig,
     ) -> anyhow::Result<NodeEnvConfig> {
         let account_id = account.id();
-        let account_sk = account.secret_key();
         let web_port = utils::pick_unused_port().await?;
         let (cipher_sk, _cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
-        let eth = EthArgs::from_config(cfg.eth.clone());
-        let sol = SolArgs::from_config(cfg.sol.clone());
-        let hydration = HydrationArgs::from_config(cfg.hydration.clone());
-        let canton = CantonArgs::from_config(cfg.canton.clone());
-        let midnight = MidnightArgs::from_config(cfg.midnight.clone());
-        let near_rpc = ctx.worker.rpc_addr();
-        let mpc_contract_id = ctx.mpc_contract.id().clone();
-        let cli = Cli::Start {
-            near_rpc: near_rpc.clone(),
-            mpc_contract_id: mpc_contract_id.clone(),
-            account_id: account_id.clone(),
-            env: ctx.env.clone(),
-            account_sk: account_sk.to_string().parse()?,
+        let node_config = NodeEnvConfig {
             web_port,
-            cipher_sk: hex::encode(cipher_sk.to_bytes()),
-            sign_sk: sign_sk.clone(),
-            eth,
-            sol,
-            hydration,
-            canton,
-            midnight,
-            tron: TronArgs::from_config(None),
-            my_address: None,
-            storage_options: ctx.storage_options.clone(),
-            log_options: ctx.log_options.clone(),
+            account: account.clone(),
+            cipher_sk,
+            sign_sk,
+            cfg: cfg.clone(),
+            near_rpc: ctx.worker.rpc_addr(),
+            binary_path: None,
         };
 
         let cmd = executable(ctx.release, crate::execute::PACKAGE_MULTICHAIN)
             .with_context(|| "could not find target dir for mpc-node")?;
-        let args = cli.into_str_args();
+        let args = node_args::start(ctx, &node_config);
         let escaped_args: Vec<_> = args
             .iter()
             .map(|arg| escape(arg.clone().into()).to_string())
@@ -102,15 +83,6 @@ impl Node {
             cmd.to_str().unwrap(),
             escaped_args.join(" ")
         );
-        let node_config = NodeEnvConfig {
-            web_port,
-            account: account.clone(),
-            cipher_sk,
-            sign_sk,
-            cfg: cfg.clone(),
-            near_rpc,
-            binary_path: None,
-        };
         Ok(node_config)
     }
 
@@ -153,38 +125,14 @@ impl Node {
 
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
-
-        let eth = EthArgs::from_config(config.cfg.eth.clone());
-        let sol = SolArgs::from_config(config.cfg.sol.clone());
-        let hydration = HydrationArgs::from_config(config.cfg.hydration.clone());
-        let canton = CantonArgs::from_config(config.cfg.canton.clone());
-        let midnight = MidnightArgs::from_config(config.cfg.midnight.clone());
-        let cli = Cli::Start {
-            near_rpc: config.near_rpc.clone(),
-            mpc_contract_id: ctx.mpc_contract.id().clone(),
-            account_id: config.account.id().clone(),
-            env: ctx.env.clone(),
-            account_sk: config.account.secret_key().to_string().parse()?,
-            web_port,
-            cipher_sk: hex::encode(config.cipher_sk.to_bytes()),
-            sign_sk: config.sign_sk.clone(),
-            eth,
-            sol,
-            hydration,
-            canton,
-            midnight,
-            tron: TronArgs::from_config(None),
-            my_address: None,
-            storage_options: ctx.storage_options.clone(),
-            log_options: ctx.log_options.clone(),
-        };
+        let args = node_args::start(ctx, &config);
 
         let mpc_node_id = format!("multichain/{}", config.account.id());
         let mut process = execute::spawn_node_with_binary(
             config.binary_path.clone(),
             ctx.release,
             &mpc_node_id,
-            cli,
+            args,
         )?;
         let address = format!("http://127.0.0.1:{web_port}");
         tracing::info!("node is starting at {address}");
