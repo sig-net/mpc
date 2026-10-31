@@ -935,6 +935,70 @@ mod tests {
         run.done.await.unwrap().unwrap();
     }
 
+    /// Watched, window closed, receipt present: both arms see the
+    /// entry, and the receipt arm must win with no Unviable. The tick
+    /// drains fully before retirement so the scan pass is observable.
+    #[tokio::test]
+    async fn expired_and_included_watched_entry_resolves_once_through_the_receipt() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        solidity_nowblock_mock(&mut server);
+        let state = MockStateManager::new();
+        let (id, sign_id, tx) =
+            pending_expiry_entry(&state, 6, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        state.watch_execution(Chain::Tron, tx).await;
+        receipt_for(&mut server, &id, success_receipt(&id));
+
+        let mut run = spawn_watcher(config, state.clone(), NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+        let tick = until_blocks(&mut run, 1).await;
+        let confirmed = tick
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ChainEvent::ExecutionConfirmed { tx_id, .. } if *tx_id == id
+                )
+            })
+            .count();
+        assert_eq!(confirmed, 1, "events: {tick:?}");
+        assert!(
+            tick.iter().any(|event| matches!(
+                event,
+                ChainEvent::ExecutionConfirmed {
+                    tx_id, block_height, result: ExecutionOutcome::Success { output },
+                    ..
+                } if *tx_id == id && *block_height == 71896097 && output.is_empty()
+            )),
+            "events: {tick:?}"
+        );
+        assert!(
+            !tick.iter().any(|event| matches!(
+                event,
+                ChainEvent::ExecutionConfirmed {
+                    result: ExecutionOutcome::Unviable | ExecutionOutcome::Failed,
+                    ..
+                }
+            )),
+            "the closed window must not attest: {tick:?}"
+        );
+
+        state.remove_pending_execution(sign_id).await;
+        state.remove_execution_watch(Chain::Tron, &id).await;
+        let next_tick = until_blocks(&mut run, 1).await;
+        assert!(
+            next_tick
+                .iter()
+                .all(|event| matches!(event, ChainEvent::Block(_))),
+            "retired entry re-fired: {next_tick:?}"
+        );
+
+        run.cancel.cancel();
+        run.done.await.unwrap().unwrap();
+    }
+
     /// Two requests share the flat txID; both must resolve through the
     /// one receipt.
     #[tokio::test]
