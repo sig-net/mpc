@@ -152,12 +152,6 @@ mod tests {
             &"ab".repeat(32),
             "--midnight-funding-seed",
             &"0f".repeat(32),
-            "--midnight-intent-gen-command",
-            r#"["node","/opt/midnight publisher/dist/main.js","--child-option"]"#,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
             "--midnight-output-storage-bucket",
@@ -378,13 +372,17 @@ mod tests {
     fn test_nodes_carry_their_artifact_directories_across_the_cli() {
         crate::cli::tests::assert_midnight_env_unset();
 
-        let mut args = configured_args();
-        args.midnight_intent_gen_command = Some("node dist/main.js".into());
-        let err = args.into_config().unwrap_err().to_string();
-
-        assert!(
-            err.contains("--midnight-intent-gen-command"),
-            "unexpected error: {err}"
-        );
+        let mut cfg = configured();
+        cfg.publisher.contract_artifacts_dir = "/opt/signet/managed".into();
+        cfg.publisher.zk_params_dir = "/opt/signet/zk-params".into();
+        let mut argv = configured_argv();
+        argv.extend([
+            "--midnight-contract-artifacts-dir".into(),
+            "/opt/signet/managed".into(),
+            "--midnight-zk-params-dir".into(),
+            "/opt/signet/zk-params".into(),
+        ]);
+        let reparsed = MidnightArgs::try_parse_from(argv).unwrap();
+        assert_eq!(reparsed.into_config().unwrap(), Some(cfg));
     }
 }
