@@ -23,6 +23,8 @@ pub enum Error {
     Sync(#[from] SyncError),
     #[error("invalid parameters: {0}")]
     InvalidParameters(String),
+    #[error("server busy")]
+    Busy,
 }
 
 impl Error {
@@ -34,6 +36,7 @@ impl Error {
             Error::Rpc(_) => StatusCode::BAD_REQUEST,
             Error::InvalidParameters(_) => StatusCode::BAD_REQUEST,
             Error::Sync(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::Busy => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }
