@@ -349,7 +349,8 @@ impl Backlog {
         publishable
     }
 
-    /// Returns all backlog entries currently in destination-chain execution for a specific chain.
+    /// Entries in destination-chain execution on `chain`, the chain that
+    /// owns them.
     pub async fn pending_executions(
         &self,
         chain: Chain,
@@ -358,7 +359,7 @@ impl Backlog {
         pending.pending_executions(chain, self)
     }
 
-    /// Returns all backlog entries currently in destination-chain execution targeting the specified chain.
+    /// `Executing` entries targeting `target`, from every owning chain.
     async fn pending_executions_targeting(
         &self,
         target: Chain,

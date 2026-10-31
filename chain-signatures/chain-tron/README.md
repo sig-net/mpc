@@ -3,18 +3,12 @@
 Tron integration for the MPC chain-signatures stack. Tron is a
 **destination chain** for bidirectional signing (see
 `doc/bidirectional-calls.md`): requests originate on the source chain,
-nodes assemble and sign `TriggerSmartContract` transactions, a
-relayer broadcasts them, and `TronWatcher` confirms execution by
-polling solidified receipts. There is no Tron source indexer and no
-Tron contract — the crate is the RPC client plus that execution
-watcher. The transaction format itself — protobuf messages, canonical parsing,
-signing derivations, address forms — lives in [`mpc-tron-wire`](../tron-wire),
-pinned against recorded mainnet fixtures: `RawTransaction::parse`
-(admission-shaped validation), `sign_and_hash(r, s, v)` with the 65-byte
-`[r ‖ s ‖ v]` signature, `txID = sha256(raw_data)` (the signature is
-outside the preimage), `NowBlock::reference_fields` (`ref_block_bytes`
-is the block height's low two bytes big-endian, `ref_block_hash` is the
-block ID's bytes 8..16).
+nodes assemble and sign `TriggerSmartContract` transactions, a relayer
+broadcasts them, and `TronWatcher` confirms execution by polling
+solidified receipts. There is no Tron source indexer and no Tron
+contract — the crate is the RPC client plus that execution watcher.
+The transaction format — protobuf messages, canonical parsing, signing
+derivations, address forms — lives in [`mpc-tron-wire`](../tron-wire).
 
 Core pieces:
 
@@ -24,11 +18,16 @@ Core pieces:
 | method | endpoint | notes |
 |---|---|---|
 | `get_now_block` | `/wallet/getnowblock` | head block for ref-block fields |
+| `get_now_block_solidity` | `/walletsolidity/getnowblock` | solidified head; the expiry check |
 | `broadcast_transaction` | `/wallet/broadcasthex` | `Accepted` / `AlreadyKnown` (`DUP_TRANSACTION_ERROR`) / `Rejected`; congestion errors retry |
 | `get_account_balance` | `/wallet/getaccount` | sun; `{}` for accounts the chain has never seen reads as 0 |
 | `get_transaction_info_solidity` | `/walletsolidity/gettransactioninfobyid` | `Ok(None)` = not solidified yet |
 
-- `TronWatcher` — execution watcher for Tron targets: polls solidified receipts by txID, and resolves `Executing` backlog entries whose validity window closed as unexecutable (backlog-keyed, so a duplicate flat txID that displaced a watch still resolves). Implements `ChainIndexer` purely as the supervision vehicle (no block scanning, no catchup).
+- `TronWatcher` — polls solidified receipts by txID and resolves
+  `Executing` entries whose validity window closed as unexecutable,
+  keyed off the backlog so a duplicate flat txID that displaced a watch
+  still resolves. Implements `ChainIndexer` purely as the supervision
+  vehicle (no block scanning, no catchup).
 
 ## Configuration
 
@@ -46,14 +45,13 @@ environment variables:
 ## Live gate
 
 `tests/live_gate.rs` exercises the full path — assembly, signing,
-broadcast, settlement, execution watching (`TronWatcher`) — against a real
-network (default Nile via TronGrid). The same sequence runs in CI against
-the recorded responses
-in `tests/fixtures/nile/`, served verbatim except for the receipt `id`
-(the recording's txid belongs to the recording's key).
+broadcast, settlement, execution watching — against a real network
+(default Nile). The same sequence runs in CI against the recorded
+responses in `tests/fixtures/nile/`, served verbatim except the receipt
+`id` (the recording's txid belongs to the recording's key).
 
 ```sh
-TRON_ENDPOINT=https://nile.trongrid.io \
+TRON_ENDPOINT=https://api.nileex.io \
 TRON_PRIVATE_KEY=$(openssl rand -hex 32) \
 cargo test -p mpc-chain-tron --test live_gate -- --ignored --nocapture
 ```
@@ -81,13 +79,12 @@ to a codeless address must come back `CONTRACT_VALIDATE_ERROR`.
 the dockerized single-node java-tron dev chain: pinned `2.0.0`,
 deterministic key `0x00…01`, `GateToken` deployed from
 `tests/fixtures/tre/` via the node's `deploycontract` API. Rejection
-classifications match Nile byte-for-byte and solidification is instant.
-`tests/fixtures/nile/` pins the wire shapes; the TRE run covers the
-rest: mempool admission, signature checks, execution.
+classifications match Nile byte-for-byte and solidification is instant;
+`tests/fixtures/nile/` pins the wire shapes, the TRE run covers
+mempool admission, signature checks, and execution.
 
 ## Tests
 
-Unit tests live with the code. `mpc-tron-wire`'s `tests/golden.rs` replays
-recorded mainnet USDT transfers; this crate's `tests/live_gate.rs` replays
-the recorded Nile responses above (the client's receipt unit test embeds
-the same recording).
+Unit tests live with the code. `mpc-tron-wire`'s `tests/golden.rs`
+replays recorded mainnet USDT transfers; this crate's
+`tests/live_gate.rs` replays the recorded Nile responses above.

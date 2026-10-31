@@ -135,12 +135,10 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
         })
     }
 
-    /// M6 resolutions for `Executing` entries whose validity window closed:
-    /// the unexecutable outcome, attested at the solidified head's height.
-    /// Backlog-keyed — an entry whose watch a duplicate flat id displaced
-    /// has no other resolution path. Every failure defers to the next tick;
-    /// per-resolution sends keep a pass that outlasts the stall timeout
-    /// resumable, as with receipt polls.
+    /// M6 resolutions for `Executing` entries whose validity window
+    /// closed. Backlog-keyed: an entry whose watch a duplicate flat id
+    /// displaced has no other resolution path. Failures defer to the
+    /// next tick.
     fn expired_resolutions(&self) -> impl Stream<Item = ChainEvent> + Unpin + '_ {
         once(async move {
             let pending = self.state_manager.get_pending_executions(Chain::Tron).await;
@@ -854,9 +852,8 @@ mod tests {
         .unwrap_or_else(|_| panic!("fewer than {n} blocks within {deadline:?}"))
     }
 
-    /// The M6 arm, endings-table row 5: no watch (the duplicate-id
-    /// collapse), window closed, no inclusion up to the solidified head —
-    /// Unviable at that head's height.
+    /// M6 with the watch displaced by a duplicate id and the window
+    /// closed.
     #[tokio::test]
     async fn expired_displaced_entry_attests_unviable() {
         let server = mockito::Server::new_async().await;
