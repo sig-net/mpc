@@ -833,7 +833,7 @@ async fn spawn_indexers(
     if tron.is_none() {
         tracing::warn!(
             "tron endpoint not configured: Tron-targeted requests are admitted and signed, \
-             but nothing watches their execution — they stay Executing until a Tron \
+             but nothing watches their execution or expiry — they stay Executing until a Tron \
              endpoint is configured"
         );
     }

@@ -7,7 +7,8 @@ executed on a target chain, and is told the outcome at most once. The
 response is final when it comes: the transaction executed, it reverted, or
 it can never execute. Until then nothing arrives. A transaction that never
 executes is answered only when another request's transaction takes its
-place; otherwise it is never answered. The rest of the document is what the
+place or its validity window closes; otherwise it is never answered. The
+rest of the document is what the
 MPC, the signet contract and the library have to do for that to hold.
 
 Organization:

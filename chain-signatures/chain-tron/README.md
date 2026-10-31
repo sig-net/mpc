@@ -28,7 +28,7 @@ Core pieces:
 | `get_account_balance` | `/wallet/getaccount` | sun; `{}` for accounts the chain has never seen reads as 0 |
 | `get_transaction_info_solidity` | `/walletsolidity/gettransactioninfobyid` | `Ok(None)` = not solidified yet |
 
-- `TronWatcher` — execution watcher for Tron targets: polls solidified receipts by txID. Implements `ChainIndexer` purely as the supervision vehicle (no block scanning, no catchup).
+- `TronWatcher` — execution watcher for Tron targets: polls solidified receipts by txID, and resolves `Executing` backlog entries whose validity window closed as unexecutable (backlog-keyed, so a duplicate flat txID that displaced a watch still resolves). Implements `ChainIndexer` purely as the supervision vehicle (no block scanning, no catchup).
 
 ## Configuration
 
@@ -37,7 +37,7 @@ environment variables:
 
 | field | env var | required? | notes |
 |---|---|---|---|
-| `endpoint` | `MPC_TRON_ENDPOINT` | to watch execution | wallet/solidity base URL; without it the node admits and signs Tron targets but nothing confirms execution |
+| `endpoint` | `MPC_TRON_ENDPOINT` | to watch execution | wallet/solidity base URL; without it the node admits and signs Tron targets but nothing confirms execution or expiry |
 | `api_key` | `MPC_TRON_API_KEY` | no | `TRON-PRO-API-KEY` when the provider is TronGrid; requires the endpoint |
 | `poll_interval` | `MPC_TRON_POLL_INTERVAL_MS` | no | milliseconds between receipt polls, default `15000` |
 
