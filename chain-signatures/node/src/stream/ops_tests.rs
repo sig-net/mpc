@@ -311,8 +311,6 @@ async fn process_execution_confirmed_success_creates_respond_request() {
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
-    // Call the handler with a Success and empty output
-    let tx_id = tx.id;
     // ensure watcher exists before processing
     let before_watchers = backlog.get_execution_watchers(tx.target_chain).await;
     assert!(before_watchers.contains_key(&tx.id));
@@ -372,7 +370,6 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
-    let sign_id = tx.sign_id();
     confirm_execution(
         &tx,
         123u64,
