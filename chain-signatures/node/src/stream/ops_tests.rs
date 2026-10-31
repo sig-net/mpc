@@ -97,7 +97,9 @@ async fn recover_backlog_requeues_pending_signs() {
     let participant = Participant::from(0u32);
     mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
     let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
-    wait_threshold_active(&mut mesh_rx, threshold).await;
+    wait_threshold_active(&mut mesh_rx, threshold)
+        .await
+        .unwrap();
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     backlog.recover_by_checkpoint(&checkpoint).await;
 
@@ -379,7 +381,9 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let participant = Participant::from(0u32);
     mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
     let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
-    wait_threshold_active(&mut mesh_rx, threshold).await;
+    wait_threshold_active(&mut mesh_rx, threshold)
+        .await
+        .unwrap();
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let recovered = Backlog::persisted(storage.clone());
 
