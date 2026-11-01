@@ -136,6 +136,9 @@ struct ExecutionWatchers {
 }
 
 impl ExecutionWatchers {
+    // TODO(non-lossy watch map): key Vec<ExecutionWatch> per flat id so
+    // duplicate ids stop evicting each other; the flat-id precedence is
+    // pinned in the backlog tests until then.
     fn insert(&mut self, watch: ExecutionWatch) -> Option<ExecutionWatch> {
         self.watchers.insert(watch.tx.id, watch)
     }
