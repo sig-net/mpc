@@ -18,9 +18,9 @@ pub trait StateManager: Send + Sync + Clone + 'static {
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>;
 
-    /// All `Executing` backlog entries targeting `chain`, from every source
-    /// chain. A superset of [`StateManager::get_execution_watchers`]: entries
-    /// whose watch a duplicate destination id displaced are included.
+    /// All `Executing` backlog entries targeting `chain`, from every
+    /// source chain — the authoritative set; the watch map is its
+    /// derived, lossy index (the mock keeps the two independent).
     async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)>;
 
     /// Registers under `tx.id`, replacing any previous watch.
