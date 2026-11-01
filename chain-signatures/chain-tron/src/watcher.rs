@@ -282,7 +282,8 @@ mod tests {
     use mpc_chain_integration_core::utils::retry::RetryConfig;
     use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry, StateManager};
     use mpc_primitives::{
-        BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RequestKind, SignId, TronTxParams,
+        BidirectionalTx, BidirectionalTxId, Calldata, CompactMaybe, ExecutionOutcome, RequestKind,
+        SignId, TronTxParams,
     };
     use mpc_tron_wire::NowBlock;
     use mpc_tron_wire::{to_unsigned_tron_tx, TronAddress};
@@ -851,7 +852,16 @@ mod tests {
                 address[0] = 0x41;
                 address
             },
-            ..TronTxParams::default()
+            fee_limit: 0,
+            call_value: 0,
+            calldata: CompactMaybe {
+                is_some: false,
+                value: Calldata {
+                    selector: [0; 4],
+                    no_words: 0,
+                    words: Vec::new(),
+                },
+            },
         };
         let owner = TronAddress::from_evm(alloy::primitives::Address::from_slice(&[0xab; 20]));
         let raw = to_unsigned_tron_tx(&params, owner).unwrap();
