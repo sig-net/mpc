@@ -175,6 +175,7 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             Ok(head) => head,
             Err(err) => {
                 tracing::warn!(?err, "solidity head fetch failed; expiry scan deferred");
+                self.telemetry.expiry_scan_deferred();
                 return Vec::new();
             }
         };
@@ -349,6 +350,7 @@ mod tests {
     struct CountingTelemetry {
         retryable: Arc<AtomicUsize>,
         terminal: Arc<AtomicUsize>,
+        deferred_expiry_scans: Arc<AtomicUsize>,
     }
 
     impl CountingTelemetry {
@@ -357,6 +359,9 @@ mod tests {
         }
         fn terminal_failures(&self) -> usize {
             self.terminal.load(Ordering::Relaxed)
+        }
+        fn deferred_expiry_scans(&self) -> usize {
+            self.deferred_expiry_scans.load(Ordering::Relaxed)
         }
     }
 
@@ -372,6 +377,9 @@ mod tests {
                 ExtractionFailureKind::Terminal => &self.terminal,
             }
             .fetch_add(1, Ordering::Relaxed);
+        }
+        fn expiry_scan_deferred(&self) {
+            self.deferred_expiry_scans.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -745,6 +753,39 @@ mod tests {
             rendered.contains("getnowblock"),
             "unexpected error: {rendered}"
         );
+    }
+
+    /// Solidity-only outage: no resolution, no shutdown, one deferral
+    /// per tick.
+    #[tokio::test]
+    async fn solidity_head_failure_defers_the_scan_and_keeps_the_run_alive() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        server
+            .mock("POST", "/walletsolidity/getnowblock")
+            .with_status(500)
+            .create();
+
+        let state = MockStateManager::new();
+        pending_expiry_entry(&state, 7, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        let telemetry = CountingTelemetry::default();
+        let counting = telemetry.clone();
+
+        let mut run = spawn_watcher(config, state, telemetry);
+        first_is_catchup_completed(&mut run).await;
+        let events = until_blocks(&mut run, 2).await;
+        assert_eq!(counting.deferred_expiry_scans(), 2, "events: {events:?}");
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event, ChainEvent::Block(_))),
+            "a deferred scan resolves nothing: {events:?}"
+        );
+
+        run.cancel.cancel();
+        run.done.await.unwrap().unwrap();
     }
 
     /// Solidified-head timestamp the expiry tests pin against; its block
