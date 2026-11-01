@@ -10,8 +10,17 @@ use crate::backlog::mock::{
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use mpc_chain_integration_core::StateManager;
-use mpc_primitives::{Chain, ChainConfig as _, ExecutionOutcome, SignId, SignKind};
+use mpc_primitives::{
+    BidirectionalTx, Chain, ChainConfig as _, ExecutionOutcome, SignId, SignKind,
+};
 use std::sync::Arc;
+
+fn routed_tx(id: u8, source: Chain, target: Chain) -> BidirectionalTx {
+    let mut tx = mock_tx(id);
+    tx.source_chain = source;
+    tx.target_chain = target;
+    tx
+}
 
 fn digest_hex(hex_str: &str) -> [u8; 32] {
     hex::decode(hex_str)
@@ -1032,12 +1041,8 @@ async fn test_initial_any_progress_advance() {
 #[tokio::test]
 async fn test_pending_executions_typestate() {
     let backlog = Backlog::new();
-    let mut tx1 = mock_tx(11);
-    tx1.source_chain = Chain::Ethereum;
-    tx1.target_chain = Chain::Solana;
-    let mut tx2_sol = mock_tx(12);
-    tx2_sol.source_chain = Chain::Solana;
-    tx2_sol.target_chain = Chain::Ethereum;
+    let tx1 = routed_tx(11, Chain::Ethereum, Chain::Solana);
+    let tx2_sol = routed_tx(12, Chain::Solana, Chain::Ethereum);
 
     backlog.insert_mock_executing(&tx1).await;
     backlog.insert_mock_executing(&tx2_sol).await;
@@ -1061,15 +1066,9 @@ async fn test_pending_executions_typestate() {
 #[tokio::test]
 async fn pending_executions_targeting_spans_sources() {
     let backlog = Backlog::new();
-    let mut tx1 = mock_tx(31);
-    tx1.source_chain = Chain::Ethereum;
-    tx1.target_chain = Chain::Tron;
-    let mut tx2 = mock_tx(32);
-    tx2.source_chain = Chain::Solana;
-    tx2.target_chain = Chain::Tron;
-    let mut tx3 = mock_tx(33);
-    tx3.source_chain = Chain::Ethereum;
-    tx3.target_chain = Chain::Solana;
+    let tx1 = routed_tx(31, Chain::Ethereum, Chain::Tron);
+    let tx2 = routed_tx(32, Chain::Solana, Chain::Tron);
+    let tx3 = routed_tx(33, Chain::Ethereum, Chain::Solana);
 
     backlog.insert_mock_executing(&tx1).await;
     backlog.insert_mock_executing(&tx2).await;
