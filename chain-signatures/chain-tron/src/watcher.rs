@@ -234,9 +234,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
                 }
             };
             // Block last: it certifies the tick; a pass outlasting the
-            // stall timeout restarts with the map already shrunk. Polls
-            // drain first so a receipt found by either arm wins over
-            // the closed window.
+            // stall timeout (`run_supervised_with_watchdog`) restarts
+            // with the map already shrunk. Polls drain first so a
+            // receipt found by either arm wins over the closed window.
             let mut polls = self.poll_watchers().await;
             loop {
                 let event = tokio::select! {
