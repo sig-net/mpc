@@ -781,6 +781,121 @@ async fn relay_sequence_runs_against_recorded_nile_responses() {
     gate.run().await.unwrap();
 }
 
+/// The expiry leg against recorded Nile responses (refusal captured
+/// 2026-10-31, api.nileex.io): refused broadcast, solidified head past
+/// the window, `Unviable` at that head.
+#[tokio::test]
+async fn expiry_leg_runs_against_recorded_nile_responses() {
+    let (nowblock, reference) = recorded_nowblock();
+    let solidified: serde_json::Value =
+        serde_json::from_str(&fixture("nowblock-solidity")).unwrap();
+    let solid_height = solidified["block_header"]["raw_data"]["number"]
+        .as_u64()
+        .unwrap();
+    let solid_ts = solidified["block_header"]["raw_data"]["timestamp"]
+        .as_u64()
+        .unwrap();
+
+    let mut key_bytes = [0u8; 32];
+    key_bytes[31] = 1;
+    let key = SigningKey::from_bytes(&k256::FieldBytes::from(key_bytes)).unwrap();
+    let owner = TronAddress::from_evm(derive_address(&key));
+    let contract: TronAddress = DEFAULT_CONTRACT.parse().unwrap();
+
+    // A 3 s window the recorded solidified head is long past.
+    let expiration = reference.timestamp as i64 + 3_000;
+    assert!(
+        solid_ts > expiration as u64 + 9_000,
+        "fence must read the window closed"
+    );
+    let raw = common::build_raw_expiring(
+        &owner,
+        &contract,
+        &usdt_transfer_calldata(&owner, 1),
+        &reference,
+        reference.timestamp as i64,
+        expiration,
+    );
+    let raw_bytes = raw.encode_to_vec();
+    let (signed, txid) = sign(&key, &raw_bytes).unwrap();
+
+    let mut server = mockito::Server::new_async().await;
+    let endpoint: Url = server.url().parse().unwrap();
+    server
+        .mock("POST", "/wallet/getnowblock")
+        .with_body(nowblock)
+        .create_async()
+        .await;
+    server
+        .mock("POST", "/wallet/broadcasthex")
+        .match_body(mockito::Matcher::Json(serde_json::json!({
+            "transaction": hex::encode(&signed)
+        })))
+        .with_body(fixture("broadcast-expired"))
+        .create_async()
+        .await;
+    server
+        .mock("POST", "/walletsolidity/getnowblock")
+        .with_body(fixture("nowblock-solidity"))
+        .create_async()
+        .await;
+    server
+        .mock("POST", "/walletsolidity/gettransactioninfobyid")
+        .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+            "value": hex::encode(txid)
+        })))
+        .with_body(fixture("receipt-pending"))
+        .create_async()
+        .await;
+
+    let client = TronHttp::new(&mock_config(endpoint.clone())).unwrap();
+    match client.broadcast_transaction(&signed).await.unwrap() {
+        BroadcastOutcome::Rejected { code, .. } => {
+            assert_eq!(code, "TRANSACTION_EXPIRATION_ERROR")
+        }
+        other => panic!("wanted the recorded expiry refusal, got {other:?}"),
+    }
+
+    let state = MockStateManager::new();
+    state
+        .add_pending_execution(common::bidirectional_tx(txid, raw_bytes, Chain::Midnight))
+        .await;
+    let watcher = TronWatcher::new(mock_config(endpoint), state, NoopChainTelemetry).unwrap();
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
+    let cancel = CancellationToken::new();
+    let done = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { watcher.run(events_tx, cancel).await }
+    });
+    let confirmation = loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+            .await
+            .expect("watcher channel open")
+            .expect("attestation within the deadline");
+        if let ChainEvent::ExecutionConfirmed { .. } = event {
+            break event;
+        }
+    };
+    cancel.cancel();
+    done.await.unwrap().unwrap();
+
+    let ChainEvent::ExecutionConfirmed {
+        tx_id,
+        block_height,
+        result,
+        ..
+    } = confirmation
+    else {
+        unreachable!()
+    };
+    assert_eq!(tx_id.0, txid);
+    assert_eq!(block_height, solid_height);
+    assert!(
+        matches!(result, ExecutionOutcome::Unviable),
+        "attested {result:?}, want Unviable"
+    );
+}
+
 #[tokio::test]
 #[ignore = "live network: TRON_ENDPOINT, TRON_PRIVATE_KEY"]
 async fn live_gate() -> anyhow::Result<()> {

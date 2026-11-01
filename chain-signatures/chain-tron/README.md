@@ -49,8 +49,9 @@ environment variables:
 ## Live gate
 
 `tests/live_gate.rs` exercises the full path — assembly, signing,
-broadcast, settlement, execution watching — against a real network
-(default Nile). The same sequence runs in CI against the recorded
+broadcast, settlement, execution watching, and the expiry leg (a refused
+window-closed broadcast attesting `Unviable`) — against a real network
+(default Nile). The same sequences run in CI against the recorded
 responses in `tests/fixtures/nile/`, served verbatim except the receipt
 `id` (the recording's txid belongs to the recording's key).
 

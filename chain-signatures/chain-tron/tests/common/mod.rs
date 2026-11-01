@@ -1,13 +1,43 @@
 //! Shared test assembly: raw transactions from structured parameters.
 
+use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain};
 use mpc_tron_wire::pb::{Contract, ContractType, Message, RawTransaction, TriggerSmartContract};
 use mpc_tron_wire::{NowBlock, TronAddress};
 use prost_types::Any;
+use std::sync::Arc;
 
 /// Validity window and energy-fee cap; observed on recorded transfers.
 pub const EXPIRATION_MS: i64 = 300_000;
 pub const FEE_LIMIT_SUN: i64 = 50_000_000;
 const TRIGGER_SMART_CONTRACT_TYPE_URL: &str = "type.googleapis.com/protocol.TriggerSmartContract";
+
+/// Minimal watcher-leg backlog entry: identity and bytes, `request_id`
+/// mirroring the flat id, Nile-targeted.
+pub fn bidirectional_tx(
+    id: [u8; 32],
+    serialized_transaction: Vec<u8>,
+    source_chain: Chain,
+) -> Arc<BidirectionalTx> {
+    Arc::new(BidirectionalTx {
+        id: BidirectionalTxId(id),
+        sender: [0u8; 32],
+        serialized_transaction,
+        source_chain,
+        target_chain: Chain::Tron,
+        caip2_id: "tron:nile".to_string(),
+        key_version: 0,
+        deposit: 0,
+        path: String::new(),
+        algo: "secp256k1".to_string(),
+        dest: "tron:nile".to_string(),
+        params: String::new(),
+        output_deserialization_schema: vec![],
+        respond_serialization_schema: vec![],
+        request_id: id,
+        from_address: [0u8; 20],
+        nonce: 0,
+    })
+}
 
 /// Test-local assembly of raw transactions from structured parameters,
 /// with the standard 5-minute validity window.
