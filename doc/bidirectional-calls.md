@@ -558,10 +558,13 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
 * Agreement. Correct nodes hold the same backlog at a source height, so
   they admit the same requests and hold the same published signatures for
   them, and they compute the same attestation for a rid, as a function of
-  final target chain state and the request's schema only. This needs a
-  node to start processing a source chain at or before the oldest
-  outstanding request, or from a backlog the correct nodes agreed on at
-  its start height; otherwise it never admits the older requests.
+  final target chain state and the request's schema only — except the
+  expiry attestation's height, the node's own scan head (M6): proposals
+  may differ in height, and the response is whichever the threshold
+  signature covers.
+  This needs a node to start processing a source chain at or before the
+  oldest outstanding request, or from a backlog the correct nodes agreed
+  on at its start height; otherwise it never admits the older requests.
 * Distinct keys (account-derivation.md). The derivation path contains the
   source chain's id and the requesting contract, so different (source
   chain, contract, key parameters) derive different keys, where the key
