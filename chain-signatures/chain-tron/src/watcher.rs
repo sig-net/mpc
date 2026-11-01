@@ -389,6 +389,13 @@ mod tests {
         done: tokio::task::JoinHandle<anyhow::Result<()>>,
     }
 
+    impl WatcherRun {
+        async fn stop(self) {
+            self.cancel.cancel();
+            self.done.await.unwrap().unwrap();
+        }
+    }
+
     fn spawn_watcher(
         config: TronConfig,
         state: MockStateManager,
@@ -406,6 +413,17 @@ mod tests {
             events: events_rx,
             done,
         }
+    }
+
+    /// The expiry tests' shared fixture: a server answering both heads
+    /// plus a fresh state.
+    async fn expiry_stack() -> (mockito::ServerGuard, TronConfig, MockStateManager) {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        nowblock_mock(&mut server);
+        solidity_nowblock_mock(&mut server);
+        (server, config, MockStateManager::new())
     }
 
     fn nowblock_mock(server: &mut mockito::ServerGuard) {
@@ -520,8 +538,7 @@ mod tests {
             "seen before seed 2: {seen2:?}"
         );
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     #[tokio::test]
@@ -542,8 +559,7 @@ mod tests {
         let (_, result) = until_confirmed(&mut run, 1).await;
         assert!(matches!(result, ExecutionOutcome::Failed));
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     #[tokio::test]
@@ -567,8 +583,7 @@ mod tests {
         let (_, result) = until_confirmed(&mut run, 1).await;
         assert!(matches!(result, ExecutionOutcome::Success { output } if output.is_empty()));
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     /// Immutable receipts: an unclassifiable result can never change, so
@@ -608,8 +623,7 @@ mod tests {
             telemetry.retryable_failures() >= 20,
             "each unclassifiable receipt must count per tick"
         );
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     /// A successful receipt can't yield a schema-carrying request's
@@ -637,8 +651,7 @@ mod tests {
         assert!(telemetry.terminal_failures() >= 1);
         assert_eq!(telemetry.retryable_failures(), 0);
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     /// A receipt must confirm while a slower poll is in flight: a batched
@@ -695,8 +708,7 @@ mod tests {
             "Block must not precede the pass's end: {seen:?}"
         );
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     #[tokio::test]
@@ -730,8 +742,7 @@ mod tests {
         assert_eq!(telemetry.retryable_failures(), 0);
         assert_eq!(telemetry.terminal_failures(), 0);
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     /// A dead endpoint fails `run` itself — the supervisor's restart
@@ -784,8 +795,7 @@ mod tests {
             "a deferred scan resolves nothing: {events:?}"
         );
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     /// Solidified-head timestamp the expiry tests pin against; its block
@@ -865,6 +875,20 @@ mod tests {
         entry
     }
 
+    /// A pending entry that also carries a watch.
+    async fn watched_expiry_entry(
+        state: &MockStateManager,
+        seed: u8,
+        source: Chain,
+        expiration: u64,
+    ) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
+        let entry = pending_expiry_entry(state, seed, source, expiration).await;
+        state
+            .watch_execution(Chain::Tron, Arc::clone(&entry.2))
+            .await;
+        entry
+    }
+
     /// Waits for `id`'s confirmation, returning its height, source, outcome.
     async fn until_tx_confirmed(
         run: &mut WatcherRun,
@@ -915,12 +939,7 @@ mod tests {
     /// closed.
     #[tokio::test]
     async fn expired_displaced_entry_attests_unviable() {
-        let server = mockito::Server::new_async().await;
-        let config = test_config(server.url().parse().unwrap());
-        let mut server = server;
-        nowblock_mock(&mut server);
-        solidity_nowblock_mock(&mut server);
-        let state = MockStateManager::new();
+        let (mut server, config, state) = expiry_stack().await;
         let (id, _, _) =
             pending_expiry_entry(&state, 1, Chain::Midnight, SOLIDITY_TS - 40_000).await;
         receipt_for(&mut server, &id, "{}".to_string());
@@ -932,23 +951,16 @@ mod tests {
         assert_eq!(source, Chain::Midnight);
         assert!(matches!(result, ExecutionOutcome::Unviable));
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     /// A watched entry expires too: the receipt poll finds nothing, and the
     /// scan answers at the solidified head.
     #[tokio::test]
     async fn expired_watched_entry_resolves_through_the_scan() {
-        let server = mockito::Server::new_async().await;
-        let config = test_config(server.url().parse().unwrap());
-        let mut server = server;
-        nowblock_mock(&mut server);
-        solidity_nowblock_mock(&mut server);
-        let state = MockStateManager::new();
-        let (id, _, tx) =
-            pending_expiry_entry(&state, 3, Chain::Midnight, SOLIDITY_TS - 40_000).await;
-        state.watch_execution(Chain::Tron, tx).await;
+        let (mut server, config, state) = expiry_stack().await;
+        let (id, _, _) =
+            watched_expiry_entry(&state, 3, Chain::Midnight, SOLIDITY_TS - 40_000).await;
         receipt_for(&mut server, &id, "{}".to_string());
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
@@ -957,20 +969,14 @@ mod tests {
         assert_eq!(height, 41);
         assert!(matches!(result, ExecutionOutcome::Unviable));
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     /// M6's premise fails — a solidified receipt exists — so the arm
     /// re-registers rather than attests.
     #[tokio::test]
     async fn expired_but_executed_re_registers_for_receipt_resolution() {
-        let server = mockito::Server::new_async().await;
-        let config = test_config(server.url().parse().unwrap());
-        let mut server = server;
-        nowblock_mock(&mut server);
-        solidity_nowblock_mock(&mut server);
-        let state = MockStateManager::new();
+        let (mut server, config, state) = expiry_stack().await;
         let (id, _, _) =
             pending_expiry_entry(&state, 4, Chain::Midnight, SOLIDITY_TS - 40_000).await;
         receipt_for(&mut server, &id, success_receipt(&id));
@@ -981,8 +987,7 @@ mod tests {
         assert_eq!(height, 71896097);
         assert!(matches!(result, ExecutionOutcome::Success { .. }));
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     /// Watched, window closed, receipt present: both arms see the
@@ -990,15 +995,9 @@ mod tests {
     /// drains fully before retirement so the scan pass is observable.
     #[tokio::test]
     async fn expired_and_included_watched_entry_resolves_once_through_the_receipt() {
-        let server = mockito::Server::new_async().await;
-        let config = test_config(server.url().parse().unwrap());
-        let mut server = server;
-        nowblock_mock(&mut server);
-        solidity_nowblock_mock(&mut server);
-        let state = MockStateManager::new();
-        let (id, sign_id, tx) =
-            pending_expiry_entry(&state, 6, Chain::Midnight, SOLIDITY_TS - 40_000).await;
-        state.watch_execution(Chain::Tron, tx).await;
+        let (mut server, config, state) = expiry_stack().await;
+        let (id, sign_id, _) =
+            watched_expiry_entry(&state, 6, Chain::Midnight, SOLIDITY_TS - 40_000).await;
         receipt_for(&mut server, &id, success_receipt(&id));
 
         let mut run = spawn_watcher(config, state.clone(), NoopChainTelemetry);
@@ -1045,20 +1044,14 @@ mod tests {
             "retired entry re-fired: {next_tick:?}"
         );
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     /// Two requests share the flat txID; both must resolve through the
     /// one receipt.
     #[tokio::test]
     async fn duplicate_flat_id_entries_both_resolve_through_the_receipt_arm() {
-        let server = mockito::Server::new_async().await;
-        let config = test_config(server.url().parse().unwrap());
-        let mut server = server;
-        nowblock_mock(&mut server);
-        solidity_nowblock_mock(&mut server);
-        let state = MockStateManager::new();
+        let (mut server, config, state) = expiry_stack().await;
         let (id, displacing, tx) =
             pending_expiry_entry(&state, 5, Chain::Midnight, SOLIDITY_TS - 40_000).await;
         let mut displaced_tx = (*tx).clone();
@@ -1106,8 +1099,7 @@ mod tests {
             assert!(matches!(result, ExecutionOutcome::Success { .. }));
         }
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     /// No `Executing` entries: the solidified head is never fetched.
@@ -1127,8 +1119,7 @@ mod tests {
         until_blocks(&mut run, 3).await;
         solidity.assert_async().await;
 
-        run.cancel.cancel();
-        run.done.await.unwrap().unwrap();
+        run.stop().await;
     }
 
     #[test]
