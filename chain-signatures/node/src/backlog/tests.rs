@@ -1189,6 +1189,64 @@ async fn executing_entry_for_resolves_the_displaced_watch_by_backlog_key() {
 }
 
 #[tokio::test]
+async fn executing_entry_for_prefers_the_watch_over_the_backlog_for_duplicate_ids() {
+    let backlog = Backlog::new();
+    let evicted = mock_bidirectional_tx(SignId::new([81; 32]), Chain::Solana);
+    let mut watch_owner = evicted.clone();
+    watch_owner.request_id = [0x7f; 32];
+    let evicted_entry = backlog.insert_mock_executing(&evicted).await;
+    let owner_entry = backlog.insert_mock_executing(&watch_owner).await;
+    backlog.watch_execution(&evicted_entry).await;
+    // Same flat id: the second watch takes the slot.
+    backlog.watch_execution(&owner_entry).await;
+
+    let watches = backlog.get_execution_watchers(evicted.target_chain).await;
+    assert_eq!(watches.len(), 1, "one flat id, one watch slot");
+    assert_eq!(watches[&evicted.id].0, watch_owner.sign_id());
+
+    // Watch-first precedence: even by the evicted entry's keys, the
+    // lookup answers with the watched entry and consumes the watch.
+    let resolved = backlog
+        .executing_entry_for(
+            evicted.target_chain,
+            &evicted.id,
+            evicted.source_chain,
+            &evicted.sign_id(),
+        )
+        .await
+        .expect("must resolve");
+    assert_eq!(resolved.sign_id(), watch_owner.sign_id());
+    assert!(
+        resolved.awaiting_execution().is_some(),
+        "the watch arm restores the wait measurement"
+    );
+    assert!(
+        backlog
+            .get_execution_watchers(evicted.target_chain)
+            .await
+            .is_empty(),
+        "the lookup consumed the watch"
+    );
+
+    // With the watch gone, the same keys fall to the backlog arm.
+    let resolved = backlog
+        .executing_entry_for(
+            evicted.target_chain,
+            &evicted.id,
+            evicted.source_chain,
+            &evicted.sign_id(),
+        )
+        .await
+        .expect("must resolve through the backlog");
+    assert_eq!(resolved.sign_id(), evicted.sign_id());
+    assert_eq!(
+        resolved.awaiting_execution(),
+        None,
+        "the backlog arm has no watch to measure from"
+    );
+}
+
+#[tokio::test]
 async fn plain_lookup_cannot_measure_the_execution_wait() {
     let backlog = Backlog::new();
     let tx = mock_bidirectional_tx(SignId::new([75; 32]), Chain::Solana);
