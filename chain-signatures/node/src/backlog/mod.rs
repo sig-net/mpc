@@ -15,7 +15,6 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 
 use enum_map::EnumMap;
-use futures_util::StreamExt;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
@@ -368,11 +367,11 @@ impl Backlog {
         &self,
         target: Chain,
     ) -> Vec<(SignId, Arc<BidirectionalTx>)> {
-        futures_util::stream::iter(self.requests.values())
-            .then(|pending| async move { pending.read().await.executing_targeting(target) })
-            .collect::<Vec<_>>()
-            .await
-            .concat()
+        let mut targeting = Vec::new();
+        for pending in self.requests.values() {
+            targeting.extend(pending.read().await.executing_targeting(target));
+        }
+        targeting
     }
 
     /// Returns the number of pending requests for a specific chain
