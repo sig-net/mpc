@@ -205,6 +205,18 @@ impl RpcEthereumClient {
         Ok(nonce.to::<u64>())
     }
 
+    pub async fn get_chain_id(&self) -> anyhow::Result<u64> {
+        #[cfg(feature = "bench")]
+        bench::rpc_inc("eth_chainId");
+
+        let chain_id: alloy::primitives::U64 = self
+            .client
+            .request_noparams("eth_chainId")
+            .await
+            .context("failed to get chain id")?;
+        Ok(chain_id.to::<u64>())
+    }
+
     pub async fn get_transaction_by_hash(
         &self,
         tx_hash: B256,

@@ -340,9 +340,6 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 
 ### Dependencies on features not implemented yet
 
-* A bidirectional `Response` cannot yet be checked from the event alone.
-  A node that holds the output removes the entry and one that does not keeps it.
-  Their digests differ, and S1 does not hold for that entry.
 * Unviable is attested from another request's execution or answer.
   A node that starts from a checkpoint taken after that answer holds no trace of it and cannot attest.
   A request's entry in the backlog must store that another request's response made it unviable.

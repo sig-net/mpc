@@ -6,16 +6,14 @@
 //! - [`MessageChannel`] (handle): cloneable senders into the workers' channels.
 
 mod crypto;
-mod filter;
 mod inbox;
 mod outbox;
 mod sub;
 mod types;
 
 pub use crate::protocol::message::types::{
-    GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
-    PresignatureMessage, Protocols, ReadyMessage, ResharingMessage, SignatureMessage,
-    TripleMessage,
+    GeneratingMessage, Message, MessageError, PositMessage, PositProtocolId, PresignatureMessage,
+    ReadyMessage, ResharingMessage, SignatureMessage, TripleMessage,
 };
 pub(crate) use crypto::cbor_to_bytes;
 pub use crypto::SignedMessage;
@@ -28,12 +26,13 @@ pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 pub const MAX_SUBSCRIBE_REQUESTS: usize = 16 * 1024;
 
+use crate::config::NetworkConfig;
 use crate::metrics::messaging::set_channel_capacity_tx;
 use crate::node_client::NodeClient;
-use crate::protocol::message::filter::MAX_FILTER_SIZE;
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeResponse, SubscriptionMessage,
 };
+use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::triple::TripleId;
 use crate::protocol::Config;
@@ -52,8 +51,6 @@ pub struct MessageChannel {
     outgoing: mpsc::Sender<SendMessage>,
     /// Subscription control: asks `MessageInbox` to create/drop subscriber channels.
     subscribe: mpsc::Sender<SubscribeRequest>,
-    /// Marks completed protocols so their late messages are dropped.
-    filter: mpsc::Sender<(Protocols, u64)>,
     /// Entry point for encrypted messages from peers (drained by `MessageInbox`).
     inbox: mpsc::Sender<Ciphered>,
 }
@@ -62,13 +59,10 @@ impl MessageChannel {
     pub fn new() -> (MessageInbox, MessageOutbox, Self) {
         let (inbox_tx, inbox_rx) = mpsc::channel(MAX_MESSAGE_INCOMING);
         let (outbox_tx, outbox_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
-        let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
         let (subscribe_tx, subscribe_rx) = mpsc::channel(MAX_SUBSCRIBE_REQUESTS);
         let inbox = MessageInbox::new(
             inbox_tx.clone(),
             inbox_rx,
-            filter_tx.clone(),
-            filter_rx,
             subscribe_tx.clone(),
             subscribe_rx,
         );
@@ -78,12 +72,10 @@ impl MessageChannel {
             inbox: inbox_tx,
             outgoing: outbox_tx,
             subscribe: subscribe_tx,
-            filter: filter_tx,
         };
 
         set_channel_capacity_tx("incoming", &channel.inbox);
         set_channel_capacity_tx("outgoing", &channel.outgoing);
-        set_channel_capacity_tx("filter", &channel.filter);
         set_channel_capacity_tx("subscribe", &channel.subscribe);
 
         (inbox, outbox, channel)
@@ -91,12 +83,13 @@ impl MessageChannel {
 
     pub async fn spawn(
         client: NodeClient,
+        network: NetworkConfig,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) -> Self {
         let (inbox, outbox, channel) = Self::new();
-        tokio::spawn(inbox.run(config.clone(), contract.clone()));
-        tokio::spawn(outbox.run(client, config, contract));
+        tokio::spawn(inbox.run(network.cipher_sk, contract.clone()));
+        tokio::spawn(outbox.run(client, network.sign_sk, config, contract));
 
         channel
     }
@@ -119,6 +112,42 @@ impl MessageChannel {
         }
     }
 
+    /// Send one posit message as `me`.
+    pub async fn send_posit(
+        &self,
+        me: Participant,
+        to: Participant,
+        id: PositProtocolId,
+        action: PositAction,
+    ) {
+        self.send(
+            me,
+            to,
+            PositMessage {
+                id,
+                from: me,
+                action,
+            },
+        )
+        .await;
+    }
+
+    /// Send the same posit message to every participant in `to` except `me`.
+    pub async fn broadcast_posit(
+        &self,
+        me: Participant,
+        to: &[Participant],
+        id: PositProtocolId,
+        action: PositAction,
+    ) {
+        for &p in to {
+            if p == me {
+                continue;
+            }
+            self.send_posit(me, p, id, action.clone()).await;
+        }
+    }
+
     /// Raw sender into the inbox, for test fixtures that route messages
     /// between in-process nodes directly instead of over HTTP.
     #[cfg(feature = "test-feature")]
@@ -132,36 +161,6 @@ impl MessageChannel {
         } else {
             set_channel_capacity_tx("incoming", &self.inbox);
         }
-    }
-
-    /// Marks this message as filtered. This is used to prevent the same message with the
-    /// corresponding MessageId from being processed again.
-    pub async fn filter<M: MessageFilterId>(&self, msg: &M) {
-        if let Err(err) = self.filter.send((M::PROTOCOL, msg.id())).await {
-            tracing::warn!(?err, "failed to send filter message");
-        } else {
-            set_channel_capacity_tx("filter", &self.filter);
-        }
-    }
-
-    pub async fn filter_triple(&self, id: TripleId) {
-        if let Err(err) = self.filter.send((Protocols::Triple, id)).await {
-            tracing::warn!(?err, "failed to send filter message");
-        } else {
-            set_channel_capacity_tx("filter", &self.filter);
-        }
-    }
-
-    pub async fn filter_presignature(&self, id: PresignatureId) {
-        if let Err(err) = self.filter.send((Protocols::Presignature, id)).await {
-            tracing::warn!(?err, "failed to send filter message");
-        } else {
-            set_channel_capacity_tx("filter", &self.filter);
-        }
-    }
-
-    pub async fn filter_sign(&self, sign_id: SignId, presignature_id: PresignatureId) {
-        self.filter(&(sign_id, presignature_id)).await;
     }
 
     async fn subscribe(&self, id: SubscribeId) -> Option<SubscribeResponse> {

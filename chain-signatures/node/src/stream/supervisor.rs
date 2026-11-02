@@ -162,6 +162,18 @@ pub async fn run_supervised<I: ChainIndexer, T: ChainTelemetry>(
     .await
 }
 
+/// Clears `chain`'s caught-up flag however the supervisor ends, a panic included.
+struct ClearCaughtUp {
+    backlog: Backlog,
+    chain: Chain,
+}
+
+impl Drop for ClearCaughtUp {
+    fn drop(&mut self) {
+        self.backlog.set_caught_up(self.chain, false);
+    }
+}
+
 async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
     indexer: I,
     mut ctx: StreamContext,
@@ -170,6 +182,10 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
 ) {
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting supervised chain indexer");
+    let _clear_caught_up = ClearCaughtUp {
+        backlog: ctx.backlog.clone(),
+        chain,
+    };
 
     let my_account_id = ctx.contract_watcher.account_id().clone();
     let root_pk = ctx.contract_watcher.wait_public_key().await;
@@ -282,6 +298,10 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 result = wait_detected_regression(&mut ctx.checkpoints_rx, &ctx.backlog, chain) => {
                     match result {
                         RegressionOutcome::Recovery => {
+                            // Before the abort, so a second leg queued after it can't
+                            // survive it. One sent just before the clear is still held
+                            // at publish until the source catches up.
+                            ctx.backlog.set_caught_up(chain, false);
                             ctx.rpc.abort_checkpoints(chain).await;
                             if let Err(err) =
                                 ctx.sign_tx.send(SignCommand::AbortChain(chain)).await
@@ -305,6 +325,9 @@ async fn run_supervised_with_watchdog<I: ChainIndexer, T: ChainTelemetry>(
                 }
             }
         };
+        // Other streams and publishes read it: clear it before draining and backoff,
+        // which can take minutes, and before a shutdown.
+        ctx.backlog.set_caught_up(chain, false);
 
         if !run_finished {
             cancel.cancel();
@@ -783,6 +806,119 @@ mod tests {
 
         first_cancel.notified().await;
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    /// Other streams and publishes read the shared caught-up flag, so a restart
+    /// must clear it until the rerun catches up again, and so must a shutdown.
+    #[tokio::test]
+    async fn restart_and_shutdown_clear_the_shared_caught_up_flag() {
+        /// First run catches up, then stalls until the watchdog cancels it. The
+        /// rerun records the flag before catching up, then exits.
+        struct CatchupThenStallIndexer {
+            backlog: Backlog,
+            attempts: Arc<AtomicUsize>,
+            rerun_saw_caught_up: Arc<Mutex<Option<bool>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ChainIndexer for CatchupThenStallIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn run(
+                &self,
+                events_tx: mpsc::Sender<ChainEvent>,
+                cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    events_tx.send(ChainEvent::CatchupCompleted).await.unwrap();
+                    while !self.backlog.is_caught_up(Self::CHAIN) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    cancel.cancelled().await;
+                } else {
+                    *self.rerun_saw_caught_up.lock().unwrap() =
+                        Some(self.backlog.is_caught_up(Self::CHAIN));
+                }
+                Ok(())
+            }
+        }
+
+        let backlog = Backlog::new();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let rerun_saw_caught_up = Arc::new(Mutex::new(None));
+        let indexer = CatchupThenStallIndexer {
+            backlog: backlog.clone(),
+            attempts: attempts.clone(),
+            rerun_saw_caught_up: rerun_saw_caught_up.clone(),
+        };
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(backlog.clone(), sign_tx);
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_supervised_with_watchdog(
+                indexer,
+                ctx,
+                NoopChainTelemetry,
+                Duration::from_millis(200),
+            ),
+        )
+        .await
+        .expect("supervisor should shut down after the rerun exits");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "run() was restarted");
+        assert_eq!(
+            *rerun_saw_caught_up.lock().unwrap(),
+            Some(false),
+            "a restart must clear the flag before the rerun catches up"
+        );
+        assert!(
+            !backlog.is_caught_up(Chain::Ethereum),
+            "a shutdown must clear the flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_that_dies_clears_the_caught_up_flag() {
+        /// Catches up, then runs until cancelled.
+        struct CatchupIndexer;
+
+        #[async_trait::async_trait]
+        impl ChainIndexer for CatchupIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn run(
+                &self,
+                events_tx: mpsc::Sender<ChainEvent>,
+                cancel: CancellationToken,
+            ) -> anyhow::Result<()> {
+                events_tx.send(ChainEvent::CatchupCompleted).await.unwrap();
+                cancel.cancelled().await;
+                Ok(())
+            }
+        }
+
+        let backlog = Backlog::new();
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let (ctx, _cp_tx, _mesh_tx, _rpc_rx) = test_ctx(backlog.clone(), sign_tx);
+        let task = tokio::spawn(run_supervised_with_watchdog(
+            CatchupIndexer,
+            ctx,
+            NoopChainTelemetry,
+            Duration::from_secs(60),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !backlog.is_caught_up(Chain::Ethereum) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the supervisor should catch up");
+
+        // Dropping the task unwinds it as a panic would.
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!backlog.is_caught_up(Chain::Ethereum));
     }
 
     #[tokio::test]

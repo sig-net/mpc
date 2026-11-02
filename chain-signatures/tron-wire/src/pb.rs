@@ -25,6 +25,10 @@ pub enum ContractType {
     TriggerSmartContract = 31,
 }
 
+/// The `Any` type URL naming a `TriggerSmartContract` parameter.
+pub const TRIGGER_SMART_CONTRACT_TYPE_URL: &str =
+    "type.googleapis.com/protocol.TriggerSmartContract";
+
 /// `Transaction.Contract` — `provider` and `ContractName` are unused.
 #[derive(Clone, PartialEq, Message)]
 pub struct Contract {

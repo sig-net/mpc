@@ -213,7 +213,7 @@ mod tests {
     use crate::backlog::{Backlog, BacklogEntry, Checkpoint};
     use crate::mesh::connection::NodeStatus;
     use crate::mesh::MeshState;
-    use crate::node_client::{NodeClient, Options as NodeClientOptions};
+    use crate::node_client::NodeClient;
     use crate::protocol::ParticipantInfo;
     use cait_sith::protocol::Participant;
     use mpc_chain_integration_core::StateManager;
@@ -240,7 +240,7 @@ mod tests {
             let backlog = Backlog::new();
             let (checkpoints_tx, checkpoints_rx) = watch::channel(digest);
             let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-            let node_client = NodeClient::new(&NodeClientOptions::default());
+            let node_client = NodeClient::new();
             let my_account_id: AccountId = "test.near".parse().unwrap();
             Self {
                 chain,
@@ -585,13 +585,7 @@ mod tests {
                 info
             }),
         ];
-        let result = query_peers_checkpoint(
-            &peers,
-            &NodeClient::new(&NodeClientOptions::default()),
-            chain,
-            digest,
-        )
-        .await;
+        let result = query_peers_checkpoint(&peers, &NodeClient::new(), chain, digest).await;
 
         assert!(result.is_some());
         newer_mock.assert_async().await;

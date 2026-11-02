@@ -186,7 +186,7 @@ impl EthereumTestEnvironment {
             account_sk: self.sandbox.secret_key.parse().unwrap(),
             execution_rpc_http_url: self.sandbox.external_http_endpoint.parse().unwrap(),
             contract_address: self.contract_address,
-            network: "sepolia".to_string(),
+            network: "anvil".to_string(),
             refresh_finalized_interval: 500,
             optimistic_requests,
             gas: Default::default(),
@@ -422,7 +422,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
             rpc.clone(),
             contract_watcher.clone(),
             mesh_rx.clone(),
-            NodeClient::new(&Default::default()),
+            NodeClient::new(),
             checkpoints_rx.clone(),
         ),
         NoopChainTelemetry,
@@ -537,6 +537,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         ctx.wallet,
         checkpoint_nonce,
     );
+    // The second leg is signed once its source chain, which has no stream here, is caught up.
+    backlog.mark_caught_up(execution_tx.source_chain);
     backlog.insert_mock_executing(&execution_tx).await;
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
@@ -572,7 +574,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
             rpc.clone(),
             contract_watcher.clone(),
             mesh_rx.clone(),
-            NodeClient::new(&Default::default()),
+            NodeClient::new(),
             checkpoints_rx.clone(),
         ),
         NoopChainTelemetry,
@@ -727,7 +729,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
             rpc.clone(),
             contract_watcher.clone(),
             mesh_rx.clone(),
-            NodeClient::new(&Default::default()),
+            NodeClient::new(),
             checkpoints_rx.clone(),
         ),
         NoopChainTelemetry,
@@ -770,6 +772,8 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let sign_id = SignId::new([0x88; 32]);
     let tx_id = mpc_primitives::BidirectionalTxId(tx_hash.0);
     let tx = test_eth_bidirectional_tx(tx_id, sign_id, ctx.wallet, 0);
+    // The second leg is signed once its source chain, which has no stream here, is caught up.
+    backlog.mark_caught_up(tx.source_chain);
     backlog.insert_mock_executing(&tx).await;
 
     let msg = next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await?;

@@ -197,6 +197,7 @@ mod tests {
                 tx_id,
                 output: vec![],
                 attestation: None,
+                outcome_kind: None,
                 chain_ctx: None,
                 origin_indexed_at: None,
             }));

@@ -1,14 +1,19 @@
 name: Prod Compatibility Tests
 
+# Informational, PR-only and not a required check: a failure means
+# investigate before a rolling deploy. Not run on develop on purpose, so it
+# never colours the default branch status.
 on:
   workflow_dispatch:
-  # Temporarily disabled until finalized
-  # push:
-  #   branches:
-  #     - develop
-  #   paths:
-  #     - chain-signatures/**
-  # pull_request:
+    inputs:
+      tag:
+        description: "release tag to test against (default: latest release)"
+        required: false
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   RUSTFLAGS: -D warnings
@@ -21,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # the compat script checks out the latest release tag
 
       - name: Install just
         run: |
@@ -45,16 +50,11 @@ jobs:
           toolchain: 1.93.0
           targets: wasm32-unknown-unknown
 
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '20'
-
-      - name: Install cargo-near
-        run: |
-          if ! command -v cargo-near >/dev/null; then
-            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
-          fi
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       - name: Detect dependency changes vs develop
         id: depchange
@@ -74,25 +74,21 @@ jobs:
           # Only save the cache if there are dependency changes or it's not a merge group
           save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
 
-      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
-      - name: Install system OpenSSL
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-      - name: Set OpenSSL to system
-        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
 
-      - name: Build governance contract
-        run: just build contract
-
-      - name: Build node with stable toolchain
-        run: cargo build-node
-
-      - name: Build compatibility binaries from tags
+      - name: Build latest release binary from tag
         run: just build compat
+        env:
+          COMPAT_TAG: ${{ github.event.inputs.tag }}
 
-      - name: Build integration tests
+      - name: Build Chain-Signatures Integration Tests
         run: just build tests
 
-      - name: Run production compatibility tests
+      - name: Test
         run: just test-compat
         env:
           RUST_LOG: info,workspaces=warn

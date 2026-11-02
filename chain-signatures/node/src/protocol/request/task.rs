@@ -248,7 +248,7 @@ pub struct SignTask {
     pub presignatures: PresignatureStorage,
     pub msg: MessageChannel,
     pub rpc: RpcChannel,
-    pub cfg: ProtocolConfig,
+    pub signature_timeout: Duration,
     pub is_proposer: Arc<AtomicBool>,
     /// Posit round, shared with `SignEntry` so it survives a respawn.
     pub round: Arc<AtomicUsize>,
@@ -258,6 +258,26 @@ pub struct SignTask {
     /// proves our holder list is wrong about what that peer stored, and state
     /// sync is what corrects it; this puts the peer back through it.
     pub sync_report_tx: SyncReportSender,
+}
+
+impl SignTask {
+    /// Send one posit message for this sign request to `to`.
+    pub async fn send_posit(
+        &self,
+        to: Participant,
+        presignature_id: PresignatureId,
+        round: usize,
+        action: PositAction,
+    ) {
+        self.msg
+            .send_posit(
+                self.governance.me,
+                to,
+                PositProtocolId::signature(self.sign_id, self.kind, presignature_id, round),
+                action,
+            )
+            .await;
+    }
 }
 
 impl SignTask {
@@ -313,7 +333,7 @@ impl SignTask {
         GenerateCtx {
             governance: self.governance.clone(),
             msg: self.msg.clone(),
-            cfg: self.cfg.clone(),
+            signature_timeout: self.signature_timeout,
             node_account_id: self.node_account_id.clone(),
         }
     }

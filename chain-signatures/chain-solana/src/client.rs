@@ -1,33 +1,25 @@
 use futures_util::StreamExt;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{
     utils::retry::{retry_rpc, RetryConfig, SharedBackoff},
-    ChainPublisher, PublishAction, PublisherTelemetry,
+    PublisherTelemetry,
 };
-use mpc_primitives::SignKind;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use signet_program::accounts::{
-    Respond as SolanaRespondAccount, RespondBidirectional as SolanaRespondBidirectionalAccount,
+use solana_client::{
+    nonblocking::rpc_client::RpcClient, rpc_client::GetConfirmedSignaturesForAddress2Config,
+    rpc_config::RpcBlockConfig, rpc_response::RpcConfirmedTransactionStatusWithSignature,
 };
-use signet_program::instruction::{
-    Respond as SolanaRespond, RespondBidirectional as SolanaRespondBidirectional,
-};
-use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
-use solana_client::rpc_config::RpcBlockConfig;
-use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_commitment_config::CommitmentConfig;
-use solana_sdk::signature::Signer as SolanaSigner;
-use solana_sdk::signer::keypair::Keypair;
-use solana_sdk::{pubkey::Pubkey, signature::Signature};
+use solana_sdk::{pubkey::Pubkey, signature::Signature, signer::keypair::Keypair};
 use solana_transaction_status::{TransactionDetails, UiConfirmedBlock, UiTransactionEncoding};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
-use crate::{config::SolConfig, utils::mpc_to_sol_signature};
+use crate::config::SolConfig;
 
 /// Shared upper bound for signature pages and globally ordered slot chunks.
 pub(crate) const CATCHUP_PAGE_SIZE: usize = 1_000;
@@ -466,110 +458,12 @@ impl SolanaClient {
     }
 }
 
-#[async_trait::async_trait]
-impl ChainPublisher for SolanaClient {
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let timestamp = action.timestamp;
-        let mpc_sig = &action.signature;
-        let program = self.client.program(self.program_id)?;
-
-        let sign_id = action.request.id;
-        let request_ids = vec![action.request.id.request_id];
-        let big_r = mpc_sig.big_r.to_encoded_point(false);
-        let signature = mpc_to_sol_signature(mpc_sig, big_r);
-
-        tracing::debug!(
-            ?sign_id,
-            request_type = ?action.request.kind,
-            "Solana publish signature: dispatching request"
-        );
-
-        let (event_authority, _) =
-            Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
-
-        match &action.request.kind {
-            SignKind::Sign | SignKind::SignBidirectional(_) => {
-                let tx = program
-                    .request()
-                    .accounts(SolanaRespondAccount {
-                        responder: self.payer.pubkey(),
-                        event_authority,
-                        program: self.program_id,
-                    })
-                    .args(SolanaRespond {
-                        request_ids,
-                        signatures: vec![signature.clone()],
-                    })
-                    .send()
-                    .await
-                    .inspect_err(|err| {
-                        tracing::error!(
-                            sign_id = ?action.request.id,
-                            error = ?err,
-                            "failed to publish solana signature"
-                        );
-                    })?;
-
-                tracing::info!(
-                    ?sign_id,
-                    tx_hash = ?tx,
-                    elapsed = ?timestamp.elapsed(),
-                    "published solana signature successfully"
-                );
-            }
-            SignKind::RespondBidirectional(respond_bidirectional_tx) => {
-                tracing::debug!(
-                    ?sign_id,
-                    request_id = ?request_ids[0],
-                    serialized_output_len = respond_bidirectional_tx.output.len(),
-                    "Solana publish signature: entering RespondBidirectional arm"
-                );
-                let respond_bidirectional_serialized_output =
-                    respond_bidirectional_tx.output.clone();
-                let tx = program
-                    .request()
-                    .accounts(SolanaRespondBidirectionalAccount {
-                        responder: self.payer.pubkey(),
-                        event_authority,
-                        program: self.program_id,
-                    })
-                    .args(SolanaRespondBidirectional {
-                        request_id: request_ids[0],
-                        serialized_output: respond_bidirectional_serialized_output,
-                        signature: signature.clone(),
-                    })
-                    .send()
-                    .await
-                    .inspect_err(|err| {
-                        tracing::error!(
-                            ?sign_id,
-                            error = ?err,
-                            "Solana publish signature: failed to publish respond bidirectional solana signature"
-                        );
-                    })?;
-
-                tracing::info!(
-                    ?sign_id,
-                    tx_hash = ?tx,
-                    elapsed = ?timestamp.elapsed(),
-                    "published respond bidirectional solana signature successfully"
-                );
-            }
-        }
-
-        self.telemetry.record_publish_metrics(action);
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::{signature_entry, signatures_response};
     use mpc_chain_integration_core::NoopPublisherTelemetry;
-    use solana_sdk::pubkey::Pubkey;
-    use solana_sdk::signature::Signature;
+    use solana_sdk::{pubkey::Pubkey, signature::Signature};
 
     /// Helper to create a SolanaClient for testing with mockito
     fn test_client(url: &str) -> SolanaClient {

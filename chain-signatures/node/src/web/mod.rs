@@ -8,10 +8,12 @@ pub mod debug;
 
 use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
+use crate::config::NetworkConfig;
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus};
-use crate::protocol::sync::SyncChannel;
+use crate::protocol::sync::{self, SyncError};
 use crate::protocol::{Chain, MessageChannel};
+use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;
@@ -31,8 +33,24 @@ use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tower_http::timeout::TimeoutLayer;
 use tracing::Instrument;
+
+/// Per-endpoint timeouts. A node waits this long on a peer, and the server cuts
+/// requests at the same values, so a node never serves a request its caller
+/// already gave up on.
+pub const MSG_TIMEOUT: Duration = Duration::from_secs(1);
+pub const STATUS_TIMEOUT: Duration = Duration::from_secs(1);
+pub const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+pub const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Cap for the endpoints no node calls: the health check, metrics and the debug page.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Answers 408 once a request outlives `timeout`.
+fn timeout(timeout: Duration) -> TimeoutLayer {
+    TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, timeout)
+}
 
 struct AxumState {
     node: NodeStateWatcher,
@@ -41,7 +59,8 @@ struct AxumState {
     triple_storage: TripleStorage,
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     presignature_storage: PresignatureStorage,
-    sync_channel: SyncChannel,
+    contract: ContractStateWatcher,
+    network: NetworkConfig,
     msg_channel: MessageChannel,
     /// Only used to label the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
@@ -56,7 +75,8 @@ pub async fn run(
     node: NodeStateWatcher,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
-    sync_channel: SyncChannel,
+    contract: ContractStateWatcher,
+    network: NetworkConfig,
     my_account_id: AccountId,
     backlog: Backlog,
 ) {
@@ -66,14 +86,15 @@ pub async fn run(
         node,
         triple_storage,
         presignature_storage,
-        sync_channel,
+        contract,
+        network,
         my_account_id,
         backlog,
     };
 
     // Sync can be a large payload, so we set a higher limit for payload.
     let sync = Router::new()
-        .route("/sync", post(sync))
+        .route("/sync", post(sync).layer(timeout(SYNC_TIMEOUT)))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024));
 
     let mut router = Router::new()
@@ -83,17 +104,24 @@ pub async fn run(
             get(|| async move {
                 tracing::info!("node is ready to accept connections");
                 StatusCode::OK
-            }),
+            })
+            .layer(timeout(DEFAULT_TIMEOUT)),
         )
-        .route("/msg", post(msg))
-        .route("/status", get(status))
-        .route("/metrics", get(metrics))
-        .route("/checkpoint", get(checkpoint))
-        .route("/debug", get(debug::page))
+        .route("/msg", post(msg).layer(timeout(MSG_TIMEOUT)))
+        .route("/status", get(status).layer(timeout(STATUS_TIMEOUT)))
+        .route("/metrics", get(metrics).layer(timeout(DEFAULT_TIMEOUT)))
+        .route(
+            "/checkpoint",
+            get(checkpoint).layer(timeout(CHECKPOINT_TIMEOUT)),
+        )
+        .route("/debug", get(debug::page).layer(timeout(DEFAULT_TIMEOUT)))
         .merge(sync);
 
     if cfg!(feature = "bench") {
-        router = router.route("/bench/metrics", get(bench_metrics));
+        router = router.route(
+            "/bench/metrics",
+            get(bench_metrics).layer(timeout(DEFAULT_TIMEOUT)),
+        );
     }
 
     let app = router
@@ -220,7 +248,17 @@ async fn sync(
     WithRejection(Cbor(update), _): WithRejection<Cbor<Ciphered>, Error>,
 ) -> Result<Cbor<Ciphered>> {
     let start = Instant::now();
-    let response = state.sync_channel.request_update(update).await?;
+    let me = state.contract.me().await.ok_or(SyncError::NotParticipant)?;
+    let participants = state.contract.participant_map().await;
+    let response = sync::process_sync_update(
+        &update,
+        &state.triple_storage,
+        &state.presignature_storage,
+        me,
+        &state.network,
+        &participants,
+    )
+    .await?;
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["sync"])
         .observe(start.elapsed().as_millis() as f64);

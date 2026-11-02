@@ -19,7 +19,7 @@ use mpc_chain_canton::{
 use mpc_node::respond_bidirectional::CANTON_RESPOND_BIDIRECTIONAL_PATH;
 use mpc_node::sign_bidirectional::{derive_user_address, sign_and_hash_transaction};
 use mpc_node::util::NearPublicKeyExt;
-use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use mpc_primitives::{Chain, LATEST_MPC_KEY_VERSION};
 use serial_test::serial;
 use std::time::Duration;
 use test_log::test;
@@ -148,7 +148,8 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
     let s_bytes: [u8; 32] = mpc_signature.s.to_bytes().into();
     let signed_bytes = encode_signed_eip1559(&evm_params, y_parity, &r_bytes, &s_bytes)?;
     let unsigned_bytes = TxEip1559::try_from(&evm_params)?.encoded_for_signing();
-    let (watched_tx_hash, _) = sign_and_hash_transaction(&unsigned_bytes, mpc_signature)?;
+    let (watched_tx_hash, _) =
+        sign_and_hash_transaction(Chain::Ethereum, &unsigned_bytes, mpc_signature)?;
     let watched_tx_hash = B256::from(watched_tx_hash);
 
     let pending_tx = anvil.send_raw_transaction(&signed_bytes).await?;

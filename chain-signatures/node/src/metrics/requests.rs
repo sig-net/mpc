@@ -98,6 +98,19 @@ pub fn record_request_latency_since(
         .with_label_values(&[chain.as_str(), step.as_str(), status, kind.as_str()])
         .observe(start.elapsed_seconds());
 }
+/// The number of latencies recorded under these labels.
+#[cfg(test)]
+pub(crate) fn request_latency_count(
+    chain: Chain,
+    step: SignRequestStep,
+    status: &str,
+    kind: RequestKind,
+) -> u64 {
+    SIGN_REQUEST_LATENCY
+        .with_label_values(&[chain.as_str(), step.as_str(), status, kind.as_str()])
+        .get_sample_count()
+}
+
 /// Some chains do not provide information about the block time.
 /// For that reason we record indexing step reached with 0.0 latency.
 pub fn record_indexing_step_reached(chain: Chain, kind: RequestKind) {

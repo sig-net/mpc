@@ -6,7 +6,7 @@ use mpc_node::backlog::mock::BacklogTestExt;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
-use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
+use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
 use mpc_primitives::{Chain, ChainConfig as _, CheckpointDigest, SignId};
@@ -162,7 +162,7 @@ async fn test_consensus_alignment_peer_fetch() {
     let fresh_storage = CheckpointStorage::in_memory();
     let fresh_backlog = Backlog::persisted(fresh_storage.clone());
 
-    let node_client = NodeClient::new(&NodeClientOptions::default());
+    let node_client = NodeClient::new();
     let my_account_id: AccountId = "fresh-node.near".parse().unwrap();
 
     // Call align_backlog_with_consensus
@@ -246,7 +246,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
     let fresh_backlog = Backlog::persisted(fresh_storage.clone());
     let fresh_backlog2 = fresh_backlog.clone();
 
-    let node_client = NodeClient::new(&NodeClientOptions::default());
+    let node_client = NodeClient::new();
     let my_account_id: AccountId = "fresh-node.near".parse().unwrap();
 
     // Spawn alignment in background; keep cp_tx here to send the abort signal.
@@ -343,7 +343,7 @@ async fn test_reset_converges_divergent_nodes() {
         digest: mpc_primitives::reset_checkpoint_digest(chain, resume_after),
     };
     let my_account_id: AccountId = "aligning.near".parse().unwrap();
-    let node_client = NodeClient::new(&NodeClientOptions::default());
+    let node_client = NodeClient::new();
 
     for node in &network.nodes {
         let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(settled));
