@@ -9,6 +9,7 @@ pub mod gcs;
 pub mod local;
 pub mod midnight;
 pub mod mpc_fixture;
+mod node_args;
 pub mod utils;
 
 use std::collections::HashMap;
@@ -27,11 +28,11 @@ use mpc_chain_ethereum::EthConfig;
 use mpc_chain_hydration::HydrationConfig;
 use mpc_chain_midnight::MidnightConfig;
 use mpc_chain_solana::SolConfig;
-use mpc_contract::config::{Config, PresignatureConfig, ProtocolConfig, TripleConfig};
+use mpc_contract::config::ProtocolConfig;
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::backlog::Checkpoint;
 use mpc_node::web::CheckpointResponse;
-use mpc_node::{logs, mesh, storage};
+use mpc_node::{logs, storage};
 use mpc_primitives::Chain;
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{KeyType, SecretKey};
@@ -76,19 +77,9 @@ impl Default for NodeConfig {
             nodes: 3,
             threshold: 2,
             protocol: ProtocolConfig {
-                max_concurrent_generation: 16,
-                max_concurrent_introduction: 2,
-                triple: TripleConfig {
-                    min_triples: 16,
-                    max_triples: 320,
-                    ..Default::default()
-                },
-                presignature: PresignatureConfig {
-                    min_presignatures: 16,
-                    max_presignatures: 320,
-                    ..Default::default()
-                },
-                ..Default::default()
+                min_mine_triple_pairs: 16,
+                min_mine_presignatures: 16,
+                max_mine_generations: 2,
             },
             eth: None,
             sol: None,
@@ -231,7 +222,6 @@ pub struct Context {
     pub env: String,
     pub storage_options: storage::Options,
     pub log_options: logs::Options,
-    pub mesh_options: mesh::Options,
     pub ethereum: Option<EthereumContext>,
 }
 
@@ -305,10 +295,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     let log_options = logs::Options::test();
 
-    let mesh_options = mpc_node::mesh::Options {
-        ping_interval: 1000,
-    };
-
     // If using pregenerated keys, inject them into storage before nodes start
     if spawner.pregenerated_keys.is_enabled() {
         tracing::info!("injecting pregenerated keyshares into storage...");
@@ -347,7 +333,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         env: spawner.env.clone(),
         storage_options,
         log_options,
-        mesh_options,
         ethereum,
     })
 }
@@ -385,7 +370,7 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let args = json!({
         "threshold": cfg.threshold,
         "candidates": candidates,
-        "config": Config { protocol: cfg.protocol.clone(), ..Default::default() },
+        "config": cfg.protocol.clone(),
     })
     .to_string();
     let sk = SecretKey::from_seed(KeyType::ED25519, "testificate");
@@ -473,7 +458,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
                 "participants": participants,
                 "threshold": cfg.threshold,
                 "public_key": near_pk,
-                "config": Config { protocol: cfg.protocol.clone(), ..Default::default() },
+                "config": cfg.protocol.clone(),
             }))
             .transact()
             .await?
@@ -486,7 +471,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
             .args_json(json!({
                 "threshold": cfg.threshold,
                 "candidates": candidates,
-                "config": Config { protocol: cfg.protocol.clone(), ..Default::default() },
+                "config": cfg.protocol.clone(),
             }))
             .transact()
             .await?
