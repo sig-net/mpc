@@ -483,6 +483,10 @@ mod tests {
     }
 
     fn test_setup(initial_threshold: usize) -> TestContext {
+        test_setup_with_redis(initial_threshold, "redis://127.0.0.1:1/")
+    }
+
+    fn test_setup_with_redis(initial_threshold: usize, redis_url: &str) -> TestContext {
         let my_account: AccountId = "node0.test".parse().unwrap();
         let peer_account: AccountId = "node1.test".parse().unwrap();
         let other_account: AccountId = "node2.test".parse().unwrap();
@@ -549,7 +553,7 @@ mod tests {
             participants,
         );
 
-        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1/");
+        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
         let pool = redis_cfg
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .unwrap();
@@ -576,8 +580,81 @@ mod tests {
         }
     }
 
+    async fn spawn_mock_redis_threshold_collector() -> (String, tokio::sync::mpsc::Receiver<usize>)
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redis_url = format!("redis://127.0.0.1:{port}/");
+        let (threshold_tx, threshold_rx) = tokio::sync::mpsc::channel::<usize>(10);
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let tx = threshold_tx.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        let data = String::from_utf8_lossy(&buf[..n]);
+                        // Acknowledge client handshake commands (CLIENT SETINFO, etc.)
+                        if data.contains("CLIENT") {
+                            let count = data.matches("CLIENT").count();
+                            let resp = "+OK\r\n".repeat(count);
+                            if stream.write_all(resp.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        // deadpool-redis recycle sends UNWATCH and PING 0
+                        if data.contains("UNWATCH") {
+                            let resp = "+OK\r\n$1\r\n0\r\n";
+                            if stream.write_all(resp.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        if data.contains("PING") {
+                            let resp = "+PONG\r\n";
+                            if stream.write_all(resp.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        // In EVALSHA: arg 0 is EVALSHA, 1 is sha, 2 is num_keys, 3 is key1,
+                        // 4 is key2, 5 is peer (ARGV[1]), 6 is threshold (ARGV[2])
+                        let lines: Vec<&str> = data.lines().collect();
+                        let bulk_strings: Vec<&str> = lines
+                            .iter()
+                            .filter(|l| !l.starts_with('*') && !l.starts_with('$'))
+                            .copied()
+                            .collect();
+                        if bulk_strings.len() >= 7 {
+                            if let Ok(t) = bulk_strings[6].parse::<usize>() {
+                                let _ = tx.send(t).await;
+                            }
+                        }
+
+                        // Reply with successful Script outcome: {removed = [id], updated = []}
+                        let response = b"*2\r\n*1\r\n:100\r\n*0\r\n";
+                        if stream.write_all(response).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        (redis_url, threshold_rx)
+    }
+
     #[tokio::test]
     async fn test_threshold_change_during_pending_broadcast() {
+        let (redis_url, mut threshold_rx) = spawn_mock_redis_threshold_collector().await;
+
         let TestContext {
             me,
             peer,
@@ -585,10 +662,16 @@ mod tests {
             sync_task,
             mut sync_report_rx,
             ..
-        } = test_setup(3);
+        } = test_setup_with_redis(3, &redis_url);
 
-        // Simulated broadcast responses received from peer
-        let responses = vec![(peer, SyncPeerResponse::Success(SyncUpdate::empty()))];
+        // Nonempty broadcast response received from peer (peer missing triple 100 and presignature 200)
+        let responses = vec![(
+            peer,
+            SyncPeerResponse::Success(SyncUpdate {
+                triples: vec![100u64],
+                presignatures: vec![200u64],
+            }),
+        )];
 
         // While broadcast was in flight, resharing changed the threshold from 3 to 2
         let current_state = contract_tx.borrow().clone();
@@ -610,6 +693,11 @@ mod tests {
         // Must observe and use the updated threshold 2, not the stale threshold 3
         assert_eq!(threshold_used, Some(2));
         assert_eq!(sync_report_rx.try_recv(), Ok((peer, SyncKind::Synced)));
+
+        // Verify that pruning actually evaluated and passed the refreshed threshold (2) to Redis
+        // for both triples and presignatures, rather than using the pre-broadcast threshold (3).
+        assert_eq!(threshold_rx.recv().await, Some(2));
+        assert_eq!(threshold_rx.recv().await, Some(2));
     }
 
     #[tokio::test]
