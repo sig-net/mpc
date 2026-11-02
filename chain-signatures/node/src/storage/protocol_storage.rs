@@ -14,6 +14,13 @@ use tracing;
 
 use super::{owner_key, STORAGE_VERSION};
 
+/// Unspent artifact counts: owned by one node, and stored under any owner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StockCounts {
+    pub mine: usize,
+    pub generated: usize,
+}
+
 // Redis connection backoff configuration
 const REDIS_CONNECT_MIN_DELAY_MS: u64 = 100;
 const REDIS_CONNECT_MAX_DELAY_SECS: u64 = 2;
@@ -702,6 +709,26 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .unwrap_or(0)
     }
 
+    /// Unspent artifact counts in one round trip: owned by `owner`, and stored
+    /// under any owner. Zero on a storage error, like the single counts.
+    pub async fn stock_counts(&self, owner: Participant) -> StockCounts {
+        let Some(mut conn) = self.connect().await else {
+            return StockCounts::default();
+        };
+        let counts: Result<(usize, usize), _> = redis::pipe()
+            .scard(owner_key(&self.owner_keys, owner))
+            .hlen(&self.artifact_key)
+            .query_async(&mut conn)
+            .await;
+        match counts {
+            Ok((mine, generated)) => StockCounts { mine, generated },
+            Err(err) => {
+                tracing::warn!(?err, "failed to read stock counts");
+                StockCounts::default()
+            }
+        }
+    }
+
     /// Get the number of unspent artifacts by a specific owner.
     pub async fn len_by_owner(&self, owner: Participant) -> usize {
         let Some(mut conn) = self.connect().await else {
@@ -766,6 +793,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let mut state = self.reserved.write().await;
         state.generating.clear();
         state.using.clear();
+        state.pending.clear();
 
         // if the outcome is None, it means the script failed or there was an error.
         outcome.is_some()

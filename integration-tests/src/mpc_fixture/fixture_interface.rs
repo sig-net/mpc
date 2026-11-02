@@ -9,7 +9,7 @@ use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
 use mpc_node::backlog::Backlog;
-use mpc_node::config::Config;
+use mpc_node::config::{Config, NetworkConfig};
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::contract::primitives::ParticipantInfo;
 use mpc_node::protocol::message::{now_millis, MessageDomain, MessageError, SignedMessage};
@@ -45,6 +45,7 @@ pub struct MpcFixtureNode {
     pub state: NodeStateWatcher,
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
+    pub network: NetworkConfig,
 
     pub sign_tx: mpsc::Sender<SignCommand>,
     pub msg_channel: MessageChannel,
@@ -57,7 +58,7 @@ pub struct MpcFixtureNode {
     pub backlog: Backlog,
 
     pub contract: ContractStateWatcher,
-    pub web_handle: Option<tokio::task::JoinHandle<()>>,
+    pub web_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     /// Admits the sync requests delivered with `deliver_sync`.
     pub sync_freshness: SyncFreshness,
 }
@@ -419,7 +420,7 @@ impl MpcFixtureNode {
             triples,
             presignatures,
         };
-        let network = from.config.borrow().local.network.clone();
+        let network = from.network.clone();
         let (reply, sent_at) = self
             .try_sync(from.me, &network.sign_sk, &update)
             .await
@@ -435,10 +436,10 @@ impl MpcFixtureNode {
         request_sent_at: u64,
         caller: &MpcFixtureNode,
     ) -> Result<SyncUpdate, MessageError> {
-        let cipher_sk = caller.config.borrow().local.network.cipher_sk.clone();
+        let cipher_sk = caller.network.cipher_sk.clone();
         // Only the signing key is checked.
         let info = ParticipantInfo {
-            sign_pk: self.config.borrow().local.network.sign_sk.public_key(),
+            sign_pk: self.network.sign_sk.public_key(),
             ..ParticipantInfo::new(self.me.into())
         };
         open_reply_for_test(
@@ -460,7 +461,7 @@ impl MpcFixtureNode {
         sign_sk: &near_crypto::SecretKey,
         update: &SyncUpdate,
     ) -> Result<(Ciphered, u64), SyncError> {
-        let cipher_pk = self.config.borrow().local.network.cipher_sk.public_key();
+        let cipher_pk = self.network.cipher_sk.public_key();
         let sent_at = next_sync_sent_at();
         let encrypted = SignedMessage::encrypt_at(
             MessageDomain::SyncRequest,
@@ -478,7 +479,6 @@ impl MpcFixtureNode {
 
     /// Hand an already encrypted sync request to this node's `/sync` handling.
     pub async fn deliver_sync(&self, encrypted: &Ciphered) -> Result<Ciphered, SyncError> {
-        let network = self.config.borrow().local.network.clone();
         let participants = self.contract.participant_map().await;
         process_sync_update(
             encrypted,
@@ -486,7 +486,7 @@ impl MpcFixtureNode {
             &self.presignature_storage,
             self.me,
             &self.account_id,
-            &network,
+            &self.network,
             &participants,
             &self.sync_freshness,
         )
@@ -552,7 +552,7 @@ impl MpcFixtureNode {
             self.triple_storage.clone(),
             self.presignature_storage.clone(),
             self.contract.clone(),
-            self.config.borrow().local.network.clone(),
+            self.network.clone(),
             account_id,
             self.backlog.clone(),
         );

@@ -38,6 +38,41 @@ use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
 use tokio::sync::{mpsc, watch};
 
+use crate::storage::protocol_storage::StockCounts;
+
+/// Whether a spawner should propose another generation: below its own floor
+/// and with a generation slot free. `stock` may be up to a second old, so
+/// the floor can be overshot by at most one second of proposals, bounded by
+/// `max_mine_generations`.
+pub(crate) fn should_generate(
+    stock: StockCounts,
+    mine_generations: usize,
+    min: usize,
+    max_mine_generations: usize,
+) -> bool {
+    stock.mine < min && mine_generations < max_mine_generations
+}
+
+/// Bounds a deliberator applies to a PROPOSE, from counts it already caches.
+/// Sized by the whole participant set with headroom for counts a tick behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AcceptLimits {
+    /// Refuse once this node runs or has accepted this many generations: a
+    /// margin above the network's cap.
+    pub ongoing: usize,
+    /// Refuse once the pool holds this many: a margin above the network's floors.
+    pub generated: usize,
+}
+
+impl AcceptLimits {
+    pub fn new(min_mine: usize, max_mine_generations: usize, num_nodes: usize) -> Self {
+        Self {
+            ongoing: num_nodes * 2 * max_mine_generations,
+            generated: num_nodes * 2 * min_mine,
+        }
+    }
+}
+
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
     pub(crate) secret_storage: SecretNodeStorageVariant,
@@ -94,7 +129,7 @@ impl MpcSignProtocol {
         mut gov_client: G,
         contract_state: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
-    ) {
+    ) -> anyhow::Result<()> {
         let _span = tracing::info_span!("running", "{}", self.my_account_id.as_str());
 
         crate::metrics::nodes::NODE_RUNNING.set(1);
@@ -255,5 +290,16 @@ mod tests {
     fn test_parse_node_version_invalid() {
         assert_eq!(parse_node_version("bad_version"), 999999999000);
         assert_eq!(parse_node_version(""), 999999999000);
+    }
+
+    #[test]
+    fn should_generate_branches() {
+        let stock = StockCounts {
+            mine: 3,
+            generated: 10,
+        };
+        assert!(should_generate(stock, 1, 5, 10));
+        assert!(!should_generate(stock, 1, 3, 10), "floor reached");
+        assert!(!should_generate(stock, 10, 5, 10), "generation cap");
     }
 }

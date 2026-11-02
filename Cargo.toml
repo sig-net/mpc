@@ -16,7 +16,8 @@ members = [
     "chain-signatures/chain-near",
     "chain-signatures/chain-hydration",
     "chain-signatures/chain-midnight",
-    "chain-signatures/chain-tron",
+"chain-signatures/chain-tron",
+    "chain-signatures/tron-wire",
     "chain-signatures/compact-hashing",
     "chain-signatures/midnight-respond-codec",
     "chain-signatures/utils",
@@ -24,7 +25,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.21.0"
+version = "1.22.0"
 publish = false
 
 [workspace.dependencies]
@@ -109,6 +110,7 @@ mpc-chain-near = { path = "./chain-signatures/chain-near" }
 mpc-chain-hydration = { path = "./chain-signatures/chain-hydration" }
 mpc-chain-midnight = { path = "./chain-signatures/chain-midnight" }
 mpc-chain-tron = { path = "./chain-signatures/chain-tron" }
+mpc-tron-wire = { path = "./chain-signatures/tron-wire" }
 mpc-compact-hashing = { path = "./chain-signatures/compact-hashing" }
 mpc-midnight-respond-codec = { path = "./chain-signatures/midnight-respond-codec" }
 mpc-keys = { path = "./chain-signatures/keys" }

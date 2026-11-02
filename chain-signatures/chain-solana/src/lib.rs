@@ -6,6 +6,7 @@ mod client;
 mod config;
 mod events;
 mod indexer;
+mod publisher;
 #[cfg(test)]
 mod test_utils;
 mod utils;

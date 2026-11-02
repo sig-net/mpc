@@ -56,7 +56,7 @@ const MAX_SEEN_PER_SENDER: usize = 100_000;
 /// Signatures of accepted batches per sender, kept until they leave the window.
 struct ReplayCache {
     started_at: u64,
-    /// Longest window seen, so raising `message_timeout` revives nothing.
+    /// Longest window seen, so raising the message timeout revives nothing.
     max_age: Duration,
     senders: HashMap<Participant, SenderSeen>,
 }
@@ -485,6 +485,7 @@ impl MessageInbox {
 
     pub async fn run(
         mut self,
+        cipher_sk: hpke::SecretKey,
         config: watch::Receiver<Config>,
         mut contract: ContractStateWatcher,
     ) {
@@ -501,12 +502,10 @@ impl MessageInbox {
                 _ = contract.next_state(), if !has_state => {}
                 Some(encrypted) = self.inbox_rx.recv(), if has_state => {
                     set_channel_capacity_tx("incoming", &self.inbox_tx);
-                    let config = config.borrow().clone();
-                    let max_age = Duration::from_millis(config.protocol.message_timeout);
+                    let max_age = config.borrow().timeouts.message;
                     let participants = contract.participant_map().await;
                     let me = contract.me().await;
                     let account = contract.account_id();
-                    let cipher_sk = config.local.network.cipher_sk;
                     // Peers resend keygen messages, signed before we started,
                     // until we are up; a restart during keygen breaks it anyway.
                     if matches!(*contract.borrow_state(), Some(ProtocolState::Initializing(_))) {
@@ -539,7 +538,6 @@ impl MessageInbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
     use crate::protocol::contract::primitives::Participants;
     use crate::protocol::message::{MessageChannel, SignedMessage};
     use crate::protocol::ParticipantInfo;
@@ -548,6 +546,7 @@ mod tests {
 
     use mpc_keys::hpke;
     use std::time::Duration;
+    use tokio::sync::watch;
 
     const MAX_AGE: Duration = Duration::from_secs(300);
 
@@ -560,7 +559,6 @@ mod tests {
         cipher_pk: hpke::PublicKey,
         channel: MessageChannel,
         inbox: tokio::task::JoinHandle<()>,
-        _config_tx: watch::Sender<Config>,
         _contract_tx: watch::Sender<Option<crate::protocol::ProtocolState>>,
     }
 
@@ -588,21 +586,15 @@ mod tests {
             }
             map
         };
-        let (_config_tx, config_rx) = Config::channel(LocalConfig {
-            over: OverrideConfig::default(),
-            network: NetworkConfig {
-                sign_sk: sign_sk.clone(),
-                cipher_sk,
-            },
-        });
         let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
             &node_id,
             root_sk.public_key().into_affine_point(),
             2,
             participants,
         );
+        let (_config_tx, config_rx) = Config::channel();
         let (inbox, _outbox, channel) = MessageChannel::new();
-        let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
+        let inbox = tokio::spawn(inbox.run(cipher_sk, config_rx, contract_watcher));
 
         InboxTestSetup {
             epoch,
@@ -612,7 +604,6 @@ mod tests {
             cipher_pk,
             channel,
             inbox,
-            _config_tx,
             _contract_tx,
         }
     }
@@ -937,17 +928,11 @@ mod tests {
                 account_id: "node1".parse().unwrap(),
             },
         );
-        let (_config_tx, config_rx) = Config::channel(LocalConfig {
-            over: OverrideConfig::default(),
-            network: NetworkConfig {
-                sign_sk: sign_sk.clone(),
-                cipher_sk,
-            },
-        });
+        let (_config_tx, config_rx) = Config::channel();
         let account: AccountId = "node0".parse().unwrap();
         let (contract_watcher, contract_tx) = ContractStateWatcher::new(&account);
         let (inbox, _outbox, channel) = MessageChannel::new();
-        let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
+        let inbox = tokio::spawn(inbox.run(cipher_sk, config_rx, contract_watcher));
 
         let batch = triple_batch(0, peer);
         let encrypted =

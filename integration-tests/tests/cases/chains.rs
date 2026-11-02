@@ -44,7 +44,6 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let execution_rpc_http_url = eth_ctx.sandbox.external_http_endpoint.clone();
     let account_sk = eth_ctx.sandbox.secret_key.clone();
     let chain_id = eth_ctx.sandbox.chain_id;
-    let parameters = serde_json::to_string(&json!({ "network": "sandbox" }))?;
 
     let solana = nodes
         .solana
@@ -60,7 +59,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let epsilon = derive_epsilon_sol(key_version, &signer_account, path)?;
     let user_pk = derive_key(root_pk, epsilon);
     let user_pk_bytes = user_pk.to_encoded_point(false);
-    let user_address = public_key_to_address(user_pk_bytes.as_bytes());
+    let user_address = public_key_to_address(&user_pk_bytes);
     let user_alloy_address = AlloyAddress::from_slice(user_address.as_slice());
 
     let client = Client::new();
@@ -105,8 +104,8 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .path(path)
         .key_version(key_version)
         .algorithm("ECDSA")
-        .destination("ethereum")
-        .parameters(&parameters)
+        .destination("")
+        .parameters("")
         .await?;
 
     assert_eq!(
@@ -273,12 +272,7 @@ async fn ensure_eth_signer_funded(
         .try_into()
         .map_err(|_| anyhow::anyhow!("expected 32-byte ethereum secret key"))?;
     let signing_key = SigningKey::from_bytes(&payer_sk_array.into())?;
-    let payer_address = public_key_to_address(
-        signing_key
-            .verifying_key()
-            .to_encoded_point(false)
-            .as_bytes(),
-    );
+    let payer_address = public_key_to_address(&signing_key.verifying_key().to_encoded_point(false));
     let payer_alloy = AlloyAddress::from_slice(payer_address.as_slice());
 
     let mut gas_price = fetch_gas_price(client, rpc_url).await?;

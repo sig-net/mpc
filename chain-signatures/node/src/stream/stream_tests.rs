@@ -4,6 +4,7 @@ use crate::backlog::{Backlog, Bidirectional, Executing};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcAction};
+use crate::sign_bidirectional::{SDK_ALGO, SDK_DEST, SDK_PARAMS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::test_utils::{
     run_stream_with_two_node_mesh, signature_responded_event, test_bidirectional_tx,
@@ -117,7 +118,8 @@ async fn test_stream_handles_sign_and_respond() {
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
-    .await;
+    .await
+    .expect("supervisor should exit cleanly");
 
     // We should have received the Request then Completion
     let msg1 = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -166,12 +168,12 @@ fn build_solana_to_ethereum_bidirectional_request(
         sender: Default::default(),
         serialized_transaction: unsigned_rlp,
         caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-        key_version: 0,
+        key_version: 1,
         deposit: 0,
         path: "".to_string(),
-        algo: "".to_string(),
-        dest: Chain::Ethereum.to_string(),
-        params: "".to_string(),
+        algo: SDK_ALGO.to_string(),
+        dest: SDK_DEST.to_string(),
+        params: SDK_PARAMS.to_string(),
         chain: Chain::Solana,
         chain_ctx: Some(Pubkey::new_unique().to_bytes().to_vec()),
         output_deserialization_schema: vec![],
@@ -232,7 +234,8 @@ async fn test_bidirectional_sign_request_enqueues_command() {
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
-    .await;
+    .await
+    .expect("supervisor should exit cleanly");
 
     // A SignCommand::Request should have been emitted for the bidirectional request
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -313,7 +316,8 @@ async fn test_respond_event_advances_to_pending_execution() {
         ),
         mpc_chain_integration_core::NoopChainTelemetry,
     )
-    .await;
+    .await
+    .expect("supervisor should exit cleanly");
 
     // The respond event should have advanced the entry to PendingExecution and
     // registered an execution watcher for the derived bidirectional tx on the
@@ -559,7 +563,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
             ),
             mpc_chain_integration_core::NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     match timeout(Duration::from_millis(100), sign_rx.recv()).await {
@@ -627,7 +631,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
             ),
             mpc_chain_integration_core::NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     let no_publish = timeout(Duration::from_millis(100), rpc_rx.recv()).await;

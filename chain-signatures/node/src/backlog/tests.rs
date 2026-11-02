@@ -465,7 +465,7 @@ fn test_checkpoint_serialization() {
     let SignKind::SignBidirectional(ref event) = restored_entry.request.kind else {
         panic!("Expected SignBidirectional kind");
     };
-    assert_eq!(event.dest, "test_dest");
+    assert_eq!(event.dest, "");
     assert_eq!(restored_entry.status, pending_execution_status(&tx1));
 }
 
