@@ -27,8 +27,8 @@ use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
 use crate::protocol::request::SignatureSpawnerTask;
 use crate::rpc::ContractStateWatcher;
+use crate::storage::key_share_store::KeyShareStore;
 use crate::storage::presignature_storage::PresignatureStorage;
-use crate::storage::secret_storage::KeyShareStore;
 use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;

@@ -3,7 +3,7 @@ use crate::mesh::MeshState;
 use crate::protocol::request::{SignatureSpawner, SignatureSpawnerTask};
 use crate::protocol::{MessageChannel, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::storage::secret_storage::KeyShareStore;
+use crate::storage::key_share_store::KeyShareStore;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::types::SignCommand;
 use near_sdk::AccountId;

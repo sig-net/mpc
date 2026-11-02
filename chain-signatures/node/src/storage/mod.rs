@@ -1,8 +1,8 @@
 pub mod checkpoint_storage;
+pub mod key_share_store;
 pub mod midnight_wallet_storage;
 pub mod presignature_storage;
 pub mod protocol_storage;
-pub mod secret_storage;
 pub mod triple_storage;
 
 use cait_sith::protocol::Participant;

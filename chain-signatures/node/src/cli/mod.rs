@@ -16,9 +16,9 @@ use crate::protocol::sync::{SyncReportSender, SyncTask};
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::storage::key_share_store::KeyShareStore;
 use crate::storage::midnight_wallet_storage::MidnightWalletStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
-use crate::storage::secret_storage::KeyShareStore;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::types::SignCommand;
@@ -694,7 +694,7 @@ impl StorageHandles {
         account_id: &AccountId,
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
-        let key_share_store = storage::secret_storage::init(storage_options, account_id).await?;
+        let key_share_store = storage::key_share_store::init(storage_options, account_id).await?;
         let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
