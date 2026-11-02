@@ -53,6 +53,15 @@ gh pr view <pr> --json body --jq .body | sed -e '/^## Checklist/,$d' -e '/^- \[ 
 
 Promotion to testnet or mainnet does not create a tag. The version on a branch is the `version` line of its `Cargo.toml`, e.g. `git show origin/mainnet:Cargo.toml | grep ^version`; the latest release on `develop` is `git describe --tags --abbrev=0 origin/develop`.
 
+### Rolling compatibility and deprecations
+
+Rolling deployments require that current code and the latest tagged release binary can cooperate on the same network:
+
+- **Wire compatibility**: Changes to contract views (`View`), contract calls, or node-to-node protocol messages must remain backward-compatible with the latest release tag. The `Prod Compatibility Tests` CI workflow enforces this by running mixed clusters with the latest release binary.
+- **Two-phase deprecation (expand-and-contract)**:
+  1. **Phase 1 (Release $N$):** Introduce the new schema while keeping the legacy format (or wire emulation) intact and marked `#[deprecated]`. The contract or node accepts and/or emits both formats.
+  2. **Phase 2 (Release $N+1$):** Once release $N$ is deployed on testnet and mainnet, release $N+1$'s compatibility test baseline becomes release $N$. The legacy format and its deprecated code can then be safely removed.
+
 ## Release flow
 
 Every second Tuesday is a **release day**. On it, in this order:
