@@ -62,23 +62,30 @@ impl KeyShareStore {
 
     pub async fn store(&mut self, data: &KeyShareRecord) -> Result<(), KeyShareStoreError> {
         match self {
-            Self::GcpSecretManager(s) => s.store(data).await,
+            Self::GcpSecretManager(s) => s.store(data).await?,
             #[cfg(any(test, feature = "test-feature"))]
-            Self::File(s) => s.store(data).await,
+            Self::File(s) => s.store(data).await?,
             #[cfg(any(test, feature = "test-feature"))]
-            Self::Memory(s) => s.store(data),
+            Self::Memory(s) => s.store(data)?,
         }
+        tracing::info!(epoch = data.epoch, "stored the key share");
+        Ok(())
     }
 
     /// Loads the key share, or `None` when the store holds nothing yet.
     pub async fn load(&self) -> Result<Option<KeyShareRecord>, KeyShareStoreError> {
-        match self {
-            Self::GcpSecretManager(s) => s.load().await,
+        let record = match self {
+            Self::GcpSecretManager(s) => s.load().await?,
             #[cfg(any(test, feature = "test-feature"))]
-            Self::File(s) => s.load().await,
+            Self::File(s) => s.load().await?,
             #[cfg(any(test, feature = "test-feature"))]
-            Self::Memory(s) => s.load(),
+            Self::Memory(s) => s.load()?,
+        };
+        match &record {
+            Some(r) => tracing::info!(epoch = r.epoch, "loaded the key share"),
+            None => tracing::info!("no key share stored yet"),
         }
+        Ok(record)
     }
 }
 
