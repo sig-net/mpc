@@ -10,7 +10,7 @@ use near_sdk::AccountId;
 use tokio::sync::{mpsc, watch};
 
 pub struct TestProtocolStorage {
-    pub secret_storage: KeyShareStore,
+    pub key_share_store: KeyShareStore,
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
 }
@@ -49,7 +49,7 @@ impl MpcSignProtocol {
             SignatureSpawnerTask::run(spawner, channels.sign_rx, channels.config.clone());
         Self {
             my_account_id,
-            secret_storage: storage.secret_storage,
+            key_share_store: storage.key_share_store,
             triple_storage: storage.triple_storage,
             presignature_storage: storage.presignature_storage,
             sign_task,

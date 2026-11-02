@@ -618,7 +618,7 @@ impl MpcFixtureNodeBuilder {
         context: &MockedNodeContext,
         fixture_input: &mut Option<FixtureInput>,
     ) -> protocol::test_setup::TestProtocolStorage {
-        let secret_storage = match &self.key_info {
+        let key_share_store = match &self.key_info {
             Some(key) => secret_storage::test_store(0, key.private_share, key.public_key),
             None => KeyShareStore::Memory(MemoryStore::default()),
         };
@@ -678,7 +678,7 @@ impl MpcFixtureNodeBuilder {
         }
 
         protocol::test_setup::TestProtocolStorage {
-            secret_storage,
+            key_share_store,
             triple_storage,
             presignature_storage,
         }

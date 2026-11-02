@@ -168,7 +168,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let (sign_tx, sign_rx) = mpsc::channel(MAX_SIGN_COMMANDS);
 
             let StorageHandles {
-                key_storage,
+                key_share_store,
                 triple_storage,
                 presignature_storage,
                 backlog,
@@ -265,7 +265,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_rx,
                 &node_client,
                 &contract_watcher,
-                key_storage,
+                key_share_store,
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
@@ -665,7 +665,7 @@ impl RpcHandles {
 }
 
 struct StorageHandles {
-    key_storage: KeyShareStore,
+    key_share_store: KeyShareStore,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     backlog: Backlog,
@@ -694,7 +694,7 @@ impl StorageHandles {
         account_id: &AccountId,
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
-        let key_storage = storage::secret_storage::init(storage_options, account_id).await?;
+        let key_share_store = storage::secret_storage::init(storage_options, account_id).await?;
         let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
@@ -704,7 +704,7 @@ impl StorageHandles {
         ));
         let midnight_wallet = Arc::new(MidnightWalletStorage::new(redis_pool, account_id));
         Ok(Self {
-            key_storage,
+            key_share_store,
             triple_storage,
             presignature_storage,
             backlog,
@@ -731,7 +731,7 @@ impl ProtocolHandles {
         sign_rx: mpsc::Receiver<SignCommand>,
         node_client: &NodeClient,
         contract_watcher: &ContractStateWatcher,
-        key_storage: KeyShareStore,
+        key_share_store: KeyShareStore,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
@@ -767,7 +767,7 @@ impl ProtocolHandles {
             resharing: message_channel.subscribe_resharing().await,
             ready: message_channel.subscribe_ready().await,
             sign_task,
-            secret_storage: key_storage,
+            key_share_store,
             triple_storage,
             presignature_storage,
             config: config_rx,

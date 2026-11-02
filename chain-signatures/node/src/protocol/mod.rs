@@ -55,7 +55,7 @@ pub(crate) fn should_generate(
 
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
-    pub(crate) secret_storage: KeyShareStore,
+    pub(crate) key_share_store: KeyShareStore,
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
     pub(crate) sign_task: SignatureSpawnerTask,

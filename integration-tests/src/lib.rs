@@ -301,7 +301,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         for (i, account) in spawner.accounts.iter().enumerate() {
             let participant = Participant::from(i as u32);
             if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
-                let mut secret_storage =
+                let mut key_share_store =
                     storage::secret_storage::init(&storage_options, account.id()).await?;
 
                 let persistent_data = mpc_node::protocol::state::PersistentNodeData {
@@ -311,7 +311,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                 };
 
                 let account_id = account.id().to_string();
-                if let Err(err) = secret_storage.store(&persistent_data).await {
+                if let Err(err) = key_share_store.store(&persistent_data).await {
                     tracing::error!(?err, "failed to store pregenerated key");
                     continue;
                 }

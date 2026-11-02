@@ -873,7 +873,7 @@ impl<G: Governance> ConsensusProtocol<G> for NodeState {
     ) -> NodeState {
         match self {
             NodeState::Starting => {
-                let persistent_node_data = match ctx.secret_storage.load().await {
+                let persistent_node_data = match ctx.key_share_store.load().await {
                     Ok(data) => data,
                     Err(err) => {
                         tracing::error!(?err, "failed to load persistent node data, retrying...");

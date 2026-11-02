@@ -134,7 +134,7 @@ impl GeneratingState {
         ctx: &mut MpcSignProtocol,
     ) -> NodeState {
         if let Err(err) = ctx
-            .secret_storage
+            .key_share_store
             .store(&PersistentNodeData {
                 epoch: 0,
                 private_share,
@@ -369,7 +369,7 @@ impl ResharingState {
         contract: &ResharingContractState,
     ) -> Result<NodeState, ()> {
         if let Err(err) = ctx
-            .secret_storage
+            .key_share_store
             .store(&PersistentNodeData {
                 epoch: contract.old_epoch + 1,
                 private_share,
