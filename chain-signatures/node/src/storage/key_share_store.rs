@@ -5,11 +5,22 @@ use tokio::fs::{self, File};
 #[cfg(any(test, feature = "test-feature"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::gcp::{SecretManagerService, SecretResult};
+use crate::gcp::{self, SecretManagerService};
 use crate::protocol::state::KeyShareRecord;
 use crate::storage::Options;
 use anyhow::Context as _;
 use near_account_id::AccountId;
+
+#[derive(thiserror::Error, Debug)]
+pub enum KeyShareStoreError {
+    #[error(transparent)]
+    Gcp(#[from] gcp::Error),
+    #[cfg(any(test, feature = "test-feature"))]
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("(de)serialization error: {0}")]
+    Serde(#[from] serde_json::Error),
+}
 
 /// Where the node keeps its key share. Production builds know only Secret
 /// Manager; test builds add a file and an in-memory store.
@@ -49,7 +60,7 @@ impl KeyShareStore {
         }))
     }
 
-    pub async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
+    pub async fn store(&mut self, data: &KeyShareRecord) -> Result<(), KeyShareStoreError> {
         match self {
             Self::GcpSecretManager(s) => s.store(data).await,
             #[cfg(any(test, feature = "test-feature"))]
@@ -60,7 +71,7 @@ impl KeyShareStore {
     }
 
     /// Loads the key share, or `None` when the store holds nothing yet.
-    pub async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
+    pub async fn load(&self) -> Result<Option<KeyShareRecord>, KeyShareStoreError> {
         match self {
             Self::GcpSecretManager(s) => s.load().await,
             #[cfg(any(test, feature = "test-feature"))]
@@ -73,20 +84,24 @@ impl KeyShareStore {
 
 /// In-memory store for in-process tests.
 #[cfg(any(test, feature = "test-feature"))]
-#[derive(Default)]
 pub struct MemoryStore {
-    node_data: Option<KeyShareRecord>,
+    record: Option<KeyShareRecord>,
 }
 
 #[cfg(any(test, feature = "test-feature"))]
 impl MemoryStore {
-    fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
-        self.node_data = Some(data.clone());
+    /// A store already holding `record`, or empty when `None`.
+    pub fn new(record: Option<KeyShareRecord>) -> Self {
+        Self { record }
+    }
+
+    fn store(&mut self, data: &KeyShareRecord) -> Result<(), KeyShareStoreError> {
+        self.record = Some(data.clone());
         Ok(())
     }
 
-    fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
-        Ok(self.node_data.clone())
+    fn load(&self) -> Result<Option<KeyShareRecord>, KeyShareStoreError> {
+        Ok(self.record.clone())
     }
 }
 
@@ -97,14 +112,14 @@ pub struct GcpSecretManagerStore {
 }
 
 impl GcpSecretManagerStore {
-    async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
+    async fn store(&mut self, data: &KeyShareRecord) -> Result<(), KeyShareStoreError> {
         self.secret_manager
             .store_secret(&serde_json::to_vec(data)?, &self.secret_id)
             .await?;
         Ok(())
     }
 
-    async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
+    async fn load(&self) -> Result<Option<KeyShareRecord>, KeyShareStoreError> {
         let Some(data) = self.secret_manager.load_secret(&self.secret_id).await? else {
             return Ok(None);
         };
@@ -126,7 +141,7 @@ impl FileStore {
         }
     }
 
-    async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
+    async fn store(&mut self, data: &KeyShareRecord) -> Result<(), KeyShareStoreError> {
         let json_bytes = serde_json::to_vec(data)?;
         // Write to a temporary file first, then rename it into place atomically.
         let tmp_path = self.path.with_extension("tmp");
@@ -138,7 +153,7 @@ impl FileStore {
         Ok(())
     }
 
-    async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
+    async fn load(&self) -> Result<Option<KeyShareRecord>, KeyShareStoreError> {
         match File::open(self.path.as_os_str()).await {
             Ok(mut file) => {
                 let mut contents = Vec::new();
@@ -150,22 +165,6 @@ impl FileStore {
             Err(e) => Err(e.into()),
         }
     }
-}
-
-/// An in-memory store already holding a key share, for fixture tests.
-#[cfg(feature = "test-feature")]
-pub fn test_store(
-    epoch: u64,
-    private_share: crate::types::SecretKeyShare,
-    public_key: mpc_crypto::PublicKey,
-) -> KeyShareStore {
-    KeyShareStore::Memory(MemoryStore {
-        node_data: Some(KeyShareRecord {
-            epoch,
-            private_share,
-            public_key,
-        }),
-    })
 }
 
 #[cfg(test)]
@@ -237,7 +236,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_store_and_load_round_trip() {
-        let mut storage = MemoryStore::default();
+        let mut storage = MemoryStore::new(None);
 
         let expected = KeyShareRecord {
             epoch: 42,

@@ -1,11 +1,24 @@
-pub mod error;
-
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use google_cloud_auth::credentials::AccessTokenCredentials;
 use serde::{Deserialize, Serialize};
 
-pub type SecretResult<T> = std::result::Result<T, error::SecretStorageError>;
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("GCP auth error: {0}")]
+    Auth(#[from] google_cloud_auth::errors::CredentialsError),
+    #[error("GCP API error ({status}): {message}")]
+    Api {
+        status: reqwest::StatusCode,
+        message: String,
+    },
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("base64 decode error: {0}")]
+    Base64(#[from] base64::DecodeError),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+}
 
 const SECRET_MANAGER_ENDPOINT: &str = "https://secretmanager.googleapis.com";
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
@@ -53,7 +66,7 @@ impl SecretManagerService {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(name = name.as_ref()))]
-    pub async fn load_secret<T: AsRef<str>>(&self, name: T) -> SecretResult<Option<Vec<u8>>> {
+    pub async fn load_secret<T: AsRef<str>>(&self, name: T) -> Result<Option<Vec<u8>>, Error> {
         let url = format!(
             "{SECRET_MANAGER_ENDPOINT}/v1/projects/{}/secrets/{}/versions/latest:access",
             self.project_id,
@@ -73,7 +86,7 @@ impl SecretManagerService {
         }
     }
 
-    pub async fn store_secret<T: AsRef<str>>(&mut self, data: &[u8], name: T) -> SecretResult<()> {
+    pub async fn store_secret<T: AsRef<str>>(&mut self, data: &[u8], name: T) -> Result<(), Error> {
         let url = format!(
             "{SECRET_MANAGER_ENDPOINT}/v1/projects/{}/secrets/{}:addVersion",
             self.project_id,
@@ -102,7 +115,7 @@ impl SecretManagerService {
         method: reqwest::Method,
         url: &str,
         body: Option<Vec<u8>>,
-    ) -> SecretResult<reqwest::Response> {
+    ) -> Result<reqwest::Response, Error> {
         let token = self.credentials.access_token().await?;
         let mut request = self.http.request(method, url).bearer_auth(token.token);
         if let Some(body) = body {
@@ -113,7 +126,7 @@ impl SecretManagerService {
         if !response.status().is_success() {
             let status = response.status();
             let message = response.text().await.unwrap_or_default();
-            return Err(error::SecretStorageError::Api { status, message });
+            return Err(Error::Api { status, message });
         }
         Ok(response)
     }
