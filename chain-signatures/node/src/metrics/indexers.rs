@@ -43,7 +43,7 @@ pub static BIDIRECTIONAL_EXTRACTION_FAILURES: LazyLock<CounterVec> = LazyLock::n
 pub static TRON_EXPIRY_SCAN_DEFERRED: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec_with_node_account_id(
         "tron_expiry_scan_deferred",
-        "Tron expiry scans deferred by an oracle failure",
+        "Tron expiry scans deferred by a solidity head-fetch failure, at most one per poll tick; probe errors uncounted",
         &[],
     )
     .unwrap()

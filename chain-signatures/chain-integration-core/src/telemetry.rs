@@ -23,9 +23,8 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
     /// same transaction increments once per retry.
     fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind);
 
-    /// Records an expiry scan that deferred without attesting: the
-    /// oracle failed while live paths stayed green, so expiry stalls
-    /// invisibly. Validity-window watchers (Tron) call it.
+    /// Records an expiry scan deferred by a solidity head-fetch
+    /// failure (Tron), at most once per poll tick.
     fn expiry_scan_deferred(&self) {}
 }
 
