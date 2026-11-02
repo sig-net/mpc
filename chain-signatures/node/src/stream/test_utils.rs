@@ -260,5 +260,6 @@ pub async fn run_stream_with_two_node_mesh<I: ChainIndexer>(
         ),
         NoopChainTelemetry,
     )
-    .await;
+    .await
+    .expect("supervisor should exit cleanly");
 }
