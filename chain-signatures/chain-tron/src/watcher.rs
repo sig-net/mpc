@@ -4,6 +4,7 @@
 //! is the supervision vehicle alone: no block scanning, no catchup — restart
 //! rebuilds the map from the backlog.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use alloy::primitives::B256;
@@ -75,6 +76,34 @@ fn expired_event(sign_id: SignId, tx: &BidirectionalTx, head: &SolidifiedNowBloc
 enum ExpiryProbe {
     Included,
     Unavailable,
+}
+
+/// One scanned entry and its receipt read.
+struct ExpiredProbe {
+    sign_id: SignId,
+    tx: Arc<BidirectionalTx>,
+    outcome: anyhow::Result<ExpiryProbe>,
+}
+
+/// An inclusion seen this pass vetoes an absence attestation for the
+/// same txid: separately routed solidity instances can disagree within
+/// [`EXPIRY_ATTEST_GRACE_MS`]'s skew, and a vetoed twin re-scans into
+/// the receipt arm next tick.
+fn attest_absences(
+    unattested: Vec<(SignId, Arc<BidirectionalTx>)>,
+    included: &HashSet<BidirectionalTxId>,
+    head: &SolidifiedNowBlock,
+) -> Vec<ChainEvent> {
+    unattested
+        .into_iter()
+        .filter(|(_, tx)| !included.contains(&tx.id))
+        .map(|(sign_id, tx)| {
+            tracing::info!(?sign_id, ?tx.id, source = ?tx.source_chain,
+                height = head.number,
+                "validity window closed without inclusion; attesting unexecutable");
+            expired_event(sign_id, &tx, head)
+        })
+        .collect()
 }
 
 impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
@@ -163,50 +192,84 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
     }
 
     /// M6 resolutions for `Executing` entries whose validity window
-    /// closed — backlog-keyed, displaced watches included. Probes run
-    /// concurrently so a large deferred backlog cannot outrun the stall
-    /// budget; failures defer to the next tick.
+    /// closed — backlog-keyed, displaced watches included; every
+    /// failure defers to the next tick.
     async fn expired_resolutions(&self) -> Vec<ChainEvent> {
         let pending = self.state_manager.get_pending_executions(Chain::Tron).await;
         if pending.is_empty() {
             return Vec::new();
         }
-        let head = match self.client.get_now_block_solidity().await {
-            Ok(head) => head,
-            Err(err) => {
+        let Some(head) = self.solidified_head().await else {
+            return Vec::new();
+        };
+        let probes = self.probe_closed_windows(&pending, &head).await;
+        let (included, unattested) = self.apply_probes(probes).await;
+        attest_absences(unattested, &included, &head)
+    }
+
+    /// The scan head; `None` defers the pass, counted through
+    /// `expiry_scan_deferred`.
+    async fn solidified_head(&self) -> Option<SolidifiedNowBlock> {
+        self.client
+            .get_now_block_solidity()
+            .await
+            .map_err(|err| {
                 tracing::warn!(?err, "solidity head fetch failed; expiry scan deferred");
                 self.telemetry.expiry_scan_deferred();
-                return Vec::new();
-            }
-        };
-        iter(pending)
-            .filter(move |(_, tx)| ready(is_window_closed(&head, tx)))
+            })
+            .ok()
+    }
+
+    /// Window-closed entries probed concurrently, so a large deferred
+    /// backlog cannot outrun the stall budget.
+    async fn probe_closed_windows(
+        &self,
+        pending: &[(SignId, Arc<BidirectionalTx>)],
+        head: &SolidifiedNowBlock,
+    ) -> Vec<ExpiredProbe> {
+        iter(pending.iter().cloned())
+            .filter(move |(_, tx)| ready(is_window_closed(head, tx)))
             .map(move |(sign_id, tx)| async move {
-                match self.expiry_probe(&tx).await {
-                    Ok(ExpiryProbe::Included) => {
-                        tracing::info!(?sign_id, ?tx.id,
-                            "expired window with inclusion; re-registered for the receipt arm");
-                        self.state_manager
-                            .watch_execution(Chain::Tron, Arc::clone(&tx))
-                            .await;
-                        None
-                    }
-                    Ok(ExpiryProbe::Unavailable) => {
-                        tracing::info!(?sign_id, ?tx.id, source = ?tx.source_chain,
-                            height = head.number,
-                            "validity window closed without inclusion; attesting unexecutable");
-                        Some(expired_event(sign_id, &tx, &head))
-                    }
-                    Err(err) => {
-                        tracing::warn!(?sign_id, ?tx.id, ?err, "expiry receipt lookup failed");
-                        None
-                    }
+                ExpiredProbe {
+                    sign_id,
+                    outcome: self.expiry_probe(&tx).await,
+                    tx,
                 }
             })
             .buffer_unordered(Self::MAX_CONCURRENT_RECEIPT_POLLS)
-            .filter_map(ready)
             .collect()
             .await
+    }
+
+    /// Registers inclusions for the receipt arm and collects the
+    /// unattested, keyed by flat id for the veto.
+    async fn apply_probes(
+        &self,
+        probes: Vec<ExpiredProbe>,
+    ) -> (
+        HashSet<BidirectionalTxId>,
+        Vec<(SignId, Arc<BidirectionalTx>)>,
+    ) {
+        let mut included = HashSet::new();
+        let mut unattested = Vec::new();
+        for probe in probes {
+            match probe.outcome {
+                Ok(ExpiryProbe::Included) => {
+                    tracing::info!(sign_id = ?probe.sign_id, ?probe.tx.id,
+                        "expired window with inclusion; re-registered for the receipt arm");
+                    self.state_manager
+                        .watch_execution(Chain::Tron, Arc::clone(&probe.tx))
+                        .await;
+                    included.insert(probe.tx.id);
+                }
+                Ok(ExpiryProbe::Unavailable) => unattested.push((probe.sign_id, probe.tx)),
+                Err(err) => {
+                    tracing::warn!(sign_id = ?probe.sign_id, ?probe.tx.id, ?err,
+                        "expiry receipt lookup failed")
+                }
+            }
+        }
+        (included, unattested)
     }
 }
 
@@ -1110,6 +1173,191 @@ mod tests {
         }
 
         run.stop().await;
+    }
+
+    /// Same flat id, separately routed receipt reads within the grace's
+    /// skew: whichever probe reads the lagging instance must not attest
+    /// its absence while the pass saw the inclusion.
+    #[tokio::test]
+    async fn skewed_same_id_expiry_probes_converge_on_the_receipt() {
+        let (mut server, config, state) = expiry_stack().await;
+        let (id, lagging, tx) =
+            pending_expiry_entry(&state, 5, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        let mut twin_tx = (*tx).clone();
+        twin_tx.request_id = [0x7f; 32];
+        let twin = twin_tx.sign_id();
+        state.add_pending_execution(Arc::new(twin_tx)).await;
+
+        // A 1-shot absence shadows the inclusion: one probe reads each,
+        // in either order.
+        server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "value": hex::encode(id.0)
+            })))
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .expect(1)
+            .create();
+        receipt_for(&mut server, &id, success_receipt(&id));
+
+        let confirmed_state = state.clone();
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+        let confirmations = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut seen: Vec<(SignId, u64, ExecutionOutcome)> = Vec::new();
+            loop {
+                let event = run.events.recv().await.expect("watcher channel open");
+                if let ChainEvent::ExecutionConfirmed {
+                    tx_id,
+                    sign_id,
+                    block_height,
+                    result,
+                    ..
+                } = event
+                {
+                    if tx_id == id {
+                        confirmed_state.remove_pending_execution(sign_id).await;
+                        confirmed_state
+                            .remove_execution_watch(Chain::Tron, &id)
+                            .await;
+                        if !seen.iter().any(|(sign, ..)| *sign == sign_id) {
+                            seen.push((sign_id, block_height, result));
+                            if seen.len() == 2 {
+                                return seen;
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("both flat-id entries must confirm"));
+
+        for (sign, height, result) in confirmations {
+            assert!(sign == lagging || sign == twin, "unknown sign id");
+            assert_eq!(height, 71896097, "{sign:?} resolved off the receipt");
+            assert!(
+                matches!(result, ExecutionOutcome::Success { .. }),
+                "{sign:?} attested {result:?}, want the receipt-decoded outcome"
+            );
+        }
+
+        run.stop().await;
+    }
+
+    /// Only the window-closed half of the backlog is probed; an open
+    /// window never spends a provider call.
+    #[tokio::test]
+    async fn only_closed_windows_are_probed() {
+        let (mut server, config, state) = expiry_stack().await;
+        let (closed_id, ..) =
+            pending_expiry_entry(&state, 6, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        let (open_id, ..) =
+            pending_expiry_entry(&state, 7, Chain::Midnight, SOLIDITY_TS + 60_000).await;
+        let served = server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "value": hex::encode(closed_id.0)
+            })))
+            .with_header("content-type", "application/json")
+            .with_body(success_receipt(&closed_id))
+            .expect(1)
+            .create();
+        server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "value": hex::encode(open_id.0)
+            })))
+            .expect(0)
+            .create();
+
+        let watcher = TronWatcher::new(config, state.clone(), NoopChainTelemetry).unwrap();
+        let head = SolidifiedNowBlock(NowBlock {
+            block_id: B256::from([0x9u8; 32]),
+            number: 41,
+            timestamp: SOLIDITY_TS,
+        });
+        let pending = state.get_pending_executions(Chain::Tron).await;
+        let probes = watcher.probe_closed_windows(&pending, &head).await;
+
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].tx.id, closed_id);
+        assert!(matches!(probes[0].outcome, Ok(ExpiryProbe::Included)));
+        served.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn probes_register_inclusions_and_collect_the_unattested() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let state = MockStateManager::new();
+        let watcher = TronWatcher::new(config, state.clone(), NoopChainTelemetry).unwrap();
+
+        let (id, included_sign, tx) = expiry_tx(6, Chain::Midnight, SOLIDITY_TS - 40_000);
+        let mut twin_tx = (*tx).clone();
+        twin_tx.request_id = [0x7f; 32];
+        let twin_sign = twin_tx.sign_id();
+        let (_, failed_sign, failed_tx) = expiry_tx(7, Chain::Ethereum, SOLIDITY_TS - 40_000);
+        let probes = vec![
+            ExpiredProbe {
+                sign_id: included_sign,
+                outcome: Ok(ExpiryProbe::Included),
+                tx,
+            },
+            ExpiredProbe {
+                sign_id: twin_sign,
+                outcome: Ok(ExpiryProbe::Unavailable),
+                tx: twin_tx.into(),
+            },
+            ExpiredProbe {
+                sign_id: failed_sign,
+                outcome: Err(anyhow::anyhow!("receipt lookup failed")),
+                tx: failed_tx,
+            },
+        ];
+
+        let (included, unattested) = watcher.apply_probes(probes).await;
+
+        assert_eq!(included, HashSet::from([id]));
+        assert_eq!(unattested.len(), 1);
+        assert_eq!(unattested[0].0, twin_sign);
+        assert_eq!(unattested[0].1.id, id);
+        let watchers = state.get_execution_watchers(Chain::Tron).await;
+        assert_eq!(watchers.len(), 1);
+        assert_eq!(watchers[&id].0, included_sign);
+    }
+
+    #[test]
+    fn an_inclusion_vetoes_the_same_txids_absence_attestation() {
+        let (id, _, tx) = expiry_tx(6, Chain::Midnight, SOLIDITY_TS - 40_000);
+        let mut twin_tx = (*tx).clone();
+        twin_tx.request_id = [0x7f; 32];
+        let twin_sign = twin_tx.sign_id();
+        let (_, other_sign, other_tx) = expiry_tx(7, Chain::Midnight, SOLIDITY_TS - 40_000);
+        let head = SolidifiedNowBlock(NowBlock {
+            block_id: B256::from([0x9u8; 32]),
+            number: 41,
+            timestamp: SOLIDITY_TS,
+        });
+
+        let events = attest_absences(
+            vec![
+                (twin_sign, twin_tx.into()),
+                (other_sign, Arc::clone(&other_tx)),
+            ],
+            &HashSet::from([id]),
+            &head,
+        );
+
+        assert_eq!(events.len(), 1, "events: {events:?}");
+        assert!(matches!(
+            &events[0],
+            ChainEvent::ExecutionConfirmed {
+                tx_id, sign_id, source_chain: Chain::Midnight,
+                block_height: 41, result: ExecutionOutcome::Unviable,
+            } if *tx_id == other_tx.id && *sign_id == other_sign
+        ));
     }
 
     /// No `Executing` entries: the solidified head is never fetched.

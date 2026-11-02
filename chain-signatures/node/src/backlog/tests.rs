@@ -748,7 +748,7 @@ async fn test_watch_unwatch_and_respond() {
 
     // Unwatch returns the executing SignEntry (automatically registered on advance to executing)
     let executing_entry = backlog
-        .unwatch_execution(tx.target_chain, &tx.id)
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
         .await
         .expect("watcher present");
     assert_eq!(executing_entry.sign_id(), sign_id);
@@ -761,7 +761,7 @@ async fn test_watch_unwatch_and_respond() {
     executing_entry.watch_execution().await;
 
     let executing_entry = backlog
-        .unwatch_execution(tx.target_chain, &tx.id)
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
         .await
         .expect("watcher present");
     assert_eq!(executing_entry.sign_id(), sign_id);
@@ -1144,7 +1144,7 @@ async fn respond_observed_at_survives_the_unwatch_lookup() {
     backlog.insert_mock_executing(&tx).await;
 
     let entry = backlog
-        .unwatch_execution(tx.target_chain, &tx.id)
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
         .await
         .expect("watch must resolve to the executing entry");
 
@@ -1162,7 +1162,9 @@ async fn executing_entry_for_resolves_the_displaced_watch_by_backlog_key() {
     let backlog = Backlog::new();
     let tx = mock_bidirectional_tx(SignId::new([77; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
-    backlog.unwatch_execution(tx.target_chain, &tx.id).await;
+    backlog
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .await;
 
     let entry = backlog
         .executing_entry_for(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
@@ -1189,7 +1191,7 @@ async fn executing_entry_for_resolves_the_displaced_watch_by_backlog_key() {
 }
 
 #[tokio::test]
-async fn executing_entry_for_prefers_the_watch_over_the_backlog_for_duplicate_ids() {
+async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_ids() {
     let backlog = Backlog::new();
     let evicted = mock_bidirectional_tx(SignId::new([81; 32]), Chain::Solana);
     let mut watch_owner = evicted.clone();
@@ -1200,35 +1202,25 @@ async fn executing_entry_for_prefers_the_watch_over_the_backlog_for_duplicate_id
     // Same flat id: the second watch takes the slot.
     backlog.watch_execution(&owner_entry).await;
 
-    let watches = backlog.get_execution_watchers(evicted.target_chain).await;
-    assert_eq!(watches.len(), 1, "one flat id, one watch slot");
-    assert_eq!(watches[&evicted.id].0, watch_owner.sign_id());
-
-    // Watch-first precedence: even by the evicted entry's keys, the
-    // lookup answers with the watched entry and consumes the watch.
+    // By the owner's keys the watch answers and is consumed.
     let resolved = backlog
         .executing_entry_for(
-            evicted.target_chain,
-            &evicted.id,
-            evicted.source_chain,
-            &evicted.sign_id(),
+            watch_owner.target_chain,
+            &watch_owner.id,
+            watch_owner.source_chain,
+            &watch_owner.sign_id(),
         )
         .await
-        .expect("must resolve");
+        .expect("the owner resolves through its watch");
     assert_eq!(resolved.sign_id(), watch_owner.sign_id());
     assert!(
         resolved.awaiting_execution().is_some(),
         "the watch arm restores the wait measurement"
     );
-    assert!(
-        backlog
-            .get_execution_watchers(evicted.target_chain)
-            .await
-            .is_empty(),
-        "the lookup consumed the watch"
-    );
 
-    // With the watch gone, the same keys fall to the backlog arm.
+    // By the evicted entry's keys the displaced watch stays and the
+    // backlog arm answers the evicted entry itself.
+    backlog.watch_execution(&owner_entry).await;
     let resolved = backlog
         .executing_entry_for(
             evicted.target_chain,
@@ -1237,12 +1229,19 @@ async fn executing_entry_for_prefers_the_watch_over_the_backlog_for_duplicate_id
             &evicted.sign_id(),
         )
         .await
-        .expect("must resolve through the backlog");
+        .expect("the evicted entry resolves through the backlog");
     assert_eq!(resolved.sign_id(), evicted.sign_id());
     assert_eq!(
         resolved.awaiting_execution(),
         None,
         "the backlog arm has no watch to measure from"
+    );
+    let watches = backlog.get_execution_watchers(evicted.target_chain).await;
+    assert_eq!(watches.len(), 1, "one flat id, one watch slot");
+    assert_eq!(
+        watches[&evicted.id].0,
+        watch_owner.sign_id(),
+        "the owner's watch survives the evicted entry's confirmation"
     );
 }
 
@@ -1279,7 +1278,12 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
     backlog.insert_mock_executing(&restored).await;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
     backlog
-        .unwatch_execution(restored.target_chain, &restored.id)
+        .unwatch_execution(
+            restored.target_chain,
+            &restored.id,
+            restored.source_chain,
+            &restored.sign_id(),
+        )
         .await
         .unwrap();
     backlog.insert_mock_executing(&stale).await;
@@ -1291,22 +1295,42 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
     backlog.regress(&checkpoint).await.unwrap();
 
     let entry = backlog
-        .unwatch_execution(retained.target_chain, &retained.id)
+        .unwatch_execution(
+            retained.target_chain,
+            &retained.id,
+            retained.source_chain,
+            &retained.sign_id(),
+        )
         .await
         .expect("matching execution must remain watched");
     assert_eq!(entry.respond_observed_at(), Some(observed_at));
     assert!(entry.awaiting_execution().unwrap() >= std::time::Duration::from_secs(120));
     let entry = backlog
-        .unwatch_execution(restored.target_chain, &restored.id)
+        .unwatch_execution(
+            restored.target_chain,
+            &restored.id,
+            restored.source_chain,
+            &restored.sign_id(),
+        )
         .await
         .expect("checkpoint execution must be re-watched");
     assert_eq!(entry.respond_observed_at(), None);
     assert!(backlog
-        .unwatch_execution(stale.target_chain, &stale.id)
+        .unwatch_execution(
+            stale.target_chain,
+            &stale.id,
+            stale.source_chain,
+            &stale.sign_id()
+        )
         .await
         .is_none());
     let entry = backlog
-        .unwatch_execution(unrelated.target_chain, &unrelated.id)
+        .unwatch_execution(
+            unrelated.target_chain,
+            &unrelated.id,
+            unrelated.source_chain,
+            &unrelated.sign_id(),
+        )
         .await
         .expect("other source chain must remain watched");
     assert_eq!(entry.respond_observed_at(), unrelated_observed_at);
@@ -1326,7 +1350,7 @@ async fn recovered_executing_entry_has_no_wait_start() {
     recovered.recover_by_checkpoint(&checkpoint).await;
 
     let entry = recovered
-        .unwatch_execution(tx.target_chain, &tx.id)
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
         .await
         .expect("recovery must re-register the watch");
     assert_eq!(

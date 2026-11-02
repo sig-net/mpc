@@ -235,7 +235,9 @@ async fn process_execution_confirmed_resolves_a_displaced_watch_by_sign_id() {
     backlog.insert_mock_executing(&tx).await;
     // A flat Tron id: an earlier confirmation consumed this entry's watch
     // while the entry itself is still Executing.
-    backlog.unwatch_execution(tx.target_chain, &tx.id).await;
+    backlog
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
@@ -2188,7 +2190,7 @@ async fn midnight_response_settles_entries_that_missed_the_outcome() {
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
-                .unwatch_execution(Chain::Ethereum, &tx.id)
+                .unwatch_execution(Chain::Ethereum, &tx.id, tx.source_chain, &tx.sign_id())
                 .await
                 .unwrap()
                 .park()
@@ -2465,7 +2467,7 @@ async fn unobserved_response_settles_when_it_verifies() {
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
-                .unwatch_execution(Chain::Ethereum, &tx.id)
+                .unwatch_execution(Chain::Ethereum, &tx.id, tx.source_chain, &tx.sign_id())
                 .await
                 .unwrap()
                 .park()

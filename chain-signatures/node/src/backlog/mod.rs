@@ -142,8 +142,19 @@ impl ExecutionWatchers {
         self.watchers.insert(watch.tx.id, watch)
     }
 
-    fn remove(&mut self, tx_id: &BidirectionalTxId) -> Option<ExecutionWatch> {
-        self.watchers.remove(tx_id)
+    /// Removes the watch only if it belongs to `(source_chain,
+    /// sign_id)`; a displaced foreign watch under the same flat id
+    /// survives for its own confirmation.
+    fn remove_owned(
+        &mut self,
+        tx_id: &BidirectionalTxId,
+        source_chain: Chain,
+        sign_id: &SignId,
+    ) -> Option<ExecutionWatch> {
+        let own = self.watchers.get(tx_id).is_some_and(|watch| {
+            watch.tx.source_chain == source_chain && watch.tx.sign_id() == *sign_id
+        });
+        own.then(|| self.watchers.remove(tx_id)).flatten()
     }
 
     fn all(&self) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
@@ -388,16 +399,20 @@ impl Backlog {
         watchers.insert(entry.execution_watch());
     }
 
-    /// Stop watching for execution of a bidirectional transaction on the destination chain
-    /// and retrieve the executing backlog entry from its source chain.
+    /// Stop watching an execution and retrieve the backlog entry the
+    /// watch belongs to — by flat id and the entry's own source and
+    /// sign id; a watch under the same flat id but a different entry
+    /// stays for its own confirmation.
     pub async fn unwatch_execution(
         &self,
         chain: Chain,
         tx_id: &BidirectionalTxId,
+        source_chain: Chain,
+        sign_id: &SignId,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
         let watch = {
             let mut watchers = self.watchers(&chain).write().await;
-            watchers.remove(tx_id)?
+            watchers.remove_owned(tx_id, source_chain, sign_id)?
         };
 
         // Restore the observation time absent from backlog status.
@@ -406,8 +421,8 @@ impl Backlog {
             .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
     }
 
-    /// The executing entry a confirmation attests:
-    /// by its watch, or by source and sign id from the backlog.
+    /// The executing entry a confirmation attests: by the entry's own
+    /// watch, or by source and sign id from the backlog.
     pub async fn executing_entry_for(
         &self,
         target_chain: Chain,
@@ -415,7 +430,10 @@ impl Backlog {
         source_chain: Chain,
         sign_id: &SignId,
     ) -> Option<SignEntry<Bidirectional<Executing>>> {
-        if let Some(entry) = self.unwatch_execution(target_chain, tx_id).await {
+        if let Some(entry) = self
+            .unwatch_execution(target_chain, tx_id, source_chain, sign_id)
+            .await
+        {
             return Some(entry);
         }
         self.get_by::<Bidirectional<Executing>>(source_chain, sign_id)

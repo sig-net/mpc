@@ -491,7 +491,9 @@ async fn settle_unobserved(
 ) -> anyhow::Result<()> {
     let sign_id = entry.sign_id();
     // An unviable transaction is never mined, so no execution event would retire its watch.
-    ctx.backlog.unwatch_execution(tx.target_chain, &tx.id).await;
+    ctx.backlog
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .await;
     entry.complete().await;
     tracing::info!(
         ?sign_id,

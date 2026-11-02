@@ -124,7 +124,7 @@ impl MockStateManager {
             .retain(|tx| tx.sign_id() != sign_id);
     }
 
-    /// Removes the watch, as `Backlog::unwatch_execution` does.
+    /// Removes the watch under the flat id.
     pub async fn remove_execution_watch(&self, chain: Chain, tx_id: &BidirectionalTxId) {
         if let Some(watches) = self.watchers.write().await.get_mut(&chain) {
             watches.remove(tx_id);
