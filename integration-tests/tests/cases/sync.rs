@@ -42,10 +42,8 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
         .disable_prestockpile()
         .with_config(|cfg| {
             // Need these to be set otherwise we will be constantly taking our mock triples:
-            cfg.protocol.triple.min_triples = 1;
-            cfg.protocol.triple.max_triples = 1;
-            cfg.protocol.presignature.min_presignatures = 1;
-            cfg.protocol.presignature.max_presignatures = 1;
+            cfg.protocol.min_mine_triple_pairs = 1;
+            cfg.protocol.min_mine_presignatures = 1;
         })
         .await
         .unwrap();
@@ -162,10 +160,8 @@ async fn test_state_sync_e2e() {
     let _cluster = spawner
         .disable_prestockpile()
         .with_config(|cfg| {
-            cfg.protocol.triple.min_triples = 1;
-            cfg.protocol.triple.max_triples = 1;
-            cfg.protocol.presignature.min_presignatures = 1;
-            cfg.protocol.presignature.max_presignatures = 1;
+            cfg.protocol.min_mine_triple_pairs = 1;
+            cfg.protocol.min_mine_presignatures = 1;
         })
         .await
         .unwrap();

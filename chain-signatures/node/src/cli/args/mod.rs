@@ -3,3 +3,4 @@ pub mod ethereum;
 pub mod hydration;
 pub mod midnight;
 pub mod solana;
+pub mod tron;

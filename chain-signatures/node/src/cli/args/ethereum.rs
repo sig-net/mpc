@@ -44,27 +44,6 @@ pub struct EthArgs {
 }
 
 impl EthArgs {
-    pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(10);
-        if let Some(eth_account_sk) = self.eth_account_sk {
-            args.extend([
-                "--eth-account-sk".to_string(),
-                eth_account_sk.expose_secret().to_string(),
-            ]);
-        }
-        if let Some(eth_execution_rpc_http_url) = self.eth_execution_rpc_http_url {
-            args.extend([
-                "--eth-execution-rpc-http-url".to_string(),
-                eth_execution_rpc_http_url,
-            ]);
-        }
-        if let Some(eth_contract_address) = self.eth_contract_address {
-            args.extend(["--eth-contract-address".to_string(), eth_contract_address]);
-        }
-        args.extend(["--eth-network".to_string(), self.eth_network]);
-        args
-    }
-
     pub fn into_config(self) -> anyhow::Result<Option<EthConfig>> {
         let network = self.eth_network;
         let Some(account_sk) = self.eth_account_sk else {
@@ -99,22 +78,5 @@ impl EthArgs {
             publisher: Default::default(),
             indexer: Default::default(),
         }))
-    }
-
-    pub fn from_config(config: Option<EthConfig>) -> Self {
-        match config {
-            Some(config) => Self {
-                eth_account_sk: Some(hex::encode(config.account_sk.credential().to_bytes()).into()),
-                eth_execution_rpc_http_url: Some(config.execution_rpc_http_url.to_string()),
-                eth_contract_address: Some(config.contract_address.to_string()),
-                eth_network: config.network,
-            },
-            _ => Self {
-                eth_account_sk: None,
-                eth_execution_rpc_http_url: None,
-                eth_contract_address: None,
-                eth_network: DEFAULT_ETH_NETWORK.to_string(),
-            },
-        }
     }
 }
