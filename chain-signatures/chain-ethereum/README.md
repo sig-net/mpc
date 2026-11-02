@@ -32,10 +32,10 @@ plumbed through from the node's config, not constructed by hand.
 
 ### Stall budget
 
-`STALL_TIMEOUT_ETHEREUM` (chain-config env var, default `2100s` — 30-minute
+The `ChainConfig` stall budget (`stall_timeout_secs`, 2100s: 30-minute
 finality plus a 5-minute buffer) is the supervisor watchdog budget: restart
 the indexer when no `ChainEvent::Block` is dispatched within it. Sibling
-chains expose the same knob; see `ChainConfig` in
+chains have their own budgets; see `ChainConfig` in
 `chain-signatures/primitives/src/chain.rs`.
 
 ### Catchup fetch tuning

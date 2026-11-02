@@ -11,8 +11,6 @@ pub struct Config {
     /// Protocol timeouts. Fixed in production; the in-process test fixture
     /// shortens them.
     pub timeouts: Timeouts,
-    /// This node's own keys, never shared with anyone else.
-    pub network: NetworkConfig,
 }
 
 /// How long each protocol waits before giving up.
@@ -37,17 +35,8 @@ impl Default for Timeouts {
 }
 
 impl Config {
-    pub fn channel(network: NetworkConfig) -> (watch::Sender<Self>, watch::Receiver<Self>) {
-        let config = Self::new(network);
-        watch::channel(config)
-    }
-
-    pub fn new(network: NetworkConfig) -> Self {
-        Self {
-            protocol: ProtocolConfig::default(),
-            timeouts: Timeouts::default(),
-            network,
-        }
+    pub fn channel() -> (watch::Sender<Self>, watch::Receiver<Self>) {
+        watch::channel(Self::default())
     }
 
     /// Returns whether the protocol config actually changed, so that the
@@ -93,12 +82,12 @@ impl Default for NetworkConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, NetworkConfig};
+    use super::Config;
     use mpc_contract::config::ProtocolConfig;
 
     #[test]
     fn test_update_returns_whether_protocol_changed() {
-        let mut config = Config::new(NetworkConfig::default());
+        let mut config = Config::default();
 
         // Same config as current => no change, no notification.
         assert!(!config.update(ProtocolConfig::default()));

@@ -117,71 +117,7 @@ pub enum Cli {
         /// Logging options
         #[command(flatten)]
         log_options: logs::Options,
-        #[command(flatten)]
-        mesh_options: mesh::Options,
     },
-}
-
-impl Cli {
-    pub fn into_str_args(self) -> Vec<String> {
-        match self {
-            Cli::Start {
-                near_rpc,
-                account_id,
-                env,
-                mpc_contract_id,
-                account_sk,
-                web_port,
-                cipher_sk,
-                sign_sk,
-                eth,
-                sol,
-                hydration,
-                canton,
-                midnight,
-                tron,
-                my_address,
-                storage_options,
-                log_options,
-                mesh_options,
-            } => {
-                let mut args = vec![
-                    "start".to_string(),
-                    "--near-rpc".to_string(),
-                    near_rpc,
-                    "--mpc-contract-id".to_string(),
-                    mpc_contract_id.to_string(),
-                    "--account-id".to_string(),
-                    account_id.to_string(),
-                    "--env".to_string(),
-                    env,
-                    "--account-sk".to_string(),
-                    account_sk.to_string(),
-                    "--cipher-sk".to_string(),
-                    cipher_sk,
-                    "--redis-url".to_string(),
-                    storage_options.redis_url.to_string(),
-                ];
-                args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
-                if let Some(my_address) = my_address {
-                    args.extend(["--my-address".to_string(), my_address.to_string()]);
-                }
-
-                args.extend(["--web-port".to_string(), web_port.to_string()]);
-
-                args.extend(eth.into_str_args());
-                args.extend(sol.into_str_args());
-                args.extend(hydration.into_str_args());
-                args.extend(canton.into_str_args());
-                args.extend(midnight.into_str_args());
-                args.extend(tron.into_str_args());
-                args.extend(storage_options.into_str_args());
-                args.extend(log_options.into_str_args());
-                args.extend(mesh_options.into_str_args());
-                args
-            }
-        }
-    }
 }
 
 pub async fn run(cmd: Cli) -> anyhow::Result<()> {
@@ -204,7 +140,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             my_address,
             storage_options,
             log_options,
-            mesh_options,
         } => {
             let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
@@ -268,7 +203,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher,
                 contract_state_tx,
                 sync_report_tx,
-            } = MeshHandles::new(mesh_options, &account_id);
+            } = MeshHandles::new(&account_id);
 
             let stack = ChainStack::new(ChainConfigs::from_args(
                 eth, sol, hydration, canton, midnight, tron,
@@ -658,10 +593,15 @@ struct MeshHandles {
 }
 
 impl MeshHandles {
-    fn new(mesh_options: mesh::Options, account_id: &AccountId) -> Self {
+    fn new(account_id: &AccountId) -> Self {
         let node_client = NodeClient::new();
         let (sync_report_tx, sync_report_rx) = SyncTask::sync_report_channel();
-        let mesh = Mesh::new(&node_client, mesh_options, account_id, sync_report_rx);
+        let mesh = Mesh::new(
+            &node_client,
+            mesh::PING_INTERVAL,
+            account_id,
+            sync_report_rx,
+        );
         let mesh_state = mesh.watch();
         let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(account_id);
         Self {
@@ -801,14 +741,14 @@ impl ProtocolHandles {
         rpc_channel: RpcChannel,
         sync_report_tx: SyncReportSender,
     ) -> Self {
-        let config = Config::new(network);
-        let (config_tx, config_rx) = watch::channel(config);
+        let (config_tx, config_rx) = Config::channel();
         let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
         let node = Node::new();
         let node_watcher = node.watch();
 
         let message_channel = MessageChannel::spawn(
             node_client.clone(),
+            network,
             config_rx.clone(),
             contract_watcher.clone(),
         )
@@ -1297,10 +1237,10 @@ mod tests {
     }
 
     /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
-    /// `--midnight-*` flags, so a set variable can silently backfill a flag
-    /// `into_str_args` dropped and turn the round-trip test green. Those
-    /// fixtures use the values a developer running a local stack exports,
-    /// which makes that the likely case rather than a remote one.
+    /// `--midnight-*` flags, so a set variable can silently backfill a flag a
+    /// test left out. Those fixtures use the values a developer running a
+    /// local stack exports, which makes that the likely case rather than a
+    /// remote one.
     pub(super) fn assert_midnight_env_unset() {
         for var in [
             "MPC_MIDNIGHT_NODE_URL",
@@ -1321,105 +1261,6 @@ mod tests {
         }
     }
 
-    /// Dockerized test nodes receive their whole configuration as CLI strings
-    /// rebuilt through `Cli::into_str_args`. If Midnight were flattened into
-    /// `Cli::Start` but missing from that extension, its config would be
-    /// accepted on the command line and then silently dropped on
-    /// reconstruction.
-    #[test]
-    fn into_str_args_forwards_midnight() {
-        assert_midnight_env_unset();
-
-        let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
-        let sign_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign").to_string();
-        let central_address = "ab".repeat(32);
-        let funding_seed = "0f".repeat(32);
-        let intent_gen_command = r#"["midnight-publisher"]"#;
-        let argv = [
-            "mpc-node",
-            "start",
-            "--near-rpc",
-            "http://127.0.0.1:3030",
-            "--mpc-contract-id",
-            "mpc.test.near",
-            "--account-id",
-            "test.near",
-            "--account-sk",
-            &account_sk,
-            "--sign-sk",
-            &sign_sk,
-            "--cipher-sk",
-            "cipher",
-            "--env",
-            "unit-tests",
-            "--gcp-project-id",
-            "project",
-            "--redis-url",
-            "redis://127.0.0.1:6379",
-            "--midnight-node-url",
-            "http://127.0.0.1:9944",
-            "--midnight-central-address",
-            &central_address,
-            "--midnight-funding-seed",
-            &funding_seed,
-            "--midnight-intent-gen-command",
-            intent_gen_command,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
-            "--midnight-indexer-ws-url",
-            "ws://127.0.0.1:8088/api/v3/graphql/ws",
-            "--midnight-output-storage-bucket",
-            "midnight-results",
-            "--midnight-output-storage-prefix",
-            "staging/testnet",
-            "--midnight-output-storage-timeout-secs",
-            "47",
-            "--tron-endpoint",
-            "https://api.trongrid.io",
-            "--tron-api-key",
-            "tron-key",
-            "--tron-poll-interval-ms",
-            "250",
-        ];
-        let out = Cli::try_parse_from(argv).unwrap().into_str_args();
-
-        for expected in [
-            "--midnight-node-url",
-            "http://127.0.0.1:9944",
-            "--midnight-central-address",
-            central_address.as_str(),
-            "--midnight-funding-seed",
-            funding_seed.as_str(),
-            "--midnight-intent-gen-command",
-            intent_gen_command,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
-            "--midnight-indexer-ws-url",
-            "ws://127.0.0.1:8088/api/v3/graphql/ws",
-            "--midnight-output-storage-bucket",
-            "midnight-results",
-            "--midnight-output-storage-prefix",
-            "staging/testnet",
-            "--midnight-output-storage-timeout-secs",
-            "47",
-            "--tron-endpoint",
-            "https://api.trongrid.io",
-            "--tron-api-key",
-            "tron-key",
-            "--tron-poll-interval-ms",
-            "250",
-        ] {
-            assert!(
-                out.contains(&expected.to_string()),
-                "into_str_args dropped {expected}"
-            );
-        }
-    }
-
     /// The Midnight config gate: with no Midnight flags supplied, the chain
     /// must be entirely absent from the node's wiring. `spawn_indexers` reads
     /// the same `chains.midnight` field, so `None` here also means no indexer
@@ -1429,12 +1270,12 @@ mod tests {
         assert_midnight_env_unset();
 
         let chains = ChainConfigs::from_args(
-            EthArgs::from_config(None),
-            SolArgs::from_config(None),
-            HydrationArgs::from_config(None),
-            CantonArgs::from_config(None),
-            MidnightArgs::from_config(None),
-            TronArgs::from_config(None),
+            EthArgs::parse_from(["test"]),
+            SolArgs::parse_from(["test"]),
+            HydrationArgs::parse_from(["test"]),
+            CantonArgs::parse_from(["test"]),
+            MidnightArgs::parse_from(["test"]),
+            TronArgs::parse_from(["test"]),
         )
         .unwrap();
 
@@ -1467,15 +1308,12 @@ mod tests {
     #[test]
     fn from_args_routes_a_configured_tron() {
         let chains = ChainConfigs::from_args(
-            EthArgs::from_config(None),
-            SolArgs::from_config(None),
-            HydrationArgs::from_config(None),
-            CantonArgs::from_config(None),
-            MidnightArgs::from_config(None),
-            TronArgs::from_config(Some(TronConfig {
-                endpoint: Url::parse("https://api.trongrid.io").unwrap(),
-                ..TronConfig::default()
-            })),
+            EthArgs::parse_from(["test"]),
+            SolArgs::parse_from(["test"]),
+            HydrationArgs::parse_from(["test"]),
+            CantonArgs::parse_from(["test"]),
+            MidnightArgs::parse_from(["test"]),
+            TronArgs::parse_from(["test", "--tron-endpoint", "https://api.trongrid.io"]),
         )
         .unwrap();
 
