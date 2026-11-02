@@ -474,9 +474,13 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             .process_sign_requests(Chain::Solana, &[sign_request(seed)])
             .await;
 
+        // Count publishes only: checkpoint votes are RPC actions too, and one
+        // of those must not stand in for a stuck request.
         match tokio::time::timeout(
             per_request_timeout,
-            network.wait_for_actions(completed as usize + 1),
+            network.wait_for_actions_matching(completed as usize + 1, |action| {
+                action.contains("RpcAction::Publish")
+            }),
         )
         .await
         {
