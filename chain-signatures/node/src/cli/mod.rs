@@ -286,7 +286,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 checkpoints_tx,
             ));
             tasks.spawn(mesh.run(contract_watcher.clone()));
-            let system_handle = spawn_system_metrics().await;
+            // A blocking loop; `main` shuts the runtime down in the background
+            // so it does not keep the process alive.
+            spawn_system_metrics().await;
             tasks.spawn(protocol.run(
                 node,
                 near_governance_client,
@@ -326,7 +328,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 _ => anyhow::anyhow!("core task exited"),
             };
             tracing::error!(?err, "core task ended, shutting down");
-            system_handle.abort();
             tasks.shutdown().await;
             Err(err)
         }
