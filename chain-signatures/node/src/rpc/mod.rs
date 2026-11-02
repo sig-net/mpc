@@ -566,7 +566,6 @@ impl RpcExecutor {
         let in_flight: Arc<DashSet<(Chain, SignId, PublishKind)>> = Arc::new(DashSet::new());
         loop {
             let Some(action) = action_rx.recv().await else {
-                tracing::error!("rpc channel closed unexpectedly");
                 return;
             };
 
