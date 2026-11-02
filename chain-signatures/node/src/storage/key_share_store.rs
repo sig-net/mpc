@@ -41,9 +41,9 @@ impl KeyShareStore {
     ) -> anyhow::Result<Self> {
         #[cfg(feature = "test-feature")]
         if let Some(base_path) = &opts.sk_share_local_path {
-            let path = format!("{base_path}-{account_id}");
-            tracing::info!(%path, "keeping the key share in a file");
-            return Ok(Self::File(FileStore::new(&path)));
+            let path = PathBuf::from(format!("{base_path}-{account_id}"));
+            tracing::info!(path = %path.display(), "keeping the key share in a file");
+            return Ok(Self::File(FileStore { path }));
         }
         let secret_id = opts
             .sk_share_secret_id
@@ -142,12 +142,6 @@ pub struct FileStore {
 
 #[cfg(any(test, feature = "test-feature"))]
 impl FileStore {
-    fn new(path: &str) -> Self {
-        Self {
-            path: PathBuf::from(path),
-        }
-    }
-
     async fn store(&mut self, data: &KeyShareRecord) -> Result<(), KeyShareStoreError> {
         let json_bytes = serde_json::to_vec(data)?;
         // Write to a temporary file first, then rename it into place atomically.
