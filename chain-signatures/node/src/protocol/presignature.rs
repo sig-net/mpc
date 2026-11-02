@@ -396,7 +396,7 @@ impl PresignatureSpawner {
         self.ongoing.len()
     }
 
-    pub fn len_introduced(&self) -> usize {
+    pub fn len_mine_generations(&self) -> usize {
         self.posits.len_proposed() + self.ongoing_owned.len()
     }
 
@@ -549,17 +549,13 @@ impl PresignatureSpawner {
     }
 
     /// Generate new presignatures if this node owns fewer than the per-node minimum
-    /// (`min_presignatures`) and the network-wide total hasn't reached the cap
-    /// (`max_presignatures`).
+    /// (`min_mine_presignatures`).
     async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
         if should_generate(
             self.stock,
-            self.ongoing.len(),
-            self.len_introduced(),
-            cfg.presignature.min_presignatures as usize,
-            cfg.presignature.max_presignatures as usize,
-            cfg.max_concurrent_introduction as usize,
-            cfg.max_concurrent_generation as usize,
+            self.len_mine_generations(),
+            cfg.min_mine_presignatures as usize,
+            cfg.max_mine_generations as usize,
         ) {
             tracing::debug!("not enough presignatures, generating");
             self.propose_posit(active).await;
@@ -731,6 +727,7 @@ impl PresignatureSpawner {
         let mut posits = self.msg.subscribe_presignature_posit().await;
 
         let mut protocol = cfg.borrow().protocol.clone();
+        let timeout = cfg.borrow().timeouts.presignature_generation;
         let mut active = mesh_state.borrow().active().keys_vec();
 
         self.refresh_stock().await;
@@ -745,7 +742,6 @@ impl PresignatureSpawner {
                             );
                             continue;
                         };
-                        let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
                         self.start_generation(id, positor, participants, timeout).await;
                     }
                     self.refresh_stock().await;
@@ -755,7 +751,6 @@ impl PresignatureSpawner {
                         .set(self.ongoing.len() as i64);
                 }
                 Some((id, from, action)) = posits.recv() => {
-                    let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
                     self.process_posit(id, from, action, timeout).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
