@@ -92,6 +92,11 @@ jobs:
       - name: Midnight output storage tests
         run: cargo test -p mpc-chain-midnight --lib --features sandbox output_storage::tests
 
+      # The node gates its test-only stores and flags behind test-feature;
+      # their unit tests only exist with the feature on.
+      - name: Node unit tests with test-feature
+        run: cargo test -p mpc-node --lib --features test-feature
+
       - name: Check build left no uncommitted changes
         if: ${{ !cancelled() }}
         run: git diff --text --exit-code
