@@ -14,9 +14,6 @@ const PUBLISHER_NETWORK_IDS: &[&str] = &["undeployed", "stagenet", "preview", "p
 pub struct RpcConfig {
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
-    /// Must exceed the node's own response cap (15 MiB by default) so an oversized
-    /// state arrives as the server's refusal, not a frame that kills the client.
-    pub max_response_size: u32,
     pub retry: RetryConfig,
 }
 
@@ -25,7 +22,6 @@ impl Default for RpcConfig {
         Self {
             connect_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(10),
-            max_response_size: 32 * 1024 * 1024,
             retry: RetryConfig {
                 min_delay: Duration::from_millis(500),
                 max_delay: Duration::from_secs(10),
