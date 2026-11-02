@@ -11,6 +11,7 @@ use mpc_crypto::kdf::check_ec_signature;
 use mpc_crypto::{derive_epsilon_sol, derive_key, near_public_key_to_affine_point};
 use mpc_node::sign_bidirectional::public_key_to_address;
 use mpc_primitives::Chain;
+use mpc_primitives::ScalarExt as _;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use reqwest::Client;
 use rlp::RlpStream;
@@ -190,6 +191,30 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         read_outcome.request_id, sol_outcome.request_id,
         "respond bidirectional event request_id mismatch"
     );
+
+    // Verify the response the way a client would, from what the network
+    // publishes rather than from node internals: the response is signed with
+    // the sender's "solana response key", over keccak(request_id || output).
+    let response_epsilon = derive_epsilon_sol(key_version, &signer_account, "solana response key")?;
+    let response_pk = derive_key(root_pk, response_epsilon);
+    let response_hash: [u8; 32] = keccak256(
+        [
+            read_outcome.request_id.as_slice(),
+            read_outcome.serialized_output.as_slice(),
+        ]
+        .concat(),
+    )
+    .into();
+    let response_scalar = k256::Scalar::from_bytes(response_hash)
+        .context("response hash does not reduce to a scalar")?;
+    check_ec_signature(
+        &response_pk,
+        &read_outcome.signature.big_r,
+        &read_outcome.signature.s,
+        response_scalar,
+        read_outcome.recovery_id,
+    )
+    .context("mpc response signature did not verify against the response key")?;
 
     Ok(())
 }
