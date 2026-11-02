@@ -50,6 +50,7 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
 use url::Url;
 
 /// Capacity of the SignCommand channel that feeds chain sign events from the
@@ -118,66 +119,6 @@ pub enum Cli {
         #[command(flatten)]
         log_options: logs::Options,
     },
-}
-
-impl Cli {
-    pub fn into_str_args(self) -> Vec<String> {
-        match self {
-            Cli::Start {
-                near_rpc,
-                account_id,
-                env,
-                mpc_contract_id,
-                account_sk,
-                web_port,
-                cipher_sk,
-                sign_sk,
-                eth,
-                sol,
-                hydration,
-                canton,
-                midnight,
-                tron,
-                my_address,
-                storage_options,
-                log_options,
-            } => {
-                let mut args = vec![
-                    "start".to_string(),
-                    "--near-rpc".to_string(),
-                    near_rpc,
-                    "--mpc-contract-id".to_string(),
-                    mpc_contract_id.to_string(),
-                    "--account-id".to_string(),
-                    account_id.to_string(),
-                    "--env".to_string(),
-                    env,
-                    "--account-sk".to_string(),
-                    account_sk.to_string(),
-                    "--cipher-sk".to_string(),
-                    cipher_sk,
-                    "--redis-url".to_string(),
-                    storage_options.redis_url.to_string(),
-                ];
-                args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
-                if let Some(my_address) = my_address {
-                    args.extend(["--my-address".to_string(), my_address.to_string()]);
-                }
-
-                args.extend(["--web-port".to_string(), web_port.to_string()]);
-
-                args.extend(eth.into_str_args());
-                args.extend(sol.into_str_args());
-                args.extend(hydration.into_str_args());
-                args.extend(canton.into_str_args());
-                args.extend(midnight.into_str_args());
-                args.extend(tron.into_str_args());
-                args.extend(storage_options.into_str_args());
-                args.extend(log_options.into_str_args());
-                args
-            }
-        }
-    }
 }
 
 pub async fn run(cmd: Cli) -> anyhow::Result<()> {
@@ -336,24 +277,25 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             .await;
 
             tracing::info!("protocol initialized");
-            tokio::spawn(sync_task.run());
-            tokio::spawn(rpc_executor.run(
+            let mut tasks = JoinSet::new();
+            tasks.spawn(sync_task.run());
+            tasks.spawn(rpc_executor.run(
                 backlog.clone(),
                 contract_state_tx,
                 config_tx.clone(),
                 checkpoints_tx,
             ));
-
-            tokio::spawn(mesh.run(contract_watcher.clone()));
-            let system_handle = spawn_system_metrics().await;
-            let protocol_handle = tokio::spawn(protocol.run(
+            tasks.spawn(mesh.run(contract_watcher.clone()));
+            // A blocking loop; `main` shuts the runtime down in the background
+            // so it does not keep the process alive.
+            spawn_system_metrics().await;
+            tasks.spawn(protocol.run(
                 node,
                 near_governance_client,
                 contract_watcher.clone(),
                 mesh_state.clone(),
             ));
-            tracing::info!("protocol thread spawned");
-            let web_handle = tokio::spawn(web::run(
+            tasks.spawn(web::run(
                 web_port,
                 message_channel,
                 node_watcher,
@@ -366,6 +308,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             ));
 
             spawn_indexers(
+                &mut tasks,
                 stack,
                 sign_tx,
                 rpc_channel.clone(),
@@ -376,15 +319,28 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 checkpoints_rx,
             )
             .await;
-            tracing::info!("protocol http server spawned");
-            protocol_handle.await?;
-            web_handle.await?;
-            system_handle.abort();
-            tracing::info!("spinning down");
-        }
-    };
+            tracing::info!("node tasks spawned");
 
-    Ok(())
+            // A core task never returns in normal operation, so the first to finish ends the node.
+            let err = match tasks.join_next().await {
+                Some(Ok(Err(err))) => err,
+                Some(Err(join)) => anyhow::Error::from(join),
+                _ => anyhow::anyhow!("core task exited"),
+            };
+            tracing::error!(?err, "core task ended, shutting down");
+            tasks.abort_all();
+            while let Some(result) = tasks.join_next().await {
+                match result {
+                    Ok(Err(err)) => tracing::error!(?err, "core task also failed"),
+                    Err(join) if !join.is_cancelled() => {
+                        tracing::error!(?join, "core task also failed")
+                    }
+                    _ => {}
+                }
+            }
+            Err(err)
+        }
+    }
 }
 
 fn configuration_digest(
@@ -851,6 +807,7 @@ impl ProtocolHandles {
 
 #[allow(clippy::too_many_arguments)]
 async fn spawn_indexers(
+    tasks: &mut JoinSet<anyhow::Result<()>>,
     stack: ChainStack,
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
@@ -910,7 +867,7 @@ async fn spawn_indexers(
         {
             Ok(eth_indexer) => {
                 tracing::info!("ethereum indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     eth_indexer,
                     StreamContext::new(
                         backlog.clone(),
@@ -941,7 +898,7 @@ async fn spawn_indexers(
         ) {
             Ok(sol_indexer) => {
                 tracing::info!("solana indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     sol_indexer,
                     StreamContext::new(
                         backlog.clone(),
@@ -969,7 +926,7 @@ async fn spawn_indexers(
         let hydration_indexer =
             HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
         tracing::info!("hydration indexer created successfully");
-        tokio::spawn(run_supervised(
+        tasks.spawn(run_supervised(
             hydration_indexer,
             StreamContext::new(
                 backlog.clone(),
@@ -997,7 +954,7 @@ async fn spawn_indexers(
         {
             Ok(canton_indexer) => {
                 tracing::info!("canton indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     canton_indexer,
                     StreamContext::new(
                         backlog.clone(),
@@ -1023,7 +980,15 @@ async fn spawn_indexers(
         // TODO: read-side gating - this indexer's reads don't share the
         // chain's cooldown gate yet
         tracing::info!("Midnight indexer waiting for the network public key");
-        let root_pk = contract_watcher.wait_public_key().await;
+        // Fails only when the contract watcher is gone, and then the process
+        // is already ending.
+        let root_pk = match contract_watcher.wait_public_key().await {
+            Ok(pk) => pk,
+            Err(err) => {
+                tracing::error!(?err, "midnight indexer: no network public key");
+                return;
+            }
+        };
         match MidnightIndexer::new(
             midnight_config,
             backlog.clone(),
@@ -1034,7 +999,7 @@ async fn spawn_indexers(
         {
             Ok(midnight_indexer) => {
                 tracing::info!("midnight indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     midnight_indexer,
                     StreamContext::new(
                         backlog.clone(),
@@ -1297,10 +1262,10 @@ mod tests {
     }
 
     /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
-    /// `--midnight-*` flags, so a set variable can silently backfill a flag
-    /// `into_str_args` dropped and turn the round-trip test green. Those
-    /// fixtures use the values a developer running a local stack exports,
-    /// which makes that the likely case rather than a remote one.
+    /// `--midnight-*` flags, so a set variable can silently backfill a flag a
+    /// test left out. Those fixtures use the values a developer running a
+    /// local stack exports, which makes that the likely case rather than a
+    /// remote one.
     pub(super) fn assert_midnight_env_unset() {
         for var in [
             "MPC_MIDNIGHT_NODE_URL",
@@ -1321,105 +1286,6 @@ mod tests {
         }
     }
 
-    /// Dockerized test nodes receive their whole configuration as CLI strings
-    /// rebuilt through `Cli::into_str_args`. If Midnight were flattened into
-    /// `Cli::Start` but missing from that extension, its config would be
-    /// accepted on the command line and then silently dropped on
-    /// reconstruction.
-    #[test]
-    fn into_str_args_forwards_midnight() {
-        assert_midnight_env_unset();
-
-        let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
-        let sign_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign").to_string();
-        let central_address = "ab".repeat(32);
-        let funding_seed = "0f".repeat(32);
-        let intent_gen_command = r#"["midnight-publisher"]"#;
-        let argv = [
-            "mpc-node",
-            "start",
-            "--near-rpc",
-            "http://127.0.0.1:3030",
-            "--mpc-contract-id",
-            "mpc.test.near",
-            "--account-id",
-            "test.near",
-            "--account-sk",
-            &account_sk,
-            "--sign-sk",
-            &sign_sk,
-            "--cipher-sk",
-            "cipher",
-            "--env",
-            "unit-tests",
-            "--gcp-project-id",
-            "project",
-            "--redis-url",
-            "redis://127.0.0.1:6379",
-            "--midnight-node-url",
-            "http://127.0.0.1:9944",
-            "--midnight-central-address",
-            &central_address,
-            "--midnight-funding-seed",
-            &funding_seed,
-            "--midnight-intent-gen-command",
-            intent_gen_command,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
-            "--midnight-indexer-ws-url",
-            "ws://127.0.0.1:8088/api/v3/graphql/ws",
-            "--midnight-output-storage-bucket",
-            "midnight-results",
-            "--midnight-output-storage-prefix",
-            "staging/testnet",
-            "--midnight-output-storage-timeout-secs",
-            "47",
-            "--tron-endpoint",
-            "https://api.trongrid.io",
-            "--tron-api-key",
-            "tron-key",
-            "--tron-poll-interval-ms",
-            "250",
-        ];
-        let out = Cli::try_parse_from(argv).unwrap().into_str_args();
-
-        for expected in [
-            "--midnight-node-url",
-            "http://127.0.0.1:9944",
-            "--midnight-central-address",
-            central_address.as_str(),
-            "--midnight-funding-seed",
-            funding_seed.as_str(),
-            "--midnight-intent-gen-command",
-            intent_gen_command,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
-            "--midnight-indexer-ws-url",
-            "ws://127.0.0.1:8088/api/v3/graphql/ws",
-            "--midnight-output-storage-bucket",
-            "midnight-results",
-            "--midnight-output-storage-prefix",
-            "staging/testnet",
-            "--midnight-output-storage-timeout-secs",
-            "47",
-            "--tron-endpoint",
-            "https://api.trongrid.io",
-            "--tron-api-key",
-            "tron-key",
-            "--tron-poll-interval-ms",
-            "250",
-        ] {
-            assert!(
-                out.contains(&expected.to_string()),
-                "into_str_args dropped {expected}"
-            );
-        }
-    }
-
     /// The Midnight config gate: with no Midnight flags supplied, the chain
     /// must be entirely absent from the node's wiring. `spawn_indexers` reads
     /// the same `chains.midnight` field, so `None` here also means no indexer
@@ -1429,12 +1295,12 @@ mod tests {
         assert_midnight_env_unset();
 
         let chains = ChainConfigs::from_args(
-            EthArgs::from_config(None),
-            SolArgs::from_config(None),
-            HydrationArgs::from_config(None),
-            CantonArgs::from_config(None),
-            MidnightArgs::from_config(None),
-            TronArgs::from_config(None),
+            EthArgs::parse_from(["test"]),
+            SolArgs::parse_from(["test"]),
+            HydrationArgs::parse_from(["test"]),
+            CantonArgs::parse_from(["test"]),
+            MidnightArgs::parse_from(["test"]),
+            TronArgs::parse_from(["test"]),
         )
         .unwrap();
 
@@ -1467,15 +1333,12 @@ mod tests {
     #[test]
     fn from_args_routes_a_configured_tron() {
         let chains = ChainConfigs::from_args(
-            EthArgs::from_config(None),
-            SolArgs::from_config(None),
-            HydrationArgs::from_config(None),
-            CantonArgs::from_config(None),
-            MidnightArgs::from_config(None),
-            TronArgs::from_config(Some(TronConfig {
-                endpoint: Url::parse("https://api.trongrid.io").unwrap(),
-                ..TronConfig::default()
-            })),
+            EthArgs::parse_from(["test"]),
+            SolArgs::parse_from(["test"]),
+            HydrationArgs::parse_from(["test"]),
+            CantonArgs::parse_from(["test"]),
+            MidnightArgs::parse_from(["test"]),
+            TronArgs::parse_from(["test", "--tron-endpoint", "https://api.trongrid.io"]),
         )
         .unwrap();
 

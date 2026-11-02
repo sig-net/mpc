@@ -79,7 +79,7 @@ pub async fn run(
     network: NetworkConfig,
     my_account_id: AccountId,
     backlog: Backlog,
-) {
+) -> anyhow::Result<()> {
     tracing::info!("starting web server");
     let axum_state = AxumState {
         msg_channel,
@@ -129,18 +129,15 @@ pub async fn run(
         .layer(Extension(Arc::new(axum_state)));
 
     let addr = format!("0.0.0.0:{port}");
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            tracing::error!(?addr, ?err, "failed to bind web server");
-            return;
-        }
-    };
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("failed to bind web server on {addr}"))?;
 
     tracing::info!(?addr, "starting http server");
-    if let Err(err) = axum::serve(listener, app).await {
-        tracing::error!(?addr, ?err, "web server exited with an error");
-    }
+    axum::serve(listener, app)
+        .await
+        .with_context(|| format!("web server on {addr} exited with an error"))?;
+    anyhow::bail!("web server on {addr} exited")
 }
 
 async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response {
