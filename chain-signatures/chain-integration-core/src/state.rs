@@ -23,7 +23,9 @@ pub trait StateManager: Send + Sync + Clone + 'static {
     /// derived, lossy index (the mock keeps the two independent).
     async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)>;
 
-    /// Registers under `tx.id`, replacing any previous watch.
+    /// Registers under `tx.id`, replacing any previous watch. No wait
+    /// measurement starts — the displaced entry's observation time is
+    /// gone — so its resolution exits the latency population.
     async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>);
 
     /// Set the processed block height for a specific chain.

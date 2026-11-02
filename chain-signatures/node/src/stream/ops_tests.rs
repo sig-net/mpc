@@ -6,6 +6,7 @@ use crate::backlog::mock::{
 use crate::backlog::{Backlog, Bidirectional, Final, Generating};
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
+use crate::metrics::requests::EXECUTION_WAIT_UNMEASURED;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction};
 use crate::sign_bidirectional::derive_user_address;
@@ -239,12 +240,25 @@ async fn process_execution_confirmed_resolves_a_displaced_watch_by_sign_id() {
         .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
         .await;
 
+    // No watch, no wait start: the resolution must count as unmeasured.
+    let unmeasured = EXECUTION_WAIT_UNMEASURED
+        .with_label_values(&[tx.source_chain.as_str()])
+        .get();
+
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
     confirm_execution(&tx, 41u64, ExecutionOutcome::Unviable, &ctx)
         .await
         .unwrap();
+
+    assert!(
+        EXECUTION_WAIT_UNMEASURED
+            .with_label_values(&[tx.source_chain.as_str()])
+            .get()
+            > unmeasured,
+        "the displaced entry's resolution counts as unmeasured"
+    );
 
     let entry = ctx
         .backlog
