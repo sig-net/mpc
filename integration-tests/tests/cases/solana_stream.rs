@@ -104,7 +104,10 @@ async fn next_sign_command(
 async fn spawn_supervised_stream(
     config: SolConfig,
     backlog: Backlog,
-) -> Result<(tokio::task::JoinHandle<()>, mpsc::Receiver<SignCommand>)> {
+) -> Result<(
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    mpsc::Receiver<SignCommand>,
+)> {
     let indexer = SolanaIndexer::new(
         config,
         backlog.clone(),
@@ -154,7 +157,7 @@ async fn spawn_supervised_stream(
             ),
             NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     Ok((run_handle, sign_rx))
@@ -587,7 +590,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             ),
             NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     solana

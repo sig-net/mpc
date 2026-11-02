@@ -53,10 +53,13 @@ impl Mesh {
         self.state_rx.clone()
     }
 
-    pub async fn run(mut self, mut contract: ContractStateWatcher) {
+    pub async fn run(mut self, mut contract: ContractStateWatcher) -> anyhow::Result<()> {
         loop {
             tokio::select! {
-                Some(contract) = contract.next_state() => {
+                state = contract.next_state() => {
+                    let Some(contract) = state? else {
+                        continue;
+                    };
                     tracing::info!(?contract, "new contract state received");
                     let my_info = self.find_myself(&contract);
                     let previous_me = self.me.take();
@@ -119,12 +122,18 @@ impl Mesh {
     }
 }
 
-pub async fn wait_threshold_active(mesh_state: &mut watch::Receiver<MeshState>, threshold: usize) {
+pub async fn wait_threshold_active(
+    mesh_state: &mut watch::Receiver<MeshState>,
+    threshold: usize,
+) -> anyhow::Result<()> {
     loop {
         if mesh_state.borrow().active().len() >= threshold {
-            return;
+            return Ok(());
         }
-        let _ = mesh_state.changed().await;
+        mesh_state
+            .changed()
+            .await
+            .map_err(|_| anyhow::anyhow!("mesh state channel closed"))?;
     }
 }
 
