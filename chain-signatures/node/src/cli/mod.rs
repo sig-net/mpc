@@ -25,7 +25,7 @@ use crate::types::SignCommand;
 use crate::{logs, storage, web};
 pub use args::{
     canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
-    solana::SolArgs,
+    solana::SolArgs, tron::TronArgs,
 };
 
 use clap::Parser;
@@ -42,7 +42,7 @@ use mpc_chain_midnight::{
 };
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
-use mpc_chain_tron::TronConfig;
+use mpc_chain_tron::{TronConfig, TronWatcher};
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
@@ -100,6 +100,9 @@ pub enum Cli {
         /// Midnight Indexer options
         #[command(flatten)]
         midnight: MidnightArgs,
+        /// Tron execution watcher options
+        #[command(flatten)]
+        tron: TronArgs,
         /// Local address that other peers can use to message this node.
         /// mainnet nodes: this should be set to their domain name
         /// testnet nodes: this should be set to their http://ip:web_port
@@ -113,69 +116,7 @@ pub enum Cli {
         /// Logging options
         #[command(flatten)]
         log_options: logs::Options,
-        #[command(flatten)]
-        mesh_options: mesh::Options,
     },
-}
-
-impl Cli {
-    pub fn into_str_args(self) -> Vec<String> {
-        match self {
-            Cli::Start {
-                near_rpc,
-                account_id,
-                env,
-                mpc_contract_id,
-                account_sk,
-                web_port,
-                cipher_sk,
-                sign_sk,
-                eth,
-                sol,
-                hydration,
-                canton,
-                midnight,
-                my_address,
-                storage_options,
-                log_options,
-                mesh_options,
-            } => {
-                let mut args = vec![
-                    "start".to_string(),
-                    "--near-rpc".to_string(),
-                    near_rpc,
-                    "--mpc-contract-id".to_string(),
-                    mpc_contract_id.to_string(),
-                    "--account-id".to_string(),
-                    account_id.to_string(),
-                    "--env".to_string(),
-                    env,
-                    "--account-sk".to_string(),
-                    account_sk.to_string(),
-                    "--cipher-sk".to_string(),
-                    cipher_sk,
-                    "--redis-url".to_string(),
-                    storage_options.redis_url.to_string(),
-                ];
-                args.extend(["--sign-sk".to_string(), sign_sk.to_string()]);
-                if let Some(my_address) = my_address {
-                    args.extend(["--my-address".to_string(), my_address.to_string()]);
-                }
-
-                args.extend(["--web-port".to_string(), web_port.to_string()]);
-
-                args.extend(eth.into_str_args());
-                args.extend(sol.into_str_args());
-                args.extend(hydration.into_str_args());
-                args.extend(canton.into_str_args());
-                args.extend(midnight.into_str_args());
-                args.extend(storage_options.into_str_args());
-                args.extend(log_options.into_str_args());
-                args.extend(mesh_options.into_str_args());
-                args
-            }
-        }
-    }
 }
 
 pub async fn run(cmd: Cli) -> anyhow::Result<()> {
@@ -194,10 +135,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             hydration,
             canton,
             midnight,
+            tron,
             my_address,
             storage_options,
             log_options,
-            mesh_options,
         } => {
             let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
@@ -261,10 +202,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher,
                 contract_state_tx,
                 sync_report_tx,
-            } = MeshHandles::new(mesh_options, &account_id);
+            } = MeshHandles::new(&account_id);
 
             let stack = ChainStack::new(ChainConfigs::from_args(
-                eth, sol, hydration, canton, midnight,
+                eth, sol, hydration, canton, midnight, tron,
             )?)
             .with_midnight_wallet(midnight_wallet);
             let network = NetworkConfig { cipher_sk, sign_sk };
@@ -470,6 +411,7 @@ impl ChainConfigs {
         hydration: HydrationArgs,
         canton: CantonArgs,
         midnight: MidnightArgs,
+        tron: TronArgs,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             eth: eth.into_config()?,
@@ -477,7 +419,7 @@ impl ChainConfigs {
             hydration: hydration.into_config(),
             canton: canton.into_config(),
             midnight: midnight.into_config()?,
-            tron: None, // Tron is a target-only chain with no indexer
+            tron: tron.into_config()?,
         })
     }
 }
@@ -650,10 +592,15 @@ struct MeshHandles {
 }
 
 impl MeshHandles {
-    fn new(mesh_options: mesh::Options, account_id: &AccountId) -> Self {
+    fn new(account_id: &AccountId) -> Self {
         let node_client = NodeClient::new();
         let (sync_report_tx, sync_report_rx) = SyncTask::sync_report_channel();
-        let mesh = Mesh::new(&node_client, mesh_options, account_id, sync_report_rx);
+        let mesh = Mesh::new(
+            &node_client,
+            mesh::PING_INTERVAL,
+            account_id,
+            sync_report_rx,
+        );
         let mesh_state = mesh.watch();
         let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(account_id);
         Self {
@@ -791,14 +738,14 @@ impl ProtocolHandles {
         rpc_channel: RpcChannel,
         sync_report_tx: SyncReportSender,
     ) -> Self {
-        let config = Config::new(network);
-        let (config_tx, config_rx) = watch::channel(config);
+        let (config_tx, config_rx) = Config::channel();
         let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
         let node = Node::new();
         let node_watcher = node.watch();
 
         let message_channel = MessageChannel::spawn(
             node_client.clone(),
+            network,
             config_rx.clone(),
             contract_watcher.clone(),
         )
@@ -877,6 +824,14 @@ async fn spawn_indexers(
         tracing::warn!(
             "ethereum not configured: Ethereum-targeted requests are admitted without the \
              chain id check that nodes with ethereum configured apply"
+        );
+    }
+
+    if tron.is_none() {
+        tracing::warn!(
+            "tron endpoint not configured: Tron-targeted requests are admitted and signed, \
+             but nothing watches their execution — they stay Executing until a Tron \
+             endpoint is configured"
         );
     }
 
@@ -1019,12 +974,12 @@ async fn spawn_indexers(
                 tokio::spawn(run_supervised(
                     midnight_indexer,
                     StreamContext::new(
-                        backlog,
-                        sign_tx,
-                        rpc_channel,
-                        contract_watcher,
-                        mesh_state,
-                        node_client,
+                        backlog.clone(),
+                        sign_tx.clone(),
+                        rpc_channel.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        node_client.clone(),
                         checkpoints_rx[Chain::Midnight].clone(),
                     )
                     .with_ethereum_chain_id(ethereum_chain_id),
@@ -1033,6 +988,34 @@ async fn spawn_indexers(
             }
             Err(err) => {
                 tracing::error!(?err, "failed to create midnight indexer");
+            }
+        }
+    }
+
+    // Target-only: no source indexer — the watcher serves every source
+    // chain's Tron-targeted requests.
+    if let Some(tron_config) = tron {
+        let tron_telemetry = NodeTelemetry::new(Chain::Tron);
+        match TronWatcher::new(tron_config, backlog.clone(), tron_telemetry.clone()) {
+            Ok(watcher) => {
+                tracing::info!("tron execution watcher created successfully");
+                tokio::spawn(run_supervised(
+                    watcher,
+                    StreamContext::new(
+                        backlog.clone(),
+                        sign_tx.clone(),
+                        rpc_channel.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        node_client.clone(),
+                        checkpoints_rx[Chain::Tron].clone(),
+                    )
+                    .with_ethereum_chain_id(ethereum_chain_id),
+                    tron_telemetry,
+                ));
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to create tron watcher");
             }
         }
     }
@@ -1251,10 +1234,10 @@ mod tests {
     }
 
     /// The `MPC_MIDNIGHT_*` env vars feed the same clap fields as the
-    /// `--midnight-*` flags, so a set variable can silently backfill a flag
-    /// `into_str_args` dropped and turn the round-trip test green. Those
-    /// fixtures use the values a developer running a local stack exports,
-    /// which makes that the likely case rather than a remote one.
+    /// `--midnight-*` flags, so a set variable can silently backfill a flag a
+    /// test left out. Those fixtures use the values a developer running a
+    /// local stack exports, which makes that the likely case rather than a
+    /// remote one.
     pub(super) fn assert_midnight_env_unset() {
         for var in [
             "MPC_MIDNIGHT_NODE_URL",
@@ -1275,95 +1258,6 @@ mod tests {
         }
     }
 
-    /// Dockerized test nodes receive their whole configuration as CLI strings
-    /// rebuilt through `Cli::into_str_args`. If Midnight were flattened into
-    /// `Cli::Start` but missing from that extension, its config would be
-    /// accepted on the command line and then silently dropped on
-    /// reconstruction.
-    #[test]
-    fn into_str_args_forwards_midnight() {
-        assert_midnight_env_unset();
-
-        let account_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
-        let sign_sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign").to_string();
-        let central_address = "ab".repeat(32);
-        let funding_seed = "0f".repeat(32);
-        let intent_gen_command = r#"["midnight-publisher"]"#;
-        let argv = [
-            "mpc-node",
-            "start",
-            "--near-rpc",
-            "http://127.0.0.1:3030",
-            "--mpc-contract-id",
-            "mpc.test.near",
-            "--account-id",
-            "test.near",
-            "--account-sk",
-            &account_sk,
-            "--sign-sk",
-            &sign_sk,
-            "--cipher-sk",
-            "cipher",
-            "--env",
-            "unit-tests",
-            "--gcp-project-id",
-            "project",
-            "--sk-share-secret-id",
-            "share",
-            "--redis-url",
-            "redis://127.0.0.1:6379",
-            "--midnight-node-url",
-            "http://127.0.0.1:9944",
-            "--midnight-central-address",
-            &central_address,
-            "--midnight-funding-seed",
-            &funding_seed,
-            "--midnight-intent-gen-command",
-            intent_gen_command,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
-            "--midnight-indexer-ws-url",
-            "ws://127.0.0.1:8088/api/v3/graphql/ws",
-            "--midnight-output-storage-bucket",
-            "midnight-results",
-            "--midnight-output-storage-prefix",
-            "staging/testnet",
-            "--midnight-output-storage-timeout-secs",
-            "47",
-        ];
-        let out = Cli::try_parse_from(argv).unwrap().into_str_args();
-
-        for expected in [
-            "--midnight-node-url",
-            "http://127.0.0.1:9944",
-            "--midnight-central-address",
-            central_address.as_str(),
-            "--midnight-funding-seed",
-            funding_seed.as_str(),
-            "--midnight-intent-gen-command",
-            intent_gen_command,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
-            "--midnight-indexer-ws-url",
-            "ws://127.0.0.1:8088/api/v3/graphql/ws",
-            "--midnight-output-storage-bucket",
-            "midnight-results",
-            "--midnight-output-storage-prefix",
-            "staging/testnet",
-            "--midnight-output-storage-timeout-secs",
-            "47",
-        ] {
-            assert!(
-                out.contains(&expected.to_string()),
-                "into_str_args dropped {expected}"
-            );
-        }
-    }
-
     /// The Midnight config gate: with no Midnight flags supplied, the chain
     /// must be entirely absent from the node's wiring. `spawn_indexers` reads
     /// the same `chains.midnight` field, so `None` here also means no indexer
@@ -1373,17 +1267,22 @@ mod tests {
         assert_midnight_env_unset();
 
         let chains = ChainConfigs::from_args(
-            EthArgs::from_config(None),
-            SolArgs::from_config(None),
-            HydrationArgs::from_config(None),
-            CantonArgs::from_config(None),
-            MidnightArgs::from_config(None),
+            EthArgs::parse_from(["test"]),
+            SolArgs::parse_from(["test"]),
+            HydrationArgs::parse_from(["test"]),
+            CantonArgs::parse_from(["test"]),
+            MidnightArgs::parse_from(["test"]),
+            TronArgs::parse_from(["test"]),
         )
         .unwrap();
 
         assert!(
             chains.midnight.is_none(),
             "empty MidnightArgs must not produce a MidnightConfig"
+        );
+        assert!(
+            chains.tron.is_none(),
+            "empty TronArgs must not produce a TronConfig"
         );
 
         let publishers = ChainStack::new(chains)
@@ -1400,6 +1299,25 @@ mod tests {
             "with no chain configured, only the NEAR publisher must exist"
         );
         assert!(publishers.contains_key(&Chain::NEAR));
+    }
+
+    /// A configured Tron must survive `from_args` into `ChainConfigs``
+    #[test]
+    fn from_args_routes_a_configured_tron() {
+        let chains = ChainConfigs::from_args(
+            EthArgs::parse_from(["test"]),
+            SolArgs::parse_from(["test"]),
+            HydrationArgs::parse_from(["test"]),
+            CantonArgs::parse_from(["test"]),
+            MidnightArgs::parse_from(["test"]),
+            TronArgs::parse_from(["test", "--tron-endpoint", "https://api.trongrid.io"]),
+        )
+        .unwrap();
+
+        let tron = chains
+            .tron
+            .expect("configured TronArgs must produce a TronConfig");
+        assert_eq!(tron.endpoint.as_str(), "https://api.trongrid.io/");
     }
 
     /// A Midnight node that is unreachable at startup must not leave the node without a
@@ -1537,6 +1455,8 @@ mod tests {
             "midnight_proof_server_url",
             "midnight_indexer_url",
             "midnight_indexer_ws_url",
+            "tron_endpoint",
+            "tron_api_key",
         ];
 
         for arg_id in sensitive_arg_ids {
