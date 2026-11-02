@@ -5,7 +5,7 @@ use tokio::fs::{self, File};
 #[cfg(any(test, feature = "test-feature"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::gcp::{GcpService, SecretResult};
+use crate::gcp::SecretResult;
 use crate::storage::Options;
 use crate::{gcp::SecretManagerService, protocol::state::PersistentNodeData};
 use anyhow::Context as _;
@@ -51,9 +51,9 @@ pub struct SecretManagerNodeStorage {
 }
 
 impl SecretManagerNodeStorage {
-    fn new(secret_manager: &SecretManagerService, sk_share_secret_id: String) -> Self {
+    fn new(secret_manager: SecretManagerService, sk_share_secret_id: String) -> Self {
         Self {
-            secret_manager: secret_manager.clone(),
+            secret_manager,
             sk_share_secret_id,
         }
     }
@@ -209,10 +209,10 @@ pub async fn init(
         .gcp_project_id
         .as_ref()
         .context("clap pairs the Secret Manager id with a GCP project")?;
-    let gcp = GcpService::init(project_id).await?;
+    let secret_manager = SecretManagerService::new(project_id)?;
     tracing::info!("using SecretManagerNodeStorage");
     Ok(SecretNodeStorageVariant::Gcp(
-        SecretManagerNodeStorage::new(&gcp.secret_manager, secret_id.clone()),
+        SecretManagerNodeStorage::new(secret_manager, secret_id.clone()),
     ))
 }
 
