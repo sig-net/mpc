@@ -3,7 +3,7 @@ use integration_tests::cluster;
 use integration_tests::utils;
 
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_contract::config::Config;
+use mpc_contract::config::ProtocolConfig;
 use mpc_contract::update::ProposeUpdateArgs;
 use mpc_crypto::{
     self, derive_epsilon_near, derive_key, reconstruct_signature, x_coordinate, ScalarExt,
@@ -84,8 +84,7 @@ async fn test_signature_many() -> anyhow::Result<()> {
     let nodes = cluster::spawn()
         .disable_prestockpile()
         .with_config(|config| {
-            config.protocol.presignature.min_presignatures = 10;
-            config.protocol.presignature.max_presignatures = 100;
+            config.protocol.min_mine_presignatures = 10;
         })
         .await?;
 
@@ -195,7 +194,7 @@ async fn test_multichain_update_contract() -> anyhow::Result<()> {
     let id = nodes
         .propose_update(ProposeUpdateArgs {
             code: None,
-            config: Some(Config::default()),
+            config: Some(ProtocolConfig::default()),
         })
         .await;
     nodes.vote_update(id).await;
