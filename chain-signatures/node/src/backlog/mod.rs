@@ -171,7 +171,7 @@ pub fn checkpoint_interval(chain: Chain) -> Option<u64> {
 
 /// Short cadence for test networks. Mirrors `ChainConfig::checkpoint_interval`
 /// in which chains have one.
-#[cfg(feature = "test-feature")]
+#[cfg(any(test, feature = "test-feature"))]
 fn mock_checkpoint_interval(chain: Chain) -> Option<u64> {
     match chain {
         Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,

@@ -136,4 +136,17 @@ mod tests {
         assert_eq!(Chain::Canton.feed_stall_timeout_secs(), 60);
         assert_eq!(Chain::Solana.feed_stall_timeout_secs(), 60);
     }
+
+    /// Pins the production cadence: every node of a network votes on it.
+    #[test]
+    fn checkpoint_intervals_pin_the_production_cadence() {
+        assert_eq!(Chain::Ethereum.checkpoint_interval(), Some(20));
+        assert_eq!(Chain::Solana.checkpoint_interval(), Some(1200));
+        assert_eq!(Chain::Hydration.checkpoint_interval(), Some(240));
+        assert_eq!(Chain::Canton.checkpoint_interval(), Some(50));
+        assert_eq!(Chain::Midnight.checkpoint_interval(), Some(120));
+        assert_eq!(Chain::NEAR.checkpoint_interval(), None);
+        assert_eq!(Chain::Bitcoin.checkpoint_interval(), None);
+        assert_eq!(Chain::Tron.checkpoint_interval(), None);
+    }
 }

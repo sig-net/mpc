@@ -1237,3 +1237,16 @@ async fn advance_carries_the_origin_into_the_final_response() {
     };
     assert_eq!(response.origin_indexed_at, Some(origin));
 }
+
+/// The mock cadence must checkpoint exactly the chains production does: a
+/// chain checkpointed only in tests, or only in production, would hide bugs.
+#[test]
+fn mock_cadence_covers_the_same_chains_as_production() {
+    for chain in Chain::iter() {
+        assert_eq!(
+            super::mock_checkpoint_interval(chain).is_some(),
+            mpc_primitives::ChainConfig::checkpoint_interval(&chain).is_some(),
+            "{chain:?}"
+        );
+    }
+}
