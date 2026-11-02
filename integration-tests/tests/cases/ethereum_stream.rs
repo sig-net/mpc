@@ -10,7 +10,7 @@ use integration_tests::eth;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
-use mpc_chain_ethereum::{EthConfig, EthereumIndexer};
+use mpc_chain_ethereum::{EthConfig, EthereumIndexer, IndexerConfig};
 use mpc_chain_integration_core::{
     utils::{retry::SharedBackoff, test::ChainIndexerStream},
     NoopChainTelemetry, StateManager,
@@ -189,7 +189,11 @@ impl EthereumTestEnvironment {
             network: "anvil".to_string(),
             optimistic_requests,
             gas: Default::default(),
-            indexer: Default::default(),
+            // The indexer runs in-process here, so poll as fast as a test node.
+            indexer: IndexerConfig {
+                refresh_interval: Duration::from_millis(100),
+                ..Default::default()
+            },
             publisher: Default::default(),
             rpc: Default::default(),
         }

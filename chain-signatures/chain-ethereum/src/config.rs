@@ -154,6 +154,8 @@ impl Default for PublisherConfig {
 /// Tuning for the indexing pipeline (catchup, live stream, finality waits).
 #[derive(Clone, Debug)]
 pub struct IndexerConfig {
+    /// How often the finalized-head watcher polls the RPC.
+    pub refresh_interval: Duration,
     /// Re-warn interval (seconds) while the finalized head is stalled
     pub stall_rewarn_secs: u64,
     /// Max concurrent JSON-RPC calls when resolving watcher receipts/nonces.
@@ -166,6 +168,7 @@ pub struct IndexerConfig {
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
+            refresh_interval: Duration::from_secs(10),
             stall_rewarn_secs: 300,
             max_concurrent_watcher_rpcs: 8,
             watcher_slow_sweep_interval: 10,

@@ -1,8 +1,16 @@
 use anyhow::Context as _;
-use mpc_chain_ethereum::EthConfig;
+use mpc_chain_ethereum::{EthConfig, IndexerConfig};
 use secrecy::{ExposeSecret, SecretString};
+use std::time::Duration;
 
 const DEFAULT_ETH_NETWORK: &str = "sepolia";
+
+/// How often the finalized-head watcher polls the RPC.
+#[cfg(not(feature = "test-feature"))]
+const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+/// Test builds poll fast so finality-gated tests finish in seconds.
+#[cfg(feature = "test-feature")]
+const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
 // Configures Ethereum indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -76,7 +84,10 @@ impl EthArgs {
             rpc: Default::default(),
             gas: Default::default(),
             publisher: Default::default(),
-            indexer: Default::default(),
+            indexer: IndexerConfig {
+                refresh_interval: REFRESH_INTERVAL,
+                ..Default::default()
+            },
         }))
     }
 }

@@ -32,9 +32,7 @@ url.workspace = true
 bench = []
 # Gate for deploy/submit helpers and the Hardhat artifact (via include_bytes!).
 contract-test = []
-# Fast finalized-head polling for test builds.
-test-feature = []
-integration = ["alloy/provider-anvil-node", "contract-test", "test-feature"]
+integration = ["alloy/provider-anvil-node", "contract-test"]
 
 [dev-dependencies]
 mockito.workspace = true

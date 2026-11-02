@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use mpc_chain_ethereum::abi::ChainSignatures;
 use mpc_chain_ethereum::utils::test::deploy_chain_signatures;
 pub use mpc_chain_ethereum::utils::test::submit_sign_request;
-use mpc_chain_ethereum::{EthConfig, PublisherConfig};
+use mpc_chain_ethereum::{EthConfig, IndexerConfig, PublisherConfig};
 use std::time::{Duration, Instant};
 
 pub type AnvilWalletProvider = FillProvider<
@@ -77,7 +77,10 @@ impl EthTestEnv {
                 batch_flush_interval: Duration::from_millis(100), // faster flush for tests
                 ..Default::default()
             },
-            indexer: Default::default(),
+            indexer: IndexerConfig {
+                refresh_interval: Duration::from_millis(100),
+                ..Default::default()
+            },
         };
 
         Ok(Self {

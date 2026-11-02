@@ -53,7 +53,10 @@ pub async fn create_test_ethereum_client_with_catchup(
         },
         gas: Default::default(),
         publisher: Default::default(),
-        indexer: Default::default(),
+        indexer: IndexerConfig {
+            refresh_interval: Duration::from_millis(100),
+            ..Default::default()
+        },
     };
 
     EthereumClient::new_with_strategy(eth, retry_strategy, shared_backoff)
@@ -85,7 +88,10 @@ impl TestIndexerBuilder {
                 rpc: Default::default(),
                 gas: Default::default(),
                 publisher: Default::default(),
-                indexer: Default::default(),
+                indexer: IndexerConfig {
+                    refresh_interval: Duration::from_millis(100),
+                    ..Default::default()
+                },
             },
             state_manager: MockStateManager::new(),
         }
@@ -182,7 +188,10 @@ impl WatcherHarness {
         Self {
             client: Arc::new(create_test_ethereum_client(url).await),
             state_manager: MockStateManager::new(),
-            config: IndexerConfig::default(),
+            config: IndexerConfig {
+                refresh_interval: Duration::from_millis(100),
+                ..Default::default()
+            },
             gate: Mutex::new(WatcherGateState::default()),
             telemetry: CountingChainTelemetry::default(),
         }

@@ -493,6 +493,7 @@ impl ChainPublisher for EthClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IndexerConfig;
     use alloy::primitives::{Address, B256, U256};
     use k256::{AffinePoint, Scalar};
     use mockito::{Matcher, Mock, Server};
@@ -580,7 +581,10 @@ mod tests {
             rpc: Default::default(),
             gas: Default::default(),
             publisher: Default::default(),
-            indexer: Default::default(),
+            indexer: IndexerConfig {
+                refresh_interval: Duration::from_millis(100),
+                ..Default::default()
+            },
         }
     }
 
