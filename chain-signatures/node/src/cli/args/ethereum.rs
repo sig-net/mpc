@@ -1,8 +1,29 @@
 use anyhow::Context as _;
-use mpc_chain_ethereum::EthConfig;
+use mpc_chain_ethereum::{EthConfig, IndexerConfig};
 use secrecy::{ExposeSecret, SecretString};
 
 const DEFAULT_ETH_NETWORK: &str = "sepolia";
+
+/// The indexer's production cadence, as `mpc-chain-ethereum` defines it.
+#[cfg(not(feature = "test-feature"))]
+fn indexer_config() -> IndexerConfig {
+    IndexerConfig::default()
+}
+
+/// Test builds run the mock cadence so finality-gated tests finish in seconds.
+#[cfg(feature = "test-feature")]
+fn indexer_config() -> IndexerConfig {
+    mock_indexer_config()
+}
+
+/// Polls the finalized head every 100ms instead of the production cadence.
+#[cfg(any(test, feature = "test-feature"))]
+pub fn mock_indexer_config() -> IndexerConfig {
+    IndexerConfig {
+        refresh_interval: std::time::Duration::from_millis(100),
+        ..Default::default()
+    }
+}
 
 // Configures Ethereum indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -42,14 +63,6 @@ pub struct EthArgs {
     )]
     pub eth_network: String,
 
-    // -- Behaviour --
-    /// Refresh finalized block interval in milliseconds
-    #[arg(
-        long,
-        env("MPC_ETH_REFRESH_FINALIZED_INTERVAL"),
-        default_value = "10000"
-    )]
-    pub eth_refresh_finalized_interval: u64,
     /// Emit requests without waiting for block finality. FOR DEV/DEMO USE ONLY:
     /// on live networks a reorg can orphan already-emitted sign requests.
     #[arg(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
@@ -90,13 +103,23 @@ impl EthArgs {
             contract_address,
             optimistic_requests: self.eth_optimistic_requests || network == "anvil", // anvil never reports finalized blocks, so requests are emitted without waiting for finality
             network,
-            refresh_finalized_interval: self.eth_refresh_finalized_interval,
             // TODO: currently we only have Ethereum and Sepolia, so defaults
             // are fine. Make these configurable when we add more chains.
             rpc: Default::default(),
             gas: Default::default(),
             publisher: Default::default(),
-            indexer: Default::default(),
+            indexer: indexer_config(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mock cadence exists to be faster than production; pin that.
+    #[test]
+    fn mock_cadence_polls_faster_than_production() {
+        assert!(mock_indexer_config().refresh_interval < IndexerConfig::default().refresh_interval);
     }
 }

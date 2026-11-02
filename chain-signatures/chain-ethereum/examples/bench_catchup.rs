@@ -18,9 +18,6 @@
 //! - `MPC_ETH_OPTIMISTIC_REQUESTS` (optional, default `false`) — production
 //!   (non-optimistic) path by default; the finalized-head watcher drives
 //!   finality. Set to `true` for the demo/soft-tip path (no finality wait).
-//! - `MPC_ETH_REFRESH_FINALIZED_INTERVAL` (optional, default `10000` ms) —
-//!   cadence of the finalized-head watcher in
-//!   `MPC_ETH_OPTIMISTIC_REQUESTS=false` mode.
 //!
 //! # Usage
 //!

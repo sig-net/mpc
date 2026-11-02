@@ -69,10 +69,6 @@ impl Args {
         self.flag("--eth-execution-rpc-http-url", &eth.execution_rpc_http_url);
         self.flag("--eth-contract-address", eth.contract_address);
         self.flag("--eth-network", &eth.network);
-        self.flag(
-            "--eth-refresh-finalized-interval",
-            eth.refresh_finalized_interval,
-        );
         self.switch("--eth-optimistic-requests", eth.optimistic_requests);
     }
 
