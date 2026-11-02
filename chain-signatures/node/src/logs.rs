@@ -54,19 +54,6 @@ impl Default for Options {
 }
 
 impl Options {
-    pub fn into_str_args(self) -> Vec<String> {
-        let mut opts = vec![
-            "--opentelemetry-level".to_string(),
-            self.opentelemetry_level.to_string(),
-            "--otlp-endpoint".to_string(),
-            self.otlp_endpoint,
-        ];
-        if self.disable_gcp_logs {
-            opts.push("--disable-gcp-logs".to_string());
-        }
-        opts
-    }
-
     pub fn test() -> Self {
         Self {
             disable_gcp_logs: true,
