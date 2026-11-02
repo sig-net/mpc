@@ -48,7 +48,14 @@ Triples and Pre-Signatures are persistently stored on each node. They go through
 the following lifecycle. Nodes must keep track of them in order for state sync
 to work.
 
-![graph](./graphs/p_and_t_states.svg)
+```mermaid
+stateDiagram-v2
+    [*] --> Generating: ON receive INIT(generate)
+    Generating --> Available: ON generating protocol success
+    Generating --> [*]: ON generating protocol failed
+    Available --> Using: ON removal from DB = receive INIT(consume) (start of following protocol)
+    Using --> [*]: ON consuming protocol finish
+```
 
 ### States
 
@@ -88,26 +95,9 @@ When a proposer selects a list of participants for a new protocol invocation, it
 - Participants must be online
 - Participants must hold the relevant P and T shares
 
-To enable the first, nodes keep a connection status for every peer. For the
-second part, they keep a directory of each owned P and T with a list of share
-holders. Both data structures are further specified below.
-
-### Node Connection Status
-
-![graph](./graphs/node_connection.svg)
-
-Nodes keep pinging each other, checking their peers status.
-
-Peers that don't respond are marked as `Offline`.
-
-Peers that respond but indicate in their status response that they are not actively participating in the MPC network, are marked as `Inactive`.
-
-Peers that respond and are participating in the MPC network are first listed as
-`Syncing` and receive a sync request. Only after the response for that has been
-answered, can the connection status transition to `Active`. Only peers with a
-connection status `Active` are valid for inclusion in the participant list of
-any protocol invocations. An `Active` peer goes back to `Syncing` when we learn
-our record of what it stores is wrong, see below.
+To enable the first, nodes keep a connection status for every peer, described
+in [Mesh](mesh.md). For the second part, they keep a directory of each owned P
+and T with a list of share holders, specified below.
 
 ### Share holder directory
 

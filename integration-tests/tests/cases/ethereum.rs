@@ -149,7 +149,7 @@ async fn test_signature_ethereum() -> Result<()> {
         .map_err(|_| anyhow!("invalid derived public key"))?;
     let verifying_key = VerifyingKey::from(&user_public_key);
     let verifying_key = verifying_key.to_encoded_point(false);
-    let expected_address = public_key_to_address(verifying_key.as_bytes());
+    let expected_address = public_key_to_address(&verifying_key);
 
     anyhow::ensure!(
         recovered_address == expected_address,

@@ -38,25 +38,27 @@ pub fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
 }
 
 /// Build an [`EthConfig`] from the standard set of benchmark env vars
-/// (`RPC_URL`, `CONTRACT_ADDRESS`, `NETWORK`, `OPTIMISTIC`,
-/// `REFRESH_FINALIZED_INTERVAL`).
+/// (`MPC_ETH_EXECUTION_RPC_HTTP_URL`, `MPC_ETH_CONTRACT_ADDRESS`,
+/// `MPC_ETH_NETWORK`, `MPC_ETH_OPTIMISTIC_REQUESTS`,
+/// `MPC_ETH_REFRESH_FINALIZED_INTERVAL`).
 pub fn make_config() -> anyhow::Result<EthConfig> {
     Ok(EthConfig {
         // The bench only indexes; the signer is never used.
         account_sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             .parse()
             .unwrap(),
-        execution_rpc_http_url: opt_env("RPC_URL")?
+        execution_rpc_http_url: opt_env("MPC_ETH_EXECUTION_RPC_HTTP_URL")?
             .parse()
-            .map_err(|e| anyhow!("invalid RPC_URL: {e}"))?,
-        contract_address: opt_env("CONTRACT_ADDRESS")?
+            .map_err(|e| anyhow!("invalid MPC_ETH_EXECUTION_RPC_HTTP_URL: {e}"))?,
+        contract_address: opt_env("MPC_ETH_CONTRACT_ADDRESS")?
             .parse()
-            .map_err(|e| anyhow!("invalid CONTRACT_ADDRESS: {e}"))?,
-        network: std::env::var("NETWORK").unwrap_or_else(|_| "sepolia".to_string()),
-        // Production finality-watch cadence; The watcher drives finality in OPTIMISTIC=0 mode.
-        refresh_finalized_interval: env_u64("REFRESH_FINALIZED_INTERVAL", Some(10_000))?,
+            .map_err(|e| anyhow!("invalid MPC_ETH_CONTRACT_ADDRESS: {e}"))?,
+        network: std::env::var("MPC_ETH_NETWORK").unwrap_or_else(|_| "sepolia".to_string()),
+        // Production finality-watch cadence; the watcher drives finality in
+        // MPC_ETH_OPTIMISTIC_REQUESTS=false mode.
+        refresh_finalized_interval: env_u64("MPC_ETH_REFRESH_FINALIZED_INTERVAL", Some(10_000))?,
         // Default to the production (non-optimistic) path;
-        optimistic_requests: env_bool("OPTIMISTIC", false)?,
+        optimistic_requests: env_bool("MPC_ETH_OPTIMISTIC_REQUESTS", false)?,
         rpc: Default::default(),
         gas: Default::default(),
         publisher: Default::default(),
@@ -89,8 +91,9 @@ pub async fn run_catchup(
         EthereumIndexer::new(config, state, NoopChainTelemetry, SharedBackoff::new()).await?;
     let (events_tx, mut events_rx) = chain_event_channel();
 
-    // Maintain the finalized head the same way `run()` does, so OPTIMISTIC=0
-    // (the default) exercises the production finality-watch path.
+    // Maintain the finalized head the same way `run()` does, so
+    // MPC_ETH_OPTIMISTIC_REQUESTS=false (the default) exercises the production
+    // finality-watch path.
     let cancel = CancellationToken::new();
     let _watcher = indexer.spawn_finalized_head_watcher(cancel.clone());
 

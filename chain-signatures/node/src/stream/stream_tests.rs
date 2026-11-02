@@ -4,6 +4,7 @@ use crate::backlog::{Backlog, Bidirectional, Executing};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcAction};
+use crate::sign_bidirectional::{SDK_ALGO, SDK_DEST, SDK_PARAMS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::test_utils::{
     run_stream_with_two_node_mesh, signature_responded_event, test_bidirectional_tx,
@@ -166,12 +167,12 @@ fn build_solana_to_ethereum_bidirectional_request(
         sender: Default::default(),
         serialized_transaction: unsigned_rlp,
         caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-        key_version: 0,
+        key_version: 1,
         deposit: 0,
         path: "".to_string(),
-        algo: "".to_string(),
-        dest: Chain::Ethereum.to_string(),
-        params: "".to_string(),
+        algo: SDK_ALGO.to_string(),
+        dest: SDK_DEST.to_string(),
+        params: SDK_PARAMS.to_string(),
         chain: Chain::Solana,
         chain_ctx: Some(Pubkey::new_unique().to_bytes().to_vec()),
         output_deserialization_schema: vec![],

@@ -7,10 +7,9 @@ use url::Url;
 
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
 
-use crate::address::{parse_hex, TronAddress};
 use crate::config::TronConfig;
-use crate::encoding::decode_bytes;
 use crate::types::{BroadcastOutcome, NowBlock, TronLog, TronReceipt};
+use mpc_tron_wire::{encoding::decode_bytes, parse_hex, TronAddress};
 
 /// Tron HTTP client for interacting with the Tron blockchain.
 pub struct TronHttp {
@@ -99,7 +98,7 @@ impl TronHttp {
                         block_number: response.block_number,
                         block_timestamp: response.block_timestamp,
                         fee: response.fee,
-                        contract_ret: response.contract_ret,
+                        result: response.result,
                         res_message: response.res_message.as_deref().map(decode_hex_ascii),
                         receipt_result: response.receipt.result,
                         logs: response.log,
@@ -255,8 +254,8 @@ struct TransactionInfoResponse {
     block_timestamp: u64,
     #[serde(default)]
     fee: u64,
-    #[serde(default, rename = "contractRet")]
-    contract_ret: Option<String>,
+    #[serde(default)]
+    result: Option<String>,
     #[serde(default, rename = "resMessage")]
     res_message: Option<String>,
     #[serde(default)]
@@ -265,9 +264,9 @@ struct TransactionInfoResponse {
     log: Vec<TronLog>,
 }
 
-/// Receipt `result` classification; recorded Nile receipts carry the
-/// outcome here (no `contractRet` field) alongside usage counters the
-/// parser leaves unread (`energy_usage_total`, `net_fee`, …).
+/// `receipt.result` classification; success carries its verdict here alone
+/// (the top-level `code` is proto3-zero-omitted), failure alongside the
+/// top-level `FAILED`. Usage counters stay unread.
 #[derive(Deserialize, Default)]
 struct ReceiptUsage {
     #[serde(default)]
@@ -574,7 +573,7 @@ mod tests {
         assert_eq!(receipt.block_number, 71896097);
         assert_eq!(receipt.fee, 472800);
         // Recorded receipts carry the outcome in receipt.result only.
-        assert_eq!(receipt.contract_ret, None);
+        assert_eq!(receipt.result, None);
         assert_eq!(receipt.receipt_result.as_deref(), Some("SUCCESS"));
         assert_eq!(receipt.res_message, None);
 

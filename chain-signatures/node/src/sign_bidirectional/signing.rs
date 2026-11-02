@@ -4,8 +4,8 @@
 use crate::protocol::Chain;
 use k256::elliptic_curve::point::AffineCoordinates as _;
 use k256::elliptic_curve::scalar::IsHigh as _;
-use mpc_chain_tron::{pb::RawTransaction, TronAddress};
 use mpc_primitives::{BidirectionalTxId, SignBidirectionalEvent, Signature};
+use mpc_tron_wire::{pb::RawTransaction, TronAddress};
 use rlp::Rlp;
 
 use super::eth_tx::{

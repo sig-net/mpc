@@ -491,3 +491,52 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test(tokio::test)]
+async fn test_clear_clears_pending_reservations() -> anyhow::Result<()> {
+    let spawner = ClusterSpawner::default()
+        .network("test-clear-pending")
+        .init_network()
+        .await?;
+
+    let node0 = Participant::from(0);
+    let node0_id = "party0.near".parse().unwrap();
+    let redis = containers::Redis::run(&spawner).await;
+    let triple_storage = redis.triple_storage(&node0_id, node0);
+
+    let id = 42u64;
+    triple_storage
+        .create_slot(id, node0)
+        .await
+        .unwrap()
+        .insert(dummy_pair(id), node0)
+        .await;
+
+    // Peek the triple: marks it as pending in memory
+    let reservation = triple_storage
+        .peek_mine(&[])
+        .await
+        .expect("should peek artifact");
+    assert_eq!(reservation.id, id);
+
+    // Deliberately forget the reservation so Drop does not release it from state.pending
+    std::mem::forget(reservation);
+
+    // Clear storage: should clear both Redis keys and in-memory reservations
+    assert!(triple_storage.clear().await);
+
+    // Re-insert the same artifact ID
+    triple_storage
+        .create_slot(id, node0)
+        .await
+        .unwrap()
+        .insert(dummy_pair(id), node0)
+        .await;
+
+    // Without state.pending.clear(), peek_mine will exclude `id` because it
+    // remains stuck in state.pending. With the fix, peek_mine succeeds.
+    let peeked = triple_storage.peek_mine(&[]).await;
+    assert!(peeked.is_some(), "artifact must be peekable after clear()");
+
+    Ok(())
+}

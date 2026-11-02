@@ -15,6 +15,8 @@ google-cloud-storage = "=1.17.0"
 google-cloud-auth = { version = "1.15", default-features = false, optional = true }
 hex.workspace = true
 http.workspace = true
+# The same crate jsonrpsee's client limits bodies with, to recognise its error.
+http-body-util = "0.1"
 jsonrpsee = { version = "0.24.10", features = ["http-client"] }
 k256.workspace = true
 memchr.workspace = true
@@ -28,6 +30,7 @@ midnight-serialize.workspace = true
 midnight-storage.workspace = true
 midnight-transient-crypto.workspace = true
 mpc-chain-integration-core.workspace = true
+mpc-tron-wire.workspace = true
 mpc-crypto.workspace = true
 mpc-compact-hashing.workspace = true
 mpc-primitives.workspace = true
