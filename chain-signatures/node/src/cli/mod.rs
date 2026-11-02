@@ -328,7 +328,16 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 _ => anyhow::anyhow!("core task exited"),
             };
             tracing::error!(?err, "core task ended, shutting down");
-            tasks.shutdown().await;
+            tasks.abort_all();
+            while let Some(result) = tasks.join_next().await {
+                match result {
+                    Ok(Err(err)) => tracing::error!(?err, "core task also failed"),
+                    Err(join) if !join.is_cancelled() => {
+                        tracing::error!(?join, "core task also failed")
+                    }
+                    _ => {}
+                }
+            }
             Err(err)
         }
     }
