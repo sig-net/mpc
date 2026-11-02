@@ -17,8 +17,7 @@ pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 use enum_map::EnumMap;
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, IndexedSignRequest, SignId,
-    SignKind,
+    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, SignId, SignKind,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -158,6 +157,26 @@ pub struct Backlog {
 impl Default for Backlog {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Blocks between checkpoints: the chain's production cadence, or in test
+/// builds the mock one so checkpoint tests finish in seconds.
+pub fn checkpoint_interval(chain: Chain) -> Option<u64> {
+    #[cfg(feature = "test-feature")]
+    return mock_checkpoint_interval(chain);
+    #[cfg(not(feature = "test-feature"))]
+    mpc_primitives::ChainConfig::checkpoint_interval(&chain)
+}
+
+/// Short cadence for test networks. Mirrors `ChainConfig::checkpoint_interval`
+/// in which chains have one.
+#[cfg(feature = "test-feature")]
+fn mock_checkpoint_interval(chain: Chain) -> Option<u64> {
+    match chain {
+        Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,
+        Chain::Ethereum => Some(2),
+        Chain::Solana | Chain::Hydration | Chain::Canton | Chain::Midnight => Some(5),
     }
 }
 
@@ -381,7 +400,7 @@ impl Backlog {
     /// Set the processed block height for a specific chain.
     /// Returns Some(Checkpoint) if a checkpoint should be created and submitted at this block height.
     pub async fn set_processed_block(&self, chain: Chain, height: u64) -> Option<Checkpoint> {
-        let interval = chain.checkpoint_interval()?;
+        let interval = checkpoint_interval(chain)?;
         self.set_processed_block_interval(chain, height, interval)
             .await
     }

@@ -12,7 +12,10 @@ pub enum SerDeserFormat {
 /// these are operational knobs of this node implementation, not part of the
 /// public interface.
 pub trait ChainConfig {
-    /// Blocks between checkpoints, or `None` for chains without one.
+    /// Blocks between checkpoints, or `None` for chains without one. Every
+    /// node of a network must use the same value: nodes vote on the digest at
+    /// each boundary, and a node on its own cadence would vote at boundaries
+    /// nobody else has.
     fn checkpoint_interval(&self) -> Option<u64>;
     /// `ChainEvent::Block` silence budget before the supervisor restarts
     /// the indexer.
@@ -29,35 +32,15 @@ pub trait ChainConfig {
     fn supports_bidirectional_signing(&self) -> bool;
 }
 
-/// Blocks between checkpoints. Every node of a network must use the same
-/// value: nodes vote on the digest at each boundary, and a node on its own
-/// cadence would vote at boundaries nobody else has.
-fn production_checkpoint_interval(chain: &Chain) -> Option<u64> {
-    match chain {
-        Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,
-        Chain::Ethereum => Some(20),
-        Chain::Solana => Some(1200),
-        Chain::Hydration => Some(240),
-        Chain::Canton => Some(50),
-        Chain::Midnight => Some(120),
-    }
-}
-
-/// Short cadence so checkpoint tests finish in seconds.
-fn test_checkpoint_interval(chain: &Chain) -> Option<u64> {
-    match chain {
-        Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,
-        Chain::Ethereum => Some(2),
-        Chain::Solana | Chain::Hydration | Chain::Canton | Chain::Midnight => Some(5),
-    }
-}
-
 impl ChainConfig for Chain {
     fn checkpoint_interval(&self) -> Option<u64> {
-        if cfg!(feature = "test-feature") {
-            test_checkpoint_interval(self)
-        } else {
-            production_checkpoint_interval(self)
+        match self {
+            Chain::NEAR | Chain::Bitcoin | Chain::Tron => None,
+            Chain::Ethereum => Some(20),
+            Chain::Solana => Some(1200),
+            Chain::Hydration => Some(240),
+            Chain::Canton => Some(50),
+            Chain::Midnight => Some(120),
         }
     }
 

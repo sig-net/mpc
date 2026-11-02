@@ -1,3 +1,4 @@
+use super::checkpoint_interval;
 use super::{
     AnyProgress, Backlog, BacklogEntry, BacklogError, Bidirectional, Checkpoint, Checkpoints,
     Executing, Final, Generating, Initial, PendingRequests, Publishing, Sign,
@@ -10,7 +11,7 @@ use crate::backlog::mock::{
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use mpc_chain_integration_core::StateManager;
-use mpc_primitives::{Chain, ChainConfig as _, ExecutionOutcome, SignId, SignKind};
+use mpc_primitives::{Chain, ExecutionOutcome, SignId, SignKind};
 use std::sync::Arc;
 
 fn digest_hex(hex_str: &str) -> [u8; 32] {
@@ -201,7 +202,7 @@ async fn test_total_pending_accounting() {
 async fn test_automatic_checkpoint_on_interval() {
     for chain in [Chain::Ethereum, Chain::Solana] {
         let backlog = Backlog::new();
-        let interval = chain.checkpoint_interval().unwrap();
+        let interval = checkpoint_interval(chain).unwrap();
 
         backlog
             .insert_mock_bidirectional(SignId::from_u8(1), chain)
@@ -865,7 +866,7 @@ async fn test_recovery_requeues_completed_bidirectional_requests() {
 async fn test_recovery_preserves_pending_checkpoints() {
     let backlog = Backlog::new();
     let chain = Chain::Ethereum;
-    let interval = chain.checkpoint_interval().unwrap();
+    let interval = checkpoint_interval(chain).unwrap();
 
     backlog.set_processed_block(chain, interval).await.unwrap();
     backlog

@@ -1138,7 +1138,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         // Fill the pending-checkpoint cap so `has_checkpoint_slot` returns false.
-        let interval = chain.checkpoint_interval().unwrap();
+        let interval = crate::backlog::checkpoint_interval(chain).unwrap();
         for i in 1..=crate::backlog::MAX_PENDING_CHECKPOINTS {
             let h = (i as u64) * interval;
             assert!(backlog.set_processed_block(chain, h).await.is_some());
