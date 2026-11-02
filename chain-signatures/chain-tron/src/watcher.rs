@@ -4,7 +4,7 @@
 //! is the supervision vehicle alone: no block scanning, no catchup — restart
 //! rebuilds the map from the backlog.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use alloy::primitives::B256;
@@ -17,7 +17,6 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
 };
 use mpc_tron_wire::pb::RawTransaction;
-use std::future::ready;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -85,25 +84,19 @@ struct ExpiredProbe {
     outcome: anyhow::Result<ExpiryProbe>,
 }
 
-/// An inclusion seen this pass vetoes an absence attestation for the
-/// same txid: separately routed solidity instances can disagree within
-/// [`EXPIRY_ATTEST_GRACE_MS`]'s skew, and a vetoed twin re-scans into
-/// the receipt arm next tick.
-fn attest_absences(
-    unattested: Vec<(SignId, Arc<BidirectionalTx>)>,
-    included: &HashSet<BidirectionalTxId>,
+/// Window-closed entries grouped by flat id; a duplicate id's probes
+/// resolve as one unit.
+fn closed_groups(
+    pending: Vec<(SignId, Arc<BidirectionalTx>)>,
     head: &SolidifiedNowBlock,
-) -> Vec<ChainEvent> {
-    unattested
-        .into_iter()
-        .filter(|(_, tx)| !included.contains(&tx.id))
-        .map(|(sign_id, tx)| {
-            tracing::info!(?sign_id, ?tx.id, source = ?tx.source_chain,
-                height = head.number,
-                "validity window closed without inclusion; attesting unexecutable");
-            expired_event(sign_id, &tx, head)
-        })
-        .collect()
+) -> Vec<Vec<(SignId, Arc<BidirectionalTx>)>> {
+    let mut groups: HashMap<BidirectionalTxId, Vec<_>> = HashMap::new();
+    for (sign_id, tx) in pending {
+        if is_window_closed(head, &tx) {
+            groups.entry(tx.id).or_default().push((sign_id, tx));
+        }
+    }
+    groups.into_values().collect()
 }
 
 impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
@@ -191,20 +184,23 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
         )
     }
 
-    /// M6 resolutions for `Executing` entries whose validity window
-    /// closed — backlog-keyed, displaced watches included; every
-    /// failure defers to the next tick.
-    async fn expired_resolutions(&self) -> Vec<ChainEvent> {
+    /// M6 attestations streamed per flat id: a group's events send as
+    /// its probes resolve, so a pass outlasting the stall budget loses
+    /// only the unsent tail; duplicates hold until their group settles.
+    async fn expiry_scan(&self) -> futures_util::stream::BoxStream<'_, ChainEvent> {
         let pending = self.state_manager.get_pending_executions(Chain::Tron).await;
         if pending.is_empty() {
-            return Vec::new();
+            return futures_util::stream::empty().boxed();
         }
         let Some(head) = self.solidified_head().await else {
-            return Vec::new();
+            return futures_util::stream::empty().boxed();
         };
-        let probes = self.probe_closed_windows(&pending, &head).await;
-        let (included, unattested) = self.apply_probes(probes).await;
-        attest_absences(unattested, &included, &head)
+        iter(closed_groups(pending, &head))
+            .map(move |group| self.resolve_group(group, head))
+            .buffer_unordered(Self::MAX_CONCURRENT_RECEIPT_POLLS)
+            .map(futures_util::stream::iter)
+            .flatten()
+            .boxed()
     }
 
     /// The scan head; `None` defers the pass, counted through
@@ -220,16 +216,17 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             .ok()
     }
 
-    /// Window-closed entries probed concurrently, so a large deferred
-    /// backlog cannot outrun the stall budget.
-    async fn probe_closed_windows(
+    /// Resolves one flat id's group: inclusions re-register for the
+    /// receipt arm; an all-absent group attests, one inclusion vetoing
+    /// its twins (instances disagree within [`EXPIRY_ATTEST_GRACE_MS`]'s
+    /// skew); failed lookups defer to the next tick.
+    async fn resolve_group(
         &self,
-        pending: &[(SignId, Arc<BidirectionalTx>)],
-        head: &SolidifiedNowBlock,
-    ) -> Vec<ExpiredProbe> {
-        iter(pending.iter().cloned())
-            .filter(move |(_, tx)| ready(is_window_closed(head, tx)))
-            .map(move |(sign_id, tx)| async move {
+        group: Vec<(SignId, Arc<BidirectionalTx>)>,
+        head: SolidifiedNowBlock,
+    ) -> Vec<ChainEvent> {
+        let probes = iter(group)
+            .map(|(sign_id, tx)| async move {
                 ExpiredProbe {
                     sign_id,
                     outcome: self.expiry_probe(&tx).await,
@@ -237,20 +234,10 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
                 }
             })
             .buffer_unordered(Self::MAX_CONCURRENT_RECEIPT_POLLS)
-            .collect()
-            .await
-    }
+            .collect::<Vec<_>>()
+            .await;
 
-    /// Registers inclusions for the receipt arm and collects the
-    /// unattested, keyed by flat id for the veto.
-    async fn apply_probes(
-        &self,
-        probes: Vec<ExpiredProbe>,
-    ) -> (
-        HashSet<BidirectionalTxId>,
-        Vec<(SignId, Arc<BidirectionalTx>)>,
-    ) {
-        let mut included = HashSet::new();
+        let mut included = false;
         let mut unattested = Vec::new();
         for probe in probes {
             match probe.outcome {
@@ -258,9 +245,9 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
                     tracing::info!(sign_id = ?probe.sign_id, ?probe.tx.id,
                         "expired window with inclusion; re-registered for the receipt arm");
                     self.state_manager
-                        .watch_execution(Chain::Tron, Arc::clone(&probe.tx))
+                        .watch_execution(Chain::Tron, probe.tx)
                         .await;
-                    included.insert(probe.tx.id);
+                    included = true;
                 }
                 Ok(ExpiryProbe::Unavailable) => unattested.push((probe.sign_id, probe.tx)),
                 Err(err) => {
@@ -269,7 +256,18 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
                 }
             }
         }
-        (included, unattested)
+        if included {
+            return Vec::new();
+        }
+        unattested
+            .into_iter()
+            .map(|(sign_id, tx)| {
+                tracing::info!(?sign_id, ?tx.id, source = ?tx.source_chain,
+                    height = head.number,
+                    "validity window closed without inclusion; attesting unexecutable");
+                expired_event(sign_id, &tx, &head)
+            })
+            .collect()
     }
 }
 
@@ -314,11 +312,16 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
                 }
             }
 
-            for event in self.expired_resolutions().await {
-                if tokio::select! {
+            let mut scans = self.expiry_scan().await;
+            loop {
+                let event = tokio::select! {
                     _ = cancel.cancelled() => return Ok(()),
-                    sent = events_tx.send(event) => sent.is_err(),
-                } {
+                    event = scans.next() => match event {
+                        Some(event) => event,
+                        None => break,
+                    },
+                };
+                if events_tx.send(event).await.is_err() {
                     return Ok(());
                 }
             }
@@ -1246,31 +1249,52 @@ mod tests {
         run.stop().await;
     }
 
-    /// Only the window-closed half of the backlog is probed; an open
-    /// window never spends a provider call.
+    #[test]
+    fn closed_windows_group_by_flat_id() {
+        let head = SolidifiedNowBlock(NowBlock {
+            block_id: B256::from([0x9u8; 32]),
+            number: 41,
+            timestamp: SOLIDITY_TS,
+        });
+        let (id, sign, tx) = expiry_tx(6, Chain::Midnight, SOLIDITY_TS - 40_000);
+        let mut twin_tx = (*tx).clone();
+        twin_tx.request_id = [0x7f; 32];
+        let twin_sign = twin_tx.sign_id();
+        let (other_id, other_sign, other_tx) = expiry_tx(7, Chain::Midnight, SOLIDITY_TS - 40_000);
+        let (_, _, open_tx) = expiry_tx(8, Chain::Midnight, SOLIDITY_TS + 60_000);
+
+        let groups = closed_groups(
+            vec![
+                (sign, tx),
+                (twin_sign, twin_tx.into()),
+                (other_sign, other_tx),
+                (SignId::new([9; 32]), open_tx),
+            ],
+            &head,
+        );
+
+        assert_eq!(groups.len(), 2, "open window groups nothing: {groups:?}");
+        let dup = groups
+            .iter()
+            .find(|g| g.len() == 2)
+            .expect("the duplicate id resolves as one group");
+        assert!(dup.iter().all(|(_, tx)| tx.id == id));
+        let singleton = groups
+            .iter()
+            .find(|g| g.len() == 1)
+            .expect("the distinct id resolves alone");
+        assert_eq!(singleton[0].1.id, other_id);
+    }
+
     #[tokio::test]
-    async fn only_closed_windows_are_probed() {
+    async fn resolve_group_registers_inclusions_and_attests_absences() {
         let (mut server, config, state) = expiry_stack().await;
-        let (closed_id, ..) =
+        let (included_id, included_sign, _) =
             pending_expiry_entry(&state, 6, Chain::Midnight, SOLIDITY_TS - 40_000).await;
-        let (open_id, ..) =
-            pending_expiry_entry(&state, 7, Chain::Midnight, SOLIDITY_TS + 60_000).await;
-        let served = server
-            .mock("POST", "/walletsolidity/gettransactioninfobyid")
-            .match_body(Matcher::PartialJson(serde_json::json!({
-                "value": hex::encode(closed_id.0)
-            })))
-            .with_header("content-type", "application/json")
-            .with_body(success_receipt(&closed_id))
-            .expect(1)
-            .create();
-        server
-            .mock("POST", "/walletsolidity/gettransactioninfobyid")
-            .match_body(Matcher::PartialJson(serde_json::json!({
-                "value": hex::encode(open_id.0)
-            })))
-            .expect(0)
-            .create();
+        let (absent_id, absent_sign, _) =
+            pending_expiry_entry(&state, 7, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        receipt_for(&mut server, &included_id, success_receipt(&included_id));
+        receipt_for(&mut server, &absent_id, "{}".to_string());
 
         let watcher = TronWatcher::new(config, state.clone(), NoopChainTelemetry).unwrap();
         let head = SolidifiedNowBlock(NowBlock {
@@ -1279,85 +1303,71 @@ mod tests {
             timestamp: SOLIDITY_TS,
         });
         let pending = state.get_pending_executions(Chain::Tron).await;
-        let probes = watcher.probe_closed_windows(&pending, &head).await;
+        let mut events = Vec::new();
+        for group in closed_groups(pending, &head) {
+            events.extend(watcher.resolve_group(group, head).await);
+        }
 
-        assert_eq!(probes.len(), 1);
-        assert_eq!(probes[0].tx.id, closed_id);
-        assert!(matches!(probes[0].outcome, Ok(ExpiryProbe::Included)));
-        served.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn probes_register_inclusions_and_collect_the_unattested() {
-        let server = mockito::Server::new_async().await;
-        let config = test_config(server.url().parse().unwrap());
-        let state = MockStateManager::new();
-        let watcher = TronWatcher::new(config, state.clone(), NoopChainTelemetry).unwrap();
-
-        let (id, included_sign, tx) = expiry_tx(6, Chain::Midnight, SOLIDITY_TS - 40_000);
-        let mut twin_tx = (*tx).clone();
-        twin_tx.request_id = [0x7f; 32];
-        let twin_sign = twin_tx.sign_id();
-        let (_, failed_sign, failed_tx) = expiry_tx(7, Chain::Ethereum, SOLIDITY_TS - 40_000);
-        let probes = vec![
-            ExpiredProbe {
-                sign_id: included_sign,
-                outcome: Ok(ExpiryProbe::Included),
-                tx,
-            },
-            ExpiredProbe {
-                sign_id: twin_sign,
-                outcome: Ok(ExpiryProbe::Unavailable),
-                tx: twin_tx.into(),
-            },
-            ExpiredProbe {
-                sign_id: failed_sign,
-                outcome: Err(anyhow::anyhow!("receipt lookup failed")),
-                tx: failed_tx,
-            },
-        ];
-
-        let (included, unattested) = watcher.apply_probes(probes).await;
-
-        assert_eq!(included, HashSet::from([id]));
-        assert_eq!(unattested.len(), 1);
-        assert_eq!(unattested[0].0, twin_sign);
-        assert_eq!(unattested[0].1.id, id);
         let watchers = state.get_execution_watchers(Chain::Tron).await;
-        assert_eq!(watchers.len(), 1);
-        assert_eq!(watchers[&id].0, included_sign);
+        assert_eq!(watchers.len(), 1, "only the inclusion re-registers");
+        assert_eq!(watchers[&included_id].0, included_sign);
+        assert_eq!(events.len(), 1, "events: {events:?}");
+        assert!(matches!(
+            &events[0],
+            ChainEvent::ExecutionConfirmed {
+                tx_id, sign_id, block_height: 41,
+                result: ExecutionOutcome::Unviable,
+                ..
+            } if *tx_id == absent_id && *sign_id == absent_sign
+        ));
     }
 
-    #[test]
-    fn an_inclusion_vetoes_the_same_txids_absence_attestation() {
-        let (id, _, tx) = expiry_tx(6, Chain::Midnight, SOLIDITY_TS - 40_000);
+    /// A duplicate flat id reading disagreeing replicas: one inclusion
+    /// vetoes its twin's absence.
+    #[tokio::test]
+    async fn resolve_group_vetoes_a_twin_absence_on_inclusion() {
+        let (mut server, config, state) = expiry_stack().await;
+        let (id, base_sign, tx) =
+            pending_expiry_entry(&state, 6, Chain::Midnight, SOLIDITY_TS - 40_000).await;
         let mut twin_tx = (*tx).clone();
         twin_tx.request_id = [0x7f; 32];
         let twin_sign = twin_tx.sign_id();
-        let (_, other_sign, other_tx) = expiry_tx(7, Chain::Midnight, SOLIDITY_TS - 40_000);
+        state.add_pending_execution(Arc::new(twin_tx)).await;
+
+        // Either member may read the lagging instance first.
+        server
+            .mock("POST", "/walletsolidity/gettransactioninfobyid")
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "value": hex::encode(id.0)
+            })))
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .expect(1)
+            .create();
+        receipt_for(&mut server, &id, success_receipt(&id));
+
+        let watcher = TronWatcher::new(config, state.clone(), NoopChainTelemetry).unwrap();
         let head = SolidifiedNowBlock(NowBlock {
             block_id: B256::from([0x9u8; 32]),
             number: 41,
             timestamp: SOLIDITY_TS,
         });
+        let pending = state.get_pending_executions(Chain::Tron).await;
+        let group = closed_groups(pending, &head).pop().expect("one group");
+        assert_eq!(group.len(), 2);
 
-        let events = attest_absences(
-            vec![
-                (twin_sign, twin_tx.into()),
-                (other_sign, Arc::clone(&other_tx)),
-            ],
-            &HashSet::from([id]),
-            &head,
+        let events = watcher.resolve_group(group, head).await;
+
+        assert!(
+            events.is_empty(),
+            "the twin's absence is vetoed: {events:?}"
         );
-
-        assert_eq!(events.len(), 1, "events: {events:?}");
-        assert!(matches!(
-            &events[0],
-            ChainEvent::ExecutionConfirmed {
-                tx_id, sign_id, source_chain: Chain::Midnight,
-                block_height: 41, result: ExecutionOutcome::Unviable,
-            } if *tx_id == other_tx.id && *sign_id == other_sign
-        ));
+        let watchers = state.get_execution_watchers(Chain::Tron).await;
+        assert_eq!(watchers.len(), 1, "the included member re-registers");
+        assert!(
+            watchers[&id].0 == base_sign || watchers[&id].0 == twin_sign,
+            "either member's inclusion re-registers"
+        );
     }
 
     /// No `Executing` entries: the solidified head is never fetched.

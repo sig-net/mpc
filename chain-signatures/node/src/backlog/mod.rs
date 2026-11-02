@@ -142,9 +142,8 @@ impl ExecutionWatchers {
         self.watchers.insert(watch.tx.id, watch)
     }
 
-    /// Removes the watch only if it belongs to `(source_chain,
-    /// sign_id)`; a displaced foreign watch under the same flat id
-    /// survives for its own confirmation.
+    /// Removes the watch only if it belongs to `(source_chain, sign_id)`;
+    /// a foreign watch under the same flat id survives.
     fn remove_owned(
         &mut self,
         tx_id: &BidirectionalTxId,
@@ -399,10 +398,9 @@ impl Backlog {
         watchers.insert(entry.execution_watch());
     }
 
-    /// Stop watching an execution and retrieve the backlog entry the
-    /// watch belongs to — by flat id and the entry's own source and
-    /// sign id; a watch under the same flat id but a different entry
-    /// stays for its own confirmation.
+    /// Stop watching an execution and retrieve its backlog entry, by
+    /// flat id and the entry's own source and sign id; a foreign watch
+    /// under the same flat id stays for its own confirmation.
     pub async fn unwatch_execution(
         &self,
         chain: Chain,
