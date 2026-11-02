@@ -73,7 +73,6 @@ impl Args {
             "--eth-refresh-finalized-interval",
             eth.refresh_finalized_interval,
         );
-        self.switch("--eth-optimistic-requests", eth.optimistic_requests);
     }
 
     fn sol(&mut self, sol: &SolConfig) {

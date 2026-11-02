@@ -28,7 +28,6 @@ plumbed through from the node's config, not constructed by hand.
 | `contract_address`        | `MPC_ETH_CONTRACT_ADDRESS` | yes | MPC contract address, with or without the `0x` prefix |
 | `network`                 | `MPC_ETH_NETWORK` | no | default `sepolia`; `run()` fails unless the RPC serves this network's chain id. Every node of a deployment must name the same network, since admission checks transactions against it |
 | `refresh_finalized_interval` | `MPC_ETH_REFRESH_FINALIZED_INTERVAL` | no | milliseconds between finalized-head watcher polls (production) |
-| `optimistic_requests`     | `MPC_ETH_OPTIMISTIC_REQUESTS` | no | default off (production waits for finality via the finalized-head watcher); set `true` for the demo/soft-tip path |
 
 ### Stall budget
 
@@ -88,7 +87,7 @@ cargo run --example bench_catchup --features bench
 ### Reference numbers
 
 Current catchup baseline for a 100-block catchup over an already-finalized
-range (`START=11214938 END=11215038`, `MPC_ETH_OPTIMISTIC_REQUESTS=false`, default
+range (`START=11214938 END=11215038`, default
 `MPC_ETH_REFRESH_FINALIZED_INTERVAL`).
 
 #### Provider cost
