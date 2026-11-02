@@ -53,6 +53,26 @@ pub(crate) fn should_generate(
     stock.mine < min && mine_generations < max_mine_generations
 }
 
+/// Bounds a deliberator applies to a PROPOSE, from counts it already caches.
+/// Sized by the whole participant set with headroom for counts a tick behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AcceptLimits {
+    /// Refuse once this node runs or has accepted this many generations: a
+    /// margin above the network's cap.
+    pub ongoing: usize,
+    /// Refuse once the pool holds this many: a margin above the network's floors.
+    pub generated: usize,
+}
+
+impl AcceptLimits {
+    pub fn new(min_mine: usize, max_mine_generations: usize, num_nodes: usize) -> Self {
+        Self {
+            ongoing: num_nodes * 2 * max_mine_generations,
+            generated: num_nodes * 2 * min_mine,
+        }
+    }
+}
+
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
     pub(crate) secret_storage: SecretNodeStorageVariant,
