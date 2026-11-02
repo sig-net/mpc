@@ -25,32 +25,32 @@ pub trait SecretNodeStorage {
 /// In-memory implementation of `SecretNodeStorage`, for in-process tests.
 #[cfg(any(test, feature = "test-feature"))]
 #[derive(Default)]
-pub struct MemoryNodeStorage {
+pub struct MemoryStore {
     node_data: Option<PersistentNodeData>,
 }
 
 #[cfg(any(test, feature = "test-feature"))]
 #[async_trait]
-impl SecretNodeStorage for MemoryNodeStorage {
+impl SecretNodeStorage for MemoryStore {
     async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
-        tracing::info!("storing PersistentNodeData using MemoryNodeStorage");
+        tracing::info!("storing PersistentNodeData using MemoryStore");
         self.node_data = Some(data.clone());
         Ok(())
     }
 
     async fn load(&self) -> SecretResult<Option<PersistentNodeData>> {
-        tracing::info!("loading PersistentNodeData using MemoryNodeStorage");
+        tracing::info!("loading PersistentNodeData using MemoryStore");
         Ok(self.node_data.clone())
     }
 }
 
 /// GCP Secret Manager implementation of `SecretNodeStorage`.
-pub struct SecretManagerNodeStorage {
+pub struct GcpSecretManagerStore {
     secret_manager: SecretManagerService,
     sk_share_secret_id: String,
 }
 
-impl SecretManagerNodeStorage {
+impl GcpSecretManagerStore {
     fn new(secret_manager: SecretManagerService, sk_share_secret_id: String) -> Self {
         Self {
             secret_manager,
@@ -60,9 +60,9 @@ impl SecretManagerNodeStorage {
 }
 
 #[async_trait]
-impl SecretNodeStorage for SecretManagerNodeStorage {
+impl SecretNodeStorage for GcpSecretManagerStore {
     async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
-        tracing::info!("storing PersistentNodeData using SecretManagerNodeStorage");
+        tracing::info!("storing PersistentNodeData using GcpSecretManagerStore");
         self.secret_manager
             .store_secret(&serde_json::to_vec(data)?, &self.sk_share_secret_id)
             .await?;
@@ -70,7 +70,7 @@ impl SecretNodeStorage for SecretManagerNodeStorage {
     }
 
     async fn load(&self) -> SecretResult<Option<PersistentNodeData>> {
-        tracing::info!("loading PersistentNodeData using SecretManagerNodeStorage");
+        tracing::info!("loading PersistentNodeData using GcpSecretManagerStore");
         let raw_data = self
             .secret_manager
             .load_secret(&self.sk_share_secret_id)
@@ -84,12 +84,12 @@ impl SecretNodeStorage for SecretManagerNodeStorage {
 
 /// File implementation of `SecretNodeStorage`, for the test harness.
 #[cfg(any(test, feature = "test-feature"))]
-pub struct DiskNodeStorage {
+pub struct FileStore {
     path: PathBuf,
 }
 
 #[cfg(any(test, feature = "test-feature"))]
-impl DiskNodeStorage {
+impl FileStore {
     pub fn new(path: &str) -> Self {
         Self {
             path: PathBuf::from(path),
@@ -99,9 +99,9 @@ impl DiskNodeStorage {
 
 #[cfg(any(test, feature = "test-feature"))]
 #[async_trait]
-impl SecretNodeStorage for DiskNodeStorage {
+impl SecretNodeStorage for FileStore {
     async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
-        tracing::info!("storing PersistentNodeData using DiskNodeStorage");
+        tracing::info!("storing PersistentNodeData using FileStore");
 
         // Serialize the person object to JSON and convert directly to bytes
         let json_bytes = serde_json::to_vec(data)?;
@@ -128,7 +128,7 @@ impl SecretNodeStorage for DiskNodeStorage {
 
         match file_res {
             Ok(mut file) => {
-                tracing::info!("loading PersistentNodeData using DiskNodeStorage");
+                tracing::info!("loading PersistentNodeData using FileStore");
                 let mut contents = Vec::new();
                 // Read the contents of the file into the vector
                 file.read_to_end(&mut contents).await?;
@@ -140,7 +140,7 @@ impl SecretNodeStorage for DiskNodeStorage {
             }
             // If the file is not found, treat it as if there is no existing data, rather than an error
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::info!("loading PersistentNodeData using DiskNodeStorage: no file");
+                tracing::info!("loading PersistentNodeData using FileStore: no file");
                 Ok(None)
             }
             // Propagate other types of errors
@@ -153,26 +153,26 @@ impl SecretNodeStorage for DiskNodeStorage {
 }
 
 /// Enum representing the different variants of secret node storage.
-pub enum SecretNodeStorageVariant {
+pub enum KeyShareStore {
     /// In-memory storage for in-process tests.
     #[cfg(any(test, feature = "test-feature"))]
-    Memory(MemoryNodeStorage),
+    Memory(MemoryStore),
     /// Google Cloud Secret Manager storage variant
-    Gcp(SecretManagerNodeStorage),
+    GcpSecretManager(GcpSecretManagerStore),
     /// File storage for the test harness.
     #[cfg(any(test, feature = "test-feature"))]
-    Disk(DiskNodeStorage),
+    File(FileStore),
 }
 
-impl SecretNodeStorageVariant {
+impl KeyShareStore {
     /// Stores the given `PersistentNodeData` using the underlying storage mechanism.
     pub async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
         match self {
             #[cfg(any(test, feature = "test-feature"))]
-            SecretNodeStorageVariant::Memory(s) => s.store(data).await,
-            SecretNodeStorageVariant::Gcp(s) => s.store(data).await,
+            KeyShareStore::Memory(s) => s.store(data).await,
+            KeyShareStore::GcpSecretManager(s) => s.store(data).await,
             #[cfg(any(test, feature = "test-feature"))]
-            SecretNodeStorageVariant::Disk(s) => s.store(data).await,
+            KeyShareStore::File(s) => s.store(data).await,
         }
     }
 
@@ -180,10 +180,10 @@ impl SecretNodeStorageVariant {
     pub async fn load(&self) -> SecretResult<Option<PersistentNodeData>> {
         match self {
             #[cfg(any(test, feature = "test-feature"))]
-            SecretNodeStorageVariant::Memory(s) => s.load().await,
-            SecretNodeStorageVariant::Gcp(s) => s.load().await,
+            KeyShareStore::Memory(s) => s.load().await,
+            KeyShareStore::GcpSecretManager(s) => s.load().await,
             #[cfg(any(test, feature = "test-feature"))]
-            SecretNodeStorageVariant::Disk(s) => s.load().await,
+            KeyShareStore::File(s) => s.load().await,
         }
     }
 }
@@ -194,12 +194,12 @@ impl SecretNodeStorageVariant {
 pub async fn init(
     opts: &Options,
     #[cfg_attr(not(feature = "test-feature"), allow(unused_variables))] account_id: &AccountId,
-) -> anyhow::Result<SecretNodeStorageVariant> {
+) -> anyhow::Result<KeyShareStore> {
     #[cfg(feature = "test-feature")]
     if let Some(sk_share_local_path) = &opts.sk_share_local_path {
         let path = format!("{sk_share_local_path}-{account_id}");
-        tracing::info!("using DiskNodeStorage with path: {}", path);
-        return Ok(SecretNodeStorageVariant::Disk(DiskNodeStorage::new(&path)));
+        tracing::info!("using FileStore with path: {}", path);
+        return Ok(KeyShareStore::File(FileStore::new(&path)));
     }
     let secret_id = opts
         .sk_share_secret_id
@@ -210,10 +210,11 @@ pub async fn init(
         .as_ref()
         .context("clap pairs the Secret Manager id with a GCP project")?;
     let secret_manager = SecretManagerService::new(project_id)?;
-    tracing::info!("using SecretManagerNodeStorage");
-    Ok(SecretNodeStorageVariant::Gcp(
-        SecretManagerNodeStorage::new(secret_manager, secret_id.clone()),
-    ))
+    tracing::info!("using GcpSecretManagerStore");
+    Ok(KeyShareStore::GcpSecretManager(GcpSecretManagerStore::new(
+        secret_manager,
+        secret_id.clone(),
+    )))
 }
 
 #[cfg(feature = "test-feature")]
@@ -221,15 +222,15 @@ pub fn test_store(
     epoch: u64,
     private_share: crate::types::SecretKeyShare,
     public_key: mpc_crypto::PublicKey,
-) -> SecretNodeStorageVariant {
-    let store = MemoryNodeStorage {
+) -> KeyShareStore {
+    let store = MemoryStore {
         node_data: Some(PersistentNodeData {
             epoch,
             private_share,
             public_key,
         }),
     };
-    SecretNodeStorageVariant::Memory(store)
+    KeyShareStore::Memory(store)
 }
 
 #[cfg(test)]
@@ -260,7 +261,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.json");
 
-        let storage = DiskNodeStorage { path };
+        let storage = FileStore { path };
 
         let result = storage.load().await.unwrap();
 
@@ -272,7 +273,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_data.json");
 
-        let mut storage = DiskNodeStorage { path };
+        let mut storage = FileStore { path };
 
         let expected = PersistentNodeData {
             epoch: 42,
@@ -294,14 +295,14 @@ mod tests {
 
         tokio::fs::write(&path, b"not a valid json").await.unwrap();
 
-        let storage = DiskNodeStorage { path };
+        let storage = FileStore { path };
 
         assert!(storage.load().await.is_err());
     }
 
     #[tokio::test]
     async fn memory_store_and_load_round_trip() {
-        let mut storage = MemoryNodeStorage::default();
+        let mut storage = MemoryStore::default();
 
         let expected = PersistentNodeData {
             epoch: 42,
@@ -328,7 +329,7 @@ mod tests {
 
         let storage = init(&opts, &make_test_account_id()).await.unwrap();
 
-        assert!(matches!(storage, SecretNodeStorageVariant::Disk(_)));
+        assert!(matches!(storage, KeyShareStore::File(_)));
     }
 
     #[tokio::test]
@@ -342,6 +343,6 @@ mod tests {
         };
         let storage = init(&opts, &make_test_account_id()).await.unwrap();
 
-        assert!(matches!(storage, SecretNodeStorageVariant::Gcp(_)));
+        assert!(matches!(storage, KeyShareStore::GcpSecretManager(_)));
     }
 }

@@ -28,7 +28,7 @@ use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage
 use crate::protocol::request::SignatureSpawnerTask;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::presignature_storage::PresignatureStorage;
-use crate::storage::secret_storage::SecretNodeStorageVariant;
+use crate::storage::secret_storage::KeyShareStore;
 use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
@@ -55,7 +55,7 @@ pub(crate) fn should_generate(
 
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
-    pub(crate) secret_storage: SecretNodeStorageVariant,
+    pub(crate) secret_storage: KeyShareStore,
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
     pub(crate) sign_task: SignatureSpawnerTask,

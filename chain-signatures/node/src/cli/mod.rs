@@ -18,7 +18,7 @@ use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, R
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::midnight_wallet_storage::MidnightWalletStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
-use crate::storage::secret_storage::SecretNodeStorageVariant;
+use crate::storage::secret_storage::KeyShareStore;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::types::SignCommand;
@@ -665,7 +665,7 @@ impl RpcHandles {
 }
 
 struct StorageHandles {
-    key_storage: SecretNodeStorageVariant,
+    key_storage: KeyShareStore,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     backlog: Backlog,
@@ -731,7 +731,7 @@ impl ProtocolHandles {
         sign_rx: mpsc::Receiver<SignCommand>,
         node_client: &NodeClient,
         contract_watcher: &ContractStateWatcher,
-        key_storage: SecretNodeStorageVariant,
+        key_storage: KeyShareStore,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
