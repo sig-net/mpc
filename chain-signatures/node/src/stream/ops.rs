@@ -549,6 +549,46 @@ pub async fn process_execution_confirmed(
         "handling execution confirmation"
     );
 
+    // An included transaction takes its nonce whatever its outcome.
+    for sibling_id in ctx.backlog.nonce_siblings(entry.execution_tx()).await {
+        let Some(sibling) = ctx
+            .backlog
+            .unwatch_execution(target_chain, &sibling_id)
+            .await
+        else {
+            continue;
+        };
+        tracing::info!(
+            ?sibling_id,
+            taker = ?tx_id,
+            block_height,
+            "nonce taken by another request's transaction"
+        );
+        // Other source chains cannot encode Unviable yet; their applications refund on Failed.
+        let outcome = if sibling.chain == Chain::Midnight {
+            ExecutionOutcome::Unviable
+        } else {
+            ExecutionOutcome::Failed
+        };
+        if let Err(err) = answer_execution(sibling, sibling_id, block_height, outcome, ctx).await {
+            tracing::error!(?sibling_id, ?err, "failed to answer a nonce sibling");
+        }
+    }
+
+    answer_execution(entry, tx_id, block_height, result, ctx).await
+}
+
+/// Answers `entry`, whose transaction `tx_id` ended with `result` at `block_height`.
+async fn answer_execution(
+    entry: SignEntry<Bidirectional<Executing>>,
+    tx_id: mpc_primitives::BidirectionalTxId,
+    block_height: u64,
+    result: ExecutionOutcome,
+    ctx: &StreamContext,
+) -> anyhow::Result<()> {
+    let sign_id = entry.sign_id();
+    let source_chain = entry.chain;
+
     // Captured before `advance` consumes the entry: the wait ends here, and the
     // outcome is what distinguishes a healthy round trip from a reverted one.
     let awaiting_execution = entry.awaiting_execution();
