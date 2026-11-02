@@ -5,24 +5,73 @@ use tokio::fs::{self, File};
 #[cfg(any(test, feature = "test-feature"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::gcp::SecretResult;
+use crate::gcp::{SecretManagerService, SecretResult};
+use crate::protocol::state::KeyShareRecord;
 use crate::storage::Options;
-use crate::{gcp::SecretManagerService, protocol::state::KeyShareRecord};
 use anyhow::Context as _;
-use async_trait::async_trait;
-
 use near_account_id::AccountId;
 
-#[async_trait]
-pub trait SecretNodeStorage {
-    /// Stores the given `KeyShareRecord` securely.
-    async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()>;
-    /// Loads the `KeyShareRecord` if it exists.
-    /// Returns `Ok(None)` if the data does not exist.
-    async fn load(&self) -> SecretResult<Option<KeyShareRecord>>;
+/// Where the node keeps its key share. Production builds know only Secret
+/// Manager; test builds add a file and an in-memory store.
+pub enum KeyShareStore {
+    GcpSecretManager(GcpSecretManagerStore),
+    #[cfg(any(test, feature = "test-feature"))]
+    File(FileStore),
+    #[cfg(any(test, feature = "test-feature"))]
+    Memory(MemoryStore),
 }
 
-/// In-memory implementation of `SecretNodeStorage`, for in-process tests.
+impl KeyShareStore {
+    /// Opens the store the options name. `async` because the Secret Manager
+    /// credentials can only be built inside a running Tokio runtime.
+    pub async fn init(
+        opts: &Options,
+        #[cfg_attr(not(feature = "test-feature"), allow(unused_variables))] account_id: &AccountId,
+    ) -> anyhow::Result<Self> {
+        #[cfg(feature = "test-feature")]
+        if let Some(base_path) = &opts.sk_share_local_path {
+            let path = format!("{base_path}-{account_id}");
+            tracing::info!(%path, "keeping the key share in a file");
+            return Ok(Self::File(FileStore::new(&path)));
+        }
+        let secret_id = opts
+            .sk_share_secret_id
+            .as_ref()
+            .context("clap requires a key-share store")?;
+        let project_id = opts
+            .gcp_project_id
+            .as_ref()
+            .context("clap pairs the Secret Manager id with a GCP project")?;
+        tracing::info!("keeping the key share in Secret Manager");
+        Ok(Self::GcpSecretManager(GcpSecretManagerStore {
+            secret_manager: SecretManagerService::new(project_id)?,
+            secret_id: secret_id.clone(),
+        }))
+    }
+
+    pub async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
+        match self {
+            Self::GcpSecretManager(s) => s.store(data).await,
+            #[cfg(any(test, feature = "test-feature"))]
+            Self::File(s) => s.store(data).await,
+            #[cfg(any(test, feature = "test-feature"))]
+            Self::Memory(s) => s.store(data),
+        }
+    }
+
+    /// Loads the key share, or `None` when the store holds nothing yet.
+    pub async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
+        match self {
+            Self::GcpSecretManager(s) => s.load().await,
+            #[cfg(any(test, feature = "test-feature"))]
+            Self::File(s) => s.load().await,
+            #[cfg(any(test, feature = "test-feature"))]
+            Self::Memory(s) => s.load(),
+        }
+    }
+}
+
+/// In-memory store for in-process tests.
 #[cfg(any(test, feature = "test-feature"))]
 #[derive(Default)]
 pub struct MemoryStore {
@@ -30,59 +79,40 @@ pub struct MemoryStore {
 }
 
 #[cfg(any(test, feature = "test-feature"))]
-#[async_trait]
-impl SecretNodeStorage for MemoryStore {
-    async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
-        tracing::info!("storing KeyShareRecord using MemoryStore");
+impl MemoryStore {
+    fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
         self.node_data = Some(data.clone());
         Ok(())
     }
 
-    async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
-        tracing::info!("loading KeyShareRecord using MemoryStore");
+    fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
         Ok(self.node_data.clone())
     }
 }
 
-/// GCP Secret Manager implementation of `SecretNodeStorage`.
+/// GCP Secret Manager store.
 pub struct GcpSecretManagerStore {
     secret_manager: SecretManagerService,
-    sk_share_secret_id: String,
+    secret_id: String,
 }
 
 impl GcpSecretManagerStore {
-    fn new(secret_manager: SecretManagerService, sk_share_secret_id: String) -> Self {
-        Self {
-            secret_manager,
-            sk_share_secret_id,
-        }
-    }
-}
-
-#[async_trait]
-impl SecretNodeStorage for GcpSecretManagerStore {
     async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
-        tracing::info!("storing KeyShareRecord using GcpSecretManagerStore");
         self.secret_manager
-            .store_secret(&serde_json::to_vec(data)?, &self.sk_share_secret_id)
+            .store_secret(&serde_json::to_vec(data)?, &self.secret_id)
             .await?;
         Ok(())
     }
 
     async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
-        tracing::info!("loading KeyShareRecord using GcpSecretManagerStore");
-        let raw_data = self
-            .secret_manager
-            .load_secret(&self.sk_share_secret_id)
-            .await?;
-        let Some(data) = raw_data else {
+        let Some(data) = self.secret_manager.load_secret(&self.secret_id).await? else {
             return Ok(None);
         };
         Ok(Some(serde_json::from_slice(&data)?))
     }
 }
 
-/// File implementation of `SecretNodeStorage`, for the test harness.
+/// File store for the test harness.
 #[cfg(any(test, feature = "test-feature"))]
 pub struct FileStore {
     path: PathBuf,
@@ -90,147 +120,52 @@ pub struct FileStore {
 
 #[cfg(any(test, feature = "test-feature"))]
 impl FileStore {
-    pub fn new(path: &str) -> Self {
+    fn new(path: &str) -> Self {
         Self {
             path: PathBuf::from(path),
         }
     }
-}
 
-#[cfg(any(test, feature = "test-feature"))]
-#[async_trait]
-impl SecretNodeStorage for FileStore {
     async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
-        tracing::info!("storing KeyShareRecord using FileStore");
-
-        // Serialize the person object to JSON and convert directly to bytes
         let json_bytes = serde_json::to_vec(data)?;
-
-        // Write the JSON bytes to a temporary file first to ensure atomicitys, then rename it to the target path
+        // Write to a temporary file first, then rename it into place atomically.
         let tmp_path = self.path.with_extension("tmp");
-
         let mut file = File::create(&tmp_path).await?;
         file.write_all(&json_bytes).await?;
-
-        // Ensure all data is flushed to disk before renaming
         file.sync_all().await?;
-
         drop(file);
-
         fs::rename(&tmp_path, &self.path).await?;
-
         Ok(())
     }
 
     async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
-        // Open the file asynchronously
-        let file_res = File::open(self.path.as_os_str()).await;
-
-        match file_res {
+        match File::open(self.path.as_os_str()).await {
             Ok(mut file) => {
-                tracing::info!("loading KeyShareRecord using FileStore");
                 let mut contents = Vec::new();
-                // Read the contents of the file into the vector
                 file.read_to_end(&mut contents).await?;
-
-                // Deserialize the JSON content to a KeyShareRecord object
-                let data: KeyShareRecord = serde_json::from_slice(&contents)?;
-
-                Ok(Some(data))
+                Ok(Some(serde_json::from_slice(&contents)?))
             }
-            // If the file is not found, treat it as if there is no existing data, rather than an error
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::info!("loading KeyShareRecord using FileStore: no file");
-                Ok(None)
-            }
-            // Propagate other types of errors
-            Err(e) => {
-                tracing::error!(%e, "failed to load KeyShareRecord");
-                Err(e.into())
-            }
+            // No file yet means no key share yet.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 }
 
-/// Enum representing the different variants of secret node storage.
-pub enum KeyShareStore {
-    /// In-memory storage for in-process tests.
-    #[cfg(any(test, feature = "test-feature"))]
-    Memory(MemoryStore),
-    /// Google Cloud Secret Manager storage variant
-    GcpSecretManager(GcpSecretManagerStore),
-    /// File storage for the test harness.
-    #[cfg(any(test, feature = "test-feature"))]
-    File(FileStore),
-}
-
-impl KeyShareStore {
-    /// Stores the given `KeyShareRecord` using the underlying storage mechanism.
-    pub async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
-        match self {
-            #[cfg(any(test, feature = "test-feature"))]
-            KeyShareStore::Memory(s) => s.store(data).await,
-            KeyShareStore::GcpSecretManager(s) => s.store(data).await,
-            #[cfg(any(test, feature = "test-feature"))]
-            KeyShareStore::File(s) => s.store(data).await,
-        }
-    }
-
-    /// Loads the `KeyShareRecord` from the underlying storage mechanism, if it exists.
-    pub async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
-        match self {
-            #[cfg(any(test, feature = "test-feature"))]
-            KeyShareStore::Memory(s) => s.load().await,
-            KeyShareStore::GcpSecretManager(s) => s.load().await,
-            #[cfg(any(test, feature = "test-feature"))]
-            KeyShareStore::File(s) => s.load().await,
-        }
-    }
-}
-
-/// Opens the key-share store the options name. Production builds know only
-/// Secret Manager, whose id clap pairs with a GCP project. Test builds may
-/// name a file.
-pub async fn init(
-    opts: &Options,
-    #[cfg_attr(not(feature = "test-feature"), allow(unused_variables))] account_id: &AccountId,
-) -> anyhow::Result<KeyShareStore> {
-    #[cfg(feature = "test-feature")]
-    if let Some(sk_share_local_path) = &opts.sk_share_local_path {
-        let path = format!("{sk_share_local_path}-{account_id}");
-        tracing::info!("using FileStore with path: {}", path);
-        return Ok(KeyShareStore::File(FileStore::new(&path)));
-    }
-    let secret_id = opts
-        .sk_share_secret_id
-        .as_ref()
-        .context("clap requires a key-share store")?;
-    let project_id = opts
-        .gcp_project_id
-        .as_ref()
-        .context("clap pairs the Secret Manager id with a GCP project")?;
-    let secret_manager = SecretManagerService::new(project_id)?;
-    tracing::info!("using GcpSecretManagerStore");
-    Ok(KeyShareStore::GcpSecretManager(GcpSecretManagerStore::new(
-        secret_manager,
-        secret_id.clone(),
-    )))
-}
-
+/// An in-memory store already holding a key share, for fixture tests.
 #[cfg(feature = "test-feature")]
 pub fn test_store(
     epoch: u64,
     private_share: crate::types::SecretKeyShare,
     public_key: mpc_crypto::PublicKey,
 ) -> KeyShareStore {
-    let store = MemoryStore {
+    KeyShareStore::Memory(MemoryStore {
         node_data: Some(KeyShareRecord {
             epoch,
             private_share,
             public_key,
         }),
-    };
-    KeyShareStore::Memory(store)
+    })
 }
 
 #[cfg(test)]
@@ -310,16 +245,16 @@ mod tests {
             public_key: make_test_public_key(),
         };
 
-        storage.store(&expected).await.unwrap();
+        storage.store(&expected).unwrap();
 
-        let loaded = storage.load().await.unwrap();
+        let loaded = storage.load().unwrap();
 
         assert_eq!(loaded, Some(expected));
     }
 
     #[cfg(feature = "test-feature")]
     #[tokio::test]
-    async fn init_uses_disk_when_local_path_provided() {
+    async fn init_opens_a_file_store() {
         let opts = Options {
             sk_share_local_path: Some("/tmp/share".into()),
             sk_share_secret_id: None,
@@ -327,13 +262,15 @@ mod tests {
             redis_url: "redis://localhost".to_string(),
         };
 
-        let storage = init(&opts, &make_test_account_id()).await.unwrap();
+        let store = KeyShareStore::init(&opts, &make_test_account_id())
+            .await
+            .unwrap();
 
-        assert!(matches!(storage, KeyShareStore::File(_)));
+        assert!(matches!(store, KeyShareStore::File(_)));
     }
 
     #[tokio::test]
-    async fn init_uses_gcp_when_secret_id_present() {
+    async fn init_opens_secret_manager() {
         let opts = Options {
             sk_share_secret_id: Some("secret-id".to_string()),
             #[cfg(feature = "test-feature")]
@@ -341,8 +278,11 @@ mod tests {
             gcp_project_id: Some("test-project".to_string()),
             redis_url: "redis://localhost".to_string(),
         };
-        let storage = init(&opts, &make_test_account_id()).await.unwrap();
 
-        assert!(matches!(storage, KeyShareStore::GcpSecretManager(_)));
+        let store = KeyShareStore::init(&opts, &make_test_account_id())
+            .await
+            .unwrap();
+
+        assert!(matches!(store, KeyShareStore::GcpSecretManager(_)));
     }
 }
