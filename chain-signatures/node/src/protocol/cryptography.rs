@@ -9,7 +9,7 @@ use super::state::{
 use super::MpcSignProtocol;
 use crate::protocol::contract::ResharingContractState;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
-use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
+use crate::protocol::state::{KeyShareRecord, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::types::{ReshareProtocol, SecretKeyShare};
 
@@ -135,7 +135,7 @@ impl GeneratingState {
     ) -> NodeState {
         if let Err(err) = ctx
             .key_share_store
-            .store(&PersistentNodeData {
+            .store(&KeyShareRecord {
                 epoch: 0,
                 private_share,
                 public_key,
@@ -370,7 +370,7 @@ impl ResharingState {
     ) -> Result<NodeState, ()> {
         if let Err(err) = ctx
             .key_share_store
-            .store(&PersistentNodeData {
+            .store(&KeyShareRecord {
                 epoch: contract.old_epoch + 1,
                 private_share,
                 public_key: contract.public_key,

@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::gcp::SecretResult;
 use crate::storage::Options;
-use crate::{gcp::SecretManagerService, protocol::state::PersistentNodeData};
+use crate::{gcp::SecretManagerService, protocol::state::KeyShareRecord};
 use anyhow::Context as _;
 use async_trait::async_trait;
 
@@ -15,31 +15,31 @@ use near_account_id::AccountId;
 
 #[async_trait]
 pub trait SecretNodeStorage {
-    /// Stores the given `PersistentNodeData` securely.
-    async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()>;
-    /// Loads the `PersistentNodeData` if it exists.
+    /// Stores the given `KeyShareRecord` securely.
+    async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()>;
+    /// Loads the `KeyShareRecord` if it exists.
     /// Returns `Ok(None)` if the data does not exist.
-    async fn load(&self) -> SecretResult<Option<PersistentNodeData>>;
+    async fn load(&self) -> SecretResult<Option<KeyShareRecord>>;
 }
 
 /// In-memory implementation of `SecretNodeStorage`, for in-process tests.
 #[cfg(any(test, feature = "test-feature"))]
 #[derive(Default)]
 pub struct MemoryStore {
-    node_data: Option<PersistentNodeData>,
+    node_data: Option<KeyShareRecord>,
 }
 
 #[cfg(any(test, feature = "test-feature"))]
 #[async_trait]
 impl SecretNodeStorage for MemoryStore {
-    async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
-        tracing::info!("storing PersistentNodeData using MemoryStore");
+    async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
+        tracing::info!("storing KeyShareRecord using MemoryStore");
         self.node_data = Some(data.clone());
         Ok(())
     }
 
-    async fn load(&self) -> SecretResult<Option<PersistentNodeData>> {
-        tracing::info!("loading PersistentNodeData using MemoryStore");
+    async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
+        tracing::info!("loading KeyShareRecord using MemoryStore");
         Ok(self.node_data.clone())
     }
 }
@@ -61,16 +61,16 @@ impl GcpSecretManagerStore {
 
 #[async_trait]
 impl SecretNodeStorage for GcpSecretManagerStore {
-    async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
-        tracing::info!("storing PersistentNodeData using GcpSecretManagerStore");
+    async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
+        tracing::info!("storing KeyShareRecord using GcpSecretManagerStore");
         self.secret_manager
             .store_secret(&serde_json::to_vec(data)?, &self.sk_share_secret_id)
             .await?;
         Ok(())
     }
 
-    async fn load(&self) -> SecretResult<Option<PersistentNodeData>> {
-        tracing::info!("loading PersistentNodeData using GcpSecretManagerStore");
+    async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
+        tracing::info!("loading KeyShareRecord using GcpSecretManagerStore");
         let raw_data = self
             .secret_manager
             .load_secret(&self.sk_share_secret_id)
@@ -100,8 +100,8 @@ impl FileStore {
 #[cfg(any(test, feature = "test-feature"))]
 #[async_trait]
 impl SecretNodeStorage for FileStore {
-    async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
-        tracing::info!("storing PersistentNodeData using FileStore");
+    async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
+        tracing::info!("storing KeyShareRecord using FileStore");
 
         // Serialize the person object to JSON and convert directly to bytes
         let json_bytes = serde_json::to_vec(data)?;
@@ -122,30 +122,30 @@ impl SecretNodeStorage for FileStore {
         Ok(())
     }
 
-    async fn load(&self) -> SecretResult<Option<PersistentNodeData>> {
+    async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
         // Open the file asynchronously
         let file_res = File::open(self.path.as_os_str()).await;
 
         match file_res {
             Ok(mut file) => {
-                tracing::info!("loading PersistentNodeData using FileStore");
+                tracing::info!("loading KeyShareRecord using FileStore");
                 let mut contents = Vec::new();
                 // Read the contents of the file into the vector
                 file.read_to_end(&mut contents).await?;
 
-                // Deserialize the JSON content to a PersistentNodeData object
-                let data: PersistentNodeData = serde_json::from_slice(&contents)?;
+                // Deserialize the JSON content to a KeyShareRecord object
+                let data: KeyShareRecord = serde_json::from_slice(&contents)?;
 
                 Ok(Some(data))
             }
             // If the file is not found, treat it as if there is no existing data, rather than an error
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::info!("loading PersistentNodeData using FileStore: no file");
+                tracing::info!("loading KeyShareRecord using FileStore: no file");
                 Ok(None)
             }
             // Propagate other types of errors
             Err(e) => {
-                tracing::error!(%e, "failed to load PersistentNodeData");
+                tracing::error!(%e, "failed to load KeyShareRecord");
                 Err(e.into())
             }
         }
@@ -165,8 +165,8 @@ pub enum KeyShareStore {
 }
 
 impl KeyShareStore {
-    /// Stores the given `PersistentNodeData` using the underlying storage mechanism.
-    pub async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
+    /// Stores the given `KeyShareRecord` using the underlying storage mechanism.
+    pub async fn store(&mut self, data: &KeyShareRecord) -> SecretResult<()> {
         match self {
             #[cfg(any(test, feature = "test-feature"))]
             KeyShareStore::Memory(s) => s.store(data).await,
@@ -176,8 +176,8 @@ impl KeyShareStore {
         }
     }
 
-    /// Loads the `PersistentNodeData` from the underlying storage mechanism, if it exists.
-    pub async fn load(&self) -> SecretResult<Option<PersistentNodeData>> {
+    /// Loads the `KeyShareRecord` from the underlying storage mechanism, if it exists.
+    pub async fn load(&self) -> SecretResult<Option<KeyShareRecord>> {
         match self {
             #[cfg(any(test, feature = "test-feature"))]
             KeyShareStore::Memory(s) => s.load().await,
@@ -224,7 +224,7 @@ pub fn test_store(
     public_key: mpc_crypto::PublicKey,
 ) -> KeyShareStore {
     let store = MemoryStore {
-        node_data: Some(PersistentNodeData {
+        node_data: Some(KeyShareRecord {
             epoch,
             private_share,
             public_key,
@@ -275,7 +275,7 @@ mod tests {
 
         let mut storage = FileStore { path };
 
-        let expected = PersistentNodeData {
+        let expected = KeyShareRecord {
             epoch: 42,
             private_share: make_test_secret_key_share(),
             public_key: make_test_public_key(),
@@ -304,7 +304,7 @@ mod tests {
     async fn memory_store_and_load_round_trip() {
         let mut storage = MemoryStore::default();
 
-        let expected = PersistentNodeData {
+        let expected = KeyShareRecord {
             epoch: 42,
             private_share: make_test_secret_key_share(),
             public_key: make_test_public_key(),

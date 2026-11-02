@@ -1,6 +1,6 @@
 use super::contract::{ProtocolState, ResharingContractState};
 use super::state::{
-    JoiningState, NodeState, PersistentNodeData, ResharingPhase, ResharingState, RunningState,
+    JoiningState, KeyShareRecord, NodeState, ResharingPhase, ResharingState, RunningState,
     StartedState, WaitingForConsensusState,
 };
 use super::MpcSignProtocol;
@@ -33,7 +33,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
         contract_state: ProtocolState,
     ) -> NodeState {
         match self.persistent_node_data {
-            Some(PersistentNodeData {
+            Some(KeyShareRecord {
                 epoch,
                 private_share,
                 public_key,
