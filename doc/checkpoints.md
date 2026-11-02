@@ -32,7 +32,8 @@ Requests, signatures, executions, attestations and the source and destination ch
 Vocabulary, per node per source chain:
 
 * **Boundary**: heights fall into intervals of a fixed length; a boundary is where a new interval starts.
-  Every correct node uses the same interval.
+  Every correct node uses the same interval: it is a per-chain constant in the node (`backlog::checkpoint_interval`), never a per-node setting, since a node on its own interval would vote at boundaries nobody else has.
+  Changing it for a network would belong in the contract config, which every node reads.
 
 * **Checkpoint height**: the first processed height in a new interval, so the boundary itself unless the chain skipped that height.
   Correct nodes process the same heights, so they agree on it.
@@ -401,7 +402,7 @@ Each item says what the code does now and what the design asks for instead.
 
 Code under `chain-signatures/`: the contract in `contract/src/lib.rs`; the node in `node/src/`, mainly `backlog/checkpoints.rs`, `backlog/consensus.rs`, `storage/checkpoint_storage.rs`, `stream/supervisor.rs` and `stream/recovery.rs`.
 `MAX_PENDING` is `MAX_PENDING_CHECKPOINTS` there and the poll period is `UPDATE_INTERVAL`.
-The interval is `checkpoint_interval`, a default per chain that `CHECKPOINT_INTERVAL_*` overrides per node, so every node must set the same override.
+The interval is `checkpoint_interval`, a per-chain constant with no per-node override.
 
 ### Contract
 

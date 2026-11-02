@@ -14,7 +14,7 @@ use mpc_crypto::derive_key;
 use mpc_crypto::kdf::derive_epsilon_eth;
 use mpc_node::backlog::Checkpoint;
 use mpc_node::sign_bidirectional::public_key_to_address;
-use mpc_primitives::{Chain, ChainConfig as _, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{Chain, LATEST_MPC_KEY_VERSION};
 use test_log::test;
 use tokio::time::Duration;
 
@@ -162,10 +162,6 @@ async fn test_signature_ethereum() -> Result<()> {
 /// Test that checkpoints are properly cleaned up after responses are observed
 #[test(tokio::test)]
 async fn test_proper_indexer_checkpoint() -> Result<()> {
-    for (name, value) in Chain::checkpoint_env_vars() {
-        std::env::set_var(name, value);
-    }
-
     let cluster = cluster::spawn().ethereum().await?;
     cluster.wait().signable().await?;
 
@@ -242,8 +238,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         .get(&Chain::Ethereum)
         .expect("checkpoint not found for eth");
     let checkpoint_height = checkpoint.block_height;
-    let checkpoint_interval = Chain::Ethereum
-        .checkpoint_interval()
+    let checkpoint_interval = mpc_node::backlog::checkpoint_interval(Chain::Ethereum)
         .expect("ethereum checkpoint interval should be configured");
     tracing::info!(
         checkpoint_height,
