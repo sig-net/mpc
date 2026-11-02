@@ -473,20 +473,16 @@ mod tests {
     use crate::storage::triple_storage::TriplePair;
     use near_account_id::AccountId;
 
-    fn test_setup(
-        initial_threshold: usize,
-    ) -> (
-        AccountId,
-        Participant,
-        NetworkConfig,
-        AccountId,
-        Participant,
-        NetworkConfig,
-        ContractStateWatcher,
-        tokio::sync::watch::Sender<Option<ProtocolState>>,
-        SyncTask,
-        SyncReportReceiver,
-    ) {
+    struct TestContext {
+        my_account: AccountId,
+        me: Participant,
+        peer: Participant,
+        contract_tx: tokio::sync::watch::Sender<Option<ProtocolState>>,
+        sync_task: SyncTask,
+        sync_report_rx: SyncReportReceiver,
+    }
+
+    fn test_setup(initial_threshold: usize) -> TestContext {
         let my_account: AccountId = "node0.test".parse().unwrap();
         let peer_account: AccountId = "node1.test".parse().unwrap();
         let other_account: AccountId = "node2.test".parse().unwrap();
@@ -565,39 +561,31 @@ mod tests {
             TriplePair::storage(&pool, &my_account),
             Presignature::storage(&pool, &my_account),
             mesh_rx,
-            contract_watcher.clone(),
+            contract_watcher,
             sync_report_tx,
-            my_network.clone(),
+            my_network,
         );
 
-        (
+        TestContext {
             my_account,
             me,
-            my_network,
-            peer_account,
             peer,
-            peer_network,
-            contract_watcher,
             contract_tx,
             sync_task,
             sync_report_rx,
-        )
+        }
     }
 
     #[tokio::test]
     async fn test_threshold_change_during_pending_broadcast() {
-        let (
-            _my_account,
+        let TestContext {
             me,
-            _my_network,
-            _peer_account,
             peer,
-            _peer_network,
-            _contract_watcher,
             contract_tx,
             sync_task,
             mut sync_report_rx,
-        ) = test_setup(3);
+            ..
+        } = test_setup(3);
 
         // Simulated broadcast responses received from peer
         let responses = vec![(peer, SyncPeerResponse::Success(SyncUpdate::empty()))];
@@ -626,18 +614,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_identity_change_during_pending_broadcast_drops_responses() {
-        let (
+        let TestContext {
             my_account,
             me,
-            _my_network,
-            _peer_account,
             peer,
-            _peer_network,
-            _contract_watcher,
             contract_tx,
             sync_task,
             mut sync_report_rx,
-        ) = test_setup(3);
+        } = test_setup(3);
 
         let responses = vec![(peer, SyncPeerResponse::Success(SyncUpdate::empty()))];
 
@@ -675,18 +659,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_membership_loss_during_pending_broadcast_drops_responses() {
-        let (
+        let TestContext {
             my_account,
             me,
-            _my_network,
-            _peer_account,
             peer,
-            _peer_network,
-            _contract_watcher,
             contract_tx,
             sync_task,
             mut sync_report_rx,
-        ) = test_setup(3);
+        } = test_setup(3);
 
         let responses = vec![(peer, SyncPeerResponse::Success(SyncUpdate::empty()))];
 
