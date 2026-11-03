@@ -493,6 +493,7 @@ impl ChainPublisher for EthClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IndexerConfig;
     use alloy::primitives::{Address, B256, U256};
     use k256::{AffinePoint, Scalar};
     use mockito::{Matcher, Mock, Server};
@@ -576,12 +577,11 @@ mod tests {
             execution_rpc_http_url: url.parse().unwrap(),
             contract_address: "1234567890123456789012345678901234567890".parse().unwrap(),
             network: "sepolia".to_string(),
-            refresh_finalized_interval: 1000,
             optimistic_requests: false,
             rpc: Default::default(),
             gas: Default::default(),
             publisher: Default::default(),
-            indexer: Default::default(),
+            indexer: IndexerConfig::fast_polling(),
         }
     }
 

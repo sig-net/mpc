@@ -28,27 +28,6 @@ pub struct TronArgs {
 }
 
 impl TronArgs {
-    pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(6);
-
-        // Unconfigured emits nothing: the compat harness forwards these to
-        // a release binary that may not know the flags.
-        if let Some(tron_endpoint) = self.tron_endpoint {
-            args.extend(["--tron-endpoint".to_string(), tron_endpoint]);
-            if let Some(tron_api_key) = self.tron_api_key {
-                args.extend([
-                    "--tron-api-key".to_string(),
-                    tron_api_key.expose_secret().to_string(),
-                ]);
-            }
-            args.extend([
-                "--tron-poll-interval-ms".to_string(),
-                self.tron_poll_interval_ms.to_string(),
-            ]);
-        }
-        args
-    }
-
     pub fn into_config(self) -> anyhow::Result<Option<TronConfig>> {
         let Some(tron_endpoint) = self.tron_endpoint else {
             return Ok(None);
@@ -62,70 +41,41 @@ impl TronArgs {
         config.validate()?;
         Ok(Some(config))
     }
-
-    pub fn from_config(config: Option<TronConfig>) -> Self {
-        match config {
-            Some(config) => Self {
-                tron_endpoint: Some(config.endpoint.to_string()),
-                tron_api_key: config.api_key.map(Into::into),
-                tron_poll_interval_ms: config.poll_interval.as_millis() as u64,
-            },
-            None => Self {
-                tron_endpoint: None,
-                tron_api_key: None,
-                tron_poll_interval_ms: TronConfig::DEFAULT_POLL_INTERVAL_MS,
-            },
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
     use url::Url;
 
     #[test]
-    fn unconfigured_emits_no_args() {
-        assert!(TronArgs::from_config(None).into_str_args().is_empty());
-    }
-
-    #[test]
     fn unconfigured_yields_no_config() {
-        assert!(TronArgs::from_config(None).into_config().unwrap().is_none());
+        assert!(TronArgs::parse_from(["test"])
+            .into_config()
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn into_config_parses_and_from_config_round_trips() {
+    fn into_config_parses_the_configured_fields() {
         let args = TronArgs {
             tron_endpoint: Some("https://api.trongrid.io".to_string()),
             tron_api_key: Some("tron-key".to_string().into()),
             tron_poll_interval_ms: 250,
         };
-        let config = args
-            .clone()
-            .into_config()
-            .unwrap()
-            .expect("configured chain");
+        let config = args.into_config().unwrap().expect("configured chain");
         assert_eq!(
             config.endpoint,
             Url::parse("https://api.trongrid.io").unwrap()
         );
         assert_eq!(config.api_key.as_deref(), Some("tron-key"));
         assert_eq!(config.poll_interval, Duration::from_millis(250));
-
-        let round_tripped = TronArgs::from_config(Some(config.clone()))
-            .into_config()
-            .unwrap()
-            .expect("round trip keeps the chain configured");
-        assert_eq!(round_tripped, config);
     }
 
     #[test]
     fn into_config_rejects_an_invalid_endpoint() {
-        let args = TronArgs {
-            tron_endpoint: Some("not a url".to_string()),
-            ..TronArgs::from_config(None)
-        };
+        let args = TronArgs::parse_from(["test", "--tron-endpoint", "not a url"]);
         assert!(args.into_config().is_err());
     }
 
