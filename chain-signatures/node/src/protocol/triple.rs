@@ -139,7 +139,8 @@ impl TripleGenerator {
             // Held only while poking, never while waiting for a peer's message.
             let permit = self.pokes.acquire().await.expect("never closed");
             let poke_start_time = Instant::now();
-            let poke_result = self.protocol.poke();
+            // Hands this worker's other tasks to another thread while the poke runs.
+            let poke_result = tokio::task::block_in_place(|| self.protocol.poke());
             drop(permit);
 
             let action = match poke_result {
