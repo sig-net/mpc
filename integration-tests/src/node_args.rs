@@ -73,17 +73,12 @@ impl Args {
             "--eth-refresh-finalized-interval",
             eth.refresh_finalized_interval,
         );
-        self.switch("--eth-optimistic-requests", eth.optimistic_requests);
     }
 
     fn sol(&mut self, sol: &SolConfig) {
         self.flag("--sol-account-sk", &sol.account_sk);
         self.flag("--sol-rpc-http-url", &sol.rpc_http_url);
         self.flag("--sol-program-address", &sol.program_address);
-        self.flag(
-            "--sol-poll-interval-ms",
-            sol.indexer.poll_interval.as_millis(),
-        );
     }
 
     fn hydration(&mut self, hydration: &HydrationConfig) {

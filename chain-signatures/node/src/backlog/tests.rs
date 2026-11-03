@@ -1,3 +1,4 @@
+use super::checkpoint_interval;
 use super::{
     AnyProgress, Backlog, BacklogEntry, BacklogError, Bidirectional, Checkpoint, Checkpoints,
     Executing, Final, Generating, Initial, PendingRequests, Publishing, Sign,
@@ -10,7 +11,7 @@ use crate::backlog::mock::{
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use mpc_chain_integration_core::StateManager;
-use mpc_primitives::{Chain, ChainConfig as _, ExecutionOutcome, SignId, SignKind};
+use mpc_primitives::{Chain, ExecutionOutcome, SignId, SignKind};
 use std::sync::Arc;
 
 fn digest_hex(hex_str: &str) -> [u8; 32] {
@@ -201,7 +202,7 @@ async fn test_total_pending_accounting() {
 async fn test_automatic_checkpoint_on_interval() {
     for chain in [Chain::Ethereum, Chain::Solana] {
         let backlog = Backlog::new();
-        let interval = chain.checkpoint_interval().unwrap();
+        let interval = checkpoint_interval(chain).unwrap();
 
         backlog
             .insert_mock_bidirectional(SignId::from_u8(1), chain)
@@ -865,7 +866,7 @@ async fn test_recovery_requeues_completed_bidirectional_requests() {
 async fn test_recovery_preserves_pending_checkpoints() {
     let backlog = Backlog::new();
     let chain = Chain::Ethereum;
-    let interval = chain.checkpoint_interval().unwrap();
+    let interval = checkpoint_interval(chain).unwrap();
 
     backlog.set_processed_block(chain, interval).await.unwrap();
     backlog
@@ -1235,4 +1236,17 @@ async fn advance_carries_the_origin_into_the_final_response() {
         panic!("expected RespondBidirectional");
     };
     assert_eq!(response.origin_indexed_at, Some(origin));
+}
+
+/// The mock cadence must checkpoint exactly the chains production does: a
+/// chain checkpointed only in tests, or only in production, would hide bugs.
+#[test]
+fn mock_cadence_covers_the_same_chains_as_production() {
+    for chain in Chain::iter() {
+        assert_eq!(
+            super::mock_checkpoint_interval(chain).is_some(),
+            mpc_primitives::ChainConfig::checkpoint_interval(&chain).is_some(),
+            "{chain:?}"
+        );
+    }
 }
