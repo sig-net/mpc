@@ -24,6 +24,8 @@ use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::types::SignCommand;
 use crate::{logs, storage, web};
+#[cfg(feature = "test-feature")]
+pub use args::ethereum::mock_indexer_config;
 pub use args::{
     canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
     solana::SolArgs, tron::TronArgs,
