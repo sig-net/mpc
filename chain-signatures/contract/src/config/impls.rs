@@ -3,7 +3,6 @@ use near_sdk::serde::ser::SerializeStruct;
 use near_sdk::serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 impl ProtocolConfig {
-    #[allow(deprecated)]
     pub fn new(
         min_mine_triple_pairs: u32,
         min_mine_presignatures: u32,
@@ -13,11 +12,6 @@ impl ProtocolConfig {
             min_mine_triple_pairs,
             min_mine_presignatures,
             max_mine_generations,
-            protocol: super::deprecated::ProtocolConfig::from_floors(
-                min_mine_triple_pairs,
-                min_mine_presignatures,
-                max_mine_generations,
-            ),
         }
     }
 }

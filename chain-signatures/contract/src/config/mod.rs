@@ -14,7 +14,6 @@ pub use deprecated::{
 use borsh::{self, BorshDeserialize, BorshSerialize};
 
 /// Protocol parameters every node reads from the contract.
-#[allow(deprecated)]
 #[derive(Clone, Debug, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
 pub struct ProtocolConfig {
     /// Per-node floor: each node generates triple pairs until it owns at least
@@ -26,14 +25,6 @@ pub struct ProtocolConfig {
     /// Per-node cap on triple and presignature generations in flight at once:
     /// proposals awaiting acceptance plus running protocols the node owns.
     pub max_mine_generations: u32,
-    /// Deprecated protocol configuration retained for backward compatibility with <=1.22 nodes.
-    /// Skipped in contract Borsh storage so on-chain state remains unchanged.
-    #[borsh(skip)]
-    #[deprecated(
-        since = "1.23.0",
-        note = "Kept for backward compatibility with pre-1.23 nodes; use top-level floors instead"
-    )]
-    pub protocol: deprecated::ProtocolConfig,
 }
 
 #[cfg(test)]
