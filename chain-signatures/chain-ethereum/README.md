@@ -26,7 +26,7 @@ plumbed through from the node's config, not constructed by hand.
 |---------------------------|---------------------|-----------|-------|
 | `execution_rpc_http_url`  | `MPC_ETH_EXECUTION_RPC_HTTP_URL` | yes | execution-layer JSON-RPC endpoint (Alchemy, Infura, OnFinality, …) |
 | `contract_address`        | `MPC_ETH_CONTRACT_ADDRESS` | yes | MPC contract address, with or without the `0x` prefix |
-| `network`                 | `MPC_ETH_NETWORK` | no | default `sepolia`; `run()` fails unless the RPC serves this network's chain id. Every node of a deployment must name the same network, since admission checks transactions against it |
+| `network`                 | `MPC_ETH_NETWORK` | no | default `sepolia`; `run()` fails unless the RPC serves this network's chain id. Every node of a deployment must name the same network, since admission checks transactions against it. Decides finality handling too: `sepolia` and `mainnet` wait for finalized blocks; `anvil` emits requests optimistically, since it never reports finalized blocks and never reorgs |
 | `refresh_finalized_interval` | `MPC_ETH_REFRESH_FINALIZED_INTERVAL` | no | milliseconds between finalized-head watcher polls (production) |
 
 ### Stall budget
@@ -142,8 +142,7 @@ cargo run --example bench_watchers --features bench
 | `MPC_ETH_CONTRACT_ADDRESS` | yes | contract to watch (with/without `0x`) |
 | `END`            | yes       | exclusive end of the range |
 | `START`          | no        | inclusive start; if omitted only `END-1` is processed |
-| `MPC_ETH_NETWORK` | no       | default `sepolia` |
-| `MPC_ETH_OPTIMISTIC_REQUESTS` | no | `false` (default, production) waits for finality via the watcher; `true` enables the demo/soft-tip path |
+| `MPC_ETH_NETWORK` | no       | default `sepolia`; `anvil` runs optimistically, like the node |
 | `WATCHERS`       | no        | `bench_watchers` only — number of pending dummy watchers to simulate (default `1000`) |
 | `RUST_LOG`       | no        | tracing filter — `mpc_chain_ethereum::bench=info` for just the report |
 
