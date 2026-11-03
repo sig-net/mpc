@@ -6,13 +6,13 @@ use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::gcp::{self, SecretManagerService};
-use crate::protocol::state::KeyShareRecord;
+use crate::protocol::state::KeyShare;
 use crate::storage::Options;
 use anyhow::Context as _;
 use near_account_id::AccountId;
 
 #[derive(thiserror::Error, Debug)]
-pub enum KeyShareStoreError {
+pub enum KeystoreError {
     #[error(transparent)]
     Gcp(#[from] gcp::Error),
     #[cfg(any(test, feature = "test-feature"))]
@@ -24,15 +24,15 @@ pub enum KeyShareStoreError {
 
 /// Where the node keeps its key share. Production builds know only Secret
 /// Manager; test builds add a file and an in-memory store.
-pub enum KeyShareStore {
-    GcpSecretManager(GcpSecretManagerStore),
+pub enum Keystore {
+    GcpSecretManager(SecretManagerKeystore),
     #[cfg(any(test, feature = "test-feature"))]
-    File(FileStore),
+    File(FileKeystore),
     #[cfg(any(test, feature = "test-feature"))]
-    Memory(MemoryStore),
+    Memory(MemoryKeystore),
 }
 
-impl KeyShareStore {
+impl Keystore {
     /// Opens the store the options name. `async` because the Secret Manager
     /// credentials can only be built inside a running Tokio runtime.
     pub async fn init(
@@ -43,7 +43,7 @@ impl KeyShareStore {
         if let Some(base_path) = &opts.sk_share_local_path {
             let path = PathBuf::from(format!("{base_path}-{account_id}"));
             tracing::info!(path = %path.display(), "keeping the key share in a file");
-            return Ok(Self::File(FileStore { path }));
+            return Ok(Self::File(FileKeystore { path }));
         }
         let secret_id = opts
             .sk_share_secret_id
@@ -54,13 +54,13 @@ impl KeyShareStore {
             .as_ref()
             .context("clap pairs the Secret Manager id with a GCP project")?;
         tracing::info!("keeping the key share in Secret Manager");
-        Ok(Self::GcpSecretManager(GcpSecretManagerStore {
+        Ok(Self::GcpSecretManager(SecretManagerKeystore {
             secret_manager: SecretManagerService::new(project_id)?,
             secret_id: secret_id.clone(),
         }))
     }
 
-    pub async fn store(&mut self, data: &KeyShareRecord) -> Result<(), KeyShareStoreError> {
+    pub async fn store(&mut self, data: &KeyShare) -> Result<(), KeystoreError> {
         match self {
             Self::GcpSecretManager(s) => s.store(data).await?,
             #[cfg(any(test, feature = "test-feature"))]
@@ -73,7 +73,7 @@ impl KeyShareStore {
     }
 
     /// Loads the key share, or `None` when the store holds nothing yet.
-    pub async fn load(&self) -> Result<Option<KeyShareRecord>, KeyShareStoreError> {
+    pub async fn load(&self) -> Result<Option<KeyShare>, KeystoreError> {
         let record = match self {
             Self::GcpSecretManager(s) => s.load().await?,
             #[cfg(any(test, feature = "test-feature"))]
@@ -91,42 +91,42 @@ impl KeyShareStore {
 
 /// In-memory store for in-process tests.
 #[cfg(any(test, feature = "test-feature"))]
-pub struct MemoryStore {
-    record: Option<KeyShareRecord>,
+pub struct MemoryKeystore {
+    record: Option<KeyShare>,
 }
 
 #[cfg(any(test, feature = "test-feature"))]
-impl MemoryStore {
+impl MemoryKeystore {
     /// A store already holding `record`, or empty when `None`.
-    pub fn new(record: Option<KeyShareRecord>) -> Self {
+    pub fn new(record: Option<KeyShare>) -> Self {
         Self { record }
     }
 
-    fn store(&mut self, data: &KeyShareRecord) -> Result<(), KeyShareStoreError> {
+    fn store(&mut self, data: &KeyShare) -> Result<(), KeystoreError> {
         self.record = Some(data.clone());
         Ok(())
     }
 
-    fn load(&self) -> Result<Option<KeyShareRecord>, KeyShareStoreError> {
+    fn load(&self) -> Result<Option<KeyShare>, KeystoreError> {
         Ok(self.record.clone())
     }
 }
 
 /// GCP Secret Manager store.
-pub struct GcpSecretManagerStore {
+pub struct SecretManagerKeystore {
     secret_manager: SecretManagerService,
     secret_id: String,
 }
 
-impl GcpSecretManagerStore {
-    async fn store(&mut self, data: &KeyShareRecord) -> Result<(), KeyShareStoreError> {
+impl SecretManagerKeystore {
+    async fn store(&mut self, data: &KeyShare) -> Result<(), KeystoreError> {
         self.secret_manager
             .store_secret(&serde_json::to_vec(data)?, &self.secret_id)
             .await?;
         Ok(())
     }
 
-    async fn load(&self) -> Result<Option<KeyShareRecord>, KeyShareStoreError> {
+    async fn load(&self) -> Result<Option<KeyShare>, KeystoreError> {
         let Some(data) = self.secret_manager.load_secret(&self.secret_id).await? else {
             return Ok(None);
         };
@@ -136,13 +136,13 @@ impl GcpSecretManagerStore {
 
 /// File store for the test harness.
 #[cfg(any(test, feature = "test-feature"))]
-pub struct FileStore {
+pub struct FileKeystore {
     path: PathBuf,
 }
 
 #[cfg(any(test, feature = "test-feature"))]
-impl FileStore {
-    async fn store(&mut self, data: &KeyShareRecord) -> Result<(), KeyShareStoreError> {
+impl FileKeystore {
+    async fn store(&mut self, data: &KeyShare) -> Result<(), KeystoreError> {
         let json_bytes = serde_json::to_vec(data)?;
         // Write to a temporary file first, then rename it into place atomically.
         let tmp_path = self.path.with_extension("tmp");
@@ -154,7 +154,7 @@ impl FileStore {
         Ok(())
     }
 
-    async fn load(&self) -> Result<Option<KeyShareRecord>, KeyShareStoreError> {
+    async fn load(&self) -> Result<Option<KeyShare>, KeystoreError> {
         match File::open(self.path.as_os_str()).await {
             Ok(mut file) => {
                 let mut contents = Vec::new();
@@ -196,7 +196,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.json");
 
-        let storage = FileStore { path };
+        let storage = FileKeystore { path };
 
         let result = storage.load().await.unwrap();
 
@@ -208,9 +208,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node_data.json");
 
-        let mut storage = FileStore { path };
+        let mut storage = FileKeystore { path };
 
-        let expected = KeyShareRecord {
+        let expected = KeyShare {
             epoch: 42,
             private_share: make_test_secret_key_share(),
             public_key: make_test_public_key(),
@@ -230,16 +230,16 @@ mod tests {
 
         tokio::fs::write(&path, b"not a valid json").await.unwrap();
 
-        let storage = FileStore { path };
+        let storage = FileKeystore { path };
 
         assert!(storage.load().await.is_err());
     }
 
     #[tokio::test]
     async fn memory_store_and_load_round_trip() {
-        let mut storage = MemoryStore::new(None);
+        let mut storage = MemoryKeystore::new(None);
 
-        let expected = KeyShareRecord {
+        let expected = KeyShare {
             epoch: 42,
             private_share: make_test_secret_key_share(),
             public_key: make_test_public_key(),
@@ -262,11 +262,11 @@ mod tests {
             redis_url: "redis://localhost".to_string(),
         };
 
-        let store = KeyShareStore::init(&opts, &make_test_account_id())
+        let store = Keystore::init(&opts, &make_test_account_id())
             .await
             .unwrap();
 
-        assert!(matches!(store, KeyShareStore::File(_)));
+        assert!(matches!(store, Keystore::File(_)));
     }
 
     #[tokio::test]
@@ -279,10 +279,10 @@ mod tests {
             redis_url: "redis://localhost".to_string(),
         };
 
-        let store = KeyShareStore::init(&opts, &make_test_account_id())
+        let store = Keystore::init(&opts, &make_test_account_id())
             .await
             .unwrap();
 
-        assert!(matches!(store, KeyShareStore::GcpSecretManager(_)));
+        assert!(matches!(store, Keystore::GcpSecretManager(_)));
     }
 }

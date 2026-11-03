@@ -3,14 +3,14 @@ use crate::mesh::MeshState;
 use crate::protocol::request::{SignatureSpawner, SignatureSpawnerTask};
 use crate::protocol::{MessageChannel, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::storage::key_share_store::KeyShareStore;
+use crate::storage::keystore::Keystore;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::types::SignCommand;
 use near_sdk::AccountId;
 use tokio::sync::{mpsc, watch};
 
 pub struct TestProtocolStorage {
-    pub key_share_store: KeyShareStore,
+    pub keystore: Keystore,
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
 }
@@ -49,7 +49,7 @@ impl MpcSignProtocol {
             SignatureSpawnerTask::run(spawner, channels.sign_rx, channels.config.clone());
         Self {
             my_account_id,
-            key_share_store: storage.key_share_store,
+            keystore: storage.keystore,
             triple_storage: storage.triple_storage,
             presignature_storage: storage.presignature_storage,
             sign_task,

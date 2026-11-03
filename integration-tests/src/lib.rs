@@ -301,18 +301,17 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         for (i, account) in spawner.accounts.iter().enumerate() {
             let participant = Participant::from(i as u32);
             if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
-                let mut key_share_store =
-                    storage::key_share_store::KeyShareStore::init(&storage_options, account.id())
-                        .await?;
+                let mut keystore =
+                    storage::keystore::Keystore::init(&storage_options, account.id()).await?;
 
-                let persistent_data = mpc_node::protocol::state::KeyShareRecord {
+                let persistent_data = mpc_node::protocol::state::KeyShare {
                     epoch: 0,
                     private_share: key_info.private_share,
                     public_key: key_info.public_key,
                 };
 
                 let account_id = account.id().to_string();
-                if let Err(err) = key_share_store.store(&persistent_data).await {
+                if let Err(err) = keystore.store(&persistent_data).await {
                     tracing::error!(?err, "failed to store pregenerated key");
                     continue;
                 }
