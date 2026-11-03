@@ -77,8 +77,7 @@ impl EthArgs {
             account_sk, // this is safe because EthConfig has custom Debug implementation that redacts the account_sk field
             execution_rpc_http_url,
             contract_address,
-            // anvil never reports finalized blocks, so requests are emitted without waiting for finality
-            optimistic_requests: network == "anvil",
+            optimistic_requests: EthConfig::is_optimistic_network(&network),
             network,
             refresh_finalized_interval: self.eth_refresh_finalized_interval,
             // TODO: currently we only have Ethereum and Sepolia, so defaults
