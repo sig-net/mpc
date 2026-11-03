@@ -63,7 +63,7 @@ Violating any of these is unacceptable in any execution within §2's fault bound
 Progress is guaranteed during a sufficiently long synchronous interval, never at a fixed time. The precise bounds and the enforcing mechanisms are in the Appendix.
 
 * **L1. Signature progress:** during a long-enough δ-synchronous interval with ≥ t correct committee members online, a usable presignature ([owner](glossary.md#owner) and [holders](glossary.md#holder) online), and ≥ t of that presignature's holders having indexed the request, the request produces a signature within bounded time (O(f \+ p)·∆timeout \+ one generation round, where p counts the members that are offline or own no usable presignature). That such a presignature keeps existing is L2.  
-* **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor and under the network-wide cap eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).   
+* **L2. Artifact supply:** during a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor whose peers are under their generation cap eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).   
 * **L3. Settlement:** once a signature is produced with a correct, online owner, it is eventually accepted on-chain.  
 * **L4. Mesh convergence:** during a long-enough synchronous interval, every correct, reachable committee member (re)enters each correct node's active set within bounded time. 
 
@@ -146,14 +146,15 @@ Three caveats remain: (i) organizing waits for the local active set to reach t (
 
 ### L2. Artifact supply.
 
-*Property.* During a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor and under the network-wide cap eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).
+*Property.* During a long-enough synchronous interval with ≥ t members (itself included) in the node's active set, a node below its artifact floor whose peers are under their generation cap eventually completes a generation, given its inputs (none for a triple pair, one owned triple pair for a presignature).
 
-A node under its own floor still generates nothing while the network-wide potential is at the cap. That is intended, the pool being full, but it means the floor alone does not entail progress.
+A node under its own floor still generates nothing while the pool is full or every peer it proposes to is saturated. That is intended, but it means the floor alone does not entail progress.
 
 *Rationale.* L1 assumes a usable presignature is there to consume, so without supply that precondition eventually fails and signing stops while the network is otherwise perfectly healthy.
 
 *Enforcement*: 
 A node re-proposes every 100 ms while it is below its floor (`min_mine_triple_pairs` for triple pairs, `min_mine_presignatures` for presignatures); concurrency counters free themselves as generation tasks finish and as proposals expire.  
+A deliberator refuses any proposal while the pool holds more than the network's floors need, or while it runs or has accepted more generations than the network's cap (`max_mine_generations` per node) allows, each with a margin for stale counts and both judged from cached counts, so one node cannot push work onto the rest without bound.  
 Generation is skipped entirely while \< t nodes are in the active set, so the failure detector gates supply though never correctness.
 
 ### L3. Settlement

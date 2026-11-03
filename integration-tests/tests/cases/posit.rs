@@ -6,7 +6,7 @@ use mpc_node::protocol::message::MessageOutbox;
 use mpc_node::protocol::posit::{PositAction, PositRejectReason};
 use mpc_node::protocol::presignature::{FullPresignatureId, PresignatureSpawner};
 use mpc_node::protocol::triple::TripleSpawner;
-use mpc_node::protocol::{Message, MessageChannel};
+use mpc_node::protocol::{AcceptLimits, Message, MessageChannel};
 use mpc_node::types::SecretKeyShare;
 use std::time::Duration;
 use test_log::test;
@@ -63,6 +63,7 @@ async fn test_generation_posits_check_storage_only_on_propose() -> anyhow::Resul
         node0_id.to_string(),
     );
     let timeout = Duration::from_secs(10);
+    let limits = AcceptLimits::new(10, 16, 3);
     let already_stored = vec![PositAction::RejectWithReason(
         PositRejectReason::AlreadyGenerating,
     )];
@@ -84,7 +85,7 @@ async fn test_generation_posits_check_storage_only_on_propose() -> anyhow::Resul
     // Triple: a PROPOSE for an unknown id is accepted and opens an entry.
     let triple_id = 1;
     triple_spawner
-        .process_posit_for_test(triple_id, node1, PositAction::Propose, timeout)
+        .process_posit_for_test(triple_id, node1, PositAction::Propose, timeout, limits)
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), vec![PositAction::Accept]);
     // Once the triple is stored, a repeated PROPOSE fails the storage check.
@@ -95,21 +96,21 @@ async fn test_generation_posits_check_storage_only_on_propose() -> anyhow::Resul
         .insert(dummy_pair(triple_id), node1)
         .await;
     triple_spawner
-        .process_posit_for_test(triple_id, node1, PositAction::Propose, timeout)
+        .process_posit_for_test(triple_id, node1, PositAction::Propose, timeout, limits)
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), already_stored);
     // The other actions draw no reply. The START consumes the entry, but
     // generation start refuses the stored id.
     for action in non_propose_actions() {
         triple_spawner
-            .process_posit_for_test(triple_id, node1, action, timeout)
+            .process_posit_for_test(triple_id, node1, action, timeout, limits)
             .await;
     }
     assert_eq!(drain_posit_replies(&mut outbox), vec![]);
     assert_eq!(triple_spawner.len_ongoing(), 0);
     // A START without an entry is refused.
     triple_spawner
-        .process_posit_for_test(triple_id, node1, start(), timeout)
+        .process_posit_for_test(triple_id, node1, start(), timeout, limits)
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), no_entry);
 
@@ -123,7 +124,13 @@ async fn test_generation_posits_check_storage_only_on_propose() -> anyhow::Resul
         .insert(dummy_pair(pair_id), node1)
         .await;
     presignature_spawner
-        .process_posit_for_test(presignature_id, node1, PositAction::Propose, timeout)
+        .process_posit_for_test(
+            presignature_id,
+            node1,
+            PositAction::Propose,
+            timeout,
+            limits,
+        )
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), vec![PositAction::Accept]);
     assert!(
@@ -135,20 +142,157 @@ async fn test_generation_posits_check_storage_only_on_propose() -> anyhow::Resul
             .await
     );
     presignature_spawner
-        .process_posit_for_test(presignature_id, node1, PositAction::Propose, timeout)
+        .process_posit_for_test(
+            presignature_id,
+            node1,
+            PositAction::Propose,
+            timeout,
+            limits,
+        )
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), already_stored);
     for action in non_propose_actions() {
         presignature_spawner
-            .process_posit_for_test(presignature_id, node1, action, timeout)
+            .process_posit_for_test(presignature_id, node1, action, timeout, limits)
             .await;
     }
     assert_eq!(drain_posit_replies(&mut outbox), vec![]);
     assert_eq!(presignature_spawner.len_ongoing(), 0);
     presignature_spawner
-        .process_posit_for_test(presignature_id, node1, start(), timeout)
+        .process_posit_for_test(presignature_id, node1, start(), timeout, limits)
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), no_entry);
+
+    Ok(())
+}
+
+/// A deliberator refuses a PROPOSE from cached counts alone: too many
+/// generations running, or too many artifacts in the pool.
+#[test(tokio::test)]
+async fn test_generation_posits_reject_on_load() -> anyhow::Result<()> {
+    let spawner = ClusterSpawner::default()
+        .network("test-generation-posits-reject-on-load")
+        .init_network()
+        .await?;
+
+    let node0 = Participant::from(0);
+    let node1 = Participant::from(1);
+    let (_, mut outbox, msg) = MessageChannel::new();
+    let node0_id = "party0.near".parse().unwrap();
+    let redis = containers::Redis::run(&spawner).await;
+    let triple_storage = redis.triple_storage(&node0_id, node0);
+    let presignature_storage = redis.presignature_storage(&node0_id, node0);
+    let mut triple_spawner = TripleSpawner::new(
+        node0,
+        5,
+        123,
+        &triple_storage,
+        msg.clone(),
+        node0_id.to_string(),
+    );
+    let mut presignature_spawner = PresignatureSpawner::new(
+        node0,
+        5,
+        123,
+        &SecretKeyShare::default(),
+        &PublicKey::default(),
+        &triple_storage,
+        &presignature_storage,
+        msg,
+        node0_id.to_string(),
+    );
+    let timeout = Duration::from_secs(10);
+    let reject = |reason| vec![PositAction::RejectWithReason(reason)];
+    // The presignature PROPOSE also needs its pair held.
+    let pair_id = 1;
+    triple_storage
+        .create_slot(pair_id, node1)
+        .await
+        .unwrap()
+        .insert(dummy_pair(pair_id), node1)
+        .await;
+    let presignature_id = FullPresignatureId::from_pair(pair_id);
+
+    // A generation cap of zero saturates the deliberator.
+    let saturated = AcceptLimits::new(1, 0, 3);
+    triple_spawner
+        .process_posit_for_test(2, node1, PositAction::Propose, timeout, saturated)
+        .await;
+    assert_eq!(
+        drain_posit_replies(&mut outbox),
+        reject(PositRejectReason::Saturated)
+    );
+    presignature_spawner
+        .process_posit_for_test(
+            presignature_id,
+            node1,
+            PositAction::Propose,
+            timeout,
+            saturated,
+        )
+        .await;
+    assert_eq!(
+        drain_posit_replies(&mut outbox),
+        reject(PositRejectReason::Saturated)
+    );
+
+    // A floor of zero makes even an empty pool overstocked.
+    let overstocked = AcceptLimits::new(0, 16, 3);
+    triple_spawner
+        .process_posit_for_test(2, node1, PositAction::Propose, timeout, overstocked)
+        .await;
+    assert_eq!(
+        drain_posit_replies(&mut outbox),
+        reject(PositRejectReason::Overstocked)
+    );
+    presignature_spawner
+        .process_posit_for_test(
+            presignature_id,
+            node1,
+            PositAction::Propose,
+            timeout,
+            overstocked,
+        )
+        .await;
+    assert_eq!(
+        drain_posit_replies(&mut outbox),
+        reject(PositRejectReason::Overstocked)
+    );
+
+    // Within both limits the same proposals are accepted.
+    let limits = AcceptLimits::new(1, 16, 3);
+    triple_spawner
+        .process_posit_for_test(2, node1, PositAction::Propose, timeout, limits)
+        .await;
+    assert_eq!(drain_posit_replies(&mut outbox), vec![PositAction::Accept]);
+    presignature_spawner
+        .process_posit_for_test(
+            presignature_id,
+            node1,
+            PositAction::Propose,
+            timeout,
+            limits,
+        )
+        .await;
+    assert_eq!(drain_posit_replies(&mut outbox), vec![PositAction::Accept]);
+
+    // An accepted PROPOSE counts before its START: with room for one more
+    // generation, the first proposal is accepted and the next refused.
+    let one_more = AcceptLimits {
+        ongoing: triple_spawner.len_ongoing() + 2,
+        generated: usize::MAX,
+    };
+    triple_spawner
+        .process_posit_for_test(5, node1, PositAction::Propose, timeout, one_more)
+        .await;
+    assert_eq!(drain_posit_replies(&mut outbox), vec![PositAction::Accept]);
+    triple_spawner
+        .process_posit_for_test(6, node1, PositAction::Propose, timeout, one_more)
+        .await;
+    assert_eq!(
+        drain_posit_replies(&mut outbox),
+        reject(PositRejectReason::Saturated)
+    );
 
     Ok(())
 }
