@@ -1157,6 +1157,51 @@ async fn respond_observed_at_survives_the_unwatch_lookup() {
     );
 }
 
+/// The tron expiry walk's inclusion arm re-registers an existing
+/// watch: the resident wait start must survive.
+#[tokio::test]
+async fn watch_execution_re_register_keeps_the_wait_start() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::new([73; 32]), Chain::Solana);
+    backlog.insert_mock_executing(&tx).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    StateManager::watch_execution(&backlog, tx.target_chain, Arc::new(tx.clone())).await;
+
+    let entry = backlog
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .await
+        .expect("the re-registered watch must resolve");
+    let measured = entry
+        .awaiting_execution()
+        .expect("the wait start must survive the re-register");
+    assert!(
+        measured >= std::time::Duration::from_millis(90),
+        "a restarted measurement would read near zero, got {measured:?}"
+    );
+}
+
+/// Re-registering with no resident watch (displaced or lost) stays
+/// unmeasured, honest `EXECUTION_WAIT_UNMEASURED` case.
+#[tokio::test]
+async fn watch_execution_without_a_resident_watch_starts_unmeasured() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::new([79; 32]), Chain::Solana);
+    backlog.insert_mock_executing(&tx).await;
+    backlog
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .await
+        .expect("the initial watch must resolve");
+
+    StateManager::watch_execution(&backlog, tx.target_chain, Arc::new(tx.clone())).await;
+
+    let entry = backlog
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .await
+        .expect("the re-registered watch must resolve");
+    assert_eq!(entry.awaiting_execution(), None);
+}
+
 #[tokio::test]
 async fn executing_entry_for_resolves_the_displaced_watch_by_backlog_key() {
     let backlog = Backlog::new();

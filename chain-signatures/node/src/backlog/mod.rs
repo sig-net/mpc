@@ -646,10 +646,12 @@ impl StateManager for Backlog {
     }
 
     async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
-        self.watchers(&chain)
-            .write()
-            .await
-            .insert(ExecutionWatch::new(tx, None));
+        let mut watchers = self.watchers(&chain).write().await;
+        let observed = watchers
+            .watchers
+            .get(&tx.id)
+            .and_then(|watch| watch.respond_observed_at);
+        watchers.insert(ExecutionWatch::new(tx, observed));
     }
 }
 
