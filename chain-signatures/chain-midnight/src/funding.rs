@@ -59,9 +59,35 @@ pub(crate) fn dust_secret_key(seed: &[u8]) -> anyhow::Result<DustSecretKey> {
     let path: bip32::DerivationPath = "m/44'/2400'/0'/2/0"
         .parse()
         .expect("the DUST role path is a valid derivation path");
-    let role = bip32::XPrv::derive_from_path(seed, &path)
+    let role = path
+        .iter()
+        .try_fold(master_key(seed)?, |key, child| key.derive_child(child))
         .map_err(|error| anyhow::anyhow!("deriving the funding wallet's DUST role key: {error}"))?;
     Ok(DustSecretKey::derive_secret_key(&role.to_bytes()))
+}
+
+/// The BIP-32 master key. `bip32::XPrv::new` takes only 16, 32 or 64 byte seeds, but
+/// BIP-32, the wallet SDK and the seed check allow any length from 16 to 64.
+fn master_key(seed: &[u8]) -> anyhow::Result<bip32::XPrv> {
+    use hmac::Mac as _;
+    let mut mac = hmac::Hmac::<sha2::Sha512>::new_from_slice(b"Bitcoin seed")
+        .expect("HMAC takes a key of any length");
+    mac.update(seed);
+    let digest = mac.finalize().into_bytes();
+    let (key, chain_code) = digest.split_at(32);
+    let mut key_bytes = [0u8; 33];
+    key_bytes[1..].copy_from_slice(key);
+    bip32::XPrv::try_from(bip32::ExtendedKey {
+        prefix: bip32::Prefix::XPRV,
+        attrs: bip32::ExtendedKeyAttrs {
+            depth: 0,
+            parent_fingerprint: [0; 4],
+            child_number: bip32::ChildNumber::default(),
+            chain_code: chain_code.try_into().expect("HMAC-SHA512 is 64 bytes"),
+        },
+        key_bytes,
+    })
+    .map_err(|error| anyhow::anyhow!("deriving the funding wallet's master key: {error}"))
 }
 
 /// Hex seed bytes, with or without `0x`: the format the configuration validates.
@@ -145,7 +171,12 @@ impl Synced {
     }
 
     fn is_ready(&self) -> bool {
-        self.connected && self.applied.is_some_and(|applied| applied >= self.max_id)
+        self.connected && self.is_caught_up()
+    }
+
+    /// Replayed up to the newest event the indexer reported, live or not.
+    fn is_caught_up(&self) -> bool {
+        self.applied.is_some_and(|applied| applied >= self.max_id)
     }
 }
 
@@ -340,6 +371,14 @@ impl FeePayer for FundingWallet {
     ) -> Result<FeePlan, SubmitError> {
         let (local, reserved) = {
             let mut state = self.shared.state();
+            // A replay restarted since `ready_by` holds a partial state, and the
+            // reservations' UTXOs are not in it yet, so the retain below would end them.
+            if !state.is_caught_up() {
+                return Err(SubmitError::WalletUnsynced(format!(
+                    "the DUST replay restarted and is at event {:?} of {}; nothing was posted",
+                    state.applied, state.max_id
+                )));
+            }
             let wall = now();
             let local = state.local.clone();
             state.reservations.retain(|reservation| {
@@ -950,6 +989,47 @@ pub(crate) mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_replay_restarted_after_ready_plans_nothing_and_keeps_its_reservations() {
+        let wallet = FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())));
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
+        let local = replayed();
+        let key = funded_key();
+        let all: Vec<DustNullifier> = local.utxos().map(|utxo| utxo.nullifier(&key)).collect();
+        let ctime = local.sync_time;
+        let ttl = Timestamp::from_secs(ctime.to_secs() + 180);
+        let mut rng = StdRng::seed_from_u64(5);
+        let base = base(&mut rng, ttl);
+        wallet.reserve(&all, Timestamp::from_secs(u64::MAX / 2));
+        {
+            // What `apply` leaves after a failed replay.
+            let mut state = wallet.shared.state();
+            let reservations = std::mem::take(&mut state.reservations);
+            *state = Synced::fresh();
+            state.reservations = reservations;
+        }
+
+        let Err(error) = wallet.plan(
+            &base,
+            &INITIAL_PARAMETERS,
+            ctime,
+            ttl,
+            "undeployed",
+            &mut rng,
+        ) else {
+            panic!("a restarted replay must not plan a fee");
+        };
+        assert!(matches!(error, SubmitError::WalletUnsynced(_)), "{error}");
+        assert_eq!(
+            wallet.shared.state().reservations.len(),
+            1,
+            "a restart does not end the in-flight reservation"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_wallet_that_cannot_sync_reports_unsynced_at_its_deadline() {
         let wallet = FundingWallet::start(funded_key(), Arc::new(OnceSource(Vec::new())));
@@ -964,7 +1044,7 @@ pub(crate) mod tests {
     /// `@midnightntwrk/ledger-v9` 1.0.0-rc.3: `HDWallet.fromSeed(seed).selectAccount(0)
     /// .selectRoles([Roles.Dust]).deriveKeysAt(0)`, then `DustSecretKey.fromSeed(key)
     /// .publicKey`, printed as a bigint in hex.
-    const DUST_KEY_VECTORS: [(&str, &str); 3] = [
+    const DUST_KEY_VECTORS: [(&str, &str); 7] = [
         (
             "0404040404040404040404040404040404040404040404040404040404040404",
             "115db88b665025219c371ad48289cc6b274bccc6baa8b52fd6f7ada315e030c0",
@@ -977,6 +1057,25 @@ pub(crate) mod tests {
             "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\
              0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
             "a1a70b03f310083be4857d1e601e0680d705c86ffbba8c052102d56e6f98797",
+        ),
+        // Lengths BIP-32 allows but `bip32::XPrv::new` refuses.
+        (
+            "ababababababababababababababababab",
+            "26d8bb16a33c836cb9323c30ff3e29dfae2030c1962572ec05c865f40e2f8ca",
+        ),
+        (
+            "abababababababababababababababababababababababab",
+            "3be7a802021cc22fd708234aa773c1737349b2f4b4eba04f299faae4c4b92f27",
+        ),
+        (
+            "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\
+             0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+            "636c088396cbda348ebaf9e7c4d41c9d28aa732f8c9a9926871103afcdccb3c5",
+        ),
+        (
+            "111111111111111111111111111111111111111111111111111111111111111111\
+             111111111111111111111111111111111111111111111111111111111111",
+            "4eddc5827d65b0bd423ef08b9c1eb6ad5ec119186f4be03e0a09549b03727a58",
         ),
     ];
 

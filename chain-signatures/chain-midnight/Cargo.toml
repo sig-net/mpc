@@ -16,6 +16,8 @@ futures-util.workspace = true
 google-cloud-storage = "=1.17.0"
 google-cloud-auth = { version = "1.15", default-features = false, optional = true }
 hex.workspace = true
+# The BIP-32 master key over any 16 to 64 byte seed, as bip32 hashes it.
+hmac = "0.12.1"
 http.workspace = true
 # The same crate jsonrpsee's client limits bodies with, to recognise its error.
 http-body-util = "0.1"
@@ -47,6 +49,7 @@ rand.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10.9"
 subxt = { workspace = true, features = ["native"] }
 thiserror.workspace = true
 tokio.workspace = true
