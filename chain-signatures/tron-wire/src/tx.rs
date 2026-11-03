@@ -39,7 +39,8 @@ impl RawTransaction {
     /// Parses and validates the bytes the multichain API carries for Tron
     /// targets: the bare `raw` message, unsigned by construction. Admission
     /// accepts only what the MPC can faithfully name and sign — canonical
-    /// bytes, one valid trigger contract, reference fields, expiration.
+    /// bytes, one valid trigger contract, reference fields, and a live,
+    /// bounded validity window.
     pub fn parse(bytes: &[u8]) -> anyhow::Result<Self> {
         let raw = RawTransaction::decode(bytes)?;
         // Unknown, duplicated, or non-minimal fields re-encode away, which
@@ -77,11 +78,25 @@ impl RawTransaction {
         Ok((signed.encode_to_vec(), txid))
     }
 
-    /// Validates that the reference fields (`ref_block_bytes`, `ref_block_hash`, and `expiration`) are present and correctly set.
+    /// An empty or inverted window can never pack; the ceiling is
+    /// [`MAX_WINDOW_MS`].
     fn validate_reference_fields(&self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.ref_block_bytes.is_empty(), "missing ref_block_bytes");
         anyhow::ensure!(!self.ref_block_hash.is_empty(), "missing ref_block_hash");
         anyhow::ensure!(self.expiration > 0, "missing expiration");
+        anyhow::ensure!(self.timestamp > 0, "missing timestamp");
+        anyhow::ensure!(
+            self.expiration > self.timestamp,
+            "expiration {} is not after the timestamp {}",
+            self.expiration,
+            self.timestamp
+        );
+        anyhow::ensure!(
+            self.expiration - self.timestamp <= MAX_WINDOW_MS,
+            "validity window spans {} ms, past the {} ms ceiling",
+            self.expiration - self.timestamp,
+            MAX_WINDOW_MS
+        );
         Ok(())
     }
 }
@@ -158,6 +173,11 @@ fn calldata_bytes(calldata: &CompactMaybe<Calldata>) -> anyhow::Result<Vec<u8>> 
     }
     Ok(calldata.value.data()?)
 }
+
+/// Validity-window ceiling, per the admission rule
+/// (`doc/bidirectional-calls.md` §4.3: "at most target's cap past
+/// it — Tron: `expiration`, 24 h").
+pub const MAX_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 
 fn i64_field(value: u64, field: &str) -> anyhow::Result<i64> {
     i64::try_from(value)
@@ -242,5 +262,49 @@ mod tests {
             to_unsigned_tron_tx(&zero_expiration, owner()).unwrap_err()
         );
         assert!(err.contains("missing expiration"), "{err}");
+    }
+
+    #[test]
+    fn assembly_rejects_dead_or_unbounded_windows() {
+        let window_of = |timestamp: u64, expiration: u64| {
+            let mut params = params();
+            params.timestamp = timestamp;
+            params.expiration = expiration;
+            params
+        };
+        for (timestamp, expiration, want) in [
+            (
+                1_728_000_000_000,
+                1_728_000_000_000,
+                "not after the timestamp",
+            ),
+            (
+                1_728_000_060_000,
+                1_728_000_000_000,
+                "not after the timestamp",
+            ),
+            (0, 1_728_000_060_000, "missing timestamp"),
+        ] {
+            let err = format!(
+                "{:#}",
+                to_unsigned_tron_tx(&window_of(timestamp, expiration), owner()).unwrap_err()
+            );
+            assert!(err.contains(want), "wanted {want:?}, got {err}");
+        }
+
+        let exactly = window_of(
+            params().timestamp,
+            params().timestamp + MAX_WINDOW_MS as u64,
+        );
+        assert!(
+            to_unsigned_tron_tx(&exactly, owner()).is_ok(),
+            "the ceiling itself is a valid window"
+        );
+        let past = window_of(
+            params().timestamp,
+            params().timestamp + MAX_WINDOW_MS as u64 + 1,
+        );
+        let err = format!("{:#}", to_unsigned_tron_tx(&past, owner()).unwrap_err());
+        assert!(err.contains("ceiling"), "{err}");
     }
 }
