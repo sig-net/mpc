@@ -69,17 +69,12 @@ impl Args {
         self.flag("--eth-execution-rpc-http-url", &eth.execution_rpc_http_url);
         self.flag("--eth-contract-address", eth.contract_address);
         self.flag("--eth-network", &eth.network);
-        self.switch("--eth-optimistic-requests", eth.optimistic_requests);
     }
 
     fn sol(&mut self, sol: &SolConfig) {
         self.flag("--sol-account-sk", &sol.account_sk);
         self.flag("--sol-rpc-http-url", &sol.rpc_http_url);
         self.flag("--sol-program-address", &sol.program_address);
-        self.flag(
-            "--sol-poll-interval-ms",
-            sol.indexer.poll_interval.as_millis(),
-        );
     }
 
     fn hydration(&mut self, hydration: &HydrationConfig) {

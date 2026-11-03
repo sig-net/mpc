@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
                     contract_address: eth_contract_address
                         .parse()
                         .map_err(|e| anyhow::anyhow!("invalid eth contract address: {e}"))?,
-                    optimistic_requests: eth_network == "anvil",
+                    optimistic_requests: EthConfig::is_optimistic_network(&eth_network),
                     network: eth_network,
                     gas: Default::default(),
                     indexer: Default::default(),

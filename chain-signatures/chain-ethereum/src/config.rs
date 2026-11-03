@@ -213,6 +213,12 @@ impl EthConfig {
         self.account_sk.address().to_string()
     }
 
+    /// Whether requests on `network` are emitted without waiting for finality.
+    /// Only `anvil`: it never reports finalized blocks and never reorgs.
+    pub fn is_optimistic_network(network: &str) -> bool {
+        network == "anvil"
+    }
+
     /// The EIP-155 chain id of `network`.
     pub fn chain_id(&self) -> Option<u64> {
         match self.network.as_str() {

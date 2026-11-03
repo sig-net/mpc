@@ -62,23 +62,11 @@ pub struct EthArgs {
         value_parser = ["sepolia", "mainnet", "anvil"],
     )]
     pub eth_network: String,
-
-    /// Emit requests without waiting for block finality. FOR DEV/DEMO USE ONLY:
-    /// on live networks a reorg can orphan already-emitted sign requests.
-    #[arg(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
-    pub eth_optimistic_requests: bool,
 }
 
 impl EthArgs {
     pub fn into_config(self) -> anyhow::Result<Option<EthConfig>> {
         let network = self.eth_network;
-        if self.eth_optimistic_requests && network == "mainnet" {
-            tracing::warn!(
-                "eth optimistic requests enabled on mainnet: emitted requests are NOT \
-                 reorg-safe; this flag is intended for dev/demo use only"
-            );
-        }
-
         let Some(account_sk) = self.eth_account_sk else {
             return Ok(None);
         };
@@ -101,7 +89,7 @@ impl EthArgs {
             account_sk, // this is safe because EthConfig has custom Debug implementation that redacts the account_sk field
             execution_rpc_http_url,
             contract_address,
-            optimistic_requests: self.eth_optimistic_requests || network == "anvil", // anvil never reports finalized blocks, so requests are emitted without waiting for finality
+            optimistic_requests: EthConfig::is_optimistic_network(&network),
             network,
             // TODO: currently we only have Ethereum and Sepolia, so defaults
             // are fine. Make these configurable when we add more chains.
@@ -116,6 +104,81 @@ impl EthArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
+
+    const ACCOUNT_SK: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const RPC_URL: &str = "http://127.0.0.1:8545";
+    const CONTRACT: &str = "0x1234567890123456789012345678901234567890";
+
+    fn configured(extra: &[&str]) -> EthArgs {
+        let argv = [
+            "test",
+            "--eth-account-sk",
+            ACCOUNT_SK,
+            "--eth-execution-rpc-http-url",
+            RPC_URL,
+            "--eth-contract-address",
+            CONTRACT,
+        ];
+        EthArgs::parse_from(argv.into_iter().chain(extra.iter().copied()))
+    }
+
+    #[test]
+    fn unconfigured_yields_no_config() {
+        assert!(EthArgs::parse_from(["test"])
+            .into_config()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn into_config_parses_the_configured_fields() {
+        let config = configured(&["--eth-network", "mainnet"])
+            .into_config()
+            .unwrap()
+            .expect("configured chain");
+        assert_eq!(
+            config.execution_rpc_http_url.as_str(),
+            "http://127.0.0.1:8545/"
+        );
+        assert_eq!(config.contract_address.to_string().to_lowercase(), CONTRACT);
+        assert_eq!(config.network, "mainnet");
+        assert_eq!(
+            config.indexer.refresh_interval,
+            indexer_config().refresh_interval
+        );
+    }
+
+    /// Only anvil skips finality; it never reports finalized blocks.
+    #[test]
+    fn only_anvil_is_optimistic() {
+        for (network, optimistic) in [("sepolia", false), ("mainnet", false), ("anvil", true)] {
+            let config = configured(&["--eth-network", network])
+                .into_config()
+                .unwrap()
+                .expect("configured chain");
+            assert_eq!(config.optimistic_requests, optimistic, "{network}");
+        }
+    }
+
+    #[test]
+    fn unknown_networks_are_rejected_by_the_cli() {
+        assert!(EthArgs::try_parse_from(["test", "--eth-network", "goerli"]).is_err());
+    }
+
+    #[test]
+    fn into_config_rejects_an_invalid_rpc_url() {
+        let args = EthArgs::parse_from([
+            "test",
+            "--eth-account-sk",
+            ACCOUNT_SK,
+            "--eth-execution-rpc-http-url",
+            "not a url",
+            "--eth-contract-address",
+            CONTRACT,
+        ]);
+        assert!(args.into_config().is_err());
+    }
 
     /// The two cadences, pinned: 100ms is also what the Ethereum crate's own
     /// tests use, so a change here must be made there too.
