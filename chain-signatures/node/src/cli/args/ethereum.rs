@@ -122,4 +122,24 @@ mod tests {
     fn mock_cadence_polls_faster_than_production() {
         assert!(mock_indexer_config().refresh_interval < IndexerConfig::default().refresh_interval);
     }
+
+    /// A production build runs the library's cadence.
+    #[cfg(not(feature = "test-feature"))]
+    #[test]
+    fn production_builds_run_the_default_cadence() {
+        assert_eq!(
+            indexer_config().refresh_interval,
+            IndexerConfig::default().refresh_interval
+        );
+    }
+
+    /// A test build runs the mock cadence.
+    #[cfg(feature = "test-feature")]
+    #[test]
+    fn test_builds_run_the_mock_cadence() {
+        assert_eq!(
+            indexer_config().refresh_interval,
+            mock_indexer_config().refresh_interval
+        );
+    }
 }
