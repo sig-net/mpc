@@ -240,6 +240,9 @@ async fn test_threshold_change_via_mpc_governance() {
         .with_preshared_presignatures()
         .with_min_mine_triple_pairs(1)
         .with_min_mine_presignatures(1)
+        // One proposal per node at a time: the post-resharing restock would
+        // otherwise start up to the cap in parallel and starve the sign posit.
+        .with_max_mine_generations(1)
         .build()
         .await;
 
