@@ -1,6 +1,6 @@
 use super::supervisor::run_supervised;
 use crate::backlog::mock::{mock_sign_request, mock_signature_output, BacklogTestExt};
-use crate::backlog::{Backlog, Bidirectional, Executing};
+use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcAction};
@@ -324,7 +324,7 @@ async fn test_respond_event_advances_to_pending_execution() {
     // target chain (Ethereum).
     assert!(
         backlog
-            .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
+            .get_executing(Chain::Solana, &sign_id)
             .await
             .is_some(),
         "expected Bidirectional Executing in backlog"

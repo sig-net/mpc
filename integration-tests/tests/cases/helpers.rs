@@ -3,7 +3,7 @@ use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use k256::Secp256k1;
-use mpc_node::backlog::BacklogEntry;
+use mpc_node::backlog::CheckpointEntry;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
@@ -27,8 +27,12 @@ pub(crate) fn dummy_indexed_sign_request(id: u8, chain: Chain) -> Arc<IndexedSig
     ))
 }
 
-pub(crate) fn dummy_backlog_entry(id: u8, chain: Chain) -> BacklogEntry {
-    BacklogEntry::new(dummy_indexed_sign_request(id, chain))
+pub(crate) fn dummy_checkpoint_entry(id: u8, chain: Chain) -> CheckpointEntry {
+    CheckpointEntry {
+        request: dummy_indexed_sign_request(id, chain),
+        tx_ids: Vec::new(),
+        legacy_tag: None,
+    }
 }
 
 pub(crate) fn dummy_presignature(id: u64) -> Presignature {

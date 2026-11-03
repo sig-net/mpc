@@ -122,12 +122,12 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             // from a plain sign request.
             let kind = request.request_kind();
 
-            // Record the request's indexed timestamp if it's a new request
-            let is_new = process_sign_request(request, ctx, root_pk)
+            // Record the indexed timestamp of a request this node starts signing.
+            let to_sign = process_sign_request(request, ctx, root_pk)
                 .await
                 .context("failed to process sign request")?;
 
-            if is_new {
+            if to_sign {
                 if let Some(ts) = block_timestamp {
                     // Ethereum (~15 min finality) reports the block timestamp.
                     telemetry.request_indexed_at(ts, kind);

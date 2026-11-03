@@ -46,8 +46,8 @@ Vocabulary, per node per source chain:
   Acting waits for it, so that a node behind the head does not spend presignatures, posit rounds and peer messages on requests the chain has already answered.
 
 * **Backlog**: one *entry* per request admitted and not *finished*, that is, not yet removed by a finalised source-chain event.
-  An entry holds the request id (rid) as its key, the request as the chain gave it, the contract that made it, and, for a bidirectional request, `signatures`: the signatures for it published in finalised blocks on the source chain.
-  A plain sign request is finished by its first published signature, so it won't have signatures in its entry.
+  An entry holds the request id (rid) as its key, the request as the chain gave it, the contract that made it, and, for a bidirectional request, `tx_ids`: the transaction IDs of the signatures for it published in finalised blocks on the source chain.
+  A plain sign request is finished by its first published signature, so it won't have transaction IDs in its entry.
   * Only finalised source-chain events change the backlog: for a bidirectional request, the handlers of [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3); for a plain sign request, its admission and its first published signature.
   * Nothing read from a destination chain changes the backlog, and neither does anything the node produced itself.
   * Everything else a node keeps about a request is *node-local*. A node stores in `local` the signatures and attestations it took part in producing and what it read on the destination chain. `local` is persisted and does not go into checkpoints.
@@ -83,16 +83,18 @@ digest(height, backlog) = H(
         rid
         request
         contract
-        signatures
+        tx_ids
 )
 ```
 
 The request goes in whole because the rid does not cover all of it, e.g., the schema.
-`signatures` goes in because a node rebased onto a checkpoint never reads the `Signature` events below its height again.
+`tx_ids` goes in because a node rebased onto a checkpoint never reads the `Signature` events below its height again.
 A peer that served a checkpoint without one of them would leave that node looking for too few executions: each signature fixes one transaction ID to look for, and a request can have several, one per signing round whose signature was published ([bidirectional-calls.md](bidirectional-calls.md), Section 2).
+To find an execution a node needs only the transaction ID, not the signature, so the checkpoint holds the IDs alone.
+A signature that is not yet published matters only to the node that issued it, and that node keeps it in `local`.
 
 The encoding of the entry must be canonical, one byte string per entry; the request has variable-length fields, so each gets its length before it.
-The order must be fixed too: entries go in rid order, and an entry's signatures in the order of their bytes.
+The order must be fixed too: entries go in rid order, and an entry's transaction IDs in the order of their bytes.
 
 ### Governance contract
 
@@ -207,7 +209,6 @@ on the next finalised block b above processed_height:
                                           // a different one there is a bug
     vote(c)
   if processed_height >= caught_up_at:   // caught up
-    delete local[rid] where rid not in backlog
     act on backlog
 ```
 Polling the governance contract
@@ -238,9 +239,9 @@ Acting waits until the node is caught up because behind the head its backlog may
 What the node already produced is in its node-local records, so it repeats nothing ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3).
 
 [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3, the `Response` handler) deletes a node-local record when the node processes the `Response` for its request.
-A node that rebases forward skips those Responses, so a caught-up node also deletes the records of requests that are not in its backlog.
-A node that is behind does not, since it may hold a record for a request above its processed height.
-If the node takes a stale head for the real head, it deletes the record of a request it has not reached yet, and later signs or sends for that request a second time, which [bidirectional-calls.md](bidirectional-calls.md) makes harmless (C3a, replay protection).
+A node that rebases skips those Responses, so when it rebuilds its backlog from a checkpoint it also drops the records of requests that are not in it and whose record was written below the checkpoint's height: such a request was admitted below that height and has left the backlog since.
+A record written at or above that height is kept until re-indexing admits its request again, since the request may lie above the checkpoint.
+A kept record whose request never comes back is dropped at the next rebase above its height.
 
 ### Rebase and re-index
 
@@ -257,6 +258,7 @@ rebase(c):                                        // c settled, above base
 
 re_index():                                       // start over from base
   backlog, processed_height = base.backlog, base.height
+  delete local[rid] where rid not in backlog and local[rid] was written below base.height
   caught_up_at = the newest finalised height (head) the provider reports
 ```
 
@@ -310,8 +312,8 @@ A rebase lifts both waits.
 
 ### *S4, a settled checkpoint is enough to take part.*
 Each thing a node does for a request reads the entry and nothing older than the checkpoint.
-Signing and joining a round read the request and the contract, which give the key and the bytes to sign, and `signatures`, whose being empty says that no signature is final yet.
-Finding an execution reads `signatures`, which give the transaction IDs, and attesting reads the request's schema.
+Signing and joining a round read the request and the contract, which give the key and the bytes to sign, and `tx_ids`, whose being empty says that no signature is final yet.
+Finding an execution reads `tx_ids`, and attesting reads the request's schema.
 Voting reads the backlog, which the node builds from the checkpoint and the blocks after it (S1).
 Attesting Unviable is the exception: it follows from the execution or the `Response` of another request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3), and once that request has left the backlog the checkpoint holds no trace of it.
 What the checkpoint cannot give back is node-local: a node that lost its storage has lost the signatures it issued and not yet seen published.
@@ -413,28 +415,18 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
    Now: the contract account can call `reset_checkpoints`, which settles an empty checkpoint without votes.
    Design: on mainnet there must not be a reset option.
 
-### Node: backlog and digest
-
-3. Entries (§1 Backlog, which [bidirectional-calls.md](bidirectional-calls.md) also needs).
-   Now: an entry is the request and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
-   There is no `local` store and no `signatures` list.
-   Design: an entry holds the rid, the request, the contract and `signatures`, and the node's own progress is node-local in `local`, outside checkpoints.
-4. Digest (§2).
-   Now: the digest covers the rids and one status tag per entry.
-   Design: it also covers each entry's request, contract and `signatures`, in the canonical encoding of Section 2.
-
 ### Node: indexing
 
-5. Hydration (§1 Processed height).
+3. Hydration (§1 Processed height).
    Now: Hydration indexes only the blocks it receives live, with no backfill.
    It loses the events of a block it cannot fetch or verify, and of the blocks between its stored height and the head on every restart or reconnect.
    It reports catching up as done before it processes any block.
    Design: every indexer processes every finalised block in order from its processed height.
-6. Catching up (§4, §5 L1).
+4. Catching up (§4, §5 L1).
    Now: while catching up, a node does not move its processed height, creates no checkpoints and casts no new votes.
    Once caught up, it creates one checkpoint at the height it reached, so the cap does not stop it while it catches up.
    Design: a node catching up indexes as usual and creates and votes for a checkpoint each time it passes a boundary, up to the cap; only acting waits until it is caught up.
-7. At the cap (§4).
+5. At the cap (§4).
    Now: the indexer makes no progress at the cap, so the stall watchdog restarts it again and again, and each restart makes the node not caught up.
    Until a settlement takes it below the cap, the node holds second-leg publishes and queues no second-leg sign requests.
    Design: at the cap the node keeps its caught-up state and keeps acting on the requests it holds.

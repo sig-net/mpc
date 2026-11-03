@@ -1,31 +1,67 @@
-use super::{BacklogEntry, PendingRequests, MAX_PENDING_CHECKPOINTS};
+use super::{migration, PendingRequests, MAX_PENDING_CHECKPOINTS};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use enum_map::EnumMap;
-use mpc_primitives::Chain;
+use mpc_primitives::{BidirectionalTxId, Chain, IndexedSignRequest, SignId};
 use sha3::Digest;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// A checkpoint represents the backlog state at a specific block height.
+/// A checkpoint represents the backlog state at a specific block height: only what the
+/// source chain says, so every node that processed it holds the same (doc/checkpoints.md).
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     pub chain: Chain,
     pub block_height: u64,
-    pub pending_requests: Vec<BacklogEntry>,
-    /// Commitment to each pending request's checkpoint-consensus phase.
-    ///
-    /// Deliberately not `#[serde(default)]`: a missing digest must fail to
-    /// decode rather than deserialize as all-zeros, which consensus would
-    /// otherwise compare against as if it were a real commitment.
-    #[serde(with = "serde_bytes")]
-    pub cumulative_digest: [u8; 32],
+    pub pending_requests: Vec<CheckpointEntry>,
+    /// Present only on a body written before entries held source facts alone. Such a body
+    /// hashes as it did then, over its entries' legacy tags; the value itself is not trusted.
+    #[serde(
+        rename = "cumulative_digest",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_bytes"
+    )]
+    pub legacy_digest: Option<[u8; 32]>,
+}
+
+/// A backlog entry as the source chain describes it, without this node's progress.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "migration::MigratableCheckpointEntry")]
+pub struct CheckpointEntry {
+    pub request: Arc<IndexedSignRequest>,
+    /// The transactions the request's published signatures give, in id order.
+    pub tx_ids: Vec<BidirectionalTxId>,
+    /// In a body from an earlier version, what that version hashed for this entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_tag: Option<u8>,
+}
+
+impl CheckpointEntry {
+    pub fn sign_id(&self) -> SignId {
+        self.request.id
+    }
+
+    /// The source-chain facts the digest covers; indexing times are node-local.
+    fn digest_bytes(&self) -> Vec<u8> {
+        let request = &self.request;
+        let fields = (
+            request.id,
+            &request.args,
+            request.chain,
+            &request.kind,
+            &self.tx_ids,
+        );
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&fields, &mut bytes).expect("encoding into memory cannot fail");
+        bytes
+    }
 }
 
 impl fmt::Debug for Checkpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        struct DebugPendingRequests<'a>(&'a [BacklogEntry]);
+        struct DebugPendingRequests<'a>(&'a [CheckpointEntry]);
         impl<'a> fmt::Debug for DebugPendingRequests<'a> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 let mut list = f.debug_list();
@@ -43,7 +79,6 @@ impl fmt::Debug for Checkpoint {
                 "pending_requests",
                 &DebugPendingRequests(&self.pending_requests),
             )
-            .field("cumulative_digest", &self.cumulative_digest)
             .finish()
     }
 }
@@ -61,12 +96,8 @@ impl Checkpoint {
             chain,
             block_height,
             pending_requests: Vec::new(),
-            cumulative_digest: Self::empty_cumulative_digest(),
+            legacy_digest: None,
         }
-    }
-
-    pub fn empty_cumulative_digest() -> [u8; 32] {
-        mpc_primitives::empty_cumulative_digest()
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -76,8 +107,29 @@ impl Checkpoint {
             self.pending_requests
                 .iter()
                 .map(|entry| entry.sign_id().request_id),
-            self.cumulative_digest,
+            match self.legacy_digest {
+                Some(_) => self.legacy_entries_digest(),
+                None => self.entries_digest(),
+            },
         )
+    }
+
+    /// The hash earlier versions took over their entries; an entry without a legacy tag
+    /// cannot come from such a version and spoils the match.
+    fn legacy_entries_digest(&self) -> [u8; 32] {
+        let mut hasher = sha3::Sha3_256::new();
+        for entry in &self.pending_requests {
+            hasher.update([entry.legacy_tag.unwrap_or(u8::MAX)]);
+        }
+        hasher.finalize().into()
+    }
+
+    fn entries_digest(&self) -> [u8; 32] {
+        let mut hasher = sha3::Sha3_256::new();
+        for entry in &self.pending_requests {
+            hasher.update(entry.digest_bytes());
+        }
+        hasher.finalize().into()
     }
 
     pub fn len(&self) -> usize {
@@ -161,19 +213,18 @@ impl Checkpoints {
 
     /// Captures the current request state as a deterministic checkpoint.
     pub(crate) fn snapshot(requests: &PendingRequests, chain: Chain) -> Checkpoint {
-        let mut pending_requests = requests.requests.values().cloned().collect::<Vec<_>>();
+        let mut pending_requests = requests
+            .requests
+            .values()
+            .map(|entry| entry.checkpoint_entry())
+            .collect::<Vec<_>>();
         pending_requests.sort_by_key(|entry| entry.sign_id());
-
-        let mut cumulative = sha3::Sha3_256::new();
-        for entry in &pending_requests {
-            cumulative.update([entry.status().consensus_tag()]);
-        }
 
         Checkpoint {
             chain,
             block_height: requests.processed_block_height.unwrap_or(0),
             pending_requests,
-            cumulative_digest: cumulative.finalize().into(),
+            legacy_digest: None,
         }
     }
 
@@ -272,8 +323,6 @@ impl Checkpoints {
         self.storage.find(chain, digest).await.ok().flatten()
     }
 
-    #[cfg(test)]
-    /// Returns the backing storage for tests that need to seed checkpoint state.
     pub(crate) fn storage(&self) -> &CheckpointStorage {
         &self.storage
     }
@@ -283,6 +332,34 @@ impl Checkpoints {
 mod tests {
     use super::*;
     use tokio::sync::Barrier;
+
+    /// The legacy marker cannot stand in for the entries: a body that carries it hashes over
+    /// its entries' legacy tags, so changed entries under a settled digest do not match.
+    #[test]
+    fn a_legacy_marker_does_not_vouch_for_changed_entries() {
+        let request =
+            crate::backlog::mock::mock_bidi_request(SignId::new([1u8; 32]), Chain::Solana);
+        let entry = CheckpointEntry {
+            request: Arc::clone(&request),
+            tx_ids: vec![BidirectionalTxId([4; 32])],
+            legacy_tag: None,
+        };
+        let settled = Checkpoint {
+            chain: Chain::Solana,
+            block_height: 7,
+            pending_requests: vec![entry.clone()],
+            legacy_digest: None,
+        };
+        let forged = Checkpoint {
+            pending_requests: vec![CheckpointEntry {
+                tx_ids: vec![BidirectionalTxId([5; 32])],
+                ..entry
+            }],
+            legacy_digest: Some(settled.entries_digest()),
+            ..settled.clone()
+        };
+        assert_ne!(forged.digest(), settled.digest());
+    }
 
     fn checkpoint(height: u64) -> Checkpoint {
         Checkpoint::reset(Chain::Ethereum, height)
@@ -549,10 +626,8 @@ mod tests {
     async fn find_finds_confirmed_and_pending_checkpoints() {
         let storage = CheckpointStorage::in_memory();
         let checkpoints = Checkpoints::new(storage.clone());
-        let mut confirmed = checkpoint(1);
-        confirmed.cumulative_digest = [1; 32];
-        let mut pending = checkpoint(2);
-        pending.cumulative_digest = [2; 32];
+        let confirmed = checkpoint(1);
+        let pending = checkpoint(2);
 
         storage.persist(&confirmed).await.unwrap();
         checkpoints.persist_pending(&pending).await.unwrap();

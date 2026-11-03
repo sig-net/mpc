@@ -2,14 +2,12 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
-use crate::backlog::{
-    AnyProgress, Backlog, Bidirectional, Executing, Final, Initial, Sign, SignEntry,
-};
+use crate::backlog::request::verify_request_signature;
+use crate::backlog::{AnyProgress, Backlog, Bidirectional, Executing, Initial, Sign, SignEntry};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
-    claims_attestation_key, published_failure, published_midnight_payload,
-    published_midnight_signing_args, published_output_payload, published_output_signing_args,
+    claims_attestation_key, published_failure, published_signing_args,
 };
 use crate::sign_bidirectional::{
     owned_by_requester, transaction_chain_id, BidirectionalProgress, BidirectionalTxId,
@@ -20,8 +18,8 @@ use crate::types::SignCommand;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, RequestKind,
-    RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
+    Chain, ExecutionOutcome, IndexedSignRequest, RequestKind, RespondBidirectionalEvent,
+    SignBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
 };
 use mpc_utils::time::unix_elapsed_checked;
 
@@ -92,9 +90,12 @@ pub(crate) async fn process_sign_request(
     );
 
     let sign_id = sign_request.id;
-    let (entry, is_new) = ctx.backlog.insert(sign_request).await;
-    if !is_new {
-        tracing::debug!(?sign_id, "sign request already pending; keeping its entry");
+    let (entry, to_sign) = ctx.backlog.insert(sign_request).await;
+    if !to_sign {
+        tracing::debug!(
+            ?sign_id,
+            "not signing: request already pending, or its record is past signing"
+        );
         return Ok(false);
     }
     ctx.try_enqueue(SignCommand::Request(entry)).await?;
@@ -260,20 +261,16 @@ pub(crate) async fn process_respond_event(
         return advance_bidirectional_to_execution(entry, respond_event, root_pk, ctx).await;
     }
 
-    if entry.is::<Bidirectional<Executing>>() {
-        tracing::info!(
-            ?sign_id,
-            ?source_chain,
-            "respond event backlog entry is already advanced; treating as processed"
-        );
+    // A later signature of the request: an execution under it must be found too (#1428).
+    let Some(entry) = ctx.backlog.entry(source_chain, &sign_id).await else {
         return Ok(());
-    }
-
-    tracing::info!(
-        ?sign_id,
-        ?source_chain,
-        "respond event is already finalized or pruned; skipping"
-    );
+    };
+    let SignKind::SignBidirectional(event) = &entry.request.kind else {
+        return Ok(());
+    };
+    verify_request_signature(&entry.request, root_pk, &respond_event.signature)?;
+    let tx = event.to_bidirectional_tx(sign_id.request_id, respond_event.signature, root_pk)?;
+    ctx.backlog.add_published_tx(Arc::new(tx)).await;
     Ok(())
 }
 
@@ -340,72 +337,31 @@ pub(crate) async fn process_respond_bidirectional_event(
     let source_chain = event.chain;
     tracing::info!(?sign_id, "processing RespondBidirectionalEvent");
 
-    let Some(entry) = ctx.backlog.get(source_chain, &sign_id).await else {
+    let Some(entry) = ctx.backlog.entry(source_chain, &sign_id).await else {
         tracing::warn!(?sign_id, "bidirectional tx not found on completion");
         return Ok(());
     };
-    let entry = match entry.try_into::<Bidirectional<Final<AnyProgress>>>() {
-        Ok(entry) => entry,
-        Err(entry) if source_chain == Chain::Midnight => {
-            return settle_unobserved_midnight_response(entry, &event, ctx, root_pk).await;
-        }
-        Err(entry) => {
-            return settle_unobserved_response(entry, &event, ctx, root_pk).await;
-        }
-    };
-
     // Check the response the event publishes, not this node's own: then every node removes the
-    // request on this event, whatever it computed itself.
-    let payload = if source_chain == Chain::Midnight {
-        let published = event
-            .attestation
-            .as_ref()
-            .context("Midnight response lacks attestation metadata")?;
-        Some(published_midnight_payload(&event.request_id, published)?)
-    } else {
-        event
-            .output
-            .as_deref()
-            .map(|output| published_output_payload(source_chain, &event.request_id, output))
-            .transpose()?
+    // request on this event, whatever it computed or observed itself.
+    let SignKind::SignBidirectional(request) = &entry.request.kind else {
+        anyhow::bail!("response to a request that is not a first leg: {sign_id:?}");
     };
-    match payload {
-        Some(payload) => {
-            let request = entry.request();
-            if payload != request.args.payload {
-                tracing::warn!(?sign_id, "published response differs from this node's");
-            }
-            mpc_crypto::verify_signature(root_pk, request.args.epsilon, payload, &event.signature)
-                .context("respond event carried invalid signature")?;
+    let (epsilon, payload) = published_signing_args(request, &event.request_id, &event)?;
+    mpc_crypto::verify_signature(root_pk, epsilon, payload, &event.signature).with_context(
+        || format!("respond event carried invalid signature for sign id {sign_id:?}"),
+    )?;
+
+    if let SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request, ..
+    }) = &entry.status
+    {
+        if payload != respond_request.args.payload {
+            tracing::warn!(?sign_id, "published response differs from this node's");
         }
-        None => entry.verify_signature(root_pk, &event.signature)?,
+        record_round_trip(source_chain, sign_id, &event, respond_request);
     }
 
-    // The whole round trip, measured against when the initial request was
-    // indexed. The origin travels with the final-response request so checkpoint
-    // recovery does not change whether this observation is emitted -- but it
-    // may therefore carry a peer's clock, so a future origin is skipped rather
-    // than saturated to a zero-length round trip.
-    if let SignKind::RespondBidirectional(response) = &entry.request.kind {
-        if let Some(origin_indexed_at) = response.origin_indexed_at {
-            match unix_elapsed_checked(origin_indexed_at) {
-                Some(elapsed) => record_request_latency(
-                    source_chain,
-                    SignRequestStep::BidirectionalTotal,
-                    execution_status(published_failure(&event, response)),
-                    RequestKind::RespondBidirectional,
-                    elapsed,
-                ),
-                None => tracing::warn!(
-                    ?sign_id,
-                    origin_indexed_at,
-                    "skipping end-to-end latency: origin timestamp is ahead of local clock"
-                ),
-            }
-        }
-    }
-
-    entry.complete().await;
+    ctx.backlog.remove(source_chain, &sign_id).await;
     tracing::info!(?sign_id, "bidirectional tx completed");
     // Sent even during catchup: unlike a request, nothing requeues it later.
     ctx.sign_tx
@@ -416,94 +372,34 @@ pub(crate) async fn process_respond_bidirectional_event(
     Ok(())
 }
 
-/// Settle a Midnight request whose outcome this node has not observed. The event carries
-/// every input of the attestation digest (height, kind, output length and output hash), so
-/// every node recomputes it for this request and settles the response at the same source
-/// event. A contract's responses under one key version share an attestation key: only that
-/// recomputed digest ties the signature to this request.
-async fn settle_unobserved_midnight_response(
-    entry: SignEntry,
+/// The whole round trip since the initial request was indexed. The origin may carry a peer's
+/// clock, so a future one is skipped rather than saturated to zero.
+fn record_round_trip(
+    source_chain: Chain,
+    sign_id: SignId,
     event: &RespondBidirectionalEvent,
-    ctx: &StreamContext,
-    root_pk: mpc_primitives::PublicKey,
-) -> anyhow::Result<()> {
-    let sign_id = entry.sign_id();
-    let Some(tx) = unobserved_tx(&entry) else {
-        return Ok(());
+    respond_request: &IndexedSignRequest,
+) {
+    let SignKind::RespondBidirectional(response) = &respond_request.kind else {
+        return;
     };
-    let published = event
-        .attestation
-        .context("Midnight response lacks attestation metadata")?;
-    let (epsilon, payload) = published_midnight_signing_args(&tx, &published)?;
-    mpc_crypto::verify_signature(root_pk, epsilon, payload, &event.signature).with_context(
-        || format!("respond event carried invalid signature for sign id {sign_id:?}"),
-    )?;
-
-    settle_unobserved(entry, &tx, ctx).await
-}
-
-/// Settle a request whose execution this node has not seen yet, on a source chain other than
-/// Midnight. The response is signed over the request id and the output, and the event carries
-/// the output, so the node can check the signature without having seen the execution.
-async fn settle_unobserved_response(
-    entry: SignEntry,
-    event: &RespondBidirectionalEvent,
-    ctx: &StreamContext,
-    root_pk: mpc_primitives::PublicKey,
-) -> anyhow::Result<()> {
-    let sign_id = entry.sign_id();
-    let Some(tx) = unobserved_tx(&entry) else {
-        return Ok(());
+    let Some(origin_indexed_at) = response.origin_indexed_at else {
+        return;
     };
-    let Some(output) = &event.output else {
-        tracing::warn!(
+    match unix_elapsed_checked(origin_indexed_at) {
+        Some(elapsed) => record_request_latency(
+            source_chain,
+            SignRequestStep::BidirectionalTotal,
+            execution_status(published_failure(event, response)),
+            RequestKind::RespondBidirectional,
+            elapsed,
+        ),
+        None => tracing::warn!(
             ?sign_id,
-            "response carries no output to check; keeping the request"
-        );
-        return Ok(());
-    };
-    let (epsilon, payload) = published_output_signing_args(&tx, output)?;
-    let verified = mpc_crypto::verify_signature(root_pk, epsilon, payload, &event.signature);
-    if verified.is_err() {
-        tracing::warn!(?sign_id, "response does not verify; keeping the request");
-        return Ok(());
+            origin_indexed_at,
+            "skipping end-to-end latency: origin timestamp is ahead of local clock"
+        ),
     }
-
-    settle_unobserved(entry, &tx, ctx).await
-}
-
-fn unobserved_tx(entry: &SignEntry) -> Option<Arc<BidirectionalTx>> {
-    match entry.status() {
-        SignStatus::Bidirectional(
-            BidirectionalProgress::Executing(tx) | BidirectionalProgress::Parked(tx),
-        ) => Some(Arc::clone(tx)),
-        _ => {
-            tracing::warn!(sign_id = ?entry.sign_id(), "bidirectional tx not found on completion");
-            None
-        }
-    }
-}
-
-async fn settle_unobserved(
-    entry: SignEntry,
-    tx: &BidirectionalTx,
-    ctx: &StreamContext,
-) -> anyhow::Result<()> {
-    let sign_id = entry.sign_id();
-    // An unviable transaction is never mined, so no execution event would retire its watch.
-    ctx.backlog.unwatch_execution(tx.target_chain, &tx.id).await;
-    entry.complete().await;
-    tracing::info!(
-        ?sign_id,
-        "bidirectional tx completed without an observed outcome"
-    );
-    // Sent even during catchup: unlike a request, nothing requeues it later.
-    ctx.sign_tx
-        .send(SignCommand::Completion(sign_id))
-        .await
-        .context("sign command channel closed")?;
-
-    Ok(())
 }
 
 fn execution_status(failed: bool) -> &'static str {
@@ -550,32 +446,43 @@ pub async fn process_execution_confirmed(
     );
 
     // An included transaction takes its nonce whatever its outcome.
-    for sibling_id in ctx.backlog.nonce_siblings(entry.execution_tx()).await {
-        let Some(sibling) = ctx
-            .backlog
-            .unwatch_execution(target_chain, &sibling_id)
-            .await
-        else {
-            continue;
-        };
+    let siblings = match &entry.request().kind {
+        SignKind::SignBidirectional(taker) => {
+            ctx.backlog.take_nonce_siblings(source_chain, taker).await
+        }
+        _ => Vec::new(),
+    };
+    for sibling in siblings {
+        let sibling_id = sibling.execution_tx().id;
         tracing::info!(
-            ?sibling_id,
+            sign_id = ?sibling.sign_id(),
             taker = ?tx_id,
             block_height,
             "nonce taken by another request's transaction"
         );
-        // Other source chains cannot encode Unviable yet; their applications refund on Failed.
-        let outcome = if sibling.chain == Chain::Midnight {
-            ExecutionOutcome::Unviable
-        } else {
-            ExecutionOutcome::Failed
-        };
+        let outcome = unexecutable_outcome(sibling.chain);
         if let Err(err) = answer_execution(sibling, sibling_id, block_height, outcome, ctx).await {
             tracing::error!(?sibling_id, ?err, "failed to answer a nonce sibling");
         }
     }
 
-    answer_execution(entry, tx_id, block_height, result, ctx).await
+    let tx = Arc::clone(entry.execution_tx());
+    let answered = answer_execution(entry, tx_id, block_height, result, ctx).await;
+    if answered.is_err() {
+        // Unwatched since the confirmation, and unanswered: watch for the next one.
+        ctx.backlog.watch_txs([tx]).await;
+    }
+    answered
+}
+
+/// What a request that can no longer execute is answered with: Unviable where the source
+/// chain encodes it, Failed elsewhere, as those applications refund on Failed.
+fn unexecutable_outcome(source_chain: Chain) -> ExecutionOutcome {
+    if source_chain == Chain::Midnight {
+        ExecutionOutcome::Unviable
+    } else {
+        ExecutionOutcome::Failed
+    }
 }
 
 /// Answers `entry`, whose transaction `tx_id` ended with `result` at `block_height`.
@@ -666,6 +573,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     // should not create checkpoint for blocks that are not caught up, as that would
     // try to create signatures for checkpoints where we are not live.
     if !ctx.caught_up {
+        ctx.backlog.note_replayed_block(chain, block).await;
         return Ok(());
     }
     let Some(checkpoint) = ctx.backlog.set_processed_block(chain, block).await else {

@@ -1,9 +1,10 @@
 use crate::backlog::{
-    Backlog, BacklogEntry, Bidirectional, Checkpoint, Checkpoints, Executing, Final, Generating,
-    Initial, PendingRequests, Publishing, Sign, SignEntry,
+    AnyProgress, Backlog, BacklogEntry, Bidirectional, Checkpoint, Checkpoints, Executing,
+    ExecutionWatch, Final, Generating, Initial, PendingRequests, Publishing, Sign, SignEntry,
 };
 use crate::sign_bidirectional::{
-    BidirectionalProgress, SignProgress, SignStatus, SDK_ALGO, SDK_DEST, SDK_PARAMS,
+    BidirectionalProgress, SignBidirectionalEventExt as _, SignProgress, SignStatus, SDK_ALGO,
+    SDK_DEST, SDK_PARAMS,
 };
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
@@ -40,6 +41,13 @@ pub trait BacklogTestExt: sealed::Sealed {
         tx: &BidirectionalTx,
     ) -> SignEntry<Bidirectional<Final<Generating>>>;
 
+    /// The entry as executing under its first transaction, if it awaits its outcome.
+    async fn get_executing(
+        &self,
+        chain: Chain,
+        id: &SignId,
+    ) -> Option<SignEntry<Bidirectional<Executing>>>;
+
     /// Mark `chain` caught up, as its stream does at catchup.
     fn mark_caught_up(&self, chain: Chain);
 }
@@ -62,13 +70,11 @@ impl BacklogTestExt for Backlog {
         &self,
         tx: &BidirectionalTx,
     ) -> SignEntry<Bidirectional<Executing>> {
-        let bidi = self
-            .insert_mock_bidirectional(tx.sign_id(), tx.source_chain)
+        self.insert_mock_bidirectional(tx.sign_id(), tx.source_chain)
             .await;
-        let (pk, output) = mock_signature_output(&bidi.request().args);
-        bidi.advance(pk, &output, mock_participants(), true)
+        self.get_by::<Bidirectional<Initial<AnyProgress>>>(tx.source_chain, &tx.sign_id())
             .await
-            .expect("advance to publishing")
+            .expect("inserted")
             .advance(Arc::new(tx.clone()))
             .await
             .expect("advance to executing")
@@ -85,9 +91,47 @@ impl BacklogTestExt for Backlog {
             .expect("advance to final generating")
     }
 
+    async fn get_executing(
+        &self,
+        chain: Chain,
+        id: &SignId,
+    ) -> Option<SignEntry<Bidirectional<Executing>>> {
+        let entry = self.entry(chain, id).await?;
+        if !entry.status.is_pending_execution() {
+            return None;
+        }
+        let tx = entry.watched_txs().into_iter().next()?;
+        Some(SignEntry {
+            chain,
+            request: entry.request,
+            state: Bidirectional(Executing(ExecutionWatch::new(tx, None))),
+            backlog: self.clone(),
+        })
+    }
+
     fn mark_caught_up(&self, chain: Chain) {
         self.set_caught_up(chain, true);
     }
+}
+
+/// The root key mock transactions are derived under.
+pub fn mock_root_pk() -> PublicKey {
+    AffinePoint::GENERATOR
+}
+
+/// An unsigned legacy Ethereum transaction on chain id 1, sending `value`.
+pub fn mock_unsigned_eth_tx(nonce: u64, value: u64) -> Vec<u8> {
+    let mut rlp = rlp::RlpStream::new_list(9);
+    rlp.append(&nonce);
+    rlp.append(&0u64);
+    rlp.append(&0u64);
+    rlp.append(&vec![0x11u8; 20]);
+    rlp.append(&value);
+    rlp.append(&Vec::<u8>::new());
+    rlp.append(&1u64);
+    rlp.append(&0u64);
+    rlp.append(&0u64);
+    rlp.out().to_vec()
 }
 
 /// Create a mock signature for tests.
@@ -144,9 +188,9 @@ pub fn mock_publishing_since(participants: usize, publishing_since: Option<u64>)
     mock_publishing_with(participants, false, publishing_since)
 }
 
-/// Helper to construct a pending execution status for a bidirectional tx.
-pub fn pending_execution_status(tx: &BidirectionalTx) -> SignStatus {
-    SignStatus::Bidirectional(BidirectionalProgress::Executing(Arc::new(tx.clone())))
+/// Helper to construct a pending execution status.
+pub fn pending_execution_status() -> SignStatus {
+    SignStatus::Bidirectional(BidirectionalProgress::Executing)
 }
 
 /// Helper to construct an initial generating status for bidirectional requests.
@@ -191,7 +235,7 @@ pub fn mock_bidi_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
         0,
         SignBidirectionalEvent {
             sender: Default::default(),
-            serialized_transaction: vec![1, 2, 3],
+            serialized_transaction: mock_unsigned_eth_tx(0, 0),
             dest: SDK_DEST.to_string(),
             caip2_id: target_chain.caip2_chain_id().to_string(),
             key_version: 1,
@@ -207,8 +251,19 @@ pub fn mock_bidi_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
     ))
 }
 
-/// Create a mock bidirectional transaction for tests.
+/// Create a mock bidirectional transaction for tests: the one [`mock_bidi_request`] gives
+/// under [`mock_root_pk`], where the source chain lets a node derive it.
 pub fn mock_bidirectional_tx(id: SignId, source_chain: Chain) -> BidirectionalTx {
+    let request = mock_bidi_request(id, source_chain);
+    if let SignKind::SignBidirectional(event) = &request.kind {
+        if let Ok(tx) = event.bidirectional_tx(
+            id.request_id,
+            BidirectionalTxId(id.request_id),
+            mock_root_pk(),
+        ) {
+            return tx;
+        }
+    }
     let target_chain = if source_chain == Chain::Ethereum {
         Chain::Solana
     } else {
@@ -297,7 +352,14 @@ pub fn mock_execution_entry_with_timestamp(
         Arc::new(req)
     };
 
-    BacklogEntry::with_status(request, status)
+    let mut entry = BacklogEntry::with_status(request, status);
+    if !matches!(
+        entry.status,
+        SignStatus::Bidirectional(BidirectionalProgress::Initial(_))
+    ) {
+        entry.txs = vec![Arc::new(tx.clone())];
+    }
+    entry
 }
 
 /// Builds a checkpoint for a chain with exactly one backlog entry at height 100.

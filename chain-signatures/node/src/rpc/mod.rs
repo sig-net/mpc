@@ -80,7 +80,7 @@ impl PublishKind {
                 self == PublishKind::BidirectionalResponse
             }
             SignStatus::Bidirectional(
-                BidirectionalProgress::Executing(_) | BidirectionalProgress::Parked(_),
+                BidirectionalProgress::Executing | BidirectionalProgress::Parked,
             ) => false,
         }
     }

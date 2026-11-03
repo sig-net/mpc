@@ -8,7 +8,7 @@ use mpc_node::protocol::MessageChannel;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
 
-use super::helpers::{dummy_backlog_entry, dummy_pair, dummy_presignature};
+use super::helpers::{dummy_checkpoint_entry, dummy_pair, dummy_presignature};
 use mpc_primitives::SignId;
 
 #[test(tokio::test)]
@@ -342,20 +342,13 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     // 1. Clean storage returns None
     assert!(storage.load_latest(Chain::Solana).await?.is_none());
 
-    fn cumulative_digest(status: [u8; 1]) -> [u8; 32] {
-        use sha3::Digest;
-        let mut hasher = sha3::Sha3_256::new();
-        hasher.update(status);
-        hasher.finalize().into()
-    }
-
     // 2. Persist first checkpoint (simulates consensus confirmation)
-    let tx1 = dummy_backlog_entry(1, Chain::Solana);
+    let tx1 = dummy_checkpoint_entry(1, Chain::Solana);
     let cp1 = Checkpoint {
         chain: Chain::Solana,
         block_height: 10,
         pending_requests: vec![tx1],
-        cumulative_digest: cumulative_digest([0]),
+        legacy_digest: None,
     };
     storage.persist(&cp1).await?;
 
@@ -366,12 +359,12 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     assert_eq!(latest.pending_requests[0].sign_id(), SignId::new([1u8; 32]));
 
     // 4. Persist second checkpoint at higher height (newer consensus checkpoint)
-    let tx2 = dummy_backlog_entry(2, Chain::Solana);
+    let tx2 = dummy_checkpoint_entry(2, Chain::Solana);
     let cp2 = Checkpoint {
         chain: Chain::Solana,
         block_height: 20,
         pending_requests: vec![tx2],
-        cumulative_digest: cumulative_digest([0]),
+        legacy_digest: None,
     };
     storage.persist(&cp2).await?;
 
@@ -403,7 +396,7 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
         chain: Chain::Solana,
         block_height: height,
         pending_requests: vec![],
-        cumulative_digest: Checkpoint::empty_cumulative_digest(),
+        legacy_digest: None,
     };
 
     // Neither key exists yet.
@@ -440,7 +433,9 @@ async fn test_pending_checkpoint_persistence() -> anyhow::Result<()> {
     );
 
     let mut conflicting = second.clone();
-    conflicting.cumulative_digest[0] = 1;
+    conflicting
+        .pending_requests
+        .push(dummy_checkpoint_entry(3, Chain::Solana));
     assert!(restarted.persist_pending(&conflicting).await.is_err());
     assert!(restarted
         .promote_pending(Chain::Solana, [99; 32])

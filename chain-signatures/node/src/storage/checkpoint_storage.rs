@@ -1,8 +1,9 @@
 use crate::protocol::Chain;
 
-use crate::backlog::Checkpoint;
+use crate::backlog::{Checkpoint, LocalRecord};
 use anyhow::Context;
 use deadpool_redis::Pool;
+use mpc_primitives::SignId;
 use near_account_id::AccountId;
 use redis::AsyncCommands;
 use tokio::sync::RwLock;
@@ -16,6 +17,7 @@ pub enum CheckpointStorage {
     InMemory {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
+        local: Arc<RwLock<HashMap<Chain, HashMap<SignId, LocalRecord>>>>,
         /// Number of upcoming `load_pending` calls to fail, for tests of transient errors.
         #[cfg(test)]
         load_pending_failures: Arc<std::sync::atomic::AtomicUsize>,
@@ -36,6 +38,7 @@ impl CheckpointStorage {
         Self::InMemory {
             latest: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(RwLock::new(HashMap::new())),
+            local: Arc::default(),
             #[cfg(test)]
             load_pending_failures: Arc::default(),
         }
@@ -98,6 +101,102 @@ impl CheckpointStorage {
 
     fn pending_digest_key(&self, chain: Chain) -> String {
         self.key("pending_digest", chain)
+    }
+
+    fn local_key(&self, chain: Chain) -> String {
+        self.key("local", chain)
+    }
+
+    /// Store what this node signed for a request, before it publishes it.
+    pub async fn put_local(
+        &self,
+        chain: Chain,
+        id: SignId,
+        record: &LocalRecord,
+    ) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut bytes = Vec::new();
+                ciborium::into_writer(record, &mut bytes)
+                    .context("failed to encode local record")?;
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                conn.hset::<_, _, _, ()>(self.local_key(chain), id.request_id.as_slice(), bytes)
+                    .await
+                    .context("failed to store local record")?;
+            }
+            CheckpointStorage::InMemory { local, .. } => {
+                local
+                    .write()
+                    .await
+                    .entry(chain)
+                    .or_default()
+                    .insert(id, record.clone());
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
+    }
+
+    /// This node's records for `chain`, by request.
+    pub async fn load_local(&self, chain: Chain) -> anyhow::Result<HashMap<SignId, LocalRecord>> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let stored: HashMap<Vec<u8>, Vec<u8>> = conn
+                    .hgetall(self.local_key(chain))
+                    .await
+                    .context("failed to load local records")?;
+                // One unreadable record must not cost the node all the others.
+                let decode = |(id, bytes): (Vec<u8>, Vec<u8>)| {
+                    let id = SignId::new(id.try_into().ok()?);
+                    match ciborium::from_reader(&bytes[..]) {
+                        Ok(record) => Some((id, record)),
+                        Err(err) => {
+                            tracing::warn!(
+                                ?chain,
+                                ?id,
+                                ?err,
+                                "skipping an undecodable local record"
+                            );
+                            None
+                        }
+                    }
+                };
+                Ok(stored.into_iter().filter_map(decode).collect())
+            }
+            CheckpointStorage::InMemory { local, .. } => {
+                Ok(local.read().await.get(&chain).cloned().unwrap_or_default())
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+    }
+
+    /// Forget this node's records of requests that left the backlog.
+    pub async fn remove_local(&self, chain: Chain, ids: &[SignId]) -> anyhow::Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let fields: Vec<&[u8]> = ids.iter().map(|id| id.request_id.as_slice()).collect();
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                conn.hdel::<_, _, ()>(self.local_key(chain), fields)
+                    .await
+                    .context("failed to remove local records")?;
+            }
+            CheckpointStorage::InMemory { local, .. } => {
+                if let Some(records) = local.write().await.get_mut(&chain) {
+                    for id in ids {
+                        records.remove(id);
+                    }
+                }
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
     }
 
     /// Persist a checkpoint as the latest consensus checkpoint.
@@ -586,7 +685,7 @@ mod tests {
             chain: Chain::Solana,
             block_height: 10,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
         storage.persist(&cp1).await?;
 
@@ -599,7 +698,7 @@ mod tests {
             chain: Chain::Solana,
             block_height: 20,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
         storage.persist(&cp2).await?;
 
@@ -618,7 +717,7 @@ mod tests {
             chain,
             block_height,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
 
         let first = checkpoint(10);
@@ -659,10 +758,19 @@ mod tests {
             chain: Chain::Solana,
             block_height: 10,
             pending_requests: vec![],
-            cumulative_digest: Checkpoint::empty_cumulative_digest(),
+            legacy_digest: None,
         };
         let mut conflicting = checkpoint.clone();
-        conflicting.cumulative_digest[0] = 1;
+        conflicting
+            .pending_requests
+            .push(crate::backlog::CheckpointEntry {
+                request: crate::backlog::mock::mock_sign_request(
+                    SignId::new([1; 32]),
+                    Chain::Solana,
+                ),
+                tx_ids: vec![],
+                legacy_tag: None,
+            });
 
         assert!(storage.persist_pending(&checkpoint).await?);
         assert!(!storage.persist_pending(&checkpoint).await?);
@@ -681,7 +789,7 @@ mod tests {
             chain: Chain::Ethereum,
             block_height: 100,
             pending_requests: vec![],
-            cumulative_digest: [42u8; 32],
+            legacy_digest: None,
         };
         let encoded = encode_checkpoint(&checkpoint).unwrap();
         let decoded = decode_checkpoint(&encoded).unwrap();

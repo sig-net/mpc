@@ -1,12 +1,12 @@
 use super::checkpoint_interval;
 use super::{
     AnyProgress, Backlog, BacklogEntry, BacklogError, Bidirectional, Checkpoint, Checkpoints,
-    Executing, Final, Generating, Initial, PendingRequests, Publishing, Sign,
+    Final, Generating, Initial, PendingRequests, Publishing, Sign,
 };
 use crate::backlog::mock::{
     bidi_initial_status, mock_bidi_request, mock_bidi_response, mock_bidirectional_tx,
     mock_execution_entry, mock_execution_entry_with_timestamp, mock_participants, mock_publishing,
-    mock_publishing_with_proposer, mock_sign_request, mock_signature_output, mock_tx,
+    mock_publishing_with_proposer, mock_root_pk, mock_sign_request, mock_signature_output, mock_tx,
     pending_execution_status, single_entry_checkpoint, BacklogTestExt,
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
@@ -73,9 +73,7 @@ async fn test_backlog_filter_by_status() {
     backlog.insert_mock_executing(&tx4).await;
 
     // Filter Solana by Pending execution
-    let sol_pending = backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Solana, &tx3.sign_id())
-        .await;
+    let sol_pending = backlog.get_executing(Chain::Solana, &tx3.sign_id()).await;
     assert!(sol_pending.is_some());
 
     // Filter Solana by Initial Generating
@@ -91,15 +89,11 @@ async fn test_backlog_filter_by_status() {
     assert!(sol_completion.is_some());
 
     // Filter Canton by Pending execution
-    let canton_pending = backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Canton, &tx4.sign_id())
-        .await;
+    let canton_pending = backlog.get_executing(Chain::Canton, &tx4.sign_id()).await;
     assert!(canton_pending.is_some());
 
     // Filter non-existent chain returns empty
-    let near_pending = backlog
-        .get_by::<Bidirectional<Executing>>(Chain::NEAR, &sign_id0)
-        .await;
+    let near_pending = backlog.get_executing(Chain::NEAR, &sign_id0).await;
     assert!(near_pending.is_none());
 }
 
@@ -310,7 +304,7 @@ async fn test_checkpoint_creation() {
     // Guard the checkpoint digest wire format; update only for intentional changes.
     assert_eq!(
         checkpoint.digest(),
-        digest_hex("449d3cbc30e57ae4964916e0366dc88c8b6d9678d4011f9a20da43ba07396836")
+        digest_hex("562a733c296c0cb20f568b1e370c1f0311eb371964d450ab67dc3b2fb343fdbe")
     );
 }
 
@@ -370,7 +364,7 @@ fn test_checkpoint_digest_invariants() {
     assert_ne!(cp_diff1.digest(), cp_diff2.digest());
     assert_eq!(
         cp_diff1.digest(),
-        digest_hex("a31e0d66f5b4fb860cc62e809cc29918b9138550b5cd62e1c752fc40ce6c2779")
+        digest_hex("7a70129d584242b811b117f5072b4f965468fab006c8caa6ca45e3fdd0ff30a1")
     );
 }
 
@@ -412,24 +406,25 @@ fn test_checkpoint_consensus_projection() {
     ));
     assert_eq!(plain_generation.digest(), plain_publish.digest());
 
-    // Post-initial phase: awaiting target-chain execution and the final
-    // response generation/publish states share the same checkpoint digest.
+    // Once a signature is published, this node's progress no longer shows: awaiting
+    // execution and the final response share the digest, which covers the transaction.
     let execution = single_entry_checkpoint(mock_execution_entry(
         &tx,
         Chain::Ethereum,
-        pending_execution_status(&tx),
+        pending_execution_status(),
     ));
     let response_request = mock_bidi_response(&tx);
-    let origin_request = mock_bidi_request(sign_id, Chain::Ethereum);
-    let gen_bidirectional = single_entry_checkpoint(BacklogEntry::with_status(
-        Arc::clone(&origin_request),
+    let gen_bidirectional = single_entry_checkpoint(mock_execution_entry(
+        &tx,
+        Chain::Ethereum,
         SignStatus::Bidirectional(BidirectionalProgress::Final {
             respond_request: Arc::clone(&response_request),
             progress: SignProgress::Generating,
         }),
     ));
-    let pub_bidirectional = single_entry_checkpoint(BacklogEntry::with_status(
-        origin_request,
+    let pub_bidirectional = single_entry_checkpoint(mock_execution_entry(
+        &tx,
+        Chain::Ethereum,
         SignStatus::Bidirectional(BidirectionalProgress::Final {
             respond_request: response_request,
             progress: SignProgress::Publishing(mock_publishing()),
@@ -438,7 +433,7 @@ fn test_checkpoint_consensus_projection() {
     assert_eq!(execution.digest(), gen_bidirectional.digest());
     assert_eq!(execution.digest(), pub_bidirectional.digest());
 
-    // Initial and post-initial phases must remain distinct.
+    // A published signature's transaction changes the digest.
     assert_ne!(generation.digest(), execution.digest());
 }
 
@@ -448,7 +443,7 @@ fn test_checkpoint_serialization() {
     let checkpoint = single_entry_checkpoint(mock_execution_entry(
         &tx1,
         Chain::Ethereum,
-        pending_execution_status(&tx1),
+        pending_execution_status(),
     ));
 
     let json = serde_json::to_string(&checkpoint).unwrap();
@@ -457,7 +452,7 @@ fn test_checkpoint_serialization() {
     assert_eq!(checkpoint, deserialized);
     assert_eq!(
         checkpoint.digest(),
-        digest_hex("12f5bc5c4f0fea1debafceb8879644ea545309775b3e2cc266335cd3247d5394")
+        digest_hex("bea87e72f589447390ccc8440fb3653b1886350835d1ff0c57f6c758e653b23a")
     );
     assert_eq!(checkpoint.digest(), deserialized.digest());
 
@@ -467,7 +462,7 @@ fn test_checkpoint_serialization() {
         panic!("Expected SignBidirectional kind");
     };
     assert_eq!(event.dest, "");
-    assert_eq!(restored_entry.status, pending_execution_status(&tx1));
+    assert_eq!(restored_entry.tx_ids, vec![tx1.id]);
 }
 
 // =========================================================================
@@ -581,7 +576,7 @@ async fn test_bidirectional_typestate_lifecycle() {
 
     // Verify get_by can retrieve Executing state directly from backlog
     assert!(backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
+        .get_executing(Chain::Solana, &sign_id)
         .await
         .is_some());
     assert!(backlog
@@ -791,11 +786,14 @@ async fn test_recovery_restores_state_and_watchers() {
         .persist(&checkpoint)
         .await
         .unwrap();
-    recovered.recover_by_checkpoint(&checkpoint).await;
+    recovered
+        .recover_by_checkpoint(&checkpoint, mock_root_pk())
+        .await
+        .unwrap();
 
     // Restores execution entry
     let entry = recovered
-        .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
+        .get_executing(Chain::Solana, &sign_id)
         .await
         .expect("executing entry restored");
     assert_eq!(entry.sign_id(), sign_id);
@@ -834,7 +832,10 @@ async fn test_recovery_reports_restored_backlog_size() {
     pending.set_processed_block(100);
     let checkpoint = Checkpoints::snapshot(&pending, chain);
 
-    Backlog::new().recover_by_checkpoint(&checkpoint).await;
+    Backlog::new()
+        .recover_by_checkpoint(&checkpoint, mock_root_pk())
+        .await
+        .unwrap();
 
     let size = crate::metrics::requests::BACKLOG_SIZE
         .with_label_values(&[chain.as_str()])
@@ -844,15 +845,20 @@ async fn test_recovery_reports_restored_backlog_size() {
 
 #[tokio::test]
 async fn test_recovery_requeues_completed_bidirectional_requests() {
-    let backlog = Backlog::new();
+    // The same storage: a restart keeps this node's record of the outcome it found.
+    let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
     let tx = mock_tx(42);
 
     backlog.insert_mock_final(&tx).await;
     backlog.set_processed_block(Chain::Solana, 10).await;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
-    let recovered = Backlog::new();
-    recovered.recover_by_checkpoint(&checkpoint).await;
+    let recovered = Backlog::persisted(storage);
+    recovered
+        .recover_by_checkpoint(&checkpoint, mock_root_pk())
+        .await
+        .unwrap();
 
     let requeued = recovered.requeueable_requests(Chain::Solana).await;
     assert_eq!(requeued.len(), 1);
@@ -877,7 +883,10 @@ async fn test_recovery_preserves_pending_checkpoints() {
 
     // Recovery does not discard pending checkpoints needed for consensus matching
     let recovery_cp = Checkpoint::reset(chain, interval / 2);
-    backlog.recover_by_checkpoint(&recovery_cp).await;
+    backlog
+        .recover_by_checkpoint(&recovery_cp, mock_root_pk())
+        .await
+        .unwrap();
     assert_eq!(backlog.checkpoints().count(chain), 2);
 }
 
@@ -895,7 +904,10 @@ async fn test_total_pending_on_recovery() {
     // Clean recovery updates count from 0 to 3
     let clean = Backlog::new();
     assert_eq!(clean.len(), 0);
-    clean.recover_by_checkpoint(&checkpoint).await;
+    clean
+        .recover_by_checkpoint(&checkpoint, mock_root_pk())
+        .await
+        .unwrap();
     assert_eq!(clean.len(), 3);
 
     // Dirty recovery overwrites pre-existing state to match checkpoint size exactly
@@ -904,7 +916,10 @@ async fn test_total_pending_on_recovery() {
         .insert_mock_sign(SignId::from_u8(99), Chain::Ethereum)
         .await;
     assert_eq!(dirty.len(), 1);
-    dirty.recover_by_checkpoint(&checkpoint).await;
+    dirty
+        .recover_by_checkpoint(&checkpoint, mock_root_pk())
+        .await
+        .unwrap();
     assert_eq!(dirty.len(), 3);
 }
 
@@ -988,7 +1003,6 @@ async fn test_dynamic_entry_cast_and_is() {
     let dyn_entry = backlog.get(chain, &sign_id).await.expect("entry exists");
     assert!(dyn_entry.is::<Sign<Publishing>>());
     assert!(!dyn_entry.is::<Sign<Generating>>());
-    assert!(!dyn_entry.is::<Bidirectional<Executing>>());
 
     // Borrowed downcast via cast
     let cast_entry = dyn_entry.cast::<Sign<Publishing>>();
@@ -1025,7 +1039,7 @@ async fn test_initial_any_progress_advance() {
         .expect("advances to executing");
     assert_eq!(exec_entry.execution_tx().id, tx.id);
     assert!(backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Solana, &sign_id)
+        .get_executing(Chain::Solana, &sign_id)
         .await
         .is_some());
 }
@@ -1048,15 +1062,16 @@ async fn test_pending_executions_typestate() {
         .insert_mock_sign(SignId::from_u8(99), Chain::Ethereum)
         .await;
 
-    let eth_execs = backlog.pending_executions(Chain::Ethereum).await;
-    assert_eq!(eth_execs.len(), 1);
-    assert_eq!(eth_execs[0].sign_id(), tx1.sign_id());
-    assert_eq!(eth_execs[0].execution_tx().id, tx1.id);
-
-    let sol_execs = backlog.pending_executions(Chain::Solana).await;
-    assert_eq!(sol_execs.len(), 1);
-    assert_eq!(sol_execs[0].sign_id(), tx2_sol.sign_id());
-    assert_eq!(sol_execs[0].execution_tx().id, tx2_sol.id);
+    let eth_execs = backlog.get_executing(Chain::Ethereum, &tx1.sign_id()).await;
+    assert_eq!(eth_execs.expect("executing").execution_tx().id, tx1.id);
+    let sol_execs = backlog
+        .get_executing(Chain::Solana, &tx2_sol.sign_id())
+        .await;
+    assert_eq!(sol_execs.expect("executing").execution_tx().id, tx2_sol.id);
+    assert!(backlog
+        .get_executing(Chain::Ethereum, &SignId::from_u8(99))
+        .await
+        .is_none());
 }
 
 #[tokio::test]
@@ -1074,8 +1089,8 @@ async fn test_advance_rejects_invalid_publish_transition() {
     {
         let mut pending = backlog.pending(&Chain::Solana).write().await;
         let storage_entry = pending.requests.get_mut(&sign_id).unwrap();
-        storage_entry.status =
-            SignStatus::Bidirectional(BidirectionalProgress::Executing(Arc::clone(&tx)));
+        storage_entry.add_tx(Arc::clone(&tx));
+        storage_entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing);
     }
 
     // Now the stale handle tries to advance to Publishing
@@ -1135,7 +1150,7 @@ async fn plain_lookup_cannot_measure_the_execution_wait() {
     backlog.insert_mock_executing(&tx).await;
 
     let entry = backlog
-        .get_by::<Bidirectional<Executing>>(Chain::Solana, &tx.sign_id())
+        .get_executing(Chain::Solana, &tx.sign_id())
         .await
         .expect("entry must still be executing");
     assert_eq!(entry.awaiting_execution(), None);
@@ -1153,10 +1168,8 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
     let observed_at = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(120))
         .expect("clock must support backdating");
-    let entry = backlog
-        .insert_mock_executing(&retained)
-        .await
-        .with_respond_observed_at(Some(observed_at));
+    let mut entry = backlog.insert_mock_executing(&retained).await;
+    entry.state.0 .0.respond_observed_at = Some(observed_at);
     backlog.watch_execution(&entry).await;
     backlog.insert_mock_executing(&restored).await;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
@@ -1170,7 +1183,7 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
         .await
         .respond_observed_at();
 
-    backlog.regress(&checkpoint).await.unwrap();
+    backlog.regress(&checkpoint, mock_root_pk()).await.unwrap();
 
     let entry = backlog
         .unwatch_execution(retained.target_chain, &retained.id)
@@ -1205,7 +1218,10 @@ async fn recovered_executing_entry_has_no_wait_start() {
         .await
         .expect("checkpoint must snapshot");
     let recovered = Backlog::new();
-    recovered.recover_by_checkpoint(&checkpoint).await;
+    recovered
+        .recover_by_checkpoint(&checkpoint, mock_root_pk())
+        .await
+        .unwrap();
 
     let entry = recovered
         .unwatch_execution(tx.target_chain, &tx.id)
@@ -1249,4 +1265,198 @@ fn mock_cadence_covers_the_same_chains_as_production() {
             "{chain:?}"
         );
     }
+}
+
+/// A transaction id two requests share goes to the latest one watched.
+#[tokio::test]
+async fn a_shared_transaction_id_is_watched_for_the_latest_request() {
+    let backlog = Backlog::new();
+    let first = mock_tx(71);
+    let mut second = mock_tx(72);
+    second.id = first.id;
+    backlog.insert_mock_executing(&first).await;
+    backlog.watch_txs([Arc::new(first.clone())]).await;
+    let watchers = backlog.get_execution_watchers(first.target_chain).await;
+    assert_eq!(watchers[&first.id].0, first.sign_id());
+
+    backlog.watch_txs([Arc::new(second.clone())]).await;
+    let watchers = backlog.get_execution_watchers(first.target_chain).await;
+    assert_eq!(watchers[&first.id].0, second.sign_id());
+}
+
+/// A first-leg signature that completes after the request was answered as a nonce sibling is
+/// dropped: recording it would publish a transaction signature as the response.
+#[tokio::test]
+async fn a_late_first_leg_signature_does_not_overwrite_the_response() {
+    let backlog = Backlog::new();
+    let request = mock_bidi_request(SignId::new([1u8; 32]), Chain::Solana);
+    let leg1 = backlog.insert_bidirectional(Arc::clone(&request)).await;
+    let tx = mock_bidirectional_tx(request.id, Chain::Solana);
+    let answered = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: mock_bidi_response(&tx),
+        progress: SignProgress::Generating,
+    });
+    backlog
+        .set_local_status(Chain::Solana, request.id, answered)
+        .await
+        .unwrap();
+
+    let (pk, output) = mock_signature_output(&request.args);
+    let result = leg1.advance(pk, &output, mock_participants(), true).await;
+
+    assert!(matches!(
+        result,
+        Err(BacklogError::InvalidPublishTransition)
+    ));
+    let entry = backlog.get(Chain::Solana, &request.id).await.unwrap();
+    assert!(matches!(
+        entry.status(),
+        SignStatus::Bidirectional(BidirectionalProgress::Final {
+            progress: SignProgress::Generating,
+            ..
+        })
+    ));
+}
+
+/// Without a checkpoint nothing says which records are stale, so a restart keeps them all for
+/// the requests re-indexing may admit again.
+#[tokio::test]
+async fn records_outlive_a_restart_without_a_checkpoint() {
+    let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+    let request = mock_bidi_request(SignId::new([1u8; 32]), Chain::Canton);
+    let (pk, output) = mock_signature_output(&request.args);
+    backlog
+        .insert_bidirectional(Arc::clone(&request))
+        .await
+        .advance(pk, &output, mock_participants(), true)
+        .await
+        .unwrap();
+
+    let restarted = Backlog::persisted(storage);
+    assert!(restarted
+        .recover_local(Chain::Canton, pk)
+        .await
+        .unwrap()
+        .is_none());
+    let (_, to_sign) = restarted.insert(Arc::clone(&request)).await;
+    assert!(!to_sign, "the re-admitted request keeps its signature");
+    assert_eq!(restarted.publishable_requests(Chain::Canton).await.len(), 1);
+}
+
+/// A request re-admitted with a stored answer is handed back as its response leg, so the
+/// node signs the response and not the first leg again.
+#[tokio::test]
+async fn a_readmitted_answer_signs_its_response() {
+    let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
+    let request = mock_bidi_request(SignId::new([1u8; 32]), Chain::Solana);
+    let (pk, _) = mock_signature_output(&request.args);
+    let tx = mock_bidirectional_tx(request.id, Chain::Solana);
+    let answered = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: mock_bidi_response(&tx),
+        progress: SignProgress::Generating,
+    });
+    let record = crate::backlog::LocalRecord {
+        status: answered,
+        at: 0,
+    };
+    storage
+        .put_local(Chain::Solana, request.id, &record)
+        .await
+        .unwrap();
+    let backlog = Backlog::persisted(storage);
+    backlog.recover_local(Chain::Solana, pk).await.unwrap();
+
+    let (handle, to_sign) = backlog.insert(Arc::clone(&request)).await;
+
+    assert!(to_sign);
+    assert!(matches!(
+        handle.request().kind,
+        SignKind::RespondBidirectional(_)
+    ));
+}
+
+/// A recovery whose records cannot be loaded fails and leaves the backlog as it was, rather
+/// than rebuilding it without them and signing again what this node already signed.
+#[tokio::test]
+async fn a_recovery_without_its_records_fails() {
+    let backlog =
+        Backlog::persisted(crate::storage::checkpoint_storage::CheckpointStorage::failing());
+    let request = mock_bidi_request(SignId::new([1u8; 32]), Chain::Solana);
+    backlog.insert_bidirectional(Arc::clone(&request)).await;
+
+    let recovered = backlog
+        .recover_by_checkpoint(&Checkpoint::reset(Chain::Solana, 10), mock_root_pk())
+        .await;
+
+    assert!(recovered.is_err());
+    assert!(backlog.entry(Chain::Solana, &request.id).await.is_some());
+}
+
+/// A status that loses to a concurrent change is neither taken nor stored, so a restart
+/// cannot bring back a status this node refused.
+#[tokio::test]
+async fn a_superseded_status_is_not_stored() {
+    let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage.clone());
+    let request = mock_bidi_request(SignId::new([1u8; 32]), Chain::Solana);
+    backlog.insert_bidirectional(Arc::clone(&request)).await;
+    let tx = mock_bidirectional_tx(request.id, Chain::Solana);
+    let answered = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: mock_bidi_response(&tx),
+        progress: SignProgress::Generating,
+    });
+    let changed_meanwhile = SignStatus::Bidirectional(BidirectionalProgress::Parked);
+
+    let result = backlog
+        .replace_local_status(Chain::Solana, request.id, &changed_meanwhile, answered)
+        .await;
+
+    assert!(matches!(result, Err(BacklogError::Superseded { .. })));
+    assert!(storage.load_local(Chain::Solana).await.unwrap().is_empty());
+    let entry = backlog.entry(Chain::Solana, &request.id).await.unwrap();
+    assert!(entry.status.is_pending_generation());
+}
+
+/// A signature whose record cannot be stored is not published: a restart would sign again
+/// and publish both. The entry goes back to generating for the next round.
+#[tokio::test]
+async fn a_signature_that_cannot_be_recorded_is_not_published() {
+    let backlog =
+        Backlog::persisted(crate::storage::checkpoint_storage::CheckpointStorage::failing());
+    let request = mock_bidi_request(SignId::new([1u8; 32]), Chain::Solana);
+    let entry = backlog.insert_bidirectional(Arc::clone(&request)).await;
+    let (pk, output) = mock_signature_output(&request.args);
+
+    let result = entry.advance(pk, &output, mock_participants(), true).await;
+
+    assert!(matches!(result, Err(BacklogError::Storage { .. })));
+    let entry = backlog.entry(Chain::Solana, &request.id).await.unwrap();
+    assert!(entry.status.is_pending_generation());
+    assert!(backlog.publishable_requests(Chain::Solana).await.is_empty());
+}
+
+/// An outcome whose record cannot be stored is not taken either; the entry keeps waiting.
+#[tokio::test]
+async fn an_outcome_that_cannot_be_recorded_is_not_taken() {
+    let backlog =
+        Backlog::persisted(crate::storage::checkpoint_storage::CheckpointStorage::failing());
+    let request = mock_bidi_request(SignId::new([1u8; 32]), Chain::Solana);
+    backlog.insert_bidirectional(Arc::clone(&request)).await;
+    let tx = mock_bidirectional_tx(request.id, Chain::Solana);
+    let answered = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: mock_bidi_response(&tx),
+        progress: SignProgress::Generating,
+    });
+
+    let result = backlog
+        .set_local_status(Chain::Solana, request.id, answered)
+        .await;
+
+    assert!(matches!(result, Err(BacklogError::Storage { .. })));
+    let entry = backlog.entry(Chain::Solana, &request.id).await.unwrap();
+    assert!(matches!(
+        entry.status,
+        SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Generating))
+    ));
 }

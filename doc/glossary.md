@@ -62,16 +62,11 @@ its [digest](#digest). See [bidirectional-calls.md
 Each node keeps one backlog per [source chain](#source-chain), with one entry
 per [admitted](#admitted-request) [request](#request) that is not finished. An
 entry holds the [request id](#request-id), the request, the contract that made
-it and, for a [bidirectional request](#bidirectional-request), the signatures
-for it [published](#publish) in final source chain blocks. Only final source
-chain events change it; anything else a node keeps about a request stays out of
-it (`Backlog`, `backlog/`). See [checkpoints.md
+it and, for a [bidirectional request](#bidirectional-request), the transaction
+IDs of the signatures for it [published](#publish) in final source chain blocks.
+Only final source chain events change it; anything else a node keeps about a
+request stays out of it (`Backlog`, `backlog/`). See [checkpoints.md
 §1](checkpoints.md#1-background).
-
-*Code today:* `BacklogEntry` holds the request and the node's progress,
-including phases set from what the node read on the [target
-chain](#target-chain), and the whole entry goes into the
-[checkpoint](#checkpoint); there is no `signatures` list.
 
 ## Bidirectional request
 

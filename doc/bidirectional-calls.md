@@ -383,7 +383,7 @@ never meets a rid from another.
 
 state:
     backlog: RequestId -> Entry
-    Entry = { req, contract, signatures: Set<Signature> }
+    Entry = { req, contract, tx_ids: Set<TxId> }
     // backlog is a function of the finalised source chain only,
     // the same on every correct node that processed the same height
 
@@ -399,7 +399,7 @@ on SignRequest { contract, rid, req } finalised on the source chain:
         drop
     if rid in backlog or not processable(req):            // M2
         drop
-    backlog[rid] = { req, contract, signatures: {} }
+    backlog[rid] = { req, contract, tx_ids: {} }
     signature = threshold_sign(req.tx, derived_key(contract, req.key))   // M1
     local[rid].issued.add(signature)       // stored before publishing
     publish_signature(rid, signature)
@@ -434,15 +434,14 @@ on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
     if e and signature verifies over e.req.tx
       under derived_key(e.contract, e.req.key):
-        e.signatures.add(signature)
+        e.tx_ids.add(txid(signature, e.req.tx))
 
 on target chain block at height h finalised on chain target:
     for (rid, e) in backlog for target and no local[rid].outcome:
         if txid ignores the signature on target:
             ours = { txid(e.req.tx) }
         else:
-            ours = { txid(s, e.req.tx)
-                     for s in e.signatures + local[rid].issued }
+            ours = e.tx_ids
         if some id in ours has receipt r in a final block at height h':  // M3
             for (rid', e') in backlog for target, other than rid, with e's
               account and e.req.tx's replay protection, unsigned bytes
@@ -489,11 +488,12 @@ not sign an entry that has a published signature or one it holds, and does
 not attest an entry it holds an attestation for.
 
 The MPC looks for a request's execution by transaction ID, under every
-signature it holds for the request, in any final block, so a node that
-starts looking late still finds it. A node holds the signatures published
-for the request and those it took part in producing. An execution under a
-signature it does not hold is not found (see Section 6 for alternatives),
-except where the transaction ID ignores the signature: there it needs none.
+signature published for the request, in any final block, so a node that
+starts looking late still finds it. A signature a node took part in
+producing is looked for once it is published, which every node reads. An
+execution under a signature that is never published is not found (see
+Section 6 for alternatives), except where the transaction ID ignores the
+signature: there it needs none.
 
 When the transaction of one request is included, every other request
 waiting on the same account and replay protection can never execute, and
@@ -559,8 +559,9 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
   correct nodes eventually produce and publish what a request in their
   backlog needs.
 * Agreement. Correct nodes hold the same backlog at a source height, so
-  they admit the same requests and hold the same published signatures for
-  them, and they compute the same attestation for a rid, as a function of
+  they admit the same requests and hold the same transaction IDs of the
+  published signatures for them, and they compute the same attestation for
+  a rid, as a function of
   final target chain state and the request's schema only. This needs a
   node to start processing a source chain at or before the oldest
   outstanding request, or from a backlog the correct nodes agreed on at
@@ -1107,7 +1108,7 @@ Source chains are Midnight, Solana, Hydration and Canton.
 Checked against `develop` at `1d823c4e`. Still to change:
 
 * Unviable from another request's response.
-* Finding nonce siblings, and executions under every published signature.
+* Finding nonce siblings that have no published signature.
 * Refusing non-canonical request fields, and the reserved paths on every
   source.
 * One key per key version, before a second version.

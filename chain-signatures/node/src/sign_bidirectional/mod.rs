@@ -18,8 +18,8 @@ pub use mpc_primitives::{
 pub use eth_tx::{derive_user_address, public_key_to_address};
 pub use progress::{BidirectionalProgress, SignProgress, SignStatus};
 pub use signing::sign_and_hash_transaction;
-use signing::validate_unsigned_transaction;
 pub(crate) use signing::{owned_by_requester, pending_destination_id, transaction_chain_id};
+use signing::{transaction_nonce, validate_unsigned_transaction};
 
 /// The requester's chain-local identity string: Midnight and Canton senders
 /// are 32-byte addresses whose canonical form is the lowercase hex of those
@@ -61,6 +61,21 @@ fn derive_epsilon(
         )?),
         _ => anyhow::bail!("unsupported chain for epsilon derivation: {chain}"),
     }
+}
+
+/// The epsilon of `sender`'s key at `path` on its chain.
+pub(crate) fn sender_epsilon(
+    chain: Chain,
+    key_version: u32,
+    sender: [u8; 32],
+    path: &str,
+) -> anyhow::Result<Scalar> {
+    derive_epsilon(
+        chain,
+        key_version,
+        &source_chain_sender_string(sender, chain)?,
+        path,
+    )
 }
 
 /// The only `algo`, `dest` and `params` a request may carry (Section 7.1 of
@@ -125,6 +140,14 @@ pub trait SignBidirectionalEventExt {
         &self,
         request_id: [u8; 32],
         mpc_sig: Signature,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx>;
+
+    /// The [`BidirectionalTx`] whose id a signature of this event gave.
+    fn bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        id: BidirectionalTxId,
         root_pk: mpc_primitives::PublicKey,
     ) -> anyhow::Result<BidirectionalTx>;
 }
@@ -215,14 +238,26 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
         let target_chain = self.target_chain().with_context(|| {
             format!("failed to determine target chain for request: {request_id:?}")
         })?;
-        let epsilon = self.epsilon()?;
-        let from_address = derive_user_address(root_pk, epsilon);
-        // EVM-shaped; Tron consumers wrap it with `TronAddress::from_evm`.
-        let (signed_tx_hash, nonce) =
+        let signed_tx_hash =
             sign_and_hash_transaction(target_chain, &self.serialized_transaction, mpc_sig)?;
+        self.bidirectional_tx(request_id, BidirectionalTxId(signed_tx_hash), root_pk)
+    }
+
+    fn bidirectional_tx(
+        &self,
+        request_id: [u8; 32],
+        id: BidirectionalTxId,
+        root_pk: mpc_primitives::PublicKey,
+    ) -> anyhow::Result<BidirectionalTx> {
+        let target_chain = self.target_chain().with_context(|| {
+            format!("failed to determine target chain for request: {request_id:?}")
+        })?;
+        // EVM-shaped; Tron consumers wrap it with `TronAddress::from_evm`.
+        let from_address = **derive_user_address(root_pk, self.epsilon()?);
+        let nonce = transaction_nonce(target_chain, &self.serialized_transaction)?;
 
         Ok(BidirectionalTx {
-            id: BidirectionalTxId(signed_tx_hash),
+            id,
             sender: self.sender,
             serialized_transaction: self.serialized_transaction.clone(),
             source_chain: self.chain,
@@ -237,30 +272,48 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
             output_deserialization_schema: self.output_deserialization_schema.clone(),
             respond_serialization_schema: self.respond_serialization_schema.clone(),
             request_id,
-            from_address: **from_address,
+            from_address,
             nonce,
         })
     }
 }
 
-/// Extension trait for `BidirectionalTx` to provide additional helper methods.
-pub trait BidirectionalTxExt {
-    fn sender_string(&self) -> anyhow::Result<String>;
-    fn epsilon(&self, path: &str) -> anyhow::Result<Scalar>;
+/// The account and replay protection a transaction uses on its target chain.
+pub(crate) struct NonceSlot {
+    caip2_id: String,
+    account: Scalar,
+    nonce: u64,
+    unsigned: Vec<u8>,
 }
 
-impl BidirectionalTxExt for BidirectionalTx {
-    fn sender_string(&self) -> anyhow::Result<String> {
-        source_chain_sender_string(self.sender, self.source_chain)
+impl NonceSlot {
+    /// The slot `request` uses; `None` where the target has no nonce: a Tron transaction ID
+    /// executes once whatever else runs, and expiry answers the rest (M6).
+    pub(crate) fn of_request(request: &SignBidirectionalEvent) -> anyhow::Result<Option<Self>> {
+        let target = request
+            .target_chain()
+            .map_err(|err| anyhow::anyhow!("bad target chain: {err:?}"))?;
+        if target != Chain::Ethereum {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            caip2_id: request.caip2_id.clone(),
+            account: request.epsilon()?,
+            nonce: transaction_nonce(target, &request.serialized_transaction)?,
+            unsigned: request.serialized_transaction.clone(),
+        }))
     }
 
-    fn epsilon(&self, path: &str) -> anyhow::Result<Scalar> {
-        derive_epsilon(
-            self.source_chain,
-            self.key_version,
-            &self.sender_string()?,
-            path,
-        )
+    /// Whether `request` waits on this slot with other bytes (M4); equal bytes are the same
+    /// transaction (M3), and have the same request id.
+    pub(crate) fn is_sibling(&self, request: &SignBidirectionalEvent) -> bool {
+        if request.caip2_id != self.caip2_id || request.serialized_transaction == self.unsigned {
+            return false;
+        }
+        match Self::of_request(request) {
+            Ok(Some(own)) => own.nonce == self.nonce && own.account == self.account,
+            _ => false,
+        }
     }
 }
 
@@ -422,10 +475,9 @@ mod tests {
             .unwrap()
         };
         let low = k256::Scalar::from(5u64);
-        let (id_low, nonce) = id_of(low, 1);
-        let (id_high, _) = id_of(-low, 0);
+        let id_low = id_of(low, 1);
+        let id_high = id_of(-low, 0);
         assert_eq!(id_low, id_high);
-        assert_eq!(nonce, 0);
         assert_eq!(hex::encode(id_low), TXID_HEX);
     }
 

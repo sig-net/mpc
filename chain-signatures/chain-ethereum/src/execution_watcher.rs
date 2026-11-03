@@ -471,9 +471,8 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         .await
     }
 
-    /// Resolves watched txs whose hash appears in this block. Returns emitted
-    /// events, the (sender, nonce) slots consumed by observed txs (input to
-    /// telling unknown takers apart), and watchers whose RPC attempt failed.
+    /// Resolves watched txs whose hash appears in this block: the events, the (sender, nonce)
+    /// slots their txs consumed, and the watchers whose RPC attempt failed.
     async fn resolve_mined_watchers(
         &self,
         mined: Vec<WatcherEntry>,
@@ -515,9 +514,8 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         (events, consumed_slots, failed)
     }
 
-    /// The sign ids of `displaced` whose nonce no watched tx with other unsigned bytes took.
-    /// A watched taker with equal bytes is another request, but it also executed this one
-    /// (M3); answering that needs matching by bytes, not tx id.
+    /// The sign ids of `displaced` whose nonce no watched tx with other unsigned bytes took; one
+    /// with equal bytes is another signature of the same request, whose execution this is.
     fn unknown_takers(
         displaced: Vec<(SignId, Arc<BidirectionalTx>)>,
         consumed_slots: &HashMap<(Address, u64), Arc<BidirectionalTx>>,
