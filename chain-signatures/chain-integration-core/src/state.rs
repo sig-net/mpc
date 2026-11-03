@@ -20,6 +20,9 @@ pub trait StateManager: Send + Sync + Clone + 'static {
 
     /// Set the processed block height for a specific chain.
     async fn set_processed_block(&self, chain: Chain, height: u64);
+
+    /// Heights of final blocks on `chain` whose hash the node needs to attest at.
+    async fn get_block_hash_lookups(&self, chain: Chain) -> Vec<u64>;
 }
 
 /// Type alias to make clippy happy
@@ -34,6 +37,7 @@ type Watchers =
 pub struct MockStateManager {
     processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
     watchers: Watchers,
+    block_hash_lookups: Arc<RwLock<Vec<u64>>>,
 }
 
 #[async_trait::async_trait]
@@ -57,6 +61,10 @@ impl StateManager for MockStateManager {
     async fn set_processed_block(&self, chain: Chain, height: u64) {
         self.processed_blocks.write().await.insert(chain, height);
     }
+
+    async fn get_block_hash_lookups(&self, _chain: Chain) -> Vec<u64> {
+        self.block_hash_lookups.read().await.clone()
+    }
 }
 
 impl MockStateManager {
@@ -72,5 +80,10 @@ impl MockStateManager {
             .entry(chain)
             .or_default()
             .insert(tx.id, (sign_id, tx));
+    }
+
+    /// Set the heights whose block hash the node asks for.
+    pub async fn set_block_hash_lookups(&self, heights: Vec<u64>) {
+        *self.block_hash_lookups.write().await = heights;
     }
 }

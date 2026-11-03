@@ -17,7 +17,7 @@ use mpc_chain_integration_core::{
 };
 use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::mock::{mock_bidi_request, mock_unsigned_eth_tx, BacklogTestExt};
-use mpc_node::backlog::{AnyProgress, Backlog, Bidirectional, Initial};
+use mpc_node::backlog::Backlog;
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::ParticipantInfo;
@@ -774,27 +774,14 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let tx = test_eth_bidirectional_tx(tx_id, sign_id, ctx.wallet, 0);
     // The second leg is signed once its source chain, which has no stream here, is caught up.
     backlog.mark_caught_up(tx.source_chain);
-    // A signed request like the taker's, with other bytes at the same nonce, which the
+    // An unsigned request like the taker's, with other bytes at the same nonce, which the
     // executed transaction leaves Failed (M4).
     let sibling_sign_id = SignId::new([0x89; 32]);
-    let sibling_tx_id = mpc_primitives::BidirectionalTxId([0x8a; 32]);
     let mut sibling = (*mock_bidi_request(sibling_sign_id, tx.source_chain)).clone();
     if let SignKind::SignBidirectional(event) = &mut sibling.kind {
         event.serialized_transaction = mock_unsigned_eth_tx(0, 1);
     }
     backlog.insert_bidirectional(Arc::new(sibling)).await;
-    backlog
-        .get_by::<Bidirectional<Initial<AnyProgress>>>(tx.source_chain, &sibling_sign_id)
-        .await
-        .expect("inserted")
-        .advance(Arc::new(test_eth_bidirectional_tx(
-            sibling_tx_id,
-            sibling_sign_id,
-            ctx.wallet,
-            0,
-        )))
-        .await
-        .expect("advance to executing");
     backlog.insert_mock_executing(&tx).await;
 
     let mut responses = std::collections::HashMap::new();
@@ -821,7 +808,11 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         "late watcher backfill should preserve the successful execution path"
     );
     let res = &responses[&sibling_sign_id];
-    assert_eq!(res.tx_id, sibling_tx_id);
+    assert_eq!(
+        res.tx_id,
+        mpc_primitives::BidirectionalTxId(sibling_sign_id.request_id),
+        "no signature names a transaction, so the request id does"
+    );
     assert!(
         res.output.starts_with(&[0xde, 0xad, 0xbe, 0xef]),
         "the sibling is answered Failed"

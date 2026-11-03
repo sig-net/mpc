@@ -31,6 +31,7 @@ pub(crate) fn dummy_checkpoint_entry(id: u8, chain: Chain) -> CheckpointEntry {
     CheckpointEntry {
         request: dummy_indexed_sign_request(id, chain),
         tx_ids: Vec::new(),
+        unviable_at: None,
         legacy_tag: None,
     }
 }

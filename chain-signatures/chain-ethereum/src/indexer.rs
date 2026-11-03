@@ -1,5 +1,5 @@
 use crate::abi::ChainSignatures;
-use crate::client::{block_may_contain_logs, CatchupItem, EthereumClient};
+use crate::client::{block_may_contain_logs, CatchupItem, EthereumClient, MaybeBlock};
 use crate::event_parsing::{emit_respond_events, parse_filtered_logs};
 use crate::execution_watcher::{ExecutionWatcher, WatcherGateState};
 use crate::finalized_head::{FinalizedHeadTracker, FinalizedHeadWatcher};
@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
 use mpc_chain_integration_core::utils::retry::SharedBackoff;
 use mpc_chain_integration_core::{ChainIndexer, ChainTelemetry, StateManager};
-use mpc_primitives::{Chain, ChainEvent, IndexedSignRequest};
+use mpc_primitives::{AttestedBlock, Chain, ChainEvent, IndexedSignRequest};
 use mpc_utils::task::{retry_until_ok, retry_until_some};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -195,7 +195,8 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             &self.watcher_gate,
             &self.telemetry,
         );
-        let exec_events = watcher.collect(block).await?;
+        let mut exec_events = watcher.collect(block).await?;
+        exec_events.extend(self.block_hash_events(block).await);
 
         // Always produce a payload so `ChainEvent::Block` is emitted even when
         // the block has no relevant contract logs.
@@ -206,6 +207,39 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             respond_logs,
             exec_events,
         ))
+    }
+
+    /// The hashes of final blocks the node asked for, up to this one, in one batch; one that
+    /// cannot be fetched is asked for on the next block, since the node asks until it attests.
+    async fn block_hash_events(&self, block: &Block) -> Vec<ChainEvent> {
+        let attested = |found: &Block| {
+            ChainEvent::BlockHash(AttestedBlock {
+                height: found.header.number,
+                hash: found.header.hash.0,
+            })
+        };
+        let lookups = self
+            .state_manager
+            .get_block_hash_lookups(Chain::Ethereum)
+            .await;
+        let earlier: Vec<_> = lookups
+            .iter()
+            .filter(|height| **height < block.header.number)
+            .map(|height| BlockId::number(*height))
+            .collect();
+        let mut events = Vec::new();
+        for fetched in self.client.get_blocks(&earlier).await {
+            match fetched {
+                MaybeBlock::Block(found) => events.push(attested(&found)),
+                MaybeBlock::Missing(id) => {
+                    tracing::warn!(?id, "the RPC does not have a block to attest at");
+                }
+            }
+        }
+        if lookups.contains(&block.header.number) {
+            events.push(attested(block));
+        }
+        events
     }
 
     /// Emit the parsed block's events in order.
@@ -504,12 +538,13 @@ mod tests {
     use crate::client::CatchupItem;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
+    use alloy::primitives::B256;
     use alloy::rpc::types::BlockId;
     use futures_util::StreamExt;
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
     use mpc_chain_integration_core::{ChainIndexer, StateManager};
-    use mpc_primitives::{Chain, ChainEvent};
+    use mpc_primitives::{AttestedBlock, Chain, ChainEvent};
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -612,6 +647,59 @@ mod tests {
             Some(43)
         );
         latest_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn block_hashes_are_reported_up_to_the_current_block() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|request| {
+                let calls: Vec<serde_json::Value> =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let responses: Vec<_> = calls
+                    .iter()
+                    .map(|call| {
+                        let id = call["id"].as_u64().unwrap();
+                        let param = call["params"][0].as_str().unwrap();
+                        match u64::from_str_radix(param.trim_start_matches("0x"), 16).unwrap() {
+                            6 => test_utils::missing_block_response(id),
+                            number => test_utils::block_response(id, number),
+                        }
+                    })
+                    .collect();
+                serde_json::to_vec(&responses).unwrap()
+            })
+            .create_async()
+            .await;
+
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        indexer
+            .state_manager
+            .set_block_hash_lookups(vec![5, 6, 12, 13])
+            .await;
+        let current =
+            serde_json::from_value(test_utils::block_response(1, 12)["result"].clone()).unwrap();
+
+        let reported: Vec<_> = indexer
+            .block_hash_events(&current)
+            .await
+            .into_iter()
+            .map(|event| match event {
+                ChainEvent::BlockHash(block) => block,
+                other => panic!("unexpected event: {other:?}"),
+            })
+            .collect();
+
+        let block = |height: u64| AttestedBlock {
+            height,
+            hash: B256::left_padding_from(&height.to_be_bytes()).0,
+        };
+        assert_eq!(reported, [block(5), block(12)]);
     }
 
     #[tokio::test]

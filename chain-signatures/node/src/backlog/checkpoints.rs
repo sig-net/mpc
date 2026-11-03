@@ -33,6 +33,8 @@ pub struct CheckpointEntry {
     pub request: Arc<IndexedSignRequest>,
     /// The transactions the request's published signatures give, in id order.
     pub tx_ids: Vec<BidirectionalTxId>,
+    /// The height another request's Response attests, which left this one unexecutable (M4).
+    pub unviable_at: Option<u64>,
     /// In a body from an earlier version, what that version hashed for this entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_tag: Option<u8>,
@@ -52,6 +54,7 @@ impl CheckpointEntry {
             request.chain,
             &request.kind,
             &self.tx_ids,
+            self.unviable_at,
         );
         let mut bytes = Vec::new();
         ciborium::into_writer(&fields, &mut bytes).expect("encoding into memory cannot fail");
@@ -342,6 +345,7 @@ mod tests {
         let entry = CheckpointEntry {
             request: Arc::clone(&request),
             tx_ids: vec![BidirectionalTxId([4; 32])],
+            unviable_at: None,
             legacy_tag: None,
         };
         let settled = Checkpoint {

@@ -48,6 +48,9 @@ pub enum ChainEvent {
         block: AttestedBlock,
         result: ExecutionOutcome,
     },
+
+    /// The hash of a final block whose height the node asked for, to attest at it.
+    BlockHash(AttestedBlock),
 }
 
 impl std::fmt::Debug for ChainEvent {
@@ -74,6 +77,9 @@ impl std::fmt::Debug for ChainEvent {
                 .finish(),
             ChainEvent::CatchupCompleted => write!(f, "CatchupCompleted"),
             ChainEvent::Block(b) => write!(f, "Block({b})"),
+            ChainEvent::BlockHash(block) => {
+                write!(f, "BlockHash({block:?})")
+            }
             ChainEvent::ExecutionConfirmed {
                 tx_id,
                 sign_id,

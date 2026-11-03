@@ -413,6 +413,12 @@ impl Backlog {
         }
     }
 
+    pub(crate) async fn unwatch_txs(&self, txs: Vec<Arc<BidirectionalTx>>) {
+        for tx in txs {
+            self.watchers(&tx.target_chain).write().await.remove(&tx.id);
+        }
+    }
+
     /// Stop watching the entry whose transaction `tx_id` was found on `chain`, under every one
     /// of its transactions, and return it as executing under that one.
     pub async fn unwatch_execution(
@@ -457,12 +463,13 @@ impl Backlog {
         }
     }
 
-    /// Take the watched entries that `taker`, executed, leaves unexecutable (M4): same account
-    /// and nonce, other bytes, no outcome yet.
+    /// Take the entries that `taker`, executed, leaves unexecutable (M4): same account and
+    /// nonce, other bytes, no outcome yet, signed or not.
     pub async fn take_nonce_siblings(
         &self,
         chain: Chain,
         taker: &SignBidirectionalEvent,
+        root_pk: PublicKey,
     ) -> Vec<SignEntry<Bidirectional<Executing>>> {
         let slot = match NonceSlot::of_request(taker) {
             Ok(Some(slot)) => slot,
@@ -474,15 +481,41 @@ impl Backlog {
         };
         let siblings =
             |entry: &BacklogEntry| entry.awaits_execution() && entry.is_nonce_sibling(&slot);
-        self.take_where([chain], siblings).await
+        self.take_where([chain], siblings, root_pk).await
+    }
+
+    /// Record that a Response at `height` used `slot` up, on every request it leaves
+    /// unexecutable (#1430). A source-chain fact, so set whatever this node's progress.
+    pub(crate) async fn mark_unviable(&self, chain: Chain, slot: &NonceSlot, height: u64) {
+        let mut pending = self.pending(&chain).write().await;
+        for entry in pending.requests.values_mut() {
+            if entry.unviable_at.is_none() && entry.is_nonce_sibling(slot) {
+                tracing::info!(sign_id = ?entry.sign_id(), height, "nonce used up by a Response");
+                entry.unviable_at = Some(height);
+            }
+        }
+    }
+
+    /// Take the entries a Response left unexecutable at `height` on `target` that this node
+    /// has not answered yet.
+    pub(crate) async fn take_unviable(
+        &self,
+        target: Chain,
+        height: u64,
+        root_pk: PublicKey,
+    ) -> Vec<SignEntry<Bidirectional<Executing>>> {
+        let unviable = |entry: &BacklogEntry| entry.awaits_unviable_answer(target) == Some(height);
+        self.take_where(Chain::iter(), unviable, root_pk).await
     }
 
     /// Take the entries on `chains` that `pick` selects, to answer them: unwatched, each
-    /// executing under its first transaction.
+    /// executing under its first transaction or, unsigned, under its request's id. One no
+    /// transaction can be built for cannot be answered, and is parked instead.
     async fn take_where(
         &self,
         chains: impl IntoIterator<Item = Chain>,
         pick: impl Fn(&BacklogEntry) -> bool,
+        root_pk: PublicKey,
     ) -> Vec<SignEntry<Bidirectional<Executing>>> {
         let mut taken = Vec::new();
         for chain in chains {
@@ -496,16 +529,17 @@ impl Backlog {
                     .collect()
             };
             for entry in picked {
-                // Unsigned siblings stay Initial: no transaction of theirs is known yet.
-                let Some(tx) = entry.watched_txs().into_iter().next() else {
+                let unsigned = BidirectionalTxId(entry.request.id.request_id);
+                let tx = entry.watched_txs().into_iter().next();
+                let Some(tx) = tx.or_else(|| entry.rebuild_txs(&[unsigned], root_pk).pop()) else {
+                    // Logged by `rebuild_txs`; parked so that nothing asks for it again.
+                    let parked = SignStatus::Bidirectional(BidirectionalProgress::Parked);
+                    if let Err(err) = self.set_local_status(chain, entry.sign_id(), parked).await {
+                        tracing::error!(sign_id = ?entry.sign_id(), ?err, "failed to park a request");
+                    }
                     continue;
                 };
-                for watched in entry.watched_txs() {
-                    self.watchers(&watched.target_chain)
-                        .write()
-                        .await
-                        .remove(&watched.id);
-                }
+                self.unwatch_txs(entry.watched_txs()).await;
                 taken.push(SignEntry {
                     chain,
                     request: entry.request,
@@ -767,6 +801,22 @@ impl StateManager for Backlog {
     ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
         self.watchers(&chain).read().await.all()
     }
+
+    async fn get_block_hash_lookups(&self, chain: Chain) -> Vec<u64> {
+        let mut heights = Vec::new();
+        for source in Chain::iter() {
+            let pending = self.pending(&source).read().await;
+            heights.extend(
+                pending
+                    .requests
+                    .values()
+                    .filter_map(|entry| entry.awaits_unviable_answer(chain)),
+            );
+        }
+        heights.sort_unstable();
+        heights.dedup();
+        heights
+    }
 }
 
 /// Errors that can occur when working with Backlog
@@ -796,6 +846,8 @@ pub struct BacklogEntry {
     pub status: SignStatus,
     /// The transactions of the request's published signatures, in id order.
     pub txs: Vec<Arc<BidirectionalTx>>,
+    /// The height another request's Response attests, which left this one unexecutable (M4).
+    pub unviable_at: Option<u64>,
 }
 
 impl BacklogEntry {
@@ -820,12 +872,14 @@ impl BacklogEntry {
             request,
             status,
             txs: Vec::new(),
+            unviable_at: None,
         }
     }
 
     /// Rebuild an entry from a checkpoint and this node's record of it.
     fn recover(entry: &CheckpointEntry, record: Option<LocalRecord>, root_pk: PublicKey) -> Self {
         let mut recovered = Self::new(Arc::clone(&entry.request));
+        recovered.unviable_at = entry.unviable_at;
         recovered.txs = recovered.rebuild_txs(&entry.tx_ids, root_pk);
         if let Some(record) = record {
             recovered.status = record.status;
@@ -905,6 +959,16 @@ impl BacklogEntry {
         }
     }
 
+    /// The height a Response left this request unexecutable at on `target`, while this node
+    /// has not answered it.
+    fn awaits_unviable_answer(&self, target: Chain) -> Option<u64> {
+        let height = self.unviable_at.filter(|_| self.awaits_execution())?;
+        let SignKind::SignBidirectional(event) = &self.request.kind else {
+            return None;
+        };
+        (event.target_chain().ok() == Some(target)).then_some(height)
+    }
+
     /// Add a published signature's transaction; false if it was known.
     pub(crate) fn add_tx(&mut self, tx: Arc<BidirectionalTx>) -> bool {
         match self.txs.binary_search_by_key(&tx.id.0, |known| known.id.0) {
@@ -920,6 +984,7 @@ impl BacklogEntry {
         CheckpointEntry {
             request: Arc::clone(&self.request),
             tx_ids: self.txs.iter().map(|tx| tx.id).collect(),
+            unviable_at: self.unviable_at,
             legacy_tag: None,
         }
     }

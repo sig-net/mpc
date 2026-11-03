@@ -3,14 +3,16 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::backlog::request::verify_request_signature;
-use crate::backlog::{AnyProgress, Backlog, Bidirectional, Executing, Initial, Sign, SignEntry};
+use crate::backlog::{
+    AnyProgress, Backlog, BacklogError, Bidirectional, Executing, Initial, Sign, SignEntry,
+};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
     claims_attestation_key, published_failure, published_signing_args,
 };
 use crate::sign_bidirectional::{
-    owned_by_requester, transaction_chain_id, BidirectionalProgress, BidirectionalTxId,
+    owned_by_requester, transaction_chain_id, BidirectionalProgress, BidirectionalTxId, NonceSlot,
     SignBidirectionalEventExt, SignStatus,
 };
 use crate::stream::StreamContext;
@@ -18,8 +20,9 @@ use crate::types::SignCommand;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    AttestedBlock, Chain, ExecutionOutcome, IndexedSignRequest, RequestKind,
-    RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
+    AttestationOutcomeKind, AttestedBlock, Chain, ExecutionOutcome, IndexedSignRequest,
+    RequestKind, RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind,
+    SignatureRespondedEvent,
 };
 use mpc_utils::time::unix_elapsed_checked;
 
@@ -269,6 +272,24 @@ pub(crate) async fn process_respond_event(
         return Ok(());
     };
     verify_request_signature(&entry.request, root_pk, &respond_event.signature)?;
+    // A first signature, on an entry answered as a sibling: a node that has not answered it
+    // quarantines it here (see `advance_bidirectional_to_execution`), so this one must too.
+    if entry.txs.is_empty() {
+        if let Err(err) = event.validate() {
+            tracing::error!(
+                ?sign_id,
+                ?source_chain,
+                ?err,
+                "quarantining bidirectional request that can never advance"
+            );
+            ctx.backlog.remove(source_chain, &sign_id).await;
+            ctx.sign_tx
+                .send(SignCommand::Completion(sign_id))
+                .await
+                .context("sign command channel closed")?;
+            return Ok(());
+        }
+    }
     let tx = event.to_bidirectional_tx(sign_id.request_id, respond_event.signature, root_pk)?;
     ctx.backlog.add_published_tx(Arc::new(tx)).await;
     Ok(())
@@ -351,6 +372,24 @@ pub(crate) async fn process_respond_bidirectional_event(
         || format!("respond event carried invalid signature for sign id {sign_id:?}"),
     )?;
 
+    // An executed or failed transaction used its nonce up for every other request on it
+    // (#1430); the event carries the height only on Midnight so far.
+    if let Some(published) = &event.attestation {
+        let used_up = matches!(
+            published.outcome_kind,
+            AttestationOutcomeKind::Executed | AttestationOutcomeKind::Failed
+        );
+        match NonceSlot::of_request(request) {
+            Ok(Some(slot)) if used_up => {
+                ctx.backlog
+                    .mark_unviable(source_chain, &slot, published.block_height)
+                    .await;
+            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!(?sign_id, ?err, "cannot derive the nonce a Response used"),
+        }
+    }
+
     if let SignStatus::Bidirectional(BidirectionalProgress::Final {
         respond_request, ..
     }) = &entry.status
@@ -418,6 +457,7 @@ pub async fn process_execution_confirmed(
     result: ExecutionOutcome,
     ctx: &StreamContext,
     target_chain: Chain,
+    root_pk: mpc_primitives::PublicKey,
 ) -> anyhow::Result<()> {
     tracing::debug!(
         ?tx_id,
@@ -448,10 +488,13 @@ pub async fn process_execution_confirmed(
     // An included transaction takes its nonce whatever its outcome.
     let siblings = match &entry.request().kind {
         SignKind::SignBidirectional(taker) => {
-            ctx.backlog.take_nonce_siblings(source_chain, taker).await
+            ctx.backlog
+                .take_nonce_siblings(source_chain, taker, root_pk)
+                .await
         }
         _ => Vec::new(),
     };
+    let mut siblings_answered = Ok(());
     for sibling in siblings {
         let sibling_id = sibling.execution_tx().id;
         tracing::info!(
@@ -461,18 +504,63 @@ pub async fn process_execution_confirmed(
             "nonce taken by another request's transaction"
         );
         let outcome = unexecutable_outcome(sibling.chain);
-        if let Err(err) = answer_execution(sibling, sibling_id, block, outcome, ctx).await {
-            tracing::error!(?sibling_id, ?err, "failed to answer a nonce sibling");
+        match answer_execution(sibling, sibling_id, block, outcome, ctx).await {
+            Ok(()) => {}
+            Err(err) if left_the_backlog(&err) => {
+                tracing::info!(?sibling_id, "nonce sibling answered by its own Response");
+            }
+            Err(err) => {
+                tracing::error!(?sibling_id, ?err, "failed to answer a nonce sibling");
+                siblings_answered = Err(err);
+            }
         }
     }
 
+    // The taker goes last: once it has an outcome nothing looks for its execution again. Left
+    // watched, it is reported again by the watcher's next sweep, and the sibling retried.
     let tx = Arc::clone(entry.execution_tx());
-    let answered = answer_execution(entry, tx_id, block, result, ctx).await;
+    let answered = match siblings_answered {
+        Ok(()) => answer_execution(entry, tx_id, block, result, ctx).await,
+        failed => failed,
+    };
     if answered.is_err() {
         // Unwatched since the confirmation, and unanswered: watch for the next one.
         ctx.backlog.watch_txs([tx]).await;
     }
     answered
+}
+
+/// Answer the requests a Response left unexecutable at `height` on `target_chain`, now that
+/// the block's hash, which their signing entropy derives from, is known (#1430).
+pub(crate) async fn process_block_hash(
+    target_chain: Chain,
+    block: AttestedBlock,
+    ctx: &StreamContext,
+    root_pk: mpc_primitives::PublicKey,
+) {
+    for entry in ctx
+        .backlog
+        .take_unviable(target_chain, block.height, root_pk)
+        .await
+    {
+        let tx_id = entry.execution_tx().id;
+        let outcome = unexecutable_outcome(entry.chain);
+        if let Err(err) = answer_execution(entry, tx_id, block, outcome, ctx).await {
+            tracing::error!(
+                ?tx_id,
+                ?err,
+                "failed to answer a request a Response left unexecutable"
+            );
+        }
+    }
+}
+
+/// Whether an answer failed because the request is finished, so that no retry can answer it.
+fn left_the_backlog(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<BacklogError>(),
+        Some(BacklogError::NotFound { .. })
+    )
 }
 
 /// What a request that can no longer execute is answered with: Unviable where the source

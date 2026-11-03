@@ -7,9 +7,9 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::stream::ops::{
-    process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
-    process_respond_event, process_sign_request, publish_failover_due,
-    requeue_pending_sign_requests, resume_pending_publish_requests,
+    process_block_event, process_block_hash, process_execution_confirmed,
+    process_respond_bidirectional_event, process_respond_event, process_sign_request,
+    publish_failover_due, requeue_pending_sign_requests, resume_pending_publish_requests,
 };
 use crate::types::{CheckpointWatcher, SignCommand};
 
@@ -153,13 +153,16 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 .await
                 .context("failed to process block event")?;
         }
+        ChainEvent::BlockHash(block) => {
+            process_block_hash(chain, block, ctx, root_pk).await;
+        }
         ChainEvent::ExecutionConfirmed {
             tx_id,
             block,
             result,
             ..
         } => {
-            process_execution_confirmed(tx_id, block, result, ctx, chain)
+            process_execution_confirmed(tx_id, block, result, ctx, chain, root_pk)
                 .await
                 .context("failed to process execution confirmation")?;
         }

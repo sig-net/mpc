@@ -12,6 +12,8 @@ pub struct MigratableCheckpointEntry {
     #[serde(default)]
     tx_ids: Vec<BidirectionalTxId>,
     #[serde(default)]
+    unviable_at: Option<u64>,
+    #[serde(default)]
     status: Option<LegacySignStatus>,
     #[serde(default)]
     legacy_tag: Option<u8>,
@@ -53,6 +55,7 @@ impl From<MigratableCheckpointEntry> for CheckpointEntry {
         Self {
             request: entry.request,
             tx_ids,
+            unviable_at: entry.unviable_at,
             legacy_tag,
         }
     }
@@ -218,6 +221,7 @@ mod tests {
         let entry = CheckpointEntry {
             request: request(SignKind::Sign),
             tx_ids: vec![BidirectionalTxId([4; 32])],
+            unviable_at: Some(9),
             legacy_tag: None,
         };
         assert_eq!(decode(&entry), entry);

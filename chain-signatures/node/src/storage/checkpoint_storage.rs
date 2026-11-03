@@ -18,13 +18,20 @@ pub enum CheckpointStorage {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
         local: Arc<RwLock<HashMap<Chain, HashMap<SignId, LocalRecord>>>>,
-        /// Number of upcoming `load_pending` calls to fail, for tests of transient errors.
         #[cfg(test)]
-        load_pending_failures: Arc<std::sync::atomic::AtomicUsize>,
+        injected_failures: Arc<InjectedFailures>,
     },
     /// A storage configured to fail operations, used to exercise error paths in tests.
     #[cfg(test)]
     Failing,
+}
+
+/// Numbers of upcoming calls to fail, for tests of transient errors.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct InjectedFailures {
+    load_pending: std::sync::atomic::AtomicUsize,
+    put_local: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for CheckpointStorage {
@@ -40,7 +47,7 @@ impl CheckpointStorage {
             pending: Arc::new(RwLock::new(HashMap::new())),
             local: Arc::default(),
             #[cfg(test)]
-            load_pending_failures: Arc::default(),
+            injected_failures: Arc::default(),
         }
     }
 
@@ -53,24 +60,38 @@ impl CheckpointStorage {
     #[cfg(test)]
     pub fn fail_next_load_pending(&self, times: usize) {
         if let Self::InMemory {
-            load_pending_failures,
-            ..
+            injected_failures, ..
         } = self
         {
-            load_pending_failures.store(times, std::sync::atomic::Ordering::SeqCst);
+            injected_failures
+                .load_pending
+                .store(times, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Makes the next `times` calls to `put_local` fail; in-memory storage only.
+    #[cfg(test)]
+    pub fn fail_next_put_local(&self, times: usize) {
+        if let Self::InMemory {
+            injected_failures, ..
+        } = self
+        {
+            injected_failures
+                .put_local
+                .store(times, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
     #[cfg(test)]
     fn take_injected_load_pending_failure(&self) -> bool {
         let Self::InMemory {
-            load_pending_failures,
-            ..
+            injected_failures, ..
         } = self
         else {
             return false;
         };
-        load_pending_failures
+        injected_failures
+            .load_pending
             .fetch_update(
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
@@ -124,7 +145,24 @@ impl CheckpointStorage {
                     .await
                     .context("failed to store local record")?;
             }
-            CheckpointStorage::InMemory { local, .. } => {
+            CheckpointStorage::InMemory {
+                local,
+                #[cfg(test)]
+                injected_failures,
+                ..
+            } => {
+                #[cfg(test)]
+                if injected_failures
+                    .put_local
+                    .fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |left| left.checked_sub(1),
+                    )
+                    .is_ok()
+                {
+                    anyhow::bail!("injected put_local failure");
+                }
                 local
                     .write()
                     .await
@@ -769,6 +807,7 @@ mod tests {
                     Chain::Solana,
                 ),
                 tx_ids: vec![],
+                unviable_at: None,
                 legacy_tag: None,
             });
 

@@ -304,7 +304,7 @@ async fn test_checkpoint_creation() {
     // Guard the checkpoint digest wire format; update only for intentional changes.
     assert_eq!(
         checkpoint.digest(),
-        digest_hex("562a733c296c0cb20f568b1e370c1f0311eb371964d450ab67dc3b2fb343fdbe")
+        digest_hex("05a0fe7b2a3546a652a21f2f0003fe49b6bf6c8ece39f27dd073c0ec5537144b")
     );
 }
 
@@ -364,7 +364,7 @@ fn test_checkpoint_digest_invariants() {
     assert_ne!(cp_diff1.digest(), cp_diff2.digest());
     assert_eq!(
         cp_diff1.digest(),
-        digest_hex("7a70129d584242b811b117f5072b4f965468fab006c8caa6ca45e3fdd0ff30a1")
+        digest_hex("40dbe3f5aba0ab212cc9e7a3cdd992e278f3cb9796b88c6b859ed17199bbab8c")
     );
 }
 
@@ -452,7 +452,7 @@ fn test_checkpoint_serialization() {
     assert_eq!(checkpoint, deserialized);
     assert_eq!(
         checkpoint.digest(),
-        digest_hex("bea87e72f589447390ccc8440fb3653b1886350835d1ff0c57f6c758e653b23a")
+        digest_hex("4d35080e6b80ebe6501767b61e8320068f6870920106fc8f09f4f2be6ea79e12")
     );
     assert_eq!(checkpoint.digest(), deserialized.digest());
 
@@ -1267,6 +1267,51 @@ fn mock_cadence_covers_the_same_chains_as_production() {
     }
 }
 
+/// An entry a Response left unexecutable but no transaction can be built for is parked, so
+/// the node stops asking for the block hash it would sign with. Only a recovered body reaches
+/// this: marking an entry itself derives what the rebuild needs.
+#[tokio::test]
+async fn an_unanswerable_unviable_entry_is_parked() {
+    let backlog = Backlog::new();
+    // A sender this node cannot name on Ethereum gives no key to rebuild a transaction under.
+    let mut request = (*mock_bidi_request(SignId::from_u8(1), Chain::Ethereum)).clone();
+    if let SignKind::SignBidirectional(event) = &mut request.kind {
+        event.caip2_id = Chain::Ethereum.caip2_chain_id().to_string();
+    }
+    let request = Arc::new(request);
+    backlog.insert_bidirectional(Arc::clone(&request)).await;
+    if let Some(entry) = backlog
+        .pending(&Chain::Ethereum)
+        .write()
+        .await
+        .requests
+        .get_mut(&request.id)
+    {
+        entry.unviable_at = Some(500);
+    }
+    assert_eq!(
+        backlog.get_block_hash_lookups(Chain::Ethereum).await,
+        vec![500]
+    );
+
+    let taken = backlog
+        .take_unviable(Chain::Ethereum, 500, mock_root_pk())
+        .await;
+    assert!(taken.is_empty());
+    assert_matches!(
+        backlog
+            .get(Chain::Ethereum, &request.id)
+            .await
+            .unwrap()
+            .status(),
+        SignStatus::Bidirectional(BidirectionalProgress::Parked)
+    );
+    assert!(backlog
+        .get_block_hash_lookups(Chain::Ethereum)
+        .await
+        .is_empty());
+}
+
 /// A transaction id two requests share goes to the latest one watched.
 #[tokio::test]
 async fn a_shared_transaction_id_is_watched_for_the_latest_request() {
@@ -1459,4 +1504,39 @@ async fn an_outcome_that_cannot_be_recorded_is_not_taken() {
         entry.status,
         SignStatus::Bidirectional(BidirectionalProgress::Initial(SignProgress::Generating))
     ));
+}
+
+/// A Signature event that lands after the request was answered as a nonce sibling adds its
+/// transaction but keeps the outcome, and watches nothing for it.
+#[tokio::test]
+async fn a_late_signature_event_keeps_an_answered_entry() {
+    let backlog = Backlog::new();
+    let request = mock_bidi_request(SignId::new([1u8; 32]), Chain::Solana);
+    backlog.insert_bidirectional(Arc::clone(&request)).await;
+    let stale = backlog
+        .get_by::<Bidirectional<Initial<AnyProgress>>>(Chain::Solana, &request.id)
+        .await
+        .unwrap();
+    let tx = Arc::new(mock_bidirectional_tx(request.id, Chain::Solana));
+    let answered = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: mock_bidi_response(&tx),
+        progress: SignProgress::Generating,
+    });
+    backlog
+        .set_local_status(Chain::Solana, request.id, answered)
+        .await
+        .unwrap();
+
+    stale.advance(Arc::clone(&tx)).await.unwrap();
+
+    let entry = backlog.entry(Chain::Solana, &request.id).await.unwrap();
+    assert!(matches!(
+        entry.status,
+        SignStatus::Bidirectional(BidirectionalProgress::Final { .. })
+    ));
+    assert_eq!(entry.txs.len(), 1);
+    assert!(backlog
+        .get_execution_watchers(tx.target_chain)
+        .await
+        .is_empty());
 }

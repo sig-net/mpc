@@ -199,9 +199,10 @@ impl<State> SignEntry<State> {
         self.map_state(|_| state)
     }
 
-    /// Record the first published signature's transaction and watch every transaction known.
-    async fn executing(&self, tx: Arc<BidirectionalTx>) -> Result<(), BacklogError> {
-        let watched = {
+    /// Record a published signature's transaction and watch every transaction known. Returns
+    /// whether the entry still awaits execution: one answered meanwhile keeps its outcome.
+    async fn executing(&self, tx: Arc<BidirectionalTx>) -> Result<bool, BacklogError> {
+        let (awaits, watched) = {
             let mut pending = self.backlog.pending(&self.chain).write().await;
             let entry =
                 pending
@@ -212,13 +213,18 @@ impl<State> SignEntry<State> {
                         id: self.request.id,
                     })?;
             entry.add_tx(Arc::clone(&tx));
-            entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing);
-            entry.watched_txs()
+            if let SignStatus::Bidirectional(BidirectionalProgress::Initial(_)) = entry.status {
+                entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing);
+            }
+            (entry.awaits_execution(), entry.watched_txs())
         };
+        if !awaits {
+            return Ok(false);
+        }
         // The advancing transaction is watched by `advance`, with its observation time.
         let others = watched.into_iter().filter(|known| known.id != tx.id);
         self.backlog.watch_txs(others).await;
-        Ok(())
+        Ok(true)
     }
 
     /// Record the outcome this node found; kept across restarts, since the event it came from
@@ -233,7 +239,12 @@ impl<State> SignEntry<State> {
         });
         self.backlog
             .set_local_status(self.chain, self.request.id, status)
-            .await
+            .await?;
+        // A Signature event may have added a watch while the outcome was stored.
+        if let Some(entry) = self.backlog.entry(self.chain, &self.request.id).await {
+            self.backlog.unwatch_txs(entry.watched_txs()).await;
+        }
+        Ok(())
     }
 
     /// Complete and remove this request from the backlog.
@@ -504,13 +515,7 @@ impl SignEntry<Bidirectional<Initial<Publishing>>> {
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
-        self.executing(Arc::clone(&tx)).await?;
-        let entry = self.transition(Bidirectional(Executing(ExecutionWatch::new(
-            tx,
-            Some(Instant::now()),
-        ))));
-        entry.watch_execution().await;
-        Ok(entry)
+        self.begin_execution(tx).await
     }
 }
 
@@ -520,17 +525,28 @@ impl SignEntry<Bidirectional<Initial<AnyProgress>>> {
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
-        self.executing(Arc::clone(&tx)).await?;
-        let entry = self.transition(Bidirectional(Executing(ExecutionWatch::new(
-            tx,
-            Some(Instant::now()),
-        ))));
-        entry.watch_execution().await;
-        Ok(entry)
+        self.begin_execution(tx).await
     }
 }
 
 impl<P> SignEntry<Bidirectional<Initial<P>>> {
+    /// Record `tx` and watch it, unless the entry was answered meanwhile: then it keeps its
+    /// outcome, and the state returned says only that `tx` was recorded.
+    async fn begin_execution(
+        self,
+        tx: Arc<BidirectionalTx>,
+    ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
+        let awaits = self.executing(Arc::clone(&tx)).await?;
+        let entry = self.transition(Bidirectional(Executing(ExecutionWatch::new(
+            tx,
+            Some(Instant::now()),
+        ))));
+        if awaits {
+            entry.watch_execution().await;
+        }
+        Ok(entry)
+    }
+
     /// Return the underlying [`SignBidirectionalEvent`] for this initial bidirectional entry.
     pub fn sign_bidirectional_event(&self) -> &SignBidirectionalEvent {
         match &self.request.kind {

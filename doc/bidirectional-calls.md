@@ -383,7 +383,7 @@ never meets a rid from another.
 
 state:
     backlog: RequestId -> Entry
-    Entry = { req, contract, tx_ids: Set<TxId> }
+    Entry = { req, contract, tx_ids: Set<TxId>, unviable_at: Height? }
     // backlog is a function of the finalised source chain only,
     // the same on every correct node that processed the same height
 
@@ -438,6 +438,9 @@ on Signature { rid, signature } finalised on the source chain:
 
 on target chain block at height h finalised on chain target:
     for (rid, e) in backlog for target and no local[rid].outcome:
+        if e.unviable_at is at most h:
+            attest(rid, (e.unviable_at, Unviable, empty))       // M4
+            continue
         if txid ignores the signature on target:
             ours = { txid(e.req.tx) }
         else:
@@ -472,9 +475,9 @@ on Response { rid, att, sig } finalised on the source chain:
       under attestation_key(e.contract, e.req.key.key_version):
         if att.kind is Executed or Failed:        // e.req.tx was included
             for (rid', e') in backlog for e.req.target, other than rid,
-              with e's account and e.req.tx's replay protection, unsigned
-              bytes other than e.req.tx, and no local[rid'].outcome:
-                attest(rid', (att.height, Unviable, empty))     // M4
+              with e's account and e.req.tx's replay protection, and unsigned
+              bytes other than e.req.tx:
+                e'.unviable_at = att.height                     // M4
         delete backlog[rid], local[rid]
 ```
 
@@ -498,10 +501,14 @@ signature: there it needs none.
 When the transaction of one request is included, every other request
 waiting on the same account and replay protection can never execute, and
 the MPC attests Unviable for each, at that transaction's height. A node
+records that transaction's own outcome only after these, so it retries any
+it could not store when it finds the execution again. A node
 learns of it in one of two ways: it finds the execution itself, or it
 reads the `Response` that reports it. The second reaches every node that
-reads the source chain. A node that is behind notes the outcome and
-attests once caught up.
+reads the source chain, and is recorded in the entry, since a node rebased
+onto a checkpoint never reads that `Response`. A node attests from the
+entry once the target block at that height is final, and if it is behind,
+once caught up.
 
 A repeated attestation has the same content (Section 5) and is dropped
 (C3a).
@@ -1107,8 +1114,7 @@ Source chains are Midnight, Solana, Hydration and Canton.
 
 Checked against `develop` at `1d823c4e`. Still to change:
 
-* Unviable from another request's response.
-* Finding nonce siblings that have no published signature.
+* Unviable from another request's response, on Solana, Hydration and Canton.
 * Refusing non-canonical request fields, and the reserved paths on every
   source.
 * One key per key version, before a second version.
