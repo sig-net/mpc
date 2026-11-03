@@ -26,6 +26,7 @@ pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 pub const MAX_SUBSCRIBE_REQUESTS: usize = 16 * 1024;
 
+use crate::config::NetworkConfig;
 use crate::metrics::messaging::set_channel_capacity_tx;
 use crate::node_client::NodeClient;
 use crate::protocol::message::sub::{
@@ -82,12 +83,13 @@ impl MessageChannel {
 
     pub async fn spawn(
         client: NodeClient,
+        network: NetworkConfig,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) -> Self {
         let (inbox, outbox, channel) = Self::new();
-        tokio::spawn(inbox.run(config.clone(), contract.clone()));
-        tokio::spawn(outbox.run(client, config, contract));
+        tokio::spawn(inbox.run(network.cipher_sk, contract.clone()));
+        tokio::spawn(outbox.run(client, network.sign_sk, config, contract));
 
         channel
     }

@@ -41,23 +41,37 @@ use tokio::sync::{mpsc, watch};
 
 use crate::storage::protocol_storage::StockCounts;
 
-/// Whether a spawner should propose another generation: below its own floor,
-/// the network cap not reached counting generations in flight, and both
-/// concurrency caps free. `stock` may be up to a second old, so the floor can
-/// be overshot by at most one second of proposals, bounded by `max_introduced`.
+/// Whether a spawner should propose another generation: below its own floor
+/// and with a generation slot free. `stock` may be up to a second old, so
+/// the floor can be overshot by at most one second of proposals, bounded by
+/// `max_mine_generations`.
 pub(crate) fn should_generate(
     stock: StockCounts,
-    ongoing: usize,
-    introduced: usize,
+    mine_generations: usize,
     min: usize,
-    max: usize,
-    max_introduced: usize,
-    max_ongoing: usize,
+    max_mine_generations: usize,
 ) -> bool {
-    stock.generated + ongoing < max
-        && stock.mine < min
-        && introduced < max_introduced
-        && ongoing < max_ongoing
+    stock.mine < min && mine_generations < max_mine_generations
+}
+
+/// Bounds a deliberator applies to a PROPOSE, from counts it already caches.
+/// Sized by the whole participant set with headroom for counts a tick behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AcceptLimits {
+    /// Refuse once this node runs or has accepted this many generations: a
+    /// margin above the network's cap.
+    pub ongoing: usize,
+    /// Refuse once the pool holds this many: a margin above the network's floors.
+    pub generated: usize,
+}
+
+impl AcceptLimits {
+    pub fn new(min_mine: usize, max_mine_generations: usize, num_nodes: usize) -> Self {
+        Self {
+            ongoing: num_nodes * 2 * max_mine_generations,
+            generated: num_nodes * 2 * min_mine,
+        }
+    }
 }
 
 pub struct MpcSignProtocol {
@@ -116,7 +130,7 @@ impl MpcSignProtocol {
         mut gov_client: G,
         contract_state: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
-    ) {
+    ) -> anyhow::Result<()> {
         let _span = tracing::info_span!("running", "{}", self.my_account_id.as_str());
 
         crate::metrics::nodes::NODE_RUNNING.set(1);
@@ -285,22 +299,8 @@ mod tests {
             mine: 3,
             generated: 10,
         };
-        assert!(should_generate(stock, 2, 1, 5, 100, 10, 128));
-        assert!(
-            !should_generate(stock, 2, 1, 3, 100, 10, 128),
-            "floor reached"
-        );
-        assert!(
-            !should_generate(stock, 2, 1, 5, 12, 10, 128),
-            "network cap counts in flight"
-        );
-        assert!(
-            !should_generate(stock, 2, 10, 5, 100, 10, 128),
-            "introduction cap"
-        );
-        assert!(
-            !should_generate(stock, 128, 1, 5, 1000, 10, 128),
-            "generation cap"
-        );
+        assert!(should_generate(stock, 1, 5, 10));
+        assert!(!should_generate(stock, 1, 3, 10), "floor reached");
+        assert!(!should_generate(stock, 10, 5, 10), "generation cap");
     }
 }

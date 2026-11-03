@@ -96,10 +96,13 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             );
 
                             let threshold = contract_state.threshold;
-                            let triple_task = TripleSpawnerTask::run(me, threshold, epoch, ctx);
+                            let num_nodes = contract_state.participants.len();
+                            let triple_task =
+                                TripleSpawnerTask::run(me, threshold, num_nodes, epoch, ctx);
                             let presign_task = PresignatureSpawnerTask::run(
                                 me,
                                 threshold,
+                                num_nodes,
                                 epoch,
                                 ctx,
                                 &private_share,
@@ -389,10 +392,13 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         return NodeState::WaitingForConsensus(self);
                     };
 
-                    let triple_task = TripleSpawnerTask::run(me, self.threshold, self.epoch, ctx);
+                    let num_nodes = contract_state.participants.len();
+                    let triple_task =
+                        TripleSpawnerTask::run(me, self.threshold, num_nodes, self.epoch, ctx);
                     let presign_task = PresignatureSpawnerTask::run(
                         me,
                         self.threshold,
+                        num_nodes,
                         self.epoch,
                         ctx,
                         &self.private_share,
