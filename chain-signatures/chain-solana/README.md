@@ -24,7 +24,6 @@ variables:
 | `account_sk`     | `MPC_SOL_ACCOUNT_SK`     | yes       | payer keypair (base58) for respond transactions |
 | `rpc_http_url`   | `MPC_SOL_RPC_HTTP_URL`   | yes       | JSON-RPC endpoint (Helius, Alchemy, …) |
 | `program_address`| `MPC_SOL_PROGRAM_ADDRESS`| yes       | signet program id (base58) |
-| `indexer.poll_interval` | `MPC_SOL_POLL_INTERVAL_MS` | no | default `1000`; finalized slots advance ~every 400ms |
 
 ### Stall budgets
 
