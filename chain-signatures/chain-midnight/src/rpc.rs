@@ -422,6 +422,7 @@ impl MidnightRpc {
         &self,
         block_ref: &BlockRef,
         singleton: &[u8; 32],
+        responder: &[u8; 32],
     ) -> anyhow::Result<Option<BlockEmissions>> {
         let hash = parse_block_hash(&block_ref.hash)?;
         let block = retry_read(
@@ -461,7 +462,10 @@ impl MidnightRpc {
                     anyhow::Error::new(err).context("send_mn_transaction did not match metadata"),
                 )
             })?;
-            if memchr::memmem::find(&found.value.midnight_tx, singleton).is_some() {
+            let tx = &found.value.midnight_tx;
+            if memchr::memmem::find(tx, singleton).is_some()
+                || memchr::memmem::find(tx, responder).is_some()
+            {
                 candidates.push(found);
             }
         }
@@ -516,43 +520,48 @@ impl MidnightRpc {
                     )
                 },
             )?;
-            let schema_hold = |err: anyhow::Error| {
-                BlockHold::new(
-                    "emission-schema-hold",
-                    height,
-                    err.context(format!(
-                        "candidate extrinsic {} transaction {} singleton emissions",
-                        found.details.index(),
-                        hex::encode(ledger_tx_hash)
-                    )),
-                )
-            };
-            let calls = match status {
-                AppliedStatus::Applied => emissions_in(&tx, singleton).map_err(schema_hold)?,
-                AppliedStatus::PartialSuccess => {
-                    let (calls, skipped) =
-                        partial_success_emissions_in(&tx, singleton).map_err(schema_hold)?;
-                    for skipped in skipped {
-                        tracing::warn!(
-                            reason = "partial-success-fallible-skipped",
-                            tx_hash = %hex::encode(ledger_tx_hash),
-                            height,
-                            block_hash = %block_ref.hash,
-                            extrinsic_index = found.details.index(),
-                            call_index = skipped.call_index,
-                            physical_segment = skipped.physical_segment,
-                            error = %format_args!("{:#}", skipped.reason),
-                            "midnight fallible singleton phase skipped in a partial success"
-                        );
+            let decode = |contract: &[u8; 32]| {
+                let schema_hold = |err: anyhow::Error| {
+                    BlockHold::new(
+                        "emission-schema-hold",
+                        height,
+                        err.context(format!(
+                            "candidate extrinsic {} transaction {} emissions of contract {}",
+                            found.details.index(),
+                            hex::encode(ledger_tx_hash),
+                            hex::encode(contract)
+                        )),
+                    )
+                };
+                anyhow::Ok(match status {
+                    AppliedStatus::Applied => emissions_in(&tx, contract).map_err(schema_hold)?,
+                    AppliedStatus::PartialSuccess => {
+                        let (calls, skipped) =
+                            partial_success_emissions_in(&tx, contract).map_err(schema_hold)?;
+                        for skipped in skipped {
+                            tracing::warn!(
+                                reason = "partial-success-fallible-skipped",
+                                tx_hash = %hex::encode(ledger_tx_hash),
+                                height,
+                                block_hash = %block_ref.hash,
+                                extrinsic_index = found.details.index(),
+                                contract = %hex::encode(contract),
+                                call_index = skipped.call_index,
+                                physical_segment = skipped.physical_segment,
+                                error = %format_args!("{:#}", skipped.reason),
+                                "midnight fallible protocol contract phase skipped in a partial success"
+                            );
+                        }
+                        calls
                     }
-                    calls
-                }
+                })
             };
             decoded_candidates.push(CandidateTransactionEmissions {
                 ledger_tx_hash,
                 extrinsic_index: found.details.index(),
                 partial_success: status == AppliedStatus::PartialSuccess,
-                calls,
+                calls: decode(singleton)?,
+                responder_calls: decode(responder)?,
             });
         }
 
@@ -562,6 +571,7 @@ impl MidnightRpc {
                 reported_block_number: height,
                 reported_block_hash: *block.hash().as_fixed_bytes(),
                 singleton_address: *singleton,
+                responder_address: *responder,
                 scale_header: block.header().encode(),
                 scale_body: extrinsics
                     .iter()
@@ -1423,9 +1433,30 @@ mod tests {
         .await
     }
 
+    /// The vault capture's singleton.
+    const CAPTURE_SINGLETON: &str =
+        "4daa9701226222a9db302dfb6f347f48c947278a4dc93812a79494f4086a0172";
+    /// A responder no captured transaction calls.
+    const ABSENT_RESPONDER: [u8; 32] = [0xcd; 32];
+
     async fn read_fallible_transaction(
         events: Vec<u8>,
         transaction: &[u8],
+    ) -> anyhow::Result<Option<BlockEmissions>> {
+        read_fallible_transaction_as(
+            events,
+            transaction,
+            crate::test_utils::hex_32(CAPTURE_SINGLETON),
+            ABSENT_RESPONDER,
+        )
+        .await
+    }
+
+    async fn read_fallible_transaction_as(
+        events: Vec<u8>,
+        transaction: &[u8],
+        singleton: [u8; 32],
+        responder: [u8; 32],
     ) -> anyhow::Result<Option<BlockEmissions>> {
         let metadata = subxt::Metadata::decode_all(
             &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
@@ -1502,12 +1533,9 @@ mod tests {
             hash: hash_of_byte(0x43),
             parent_hash: hash_of_byte(0x42),
         };
-        let singleton = crate::test_utils::hex_32(
-            "4daa9701226222a9db302dfb6f347f48c947278a4dc93812a79494f4086a0172",
-        );
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            rpc.block_emissions(&block, &singleton),
+            rpc.block_emissions(&block, &singleton, &responder),
         )
         .await;
         handle.stop()?;
@@ -1536,6 +1564,7 @@ mod tests {
             )
         );
         assert_eq!(candidate.calls.len(), 1);
+        assert!(candidate.responder_calls.is_empty());
         let call = &candidate.calls[0];
         assert_eq!(call.call_index, 1);
         assert_eq!(call.physical_segment, 49592);
@@ -1551,6 +1580,36 @@ mod tests {
                 "ee3385dda706877d30e802a0df57c228310016889104b8fb361c830a58d1e500"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn block_reader_finds_calls_by_the_responder_address_too() {
+        // The decoder keys on the address alone, so the captured call stands in for a
+        // responder call when the responder is configured at its address.
+        let block = read_fallible_transaction_as(
+            include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
+            include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
+            [0xab; 32],
+            crate::test_utils::hex_32(CAPTURE_SINGLETON),
+        )
+        .await
+        .expect("read captured fallible transaction")
+        .expect("block contains a responder candidate");
+        assert_eq!(
+            block.proof_seed.responder_address,
+            crate::test_utils::hex_32(CAPTURE_SINGLETON)
+        );
+        let [candidate] = block.candidates.as_slice() else {
+            panic!("expected one candidate: {:?}", block.candidates);
+        };
+        assert!(candidate.calls.is_empty());
+        let [call] = candidate.responder_calls.as_slice() else {
+            panic!(
+                "expected one responder call: {:?}",
+                candidate.responder_calls
+            );
+        };
+        assert_eq!((call.call_index, call.physical_segment), (1, 49592));
     }
 
     fn captured_applied_status_record() -> Vec<u8> {
@@ -1952,6 +2011,8 @@ mod tests {
         let config = crate::config::MidnightConfig {
             node_url,
             central_address: crate::config::MidnightAddress::from_bytes(singleton),
+            // Unread: the capture reads only the singleton's calls.
+            responder_address: crate::config::MidnightAddress::from_bytes([0; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
@@ -2051,6 +2112,7 @@ mod tests {
         crate::config::MidnightConfig {
             node_url: format!("http://{address}"),
             central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: crate::config::MidnightAddress::from_bytes([0xcd; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),
@@ -2642,6 +2704,7 @@ mod tests {
         let mut config = crate::config::MidnightConfig {
             node_url: format!("http://{address}"),
             central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: crate::config::MidnightAddress::from_bytes([0xcd; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
             indexer: Default::default(),

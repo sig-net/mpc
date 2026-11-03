@@ -7,28 +7,29 @@ RUN npm install
 COPY chain-signatures/contract-eth ./
 RUN npx hardhat compile
 
-# What the Midnight publisher proves with: the singleton's packaged keys and IR, the
+# What the Midnight publisher proves with: the responder's packaged keys and IR, the
 # KZG parameters its circuits and the DUST spend need, and the DUST spend's keys. The
 # node fetches a missing file at runtime, so baking them in keeps proving offline.
 FROM debian:bookworm-slim AS midnight-artifacts
 RUN apt-get update && apt-get install --assume-yes --no-install-recommends ca-certificates curl
 WORKDIR /tmp/midnight
-RUN curl -fsSL --retry 4 -o contract.tgz \
-      https://registry.npmjs.org/@sig-net/midnight-contract/-/midnight-contract-0.25.0.tgz \
-    && echo "c965f4033897dd09d7fc8eaf4b1a0913e7992401f8b5c206aa9a9f9f177fb928  contract.tgz" | sha256sum -c \
-    && tar -xzf contract.tgz \
-    && mkdir -p /out/signet-contract/keys /out/signet-contract/zkir /out/zk-params/dust/9 \
+RUN curl -fsSL --retry 4 -o responder.tgz \
+      https://registry.npmjs.org/@sig-net/midnight-responder/-/midnight-responder-0.26.0-rc.3.tgz \
+    && echo "d562282cf48b3537db7cccc7163e6e4c848587ba3ca2d7c86542dc32710a868c  responder.tgz" | sha256sum -c \
+    && tar -xzf responder.tgz \
+    && mkdir -p /out/signet-responder/keys /out/signet-responder/zkir /out/zk-params/dust/9 \
     && for circuit in respond respondBidirectional; do \
-         cp "package/dist/managed/keys/$circuit.prover" "package/dist/managed/keys/$circuit.verifier" /out/signet-contract/keys/ \
-         && cp "package/dist/managed/zkir/$circuit.bzkir" /out/signet-contract/zkir/; \
+         cp "package/dist/managed/keys/$circuit.prover" "package/dist/managed/keys/$circuit.verifier" /out/signet-responder/keys/ \
+         && cp "package/dist/managed/zkir/$circuit.bzkir" /out/signet-responder/zkir/; \
        done \
-    && for file in bls_midnight_2p13 bls_midnight_2p16 dust/9/spend.prover dust/9/spend.verifier dust/9/spend.bzkir; do \
+    && for file in bls_midnight_2p10 bls_midnight_2p11 bls_midnight_2p13 dust/9/spend.prover dust/9/spend.verifier dust/9/spend.bzkir; do \
          curl -fsSL --retry 4 -o "/out/zk-params/$file" "https://srs.midnight.network/$file"; \
        done \
     && cd /out/zk-params \
     && printf '%s\n' \
+      "46b2290933cbed4c378889e4ba971f1a92888331ffb09466acd4ff61a1e2cb42  bls_midnight_2p10" \
+      "9901589d7956ff58be0d85569b2f455b77b58c3758026ffb5bbe4807000b96d1  bls_midnight_2p11" \
       "d3324910969c4cc54143b8045b649e5c3a4bd5fb7b8f85fe1b770f640ce1c803  bls_midnight_2p13" \
-      "09c877216d6589b370263e18af40a030a901b41a7a7c37ef58c9901db41f05c6  bls_midnight_2p16" \
       "996602da7ca386284e656c78ea03e55bffdba29475e6a67965c50de05e13efc2  dust/9/spend.prover" \
       "3f1569ebcab0655c5c145b28947c74edc4e3f5c6b276e4404b661cf0905b49d3  dust/9/spend.verifier" \
       "904181287e75b0fb596ba5fcc116c882ee5d28e3115304c93ebd913722ce5841  dust/9/spend.bzkir" \
@@ -59,7 +60,7 @@ COPY --from=redis-bin /usr/local/bin/redis-server /usr/local/bin/redis-server
 COPY --from=node-builder /usr/src/app/target/release/mpc-node /usr/local/bin/mpc-node
 COPY chain-signatures/node/redis.conf /etc/redis/redis.conf
 # The paths PublisherConfig defaults to.
-COPY --from=midnight-artifacts /out/signet-contract /usr/local/share/midnight/signet-contract
+COPY --from=midnight-artifacts /out/signet-responder /usr/local/share/midnight/signet-responder
 COPY --from=midnight-artifacts /out/zk-params /usr/local/share/midnight/zk-params
 
 # Create a script to start both Redis and the Rust app

@@ -15,18 +15,28 @@ pub struct MidnightArgs {
         hide_env_values = true,
         requires_all = [
             "midnight_central_address",
+            "midnight_responder_address",
             "midnight_funding_seed",
             "midnight_indexer_ws_url",
         ]
     )]
     pub midnight_node_url: Option<String>,
-    /// Address of the central singleton contract: 64 hex characters, no `0x` prefix.
+    /// Address of the central singleton contract, where clients notify their
+    /// requests: 64 hex characters, no `0x` prefix.
     #[arg(
         long,
         env("MPC_MIDNIGHT_CENTRAL_ADDRESS"),
         requires = "midnight_node_url"
     )]
     pub midnight_central_address: Option<String>,
+    /// Address of the signet responder contract, where responses are posted:
+    /// 64 hex characters, no `0x` prefix.
+    #[arg(
+        long,
+        env("MPC_MIDNIGHT_RESPONDER_ADDRESS"),
+        requires = "midnight_node_url"
+    )]
+    pub midnight_responder_address: Option<String>,
     /// Hex seed of the wallet that funds respond transactions.
     #[arg(
         long,
@@ -71,7 +81,7 @@ pub struct MidnightArgs {
     #[cfg(feature = "test-feature")]
     #[arg(long, requires = "midnight_node_url")]
     pub midnight_output_storage_emulator_endpoint: Option<String>,
-    /// The singleton's proving artifacts, for test nodes running outside the image
+    /// The responder's proving artifacts, for test nodes running outside the image
     /// that installs them.
     #[cfg(feature = "test-feature")]
     #[arg(long, requires = "midnight_node_url")]
@@ -85,14 +95,22 @@ pub struct MidnightArgs {
 
 impl MidnightArgs {
     /// Clap's `requires_all` on the node URL makes the flags all-or-nothing before
-    /// this conversion parses the central address and validates the remaining fields.
+    /// this conversion parses the contract addresses and validates the remaining fields.
     pub fn into_config(self) -> anyhow::Result<Option<MidnightConfig>> {
-        let (Some(node_url), Some(central_address), Some(funding_seed), Some(indexer_ws_url)) = (
+        let (
+            Some(node_url),
+            Some(central_address),
+            Some(responder_address),
+            Some(funding_seed),
+            Some(indexer_ws_url),
+        ) = (
             self.midnight_node_url,
             self.midnight_central_address,
+            self.midnight_responder_address,
             self.midnight_funding_seed,
             self.midnight_indexer_ws_url,
-        ) else {
+        )
+        else {
             return Ok(None);
         };
         // Only test builds override the image's artifact directories.
@@ -124,9 +142,12 @@ impl MidnightArgs {
         }
         let central_address = MidnightAddress::from_hex(&central_address)
             .context("midnight config: central_address must be 32 bytes of hex")?;
+        let responder_address = MidnightAddress::from_hex(&responder_address)
+            .context("midnight config: responder_address must be 32 bytes of hex")?;
         let config = MidnightConfig {
             node_url,
             central_address,
+            responder_address,
             publisher,
             rpc: Default::default(),
             indexer: Default::default(),
@@ -150,6 +171,8 @@ mod tests {
             "http://127.0.0.1:9944",
             "--midnight-central-address",
             &"ab".repeat(32),
+            "--midnight-responder-address",
+            &"cd".repeat(32),
             "--midnight-funding-seed",
             &"0f".repeat(32),
             "--midnight-indexer-ws-url",
@@ -176,6 +199,7 @@ mod tests {
         MidnightConfig {
             node_url: "http://127.0.0.1:9944".into(),
             central_address: MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: MidnightAddress::from_bytes([0xcd; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".into(),
@@ -225,16 +249,24 @@ mod tests {
     }
 
     #[test]
-    fn central_address_is_parsed_at_the_config_boundary() {
+    fn contract_addresses_are_parsed_at_the_config_boundary() {
         for invalid in ["ab".repeat(31), format!("0x{}", "ab".repeat(31))] {
-            let mut args = configured_args();
-            args.midnight_central_address = Some(invalid);
+            for (field, apply) in [
+                (
+                    "central_address",
+                    (|args: &mut MidnightArgs, value| args.midnight_central_address = Some(value))
+                        as fn(&mut MidnightArgs, String),
+                ),
+                ("responder_address", |args, value| {
+                    args.midnight_responder_address = Some(value)
+                }),
+            ] {
+                let mut args = configured_args();
+                apply(&mut args, invalid.clone());
 
-            let error = args.into_config().unwrap_err().to_string();
-            assert!(
-                error.contains("central_address"),
-                "unexpected address error: {error}"
-            );
+                let error = args.into_config().unwrap_err().to_string();
+                assert!(error.contains(field), "unexpected address error: {error}");
+            }
         }
     }
 
@@ -277,6 +309,7 @@ mod tests {
         crate::cli::tests::assert_midnight_env_unset();
 
         for flag in [
+            "--midnight-responder-address",
             "--midnight-funding-seed",
             "--midnight-indexer-ws-url",
             "--midnight-output-storage-bucket",
@@ -300,7 +333,11 @@ mod tests {
             &central_address,
         ])
         .expect_err("clap must demand the publisher group with the node url");
-        for flag in ["--midnight-funding-seed", "--midnight-indexer-ws-url"] {
+        for flag in [
+            "--midnight-responder-address",
+            "--midnight-funding-seed",
+            "--midnight-indexer-ws-url",
+        ] {
             assert!(
                 err.to_string().contains(flag),
                 "clap must name {flag} as missing: {err}"

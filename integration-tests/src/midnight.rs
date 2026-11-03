@@ -57,6 +57,7 @@ struct MidnightStack {
 #[serde(rename_all = "camelCase")]
 struct BootstrapResult {
     central_address: String,
+    responder_address: String,
     caller_address: String,
     publisher_seed: String,
 }
@@ -120,10 +121,10 @@ impl MidnightContext {
             .await
             .context("initialising the Midnight caller with the MPC response key")?;
         let contract_artifacts =
-            devtools_package_dir()?.join("node_modules/@sig-net/midnight-contract/dist/managed");
+            devtools_package_dir()?.join("node_modules/@sig-net/midnight-responder/dist/managed");
         anyhow::ensure!(
             contract_artifacts.join("keys/respond.prover").is_file(),
-            "Midnight contract artifacts {} are missing; run npm ci in {}",
+            "Midnight responder artifacts {} are missing; run npm ci in {}",
             contract_artifacts.display(),
             devtools_package_dir()?.display()
         );
@@ -272,6 +273,8 @@ fn responder_config(
         node_url: endpoints.node_http_url.clone(),
         central_address: MidnightAddress::from_hex(&bootstrap.central_address)
             .context("decoding Midnight central address")?,
+        responder_address: MidnightAddress::from_hex(&bootstrap.responder_address)
+            .context("decoding Midnight responder address")?,
         publisher: PublisherConfig {
             output_storage,
             funding_seed: bootstrap.publisher_seed.clone(),

@@ -1,8 +1,8 @@
 // Deploy path, never shipped. Makes the deployer wallet fee-ready and deploys a fresh signet
-// singleton; the LAST line printed is the contract address.
+// responder; the LAST line printed is the contract address.
 
 import {
-  deploySignetContract,
+  deploySignetResponder,
   deriveAccountKeys,
   GENESIS_MINT_WALLET_SEED,
   getMidnightNodeConfig,
@@ -23,6 +23,6 @@ await withSyncedWalletFacade(keys, config, async (facade, state) => {
   console.log(`dust: ${dust} spendable`);
 });
 
-const { contractAddress, txId } = await deploySignetContract({ ...env, DEPLOYER_SEED: seed });
-console.log(`deployed singleton in tx ${txId}`);
+const { contractAddress, txId } = await deploySignetResponder({ ...env, DEPLOYER_SEED: seed });
+console.log(`deployed responder in tx ${txId}`);
 console.log(contractAddress);

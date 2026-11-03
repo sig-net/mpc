@@ -1224,6 +1224,7 @@ mod tests {
         for var in [
             "MPC_MIDNIGHT_NODE_URL",
             "MPC_MIDNIGHT_CENTRAL_ADDRESS",
+            "MPC_MIDNIGHT_RESPONDER_ADDRESS",
             "MPC_MIDNIGHT_FUNDING_SEED",
             "MPC_MIDNIGHT_INDEXER_WS_URL",
             "MPC_MIDNIGHT_OUTPUT_STORAGE_BUCKET",
@@ -1312,6 +1313,7 @@ mod tests {
                 // Nothing listens on port 1, so the startup dial is refused.
                 node_url: "http://127.0.0.1:1".to_string(),
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
+                responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
                     funding_seed: "ab".repeat(32),
                     indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),

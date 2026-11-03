@@ -1,7 +1,7 @@
 //! Builds, proves, pays for and posts respond intents in process.
 //!
-//! The call comes from `minocrab-publisher`, which writes the singleton's transcript
-//! and proves it under the contract's packaged keys with zkir v3. The fee is a second
+//! The call comes from `minocrab-publisher`, which writes the respond call's transcript
+//! and proves it under the responder's packaged keys with zkir v3. The fee is a second
 //! intent spending the funding wallet's DUST, proven with the ledger's own zkir v2
 //! prover. Both halves are sealed separately and merged, the way the Midnight wallet
 //! SDK finalizes a balanced transaction.
@@ -155,6 +155,12 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         })?;
 
         let circuit = request.circuit;
+        // Before the key read: the package holds no key for any other circuit.
+        if !matches!(circuit, "respond" | "respondBidirectional") {
+            return Err(SubmitError::BadRequest(format!(
+                "unknown circuit `{circuit}`"
+            )));
+        }
         let packaged = self
             .provers
             .managed
@@ -177,15 +183,10 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
                     &signature,
                 )
             }
-            ("respond" | "respondBidirectional", _) => {
+            _ => {
                 return Err(SubmitError::BadRequest(
                     "attestation is required only for respondBidirectional".to_string(),
                 ))
-            }
-            (other, _) => {
-                return Err(SubmitError::BadRequest(format!(
-                    "unknown circuit `{other}`"
-                )))
             }
         }
         .map_err(|error| SubmitError::BadRequest(error.to_string()))?;
@@ -601,10 +602,10 @@ mod tests {
     use crate::funding::FeePlan;
     use crate::intent::WirePoint;
 
-    /// The singleton's initial state with the package's verifier keys
+    /// The responder's initial state with the package's verifier keys
     /// (`midnight-devtools`' `gen:initial-state`).
-    const SINGLETON_STATE: &[u8] = include_bytes!("../fixtures/initial-singleton-state.mn");
-    const SINGLETON: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+    const RESPONDER_STATE: &[u8] = include_bytes!("../fixtures/initial-responder-state.mn");
+    const RESPONDER: &str = "5555555555555555555555555555555555555555555555555555555555555555";
     const REQUEST_ID: &str = "abf32e141d471192a834779b0a8960aa05a7f94534564f477420eef80f588c48";
     const TTL: u64 = 1_800_000_000;
     const TX_HASH: [u8; 32] = [0x7a; 32];
@@ -741,7 +742,7 @@ mod tests {
     /// `keys/<circuit>.verifier`.
     fn managed_dir(verifier: impl Fn(&str, Vec<u8>) -> Vec<u8>) -> std::path::PathBuf {
         let state: ContractState<DefaultDB> =
-            midnight_serialize::tagged_deserialize(&mut &SINGLETON_STATE[..]).unwrap();
+            midnight_serialize::tagged_deserialize(&mut &RESPONDER_STATE[..]).unwrap();
         let dir = std::env::temp_dir().join(format!(
             "mpc-midnight-native-{}-{}",
             std::process::id(),
@@ -754,11 +755,11 @@ mod tests {
             std::fs::write(dir.join("keys").join(format!("{circuit}.prover")), b"").unwrap();
             std::fs::write(dir.join("zkir").join(format!("{circuit}.bzkir")), b"").unwrap();
         }
-        for circuit in ["respond", "respondBidirectional", "signBidirectional"] {
+        for circuit in ["respond", "respondBidirectional"] {
             let op = state
                 .operations
                 .get(&circuit.as_bytes().into())
-                .expect("the fixture carries every signer circuit");
+                .expect("the fixture carries every responder circuit");
             let mut bytes = Vec::new();
             midnight_serialize::tagged_serialize(op.v3.as_ref().unwrap(), &mut bytes).unwrap();
             std::fs::write(
@@ -799,7 +800,7 @@ mod tests {
     pub(super) fn respond_request() -> IntentRequest {
         IntentRequest {
             circuit: "respond",
-            contract_address: SINGLETON.to_string(),
+            contract_address: RESPONDER.to_string(),
             request_id: REQUEST_ID.to_string(),
             signature: WireSignature {
                 big_r: WirePoint {
@@ -810,13 +811,13 @@ mod tests {
                 recovery_id: 1,
             },
             attestation: None,
-            contract_state: hex::encode(SINGLETON_STATE),
+            contract_state: hex::encode(RESPONDER_STATE),
             ledger_parameters: ledger_parameters(),
             ttl_seconds: TTL,
         }
     }
 
-    /// The compiled singleton's own `respondBidirectional` event, captured by
+    /// The compiled responder's own `respondBidirectional` event, captured by
     /// `midnight-devtools`' `gen:api-parity-vectors`, as a request.
     pub(super) fn bidirectional_request() -> IntentRequest {
         let fixtures: serde_json::Value =
@@ -854,7 +855,7 @@ mod tests {
         let ContractAction::Call(call) = &actions[0] else {
             panic!("the single action must be a call");
         };
-        assert_eq!(hex::encode(call.address.0 .0), SINGLETON);
+        assert_eq!(hex::encode(call.address.0 .0), RESPONDER);
         assert!(call.guaranteed_transcript.is_some());
         assert!(call.fallible_transcript.is_none());
         (**call).clone()
@@ -881,7 +882,7 @@ mod tests {
 
     #[test]
     fn a_bidirectional_intent_emits_the_payload_the_compiled_contract_emits() {
-        // The compiled singleton's own emission for this event, captured by
+        // The compiled responder's own emission for this event, captured by
         // `midnight-devtools`' `gen:api-parity-vectors`.
         let fixtures: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/api-parity-vectors.json")).unwrap();
@@ -991,7 +992,7 @@ mod tests {
             (
                 "0x prefix",
                 IntentRequest {
-                    contract_address: format!("0x{}", &SINGLETON[2..]),
+                    contract_address: format!("0x{}", &RESPONDER[2..]),
                     ..respond_request()
                 },
             ),
@@ -1344,7 +1345,7 @@ mod bench {
 #[cfg(test)]
 mod live {
     //! Against a running stack: `MIDNIGHT_LIVE_*` name a node, its indexer, a deployed
-    //! singleton, a funded seed and the artifact directories. Proving wants `--release`.
+    //! responder, a funded seed and the artifact directories. Proving wants `--release`.
 
     use super::*;
     use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
@@ -1363,7 +1364,9 @@ mod live {
         let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
         let config = MidnightConfig {
             node_url: env("MIDNIGHT_LIVE_NODE_URL"),
-            central_address: MidnightAddress::from_hex(&env("MIDNIGHT_LIVE_CENTRAL")).unwrap(),
+            // Unread: this test only posts.
+            central_address: MidnightAddress::from_bytes([0; 32]),
+            responder_address: MidnightAddress::from_hex(&env("MIDNIGHT_LIVE_RESPONDER")).unwrap(),
             publisher: PublisherConfig {
                 funding_seed: env("MIDNIGHT_LIVE_SEED"),
                 indexer_ws_url: env("MIDNIGHT_LIVE_INDEXER_WS_URL"),
@@ -1397,14 +1400,18 @@ mod live {
             rpc.network_id(),
             config.publisher.submit_timeout,
         );
-        let central = config.central_address.to_hex();
+        let responder = config.responder_address.to_hex();
         for circuit in ["respond", "respondBidirectional", "respond"] {
             let head = rpc.finalized_head().await.unwrap();
-            let state = rpc.contract_state(&central, &head).await.unwrap().unwrap();
+            let state = rpc
+                .contract_state(&responder, &head)
+                .await
+                .unwrap()
+                .unwrap();
             let parameters = rpc.ledger_parameters(&head).await.unwrap();
             let request = IntentRequest {
                 circuit,
-                contract_address: central.clone(),
+                contract_address: responder.clone(),
                 request_id: hex::encode(rand::random::<[u8; 32]>()),
                 signature: WireSignature {
                     big_r: WirePoint {

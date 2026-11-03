@@ -114,6 +114,10 @@ impl Args {
             "--midnight-central-address",
             midnight.central_address.to_hex(),
         );
+        self.flag(
+            "--midnight-responder-address",
+            midnight.responder_address.to_hex(),
+        );
         self.flag("--midnight-funding-seed", &publisher.funding_seed);
         self.flag("--midnight-indexer-ws-url", &publisher.indexer_ws_url);
         self.flag(

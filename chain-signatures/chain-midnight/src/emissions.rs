@@ -56,7 +56,7 @@ pub enum TranscriptPhase {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct SingletonCallEmissions {
+pub struct ContractCallEmissions {
     /// Position in [`DecodedTransaction::calls`] before filtering or execution-order sorting.
     pub call_index: u32,
     pub physical_segment: u16,
@@ -275,7 +275,7 @@ pub struct SkippedFallibleCall {
 pub fn emissions_in(
     tx: &DecodedTransaction,
     singleton: &[u8; 32],
-) -> anyhow::Result<Vec<SingletonCallEmissions>> {
+) -> anyhow::Result<Vec<ContractCallEmissions>> {
     let (decoded, skipped) = decode_singleton_calls(tx, singleton, false)?;
     debug_assert!(skipped.is_empty());
     Ok(decoded)
@@ -291,7 +291,7 @@ pub fn emissions_in(
 pub fn partial_success_emissions_in(
     tx: &DecodedTransaction,
     singleton: &[u8; 32],
-) -> anyhow::Result<(Vec<SingletonCallEmissions>, Vec<SkippedFallibleCall>)> {
+) -> anyhow::Result<(Vec<ContractCallEmissions>, Vec<SkippedFallibleCall>)> {
     decode_singleton_calls(tx, singleton, true)
 }
 
@@ -299,7 +299,7 @@ fn decode_singleton_calls(
     tx: &DecodedTransaction,
     singleton: &[u8; 32],
     partial_success: bool,
-) -> anyhow::Result<(Vec<SingletonCallEmissions>, Vec<SkippedFallibleCall>)> {
+) -> anyhow::Result<(Vec<ContractCallEmissions>, Vec<SkippedFallibleCall>)> {
     let all_calls: Vec<_> = tx.calls().collect();
     let mut calls = all_calls
         .iter()
@@ -372,7 +372,7 @@ fn decode_singleton_calls(
             } else {
                 continue;
             };
-            decoded.push(SingletonCallEmissions {
+            decoded.push(ContractCallEmissions {
                 call_index: *call_index,
                 physical_segment: *physical_segment,
                 phase,
@@ -1011,7 +1011,7 @@ mod tests {
 
         assert_eq!(
             emissions_in(&tx, &SINGLETON).unwrap(),
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 call_index: 1,
                 caller: None,
                 physical_segment: 1,
@@ -1119,7 +1119,7 @@ mod tests {
         assert_eq!(
             decoded,
             vec![
-                SingletonCallEmissions {
+                ContractCallEmissions {
                     call_index: 0,
                     caller: None,
                     physical_segment: 1,
@@ -1129,7 +1129,7 @@ mod tests {
                         payload: GUARANTEED,
                     }],
                 },
-                SingletonCallEmissions {
+                ContractCallEmissions {
                     call_index: 0,
                     caller: None,
                     physical_segment: 1,
@@ -1305,7 +1305,7 @@ mod tests {
 
         assert_eq!(
             emissions_in(&tx, &SINGLETON).unwrap(),
-            vec![SingletonCallEmissions {
+            vec![ContractCallEmissions {
                 call_index: 0,
                 caller: None,
                 physical_segment: 1,

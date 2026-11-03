@@ -1,10 +1,10 @@
 import { writeFileSync } from "node:fs";
-import { initialSingletonState } from "./initial-state.js";
+import { initialResponderState } from "./initial-state.js";
 
-// The native publisher's build tests read this as the deployed singleton's state.
-const bytes = await initialSingletonState();
+// The native publisher's build tests read this as the deployed responder's state.
+const bytes = await initialResponderState();
 writeFileSync(
-  new URL("../../chain-midnight/fixtures/initial-singleton-state.mn", import.meta.url),
+  new URL("../../chain-midnight/fixtures/initial-responder-state.mn", import.meta.url),
   bytes,
 );
-console.log(`wrote initial-singleton-state.mn (${bytes.length} bytes)`);
+console.log(`wrote initial-responder-state.mn (${bytes.length} bytes)`);

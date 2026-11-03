@@ -10,7 +10,7 @@ import {
   decodeRespondBidirectionalEventPayload,
 } from "@sig-net/midnight";
 import { calculateSignetAttestationDigest } from "@sig-net/midnight/testing";
-import { Contract as SingletonContract } from "@sig-net/midnight-contract";
+import { Contract as SignetResponder } from "@sig-net/midnight-responder";
 import { Contract, pureCircuits } from "./managed/api-parity-oracle/contract/index.js";
 
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
@@ -304,8 +304,8 @@ for (const kind of [0, 1, 2] as const) {
   );
 }
 
-const singleton = new SingletonContract({});
-const singletonInitial = await singleton.initialState(
+const responder = new SignetResponder({});
+const responderInitial = await responder.initialState(
   createConstructorContext({}, "44".repeat(32)),
 );
 const wireResponse = {
@@ -316,12 +316,12 @@ const wireResponse = {
     s: Uint8Array.from(response.signature.s).reverse(),
   },
 };
-const emitted = await singleton.circuits.respondBidirectional(
+const emitted = await responder.circuits.respondBidirectional(
   createCircuitContext(
     "respondBidirectional",
     "ab".repeat(32),
     "44".repeat(32),
-    singletonInitial.currentContractState,
+    responderInitial.currentContractState,
     {},
   ),
   wireResponse,
@@ -348,8 +348,8 @@ const fixture = {
   responseEvent,
   compiler: "0.33.0-rc.2",
   runtime: "0.18.0-rc.1",
-  reference: "@sig-net/midnight@0.25.0-rc.1/src/Signet.compact",
-  referenceCommit: "350f9a3080e4b4073e0f1dafaa3603b05c22be92",
+  reference: "@sig-net/midnight@0.26.0-rc.3/src/Signet.compact",
+  referenceCommit: "82e09b230f17817a6e3a078a0bd7c67abe2c0421",
   request: requestVectors[0],
   requestVectors,
   attestations: vectors.map((vector) => ({

@@ -49,7 +49,7 @@ To recapture, run the real vault integration suite, record the node block hash, 
 
 ## Publisher fixtures
 
-`initial-singleton-state.mn` is the singleton's synthesized initial state, never a chain capture: the empty ledger plus the three verifier keys of the `@sig-net/midnight-contract` package `midnight-devtools` installs, written by its `npm run gen:initial-state`. The native publisher's build tests read it as the deployed contract.
+`initial-responder-state.mn` is the responder's synthesized initial state, never a chain capture: the empty ledger plus the two verifier keys of the `@sig-net/midnight-responder` package `midnight-devtools` installs, written by its `npm run gen:initial-state`. The native publisher's build tests read it as the deployed contract.
 
 `dust-events-undeployed.json` is every `dustLedgerEvents` item (`id`, `maxId`, `raw`) a local `undeployed` stack served at finalized block `0x03684af0efbb73e8cd0f6f108f037165cacb380c2022d862cf798581d1ea488e`, on `midnightntwrk/midnight-node:2.0.0-rc.4` and the indexer image `integration-tests` pins. The stack's genesis wallet funded and registered the wallet of seed `04` × 32, which then paid three respond fees. The funding wallet's tests replay it.
 

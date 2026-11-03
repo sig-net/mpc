@@ -24,8 +24,9 @@
   },
   "dependencies": {
     "@midnight-ntwrk/compact-runtime": "0.18.0-rc.1",
-    "@sig-net/midnight-contract": "0.25.0-rc.1",
-    "@sig-net/midnight-contract-deploy": "0.25.0-rc.1"
+    "@sig-net/midnight-contract": "0.26.0-rc.3",
+    "@sig-net/midnight-contract-deploy": "0.26.0-rc.3",
+    "@sig-net/midnight-responder": "0.26.0-rc.3"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -35,7 +36,7 @@
     "@midnight-ntwrk/midnight-js-level-private-state-provider": "5.0.0-beta.6",
     "@midnight-ntwrk/midnight-js-node-zk-config-provider": "5.0.0-beta.6",
     "@midnightntwrk/wallet-sdk-facade": "5.0.0-beta.2",
-    "@sig-net/midnight": "0.25.0-rc.1",
+    "@sig-net/midnight": "0.26.0-rc.3",
     "@sig-net/midnight-respond-oracle": "npm:@sig-net/midnight@0.24.0-rc.10",
     "@types/node": "^22.20.1",
     "eslint": "^10.8.0",
@@ -47,8 +48,8 @@
     "typescript-eslint": "^8.66.0"
   },
   "overrides": {
-    "@sig-net/midnight@0.25.0-rc.1": {
-      "@sig-net/midnight-serde": "0.25.0-rc.1"
+    "@sig-net/midnight@0.26.0-rc.3": {
+      "@sig-net/midnight-serde": "0.26.0-rc.3"
     }
   }
 }

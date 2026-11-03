@@ -6,6 +6,7 @@ import { setNetworkId } from "@midnight-ntwrk/midnight-js/network-id";
 import {
   buildDeployTransaction,
   deploySignetContract,
+  deploySignetResponder,
   deriveAccountKeys,
   deriveWalletAddresses,
   GENESIS_MINT_WALLET_SEED,
@@ -263,6 +264,8 @@ async function bootstrap(request: BootstrapRequest) {
   await fundRoles(request.config);
   diagnostics("deploying central Signet contract");
   const central = await deploySignetContract(deployEnv(request.config, DEPLOYER_SEED));
+  diagnostics("deploying Signet responder");
+  const responder = await deploySignetResponder(deployEnv(request.config, DEPLOYER_SEED));
 
   const deployerKeys = deriveAccountKeys(DEPLOYER_SEED, request.config.networkId);
   const deployerSecret = bytes(DEPLOYER_SEED, 32);
@@ -311,13 +314,14 @@ async function bootstrap(request: BootstrapRequest) {
     reader: new SignetRequestResponseReader({
       requesterContractAddress: callerDeployment.contractAddress,
       requesterRequestsPath: [2],
-      signetContractAddress: central.contractAddress,
+      responderContractAddress: responder.contractAddress,
       publicDataProvider: providers.publicDataProvider,
       eventSource: signetEventSourceFromIndexer({ queryUrl: request.config.indexerUrl }),
     }),
   };
   return {
     centralAddress: central.contractAddress,
+    responderAddress: responder.contractAddress,
     callerAddress: callerDeployment.contractAddress,
     publisherSeed: PUBLISHER_SEED,
   };

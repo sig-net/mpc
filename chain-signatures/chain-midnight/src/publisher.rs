@@ -1,4 +1,4 @@
-//! Publishes finished MPC signatures to the Midnight central contract: one respond
+//! Publishes finished MPC signatures to the Midnight signet responder: one respond
 //! intent per signature, built, proven, paid for and posted in process.
 
 use std::future::Future;
@@ -82,13 +82,13 @@ struct RespondCall {
     attestation: Option<WireAttestation>,
 }
 
-/// Posts MPC responses back to the Midnight central contract.
+/// Posts MPC responses to the Midnight signet responder.
 pub struct MidnightPublisher {
     config: PublisherConfig,
     reads: Arc<dyn PinnedReads>,
     client: Arc<dyn IntentClient>,
     output_store: Option<Arc<dyn OutputStore>>,
-    central_address: MidnightAddress,
+    responder_address: MidnightAddress,
     telemetry: Arc<dyn PublisherTelemetry>,
     awaiter: Arc<dyn ResponseAwaiter>,
     /// One funding wallet and one DUST UTXO mean build-to-submit is one serial flow.
@@ -133,7 +133,7 @@ impl MidnightPublisher {
         ));
         Ok(Self::new(
             &config.publisher,
-            config.central_address,
+            config.responder_address,
             rpc,
             client,
             output_store,
@@ -144,7 +144,7 @@ impl MidnightPublisher {
 
     fn new(
         config: &PublisherConfig,
-        central_address: MidnightAddress,
+        responder_address: MidnightAddress,
         reads: Arc<dyn PinnedReads>,
         client: Arc<dyn IntentClient>,
         output_store: Option<Arc<dyn OutputStore>>,
@@ -153,7 +153,7 @@ impl MidnightPublisher {
     ) -> Self {
         Self {
             config: config.clone(),
-            central_address,
+            responder_address,
             reads,
             client,
             output_store,
@@ -188,13 +188,13 @@ impl MidnightPublisher {
     }
 
     /// The contract state and ledger parameters at one finalized hash.
-    async fn pin(&self, central_address: &str, at_hash: String) -> anyhow::Result<PinnedState> {
+    async fn pin(&self, responder_address: &str, at_hash: String) -> anyhow::Result<PinnedState> {
         let contract_state = self
             .reads
-            .contract_state(central_address, &at_hash)
+            .contract_state(responder_address, &at_hash)
             .await?
             .with_context(|| {
-                format!("midnight central contract {central_address} is not present at {at_hash}")
+                format!("midnight responder {responder_address} is not present at {at_hash}")
             })?;
         let ledger_parameters = self.reads.ledger_parameters(&at_hash).await?;
         Ok(PinnedState {
@@ -241,12 +241,12 @@ impl ChainPublisher for MidnightPublisher {
         if !self.still_awaited(action, "queued").await? {
             return Ok(());
         }
-        let central_address = self.central_address.to_hex();
+        let responder_address = self.responder_address.to_hex();
         let sign_id = action.request.id;
         tracing::info!(
             ?sign_id,
             circuit = call.circuit.wire_name(),
-            central = %central_address,
+            responder = %responder_address,
             request_id = %hex::encode(call.request_id),
             elapsed = ?action.timestamp.elapsed(),
             ?queued_for,
@@ -255,10 +255,10 @@ impl ChainPublisher for MidnightPublisher {
 
         // One head for every read below it.
         let at_hash = self.reads.finalized_head().await?;
-        let chain = self.pin(&central_address, at_hash).await?;
+        let chain = self.pin(&responder_address, at_hash).await?;
         let request = IntentRequest {
             circuit: call.circuit.wire_name(),
-            contract_address: central_address,
+            contract_address: responder_address,
             request_id: hex::encode(call.request_id),
             signature: call.signature.clone(),
             attestation: call.attestation,
@@ -485,15 +485,17 @@ mod tests {
         SignBidirectionalEvent, SignId, SignKind,
     };
 
-    /// An arbitrary well-formed central address.
+    /// An arbitrary well-formed central address, which namespaces the output cache.
     const CENTRAL: &str = "d7b3c45da613be25050bbdf3fde4cef8f66154d3a52ca8c1edd878bd6391f169";
+    /// An arbitrary well-formed responder address, which responses are posted to.
+    const RESPONDER: &str = "6e1f0c2a9b8d7e5f4a3c2b1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f";
     const REQUEST_ID: [u8; 32] = [0x5c; 32];
     /// Two different heads, so a per-read re-reader cannot pass the one-hash assertion.
     const HEAD_ONE: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
     const HEAD_TWO: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
 
     /// Distinct per read, so a test can tell which read produced which bytes.
-    const CONTRACT_STATE: &[u8] = include_bytes!("../fixtures/initial-singleton-state.mn");
+    const CONTRACT_STATE: &[u8] = include_bytes!("../fixtures/initial-responder-state.mn");
     const LEDGER_PARAMETERS: &[u8] = b"ledger-parameters";
 
     /// One read the publisher made: which surface, and at which hash.
@@ -1286,7 +1288,7 @@ mod tests {
     ) -> MidnightPublisher {
         MidnightPublisher::new(
             &config(),
-            MidnightAddress::from_hex(CENTRAL).expect("CENTRAL is a 32-byte hex address"),
+            MidnightAddress::from_hex(RESPONDER).expect("RESPONDER is a 32-byte hex address"),
             StubReads::new(),
             client,
             Some(Arc::new(StubOutputStore::default())),
@@ -1500,7 +1502,7 @@ mod tests {
     ) -> MidnightPublisher {
         MidnightPublisher::new(
             &config(),
-            MidnightAddress::from_hex(CENTRAL).expect("CENTRAL is a 32-byte hex address"),
+            MidnightAddress::from_hex(RESPONDER).expect("RESPONDER is a 32-byte hex address"),
             reads,
             client,
             Some(Arc::new(StubOutputStore::default())),
@@ -1633,8 +1635,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_central_contract_absent_at_the_pinned_hash_fails_the_publish() {
-        // A wrong central address or a node that cannot reach the block: either way
+    async fn a_responder_absent_at_the_pinned_hash_fails_the_publish() {
+        // A wrong responder address or a node that cannot reach the block: either way
         // there is nothing to prove against.
         let publisher = publisher(StubReads::absent(), StubClient::new());
 
@@ -1660,8 +1662,8 @@ mod tests {
 
         let [request] = client.built().try_into().expect("one build per publish");
         assert_eq!(request.circuit, RESPOND);
-        assert_eq!(request.contract_address, CENTRAL);
-        assert_eq!(reads.contract_addresses(), [CENTRAL]);
+        assert_eq!(request.contract_address, RESPONDER);
+        assert_eq!(reads.contract_addresses(), [RESPONDER]);
         assert_eq!(request.request_id, hex::encode(REQUEST_ID));
         assert_eq!(request.contract_state, hex::encode(CONTRACT_STATE));
         assert_eq!(request.ledger_parameters, hex::encode(LEDGER_PARAMETERS));
@@ -1701,7 +1703,7 @@ mod tests {
 
         let [request] = client.built().try_into().expect("one build per publish");
         assert_eq!(request.circuit, RESPOND_BIDIRECTIONAL);
-        assert_eq!(request.contract_address, CENTRAL);
+        assert_eq!(request.contract_address, RESPONDER);
         assert_eq!(request.request_id, hex::encode(REQUEST_ID));
         assert_eq!(
             request.attestation,
@@ -1773,6 +1775,8 @@ mod tests {
             node_url: "ftp://127.0.0.1:1".to_string(),
             central_address: MidnightAddress::from_hex(CENTRAL)
                 .expect("CENTRAL is a 32-byte hex address"),
+            responder_address: MidnightAddress::from_hex(RESPONDER)
+                .expect("RESPONDER is a 32-byte hex address"),
             publisher: PublisherConfig {
                 funding_seed: "ab".repeat(32),
                 indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),

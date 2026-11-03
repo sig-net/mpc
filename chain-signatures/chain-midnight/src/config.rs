@@ -96,7 +96,7 @@ pub struct PublisherConfig {
     /// The indexer's GraphQL subscription URL: spendable DUST derives only from the
     /// ledger events it serves.
     pub indexer_ws_url: String,
-    /// The singleton's packaged proving artifacts, `@sig-net/midnight-contract`'s
+    /// The responder's packaged proving artifacts, `@sig-net/midnight-responder`'s
     /// `dist/managed`: `keys/<circuit>.{prover,verifier}` and `zkir/<circuit>.bzkir`.
     pub contract_artifacts_dir: PathBuf,
     /// The KZG parameters and DUST spend keys. A missing file is fetched into it from
@@ -115,7 +115,7 @@ impl Default for PublisherConfig {
             funding_seed: String::new(),
             indexer_ws_url: String::new(),
             // Where the node image installs them.
-            contract_artifacts_dir: PathBuf::from("/usr/local/share/midnight/signet-contract"),
+            contract_artifacts_dir: PathBuf::from("/usr/local/share/midnight/signet-responder"),
             zk_params_dir: PathBuf::from("/usr/local/share/midnight/zk-params"),
             request_timeout: Duration::from_secs(120),
             submit_timeout: Duration::from_secs(420),
@@ -169,8 +169,10 @@ impl MidnightAddress {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MidnightConfig {
     pub node_url: String,
-    /// Address of the central singleton contract.
+    /// Address of the central singleton contract, where clients notify their requests.
     pub central_address: MidnightAddress,
+    /// Address of the signet responder contract, where responses are posted and read.
+    pub responder_address: MidnightAddress,
     pub publisher: PublisherConfig,
     pub rpc: RpcConfig,
     pub indexer: IndexerConfig,
@@ -183,6 +185,10 @@ impl MidnightConfig {
             "midnight config: node_url must use a lowercase http or https scheme"
         );
         validate_url("node_url", &self.node_url, &["http", "https"])?;
+        anyhow::ensure!(
+            self.responder_address != self.central_address,
+            "midnight config: responder_address must differ from central_address"
+        );
         anyhow::ensure!(
             !self.indexer.poll_interval.is_zero(),
             "midnight config: indexer.poll_interval must be greater than zero"
@@ -306,6 +312,7 @@ mod tests {
         MidnightConfig {
             node_url: "http://127.0.0.1:9944".to_string(),
             central_address: MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: MidnightAddress::from_bytes([0xcd; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
@@ -471,6 +478,9 @@ mod tests {
             }),
             ("indexer_ws_url", |config: &mut MidnightConfig| {
                 config.publisher.indexer_ws_url = "http://127.0.0.1:8088".to_string();
+            }),
+            ("responder_address", |config: &mut MidnightConfig| {
+                config.responder_address = config.central_address;
             }),
         ] {
             let mut invalid = valid_config();
