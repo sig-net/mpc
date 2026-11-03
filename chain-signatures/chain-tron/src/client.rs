@@ -8,7 +8,7 @@ use url::Url;
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, SharedBackoff};
 
 use crate::config::TronConfig;
-use crate::types::{BroadcastOutcome, NowBlock, TronLog, TronReceipt};
+use crate::types::{BroadcastOutcome, NowBlock, SolidifiedBlock, TronLog, TronReceipt};
 use mpc_tron_wire::{encoding::decode_bytes, parse_hex, TronAddress};
 
 /// Tron HTTP client for interacting with the Tron blockchain.
@@ -55,19 +55,40 @@ impl TronHttp {
         )
     }
 
-    /// `POST /walletsolidity/getnowblock` — the solidified head; used for the
-    /// expiration check.
-    pub async fn get_now_block_solidity(&self) -> anyhow::Result<SolidifiedNowBlock> {
+    /// `POST /walletsolidity/getnowblock` — the solidified head as a
+    /// [`SolidifiedBlock`] with empty `txids` (the response carries no
+    /// transactions; the head only gates the expiry scan).
+    pub async fn get_now_block_solidity(&self) -> anyhow::Result<SolidifiedBlock> {
         retry_rpc!(
             self.request_timeout,
             self.retry,
             self.gate,
             "get_now_block_solidity",
             {
-                let response: NowBlockResponse = self
+                let response: SolidBlockResponse = self
                     .post_json("walletsolidity/getnowblock", &serde_json::json!({}))
                     .await?;
-                response.into_now_block().map(SolidifiedNowBlock)
+                response.into_block().context("solidified head absent")
+            }
+        )
+    }
+
+    /// `POST /walletsolidity/getblockbynum` — one final block's
+    /// header and resident txIDs; `Ok(None)` means not solidified yet.
+    pub async fn get_block_solidity(&self, number: u64) -> anyhow::Result<Option<SolidifiedBlock>> {
+        retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            self.gate,
+            "get_block_solidity",
+            {
+                let response: SolidBlockResponse = self
+                    .post_json(
+                        "walletsolidity/getblockbynum",
+                        &serde_json::json!({ "num": number }),
+                    )
+                    .await?;
+                Ok(response.into_block())
             }
         )
     }
@@ -194,18 +215,6 @@ fn decode_hex_ascii(s: &str) -> String {
         .unwrap_or_else(|| s.to_string())
 }
 
-/// The `/walletsolidity` view's head — only it may reach the expiry
-/// attestation.
-#[derive(Debug, Clone, Copy)]
-pub struct SolidifiedNowBlock(pub(crate) NowBlock);
-
-impl std::ops::Deref for SolidifiedNowBlock {
-    type Target = NowBlock;
-    fn deref(&self) -> &NowBlock {
-        &self.0
-    }
-}
-
 /// Response structure for the `now` block query.
 #[derive(Deserialize)]
 struct NowBlockResponse {
@@ -225,6 +234,40 @@ struct NowBlockHeader {
 struct NowBlockRawData {
     number: u64,
     timestamp: u64,
+}
+
+/// Response structure for `getblockbynum`/`getnowblock` on the
+/// solidity router; `{}` (not solidified) reads as an absent header.
+#[derive(Deserialize)]
+struct SolidBlockResponse {
+    #[serde(default)]
+    block_header: Option<NowBlockHeader>,
+    #[serde(default)]
+    transactions: Vec<SolidBlockTx>,
+}
+
+/// One resident transaction; only its hex `txID` is read.
+#[derive(Deserialize)]
+struct SolidBlockTx {
+    #[serde(rename = "txID", default)]
+    tx_id: Option<String>,
+}
+
+impl SolidBlockResponse {
+    fn into_block(self) -> Option<SolidifiedBlock> {
+        let raw = self.block_header?.raw_data;
+        Some(SolidifiedBlock {
+            number: raw.number,
+            timestamp: raw.timestamp as i64,
+            txids: self
+                .transactions
+                .iter()
+                .filter_map(|tx| tx.tx_id.as_deref())
+                .filter_map(|id| id.parse::<B256>().ok())
+                .map(|id| id.0)
+                .collect(),
+        })
+    }
 }
 
 impl NowBlockResponse {
@@ -434,6 +477,54 @@ mod tests {
         let block = client.get_now_block_solidity().await.unwrap();
         assert_eq!(block.number, 72_266_582);
         assert_eq!(block.timestamp, 1_793_335_731_000);
+    }
+
+    #[tokio::test]
+    async fn solidity_block_parses_the_recorded_nile_body() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        // Recorded 2026-10-31 off api.nileex.io
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .match_body(Matcher::PartialJson(
+                serde_json::json!({ "num": 71_896_096 }),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(include_str!(
+                "../tests/fixtures/nile/solid-block-71896096.json"
+            ))
+            .create_async()
+            .await;
+
+        let block = client
+            .get_block_solidity(71_896_096)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(block.number, 71_896_096);
+        assert_eq!(block.timestamp, 1_792_220_499_000);
+        assert_eq!(block.txids.len(), 9);
+        assert_eq!(
+            block.txids[0],
+            "b4e8076ad07087c23b857a4649686954f235b57425bce5205295a5f5e9274e88"
+                .parse::<B256>()
+                .unwrap()
+                .0
+        );
+    }
+
+    #[tokio::test]
+    async fn solidity_block_absent_reads_as_none() {
+        let (mut server, client) = test_client(fast_retry()).await;
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        assert!(client.get_block_solidity(99).await.unwrap().is_none());
     }
 
     #[test]
