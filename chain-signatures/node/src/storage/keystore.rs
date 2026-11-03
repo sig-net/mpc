@@ -232,7 +232,7 @@ mod tests {
 
         let storage = FileKeystore { path };
 
-        assert!(storage.load().await.is_err());
+        assert!(matches!(storage.load().await, Err(KeystoreError::Serde(_))));
     }
 
     #[tokio::test]
