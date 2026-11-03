@@ -104,7 +104,7 @@ build target="":
     elif [ "{{target}}" = "contract" ]; then \
       ./build-contract.sh && mkdir -p target/wasm32-unknown-unknown/release && cp target/near/mpc_contract/mpc_contract.wasm target/wasm32-unknown-unknown/release/mpc_contract.wasm; \
     elif [ "{{target}}" = "midnight" ]; then \
-      cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-caller && npm run compile:real-stack-vault && npm run typecheck:real-stack; \
+      cd chain-signatures/midnight-devtools && npm ci && npm run compile:real-stack-caller && npm run compile:real-stack-vault && npm run typecheck:real-stack; \
     elif [ "{{target}}" = "tests" ]; then \
       cargo build -p integration-tests --tests; \
     elif [ "{{target}}" = "compat" ]; then \

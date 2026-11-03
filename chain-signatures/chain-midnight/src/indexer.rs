@@ -1368,7 +1368,7 @@ mod tests {
             let mut source = FixtureSource::default();
             source.set_emissions(
                 9,
-                vec![SingletonCallEmissions {
+                vec![ContractCallEmissions {
                     phase: crate::emissions::TranscriptPhase::Guaranteed,
                     physical_segment: 1,
                     call_index: 1,

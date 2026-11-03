@@ -9,6 +9,8 @@ TypeScript test tooling for the MPC node's Midnight integration. Nothing here sh
 - `devtools/generate-midnight-respond-vectors.ts`: writes the `midnight-respond-codec` test vectors.
 - `devtools/gen-initial-state.ts`: writes `chain-midnight/fixtures/initial-responder-state.mn`, the responder's initial state with the installed package's verifier keys.
 - `devtools/bootstrap-live.ts`: funds a deployer wallet and deploys a fresh responder on a live network.
+- `devtools/real-stack/vault.ts` and its `vault-*.ts` helpers: drive `erc20-vault.compact`, an unmodified copy of the example vault; `provenance.json` records its source commit, compiler, the Signet library it was written against, and SHA-256. Here it is compiled against the pinned `@sig-net/midnight`, like the caller.
+- `devtools/real-stack/fallible.ts` and `adversarial.ts`: build the transactions that place singleton notifications in guaranteed and fallible transcripts, and the partially successful shapes from the partial-success review; `placement.ts` reads where the ledger will run each call.
 
 The installed `@sig-net/midnight-responder` package is also where local runs and the real-stack tests read the responder's proving artifacts from (`node_modules/@sig-net/midnight-responder/dist/managed`).
 
@@ -23,4 +25,4 @@ npm run lint
 npm run typecheck
 ```
 
-`npm run compile:real-stack-caller` compiles the real-stack caller and the API parity oracle; run it before `npm run typecheck:real-stack`. `npm run gen:api-parity-vectors`, `npm run gen:midnight-respond-vectors` and `npm run gen:initial-state` regenerate the fixtures above.
+`npm run compile:real-stack-caller` compiles the real-stack caller and the API parity oracle, and `npm run compile:real-stack-vault` the vault; run both before `npm run typecheck:real-stack`. `npm run gen:api-parity-vectors`, `npm run gen:midnight-respond-vectors` and `npm run gen:initial-state` regenerate the fixtures above.

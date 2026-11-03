@@ -102,6 +102,7 @@ export interface VaultRunInput {
   config: MidnightNodeConfig;
   artifactDir: string;
   centralAddress: string;
+  responderAddress: string;
   mpcPublicKey: string;
   evmRpcUrl: string;
   evmFunderKey: string;
@@ -266,7 +267,7 @@ class VaultRun {
     return new SignetRequestResponseReader({
       requesterContractAddress: this.vaultAddress,
       requesterRequestsPath: REQUEST_MAPS[action].path,
-      signetContractAddress: this.input.centralAddress,
+      responderContractAddress: this.input.responderAddress,
       publicDataProvider: this.providers.publicDataProvider,
       eventSource: signetEventSourceFromIndexer({ queryUrl: this.input.config.indexerUrl }),
     });

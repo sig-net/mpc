@@ -173,6 +173,7 @@ interface Session {
   caller: CallerHandle;
   callerAddress: string;
   centralAddress: string;
+  responderAddress: string;
   impersonator: CallerHandle;
   publicDataProvider: SignetPublicStateSource;
   reader: SignetRequestResponseReader;
@@ -403,6 +404,7 @@ async function bootstrap(request: BootstrapRequest) {
     caller,
     callerAddress: callerDeployment.contractAddress,
     centralAddress: central.contractAddress,
+    responderAddress: responder.contractAddress,
     impersonator,
     publicDataProvider: providers.publicDataProvider,
     reader: new SignetRequestResponseReader({
@@ -470,6 +472,7 @@ async function dispatch(request: Request): Promise<unknown> {
       config: active.config,
       artifactDir: active.artifactDir,
       centralAddress: active.centralAddress,
+      responderAddress: active.responderAddress,
       mpcPublicKey: request.mpcPublicKey,
       evmRpcUrl: request.evmRpcUrl,
       evmFunderKey: request.evmFunderKey,
