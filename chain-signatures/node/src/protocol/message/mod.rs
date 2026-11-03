@@ -15,8 +15,8 @@ pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, PositMessage, PositProtocolId, PresignatureMessage,
     ReadyMessage, ResharingMessage, SignatureMessage, TripleMessage,
 };
-pub(crate) use crypto::cbor_to_bytes;
-pub use crypto::SignedMessage;
+pub(crate) use crypto::{cbor_to_bytes, signed_after_start};
+pub use crypto::{now_millis, MessageDomain, Opened, SignedMessage};
 pub use inbox::MessageInbox;
 pub use outbox::{MessageOutbox, SendMessage};
 pub use sub::{PresignaturePosit, SignaturePosit, Subscriber, TriplePosit};
@@ -88,7 +88,7 @@ impl MessageChannel {
         contract: ContractStateWatcher,
     ) -> Self {
         let (inbox, outbox, channel) = Self::new();
-        tokio::spawn(inbox.run(network.cipher_sk, contract.clone()));
+        tokio::spawn(inbox.run(network.cipher_sk, config.clone(), contract.clone()));
         tokio::spawn(outbox.run(client, network.sign_sk, config, contract));
 
         channel

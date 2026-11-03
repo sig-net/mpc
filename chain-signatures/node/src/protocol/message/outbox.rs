@@ -99,6 +99,7 @@ impl MessageOutbox {
                 let message = match SignedMessage::encrypt(
                     &partition.messages,
                     from,
+                    &info.account_id,
                     sign_sk,
                     &info.cipher_pk,
                 ) {
