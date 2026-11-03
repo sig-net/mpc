@@ -525,9 +525,9 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         displaced
             .into_iter()
             .filter(|(_, tx)| {
-                !consumed_slots
+                consumed_slots
                     .get(&(Address::from(tx.from_address), tx.nonce))
-                    .is_some_and(|taker| taker.serialized_transaction != tx.serialized_transaction)
+                    .is_none_or(|taker| taker.serialized_transaction == tx.serialized_transaction)
             })
             .map(|(sign_id, _)| sign_id)
             .collect()
