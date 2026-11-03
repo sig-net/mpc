@@ -24,17 +24,16 @@ variables:
 | `account_sk`     | `MPC_SOL_ACCOUNT_SK`     | yes       | payer keypair (base58) for respond transactions |
 | `rpc_http_url`   | `MPC_SOL_RPC_HTTP_URL`   | yes       | JSON-RPC endpoint (Helius, Alchemy, …) |
 | `program_address`| `MPC_SOL_PROGRAM_ADDRESS`| yes       | signet program id (base58) |
-| `indexer.poll_interval` | `MPC_SOL_POLL_INTERVAL_MS` | no | default `1000`; finalized slots advance ~every 400ms |
 
 ### Stall budgets
 
-Chain-config env vars (see `ChainConfig` in `chain-signatures/primitives/src/chain.rs`),
+`ChainConfig` budgets (see `chain-signatures/primitives/src/chain.rs`),
 consumed by the node's stream supervisor — not `SolConfig` fields:
 
-| env var | default | trips on |
+| budget | value | trips on |
 |---|---|---|
-| `FEED_STALL_TIMEOUT_SOLANA` | 60s | observed anchor slot frozen (lagging/frozen RPC replica) — fails `run()` immediately |
-| `STALL_TIMEOUT_SOLANA` | 315s | no `ChainEvent::Block` dispatched — supervisor watchdog restart |
+| `feed_stall_timeout_secs` | 60s | observed anchor slot frozen (lagging/frozen RPC replica) — fails `run()` immediately |
+| `stall_timeout_secs` | 315s | no `ChainEvent::Block` dispatched — supervisor watchdog restart |
 
 Restarts back off exponentially (1s → 30s). 
 

@@ -7,7 +7,6 @@ use crate::mpc_fixture::mock_stream::{MockIndexer, MockStream};
 use cait_sith::protocol::Participant;
 use mpc_chain_integration_core::NoopChainTelemetry;
 use mpc_keys::hpke::Ciphered;
-use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
 use mpc_node::rpc::RpcAction;
@@ -28,7 +27,7 @@ pub(super) fn test_mock_network(
     mut outbox: MessageOutbox,
     mut rpc_rx: Receiver<RpcAction>,
     mesh: watch::Sender<MeshState>,
-    config: watch::Sender<Config>,
+    sign_sk: near_crypto::SecretKey,
     mut filter: MessageFilter,
     mock_chain: Option<MockChain>,
 ) -> JoinHandle<()> {
@@ -52,7 +51,6 @@ pub(super) fn test_mock_network(
 
                     // directly send out single message, no batching
                     // (might want to add MessageOutbox, too, but for now this is easier)
-                    let config = config.borrow().clone();
                     let participants = mesh.borrow().active().clone();
                     let SendMessage { message: msg, from, to, .. } = &send_message;
                     let receiver_info = participants
@@ -62,7 +60,7 @@ pub(super) fn test_mock_network(
                     match SignedMessage::encrypt(
                         &[msg],
                         *from,
-                        &config.network.sign_sk,
+                        &sign_sk,
                         &receiver_info.cipher_pk,
                     ) {
                         Ok(ciphered) => {

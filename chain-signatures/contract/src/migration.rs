@@ -16,7 +16,7 @@
 //! This module allows us to keep track of rolling updates to the underlying contract
 //! state as deployments progress.
 
-use crate::config::Config;
+use crate::config::ProtocolConfig;
 use crate::errors::{Error, InvalidState};
 use crate::primitives::{
     Candidates, CheckpointVotes, Participants, PendingRequest, ReshareVotes, ThresholdVotes, Votes,
@@ -31,6 +31,97 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use mpc_primitives::{Chain, CheckpointDigest, SignId};
 use near_sdk::store::IterableMap;
 use near_sdk::PublicKey;
+use std::collections::HashMap;
+
+/// Config as currently deployed on every network: carries the removed timeouts,
+/// network-wide stockpile caps and the dynamic `other` maps (borsh: each value is
+/// a JSON byte vector; every live map is empty).
+#[derive(BorshDeserialize, BorshSerialize)]
+pub(crate) struct PreviousConfig {
+    pub protocol: PreviousProtocolConfig,
+    pub other: HashMap<String, Vec<u8>>,
+}
+
+#[derive(BorshDeserialize, BorshSerialize)]
+pub(crate) struct PreviousProtocolConfig {
+    pub message_timeout: u64,
+    pub garbage_timeout: u64,
+    pub max_concurrent_introduction: u32,
+    pub max_concurrent_generation: u32,
+    pub triple: PreviousTripleConfig,
+    pub presignature: PreviousPresignatureConfig,
+    pub signature: PreviousSignatureConfig,
+    pub other: HashMap<String, Vec<u8>>,
+}
+
+#[derive(BorshDeserialize, BorshSerialize)]
+pub(crate) struct PreviousTripleConfig {
+    pub min_triples: u32,
+    pub max_triples: u32,
+    pub generation_timeout: u64,
+    pub other: HashMap<String, Vec<u8>>,
+}
+
+#[derive(BorshDeserialize, BorshSerialize)]
+pub(crate) struct PreviousPresignatureConfig {
+    pub min_presignatures: u32,
+    pub max_presignatures: u32,
+    pub generation_timeout: u64,
+    pub other: HashMap<String, Vec<u8>>,
+}
+
+#[derive(BorshDeserialize, BorshSerialize)]
+pub(crate) struct PreviousSignatureConfig {
+    pub generation_timeout: u64,
+    pub generation_timeout_total: u64,
+    pub garbage_timeout: u64,
+    pub other: HashMap<String, Vec<u8>>,
+}
+
+impl PreviousConfig {
+    fn upgrade(self) -> ProtocolConfig {
+        let p = self.protocol;
+        ProtocolConfig {
+            min_mine_triple_pairs: p.triple.min_triples,
+            min_mine_presignatures: p.presignature.min_presignatures,
+            max_mine_generations: p.max_concurrent_introduction,
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<ProtocolConfig> for PreviousConfig {
+    fn from(p: ProtocolConfig) -> Self {
+        Self {
+            protocol: PreviousProtocolConfig {
+                message_timeout: 0,
+                garbage_timeout: 0,
+                max_concurrent_introduction: p.max_mine_generations,
+                max_concurrent_generation: 0,
+                triple: PreviousTripleConfig {
+                    min_triples: p.min_mine_triple_pairs,
+                    max_triples: 0,
+                    generation_timeout: 0,
+                    other: HashMap::new(),
+                },
+                presignature: PreviousPresignatureConfig {
+                    min_presignatures: p.min_mine_presignatures,
+                    max_presignatures: 0,
+                    generation_timeout: 0,
+                    other: HashMap::new(),
+                },
+                signature: PreviousSignatureConfig {
+                    generation_timeout: 0,
+                    generation_timeout_total: 0,
+                    garbage_timeout: 0,
+                    other: HashMap::new(),
+                },
+                other: HashMap::new(),
+            },
+            other: HashMap::new(),
+        }
+    }
+}
 
 #[derive(BorshDeserialize, BorshSerialize)]
 #[allow(dead_code)]
@@ -72,13 +163,14 @@ impl PreviousProtocolContractState {
     }
 }
 
-/// The state currently deployed on devnet (`dev.sig-net.testnet`).
+/// The state currently deployed on devnet (`dev.sig-net.testnet`): the current
+/// protocol state with the previous config layout.
 #[derive(BorshDeserialize, BorshSerialize)]
 pub(crate) struct PreviousDevnet {
-    pub protocol_state: PreviousProtocolContractState,
+    pub protocol_state: ProtocolContractState,
     pub pending_requests: IterableMap<SignId, PendingRequest>,
     pub proposed_updates: ProposedUpdates,
-    pub config: Config,
+    pub config: PreviousConfig,
     pub latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
     pub checkpoint_votes: CheckpointVotes,
 }
@@ -86,10 +178,10 @@ pub(crate) struct PreviousDevnet {
 impl PreviousDevnet {
     fn upgrade(self) -> MpcContract {
         MpcContract {
-            protocol_state: self.protocol_state.upgrade(),
+            protocol_state: self.protocol_state,
             pending_requests: self.pending_requests,
             proposed_updates: self.proposed_updates,
-            config: self.config,
+            config: self.config.upgrade(),
             latest_checkpoints: self.latest_checkpoints,
             checkpoint_votes: self.checkpoint_votes,
         }
@@ -102,7 +194,7 @@ pub(crate) struct PreviousTestnet {
     pub protocol_state: PreviousProtocolContractState,
     pub pending_requests: IterableMap<SignId, PendingRequest>,
     pub proposed_updates: ProposedUpdates,
-    pub config: Config,
+    pub config: PreviousConfig,
     pub latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
     pub checkpoint_votes: CheckpointVotes,
 }
@@ -113,7 +205,7 @@ impl PreviousTestnet {
             protocol_state: self.protocol_state.upgrade(),
             pending_requests: self.pending_requests,
             proposed_updates: self.proposed_updates,
-            config: self.config,
+            config: self.config.upgrade(),
             latest_checkpoints: self.latest_checkpoints,
             checkpoint_votes: self.checkpoint_votes,
         }
@@ -126,7 +218,7 @@ pub(crate) struct PreviousMainnet {
     pub protocol_state: PreviousProtocolContractState,
     pub pending_requests: IterableMap<SignId, PendingRequest>,
     pub proposed_updates: ProposedUpdates,
-    pub config: Config,
+    pub config: PreviousConfig,
     pub latest_checkpoints: IterableMap<Chain, CheckpointDigest>,
     pub checkpoint_votes: CheckpointVotes,
 }
@@ -137,7 +229,7 @@ impl PreviousMainnet {
             protocol_state: self.protocol_state.upgrade(),
             pending_requests: self.pending_requests,
             proposed_updates: self.proposed_updates,
-            config: self.config,
+            config: self.config.upgrade(),
             latest_checkpoints: self.latest_checkpoints,
             checkpoint_votes: self.checkpoint_votes,
         }
@@ -223,10 +315,37 @@ mod tests {
         testing_env!(VMContextBuilder::new().build());
 
         let devnet = PreviousDevnet {
-            protocol_state: PreviousProtocolContractState::NotInitialized,
+            protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
-            config: Config::default(),
+            config: PreviousConfig {
+                protocol: PreviousProtocolConfig {
+                    message_timeout: 1,
+                    garbage_timeout: 2,
+                    max_concurrent_introduction: 3,
+                    max_concurrent_generation: 4,
+                    triple: PreviousTripleConfig {
+                        min_triples: 5,
+                        max_triples: 6,
+                        generation_timeout: 7,
+                        other: HashMap::new(),
+                    },
+                    presignature: PreviousPresignatureConfig {
+                        min_presignatures: 8,
+                        max_presignatures: 9,
+                        generation_timeout: 10,
+                        other: HashMap::new(),
+                    },
+                    signature: PreviousSignatureConfig {
+                        generation_timeout: 11,
+                        generation_timeout_total: 12,
+                        garbage_timeout: 13,
+                        other: HashMap::new(),
+                    },
+                    other: HashMap::new(),
+                },
+                other: HashMap::new(),
+            },
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
         };
@@ -237,6 +356,9 @@ mod tests {
             migrated.protocol_state,
             ProtocolContractState::NotInitialized
         ));
+        assert_eq!(migrated.config.min_mine_triple_pairs, 5);
+        assert_eq!(migrated.config.min_mine_presignatures, 8);
+        assert_eq!(migrated.config.max_mine_generations, 3);
     }
 
     #[test]
@@ -247,7 +369,7 @@ mod tests {
             protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
-            config: Config::default(),
+            config: ProtocolConfig::default(),
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
         };
@@ -296,7 +418,7 @@ mod tests {
             }),
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
-            config: Config::default(),
+            config: ProtocolConfig::default(),
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpointDigests),
             checkpoint_votes: CheckpointVotes::new(),
         };

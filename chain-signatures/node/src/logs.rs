@@ -54,19 +54,6 @@ impl Default for Options {
 }
 
 impl Options {
-    pub fn into_str_args(self) -> Vec<String> {
-        let mut opts = vec![
-            "--opentelemetry-level".to_string(),
-            self.opentelemetry_level.to_string(),
-            "--otlp-endpoint".to_string(),
-            self.otlp_endpoint,
-        ];
-        if self.disable_gcp_logs {
-            opts.push("--disable-gcp-logs".to_string());
-        }
-        opts
-    }
-
     pub fn test() -> Self {
         Self {
             disable_gcp_logs: true,
@@ -267,6 +254,13 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
                 .with_filter(otlp_filter),
         )
         .init();
+    // Panics go through tracing so the line explaining a restart reaches OTLP.
+    // The default hook still runs afterwards, so `RUST_BACKTRACE` keeps working.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, "task panicked");
+        default_hook(info);
+    }));
     tracing::info!(gcp_logs = on_gcp, "Set global logging subscriber");
 
     tracing::info!(

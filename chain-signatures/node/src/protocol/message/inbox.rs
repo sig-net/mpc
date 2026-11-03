@@ -8,7 +8,6 @@ use crate::protocol::message::sub::{
 };
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::triple::TripleId;
-use crate::protocol::Config;
 use crate::rpc::ContractStateWatcher;
 
 use crate::protocol::message::types::{
@@ -20,7 +19,7 @@ use cait_sith::protocol::Participant;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_primitives::SignId;
 use near_crypto::Signature;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -409,11 +408,7 @@ impl MessageInbox {
         }
     }
 
-    pub async fn run(
-        mut self,
-        config: watch::Receiver<Config>,
-        mut contract: ContractStateWatcher,
-    ) {
+    pub async fn run(mut self, cipher_sk: hpke::SecretKey, mut contract: ContractStateWatcher) {
         loop {
             // Without a contract state we know no participant and could verify
             // nothing. Messages wait in the channel until the first one arrives,
@@ -427,10 +422,8 @@ impl MessageInbox {
                 _ = contract.next_state(), if !has_state => {}
                 Some(encrypted) = self.inbox_rx.recv(), if has_state => {
                     set_channel_capacity_tx("incoming", &self.inbox_tx);
-                    let config = config.borrow().clone();
                     let participants = contract.participant_map().await;
                     let me = contract.me().await;
-                    let cipher_sk = config.network.cipher_sk;
 
                     let batch = self.decrypt(&encrypted, &cipher_sk, &participants);
                     let messages = Self::verify_senders(batch, me);
@@ -457,7 +450,6 @@ impl MessageInbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, NetworkConfig};
     use crate::protocol::contract::primitives::Participants;
     use crate::protocol::message::{MessageChannel, SignedMessage};
     use crate::protocol::ParticipantInfo;
@@ -466,6 +458,7 @@ mod tests {
 
     use mpc_keys::hpke;
     use std::time::Duration;
+    use tokio::sync::watch;
 
     struct InboxTestSetup {
         epoch: u64,
@@ -474,7 +467,6 @@ mod tests {
         cipher_pk: hpke::PublicKey,
         channel: MessageChannel,
         inbox: tokio::task::JoinHandle<()>,
-        _config_tx: watch::Sender<Config>,
         _contract_tx: watch::Sender<Option<crate::protocol::ProtocolState>>,
     }
 
@@ -502,10 +494,6 @@ mod tests {
             }
             map
         };
-        let (_config_tx, config_rx) = Config::channel(NetworkConfig {
-            sign_sk: sign_sk.clone(),
-            cipher_sk,
-        });
         let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
             &node_id,
             root_sk.public_key().into_affine_point(),
@@ -513,7 +501,7 @@ mod tests {
             participants,
         );
         let (inbox, _outbox, channel) = MessageChannel::new();
-        let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
+        let inbox = tokio::spawn(inbox.run(cipher_sk, contract_watcher));
 
         InboxTestSetup {
             epoch,
@@ -522,7 +510,6 @@ mod tests {
             cipher_pk,
             channel,
             inbox,
-            _config_tx,
             _contract_tx,
         }
     }
@@ -822,13 +809,9 @@ mod tests {
                 account_id: "node1".parse().unwrap(),
             },
         );
-        let (_config_tx, config_rx) = Config::channel(NetworkConfig {
-            sign_sk: sign_sk.clone(),
-            cipher_sk,
-        });
         let (contract_watcher, contract_tx) = ContractStateWatcher::new(&"node0".parse().unwrap());
         let (inbox, _outbox, channel) = MessageChannel::new();
-        let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
+        let inbox = tokio::spawn(inbox.run(cipher_sk, contract_watcher));
 
         let batch = triple_batch(0, peer);
         let encrypted = SignedMessage::encrypt(&batch, peer, &sign_sk, &cipher_pk).unwrap();
