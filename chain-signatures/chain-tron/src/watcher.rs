@@ -3,7 +3,6 @@
 //! Target-only, so [`ChainIndexer`](mpc_chain_integration_core::ChainIndexer)
 //! is the supervision vehicle alone: no block scanning, no catchup — restart
 //! rebuilds the map from the backlog.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -17,100 +16,212 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
 };
 use mpc_tron_wire::pb::RawTransaction;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use crate::client::{SolidifiedNowBlock, TronHttp};
+use crate::client::TronHttp;
 use crate::config::TronConfig;
+use crate::types::SolidifiedBlock;
 
 pub struct TronWatcher<S: StateManager, T: ChainTelemetry> {
-    client: Arc<TronHttp>,
+    client: TronHttp,
     config: TronConfig,
     state_manager: S,
     telemetry: T,
 }
 
-/// Head and receipt reads hit separately routed solidity instances that
-/// can disagree by a couple of 3 s slots; without this margin, a receipt
-/// read lagging the head reads the boundary block's inclusion as absence
-/// (three slots: two of skew, one of pack grace — `is_window_closed`).
-const EXPIRY_ATTEST_GRACE_MS: u64 = 9_000;
+struct TxWindow {
+    timestamp: i64,
+    expiration: i64,
+}
 
-/// Solidified head strictly past `expiration` + [`EXPIRY_ATTEST_GRACE_MS`]:
-/// java-tron (`Manager.validateCommon`, b33eed89a6a4) rejects packaging at
-/// `expiration <= headBlockTime` against the *parent* head — a block one
-/// 3 s slot past the expiration can still carry the transaction.
-fn is_window_closed(head: &SolidifiedNowBlock, tx: &BidirectionalTx) -> bool {
+/// One flat id's entries; the txID is the hash of their (identical)
+/// bytes, so they share a window and one verdict settles them.
+type Group = Vec<(SignId, Arc<BidirectionalTx>, TxWindow)>;
+
+fn tx_window(tx: &BidirectionalTx) -> Option<TxWindow> {
     RawTransaction::parse(&tx.serialized_transaction)
-        .map(|raw| {
-            u64::try_from(raw.expiration).is_ok_and(|expiration| {
-                head.timestamp > expiration.saturating_add(EXPIRY_ATTEST_GRACE_MS)
-            })
+        .map(|raw| TxWindow {
+            timestamp: raw.timestamp,
+            expiration: raw.expiration,
         })
-        .unwrap_or_else(|err| {
+        .map_err(|err| {
             tracing::warn!(
                 sign_id = ?tx.sign_id(),
                 ?tx.id,
                 ?err,
                 "cannot parse serialized_transaction; admission validated these bytes"
             );
-            false
         })
+        .ok()
 }
 
-/// The M6 attestation for one expired, unexecuted entry: the unexecutable
-/// outcome at the scan-time solidified head, not the lowest block past
-/// the expiry.
-fn expired_event(sign_id: SignId, tx: &BidirectionalTx, head: &SolidifiedNowBlock) -> ChainEvent {
+/// The M6 attestation for one expired, unexecuted entry.
+fn expired_event(sign_id: SignId, tx: &BidirectionalTx, boundary: u64) -> ChainEvent {
     ChainEvent::ExecutionConfirmed {
         tx_id: tx.id,
         sign_id,
         source_chain: tx.source_chain,
-        block_height: head.number,
+        block_height: boundary,
         result: unexecutable_outcome(tx.source_chain),
     }
 }
 
-/// The receipt read for one expired entry.
-enum ExpiryProbe {
-    Included,
-    Unavailable,
-}
-
-/// One scanned entry and its receipt read.
-struct ExpiredProbe {
-    sign_id: SignId,
-    tx: Arc<BidirectionalTx>,
-    outcome: anyhow::Result<ExpiryProbe>,
-}
-
-/// Window-closed entries grouped by flat id; a duplicate id's probes
-/// resolve as one unit.
 fn closed_groups(
     pending: Vec<(SignId, Arc<BidirectionalTx>)>,
-    head: &SolidifiedNowBlock,
-) -> Vec<Vec<(SignId, Arc<BidirectionalTx>)>> {
+    head: &SolidifiedBlock,
+) -> Vec<Group> {
     let mut groups: HashMap<BidirectionalTxId, Vec<_>> = HashMap::new();
     for (sign_id, tx) in pending {
-        if is_window_closed(head, &tx) {
-            groups.entry(tx.id).or_default().push((sign_id, tx));
+        if let Some(window) = tx_window(&tx).filter(|w| head.timestamp >= w.expiration) {
+            groups.entry(tx.id).or_default().push((sign_id, tx, window));
         }
     }
     groups.into_values().collect()
 }
 
+/// One walk's answer for a flat id's bytes.
+#[derive(Debug)]
+enum ExpiryVerdict {
+    Included,
+    Absent { boundary: u64 },
+}
+
+/// Bounds the linear absence walk at one 24 h window of 3 s slots.
+/// tron-wire caps windows at admission (`MAX_WINDOW_MS`), so a breach
+/// means a pre-cap backlog entry or a lying provider.
+const MAX_WALK_SPAN: u64 = 28_800;
+
+/// Solidified blocks by number, memoized for the scan pass — final
+/// blocks never change, so re-fetches are pure cost and a racing
+/// double fetch is benign.
+#[derive(Clone)]
+struct SolidityView<'a> {
+    client: &'a TronHttp,
+    head: u64,
+    span_cap: u64,
+    blocks: Arc<Mutex<HashMap<u64, Option<Arc<SolidifiedBlock>>>>>,
+}
+
+impl<'a> SolidityView<'a> {
+    fn new(client: &'a TronHttp, head: u64) -> Self {
+        Self {
+            client,
+            head,
+            span_cap: MAX_WALK_SPAN,
+            blocks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn block(&self, number: u64) -> anyhow::Result<Option<Arc<SolidifiedBlock>>> {
+        if let Some(hit) = self.blocks.lock().await.get(&number) {
+            return Ok(hit.clone());
+        }
+        let fetched = self.client.get_block_solidity(number).await?.map(Arc::new);
+        self.blocks.lock().await.insert(number, fetched.clone());
+        Ok(fetched)
+    }
+
+    /// A search mid's timestamp; absent below the head is pruned
+    /// history or a lagging instance — deferring, not reading it as
+    /// ancient, keeps the boundary one every node shares.
+    async fn require_timestamp(&self, number: u64) -> anyhow::Result<i64> {
+        self.block(number)
+            .await?
+            .map(|block| block.timestamp)
+            .with_context(|| {
+                format!(
+                    "solidified block {number} below the scan head {} is absent: \
+                     pruned history or a lagging instance",
+                    self.head
+                )
+            })
+    }
+
+    /// The first block number at or past `ts`, deferring when nothing
+    /// that new is solidified. Timestamps strictly increase with
+    /// height, so a lower-bound binary search.
+    async fn first_at_or_after(&self, ts: i64) -> anyhow::Result<u64> {
+        let (mut lo, mut hi) = (0, self.head);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.require_timestamp(mid).await? >= ts {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        // The converged probe may be the head itself; absent there only
+        // means nothing that new is solidified yet.
+        self.block(lo)
+            .await?
+            .filter(|block| block.timestamp >= ts)
+            .with_context(|| format!("nothing solidified at or past {ts}"))
+            .map(|_| lo)
+    }
+
+    /// Inclusion over the packable span — blocks before the tx's
+    /// timestamp cannot hold it (it did not exist yet) and blocks
+    /// past the window's end cannot pack it — the whole M6 proof.
+    async fn verdict(
+        &self,
+        tx: &BidirectionalTx,
+        window: &TxWindow,
+    ) -> anyhow::Result<ExpiryVerdict> {
+        let start = self.first_at_or_after(window.timestamp).await?;
+        let boundary = self.first_at_or_after(window.expiration).await?;
+        anyhow::ensure!(
+            boundary - start <= self.span_cap,
+            "packable span {start}..={boundary} exceeds the {}-block walk cap",
+            self.span_cap
+        );
+        for number in start..=boundary {
+            if self
+                .block(number)
+                .await?
+                .is_some_and(|block| block.txids.contains(&tx.id.0))
+            {
+                return Ok(ExpiryVerdict::Included);
+            }
+        }
+        Ok(ExpiryVerdict::Absent { boundary })
+    }
+}
+
 impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
-    /// Bounds in-flight receipt requests to the provider; Ethereum's
-    /// default.
-    const MAX_CONCURRENT_RECEIPT_POLLS: usize = 8;
+    /// Bounds in-flight provider requests across both arms; Ethereum's
+    /// receipt-poll default.
+    const MAX_CONCURRENT_PROVIDER_REQUESTS: usize = 8;
 
     pub fn new(config: TronConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
         Ok(Self {
-            client: Arc::new(TronHttp::new(&config)?),
+            client: TronHttp::new(&config)?,
             config,
             state_manager,
             telemetry,
         })
+    }
+
+    /// Forwards one pass's events as they resolve; `true` ends the run
+    /// (cancelled or the channel closed), `false` when the pass drained.
+    async fn forward_pass<St: futures_util::Stream<Item = ChainEvent> + Unpin>(
+        &self,
+        mut events: St,
+        events_tx: &mpsc::Sender<ChainEvent>,
+        cancel: &CancellationToken,
+    ) -> bool {
+        loop {
+            let event = tokio::select! {
+                _ = cancel.cancelled() => return true,
+                event = events.next() => match event {
+                    Some(event) => event,
+                    None => return false,
+                },
+            };
+            if events_tx.send(event).await.is_err() {
+                return true;
+            }
+        }
     }
 
     /// Yields per resolved receipt, in resolution order; pending, failed
@@ -123,7 +234,7 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
 
         iter(watchers)
             .map(|(tx_id, (sign_id, tx))| self.resolve_watcher_from_receipt(tx_id, sign_id, tx))
-            .buffer_unordered(Self::MAX_CONCURRENT_RECEIPT_POLLS)
+            .buffer_unordered(Self::MAX_CONCURRENT_PROVIDER_REQUESTS)
             .filter_map(std::future::ready)
     }
 
@@ -171,41 +282,38 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
         })
     }
 
-    async fn expiry_probe(&self, tx: &BidirectionalTx) -> anyhow::Result<ExpiryProbe> {
-        Ok(
-            match self
-                .client
-                .get_transaction_info_solidity(&B256::from(tx.id.0))
-                .await?
-            {
-                Some(_) => ExpiryProbe::Included,
-                None => ExpiryProbe::Unavailable,
-            },
-        )
-    }
-
-    /// M6 attestations streamed per flat id: a group's events send as
-    /// its probes resolve, so a pass outlasting the stall budget loses
-    /// only the unsent tail; duplicates hold until their group settles.
+    /// M6 attestations per flat id, each at the boundary every node
+    /// derives identically. A pass outlasting the stall budget loses
+    /// only the unsent tail.
     async fn expiry_scan(&self) -> futures_util::stream::BoxStream<'_, ChainEvent> {
-        let pending = self.state_manager.get_pending_executions(Chain::Tron).await;
-        if pending.is_empty() {
-            return futures_util::stream::empty().boxed();
-        }
-        let Some(head) = self.solidified_head().await else {
+        let Some((head, groups)) = self.closed_window_groups().await else {
             return futures_util::stream::empty().boxed();
         };
-        iter(closed_groups(pending, &head))
-            .map(move |group| self.resolve_group(group, head))
-            .buffer_unordered(Self::MAX_CONCURRENT_RECEIPT_POLLS)
+        let view = SolidityView::new(&self.client, head.number);
+        iter(groups)
+            .map(move |group| self.resolve_group(group, view.clone()))
+            .buffer_unordered(Self::MAX_CONCURRENT_PROVIDER_REQUESTS)
             .map(futures_util::stream::iter)
             .flatten()
             .boxed()
     }
 
-    /// The scan head; `None` defers the pass, counted through
-    /// `expiry_scan_deferred`.
-    async fn solidified_head(&self) -> Option<SolidifiedNowBlock> {
+    /// The head and its window-closed groups; `None` defers the
+    /// pass: empty backlog (head unread), head failure, nothing
+    /// closed yet.
+    async fn closed_window_groups(&self) -> Option<(SolidifiedBlock, Vec<Group>)> {
+        let pending = self.state_manager.get_pending_executions(Chain::Tron).await;
+        if pending.is_empty() {
+            return None;
+        }
+        let head = self.solidified_head().await?;
+        let groups = closed_groups(pending, &head);
+        (!groups.is_empty()).then_some((head, groups))
+    }
+
+    /// The scan head — a gate only, never part of an attestation.
+    /// Failure defers, counted through `expiry_scan_deferred`.
+    async fn solidified_head(&self) -> Option<SolidifiedBlock> {
         self.client
             .get_now_block_solidity()
             .await
@@ -216,58 +324,33 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             .ok()
     }
 
-    /// Resolves one flat id's group: inclusions re-register for the
-    /// receipt arm; an all-absent group attests, one inclusion vetoing
-    /// its twins (instances disagree within [`EXPIRY_ATTEST_GRACE_MS`]'s
-    /// skew); failed lookups defer to the next tick.
-    async fn resolve_group(
-        &self,
-        group: Vec<(SignId, Arc<BidirectionalTx>)>,
-        head: SolidifiedNowBlock,
-    ) -> Vec<ChainEvent> {
-        let probes = iter(group)
-            .map(|(sign_id, tx)| async move {
-                ExpiredProbe {
-                    sign_id,
-                    outcome: self.expiry_probe(&tx).await,
-                    tx,
-                }
-            })
-            .buffer_unordered(Self::MAX_CONCURRENT_RECEIPT_POLLS)
-            .collect::<Vec<_>>()
-            .await;
-
-        let mut included = false;
-        let mut unattested = Vec::new();
-        for probe in probes {
-            match probe.outcome {
-                Ok(ExpiryProbe::Included) => {
-                    tracing::info!(sign_id = ?probe.sign_id, ?probe.tx.id,
+    async fn resolve_group(&self, group: Group, view: SolidityView<'_>) -> Vec<ChainEvent> {
+        let (sign_id, tx, window) = &group[0];
+        match view.verdict(tx, window).await {
+            Ok(ExpiryVerdict::Included) => {
+                for (sign_id, tx, _) in &group {
+                    tracing::info!(?sign_id, ?tx.id,
                         "expired window with inclusion; re-registered for the receipt arm");
                     self.state_manager
-                        .watch_execution(Chain::Tron, probe.tx)
+                        .watch_execution(Chain::Tron, Arc::clone(tx))
                         .await;
-                    included = true;
                 }
-                Ok(ExpiryProbe::Unavailable) => unattested.push((probe.sign_id, probe.tx)),
-                Err(err) => {
-                    tracing::warn!(sign_id = ?probe.sign_id, ?probe.tx.id, ?err,
-                        "expiry receipt lookup failed")
-                }
+                Vec::new()
+            }
+            Ok(ExpiryVerdict::Absent { boundary }) => group
+                .into_iter()
+                .map(|(sign_id, tx, _)| {
+                    tracing::info!(?sign_id, ?tx.id, source = ?tx.source_chain,
+                        boundary,
+                        "validity window closed without inclusion; attesting unexecutable");
+                    expired_event(sign_id, &tx, boundary)
+                })
+                .collect(),
+            Err(err) => {
+                tracing::warn!(?tx.id, ?sign_id, "expiry walk failed; deferring: {err:#}");
+                Vec::new()
             }
         }
-        if included {
-            return Vec::new();
-        }
-        unattested
-            .into_iter()
-            .map(|(sign_id, tx)| {
-                tracing::info!(?sign_id, ?tx.id, source = ?tx.source_chain,
-                    height = head.number,
-                    "validity window closed without inclusion; attesting unexecutable");
-                expired_event(sign_id, &tx, &head)
-            })
-            .collect()
     }
 }
 
@@ -298,32 +381,14 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for TronWatcher<S, T> {
             // stall timeout (`run_supervised_with_watchdog`) restarts
             // with the map already shrunk. Polls drain first so a
             // receipt found by either arm wins over the closed window.
-            let mut polls = self.poll_watchers().await;
-            loop {
-                let event = tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    event = polls.next() => match event {
-                        Some(event) => event,
-                        None => break,
-                    },
-                };
-                if events_tx.send(event).await.is_err() {
-                    return Ok(());
-                }
+            let polls = self.poll_watchers().await;
+            if self.forward_pass(polls, &events_tx, &cancel).await {
+                return Ok(());
             }
 
-            let mut scans = self.expiry_scan().await;
-            loop {
-                let event = tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    event = scans.next() => match event {
-                        Some(event) => event,
-                        None => break,
-                    },
-                };
-                if events_tx.send(event).await.is_err() {
-                    return Ok(());
-                }
+            let scans = self.expiry_scan().await;
+            if self.forward_pass(scans, &events_tx, &cancel).await {
+                return Ok(());
             }
 
             // Provider head as a liveness gauge; Tron indexes no blocks.
@@ -346,12 +411,14 @@ mod tests {
 
     use mockito::Matcher;
     use mpc_chain_integration_core::utils::retry::RetryConfig;
-    use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry, StateManager};
+    use mpc_chain_integration_core::{
+        ExtractionFailureKind, MockStateManager, NoopChainTelemetry, StateManager,
+    };
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, Calldata, CompactMaybe, ExecutionOutcome, RequestKind,
         SignId, TronTxParams,
     };
-    use mpc_tron_wire::NowBlock;
+    use mpc_tron_wire::pb::RawTransaction;
     use mpc_tron_wire::{to_unsigned_tron_tx, TronAddress};
     use url::Url;
 
@@ -489,20 +556,19 @@ mod tests {
         let config = test_config(server.url().parse().unwrap());
         let mut server = server;
         nowblock_mock(&mut server);
-        solidity_nowblock_mock(&mut server);
         (server, config, MockStateManager::new())
     }
 
     fn nowblock_mock(server: &mut mockito::ServerGuard) {
         server
-            .mock("POST", "/wallet/getnowblock")
-            .with_header("content-type", "application/json")
-            .with_body(format!(
-                r#"{{ "blockID": "{}",
-                     "block_header": {{ "raw_data": {{ "number": 42, "timestamp": 1730000000000 }} }} }}"#,
-                hex::encode([0xau8; 32])
-            ))
-            .create();
+        .mock("POST", "/wallet/getnowblock")
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{ "blockID": "{}",
+                 "block_header": {{ "raw_data": {{ "number": 42, "timestamp": 1730000000000 }} }} }}"#,
+            hex::encode([0xau8; 32])
+        ))
+        .create();
     }
 
     fn receipt_stub(server: &mut mockito::ServerGuard, seed: u8, body: String) -> mockito::Mock {
@@ -871,14 +937,67 @@ mod tests {
     const SOLIDITY_TS: u64 = 1_728_000_100_000;
 
     fn solidity_nowblock_mock(server: &mut mockito::ServerGuard) {
+        solidity_head_at(server, 41);
+    }
+
+    /// The tests' solidified chain: `ts(n) = SOLIDITY_TS − (45 − n)·3 s`,
+    /// empty blocks. Resident txids stub their number ahead of the
+    /// ladder — mockito answers the first matching stub.
+    const LADDER_TOP: u64 = 45;
+
+    fn ladder_ts(number: u64) -> i64 {
+        SOLIDITY_TS as i64 - (LADDER_TOP - number) as i64 * 3_000
+    }
+
+    fn solid_block_mock(server: &mut mockito::ServerGuard, number: u64, txids: &[[u8; 32]]) {
+        let transactions: Vec<String> = txids
+            .iter()
+            .map(|id| format!(r#"{{ "txID": "{}" }}"#, hex::encode(id)))
+            .collect();
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .match_body(Matcher::PartialJson(serde_json::json!({ "num": number })))
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{ "blockID": "{}",
+                 "block_header": {{ "raw_data": {{ "number": {number}, "timestamp": {} }} }},
+                 "transactions": [{}] }}"#,
+                hex::encode([number as u8; 32]),
+                ladder_ts(number),
+                transactions.join(",")
+            ))
+            .create();
+    }
+
+    fn solid_block_ladder(server: &mut mockito::ServerGuard, resident: &[(u64, [u8; 32])]) {
+        for number in 0..=LADDER_TOP {
+            let txids: Vec<_> = resident
+                .iter()
+                .filter(|(at, _)| *at == number)
+                .map(|(_, id)| *id)
+                .collect();
+            solid_block_mock(server, number, &txids);
+        }
+    }
+
+    /// Every `getblockbynum` reads absent.
+    fn solid_block_absent(server: &mut mockito::ServerGuard) {
+        server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .create();
+    }
+
+    fn solidity_head_at(server: &mut mockito::ServerGuard, number: u64) {
         server
             .mock("POST", "/walletsolidity/getnowblock")
             .with_header("content-type", "application/json")
             .with_body(format!(
                 r#"{{ "blockID": "{}",
-                     "block_header": {{ "raw_data": {{ "number": 41, "timestamp": {} }} }} }}"#,
+                 "block_header": {{ "raw_data": {{ "number": {number}, "timestamp": {} }} }} }}"#,
                 hex::encode([0x9u8; 32]),
-                SOLIDITY_TS
+                ladder_ts(number)
             ))
             .create();
     }
@@ -1016,14 +1135,15 @@ mod tests {
     #[tokio::test]
     async fn expired_displaced_entry_attests_unviable() {
         let (mut server, config, state) = expiry_stack().await;
+        solidity_nowblock_mock(&mut server);
+        solid_block_ladder(&mut server, &[]);
         let (id, _, _) =
             pending_expiry_entry(&state, 1, Chain::Midnight, SOLIDITY_TS - 40_000).await;
-        receipt_for(&mut server, &id, "{}".to_string());
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
         let (height, source, result) = until_tx_confirmed(&mut run, &id).await;
-        assert_eq!(height, 41);
+        assert_eq!(height, 32);
         assert_eq!(source, Chain::Midnight);
         assert!(matches!(result, ExecutionOutcome::Unviable));
 
@@ -1035,6 +1155,8 @@ mod tests {
     #[tokio::test]
     async fn expired_watched_entry_resolves_through_the_scan() {
         let (mut server, config, state) = expiry_stack().await;
+        solidity_nowblock_mock(&mut server);
+        solid_block_ladder(&mut server, &[]);
         let (id, _, _) =
             watched_expiry_entry(&state, 3, Chain::Midnight, SOLIDITY_TS - 40_000).await;
         receipt_for(&mut server, &id, "{}".to_string());
@@ -1042,7 +1164,7 @@ mod tests {
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
         let (height, _, result) = until_tx_confirmed(&mut run, &id).await;
-        assert_eq!(height, 41);
+        assert_eq!(height, 32);
         assert!(matches!(result, ExecutionOutcome::Unviable));
 
         run.stop().await;
@@ -1053,8 +1175,10 @@ mod tests {
     #[tokio::test]
     async fn expired_but_executed_re_registers_for_receipt_resolution() {
         let (mut server, config, state) = expiry_stack().await;
+        solidity_nowblock_mock(&mut server);
         let (id, _, _) =
             pending_expiry_entry(&state, 4, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        solid_block_ladder(&mut server, &[(20, id.0)]);
         receipt_for(&mut server, &id, success_receipt(&id));
 
         let mut run = spawn_watcher(config, state, NoopChainTelemetry);
@@ -1072,9 +1196,11 @@ mod tests {
     #[tokio::test]
     async fn expired_and_included_watched_entry_resolves_once_through_the_receipt() {
         let (mut server, config, state) = expiry_stack().await;
+        solidity_nowblock_mock(&mut server);
         let (id, sign_id, _) =
             watched_expiry_entry(&state, 6, Chain::Midnight, SOLIDITY_TS - 40_000).await;
         receipt_for(&mut server, &id, success_receipt(&id));
+        solid_block_ladder(&mut server, &[(20, id.0)]);
 
         let mut run = spawn_watcher(config, state.clone(), NoopChainTelemetry);
         first_is_catchup_completed(&mut run).await;
@@ -1128,8 +1254,12 @@ mod tests {
     #[tokio::test]
     async fn duplicate_flat_id_entries_both_resolve_through_the_receipt_arm() {
         let (mut server, config, state) = expiry_stack().await;
+        solidity_nowblock_mock(&mut server);
         let (id, displacing, tx) =
             pending_expiry_entry(&state, 5, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        // The twins' bytes live in a walked block: whichever twin the
+        // receipt arm retires first, the scan re-registers the other.
+        solid_block_ladder(&mut server, &[(20, id.0)]);
         let mut displaced_tx = (*tx).clone();
         displaced_tx.request_id = [0x7f; 32];
         let displaced = displaced_tx.sign_id();
@@ -1178,196 +1308,27 @@ mod tests {
         run.stop().await;
     }
 
-    /// Same flat id, separately routed receipt reads within the grace's
-    /// skew: whichever probe reads the lagging instance must not attest
-    /// its absence while the pass saw the inclusion.
+    /// Two nodes at different solidified heads attest the same height:
+    /// the boundary — the digest binds the height, so a head a poll
+    /// interval apart must not diverge the message.
     #[tokio::test]
-    async fn skewed_same_id_expiry_probes_converge_on_the_receipt() {
-        let (mut server, config, state) = expiry_stack().await;
-        let (id, lagging, tx) =
-            pending_expiry_entry(&state, 5, Chain::Midnight, SOLIDITY_TS - 40_000).await;
-        let mut twin_tx = (*tx).clone();
-        twin_tx.request_id = [0x7f; 32];
-        let twin = twin_tx.sign_id();
-        state.add_pending_execution(Arc::new(twin_tx)).await;
+    async fn expiry_attests_the_same_boundary_whatever_the_head() {
+        let mut heights = Vec::new();
+        for head in [41u64, LADDER_TOP] {
+            let (mut server, config, state) = expiry_stack().await;
+            solidity_head_at(&mut server, head);
+            solid_block_ladder(&mut server, &[]);
+            let (id, _, _) =
+                pending_expiry_entry(&state, 1, Chain::Midnight, SOLIDITY_TS - 40_000).await;
 
-        // A 1-shot absence shadows the inclusion: one probe reads each,
-        // in either order.
-        server
-            .mock("POST", "/walletsolidity/gettransactioninfobyid")
-            .match_body(Matcher::PartialJson(serde_json::json!({
-                "value": hex::encode(id.0)
-            })))
-            .with_header("content-type", "application/json")
-            .with_body("{}")
-            .expect(1)
-            .create();
-        receipt_for(&mut server, &id, success_receipt(&id));
-
-        let confirmed_state = state.clone();
-        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
-        first_is_catchup_completed(&mut run).await;
-        let confirmations = tokio::time::timeout(Duration::from_secs(5), async {
-            let mut seen: Vec<(SignId, u64, ExecutionOutcome)> = Vec::new();
-            loop {
-                let event = run.events.recv().await.expect("watcher channel open");
-                if let ChainEvent::ExecutionConfirmed {
-                    tx_id,
-                    sign_id,
-                    block_height,
-                    result,
-                    ..
-                } = event
-                {
-                    if tx_id == id {
-                        confirmed_state.remove_pending_execution(sign_id).await;
-                        confirmed_state
-                            .remove_execution_watch(Chain::Tron, &id)
-                            .await;
-                        if !seen.iter().any(|(sign, ..)| *sign == sign_id) {
-                            seen.push((sign_id, block_height, result));
-                            if seen.len() == 2 {
-                                return seen;
-                            }
-                        }
-                    }
-                }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("both flat-id entries must confirm"));
-
-        for (sign, height, result) in confirmations {
-            assert!(sign == lagging || sign == twin, "unknown sign id");
-            assert_eq!(height, 71896097, "{sign:?} resolved off the receipt");
-            assert!(
-                matches!(result, ExecutionOutcome::Success { .. }),
-                "{sign:?} attested {result:?}, want the receipt-decoded outcome"
-            );
+            let mut run = spawn_watcher(config, state, NoopChainTelemetry);
+            first_is_catchup_completed(&mut run).await;
+            let (height, _, result) = until_tx_confirmed(&mut run, &id).await;
+            heights.push(height);
+            assert!(matches!(result, ExecutionOutcome::Unviable));
+            run.stop().await;
         }
-
-        run.stop().await;
-    }
-
-    #[test]
-    fn closed_windows_group_by_flat_id() {
-        let head = SolidifiedNowBlock(NowBlock {
-            block_id: B256::from([0x9u8; 32]),
-            number: 41,
-            timestamp: SOLIDITY_TS,
-        });
-        let (id, sign, tx) = expiry_tx(6, Chain::Midnight, SOLIDITY_TS - 40_000);
-        let mut twin_tx = (*tx).clone();
-        twin_tx.request_id = [0x7f; 32];
-        let twin_sign = twin_tx.sign_id();
-        let (other_id, other_sign, other_tx) = expiry_tx(7, Chain::Midnight, SOLIDITY_TS - 40_000);
-        let (_, _, open_tx) = expiry_tx(8, Chain::Midnight, SOLIDITY_TS + 60_000);
-
-        let groups = closed_groups(
-            vec![
-                (sign, tx),
-                (twin_sign, twin_tx.into()),
-                (other_sign, other_tx),
-                (SignId::new([9; 32]), open_tx),
-            ],
-            &head,
-        );
-
-        assert_eq!(groups.len(), 2, "open window groups nothing: {groups:?}");
-        let dup = groups
-            .iter()
-            .find(|g| g.len() == 2)
-            .expect("the duplicate id resolves as one group");
-        assert!(dup.iter().all(|(_, tx)| tx.id == id));
-        let singleton = groups
-            .iter()
-            .find(|g| g.len() == 1)
-            .expect("the distinct id resolves alone");
-        assert_eq!(singleton[0].1.id, other_id);
-    }
-
-    #[tokio::test]
-    async fn resolve_group_registers_inclusions_and_attests_absences() {
-        let (mut server, config, state) = expiry_stack().await;
-        let (included_id, included_sign, _) =
-            pending_expiry_entry(&state, 6, Chain::Midnight, SOLIDITY_TS - 40_000).await;
-        let (absent_id, absent_sign, _) =
-            pending_expiry_entry(&state, 7, Chain::Midnight, SOLIDITY_TS - 40_000).await;
-        receipt_for(&mut server, &included_id, success_receipt(&included_id));
-        receipt_for(&mut server, &absent_id, "{}".to_string());
-
-        let watcher = TronWatcher::new(config, state.clone(), NoopChainTelemetry).unwrap();
-        let head = SolidifiedNowBlock(NowBlock {
-            block_id: B256::from([0x9u8; 32]),
-            number: 41,
-            timestamp: SOLIDITY_TS,
-        });
-        let pending = state.get_pending_executions(Chain::Tron).await;
-        let mut events = Vec::new();
-        for group in closed_groups(pending, &head) {
-            events.extend(watcher.resolve_group(group, head).await);
-        }
-
-        let watchers = state.get_execution_watchers(Chain::Tron).await;
-        assert_eq!(watchers.len(), 1, "only the inclusion re-registers");
-        assert_eq!(watchers[&included_id].0, included_sign);
-        assert_eq!(events.len(), 1, "events: {events:?}");
-        assert!(matches!(
-            &events[0],
-            ChainEvent::ExecutionConfirmed {
-                tx_id, sign_id, block_height: 41,
-                result: ExecutionOutcome::Unviable,
-                ..
-            } if *tx_id == absent_id && *sign_id == absent_sign
-        ));
-    }
-
-    /// A duplicate flat id reading disagreeing replicas: one inclusion
-    /// vetoes its twin's absence.
-    #[tokio::test]
-    async fn resolve_group_vetoes_a_twin_absence_on_inclusion() {
-        let (mut server, config, state) = expiry_stack().await;
-        let (id, base_sign, tx) =
-            pending_expiry_entry(&state, 6, Chain::Midnight, SOLIDITY_TS - 40_000).await;
-        let mut twin_tx = (*tx).clone();
-        twin_tx.request_id = [0x7f; 32];
-        let twin_sign = twin_tx.sign_id();
-        state.add_pending_execution(Arc::new(twin_tx)).await;
-
-        // Either member may read the lagging instance first.
-        server
-            .mock("POST", "/walletsolidity/gettransactioninfobyid")
-            .match_body(Matcher::PartialJson(serde_json::json!({
-                "value": hex::encode(id.0)
-            })))
-            .with_header("content-type", "application/json")
-            .with_body("{}")
-            .expect(1)
-            .create();
-        receipt_for(&mut server, &id, success_receipt(&id));
-
-        let watcher = TronWatcher::new(config, state.clone(), NoopChainTelemetry).unwrap();
-        let head = SolidifiedNowBlock(NowBlock {
-            block_id: B256::from([0x9u8; 32]),
-            number: 41,
-            timestamp: SOLIDITY_TS,
-        });
-        let pending = state.get_pending_executions(Chain::Tron).await;
-        let group = closed_groups(pending, &head).pop().expect("one group");
-        assert_eq!(group.len(), 2);
-
-        let events = watcher.resolve_group(group, head).await;
-
-        assert!(
-            events.is_empty(),
-            "the twin's absence is vetoed: {events:?}"
-        );
-        let watchers = state.get_execution_watchers(Chain::Tron).await;
-        assert_eq!(watchers.len(), 1, "the included member re-registers");
-        assert!(
-            watchers[&id].0 == base_sign || watchers[&id].0 == twin_sign,
-            "either member's inclusion re-registers"
-        );
+        assert_eq!(heights, [32, 32]);
     }
 
     /// No `Executing` entries: the solidified head is never fetched.
@@ -1390,40 +1351,85 @@ mod tests {
         run.stop().await;
     }
 
+    /// A probe below the head reading absent must defer, not attest at a
+    /// boundary it cannot prove is the first past the window — the
+    /// pruned-history shape. The head serves by number; mockito answers
+    /// the first matching stub, so the exact stub precedes the catch-all.
+    #[tokio::test]
+    async fn absent_probe_below_the_head_defers_rather_than_attesting() {
+        let (mut server, config, state) = expiry_stack().await;
+        solidity_head_at(&mut server, 41);
+        solid_block_mock(&mut server, 41, &[]);
+        solid_block_absent(&mut server);
+        pending_expiry_entry(&state, 1, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+        let events = until_blocks(&mut run, 2).await;
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event, ChainEvent::Block(_))),
+            "an absent probe must defer, not attest: {events:?}"
+        );
+
+        run.stop().await;
+    }
+
+    /// A span past the cap defers; below it, the same walk resolves the
+    /// boundary.
+    #[tokio::test]
+    async fn verdict_refuses_spans_past_the_cap() {
+        let (mut server, config, _) = expiry_stack().await;
+        solid_block_ladder(&mut server, &[]);
+        let client = TronHttp::new(&config).unwrap();
+        let (_, _, tx) = expiry_tx(1, Chain::Midnight, SOLIDITY_TS - 40_000);
+        let window = tx_window(&tx).unwrap();
+
+        let mut view = SolidityView::new(&client, LADDER_TOP);
+        view.span_cap = 8;
+        let err = format!("{:#}", view.verdict(&tx, &window).await.unwrap_err());
+        assert!(err.contains("walk cap"), "{err}");
+
+        view.span_cap = 32;
+        match view.verdict(&tx, &window).await.unwrap() {
+            ExpiryVerdict::Absent { boundary } => assert_eq!(boundary, 32),
+            other => panic!("absence expected, got {other:?}"),
+        }
+    }
+
+    /// Eligibility over a live window; assembly refuses dead ones.
     #[test]
-    fn window_closes_strictly_past_the_expiration() {
-        let head = |timestamp| {
-            SolidifiedNowBlock(NowBlock {
-                block_id: B256::from([0x9u8; 32]),
-                number: 41,
-                timestamp,
-            })
+    fn the_scan_eligibility_ends_at_or_past_the_expiration() {
+        const EXPIRATION: i64 = 1_728_000_060_000;
+        let head = |timestamp| SolidifiedBlock {
+            number: 41,
+            timestamp,
+            txids: Vec::new(),
         };
-        let tx = |expiration| expiry_tx(1, Chain::Midnight, expiration).2;
-        assert!(!is_window_closed(&head(1_000), &tx(1_000)));
-        assert!(!is_window_closed(
-            &head(1_000 + EXPIRY_ATTEST_GRACE_MS),
-            &tx(1_000)
-        ));
-        assert!(is_window_closed(
-            &head(1_000 + EXPIRY_ATTEST_GRACE_MS + 1),
-            &tx(1_000)
-        ));
-        assert!(is_window_closed(&head(u64::MAX), &tx(i64::MAX as u64)));
-        let mut unparsable = (*tx(1_000)).clone();
+        let tx = || expiry_tx(1, Chain::Midnight, EXPIRATION as u64).2;
+        let eligible = |head_ts: i64| {
+            let pending = vec![(SignId::new([1; 32]), tx())];
+            let groups = closed_groups(pending, &head(head_ts));
+            groups.len() == 1 && groups[0].len() == 1
+        };
+        assert!(!eligible(EXPIRATION - 1));
+        assert!(eligible(EXPIRATION), "the end block is past the window");
+        assert!(eligible(i64::MAX));
+        let mut unparsable = (*tx()).clone();
         unparsable.serialized_transaction = vec![0xff];
-        assert!(!is_window_closed(&head(2_000), &unparsable));
+        let groups = closed_groups(
+            vec![(SignId::new([1; 32]), unparsable.into())],
+            &head(i64::MAX),
+        );
+        assert!(groups.is_empty(), "unparsable bytes never scan");
     }
 
     #[test]
     fn expired_event_attests_by_source_policy() {
-        let head = SolidifiedNowBlock(NowBlock {
-            block_id: B256::from([0x9u8; 32]),
-            number: 41,
-            timestamp: 1_000,
-        });
-        let midnight = expiry_tx(1, Chain::Midnight, 900).2;
-        let canton = expiry_tx(2, Chain::Canton, 900).2;
+        const EXPIRATION: u64 = 1_728_000_060_000;
+        let midnight = expiry_tx(1, Chain::Midnight, EXPIRATION).2;
+        let canton = expiry_tx(2, Chain::Canton, EXPIRATION).2;
         let assert_event = |tx: &BidirectionalTx, unviable: bool| {
             let ChainEvent::ExecutionConfirmed {
                 tx_id,
@@ -1431,7 +1437,7 @@ mod tests {
                 source_chain,
                 block_height,
                 result,
-            } = expired_event(tx.sign_id(), tx, &head)
+            } = expired_event(tx.sign_id(), tx, 41)
             else {
                 panic!("expected an ExecutionConfirmed")
             };

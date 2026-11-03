@@ -27,9 +27,10 @@ Core pieces:
   `Executing` entries whose validity window closed as unexecutable,
   keyed off the backlog so a duplicate flat txID that displaced a watch
   still resolves; an entry found executed instead re-registers its
-  watch and resolves through the receipt arm. The head and receipt
-  reads hit separately routed solidity instances, so the attestation
-  requires the head past the window by a read-skew margin (3 slots).
+  watch and resolves through the receipt arm. The attested height is
+  deterministic — the first solidified block at or past the window's
+  end, proved absent over the packable span — so every node signs
+  the same message.
   Implements `ChainIndexer` purely as the supervision vehicle (no
   block scanning, no catchup).
 
