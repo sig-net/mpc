@@ -1,7 +1,7 @@
 //! The node reads the indexer consumes: the [`ChainSource`] seam and its subxt implementation.
 
 use crate::config::MidnightConfig;
-use crate::emissions::SingletonCallEmissions;
+use crate::emissions::ContractCallEmissions;
 use crate::reader::Node;
 use crate::rpc::{BlockRef, MidnightRpc};
 use crate::state::decode_contract_state;
@@ -14,6 +14,7 @@ pub(crate) struct BlockProofSeed {
     pub reported_block_number: u64,
     pub reported_block_hash: [u8; 32],
     pub singleton_address: [u8; 32],
+    pub responder_address: [u8; 32],
     pub scale_header: Vec<u8>,
     pub scale_body: Vec<Vec<u8>>,
     pub scale_system_events: Vec<u8>,
@@ -25,7 +26,10 @@ pub(crate) struct CandidateTransactionEmissions {
     pub extrinsic_index: u32,
     /// `TxPartialSuccess`: any fallible phase in `calls` may have rolled back.
     pub partial_success: bool,
-    pub calls: Vec<SingletonCallEmissions>,
+    /// Calls to the singleton, where clients notify their requests.
+    pub calls: Vec<ContractCallEmissions>,
+    /// Calls to the responder, where responses are posted.
+    pub responder_calls: Vec<ContractCallEmissions>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +56,7 @@ pub(crate) trait ChainSource: Send + Sync {
         &self,
         block: &BlockRef,
         singleton: &[u8; 32],
+        responder: &[u8; 32],
     ) -> anyhow::Result<Option<BlockEmissions>>;
     /// The decoded state tree of `address_64hex` at `at_hash`.
     async fn contract_state_tree(
@@ -87,8 +92,9 @@ impl ChainSource for LiveSource {
         &self,
         block: &BlockRef,
         singleton: &[u8; 32],
+        responder: &[u8; 32],
     ) -> anyhow::Result<Option<BlockEmissions>> {
-        self.rpc.block_emissions(block, singleton).await
+        self.rpc.block_emissions(block, singleton, responder).await
     }
 
     async fn contract_state_tree(
@@ -109,7 +115,7 @@ impl ChainSource for LiveSource {
 #[cfg(test)]
 mod proof_seed_tests {
     use super::*;
-    use crate::emissions::{Emission, EmissionKind, SingletonCallEmissions};
+    use crate::emissions::{ContractCallEmissions, Emission, EmissionKind};
 
     #[test]
     fn block_emissions_preserves_the_proof_seed_and_locator() {
@@ -119,6 +125,7 @@ mod proof_seed_tests {
                 reported_block_number: 42,
                 reported_block_hash: [0x22; 32],
                 singleton_address: [0x33; 32],
+                responder_address: [0x34; 32],
                 scale_header: vec![0x44, 0x45],
                 scale_body: vec![vec![0x51], vec![0x52, 0x53], vec![0x54]],
                 scale_system_events: vec![0x61, 0x62, 0x63],
@@ -127,7 +134,7 @@ mod proof_seed_tests {
                 ledger_tx_hash: [0x55; 32],
                 extrinsic_index: 1,
                 partial_success: false,
-                calls: vec![SingletonCallEmissions {
+                calls: vec![ContractCallEmissions {
                     phase: crate::emissions::TranscriptPhase::Guaranteed,
                     physical_segment: 1,
                     call_index: 1,
@@ -143,6 +150,7 @@ mod proof_seed_tests {
                         },
                     ],
                 }],
+                responder_calls: Vec::new(),
             }],
         };
 

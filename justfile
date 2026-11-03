@@ -94,7 +94,7 @@ alias ts := test-seq
 
 # Build artifacts: `just build` = whole Rust workspace (via setup),
 # `just build eth` = EVM artifacts, `just build contract` = NEAR contract wasm,
-# `just build midnight` = midnight-publisher-ts fixtures,
+# `just build midnight` = midnight-devtools real-stack fixtures,
 # `just build tests` = integration test binaries without running them,
 # `just build compat` = latest release node binary for the compat test
 # Usage: just build [target] (target="" | eth | contract | midnight | tests | compat)
@@ -104,7 +104,7 @@ build target="":
     elif [ "{{target}}" = "contract" ]; then \
       ./build-contract.sh && mkdir -p target/wasm32-unknown-unknown/release && cp target/near/mpc_contract/mpc_contract.wasm target/wasm32-unknown-unknown/release/mpc_contract.wasm; \
     elif [ "{{target}}" = "midnight" ]; then \
-      cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-caller && npm run compile:real-stack-vault && npm run typecheck:real-stack; \
+      cd chain-signatures/midnight-devtools && npm ci && npm run compile:real-stack-caller && npm run compile:real-stack-vault && npm run typecheck:real-stack; \
     elif [ "{{target}}" = "tests" ]; then \
       cargo build -p integration-tests --tests; \
     elif [ "{{target}}" = "compat" ]; then \
@@ -160,10 +160,6 @@ test-tron-tre:
 # Usage: just test-midnight [test]
 test-midnight test="": (build "eth") (setup "")
     cargo nextest run -p integration-tests --test lib --run-ignored only --no-capture -E '{{ if test == "" { "test(/^cases::midnight_stream::/)" } else { "test(=cases::midnight_stream::" + test + ")" } }}'
-
-# Midnight TS/Rust seam differential (needs dist/ built via npm test in midnight-publisher-ts)
-test-midnight-seam:
-    cargo nextest run -p mpc-chain-midnight --run-ignored all -E 'binary(intent_seam)'
 
 # Canton tests (default: stream; e2e via `just test-canton cases::canton`)
 test-canton filter="canton_stream": (setup "")

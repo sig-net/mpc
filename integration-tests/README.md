@@ -79,7 +79,7 @@ In addition to the prerequisites above, it requires:
 - [cargo-near](https://github.com/near/cargo-near)
 - Compact launcher 0.5.1 with `compactc` 0.33.0-rc.2 available as `compact`; see the [Midnight CI workflow](../.github/workflows/test-chain-midnight.yml) for the pinned Linux installation
 
-From the repository root, prepare the TypeScript publisher and the test caller and vault contracts,
+From the repository root, prepare the Midnight devtools and the test caller and vault contracts,
 then build the MPC contract and host node and run the ignored tests:
 
 ```bash
