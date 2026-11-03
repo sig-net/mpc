@@ -285,4 +285,43 @@ mod tests {
 
         assert!(matches!(store, Keystore::GcpSecretManager(_)));
     }
+
+    /// Clap enforces both of these; `init` must still refuse rather than
+    /// fall back to anything when handed options that bypass it.
+    #[tokio::test]
+    async fn init_without_a_store_is_an_error() {
+        let opts = Options {
+            sk_share_secret_id: None,
+            #[cfg(feature = "test-feature")]
+            sk_share_local_path: None,
+            gcp_project_id: Some("test-project".to_string()),
+            redis_url: "redis://localhost".to_string(),
+        };
+
+        let Err(err) = Keystore::init(&opts, &make_test_account_id()).await else {
+            panic!("no store named, yet a store opened");
+        };
+
+        assert!(
+            err.to_string().contains("requires a key-share store"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_without_a_project_is_an_error() {
+        let opts = Options {
+            sk_share_secret_id: Some("secret-id".to_string()),
+            #[cfg(feature = "test-feature")]
+            sk_share_local_path: None,
+            gcp_project_id: None,
+            redis_url: "redis://localhost".to_string(),
+        };
+
+        let Err(err) = Keystore::init(&opts, &make_test_account_id()).await else {
+            panic!("Secret Manager without a project, yet a store opened");
+        };
+
+        assert!(err.to_string().contains("GCP project"), "{err}");
+    }
 }
