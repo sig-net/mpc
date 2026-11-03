@@ -277,15 +277,23 @@ impl<A: ProtocolArtifact, Phase> ProtocolStorage<A, Phase> {
             _phantom: std::marker::PhantomData,
         }
     }
+
+    /// Derive an uninitialized storage handle that shares the underlying Redis
+    /// connection pool and in-memory reservations with this storage.
+    pub fn to_initializing(&self) -> ProtocolStorage<A, Initializing> {
+        self.transition(Initializing)
+    }
+
+    /// Transition this storage handle to a ready state with participant `me`,
+    /// sharing the underlying Redis connection pool and in-memory reservations.
+    pub fn to_ready(&self, me: Participant) -> ProtocolStorage<A, Ready> {
+        self.transition(Ready { me })
+    }
 }
 
 impl<A: ProtocolArtifact> ProtocolStorage<A, Initializing> {
     pub fn new(pool: &Pool, account_id: &AccountId, base_prefix: &str) -> Self {
         Self::with_phase(pool, account_id, base_prefix, Initializing)
-    }
-
-    pub fn to_ready(&self, me: Participant) -> ProtocolStorage<A, Ready> {
-        self.transition(Ready { me })
     }
 }
 
@@ -1183,5 +1191,29 @@ mod tests {
             .expect("reserved lock still held after commit()");
         assert!(!state.pending.contains(&id));
         assert!(!state.using.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn transitions_share_reserved_state() {
+        let storage = unreachable_storage();
+        let initializing = storage.to_initializing();
+
+        let id = 100u64;
+        storage.reserved.write().await.generating.insert(id, true);
+
+        // Initializing derived from ready shares the same reservation state.
+        let state = initializing.reserved.read().await;
+        assert!(state.contains_reserved(&id));
+        drop(state);
+
+        // Re-transitioning to ready preserves identity and shares reservation state.
+        let ready = initializing.to_ready(Participant::from(1u32));
+        assert_eq!(ready.me(), Participant::from(1u32));
+        assert!(ready.reserved.read().await.contains_reserved(&id));
+
+        // Transitioning ready to another ready preserves shared reservations.
+        let ready2 = ready.to_ready(Participant::from(2u32));
+        assert_eq!(ready2.me(), Participant::from(2u32));
+        assert!(ready2.reserved.read().await.contains_reserved(&id));
     }
 }
