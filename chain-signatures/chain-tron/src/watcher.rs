@@ -935,6 +935,9 @@ mod tests {
     /// number (41) sits behind the live head's 42, so an attestation at 41
     /// proves the scan reads solidified state.
     const SOLIDITY_TS: u64 = 1_728_000_100_000;
+    /// The fixtures' assembly anchor: 2024-10-03T00:00:00Z, 100 s
+    /// before [`SOLIDITY_TS`].
+    const ASSEMBLED_AT: u64 = 1_728_000_000_000;
 
     fn solidity_nowblock_mock(server: &mut mockito::ServerGuard) {
         solidity_head_at(server, 41);
@@ -1027,10 +1030,21 @@ mod tests {
         source: Chain,
         expiration: u64,
     ) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
+        expiry_tx_assembled_at(ASSEMBLED_AT + seed as u64, seed, source, expiration)
+    }
+
+    /// [`expiry_tx`] with an explicit assembly time — a lying one puts
+    /// the tx's real inclusion below the walkable span.
+    fn expiry_tx_assembled_at(
+        timestamp: u64,
+        seed: u8,
+        source: Chain,
+        expiration: u64,
+    ) -> (BidirectionalTxId, SignId, Arc<BidirectionalTx>) {
         let params = TronTxParams {
             ref_block_bytes: [0x27, 0x10],
             ref_block_hash: [0x42; 8],
-            timestamp: 1_728_000_000_000 + seed as u64,
+            timestamp,
             expiration,
             contract_address: {
                 let mut address = [0xcd; 21];
@@ -1371,6 +1385,83 @@ mod tests {
                 .iter()
                 .all(|event| matches!(event, ChainEvent::Block(_))),
             "an absent probe must defer, not attest: {events:?}"
+        );
+
+        run.stop().await;
+    }
+
+    /// One retry cycle of read failures during the walk defers the
+    /// pass; the entry attests once reads recover.
+    #[tokio::test]
+    async fn walk_read_failure_defers_then_attests_on_recovery() {
+        let (mut server, config, state) = expiry_stack().await;
+        solidity_nowblock_mock(&mut server);
+        let failures = server
+            .mock("POST", "/walletsolidity/getblockbynum")
+            .with_status(500)
+            .expect(3)
+            .create();
+        solid_block_ladder(&mut server, &[]);
+        let (id, _, _) =
+            pending_expiry_entry(&state, 1, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+        let (height, _, result) = until_tx_confirmed(&mut run, &id).await;
+        assert_eq!(height, 32);
+        assert!(matches!(result, ExecutionOutcome::Unviable));
+
+        failures.assert_async().await;
+        run.stop().await;
+    }
+
+    /// The pass order is load-bearing: polls drain before the scan, so
+    /// a receipt the walk cannot see still resolves first.
+    #[tokio::test]
+    async fn polls_drain_before_the_expiry_scan() {
+        let (mut server, config, state) = expiry_stack().await;
+        solidity_nowblock_mock(&mut server);
+        let (id, _, tx) =
+            expiry_tx_assembled_at(1_728_000_050_000, 9, Chain::Midnight, SOLIDITY_TS - 40_000);
+        state.add_pending_execution(Arc::clone(&tx)).await;
+        state.watch_execution(Chain::Tron, Arc::clone(&tx)).await;
+        receipt_for(&mut server, &id, success_receipt(&id));
+        solid_block_ladder(&mut server, &[(3, id.0)]);
+
+        let mut run = spawn_watcher(config, state, NoopChainTelemetry);
+        first_is_catchup_completed(&mut run).await;
+        let tick = until_blocks(&mut run, 1).await;
+        let receipt_at = tick.iter().position(|event| {
+            matches!(
+                event,
+                ChainEvent::ExecutionConfirmed {
+                    tx_id,
+                    result: ExecutionOutcome::Success { .. },
+                    ..
+                } if *tx_id == id
+            )
+        });
+        let scan_at = tick.iter().position(|event| {
+            matches!(
+                event,
+                ChainEvent::ExecutionConfirmed {
+                    tx_id,
+                    result: ExecutionOutcome::Unviable,
+                    ..
+                } if *tx_id == id
+            )
+        });
+        assert!(
+            receipt_at.is_some(),
+            "the receipt must resolve in the same tick: {tick:?}"
+        );
+        assert!(
+            scan_at.is_some(),
+            "the closed window still attests: {tick:?}"
+        );
+        assert!(
+            receipt_at < scan_at,
+            "polls must drain before the scan: {tick:?}"
         );
 
         run.stop().await;
