@@ -26,8 +26,8 @@ use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ChainConfig as _, IndexedSignRequest, SignArgs,
-    SignBidirectionalEvent, SignKind, Signature,
+    BidirectionalTx, BidirectionalTxId, IndexedSignRequest, SignArgs, SignBidirectionalEvent,
+    SignKind, Signature,
 };
 use mpc_tron_wire::{
     pb::{Message as _, RawTransaction, TriggerSmartContract},
@@ -98,7 +98,9 @@ async fn recover_backlog_requeues_pending_signs() {
     let participant = Participant::from(0u32);
     mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
     let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
-    wait_threshold_active(&mut mesh_rx, threshold).await;
+    wait_threshold_active(&mut mesh_rx, threshold)
+        .await
+        .unwrap();
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     backlog.recover_by_checkpoint(&checkpoint).await;
 
@@ -463,7 +465,9 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let participant = Participant::from(0u32);
     mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
     let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
-    wait_threshold_active(&mut mesh_rx, threshold).await;
+    wait_threshold_active(&mut mesh_rx, threshold)
+        .await
+        .unwrap();
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let recovered = Backlog::persisted(storage.clone());
 
@@ -1618,7 +1622,7 @@ async fn catchup_blocks_do_not_consume_checkpoint_slots() {
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
 
     // Process 33 checkpoint intervals at caught_up=false
-    let interval = chain.checkpoint_interval().unwrap(); // 100 for Ethereum
+    let interval = crate::backlog::checkpoint_interval(chain).unwrap();
     for i in 1..=33 {
         process_block_event(chain, i * interval, &ctx, &telemetry)
             .await
@@ -1645,7 +1649,7 @@ async fn live_block_votes_for_checkpoint() {
         true,
         ProjectivePoint::GENERATOR.to_affine(),
     );
-    let interval = chain.checkpoint_interval().unwrap();
+    let interval = crate::backlog::checkpoint_interval(chain).unwrap();
 
     process_block_event(chain, interval, &ctx, &telemetry)
         .await
