@@ -117,10 +117,18 @@ impl EthArgs {
 mod tests {
     use super::*;
 
-    /// The mock cadence exists to be faster than production; pin that.
+    /// The two cadences, pinned: 100ms is also what the Ethereum crate's own
+    /// tests use, so a change here must be made there too.
     #[test]
-    fn mock_cadence_polls_faster_than_production() {
-        assert!(mock_indexer_config().refresh_interval < IndexerConfig::default().refresh_interval);
+    fn cadences_are_pinned() {
+        assert_eq!(
+            mock_indexer_config().refresh_interval,
+            std::time::Duration::from_millis(100)
+        );
+        assert_eq!(
+            IndexerConfig::default().refresh_interval,
+            std::time::Duration::from_secs(10)
+        );
     }
 
     /// A production build runs the library's cadence.

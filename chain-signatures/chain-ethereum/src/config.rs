@@ -244,6 +244,19 @@ impl fmt::Debug for EthConfig {
 mod tests {
     use super::*;
 
+    /// Pinned with the node's `mock_indexer_config`, which uses the same 100ms.
+    #[test]
+    fn head_polling_cadences_are_pinned() {
+        assert_eq!(
+            IndexerConfig::default().refresh_interval,
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            IndexerConfig::fast_polling().refresh_interval,
+            Duration::from_millis(100)
+        );
+    }
+
     #[test]
     fn clamp_estimate_buffers_then_clamps() {
         let gas = GasConfig::default();
