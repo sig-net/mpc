@@ -149,7 +149,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         let mut events = Vec::new();
         let mut indexed_ts = None;
         for candidate in candidates {
-            let calls = candidate
+            let mut calls: Vec<_> = candidate
                 .calls
                 .into_iter()
                 .map(|call| (ProtocolContract::Singleton, call))
@@ -158,7 +158,17 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                         .responder_calls
                         .into_iter()
                         .map(|call| (ProtocolContract::Responder, call)),
-                );
+                )
+                .collect();
+            // Ledger execution order across both contracts: every guaranteed phase,
+            // then every fallible one, each by segment and call position.
+            calls.sort_by_key(|(_, call)| {
+                (
+                    call.phase == TranscriptPhase::Fallible,
+                    call.physical_segment,
+                    call.call_index,
+                )
+            });
             for (
                 contract,
                 ContractCallEmissions {
@@ -1712,6 +1722,54 @@ mod tests {
             })
             .collect();
         assert_eq!(request_ids, vec![[0x63; 32], [0x64; 32]]);
+    }
+
+    #[tokio::test]
+    async fn both_contracts_calls_are_processed_in_ledger_execution_order() {
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+        let encoded = k256::AffinePoint::GENERATOR.to_encoded_point(false);
+        let mut x = [0u8; 32];
+        x.copy_from_slice(encoded.x().expect("x"));
+        let mut y = [0u8; 32];
+        y.copy_from_slice(encoded.y().expect("y"));
+        let s: [u8; 32] = k256::Scalar::from(9u64).to_bytes().into();
+        let (record, rid) = named_record_and_rid(7);
+        // The singleton's fallible notification comes first in the transaction, the
+        // responder's guaranteed response second; the ledger applies the response first.
+        let mut batch = batch(
+            9,
+            vec![ContractCallEmissions {
+                phase: crate::emissions::TranscriptPhase::Fallible,
+                call_index: 0,
+                ..one_call(EmissionKind::SignBidirectional, notification(rid)).remove(0)
+            }],
+        );
+        batch.candidates[0].responder_calls = vec![ContractCallEmissions {
+            phase: crate::emissions::TranscriptPhase::Guaranteed,
+            call_index: 1,
+            ..one_call(
+                EmissionKind::SignatureResponded,
+                response_payload([0x66; 32], x, y, s, 0),
+            )
+            .remove(0)
+        }];
+        let mut source = FixtureSource::default();
+        source.emissions.insert(9, Some(batch));
+        source.set_state(CALLER, 9, caller_state(&record, rid));
+
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("block processes");
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ChainEvent::Respond(_), ChainEvent::SignRequest { .. }]
+            ),
+            "the guaranteed response precedes the fallible notification: {events:?}"
+        );
     }
 
     #[tokio::test]

@@ -99,7 +99,7 @@ midnight-onchain-state = "4.0.0"
 midnight-serialize = "1.2.0"
 midnight-storage = "2.0.1"
 midnight-transient-crypto = "3.0.0"
-# The respond-intent builder and in-process prover for the Signet singleton.
+# The respond-intent builder and in-process prover for the signet responder.
 minocrab-publisher = { git = "https://github.com/sig-net/minocrab", rev = "4575b94f32dd1904946b701611c8fb0668a16e46" }
 
 mpc-contract = { path = "./chain-signatures/contract" }

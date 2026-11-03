@@ -967,7 +967,7 @@ async fn publisher_contract_state(
                 None => anyhow::anyhow!(detail),
             };
             Err(cause.context(
-                "the central contract's state was refused for its size; it is exempt from \
+                "the responder's state was refused for its size; it is exempt from \
                  the admission limit, so the refusing cap is too small for it",
             ))
         }
@@ -1050,7 +1050,7 @@ fn server_response_cap(reply: &UserError) -> Option<usize> {
 }
 
 /// The indexer's limit on a caller state it did receive. The publisher reads the
-/// central contract through the same classifier and is not bound by it.
+/// responder through the same classifier and is not bound by it.
 fn admit_caller_state(state: Option<Vec<u8>>) -> anyhow::Result<Option<Vec<u8>>> {
     match state {
         Some(state) if state.len() > MAX_CALLER_STATE_BYTES => Err(oversized_contract_state(
@@ -2539,7 +2539,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "a drop is not retried");
     }
 
-    /// The publisher reads the central contract through the same classifier, but a
+    /// The publisher reads the responder through the same classifier, but a
     /// size refusal there is a read failure, never an admission drop.
     #[tokio::test]
     async fn a_size_refusal_on_the_publisher_read_is_not_an_admission_drop() {
