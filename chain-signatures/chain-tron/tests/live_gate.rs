@@ -315,7 +315,7 @@ impl Gate {
         let ChainEvent::ExecutionConfirmed {
             tx_id,
             sign_id,
-            block_height,
+            block,
             result,
             ..
         } = confirmation
@@ -325,9 +325,15 @@ impl Gate {
         anyhow::ensure!(tx_id.0 == accepted.txid, "watcher confirmed {tx_id:?}");
         anyhow::ensure!(sign_id == SignId::new(accepted.txid));
         anyhow::ensure!(
-            block_height == accepted.receipt.block_number,
-            "watcher height {block_height} != receipt {}",
+            block.height == accepted.receipt.block_number,
+            "watcher height {} != receipt {}",
+            block.height,
             accepted.receipt.block_number
+        );
+        anyhow::ensure!(
+            block.hash[..8] == block.height.to_be_bytes(),
+            "block id {} does not start with its height",
+            hex::encode(block.hash)
         );
 
         let agrees = match (&expected, &result) {
@@ -342,7 +348,7 @@ impl Gate {
             agrees,
             "watcher classified {result:?}, receipt says {expected:?}"
         );
-        println!("[watcher] confirmed at block {block_height} as {result:?}");
+        println!("[watcher] confirmed in block {block:?} as {result:?}");
         Ok(())
     }
 
@@ -610,6 +616,12 @@ async fn relay_sequence_runs_against_recorded_nile_responses() {
             "value": hex::encode(txid)
         })))
         .with_body(patched_receipt(&txid))
+        .create_async()
+        .await;
+
+    server
+        .mock("POST", "/walletsolidity/getblock")
+        .with_body(fixture("block-solidity"))
         .create_async()
         .await;
 

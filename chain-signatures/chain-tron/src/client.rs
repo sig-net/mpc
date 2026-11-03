@@ -59,6 +59,31 @@ impl TronHttp {
         )
     }
 
+    /// `POST /walletsolidity/getblock`: the id (hash) of the solidified block `number`,
+    /// without its transactions.
+    pub async fn get_block_id_solidity(&self, number: u64) -> anyhow::Result<B256> {
+        retry_rpc!(
+            self.request_timeout,
+            self.retry,
+            self.gate,
+            "get_block_id_solidity",
+            {
+                let response: NowBlockResponse = self
+                    .post_json(
+                        "walletsolidity/getblock",
+                        &serde_json::json!({ "id_or_num": number.to_string(), "detail": false }),
+                    )
+                    .await?;
+                let answered = response.block_header.raw_data.number;
+                anyhow::ensure!(
+                    answered == number,
+                    "asked for block {number}, got {answered}"
+                );
+                response.block_id.parse().context("blockID")
+            }
+        )
+    }
+
     /// `POST /wallet/broadcasthex` with the raw (protobuf-serialized)
     /// transaction. Congestion errors (`SERVER_BUSY`, `NO_CONNECTION`,
     /// `NOT_ENOUGH_EFFECTIVE_CONNECTION`) become `Err` so the gate retries

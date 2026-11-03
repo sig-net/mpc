@@ -1,5 +1,5 @@
 use super::supervisor::run_supervised;
-use crate::backlog::mock::{mock_sign_request, mock_signature_output, BacklogTestExt};
+use crate::backlog::mock::{block_at, mock_sign_request, mock_signature_output, BacklogTestExt};
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
@@ -375,7 +375,7 @@ async fn test_execution_confirmation_advances_to_respond_bidirectional() {
 
     crate::stream::ops::process_execution_confirmed(
         tx_id,
-        123u64,
+        block_at(123u64),
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
         Chain::Ethereum,

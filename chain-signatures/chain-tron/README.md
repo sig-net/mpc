@@ -27,6 +27,7 @@ Core pieces:
 | `broadcast_transaction` | `/wallet/broadcasthex` | `Accepted` / `AlreadyKnown` (`DUP_TRANSACTION_ERROR`) / `Rejected`; congestion errors retry |
 | `get_account_balance` | `/wallet/getaccount` | sun; `{}` for accounts the chain has never seen reads as 0 |
 | `get_transaction_info_solidity` | `/walletsolidity/gettransactioninfobyid` | `Ok(None)` = not solidified yet |
+| `get_block_id_solidity` | `/walletsolidity/getblock` | block hash at a height, without transactions; `Err` until solidified or if another block answers |
 
 - `TronWatcher` — execution watcher for Tron targets: polls solidified receipts by txID. Implements `ChainIndexer` purely as the supervision vehicle (no block scanning, no catchup).
 

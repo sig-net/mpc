@@ -7,7 +7,7 @@ use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_crypto::{derive_key, reconstruct_signature};
 use mpc_primitives::{
-    BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey,
+    AttestedBlock, BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey,
     SignBidirectionalEvent, SignId, SignKind, Signature,
 };
 use serde::{Deserialize, Serialize};
@@ -582,7 +582,7 @@ impl SignEntry<Bidirectional<Executing>> {
     pub async fn advance(
         self,
         outcome: ExecutionOutcome,
-        block_height: u64,
+        block: AttestedBlock,
     ) -> anyhow::Result<SignEntry<Bidirectional<Final<Generating>>>> {
         let chain_ctx = match &self.request.kind {
             SignKind::SignBidirectional(event) => event.chain_ctx.clone(),
@@ -598,7 +598,7 @@ impl SignEntry<Bidirectional<Executing>> {
             Arc::clone(self.execution_tx()),
             chain_ctx,
             origin_indexed_at,
-            block_height,
+            block,
         );
         let sign_request = match outcome {
             ExecutionOutcome::Success { output } => {

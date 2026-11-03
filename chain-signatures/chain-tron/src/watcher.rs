@@ -12,7 +12,7 @@ use mpc_chain_integration_core::{
     ChainIndexer, ChainTelemetry, ExtractionFailureKind, StateManager,
 };
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
+    AttestedBlock, BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -79,6 +79,13 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             })
             .ok()?;
 
+        let block_hash = self
+            .client
+            .get_block_id_solidity(receipt.block_number)
+            .await
+            .inspect_err(|err| tracing::warn!(?tx_id, ?sign_id, ?err, "block fetch failed"))
+            .ok()?;
+
         // The park arm reports terminal telemetry.
         if matches!(result, ExecutionOutcome::ExtractionFailed) {
             self.telemetry
@@ -94,7 +101,10 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             tx_id,
             sign_id,
             source_chain: tx.source_chain,
-            block_height: receipt.block_number,
+            block: AttestedBlock {
+                height: receipt.block_number,
+                hash: block_hash.0,
+            },
             result,
         })
     }
@@ -280,17 +290,46 @@ mod tests {
         }
     }
 
+    /// The head, block 42, and the solidified block a receipt names.
     fn nowblock_mock(server: &mut mockito::ServerGuard) {
+        head_mock(server);
+        solidified_block_mock(server, RECEIPT_BLOCK);
+    }
+
+    fn head_mock(server: &mut mockito::ServerGuard) {
         server
             .mock("POST", "/wallet/getnowblock")
             .with_header("content-type", "application/json")
-            .with_body(format!(
-                r#"{{ "blockID": "{}",
-                     "block_header": {{ "raw_data": {{ "number": 42, "timestamp": 1730000000000 }} }} }}"#,
-                hex::encode([0xau8; 32])
-            ))
+            .with_body(block_body(42))
             .create();
     }
+
+    /// Answers the fetch of the receipt's block with block `number`.
+    fn solidified_block_mock(server: &mut mockito::ServerGuard, number: u64) {
+        server
+            .mock("POST", "/walletsolidity/getblock")
+            .match_body(Matcher::PartialJson(
+                serde_json::json!({ "id_or_num": RECEIPT_BLOCK.to_string() }),
+            ))
+            .with_header("content-type", "application/json")
+            .with_body(block_body(number))
+            .create();
+    }
+
+    fn block_body(number: u64) -> String {
+        format!(
+            r#"{{ "blockID": "{}",
+                 "block_header": {{ "raw_data": {{ "number": {number}, "timestamp": 1730000000000 }} }} }}"#,
+            hex::encode(BLOCK_ID)
+        )
+    }
+
+    /// Shaped like a real block id: the height, then the hash.
+    const BLOCK_ID: [u8; 32] = [
+        0, 0, 0, 0, 0x04, 0x49, 0x0c, 0x21, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa,
+        0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa, 0xa,
+    ];
+    const RECEIPT_BLOCK: u64 = 71896097;
 
     fn receipt_stub(server: &mut mockito::ServerGuard, seed: u8, body: String) -> mockito::Mock {
         let tx_id = watcher_tx(seed).0;
@@ -323,13 +362,15 @@ mod tests {
     fn receipt_body(seed: u8, top_level: &str, nested: &str) -> String {
         let tx_id = watcher_tx(seed).0;
         format!(
-            r#"{{ "id": "{}", "blockNumber": 71896097, "fee": 472800{top_level}, "receipt": {{ "result": "{nested}" }} }}"#,
+            r#"{{ "id": "{}", "blockNumber": {RECEIPT_BLOCK}, "fee": 472800{top_level}, "receipt": {{ "result": "{nested}" }} }}"#,
             hex::encode(tx_id.0)
         )
     }
 
     /// Waits for `seed`'s `ExecutionConfirmed`, returning it with the
     /// events seen first.
+    /// Waits for `seed`'s `ExecutionConfirmed` event, checking it names the
+    /// receipt's solidified block, and returns the events seen before it.
     async fn until_confirmed(
         run: &mut WatcherRun,
         seed: u8,
@@ -340,8 +381,21 @@ mod tests {
             loop {
                 let event = run.events.recv().await.expect("watcher channel open");
                 match event {
-                    ChainEvent::ExecutionConfirmed { tx_id, result, .. } if tx_id.0[0] == seed => {
-                        return (seen, result)
+                    ChainEvent::ExecutionConfirmed {
+                        tx_id,
+                        block,
+                        result,
+                        ..
+                    } if tx_id.0[0] == seed => {
+                        assert_eq!(
+                            block,
+                            AttestedBlock {
+                                height: RECEIPT_BLOCK,
+                                hash: BLOCK_ID
+                            },
+                            "the solidified block the receipt names"
+                        );
+                        return (seen, result);
                     }
                     other => seen.push(other),
                 }
@@ -529,13 +583,49 @@ mod tests {
         run.done.await.unwrap().unwrap();
     }
 
+    /// Another block answering the fetch confirms nothing, and the park is not
+    /// reported while there is no event to park on.
+    #[tokio::test]
+    async fn wrong_block_confirms_nothing_and_reports_no_park() {
+        let server = mockito::Server::new_async().await;
+        let config = test_config(server.url().parse().unwrap());
+        let mut server = server;
+        head_mock(&mut server);
+        solidified_block_mock(&mut server, RECEIPT_BLOCK + 1);
+        receipt_stub(&mut server, 1, success_body(1)).create();
+
+        let state = MockStateManager::new();
+        state
+            .watch_execution(
+                Chain::Tron,
+                schema_carrying_tx(1).1,
+                schema_carrying_tx(1).2,
+            )
+            .await;
+
+        let telemetry = CountingTelemetry::default();
+        let mut run = spawn_watcher(config, state, telemetry.clone());
+        first_is_catchup_completed(&mut run).await;
+        for _ in 0..5 {
+            match run.events.recv().await.expect("watcher channel open") {
+                ChainEvent::Block(_) => {}
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert_eq!(telemetry.terminal_failures(), 0);
+
+        run.cancel.cancel();
+        run.done.await.unwrap().unwrap();
+    }
+
     /// A receipt must confirm while a slower poll is in flight: a batched
     /// pass outlasting the stall timeout would discard it on restart.
     #[tokio::test]
     async fn confirms_stream_while_a_slow_poll_is_in_flight() {
         let server = mockito::Server::new_async().await;
-        // Seed 2 retries a 429 on a 300ms cadence — in flight well past
-        // the assert window below.
+        // Seed 2 retries a 500 on a 300ms cadence, in flight well past the
+        // assert window below. A 429 would engage the shared cooldown gate,
+        // and seed 1's block fetch would wait on it.
         let config = TronConfig {
             retry: RetryConfig {
                 min_delay: Duration::from_millis(300),
@@ -556,7 +646,7 @@ mod tests {
             .match_body(Matcher::PartialJson(serde_json::json!({
                 "value": hex::encode(tx2.0)
             })))
-            .with_status(429)
+            .with_status(500)
             .expect_at_least(1)
             .create();
 

@@ -155,11 +155,11 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
         }
         ChainEvent::ExecutionConfirmed {
             tx_id,
-            block_height,
+            block,
             result,
             ..
         } => {
-            process_execution_confirmed(tx_id, block_height, result, ctx, chain)
+            process_execution_confirmed(tx_id, block, result, ctx, chain)
                 .await
                 .context("failed to process execution confirmation")?;
         }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::backlog::mock::{
-    mock_bidi_request, mock_bidi_response_request, mock_participants, mock_root_pk,
+    block_at, mock_bidi_request, mock_bidi_response_request, mock_participants, mock_root_pk,
     mock_sign_request, mock_signature_output, mock_tx, BacklogTestExt,
 };
 use crate::backlog::{Backlog, Bidirectional, Final, Generating};
@@ -25,8 +25,8 @@ use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, IndexedSignRequest, SignArgs, SignBidirectionalEvent,
-    SignKind, Signature,
+    AttestedBlock, BidirectionalTx, BidirectionalTxId, IndexedSignRequest, SignArgs,
+    SignBidirectionalEvent, SignKind, Signature,
 };
 use mpc_tron_wire::{
     pb::{Message as _, RawTransaction, TriggerSmartContract},
@@ -254,9 +254,14 @@ async fn an_outcome_that_cannot_be_recorded_keeps_the_watch() {
     let (sign_tx, _sign_rx) = mpsc::channel(8);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
-    let answered =
-        process_execution_confirmed(tx.id, 123, ExecutionOutcome::Failed, &ctx, Chain::Ethereum)
-            .await;
+    let answered = process_execution_confirmed(
+        tx.id,
+        block_at(123),
+        ExecutionOutcome::Failed,
+        &ctx,
+        Chain::Ethereum,
+    )
+    .await;
 
     assert!(answered.is_err());
     let watched = ctx.backlog.get_execution_watchers(Chain::Ethereum).await;
@@ -285,7 +290,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
     process_execution_confirmed(
         tx_id,
-        123u64,
+        block_at(123u64),
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
         tx.target_chain,
@@ -444,7 +449,7 @@ async fn execution_answers_the_nonce_siblings_of_its_transaction() {
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
         process_execution_confirmed(
             taker_tx.id,
-            123,
+            block_at(123),
             ExecutionOutcome::Failed,
             &ctx,
             Chain::Ethereum,
@@ -471,6 +476,11 @@ async fn execution_answers_the_nonce_siblings_of_its_transaction() {
             };
             assert_eq!(response.outcome_kind, Some(expected), "{source_chain}");
             assert_eq!(response.tx_id, named, "{source_chain}");
+            assert_eq!(
+                respond_request.args.entropy,
+                crate::respond_bidirectional::response_entropy(&[7; 32], &request.id.request_id),
+                "derived from the taker's block hash"
+            );
             if let Some(attestation) = response.attestation {
                 assert_eq!(attestation.block_height, 123, "{source_chain}");
             }
@@ -569,7 +579,7 @@ async fn an_execution_under_a_later_signature_is_answered_and_named() {
 
     process_execution_confirmed(
         second.id,
-        123,
+        block_at(123),
         ExecutionOutcome::Failed,
         &ctx,
         Chain::Ethereum,
@@ -761,7 +771,7 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
 
     process_execution_confirmed(
         tx.id,
-        123u64,
+        block_at(123u64),
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
         tx.target_chain,
@@ -771,7 +781,7 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
 
     process_execution_confirmed(
         tx.id,
-        124u64,
+        block_at(124u64),
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
         tx.target_chain,
@@ -814,7 +824,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
 
     process_execution_confirmed(
         tx.id,
-        444u64,
+        block_at(444u64),
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
         tx.target_chain,
@@ -1813,7 +1823,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
 
     process_execution_confirmed(
         tx.id,
-        456u64,
+        block_at(456u64),
         ExecutionOutcome::Failed,
         &ctx,
         tx.target_chain,
@@ -1867,7 +1877,7 @@ async fn process_execution_confirmed_waits_for_source_catchup() {
     ctx.backlog.set_caught_up(Chain::Ethereum, true);
     process_execution_confirmed(
         tx.id,
-        789u64,
+        block_at(789u64),
         ExecutionOutcome::Failed,
         &ctx,
         tx.target_chain,
@@ -1921,7 +1931,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
 
     process_execution_confirmed(
         tx.id,
-        456u64,
+        block_at(456u64),
         ExecutionOutcome::Success { output: vec![1] },
         &ctx,
         tx.target_chain,
@@ -2119,7 +2129,7 @@ async fn publish_failover_fires_once_per_leg() {
     // Advance through execution into final response publishing (leg 2)
     let exec = pub1.advance(Arc::new(tx)).await.unwrap();
     let fin_gen = exec
-        .advance(ExecutionOutcome::Success { output: vec![] }, 456)
+        .advance(ExecutionOutcome::Success { output: vec![] }, block_at(456))
         .await
         .unwrap();
     let (pk2, output2) = mock_signature_output(&fin_gen.request().args);
@@ -2282,7 +2292,7 @@ async fn midnight_execution_response_binds_receipt_height_and_outcome() {
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-        process_execution_confirmed(tx.id, 7123, result, &ctx, Chain::Ethereum)
+        process_execution_confirmed(tx.id, block_at(7123), result, &ctx, Chain::Ethereum)
             .await
             .unwrap();
         let SignCommand::Request(entry) = sign_rx.try_recv().unwrap() else {
@@ -2469,7 +2479,7 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
             let ctx = make_test_stream_context_with_generator_pk(observer, sign_tx, caught_up);
             process_execution_confirmed(
                 tx.id,
-                7123,
+                block_at(7123),
                 ExecutionOutcome::ExtractionFailed,
                 &ctx,
                 Chain::Ethereum,
@@ -2506,7 +2516,7 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
             );
             process_execution_confirmed(
                 tx.id,
-                7123,
+                block_at(7123),
                 ExecutionOutcome::ExtractionFailed,
                 &ctx,
                 Chain::Ethereum,
@@ -2545,7 +2555,7 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
                 make_test_stream_context_with_generator_pk(restored, sign_tx, caught_up);
             process_execution_confirmed(
                 tx.id,
-                7123,
+                block_at(7123),
                 ExecutionOutcome::ExtractionFailed,
                 &restored_ctx,
                 Chain::Ethereum,
@@ -2607,9 +2617,18 @@ async fn published_midnight_response(
         .await;
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
-    process_execution_confirmed(tx.id, height, outcome, &ctx, Chain::Ethereum)
-        .await
-        .unwrap();
+    process_execution_confirmed(
+        tx.id,
+        AttestedBlock {
+            height,
+            hash: [7; 32],
+        },
+        outcome,
+        &ctx,
+        Chain::Ethereum,
+    )
+    .await
+    .unwrap();
     let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
         panic!("the observed outcome must be signed");
     };
@@ -2903,7 +2922,7 @@ async fn unobserved_response_settles_when_it_verifies() {
         attested.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(attested, sign_tx, true);
-        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
+        process_execution_confirmed(tx.id, block_at(7123), outcome, &ctx, Chain::Ethereum)
             .await
             .unwrap();
         let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
@@ -2999,7 +3018,7 @@ async fn final_response_latency_follows_the_recorded_outcome() {
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
+        process_execution_confirmed(tx.id, block_at(7123), outcome, &ctx, Chain::Ethereum)
             .await
             .unwrap();
         let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
@@ -3039,7 +3058,7 @@ async fn final_response_settles_on_the_published_output() {
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
         let outcome = ExecutionOutcome::Success { output: vec![] };
-        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
+        process_execution_confirmed(tx.id, block_at(7123), outcome, &ctx, Chain::Ethereum)
             .await
             .unwrap();
         let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {

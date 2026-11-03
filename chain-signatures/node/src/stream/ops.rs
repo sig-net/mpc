@@ -18,8 +18,8 @@ use crate::types::SignCommand;
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    Chain, ExecutionOutcome, IndexedSignRequest, RequestKind, RespondBidirectionalEvent,
-    SignBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
+    AttestedBlock, Chain, ExecutionOutcome, IndexedSignRequest, RequestKind,
+    RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind, SignatureRespondedEvent,
 };
 use mpc_utils::time::unix_elapsed_checked;
 
@@ -414,7 +414,7 @@ fn execution_status(failed: bool) -> &'static str {
 /// The target chain is the chain where the execution was observed.
 pub async fn process_execution_confirmed(
     tx_id: mpc_primitives::BidirectionalTxId,
-    block_height: u64,
+    block: AttestedBlock,
     result: ExecutionOutcome,
     ctx: &StreamContext,
     target_chain: Chain,
@@ -422,7 +422,7 @@ pub async fn process_execution_confirmed(
     tracing::debug!(
         ?tx_id,
         ?target_chain,
-        block_height,
+        ?block,
         "received execution confirmation event"
     );
 
@@ -441,7 +441,7 @@ pub async fn process_execution_confirmed(
         ?sign_id,
         ?source_chain,
         ?target_chain,
-        block_height,
+        ?block,
         "handling execution confirmation"
     );
 
@@ -457,17 +457,17 @@ pub async fn process_execution_confirmed(
         tracing::info!(
             sign_id = ?sibling.sign_id(),
             taker = ?tx_id,
-            block_height,
+            ?block,
             "nonce taken by another request's transaction"
         );
         let outcome = unexecutable_outcome(sibling.chain);
-        if let Err(err) = answer_execution(sibling, sibling_id, block_height, outcome, ctx).await {
+        if let Err(err) = answer_execution(sibling, sibling_id, block, outcome, ctx).await {
             tracing::error!(?sibling_id, ?err, "failed to answer a nonce sibling");
         }
     }
 
     let tx = Arc::clone(entry.execution_tx());
-    let answered = answer_execution(entry, tx_id, block_height, result, ctx).await;
+    let answered = answer_execution(entry, tx_id, block, result, ctx).await;
     if answered.is_err() {
         // Unwatched since the confirmation, and unanswered: watch for the next one.
         ctx.backlog.watch_txs([tx]).await;
@@ -485,11 +485,11 @@ fn unexecutable_outcome(source_chain: Chain) -> ExecutionOutcome {
     }
 }
 
-/// Answers `entry`, whose transaction `tx_id` ended with `result` at `block_height`.
+/// Answers `entry`, whose transaction `tx_id` ended with `result` in `block`.
 async fn answer_execution(
     entry: SignEntry<Bidirectional<Executing>>,
     tx_id: mpc_primitives::BidirectionalTxId,
-    block_height: u64,
+    block: AttestedBlock,
     result: ExecutionOutcome,
     ctx: &StreamContext,
 ) -> anyhow::Result<()> {
@@ -526,7 +526,7 @@ async fn answer_execution(
     );
 
     let entry = entry
-        .advance(result, block_height)
+        .advance(result, block)
         .await
         .with_context(|| {
             format!(

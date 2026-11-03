@@ -20,3 +20,7 @@ big_r' = big_r * delta,  k' = k / delta,  sigma' = (sigma + epsilon * k) / delta
 Operators choose which presignature they propose and so control `big_r`. That is acceptable: `delta` still depends on the request and on `entropy`, so choosing `big_r` gives no advantage toward forging. `entropy` is not there to counter presignature choice.
 
 Which block field satisfies requirement 1 depends on the chain and is decided per chain.
+
+## Entropy of a response
+
+A response to a bidirectional request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3) is signed like a request, but no block holds it: the node builds it from what it read on the target chain. Its `entropy` is `H(block_hash || request_id)`, where `block_hash` is the hash of the target chain block at the attested height, read final. Every node attesting the same height derives the same `entropy`, whether it found the execution, read another request's `Response`, or rebuilt its backlog from a checkpoint. The request ID spreads the responses of one block across proposers, since the proposer election reads `entropy` directly and a block hash can start with the block's height.

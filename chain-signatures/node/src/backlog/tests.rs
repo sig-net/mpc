@@ -4,7 +4,7 @@ use super::{
     Final, Generating, Initial, PendingRequests, Publishing, Sign,
 };
 use crate::backlog::mock::{
-    bidi_initial_status, mock_bidi_request, mock_bidi_response, mock_bidirectional_tx,
+    bidi_initial_status, block_at, mock_bidi_request, mock_bidi_response, mock_bidirectional_tx,
     mock_execution_entry, mock_execution_entry_with_timestamp, mock_participants, mock_publishing,
     mock_publishing_with_proposer, mock_root_pk, mock_sign_request, mock_signature_output, mock_tx,
     pending_execution_status, single_entry_checkpoint, BacklogTestExt,
@@ -586,7 +586,7 @@ async fn test_bidirectional_typestate_lifecycle() {
 
     // 4. Advance to Final Generating
     let final_entry = exec_entry
-        .advance(ExecutionOutcome::Success { output: vec![] }, 456)
+        .advance(ExecutionOutcome::Success { output: vec![] }, block_at(456))
         .await
         .expect("should advance to final");
     assert_eq!(final_entry.request().id, sign_id);
@@ -630,7 +630,7 @@ async fn test_bidirectional_typestate_lifecycle() {
         .advance(tx2)
         .await
         .expect("chained advance to executing")
-        .advance(ExecutionOutcome::Success { output: vec![] }, 456)
+        .advance(ExecutionOutcome::Success { output: vec![] }, block_at(456))
         .await
         .expect("chained advance to final generating");
 
@@ -660,7 +660,7 @@ async fn test_bidirectional_executing_advance_outcomes() {
             ExecutionOutcome::Success {
                 output: vec![0x01, 0x02],
             },
-            456,
+            block_at(456),
         )
         .await
         .expect("advance success");
@@ -679,7 +679,7 @@ async fn test_bidirectional_executing_advance_outcomes() {
     let sign_id2 = tx2.sign_id();
     let entry2 = backlog.insert_mock_executing(&tx2).await;
     let failed_entry = entry2
-        .advance(ExecutionOutcome::Failed, 456)
+        .advance(ExecutionOutcome::Failed, block_at(456))
         .await
         .expect("advance failed");
 
@@ -705,7 +705,7 @@ async fn extraction_failure_cannot_advance_into_response_signing() {
         let entry = backlog.insert_mock_executing(&tx).await;
         let before = backlog.checkpoint(chain).await.unwrap();
         assert!(entry
-            .advance(ExecutionOutcome::ExtractionFailed, 456)
+            .advance(ExecutionOutcome::ExtractionFailed, block_at(456))
             .await
             .is_err());
         assert_eq!(
@@ -756,7 +756,7 @@ async fn test_watch_unwatch_and_respond() {
 
     // Advance executing entry to final response signing
     executing_entry
-        .advance(ExecutionOutcome::Success { output: vec![] }, 456)
+        .advance(ExecutionOutcome::Success { output: vec![] }, block_at(456))
         .await
         .expect("respond should transition to final generating");
     assert!(backlog
@@ -1244,7 +1244,7 @@ async fn advance_carries_the_origin_into_the_final_response() {
     let origin = executing.request().unix_timestamp_indexed;
 
     let entry = executing
-        .advance(ExecutionOutcome::Success { output: vec![] }, 456)
+        .advance(ExecutionOutcome::Success { output: vec![] }, block_at(456))
         .await
         .expect("advance to final generating");
 

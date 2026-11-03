@@ -5,6 +5,20 @@ use crate::{
     Signature,
 };
 
+/// The target block a response attests: its height, and its hash, which the
+/// response's entropy derives from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct AttestedBlock {
+    pub height: u64,
+    pub hash: [u8; 32],
+}
+
+impl std::fmt::Debug for AttestedBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.height, hex::encode(self.hash))
+    }
+}
+
 /// Unified event produced by a chain stream
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
@@ -31,7 +45,7 @@ pub enum ChainEvent {
         tx_id: BidirectionalTxId,
         sign_id: SignId,
         source_chain: Chain,
-        block_height: u64,
+        block: AttestedBlock,
         result: ExecutionOutcome,
     },
 }
@@ -64,14 +78,14 @@ impl std::fmt::Debug for ChainEvent {
                 tx_id,
                 sign_id,
                 source_chain,
-                block_height,
+                block,
                 result,
             } => f
                 .debug_struct("ExecutionConfirmed")
                 .field("tx_id", tx_id)
                 .field("sign_id", sign_id)
                 .field("source_chain", source_chain)
-                .field("block_height", block_height)
+                .field("block", block)
                 .field("result", result)
                 .finish(),
         }

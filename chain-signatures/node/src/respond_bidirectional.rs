@@ -4,12 +4,13 @@ use anyhow::Context as _;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
-    AttestationError, AttestationMetadata, AttestationOutcomeKind, BidirectionalTx, Chain,
-    ChainConfig as _, IndexedSignRequest, PublishedAttestation, RespondBidirectionalEvent,
+    AttestationError, AttestationMetadata, AttestationOutcomeKind, AttestedBlock, BidirectionalTx,
+    Chain, ChainConfig as _, IndexedSignRequest, PublishedAttestation, RespondBidirectionalEvent,
     RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat, SignArgs,
     SignBidirectionalEvent, SignId, SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
+use sha3::{Digest as _, Sha3_256};
 use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
@@ -124,7 +125,7 @@ pub struct CompletedTx {
     tx: Arc<BidirectionalTx>,
     chain_ctx: Option<Vec<u8>>,
     origin_indexed_at: Option<u64>,
-    block_height: u64,
+    block: AttestedBlock,
 }
 
 impl CompletedTx {
@@ -132,13 +133,13 @@ impl CompletedTx {
         tx: Arc<BidirectionalTx>,
         chain_ctx: Option<Vec<u8>>,
         origin_indexed_at: Option<u64>,
-        block_height: u64,
+        block: AttestedBlock,
     ) -> Self {
         Self {
             tx,
             chain_ctx,
             origin_indexed_at,
-            block_height,
+            block,
         }
     }
 
@@ -213,7 +214,7 @@ impl CompletedTx {
         );
         let attestation = (source_chain == Chain::Midnight).then_some(AttestationMetadata {
             key_version: self.tx.key_version,
-            block_height: self.block_height,
+            block_height: self.block.height,
             outcome_kind,
         });
         let payload = response_payload(
@@ -229,7 +230,7 @@ impl CompletedTx {
         let (path, epsilon) =
             response_key(self.tx.source_chain, self.tx.key_version, self.tx.sender)?;
         let path = path.to_string();
-        let entropy = self.tx.id.0;
+        let entropy = response_entropy(&self.block.hash, &request_id_bytes);
         Ok(IndexedSignRequest::respond_bidirectional(
             SignId::new(request_id_bytes),
             SignArgs {
@@ -251,6 +252,16 @@ impl CompletedTx {
             },
         ))
     }
+}
+
+/// The entropy of a response. The request id spreads the responses of one block across
+/// proposers, which block hashes alone do not: a Tron block id starts with its height.
+pub(crate) fn response_entropy(block_hash: &[u8; 32], request_id: &[u8; 32]) -> [u8; 32] {
+    Sha3_256::new()
+        .chain_update(block_hash)
+        .chain_update(request_id)
+        .finalize()
+        .into()
 }
 
 /// The payload a response with `output` is signed with.
@@ -337,6 +348,7 @@ fn calculate_respond_bidirectional_hash_message_for_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backlog::mock::block_at;
     use alloy::primitives::{Address, B256};
     use mpc_primitives::{BidirectionalTxId, SignKind};
 
@@ -371,7 +383,7 @@ mod tests {
             sample_bidirectional_tx(Chain::Solana, [0x22; 32]),
             None,
             Some(100),
-            456,
+            block_at(456),
         )
         .create_failed_sign_request()
         .await
@@ -386,7 +398,7 @@ mod tests {
             sample_bidirectional_tx(Chain::Canton, [0x22; 32]),
             None,
             Some(100),
-            456,
+            block_at(456),
         )
         .create_failed_sign_request()
         .await
@@ -404,7 +416,7 @@ mod tests {
             sample_bidirectional_tx(Chain::Midnight, [0x22; 32]),
             None,
             Some(100),
-            456,
+            block_at(456),
         )
         .create_failed_sign_request()
         .await
@@ -428,7 +440,7 @@ mod tests {
         let tx = sample_bidirectional_tx(Chain::Solana, [0x22; 32]);
         let output = vec![1, 2, 3, 4];
         let chain_ctx = Some(vec![9, 9]);
-        let completed = CompletedTx::new(tx.clone(), chain_ctx.clone(), Some(100), 456);
+        let completed = CompletedTx::new(tx.clone(), chain_ctx.clone(), Some(100), block_at(456));
 
         let req = completed
             .create_sign_request_from_serialized_output(output.clone())
@@ -453,7 +465,7 @@ mod tests {
             sample_bidirectional_tx(Chain::Solana, [0x31; 32]),
             None,
             Some(100),
-            456,
+            block_at(456),
         )
         .create_failed_sign_request()
         .await
@@ -467,7 +479,7 @@ mod tests {
             sample_bidirectional_tx(Chain::Solana, [0x32; 32]),
             None,
             Some(100),
-            456,
+            block_at(456),
         )
         .create_sign_request_from_serialized_output(vec![1, 2, 3, 4, 5])
         .unwrap();
@@ -477,16 +489,42 @@ mod tests {
         assert!(!is_failed_execution_response(&succeeded));
     }
 
+    #[test]
+    fn responses_of_one_block_can_elect_different_proposers() {
+        let mut tron_block_id = [0xa; 32];
+        tron_block_id[..8].copy_from_slice(&70_000_000u64.to_be_bytes());
+        let election_seeds: std::collections::HashSet<u8> = (0..8)
+            .map(|i| {
+                CompletedTx::new(
+                    sample_bidirectional_tx(Chain::Solana, [i; 32]),
+                    None,
+                    None,
+                    AttestedBlock {
+                        height: 456,
+                        hash: tron_block_id,
+                    },
+                )
+                .create_sign_request_from_serialized_output(vec![1; 32])
+                .unwrap()
+                .args
+                .entropy[0]
+            })
+            .collect();
+        assert!(election_seeds.len() > 1, "{election_seeds:?}");
+    }
+
     /// A successful output may itself begin with the error prefix.
     #[test]
     fn success_with_error_prefix_remains_success() {
         for chain in [Chain::Solana, Chain::Canton, Chain::Hydration] {
-            let request =
-                CompletedTx::new(sample_bidirectional_tx(chain, [0x33; 32]), None, None, 0)
-                    .create_sign_request_from_serialized_output(
-                        [&MAGIC_ERROR_PREFIX[..], &[1]].concat(),
-                    )
-                    .unwrap();
+            let request = CompletedTx::new(
+                sample_bidirectional_tx(chain, [0x33; 32]),
+                None,
+                None,
+                block_at(0),
+            )
+            .create_sign_request_from_serialized_output([&MAGIC_ERROR_PREFIX[..], &[1]].concat())
+            .unwrap();
             let SignKind::RespondBidirectional(response) = request.kind else {
                 panic!("expected RespondBidirectional");
             };
@@ -589,7 +627,7 @@ mod tests {
             sample_bidirectional_tx(Chain::Midnight, [3; 32]),
             None,
             None,
-            456,
+            block_at(456),
         )
         .create_sign_request_from_serialized_output(MAGIC_ERROR_PREFIX.to_vec())
         .unwrap();
@@ -613,7 +651,7 @@ mod tests {
             sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]),
             None,
             Some(100),
-            456,
+            block_at(456),
         );
         let failure = completed.create_failed_sign_request().await.unwrap();
         let SignKind::RespondBidirectional(response) = &failure.kind else {
@@ -647,7 +685,7 @@ mod tests {
                 sample_bidirectional_tx(source_chain, request_id),
                 None,
                 None,
-                456,
+                block_at(456),
             )
             .create_sign_request_from_serialized_output(serialized_output.clone())
             .unwrap();
@@ -708,7 +746,7 @@ mod tests {
         let tx = sample_bidirectional_tx(Chain::Midnight, request_id);
         assert_eq!(tx.target_chain, Chain::Ethereum);
 
-        let request = CompletedTx::new(tx, None, Some(100), 456)
+        let request = CompletedTx::new(tx, None, Some(100), block_at(456))
             .create_sign_request_from_serialized_output(serialized_output)
             .unwrap();
         let expected_payload = Scalar::from_bytes(
@@ -734,7 +772,7 @@ mod tests {
     async fn midnight_unviable_binds_replacement_height_and_empty_output() {
         let request_id = [0x2f; 32];
         let tx = sample_bidirectional_tx(Chain::Midnight, request_id);
-        let completed = CompletedTx::new(tx, None, Some(100), 456);
+        let completed = CompletedTx::new(tx, None, Some(100), block_at(456));
         let request = completed.create_unviable_sign_request().unwrap();
         let SignKind::RespondBidirectional(response) = &request.kind else {
             panic!("expected a response");
@@ -776,9 +814,14 @@ mod tests {
 
         for chain in [Chain::Solana, Chain::Canton, Chain::Hydration] {
             assert!(
-                CompletedTx::new(sample_bidirectional_tx(chain, request_id), None, None, 456)
-                    .create_unviable_sign_request()
-                    .is_err(),
+                CompletedTx::new(
+                    sample_bidirectional_tx(chain, request_id),
+                    None,
+                    None,
+                    block_at(456),
+                )
+                .create_unviable_sign_request()
+                .is_err(),
                 "{chain}"
             );
         }
@@ -819,7 +862,7 @@ mod tests {
     #[tokio::test]
     async fn published_signing_args_match_the_signed_midnight_response() {
         let tx = sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]);
-        let completed = CompletedTx::new(Arc::clone(&tx), None, None, 456);
+        let completed = CompletedTx::new(Arc::clone(&tx), None, None, block_at(456));
         for request in [
             completed
                 .create_sign_request_from_serialized_output((1..=32).collect())
@@ -840,7 +883,7 @@ mod tests {
     #[test]
     fn published_signing_args_reject_a_digest_for_another_response() {
         let tx = sample_bidirectional_tx(Chain::Midnight, [0x2f; 32]);
-        let request = CompletedTx::new(Arc::clone(&tx), None, None, 456)
+        let request = CompletedTx::new(Arc::clone(&tx), None, None, block_at(456))
             .create_sign_request_from_serialized_output((1..=32).collect())
             .unwrap();
         let published = mpc_chain_midnight::validate_attestation_response(&request).unwrap();
@@ -909,7 +952,7 @@ mod tests {
     #[test]
     fn claims_attestation_key_separates_the_attack_from_leg_two() {
         let tx = sample_bidirectional_tx(Chain::Solana, [0x30; 32]);
-        let leg_two = CompletedTx::new(tx, None, None, 456)
+        let leg_two = CompletedTx::new(tx, None, None, block_at(456))
             .create_sign_request_from_serialized_output(vec![1; 32])
             .unwrap();
         assert!(!claims_attestation_key(&leg_two));

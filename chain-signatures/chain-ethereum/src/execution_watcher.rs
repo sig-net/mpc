@@ -19,8 +19,8 @@ use alloy::rpc::types::{Block, BlockId, BlockTransactions, TransactionReceipt};
 use futures_util::{stream, StreamExt};
 use mpc_chain_integration_core::{ChainTelemetry, ExtractionFailureKind, StateManager};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
-    SignId,
+    AttestedBlock, BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent,
+    ExecutionOutcome, SignId,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -315,7 +315,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         tx_id: BidirectionalTxId,
         sign_id: SignId,
         pending_tx: &BidirectionalTx,
-        block_number: u64,
+        block: AttestedBlock,
         receipt: &TransactionReceipt,
     ) -> ConfirmationOutcome {
         let receipt_succeeded = receipt.status();
@@ -323,7 +323,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         tracing::info!(
             ?tx_id,
             ?sign_id,
-            block_number,
+            ?block,
             "bidirectional execution observed via rpc"
         );
 
@@ -376,7 +376,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             tx_id,
             sign_id,
             source_chain: pending_tx.source_chain,
-            block_height: block_number,
+            block,
             result,
         })
     }
@@ -393,11 +393,13 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             return Ok(BackfillOutcome::NotObserved);
         };
 
-        let Some(mined_block_number) = receipt.block_number else {
+        let (Some(mined_block_number), Some(block_hash)) =
+            (receipt.block_number, receipt.block_hash)
+        else {
             tracing::debug!(
                 ?tx_id,
                 ?sign_id,
-                "late watcher backfill: transaction receipt has no block number"
+                "late watcher backfill: transaction receipt is not mined"
             );
             return Ok(BackfillOutcome::NotObserved);
         };
@@ -423,7 +425,16 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         );
 
         let confirmation = self
-            .execution_confirmed_event(tx_id, sign_id, pending_tx, mined_block_number, &receipt)
+            .execution_confirmed_event(
+                tx_id,
+                sign_id,
+                pending_tx,
+                AttestedBlock {
+                    height: mined_block_number,
+                    hash: block_hash.0,
+                },
+                &receipt,
+            )
             .await;
         Ok(BackfillOutcome::Observed { confirmation })
     }
@@ -626,6 +637,7 @@ mod tests {
     use alloy::rpc::types::{Block, BlockTransactions};
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::StateManager;
+    use mpc_primitives::AttestedBlock;
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
@@ -745,13 +757,19 @@ mod tests {
                 tx_id: event_tx_id,
                 sign_id: event_sign_id,
                 source_chain,
-                block_height,
+                block,
                 result,
             } => {
                 assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash.0));
                 assert_eq!(*event_sign_id, sign_id);
                 assert_eq!(*source_chain, Chain::Solana);
-                assert_eq!(*block_height, 2);
+                assert_eq!(
+                    *block,
+                    AttestedBlock {
+                        height: 2,
+                        hash: block_hash.0
+                    }
+                );
                 assert!(matches!(result, ExecutionOutcome::Failed));
             }
             other => panic!("expected ExecutionConfirmed, got {other:?}"),
@@ -1183,12 +1201,12 @@ mod tests {
         match &events[0] {
             ChainEvent::ExecutionConfirmed {
                 tx_id,
-                block_height,
+                block,
                 result,
                 ..
             } => {
                 assert_eq!(tx_id.0, tx_hash.0);
-                assert_eq!(*block_height, 3, "event height is the mined block");
+                assert_eq!(block.height, 3, "event height is the mined block");
                 assert!(matches!(result, ExecutionOutcome::Failed));
             }
             other => panic!("expected ExecutionConfirmed, got {other:?}"),
@@ -1315,13 +1333,9 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ChainEvent::ExecutionConfirmed {
-                tx_id,
-                block_height,
-                ..
-            } => {
+            ChainEvent::ExecutionConfirmed { tx_id, block, .. } => {
                 assert_eq!(tx_id.0, tx_hash.0);
-                assert_eq!(*block_height, 5, "event height is the mined block");
+                assert_eq!(block.height, 5, "event height is the mined block");
             }
             other => panic!("expected ExecutionConfirmed, got {other:?}"),
         }
@@ -1433,12 +1447,12 @@ mod tests {
         match &events[0] {
             ChainEvent::ExecutionConfirmed {
                 tx_id,
-                block_height,
+                block,
                 result,
                 ..
             } => {
                 assert_eq!(tx_id.0, tx_hash.0);
-                assert_eq!(*block_height, 3);
+                assert_eq!(block.height, 3);
                 assert!(matches!(result, ExecutionOutcome::Failed));
             }
             other => panic!("expected ExecutionConfirmed, got {other:?}"),
@@ -1624,7 +1638,7 @@ mod tests {
                     assert_eq!(events.len(), 1, "{name}");
                     let ChainEvent::ExecutionConfirmed {
                         source_chain: actual_source,
-                        block_height,
+                        block,
                         result,
                         ..
                     } = &events[0]
@@ -1633,7 +1647,7 @@ mod tests {
                     };
                     assert_eq!(*actual_source, source_chain, "{name}");
                     assert_eq!(
-                        *block_height,
+                        block.height,
                         if receipt_status.is_some() { 3 } else { 5 },
                         "{name}"
                     );
@@ -1707,7 +1721,7 @@ mod tests {
                     }
                     let recovered = harness.watcher().collect(&block).await.unwrap();
                     assert!(matches!(recovered.as_slice(), [ChainEvent::ExecutionConfirmed {
-                    block_height: 3, result: ExecutionOutcome::Success { .. }, ..
+                    block: AttestedBlock { height: 3, .. }, result: ExecutionOutcome::Success { .. }, ..
                 }]), "{name}: later receipt/trace must recover at the inclusion height: {recovered:?}");
                 }
             }
@@ -1833,12 +1847,12 @@ mod tests {
         match &events[0] {
             ChainEvent::ExecutionConfirmed {
                 tx_id,
-                block_height,
+                block,
                 result,
                 ..
             } => {
                 assert_eq!(tx_id.0, tx_hash.0);
-                assert_eq!(*block_height, 5, "event height is the mined block");
+                assert_eq!(block.height, 5, "event height is the mined block");
                 assert!(
                     matches!(result, ExecutionOutcome::ExtractionFailed),
                     "the receipt succeeded: this must not be attested as a failed execution"
@@ -1990,12 +2004,12 @@ mod tests {
         match &events[0] {
             ChainEvent::ExecutionConfirmed {
                 tx_id,
-                block_height,
+                block,
                 result,
                 ..
             } => {
                 assert_eq!(tx_id.0, tx_hash.0);
-                assert_eq!(*block_height, 5, "event height is the mined block");
+                assert_eq!(block.height, 5, "event height is the mined block");
                 assert!(matches!(result, ExecutionOutcome::Success { .. }));
             }
             other => panic!("expected ExecutionConfirmed, got {other:?}"),

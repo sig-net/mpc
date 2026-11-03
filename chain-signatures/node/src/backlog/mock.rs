@@ -10,8 +10,9 @@ use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Scalar, Secp256k1};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest, PublicKey,
-    RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignId, SignKind, Signature,
+    AttestedBlock, BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
+    PublicKey, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignId, SignKind,
+    Signature,
 };
 use std::sync::Arc;
 
@@ -86,7 +87,7 @@ impl BacklogTestExt for Backlog {
     ) -> SignEntry<Bidirectional<Final<Generating>>> {
         self.insert_mock_executing(tx)
             .await
-            .advance(ExecutionOutcome::Success { output: vec![] }, 456)
+            .advance(ExecutionOutcome::Success { output: vec![] }, block_at(456))
             .await
             .expect("advance to final generating")
     }
@@ -115,6 +116,14 @@ impl BacklogTestExt for Backlog {
 }
 
 /// The root key mock transactions are derived under.
+/// A target block whose hash no test reads: `block_at(h)` is block `h` with a fixed hash.
+pub fn block_at(height: u64) -> AttestedBlock {
+    AttestedBlock {
+        height,
+        hash: [7; 32],
+    }
+}
+
 pub fn mock_root_pk() -> PublicKey {
     AffinePoint::GENERATOR
 }
