@@ -24,24 +24,12 @@ pub fn env_u64(name: &str, default: Option<u64>) -> anyhow::Result<u64> {
     }
 }
 
-/// Read an environment variable and parse it as a `bool` (`0/1/true/false/yes/no`).
-pub fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
-    match std::env::var(name) {
-        Ok(v) => match v.as_str() {
-            "1" | "true" | "yes" => Ok(true),
-            "0" | "false" | "no" => Ok(false),
-            other => Err(anyhow!("invalid {name}: {other:?}, expected 0/1")),
-        },
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => Err(anyhow!("invalid {name}: not valid UTF-8")),
-    }
-}
-
 /// Build an [`EthConfig`] from the standard set of benchmark env vars
 /// (`MPC_ETH_EXECUTION_RPC_HTTP_URL`, `MPC_ETH_CONTRACT_ADDRESS`,
-/// `MPC_ETH_NETWORK`, `MPC_ETH_OPTIMISTIC_REQUESTS`,
-/// `MPC_ETH_REFRESH_FINALIZED_INTERVAL`).
+/// `MPC_ETH_NETWORK`, `MPC_ETH_REFRESH_FINALIZED_INTERVAL`). Like the node,
+/// the bench waits for finality unless the network is `anvil`.
 pub fn make_config() -> anyhow::Result<EthConfig> {
+    let network = std::env::var("MPC_ETH_NETWORK").unwrap_or_else(|_| "sepolia".to_string());
     Ok(EthConfig {
         // The bench only indexes; the signer is never used.
         account_sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -53,12 +41,10 @@ pub fn make_config() -> anyhow::Result<EthConfig> {
         contract_address: opt_env("MPC_ETH_CONTRACT_ADDRESS")?
             .parse()
             .map_err(|e| anyhow!("invalid MPC_ETH_CONTRACT_ADDRESS: {e}"))?,
-        network: std::env::var("MPC_ETH_NETWORK").unwrap_or_else(|_| "sepolia".to_string()),
-        // Production finality-watch cadence; the watcher drives finality in
-        // MPC_ETH_OPTIMISTIC_REQUESTS=false mode.
+        optimistic_requests: EthConfig::is_optimistic_network(&network),
+        network,
+        // Production finality-watch cadence.
         refresh_finalized_interval: env_u64("MPC_ETH_REFRESH_FINALIZED_INTERVAL", Some(10_000))?,
-        // Default to the production (non-optimistic) path;
-        optimistic_requests: env_bool("MPC_ETH_OPTIMISTIC_REQUESTS", false)?,
         rpc: Default::default(),
         gas: Default::default(),
         publisher: Default::default(),
