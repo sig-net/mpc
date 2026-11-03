@@ -286,6 +286,11 @@ async fn test_generation_posits_reject_on_load() -> anyhow::Result<()> {
         .process_posit_for_test(5, node1, PositAction::Propose, timeout, one_more)
         .await;
     assert_eq!(drain_posit_replies(&mut outbox), vec![PositAction::Accept]);
+    // A repeat of the accepted proposal commits nothing new and stays accepted.
+    triple_spawner
+        .process_posit_for_test(5, node1, PositAction::Propose, timeout, one_more)
+        .await;
+    assert_eq!(drain_posit_replies(&mut outbox), vec![PositAction::Accept]);
     triple_spawner
         .process_posit_for_test(6, node1, PositAction::Propose, timeout, one_more)
         .await;
