@@ -18,7 +18,7 @@ setup mode="" scope="":
     @if [ "{{mode}}" = "act" ]; then \
       ./scripts/setup-deps.sh --install-act; \
     else \
-      ./scripts/setup-deps.sh --install {{scope}} && ./build-contract.sh && cargo build -p mpc-node --release --features test-feature,debug-page; \
+      ./scripts/setup-deps.sh --install {{scope}} && just build contract && just build test-node; \
     fi
 alias s := setup
 
@@ -94,15 +94,18 @@ alias ts := test-seq
 
 # Build artifacts: `just build` = whole Rust workspace (via setup),
 # `just build eth` = EVM artifacts, `just build contract` = NEAR contract wasm,
+# `just build test-node` = mpc-node with test-feature, the binary the integration harness spawns (not the release build),
 # `just build midnight` = midnight-publisher-ts fixtures,
 # `just build tests` = integration test binaries without running them,
 # `just build compat` = latest release node binary for the compat test
-# Usage: just build [target] (target="" | eth | contract | midnight | tests | compat)
+# Usage: just build [target] (target="" | eth | contract | test-node | midnight | tests | compat)
 build target="":
     @if [ "{{target}}" = "eth" ]; then \
       cd chain-signatures/contract-eth && npm ci && npx hardhat compile; \
     elif [ "{{target}}" = "contract" ]; then \
       ./build-contract.sh; \
+    elif [ "{{target}}" = "test-node" ]; then \
+      cargo build -p mpc-node --release --features test-feature,debug-page; \
     elif [ "{{target}}" = "midnight" ]; then \
       cd chain-signatures/midnight-publisher-ts && npm ci && npm run build && npm run compile:real-stack-caller && npm run typecheck:real-stack; \
     elif [ "{{target}}" = "tests" ]; then \
@@ -112,7 +115,7 @@ build target="":
     elif [ -z "{{target}}" ]; then \
       just setup && cargo build --workspace; \
     else \
-      echo "Unknown build target: {{target}} (expected '' | eth | contract | midnight | tests | compat)" >&2; exit 1; \
+      echo "Unknown build target: {{target}} (expected '' | eth | contract | test-node | midnight | tests | compat)" >&2; exit 1; \
     fi
 
 # Anvil-backed EVM tests: real EVM + real contract bytecode (needs anvil + eth-build output)
