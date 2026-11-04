@@ -58,12 +58,8 @@ RUN update-ca-certificates
 COPY --from=redis-bin /usr/local/bin/redis-server /usr/local/bin/redis-server
 COPY --from=node-builder /usr/src/app/target/release/mpc-node /usr/local/bin/mpc-node
 COPY chain-signatures/node/redis.conf /etc/redis/redis.conf
-
-# Create a script to start both Redis and the Rust app
-RUN echo "#!/bin/bash\nredis-server /etc/redis/redis.conf &\nexec env RUST_LOG=${RUST_LOG:-mpc=debug} mpc-node start" > /start.sh \
-    && chmod +x /start.sh
+COPY --chmod=755 chain-signatures/node/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 WORKDIR /usr/local/bin
 
-# Start Redis and the Rust application
-ENTRYPOINT [ "/start.sh" ]
+ENTRYPOINT [ "entrypoint.sh" ]
