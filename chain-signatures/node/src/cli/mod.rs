@@ -31,6 +31,7 @@ pub use args::{
     solana::SolArgs, tron::TronArgs,
 };
 
+use anyhow::Context as _;
 use clap::Parser;
 use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
@@ -225,7 +226,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &stack,
                 backlog.clone(),
             )
-            .await;
+            .await?;
 
             let sync_task = SyncTask::new(
                 &node_client,
@@ -313,7 +314,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 node_client.clone(),
                 checkpoints_rx,
             )
-            .await;
+            .await?;
             tracing::info!("node tasks spawned");
 
             // A core task never returns in normal operation, so the first to
@@ -462,14 +463,14 @@ impl ChainStack {
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
-    /// each other chain is added only when configured. A client that fails to build is
-    /// logged and skipped rather than aborting startup.
+    /// each other chain is added only when configured. A configured chain whose client
+    /// cannot be built fails startup: a node must not sign for a chain it cannot reach.
     /// `backlog` lets publishers that queue (Midnight) re-check a response before spending on it.
     async fn publishers(
         &self,
         near: NearClient,
         backlog: Backlog,
-    ) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
+    ) -> anyhow::Result<HashMap<Chain, Arc<dyn ChainPublisher>>> {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
@@ -499,7 +500,7 @@ impl ChainStack {
                         self.gated_publisher(Chain::Hydration, "hydration publish", client),
                     );
                 }
-                Err(e) => tracing::error!(%e, "failed to create hydration client"),
+                Err(e) => anyhow::bail!("failed to create hydration client: {e:#}"),
             }
         }
         if let Some(canton) = &self.configs.canton {
@@ -508,7 +509,7 @@ impl ChainStack {
                 Ok(client) => {
                     publishers.insert(Chain::Canton, Arc::new(client));
                 }
-                Err(e) => tracing::error!(%e, "failed to create canton client"),
+                Err(e) => anyhow::bail!("failed to create canton client: {e:#}"),
             }
         }
         if let Some(midnight) = &self.configs.midnight {
@@ -526,11 +527,11 @@ impl ChainStack {
                         self.gated_publisher(Chain::Midnight, "midnight publish", client),
                     );
                 }
-                Err(e) => tracing::error!(%e, "failed to create midnight publisher"),
+                Err(e) => anyhow::bail!("failed to create midnight publisher: {e:#}"),
             }
         }
 
-        publishers
+        Ok(publishers)
     }
 }
 
@@ -624,7 +625,7 @@ impl RpcHandles {
         signer: InMemorySigner,
         stack: &ChainStack,
         backlog: Backlog,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         let near_rpc = near_fetch::Client::new(near_rpc_url);
         // One set of gates for every NEAR call: the publisher and the governance
@@ -646,15 +647,15 @@ impl RpcHandles {
             signer,
             near_gates,
         );
-        let publishers = stack.publishers(near_client.clone(), backlog).await;
+        let publishers = stack.publishers(near_client.clone(), backlog).await?;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
-        Self {
+        Ok(Self {
             near_client,
             near_governance_client,
             rpc_channel,
             rpc_executor,
-        }
+        })
     }
 }
 
@@ -791,7 +792,7 @@ async fn spawn_indexers(
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
-) {
+) -> anyhow::Result<()> {
     let ChainStack { configs, gates, .. } = stack;
     let ChainConfigs {
         eth,
@@ -857,9 +858,7 @@ async fn spawn_indexers(
                     eth_telemetry,
                 ));
             }
-            Err(err) => {
-                tracing::error!(?err, "failed to create ethereum indexer");
-            }
+            Err(err) => anyhow::bail!("failed to create ethereum indexer: {err:#}"),
         }
     }
 
@@ -888,9 +887,7 @@ async fn spawn_indexers(
                     sol_telemetry,
                 ));
             }
-            Err(err) => {
-                tracing::error!(?err, "failed to create solana indexer");
-            }
+            Err(err) => anyhow::bail!("failed to create solana indexer: {err:#}"),
         }
     }
 
@@ -944,9 +941,7 @@ async fn spawn_indexers(
                     canton_telemetry,
                 ));
             }
-            Err(err) => {
-                tracing::error!(?err, "failed to create canton indexer");
-            }
+            Err(err) => anyhow::bail!("failed to create canton indexer: {err:#}"),
         }
     }
 
@@ -957,13 +952,10 @@ async fn spawn_indexers(
         tracing::info!("Midnight indexer waiting for the network public key");
         // Fails only when the contract watcher is gone, and then the process
         // is already ending.
-        let root_pk = match contract_watcher.wait_public_key().await {
-            Ok(pk) => pk,
-            Err(err) => {
-                tracing::error!(?err, "midnight indexer: no network public key");
-                return;
-            }
-        };
+        let root_pk = contract_watcher
+            .wait_public_key()
+            .await
+            .context("midnight indexer: no network public key")?;
         match MidnightIndexer::new(
             midnight_config,
             backlog.clone(),
@@ -989,9 +981,7 @@ async fn spawn_indexers(
                     midnight_telemetry,
                 ));
             }
-            Err(err) => {
-                tracing::error!(?err, "failed to create midnight indexer");
-            }
+            Err(err) => anyhow::bail!("failed to create midnight indexer: {err:#}"),
         }
     }
 
@@ -1002,7 +992,7 @@ async fn spawn_indexers(
         match TronWatcher::new(tron_config, backlog.clone(), tron_telemetry.clone()) {
             Ok(watcher) => {
                 tracing::info!("tron execution watcher created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     watcher,
                     StreamContext::new(
                         backlog.clone(),
@@ -1017,11 +1007,10 @@ async fn spawn_indexers(
                     tron_telemetry,
                 ));
             }
-            Err(err) => {
-                tracing::error!(?err, "failed to create tron watcher");
-            }
+            Err(err) => anyhow::bail!("failed to create tron watcher: {err:#}"),
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1121,7 +1110,8 @@ mod tests {
 
         let publishers = ChainStack::new(chains)
             .publishers(undialed_near_client(), Backlog::new())
-            .await;
+            .await
+            .unwrap();
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),
@@ -1182,7 +1172,8 @@ mod tests {
 
         let publishers = ChainStack::new(chains)
             .publishers(undialed_near_client(), Backlog::new())
-            .await;
+            .await
+            .unwrap();
 
         assert!(publishers.contains_key(&Chain::Midnight));
     }
@@ -1228,7 +1219,8 @@ mod tests {
 
         let publishers = stack
             .publishers(undialed_near_client(), Backlog::new())
-            .await;
+            .await
+            .unwrap();
         let publisher = publishers
             .get(&Chain::Solana)
             .expect("solana publisher must be wired when configured");
