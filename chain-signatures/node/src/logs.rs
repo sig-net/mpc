@@ -261,13 +261,14 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
         tracing::error!(panic = %info, "task panicked");
         default_hook(info);
     }));
-    tracing::info!(gcp_logs = on_gcp, "Set global logging subscriber");
-
+    // Not logging the endpoint: it may carry a token.
     tracing::info!(
-        "Logging parameters: env={}, node_id={}, options={:?}",
         env,
         node_id,
-        options
+        otel_level = ?options.opentelemetry_level,
+        otlp = !matches!(options.opentelemetry_level, OpenTelemetryLevel::OFF),
+        gcp_logs = on_gcp,
+        "logging configured"
     );
 
     otlp_guard
