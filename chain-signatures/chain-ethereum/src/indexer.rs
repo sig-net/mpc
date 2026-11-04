@@ -404,22 +404,16 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         // An endpoint on another network would feed this node that network's
         // requests and receipts, and admission checks transactions against the
         // configured network only.
-        if let Some(expected) = self.config.chain_id() {
-            let Some(actual) = self.sample_chain_id(&cancel).await else {
-                tracing::debug!("ethereum indexer cancelled before the chain id was sampled");
-                return Ok(());
-            };
-            anyhow::ensure!(
-                actual == expected,
-                "ethereum RPC serves chain id {actual}, but network {} has chain id {expected}",
-                self.config.network
-            );
-        } else {
-            tracing::warn!(
-                network = %self.config.network,
-                "unknown ethereum network: the RPC's chain id is not checked"
-            );
-        }
+        let expected = self.config.chain_id();
+        let Some(actual) = self.sample_chain_id(&cancel).await else {
+            tracing::debug!("ethereum indexer cancelled before the chain id was sampled");
+            return Ok(());
+        };
+        anyhow::ensure!(
+            actual == expected,
+            "ethereum RPC serves chain id {actual}, but network {} has chain id {expected}",
+            self.config.network
+        );
 
         // Spawn the finalized head watcher.
         let mut finalized_watcher = self

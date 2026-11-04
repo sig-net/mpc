@@ -99,15 +99,13 @@ impl SolanaClient {
         let keypair = Keypair::from_base58_string(&sol.account_sk);
         let payer = Arc::new(keypair);
         // Empty ws slot: nothing subscribes (the indexer polls finalized blocks).
-        let cluster = anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), String::new());
+        let cluster = anchor_client::Cluster::Custom(sol.rpc_http_url.to_string(), String::new());
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
             CommitmentConfig::confirmed(),
         );
-        let rpc_client = Arc::new(RpcClient::new(sol.rpc_http_url.clone()));
-        let program_id = Pubkey::from_str(&sol.program_address)
-            .expect("Invalid Solana program address provided in configuration");
+        let rpc_client = Arc::new(RpcClient::new(sol.rpc_http_url.to_string()));
         Self {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
@@ -116,9 +114,9 @@ impl SolanaClient {
             // moves inside the client
             shared_backoff: SharedBackoff::new(),
             rpc_client,
-            rpc_http_url: sol.rpc_http_url.clone(),
+            rpc_http_url: sol.rpc_http_url.to_string(),
             http_client: reqwest::Client::new(),
-            program_id,
+            program_id: sol.program_address,
             payer,
             telemetry,
         }

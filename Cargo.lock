@@ -7457,6 +7457,7 @@ dependencies = [
  "tokio-tungstenite 0.29.0",
  "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -7509,6 +7510,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -7627,6 +7629,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

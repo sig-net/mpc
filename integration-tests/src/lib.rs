@@ -242,7 +242,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     let sk_share_local_path = spawner.tmp_dir.join("secrets");
     std::fs::create_dir_all(&sk_share_local_path).expect("could not create secrets dir");
-    let sk_share_local_path = sk_share_local_path.to_string_lossy().to_string();
 
     let mut ethereum = None;
     if spawner.use_ethereum {
@@ -270,7 +269,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             contract_address: contract_address_hex
                 .parse()
                 .context("invalid deployed contract address")?,
-            network: "anvil".to_string(),
+            network: mpc_chain_ethereum::EthNetwork::Anvil,
             optimistic_requests: true,
             gas: Default::default(),
             indexer: Default::default(),
@@ -289,7 +288,10 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         gcp_project_id: None,
         sk_share_secret_id: None,
         sk_share_local_path: Some(sk_share_local_path),
-        redis_url: redis.internal_address.clone(),
+        redis_url: redis
+            .internal_address
+            .parse()
+            .context("invalid redis address")?,
     };
 
     let log_options = logs::Options::test();

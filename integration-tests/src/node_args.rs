@@ -68,13 +68,13 @@ impl Args {
         );
         self.flag("--eth-execution-rpc-http-url", &eth.execution_rpc_http_url);
         self.flag("--eth-contract-address", eth.contract_address);
-        self.flag("--eth-network", &eth.network);
+        self.flag("--eth-network", eth.network);
     }
 
     fn sol(&mut self, sol: &SolConfig) {
         self.flag("--sol-account-sk", &sol.account_sk);
         self.flag("--sol-rpc-http-url", &sol.rpc_http_url);
-        self.flag("--sol-program-address", &sol.program_address);
+        self.flag("--sol-program-address", sol.program_address);
     }
 
     fn hydration(&mut self, hydration: &HydrationConfig) {
@@ -135,7 +135,7 @@ impl Args {
             self.flag("--sk-share-secret-id", id);
         }
         if let Some(path) = &storage.sk_share_local_path {
-            self.flag("--sk-share-local-path", path);
+            self.flag("--sk-share-local-path", path.display());
         }
         self.flag("--redis-url", &storage.redis_url);
     }

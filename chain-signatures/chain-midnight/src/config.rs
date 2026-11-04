@@ -176,6 +176,14 @@ impl MidnightAddress {
     }
 }
 
+impl std::str::FromStr for MidnightAddress {
+    type Err = hex::FromHexError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_hex(s)
+    }
+}
+
 /// Midnight chain integration configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MidnightConfig {

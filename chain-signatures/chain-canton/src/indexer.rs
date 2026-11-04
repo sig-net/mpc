@@ -195,7 +195,14 @@ impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
     // immutable. Consider a better approach post migration.
     async fn subscribe(&self, begin_exclusive: u64) -> anyhow::Result<CantonConnection> {
         let jwt_token = self.client.bearer_token().await?;
-        let ws_url = format!("{}/v2/updates", self.client.config.json_api_ws_url);
+        let ws_url = format!(
+            "{}/v2/updates",
+            self.client
+                .config
+                .json_api_ws_url
+                .as_str()
+                .trim_end_matches('/')
+        );
         CantonConnection::connect(
             &ws_url,
             &jwt_token,

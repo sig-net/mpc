@@ -60,6 +60,11 @@ fn thread_network_name(docker: &DockerClient) -> String {
 }
 
 const ENV: &str = "integration-tests";
+
+/// Stands in for a chain endpoint until its sandbox is up.
+fn placeholder_url() -> url::Url {
+    "http://127.0.0.1:1".parse().expect("a valid literal")
+}
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
 ///
 /// When enabled, uses hardcoded key shares from fixture data to start nodes in
@@ -288,10 +293,11 @@ impl ClusterSpawner {
     pub fn solana(mut self) -> Self {
         // Enable Solana by setting a placeholder if not already configured
         if self.cfg.sol.is_none() {
+            // Placeholders, filled in once the validator runs.
             self.cfg.sol = Some(SolConfig {
-                account_sk: String::new(),      // Will be filled in later
-                rpc_http_url: String::new(),    // Will be filled in later
-                program_address: String::new(), // Will be filled in later
+                account_sk: String::new(),
+                rpc_http_url: placeholder_url(),
+                program_address: Default::default(),
                 indexer: Default::default(),
             });
         }
@@ -327,10 +333,10 @@ impl ClusterSpawner {
     pub fn canton(mut self) -> Self {
         if self.cfg.canton.is_none() {
             self.cfg.canton = Some(CantonConfig {
-                json_api_url: String::new(),
-                json_api_ws_url: String::new(),
+                json_api_url: placeholder_url(),
+                json_api_ws_url: placeholder_url(),
                 auth: CantonAuthConfig {
-                    token_url: String::new(),
+                    token_url: placeholder_url(),
                     client_id: String::new(),
                     client_secret: String::new(),
                     audience: String::new(),

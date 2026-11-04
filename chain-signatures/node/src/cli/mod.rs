@@ -63,7 +63,7 @@ pub enum Cli {
     Start {
         /// NEAR RPC address
         #[arg(long, env("MPC_NEAR_RPC"), hide_env_values = true)]
-        near_rpc: String,
+        near_rpc: Url,
         /// MPC contract id
         #[arg(long, env("MPC_CONTRACT_ID"))]
         mpc_contract_id: AccountId,
@@ -187,7 +187,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // NEAR as a source chain exists for the integration tests only, and the
             // test harness builds this binary with `test-feature`.
             if cfg!(feature = "test-feature") {
-                let rpc_client = near_fetch::Client::new(&near_rpc);
+                let rpc_client = near_fetch::Client::new(near_rpc.as_str());
                 let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
                 mpc_chain_near::run(
                     &mpc_contract_id,
@@ -223,7 +223,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 rpc_channel,
                 rpc_executor,
             } = RpcHandles::new(
-                &near_rpc,
+                near_rpc.as_str(),
                 &my_address,
                 &network,
                 &mpc_contract_id,
@@ -352,7 +352,11 @@ fn configuration_digest(
     sign_sk: SecretKey,
     eth: EthArgs,
 ) -> i64 {
-    let eth_contract_address = eth.eth_contract_address.unwrap_or_default();
+    // Hashed in its checksummed form, so the spelling of the flag does not matter.
+    let eth_contract_address = eth
+        .eth_contract_address
+        .map(|address| address.to_string())
+        .unwrap_or_default();
     calculate_digest(
         mpc_contract_id,
         account_id,
@@ -588,7 +592,7 @@ fn log_startup(
         near_rpc_url = %near_client.rpc_addr(),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
         eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
-        sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.as_str()).unwrap_or("None"),
+        sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.to_string()).unwrap_or_else(|| "None".to_string()),
         sol_rpc_url = %chains.sol.as_ref().map(|c| c.rpc_http_url.as_str()).unwrap_or("None"),
         sol_signer_address = %sol_signer_address.as_deref().unwrap_or("None"),
         hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
@@ -713,7 +717,7 @@ impl StorageHandles {
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
         let keystore = Keystore::init(storage_options, account_id).await?;
-        let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
+        let redis_pool = redis_pool(storage_options.redis_url.clone())?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
@@ -838,7 +842,7 @@ async fn spawn_indexers(
 
     // Every source chain's stream admits bidirectional requests targeting Ethereum.
     // Admission must match across nodes, so they all need the same Ethereum network.
-    let ethereum_chain_id = eth.as_ref().and_then(EthConfig::chain_id);
+    let ethereum_chain_id = eth.as_ref().map(EthConfig::chain_id);
     if ethereum_chain_id.is_none() {
         tracing::warn!(
             "ethereum not configured: Ethereum-targeted requests are admitted without the \
@@ -1403,8 +1407,8 @@ mod tests {
     fn sol_config_with_bogus_rpc() -> SolConfig {
         SolConfig {
             account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
-            rpc_http_url: "http://127.0.0.1:1".into(),
-            program_address: mpc_chain_solana::Pubkey::new_unique().to_string(),
+            rpc_http_url: "http://127.0.0.1:1".parse().unwrap(),
+            program_address: mpc_chain_solana::Pubkey::new_unique(),
             indexer: Default::default(),
         }
     }

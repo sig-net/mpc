@@ -2,6 +2,7 @@ use anyhow::Context as _;
 use mpc_chain_midnight::{MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 use std::time::Duration;
+use url::Url;
 
 /// CLI arguments for the Midnight integration. The node url requires the whole
 /// required publisher group. GCS output storage is optional.
@@ -21,14 +22,14 @@ pub struct MidnightArgs {
             "midnight_indexer_ws_url",
         ]
     )]
-    pub midnight_node_url: Option<String>,
+    pub midnight_node_url: Option<Url>,
     /// Address of the central singleton contract: 64 hex characters, no `0x` prefix.
     #[arg(
         long,
         env("MPC_MIDNIGHT_CENTRAL_ADDRESS"),
         requires = "midnight_node_url"
     )]
-    pub midnight_central_address: Option<String>,
+    pub midnight_central_address: Option<MidnightAddress>,
     /// Hex seed of the wallet that funds respond transactions.
     #[arg(
         long,
@@ -55,7 +56,7 @@ pub struct MidnightArgs {
         hide_env_values = true,
         requires = "midnight_node_url"
     )]
-    pub midnight_proof_server_url: Option<String>,
+    pub midnight_proof_server_url: Option<Url>,
     /// Indexer GraphQL URL. Required to respond: the funding wallet's spendable
     /// DUST is only derivable from the ledger events the indexer serves.
     #[arg(
@@ -64,7 +65,7 @@ pub struct MidnightArgs {
         hide_env_values = true,
         requires = "midnight_node_url"
     )]
-    pub midnight_indexer_url: Option<String>,
+    pub midnight_indexer_url: Option<Url>,
     /// Indexer GraphQL subscription URL: the wallet catches up over the URL
     /// above and follows over this one.
     #[arg(
@@ -73,7 +74,7 @@ pub struct MidnightArgs {
         hide_env_values = true,
         requires = "midnight_node_url"
     )]
-    pub midnight_indexer_ws_url: Option<String>,
+    pub midnight_indexer_ws_url: Option<Url>,
     /// Optional GCS output cache. Initialization retries in the background; upload failures warn
     /// and do not prevent the on-chain response.
     #[arg(
@@ -82,20 +83,22 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_output_storage_bucket: Option<String>,
-    /// Object prefix within the bucket (default: v1).
+    /// Object prefix within the bucket.
     #[arg(
         long,
         env("MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX"),
+        default_value = "v1",
         requires = "midnight_node_url"
     )]
-    pub midnight_output_storage_prefix: Option<String>,
-    /// Maximum time for one cache initialization attempt or storing one output, in seconds (default: 30).
+    pub midnight_output_storage_prefix: String,
+    /// Maximum time for one cache initialization attempt or storing one output, in seconds.
     #[arg(
         long,
         env("MPC_MIDNIGHT_OUTPUT_STORAGE_TIMEOUT_SECS"),
+        default_value_t = 30,
         requires = "midnight_node_url"
     )]
-    pub midnight_output_storage_timeout_secs: Option<u64>,
+    pub midnight_output_storage_timeout_secs: u64,
     /// Local GCS emulator endpoint for integration tests; uses anonymous credentials.
     #[cfg(feature = "test-feature")]
     #[arg(long, requires = "midnight_node_url")]
@@ -104,7 +107,7 @@ pub struct MidnightArgs {
 
 impl MidnightArgs {
     /// Clap's `requires_all` on the node URL makes the flags all-or-nothing before
-    /// this conversion parses the central address and validates the remaining fields.
+    /// this conversion validates the remaining fields.
     pub fn into_config(self) -> anyhow::Result<Option<MidnightConfig>> {
         let (
             Some(node_url),
@@ -126,15 +129,14 @@ impl MidnightArgs {
         };
         let mut publisher = PublisherConfig {
             funding_seed: funding_seed.expose_secret().to_string(),
-            proof_server_url,
-            indexer_url,
-            indexer_ws_url,
+            proof_server_url: proof_server_url.to_string(),
+            indexer_url: indexer_url.to_string(),
+            indexer_ws_url: indexer_ws_url.to_string(),
             output_storage: self.midnight_output_storage_bucket.map(|bucket| {
                 OutputStorageConfig::new(
                     bucket,
-                    self.midnight_output_storage_prefix
-                        .unwrap_or_else(|| "v1".to_string()),
-                    Duration::from_secs(self.midnight_output_storage_timeout_secs.unwrap_or(30)),
+                    self.midnight_output_storage_prefix,
+                    Duration::from_secs(self.midnight_output_storage_timeout_secs),
                 )
             }),
             ..Default::default()
@@ -148,10 +150,8 @@ impl MidnightArgs {
                 format!("midnight config: --midnight-intent-gen-command must be a JSON array of strings, got {command}")
             })?;
         }
-        let central_address = MidnightAddress::from_hex(&central_address)
-            .context("midnight config: central_address must be 32 bytes of hex")?;
         let config = MidnightConfig {
-            node_url,
+            node_url: node_url.to_string(),
             central_address,
             publisher,
             rpc: Default::default(),
@@ -206,7 +206,7 @@ mod tests {
     /// assertion cannot pass on a dropped flag.
     fn configured() -> MidnightConfig {
         MidnightConfig {
-            node_url: "http://127.0.0.1:9944".into(),
+            node_url: "http://127.0.0.1:9944/".into(),
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
@@ -216,7 +216,7 @@ mod tests {
                     "/opt/midnight publisher/dist/main.js".into(),
                     "--child-option".into(),
                 ],
-                proof_server_url: "http://127.0.0.1:6300".into(),
+                proof_server_url: "http://127.0.0.1:6300/".into(),
                 indexer_url: "http://127.0.0.1:8088/api/v3/graphql".into(),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".into(),
                 output_storage: Some(OutputStorageConfig::new(
@@ -265,14 +265,21 @@ mod tests {
     }
 
     #[test]
-    fn central_address_is_parsed_at_the_config_boundary() {
-        for invalid in ["ab".repeat(31), format!("0x{}", "ab".repeat(31))] {
-            let mut args = configured_args();
-            args.midnight_central_address = Some(invalid);
-
-            let error = args.into_config().unwrap_err().to_string();
+    fn the_cli_rejects_a_malformed_central_address() {
+        for invalid in ["ab".repeat(31), format!("0x{}", "ab".repeat(32))] {
+            let argv: Vec<String> = configured_argv()
+                .into_iter()
+                .map(|arg| {
+                    if arg == "ab".repeat(32) {
+                        invalid.clone()
+                    } else {
+                        arg
+                    }
+                })
+                .collect();
+            let error = MidnightArgs::try_parse_from(argv).unwrap_err().to_string();
             assert!(
-                error.contains("central_address"),
+                error.contains("--midnight-central-address"),
                 "unexpected address error: {error}"
             );
         }
@@ -310,23 +317,36 @@ mod tests {
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
+    /// The defaulted storage flags must not pull in the `requires` on the node url.
+    #[test]
+    fn unconfigured_yields_no_config() {
+        crate::cli::tests::assert_midnight_env_unset();
+        assert!(MidnightArgs::try_parse_from(["test"])
+            .unwrap()
+            .into_config()
+            .unwrap()
+            .is_none());
+    }
+
     #[test]
     fn the_midnight_flags_are_all_or_nothing() {
         // A publisher flag accepted on its own would let a node carry a funding
         // seed with no chain configured to spend it on, unnoticed.
         crate::cli::tests::assert_midnight_env_unset();
 
-        for flag in [
-            "--midnight-funding-seed",
-            "--midnight-intent-gen-command",
-            "--midnight-proof-server-url",
-            "--midnight-indexer-url",
-            "--midnight-indexer-ws-url",
-            "--midnight-output-storage-bucket",
-            "--midnight-output-storage-prefix",
-            "--midnight-output-storage-timeout-secs",
+        // Well-formed values, so the rejection is the missing node url and
+        // not the value itself.
+        for (flag, value) in [
+            ("--midnight-funding-seed", "1"),
+            ("--midnight-intent-gen-command", "1"),
+            ("--midnight-proof-server-url", "http://127.0.0.1:1"),
+            ("--midnight-indexer-url", "http://127.0.0.1:1"),
+            ("--midnight-indexer-ws-url", "ws://127.0.0.1:1"),
+            ("--midnight-output-storage-bucket", "1"),
+            ("--midnight-output-storage-prefix", "1"),
+            ("--midnight-output-storage-timeout-secs", "1"),
         ] {
-            let err = MidnightArgs::try_parse_from(["test", flag, "1"])
+            let err = MidnightArgs::try_parse_from(["test", flag, value])
                 .expect_err("clap must reject a publisher flag supplied on its own");
             assert!(
                 err.to_string().contains("midnight-node-url"),
@@ -379,11 +399,19 @@ mod tests {
     #[test]
     fn output_storage_defaults_are_resolved_at_the_cli_boundary() {
         crate::cli::tests::assert_midnight_env_unset();
-        let mut args = configured_args();
-        args.midnight_output_storage_prefix = None;
-        args.midnight_output_storage_timeout_secs = None;
+        let mut argv = configured_argv();
+        let prefix_flag = argv
+            .iter()
+            .position(|arg| arg == "--midnight-output-storage-prefix")
+            .unwrap();
+        // The prefix and timeout flags with their values are the last four entries.
+        argv.truncate(prefix_flag);
 
-        let config = args.into_config().unwrap().unwrap();
+        let config = MidnightArgs::try_parse_from(argv)
+            .unwrap()
+            .into_config()
+            .unwrap()
+            .unwrap();
         assert_eq!(
             config.publisher.output_storage,
             Some(OutputStorageConfig::new(
