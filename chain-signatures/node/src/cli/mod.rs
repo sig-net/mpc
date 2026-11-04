@@ -70,9 +70,8 @@ pub enum Cli {
         /// This node's account id
         #[arg(long, env("MPC_ACCOUNT_ID"))]
         account_id: AccountId,
-        /// Environment this node runs in (e.g. `testnet`, `mainnet`). Labels logs
-        /// and telemetry.
-        #[arg(long, env("MPC_ENV"))]
+        /// Deployment this node belongs to. Labels logs and telemetry.
+        #[arg(long, env("MPC_ENV"), value_parser = ["dev", "testnet", "mainnet", "test"])]
         env: String,
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]

@@ -168,11 +168,12 @@ fn get_resource(env: &str, node_id: &str) -> Resource {
     static RESOURCE: OnceLock<Resource> = OnceLock::new();
     RESOURCE
         .get_or_init(|| {
+            // OpenTelemetry resource conventions, so shared backends filter by them.
             Resource::builder()
-                .with_service_name(format!("mpc:{env}:{node_id}"))
-                .with_attributes(vec![
-                    KeyValue::new("env", env.to_string()),
-                    KeyValue::new("node_id", node_id.to_string()),
+                .with_service_name("mpc")
+                .with_attributes([
+                    KeyValue::new("deployment.environment.name", env.to_string()),
+                    KeyValue::new("service.instance.id", node_id.to_string()),
                 ])
                 .build()
         })
