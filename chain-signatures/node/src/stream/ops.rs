@@ -570,6 +570,8 @@ pub async fn process_execution_confirmed(
         } else {
             ExecutionOutcome::Failed
         };
+        // Logged, not propagated: a `?` would skip the rest and leave the
+        // taker, unwatched above, without an answer.
         if let Err(err) = answer_execution(sibling, sibling_id, block_height, outcome, ctx).await {
             tracing::error!(?sibling_id, ?err, "failed to answer a nonce sibling");
         }
