@@ -1918,6 +1918,37 @@ mod tests {
                 empty_output_schema_tx(tx_hash, from_address),
             )
             .await;
+        // A watched sibling at the taker's nonce: the node answers it from the taker's event,
+        // so the watcher stays silent on it during the retry and after.
+        let sibling_hash = alloy::primitives::B256::repeat_byte(0xbb);
+        let mut sibling = test_watcher_tx(sibling_hash, from_address, 0);
+        Arc::make_mut(&mut sibling).serialized_transaction = vec![1];
+        harness
+            .state_manager
+            .watch_execution(Chain::Ethereum, SignId::new([0xbb; 32]), sibling)
+            .await;
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+                "params": [format!("{from_address:#x}"), "0x5"]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x1" }).to_string())
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{sibling_hash:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": null }).to_string())
+            .create_async()
+            .await;
 
         let mut block5: Block = Block::default();
         block5.header.number = 5;
