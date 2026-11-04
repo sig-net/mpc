@@ -630,6 +630,7 @@ impl MpcFixtureNodeBuilder {
                 },
                 &self.participant_info.account_id,
             )
+            .unwrap()
         };
 
         let triple_storage =
