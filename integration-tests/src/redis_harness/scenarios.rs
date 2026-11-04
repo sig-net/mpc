@@ -5,10 +5,20 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 
-use super::diagnostics::{partition_wall_3, partition_wall_by_active_time, LatencySummary};
+use super::diagnostics::LatencySummary;
 use super::gate::StartingGate;
 use super::participant::{next_id_block, ArtifactKind, MeasuredOp};
 use super::RedisHarness;
+
+fn summarize(name: &str, mut metric: MeasuredOp, wall: Duration) -> LatencySummary {
+    LatencySummary::calculate_with_outcomes(
+        name,
+        &mut metric.latencies,
+        wall,
+        metric.failures,
+        metric.indeterminate,
+    )
+}
 
 async fn collect_task_results(
     tasks: impl IntoIterator<Item = tokio::task::JoinHandle<(Vec<Duration>, usize)>>,
@@ -89,7 +99,7 @@ impl RedisHarness {
 
         let take_start = gate.start().await;
 
-        let (mut all_take_latencies, take_failures) = collect_task_results(take_tasks).await?;
+        let (mut all_take_latencies, take_indeterminate) = collect_task_results(take_tasks).await?;
         let take_wall = take_start.elapsed();
 
         let s1 = LatencySummary::calculate_with_failures(
@@ -98,11 +108,12 @@ impl RedisHarness {
             insert_wall,
             insert_failures,
         );
-        let s2 = LatencySummary::calculate_with_failures(
+        let s2 = LatencySummary::calculate_with_outcomes(
             "concurrent_take_triple",
             &mut all_take_latencies,
             take_wall,
-            take_failures,
+            0,
+            take_indeterminate,
         );
 
         Ok(vec![s1, s2])
@@ -229,8 +240,7 @@ impl RedisHarness {
         if self.participants.is_empty() || num_racers == 0 || proposals_per_racer == 0 {
             return Ok(vec![
                 LatencySummary::empty("peek_mine_contended"),
-                LatencySummary::empty("commit_winner_success"),
-                LatencySummary::empty("commit_conflict_rejected"),
+                LatencySummary::empty("commit_proposal"),
             ]);
         }
 
@@ -255,40 +265,25 @@ impl RedisHarness {
         let racer_tasks: Vec<_> = (0..num_racers)
             .map(|_| {
                 let racer = p.clone();
-                tokio::spawn(racer.race_proposals(
-                    gate.barrier(),
-                    base_id,
-                    proposals_per_racer,
-                ))
+                tokio::spawn(racer.race_proposals(gate.barrier(), base_id, proposals_per_racer))
             })
             .collect();
 
         let race_start = gate.start().await;
 
-        let mut all_peek = Vec::new();
-        let mut all_commit_wins = Vec::new();
-        let mut all_commit_losses = Vec::new();
+        let mut metrics: [MeasuredOp; 2] = Default::default();
 
         for task in racer_tasks {
-            let (peek, wins, losses) = task.await?;
-            all_peek.extend(peek);
-            all_commit_wins.extend(wins);
-            all_commit_losses.extend(losses);
+            for (total, result) in metrics.iter_mut().zip(task.await?) {
+                total.merge(result);
+            }
         }
         let wall = race_start.elapsed();
-        let (peek_wall, win_wall, loss_wall) =
-            partition_wall_3(wall, &all_peek, &all_commit_wins, &all_commit_losses);
-
-        let s1 = LatencySummary::calculate("peek_mine_contended", &mut all_peek, peek_wall);
-        let s2 =
-            LatencySummary::calculate("commit_winner_success", &mut all_commit_wins, win_wall);
-        let s3 = LatencySummary::calculate(
-            "commit_conflict_rejected",
-            &mut all_commit_losses,
-            loss_wall,
-        );
-
-        Ok(vec![s1, s2, s3])
+        let [peek, commit] = metrics;
+        Ok(vec![
+            summarize("peek_mine_contended", peek, wall),
+            summarize("commit_proposal", commit, wall),
+        ])
     }
 
     /// SCENARIO 5: Production Cascading Saturation & Head-of-Line Blocking (reproducing 50ms - 6s latencies).
@@ -378,7 +373,7 @@ impl RedisHarness {
         }
 
         let peek_start = peek_gate.start().await;
-        let (mut all_peek_latencies, total_peek_failures) =
+        let (mut all_peek_latencies, total_peek_indeterminate) =
             collect_task_results(peek_tasks).await?;
         let peek_wall = peek_start.elapsed();
 
@@ -395,7 +390,7 @@ impl RedisHarness {
         }
 
         let take_start = take_gate.start().await;
-        let (mut all_take_latencies, total_take_failures) =
+        let (mut all_take_latencies, total_take_indeterminate) =
             collect_task_results(take_tasks).await?;
         let take_wall = take_start.elapsed();
 
@@ -411,17 +406,19 @@ impl RedisHarness {
             insert_wall,
             total_insert_failures,
         );
-        let peek_summary = LatencySummary::calculate_with_failures(
+        let peek_summary = LatencySummary::calculate_with_outcomes(
             "saturated_peek_mine",
             &mut all_peek_latencies,
             peek_wall,
-            total_peek_failures,
+            0,
+            total_peek_indeterminate,
         );
-        let take_summary = LatencySummary::calculate_with_failures(
+        let take_summary = LatencySummary::calculate_with_outcomes(
             "saturated_take_triple",
             &mut all_take_latencies,
             take_wall,
-            total_take_failures,
+            0,
+            total_take_indeterminate,
         );
 
         Ok(vec![insert_summary, peek_summary, take_summary])
@@ -637,14 +634,12 @@ impl RedisHarness {
         }
         for task in presig_tasks {
             for (target, result) in metrics[1..4].iter_mut().zip(task.await?) {
-                target.latencies.extend(result.latencies);
-                target.failures += result.failures;
+                target.merge(result);
             }
         }
         for task in sign_tasks {
             for (target, result) in metrics[4..7].iter_mut().zip(task.await?) {
-                target.latencies.extend(result.latencies);
-                target.failures += result.failures;
+                target.merge(result);
             }
         }
         let wall = start.elapsed();
@@ -652,14 +647,7 @@ impl RedisHarness {
         Ok(NAMES
             .into_iter()
             .zip(metrics)
-            .map(|(name, mut metric)| {
-                LatencySummary::calculate_with_failures(
-                    name,
-                    &mut metric.latencies,
-                    wall,
-                    metric.failures,
-                )
-            })
+            .map(|(name, metric)| summarize(name, metric, wall))
             .collect())
     }
 
@@ -746,7 +734,11 @@ impl RedisHarness {
                 match t_res {
                     Ok((_, t_upd)) => {
                         round_updated_triples += t_upd.len();
-                        all_update_triple_latencies.push(t_lat);
+                        if t_upd.len() == items_per_participant {
+                            all_update_triple_latencies.push(t_lat);
+                        } else {
+                            update_triple_fails += 1;
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to update holder triples in S8: {e:#}");
@@ -757,7 +749,11 @@ impl RedisHarness {
                 match p_res {
                     Ok((_, p_upd)) => {
                         round_updated_presigs += p_upd.len();
-                        all_update_presig_latencies.push(p_lat);
+                        if p_upd.len() == items_per_participant {
+                            all_update_presig_latencies.push(p_lat);
+                        } else {
+                            update_presig_fails += 1;
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to update holder presignatures in S8: {e:#}");
@@ -772,13 +768,11 @@ impl RedisHarness {
                 tracing::warn!(
                     "Incomplete triple holder update in S8 round: expected {total_items}, updated {round_updated_triples}"
                 );
-                update_triple_fails += 1;
             }
             if round_update_presig_errors == 0 && round_updated_presigs != total_items {
                 tracing::warn!(
                     "Incomplete presignature holder update in S8 round: expected {total_items}, updated {round_updated_presigs}"
                 );
-                update_presig_fails += 1;
             }
 
             // Phase 2: Below-threshold prune (count < threshold, items removed from Redis)
@@ -811,7 +805,11 @@ impl RedisHarness {
                 match t_res {
                     Ok((t_rem, _)) => {
                         round_pruned_triples += t_rem.len();
-                        all_prune_triple_latencies.push(t_lat);
+                        if t_rem.len() == items_per_participant {
+                            all_prune_triple_latencies.push(t_lat);
+                        } else {
+                            prune_triple_fails += 1;
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to prune triples in S8: {e:#}");
@@ -822,7 +820,11 @@ impl RedisHarness {
                 match p_res {
                     Ok((p_rem, _)) => {
                         round_pruned_presigs += p_rem.len();
-                        all_prune_presig_latencies.push(p_lat);
+                        if p_rem.len() == items_per_participant {
+                            all_prune_presig_latencies.push(p_lat);
+                        } else {
+                            prune_presig_fails += 1;
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to prune presignatures in S8: {e:#}");
@@ -833,48 +835,40 @@ impl RedisHarness {
             }
             total_prune_wall += prune_start.elapsed();
 
-            // Soft-failure tracking consistent with S3/S6 to avoid aborting multi-scenario runs on partial prunes
             if round_prune_triple_errors == 0 && round_pruned_triples != total_items {
                 tracing::warn!(
                     "Incomplete triple prune in S8 round: expected {total_items}, pruned {round_pruned_triples}"
                 );
-                prune_triple_fails += 1;
             }
             if round_prune_presig_errors == 0 && round_pruned_presigs != total_items {
                 tracing::warn!(
                     "Incomplete presignature prune in S8 round: expected {total_items}, pruned {round_pruned_presigs}"
                 );
-                prune_presig_fails += 1;
             }
         }
-
-        let (update_triple_wall, update_presig_wall) =
-            partition_wall_by_active_time(total_update_wall, &all_update_triple_latencies, &all_update_presig_latencies);
-        let (prune_triple_wall, prune_presig_wall) =
-            partition_wall_by_active_time(total_prune_wall, &all_prune_triple_latencies, &all_prune_presig_latencies);
 
         let s1 = LatencySummary::calculate_with_failures(
             "sync_update_triples",
             &mut all_update_triple_latencies,
-            update_triple_wall,
+            total_update_wall,
             update_triple_fails,
         );
         let s2 = LatencySummary::calculate_with_failures(
             "sync_update_presigs",
             &mut all_update_presig_latencies,
-            update_presig_wall,
+            total_update_wall,
             update_presig_fails,
         );
         let s3 = LatencySummary::calculate_with_failures(
             "sync_prune_triples",
             &mut all_prune_triple_latencies,
-            prune_triple_wall,
+            total_prune_wall,
             prune_triple_fails,
         );
         let s4 = LatencySummary::calculate_with_failures(
             "sync_prune_presigs",
             &mut all_prune_presig_latencies,
-            prune_presig_wall,
+            total_prune_wall,
             prune_presig_fails,
         );
         Ok(vec![s1, s2, s3, s4])
@@ -973,7 +967,7 @@ impl RedisHarness {
 
         let take_kill_start = take_gate.start().await;
         let _ = take_killer_task.await?;
-        let (mut all_kill_take_latencies, total_kill_take_failures) =
+        let (mut all_kill_take_latencies, total_kill_take_indeterminate) =
             collect_task_results(kill_take_tasks).await?;
         let take_kill_wall = take_kill_start.elapsed();
 
@@ -984,7 +978,7 @@ impl RedisHarness {
             post_take_tasks.push(tokio::spawn(p.take_triples(ids, None)));
         }
 
-        let (mut all_post_take_latencies, total_post_take_failures) =
+        let (mut all_post_take_latencies, total_post_take_indeterminate) =
             collect_task_results(post_take_tasks).await?;
         let post_take_wall = post_take_start.elapsed();
 
@@ -994,17 +988,19 @@ impl RedisHarness {
             insert_wall,
             total_insert_failures,
         );
-        let s2 = LatencySummary::calculate_with_failures(
+        let s2 = LatencySummary::calculate_with_outcomes(
             "take_under_client_kill",
             &mut all_kill_take_latencies,
             take_kill_wall,
-            total_kill_take_failures,
+            0,
+            total_kill_take_indeterminate,
         );
-        let s3 = LatencySummary::calculate_with_failures(
+        let s3 = LatencySummary::calculate_with_outcomes(
             "take_post_reconnect",
             &mut all_post_take_latencies,
             post_take_wall,
-            total_post_take_failures,
+            0,
+            total_post_take_indeterminate,
         );
         Ok(vec![s1, s2, s3])
     }
@@ -1025,8 +1021,7 @@ impl RedisHarness {
         if self.participants.is_empty() || stockpile_size == 0 || num_seekers == 0 {
             return Ok(vec![
                 LatencySummary::empty("deep_peek_mine"),
-                LatencySummary::empty("deep_commit_winner"),
-                LatencySummary::empty("deep_commit_conflict"),
+                LatencySummary::empty("deep_commit"),
             ]);
         }
 
@@ -1059,29 +1054,18 @@ impl RedisHarness {
 
         let overall_start = gate.start().await;
 
-        let mut all_peek = Vec::new();
-        let mut all_commit_wins = Vec::new();
-        let mut all_commit_losses = Vec::new();
-
-        for t in tasks {
-            let (peek, wins, losses) = t.await?;
-            all_peek.extend(peek);
-            all_commit_wins.extend(wins);
-            all_commit_losses.extend(losses);
+        let mut metrics: [MeasuredOp; 2] = Default::default();
+        for task in tasks {
+            for (total, result) in metrics.iter_mut().zip(task.await?) {
+                total.merge(result);
+            }
         }
         let wall = overall_start.elapsed();
-        let (peek_wall, win_wall, loss_wall) =
-            partition_wall_3(wall, &all_peek, &all_commit_wins, &all_commit_losses);
-
-        let s1 = LatencySummary::calculate("deep_peek_mine", &mut all_peek, peek_wall);
-        let s2 =
-            LatencySummary::calculate("deep_commit_winner", &mut all_commit_wins, win_wall);
-        let s3 = LatencySummary::calculate(
-            "deep_commit_conflict",
-            &mut all_commit_losses,
-            loss_wall,
-        );
-        Ok(vec![s1, s2, s3])
+        let [peek, commit] = metrics;
+        Ok(vec![
+            summarize("deep_peek_mine", peek, wall),
+            summarize("deep_commit", commit, wall),
+        ])
     }
 
     /// SCENARIO 11: Proposer Churn & Aborted Reservation Storm.
@@ -1101,8 +1085,7 @@ impl RedisHarness {
         if self.participants.is_empty() || initial_stockpile == 0 || num_proposers == 0 {
             return Ok(vec![
                 LatencySummary::empty("churn_peek_mine"),
-                LatencySummary::empty("churn_commit_winner"),
-                LatencySummary::empty("churn_commit_conflict"),
+                LatencySummary::empty("churn_commit"),
                 LatencySummary::empty("churn_simulated_deliberation"),
             ]);
         }
@@ -1134,63 +1117,31 @@ impl RedisHarness {
 
         let overall_start = gate.start().await;
 
-        let mut all_peek = Vec::new();
-        let mut all_commit_wins = Vec::new();
-        let mut all_commit_losses = Vec::new();
+        let mut metrics: [MeasuredOp; 2] = Default::default();
         let mut all_deliberation = Vec::new();
         let mut total_aborts = 0;
-        let mut total_commits = 0;
-
-        for t in tasks {
-            let (peek, wins, losses, deliberation, aborted, committed) = t.await?;
-            all_peek.extend(peek);
-            all_commit_wins.extend(wins);
-            all_commit_losses.extend(losses);
+        for task in tasks {
+            let (results, deliberation, aborted) = task.await?;
+            for (total, result) in metrics.iter_mut().zip(results) {
+                total.merge(result);
+            }
             all_deliberation.extend(deliberation);
             total_aborts += aborted;
-            total_commits += committed;
         }
-        let total_wall = overall_start.elapsed();
-
-        // Calculate active Redis time (excluding simulated node deliberation sleep)
-        // so Redis command throughput accurately reflects database performance.
-        let total_deliberation_time: Duration = all_deliberation.iter().copied().sum();
-        let effective_redis_wall = if num_proposers > 0 {
-            let avg_deliberation = total_deliberation_time / num_proposers as u32;
-            total_wall.saturating_sub(avg_deliberation)
-        } else {
-            total_wall
-        };
-
-        let (peek_wall, win_wall, loss_wall) = partition_wall_3(
-            effective_redis_wall,
-            &all_peek,
-            &all_commit_wins,
-            &all_commit_losses,
-        );
-
+        let wall = overall_start.elapsed();
         println!(
-            "   -> Churn outcome: {total_commits} successfully committed, {} rejected on conflict, {total_aborts} dropped back to pool on timeout/reject",
-            all_commit_losses.len()
+            "   -> Churn outcome: {} committed, {} indeterminate commits, {total_aborts} dropped on timeout/reject",
+            metrics[1].latencies.len(), metrics[1].indeterminate,
         );
         println!(
-            "   -> Deliberation hold time: {deliberation_delay_ms}ms per round (reported separately from Redis command throughput)"
+            "   -> Deliberation hold time: {deliberation_delay_ms}ms per round (simulated sleep)"
         );
-
-        let s1 = LatencySummary::calculate("churn_peek_mine", &mut all_peek, peek_wall);
-        let s2 =
-            LatencySummary::calculate("churn_commit_winner", &mut all_commit_wins, win_wall);
-        let s3 = LatencySummary::calculate(
-            "churn_commit_conflict",
-            &mut all_commit_losses,
-            loss_wall,
-        );
-        let s4 = LatencySummary::calculate(
-            "churn_simulated_deliberation",
-            &mut all_deliberation,
-            total_deliberation_time,
-        );
-        Ok(vec![s1, s2, s3, s4])
+        let [peek, commit] = metrics;
+        Ok(vec![
+            summarize("churn_peek_mine", peek, wall),
+            summarize("churn_commit", commit, wall),
+            LatencySummary::calculate("churn_simulated_deliberation", &mut all_deliberation, wall),
+        ])
     }
 
     /// SCENARIO 12: Conflicted Double-Take Race Storm.
@@ -1204,10 +1155,7 @@ impl RedisHarness {
         self.reset_diagnostics().await?;
 
         if self.participants.is_empty() || num_items == 0 || contenders_per_item == 0 {
-            return Ok(vec![
-                LatencySummary::empty("take_winner_success"),
-                LatencySummary::empty("take_conflict_rejected"),
-            ]);
+            return Ok(vec![LatencySummary::empty("take_contended")]);
         }
 
         let owner = &self.participants[0];
@@ -1242,30 +1190,17 @@ impl RedisHarness {
 
         let overall_start = gate.start().await;
 
-        let mut all_wins = Vec::new();
-        let mut all_conflicts = Vec::new();
-        let mut total_wins = 0;
-        let mut total_conflicts = 0;
-
-        for t in tasks {
-            let (wins, conflicts, w_count, c_count) = t.await?;
-            all_wins.extend(wins);
-            all_conflicts.extend(conflicts);
-            total_wins += w_count;
-            total_conflicts += c_count;
+        let mut total = MeasuredOp::default();
+        for task in tasks {
+            total.merge(task.await?);
         }
         let wall = overall_start.elapsed();
-        let (win_wall, conflict_wall) =
-            partition_wall_by_active_time(wall, &all_wins, &all_conflicts);
-
         println!(
-            "   -> Conflict outcome: {total_wins} successful takes, {total_conflicts} rejected (SREM == 0 Lua conflict errors)"
+            "   -> Take outcomes: {} successful, {} indeterminate (unavailable or storage error)",
+            total.latencies.len(),
+            total.indeterminate,
         );
-
-        let s1 = LatencySummary::calculate("take_winner_success", &mut all_wins, win_wall);
-        let s2 =
-            LatencySummary::calculate("take_conflict_rejected", &mut all_conflicts, conflict_wall);
-        Ok(vec![s1, s2])
+        Ok(vec![summarize("take_contended", total, wall)])
     }
 
     /// SCENARIO 13: Large-Batch & ARGV Outdated Pruning (>4,096 items Lua unpack limit stress).
@@ -1482,7 +1417,7 @@ impl RedisHarness {
             .collect();
 
         let t_start_3 = gate_3.start().await;
-        let (mut bgsave_latencies, bgsave_fails) = collect_task_results(tasks_3).await?;
+        let (mut bgsave_latencies, bgsave_indeterminate) = collect_task_results(tasks_3).await?;
         let bgsave_wall = t_start_3.elapsed();
 
         // Cleanup: disable AOF and reset keys
@@ -1501,11 +1436,12 @@ impl RedisHarness {
             aof_wall,
             aof_fails,
         );
-        let s3 = LatencySummary::calculate_with_failures(
+        let s3 = LatencySummary::calculate_with_outcomes(
             "bgsave_concurrent_take",
             &mut bgsave_latencies,
             bgsave_wall,
-            bgsave_fails,
+            0,
+            bgsave_indeterminate,
         );
 
         Ok(vec![s1, s2, s3])

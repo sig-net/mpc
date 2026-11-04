@@ -425,7 +425,7 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(ref path) = args.csv_out {
         let mut csv = String::from(
-            "iteration,operation,samples,failures,p50_ms,p90_ms,p95_ms,p99_ms,max_ms,attempts_ops_sec,goodput_ops_sec\n",
+            "iteration,operation,samples,failures,indeterminate,p50_ms,p90_ms,p95_ms,p99_ms,max_ms,attempts_ops_sec,goodput_ops_sec\n",
         );
         for rec in &all_results {
             let r = &rec.summary;
@@ -437,11 +437,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             csv.push_str(&format!(
-                "{},{},{},{},{},{},{},{},{},{:.1},{:.1}\n",
+                "{},{},{},{},{},{},{},{},{},{},{:.1},{:.1}\n",
                 rec.iteration,
                 r.op_name,
                 r.count,
                 r.failures,
+                r.indeterminate,
                 fmt_csv(r.p50_ms, 1),
                 fmt_csv(r.p90_ms, 10),
                 fmt_csv(r.p95_ms, 20),

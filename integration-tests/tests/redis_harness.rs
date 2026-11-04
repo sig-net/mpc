@@ -25,6 +25,28 @@ async fn mixed_pipeline_uses_independent_node_pools() -> anyhow::Result<()> {
         };
         assert_eq!(result.count, expected, "{}", result.op_name);
         assert_eq!(result.failures, 0, "{}", result.op_name);
+        assert_eq!(result.indeterminate, 0, "{}", result.op_name);
     }
+
+    // All five items are excluded by the proposer scenario: empty peeks are
+    // indeterminate, not successful latency samples or known Redis errors.
+    let results = harness.bench_proposer_race(0, 5, 1, 3).await?;
+    assert_eq!(results[0].count, 0);
+    assert_eq!(results[0].indeterminate, 3);
+    assert_eq!(results[0].failures, 0);
+
+    let results = harness.bench_conflicted_take(3, 2).await?;
+    assert_eq!(results[0].count, 3);
+    assert_eq!(results[0].indeterminate, 3);
+    assert_eq!(results[0].failures, 0);
+
+    // A closed pool produces the same Option::None as an empty stockpile.
+    let p = harness.participants[0].clone();
+    p.pool.close();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(1));
+    let [peek, commit] = p.race_proposals(barrier, 0, 2).await;
+    assert_eq!(peek.latencies.len(), 0);
+    assert_eq!(peek.indeterminate, 2);
+    assert_eq!(commit.latencies.len(), 0);
     Ok(())
 }

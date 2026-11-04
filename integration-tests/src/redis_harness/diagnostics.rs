@@ -421,6 +421,8 @@ pub struct LatencySummary {
     pub op_name: String,
     pub count: usize,
     pub failures: usize,
+    /// Outcomes that the storage API cannot distinguish from errors or misses.
+    pub indeterminate: usize,
     pub min_ms: f64,
     pub mean_ms: f64,
     pub p50_ms: f64,
@@ -438,6 +440,7 @@ impl LatencySummary {
             op_name: op_name.into(),
             count: 0,
             failures: 0,
+            indeterminate: 0,
             min_ms: 0.0,
             mean_ms: 0.0,
             p50_ms: 0.0,
@@ -464,12 +467,30 @@ impl LatencySummary {
         total_wall_time: Duration,
         failures: usize,
     ) -> Self {
+        Self::calculate_with_outcomes(op_name, samples, total_wall_time, failures, 0)
+    }
+
+    pub fn calculate_with_outcomes(
+        op_name: impl Into<String>,
+        samples: &mut [Duration],
+        total_wall_time: Duration,
+        failures: usize,
+        indeterminate: usize,
+    ) -> Self {
         let op_name = op_name.into();
-        let wall_sec = total_wall_time.as_secs_f64().max(0.0001);
+        let wall_sec = total_wall_time.as_secs_f64();
+        let rate = |count: usize| {
+            if wall_sec > 0.0 {
+                count as f64 / wall_sec
+            } else {
+                0.0
+            }
+        };
         if samples.is_empty() {
             let mut summary = Self::empty(op_name);
             summary.failures = failures;
-            summary.attempts_ops_sec = failures as f64 / wall_sec;
+            summary.indeterminate = indeterminate;
+            summary.attempts_ops_sec = rate(failures + indeterminate);
             return summary;
         }
 
@@ -490,14 +511,15 @@ impl LatencySummary {
         let p95_ms = percentile(0.95);
         let p99_ms = percentile(0.99);
 
-        let total_attempts = count + failures;
-        let attempts_ops_sec = total_attempts as f64 / wall_sec;
-        let goodput_ops_sec = count as f64 / wall_sec;
+        let total_attempts = count + failures + indeterminate;
+        let attempts_ops_sec = rate(total_attempts);
+        let goodput_ops_sec = rate(count);
 
         Self {
             op_name,
             count,
             failures,
+            indeterminate,
             min_ms,
             mean_ms,
             p50_ms,
@@ -526,10 +548,11 @@ impl LatencySummary {
         let max_str = fmt_metric(self.max_ms, 1);
 
         println!(
-            "{:<26} | {:>7} | {:>8} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>10.1} | {:>9.1}",
+            "{:<26} | {:>7} | {:>8} | {:>8} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>10.1} | {:>9.1}",
             self.op_name,
             self.count,
             self.failures,
+            self.indeterminate,
             p50_str,
             p90_str,
             p95_str,
@@ -542,52 +565,55 @@ impl LatencySummary {
 }
 
 pub fn print_summary_header() {
-    println!("{:-<122}", "");
+    println!("Unknown: storage returned no value (unavailable or error); latency samples include successes only.");
+    println!("{:-<133}", "");
     println!(
-        "{:<26} | {:>7} | {:>8} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>10} | {:>9}",
-        "Operation", "Samples", "Failures", "p50", "p90", "p95", "p99", "Max", "Attempts/s", "Goodput/s"
+        "{:<26} | {:>7} | {:>8} | {:>8} | {:>9} | {:>9} | {:>9} | {:>9} | {:>9} | {:>10} | {:>9}",
+        "Operation",
+        "Samples",
+        "Failures",
+        "Unknown",
+        "p50",
+        "p90",
+        "p95",
+        "p99",
+        "Max",
+        "Attempts/s",
+        "Goodput/s"
     );
-    println!("{:-<122}", "");
+    println!("{:-<133}", "");
 }
 
-/// Partitions a combined wall duration between two interleaved operations
-/// proportionally according to the total active time measured for each operation.
-pub fn partition_wall_by_active_time(
-    wall: Duration,
-    op1_samples: &[Duration],
-    op2_samples: &[Duration],
-) -> (Duration, Duration) {
-    let t1: Duration = op1_samples.iter().copied().sum();
-    let t2: Duration = op2_samples.iter().copied().sum();
-    let total = t1 + t2;
-    if total > Duration::ZERO {
-        let r1 = t1.as_secs_f64() / total.as_secs_f64();
-        (wall.mul_f64(r1), wall.mul_f64(1.0 - r1))
-    } else {
-        (Duration::ZERO, Duration::ZERO)
+#[cfg(test)]
+mod tests {
+    use super::LatencySummary;
+    use std::time::Duration;
+
+    #[test]
+    fn rates_include_indeterminate_attempts_but_not_as_successes() {
+        let mut samples = [Duration::from_millis(2), Duration::from_millis(4)];
+        let result = LatencySummary::calculate_with_outcomes(
+            "op",
+            &mut samples,
+            Duration::from_secs(2),
+            1,
+            3,
+        );
+        assert_eq!(result.count, 2);
+        assert_eq!(result.failures, 1);
+        assert_eq!(result.indeterminate, 3);
+        assert_eq!(result.attempts_ops_sec, 3.0);
+        assert_eq!(result.goodput_ops_sec, 1.0);
+        assert_eq!(result.mean_ms, 3.0);
     }
-}
 
-/// Partitions a combined wall duration between three interleaved operations
-/// proportionally according to the total active time measured for each operation.
-pub fn partition_wall_3(
-    wall: Duration,
-    op1_samples: &[Duration],
-    op2_samples: &[Duration],
-    op3_samples: &[Duration],
-) -> (Duration, Duration, Duration) {
-    let t1: Duration = op1_samples.iter().copied().sum();
-    let t2: Duration = op2_samples.iter().copied().sum();
-    let t3: Duration = op3_samples.iter().copied().sum();
-    let total = t1 + t2 + t3;
-    if total > Duration::ZERO {
-        let total_secs = total.as_secs_f64();
-        (
-            wall.mul_f64(t1.as_secs_f64() / total_secs),
-            wall.mul_f64(t2.as_secs_f64() / total_secs),
-            wall.mul_f64(t3.as_secs_f64() / total_secs),
-        )
-    } else {
-        (Duration::ZERO, Duration::ZERO, Duration::ZERO)
+    #[test]
+    fn rates_use_actual_elapsed_time_even_for_short_runs() {
+        let mut samples = [Duration::from_micros(1)];
+        let result = LatencySummary::calculate("op", &mut samples, Duration::from_micros(10));
+        assert!((result.goodput_ops_sec - 100_000.0).abs() < 0.001);
+        let empty = LatencySummary::calculate_with_outcomes("op", &mut [], Duration::ZERO, 0, 2);
+        assert_eq!(empty.indeterminate, 2);
+        assert_eq!(empty.attempts_ops_sec, 0.0);
     }
 }

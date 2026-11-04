@@ -34,6 +34,7 @@ pub enum ArtifactKind {
 pub struct MeasuredOp {
     pub latencies: Vec<Duration>,
     pub failures: usize,
+    pub indeterminate: usize,
 }
 
 impl MeasuredOp {
@@ -43,6 +44,20 @@ impl MeasuredOp {
         } else {
             self.failures += 1;
         }
+    }
+
+    fn record_optional(&mut self, start: Instant, success: bool) {
+        if success {
+            self.latencies.push(start.elapsed());
+        } else {
+            self.indeterminate += 1;
+        }
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.latencies.extend(other.latencies);
+        self.failures += other.failures;
+        self.indeterminate += other.indeterminate;
     }
 }
 
@@ -236,7 +251,7 @@ impl SimulatedParticipant {
         (latencies, failures)
     }
 
-    /// Concurrently take a list of triple IDs, measuring latency for each take and tracking failures.
+    /// Concurrently take a list of triple IDs, measuring latency for each take and tracking indeterminate results.
     pub async fn take_triples(
         self,
         ids: Vec<u64>,
@@ -246,19 +261,19 @@ impl SimulatedParticipant {
             b.wait().await;
         }
         let mut latencies = Vec::with_capacity(ids.len());
-        let mut failures = 0;
+        let mut indeterminate = 0;
         for id in ids {
             let t0 = Instant::now();
             if self.triples.take(id, self.participant).await.is_some() {
                 latencies.push(t0.elapsed());
             } else {
-                failures += 1;
+                indeterminate += 1;
             }
         }
-        (latencies, failures)
+        (latencies, indeterminate)
     }
 
-    /// Concurrently peek unreserved triples, measuring latency per peek and tracking empty results.
+    /// Concurrently peek unreserved triples, measuring latency per peek and tracking indeterminate results.
     pub async fn peek_triples_measured(
         self,
         barrier: Arc<Barrier>,
@@ -266,17 +281,17 @@ impl SimulatedParticipant {
     ) -> (Vec<Duration>, usize) {
         barrier.wait().await;
         let mut latencies = Vec::with_capacity(count);
-        let mut failures = 0;
+        let mut indeterminate = 0;
         for _ in 0..count {
             let t0 = Instant::now();
             let res = self.triples.peek_mine(&[]).await;
             if res.is_some() {
                 latencies.push(t0.elapsed());
             } else {
-                failures += 1;
+                indeterminate += 1;
             }
         }
-        (latencies, failures)
+        (latencies, indeterminate)
     }
 
     /// Concurrently invoke remove_outdated on triples storage.
@@ -359,13 +374,13 @@ impl SimulatedParticipant {
         for i in 0..count {
             let start = Instant::now();
             let reservation = self.triples.peek_mine(&[]).await;
-            metrics[0].record(start, reservation.is_some());
+            metrics[0].record_optional(start, reservation.is_some());
             let Some(reservation) = reservation else {
                 continue;
             };
             let start = Instant::now();
             let pair = reservation.commit().await;
-            metrics[1].record(start, pair.is_some());
+            metrics[1].record_optional(start, pair.is_some());
             let Some(_pair) = pair else { continue };
             let id = base_id + i as u64;
             let presig = dummy_presignature(id, &participants);
@@ -392,14 +407,14 @@ impl SimulatedParticipant {
         for _ in 0..count {
             let start = Instant::now();
             let reservation = self.presignatures.peek_mine(&excluded).await;
-            metrics[0].record(start, reservation.is_some());
+            metrics[0].record_optional(start, reservation.is_some());
             let Some(reservation) = reservation else {
                 continue;
             };
             let id = reservation.id;
             let start = Instant::now();
             let committed = reservation.commit().await.is_some();
-            metrics[1].record(start, committed);
+            metrics[1].record_optional(start, committed);
             if committed {
                 if let Some(sender) = &deliberator {
                     let _ = sender.send(id);
@@ -420,7 +435,7 @@ impl SimulatedParticipant {
         let mut metric = MeasuredOp::default();
         while let Some(id) = ids.recv().await {
             let start = Instant::now();
-            metric.record(start, self.presignatures.take(id, owner).await.is_some());
+            metric.record_optional(start, self.presignatures.take(id, owner).await.is_some());
         }
         metric
     }
@@ -431,35 +446,21 @@ impl SimulatedParticipant {
         barrier: Arc<Barrier>,
         base_id: u64,
         proposals_per_racer: usize,
-    ) -> (Vec<Duration>, Vec<Duration>, Vec<Duration>) {
+    ) -> [MeasuredOp; 2] {
         barrier.wait().await;
-        let mut peek_latencies = Vec::with_capacity(proposals_per_racer);
-        let mut commit_win_latencies = Vec::with_capacity(proposals_per_racer);
-        let mut commit_loss_latencies = Vec::new();
-
+        let mut metrics: [MeasuredOp; 2] = Default::default();
         let excluded: Vec<u64> = (0..5).map(|x| base_id + (x as u64)).collect();
-
         for _ in 0..proposals_per_racer {
-            let t0 = Instant::now();
+            let start = Instant::now();
             let reservation = self.triples.peek_mine(&excluded).await;
-            peek_latencies.push(t0.elapsed());
-
+            metrics[0].record_optional(start, reservation.is_some());
             let Some(reservation) = reservation else {
                 continue;
             };
-            let t1 = Instant::now();
-            let taken = reservation.commit().await;
-            if taken.is_some() {
-                commit_win_latencies.push(t1.elapsed());
-            } else {
-                commit_loss_latencies.push(t1.elapsed());
-                tracing::debug!(
-                    "lost reservation race on commit, as expected in concurrent proposers"
-                );
-            }
+            let start = Instant::now();
+            metrics[1].record_optional(start, reservation.commit().await.is_some());
         }
-
-        (peek_latencies, commit_win_latencies, commit_loss_latencies)
+        metrics
     }
 
     /// Concurrently insert triples and track successful IDs vs failures (e.g. during client kill tests).
@@ -503,41 +504,27 @@ impl SimulatedParticipant {
         base_id: u64,
         seeks_count: usize,
         exclusions_count: usize,
-    ) -> (Vec<Duration>, Vec<Duration>, Vec<Duration>) {
+    ) -> [MeasuredOp; 2] {
         barrier.wait().await;
-        let mut peek_latencies = Vec::with_capacity(seeks_count);
-        let mut commit_win_latencies = Vec::with_capacity(seeks_count);
-        let mut commit_loss_latencies = Vec::new();
-
-        // Exclusion list covers the first `exclusions_count` IDs of the stockpile,
-        // simulating accumulated rejected / timed-out IDs from prior reorg rounds.
-        // This forces Lua's SMEMBERS to scan through the large exclusion set before
-        // finding unexcluded items, reproducing near-exhaustion tail latency.
-        let mut local_excluded: Vec<u64> = (0..exclusions_count)
-            .map(|x| base_id + (x as u64))
-            .collect();
-
+        let mut metrics: [MeasuredOp; 2] = Default::default();
+        let mut local_excluded: Vec<u64> =
+            (0..exclusions_count).map(|x| base_id + x as u64).collect();
         for _ in 0..seeks_count {
-            let t0 = Instant::now();
+            let start = Instant::now();
             let reservation = self.triples.peek_mine(&local_excluded).await;
-            peek_latencies.push(t0.elapsed());
-
+            metrics[0].record_optional(start, reservation.is_some());
             let Some(reservation) = reservation else {
                 continue;
             };
             let id = reservation.id;
-            let t1 = Instant::now();
-            let taken = reservation.commit().await;
-            if taken.is_some() {
-                commit_win_latencies.push(t1.elapsed());
+            let start = Instant::now();
+            let committed = reservation.commit().await.is_some();
+            metrics[1].record_optional(start, committed);
+            if committed {
                 local_excluded.push(id);
-            } else {
-                commit_loss_latencies.push(t1.elapsed());
-                tracing::debug!("lost reservation race on commit in deep stockpile seek");
             }
         }
-
-        (peek_latencies, commit_win_latencies, commit_loss_latencies)
+        metrics
     }
 
     /// Concurrently simulate proposer deliberation with partial timeout / reject drops.
@@ -548,66 +535,36 @@ impl SimulatedParticipant {
         rounds: usize,
         abort_percent: u8,
         deliberation_delay_ms: u64,
-    ) -> (
-        Vec<Duration>,
-        Vec<Duration>,
-        Vec<Duration>,
-        Vec<Duration>,
-        usize,
-        usize,
-    ) {
+    ) -> ([MeasuredOp; 2], Vec<Duration>, usize) {
         barrier.wait().await;
-        let mut peek_latencies = Vec::with_capacity(rounds);
-        let mut commit_win_latencies = Vec::with_capacity(rounds);
-        let mut commit_loss_latencies = Vec::new();
+        let mut metrics: [MeasuredOp; 2] = Default::default();
         let mut deliberation_latencies = Vec::with_capacity(rounds);
         let mut aborted_count = 0;
-        let mut committed_count = 0;
-
         let mut local_excluded: Vec<u64> = Vec::new();
-
         for round_idx in 0..rounds {
-            let t0 = Instant::now();
+            let start = Instant::now();
             let reservation = self.presignatures.peek_mine(&local_excluded).await;
-            peek_latencies.push(t0.elapsed());
-
+            metrics[0].record_optional(start, reservation.is_some());
             let Some(reservation) = reservation else {
                 continue;
             };
-
             if deliberation_delay_ms > 0 {
-                let d0 = Instant::now();
+                let start = Instant::now();
                 tokio::time::sleep(Duration::from_millis(deliberation_delay_ms)).await;
-                deliberation_latencies.push(d0.elapsed());
+                deliberation_latencies.push(start.elapsed());
             }
-
-            let should_abort =
-                ((proposer_id * 17 + round_idx * 31) % 100) < (abort_percent as usize);
+            let should_abort = ((proposer_id * 17 + round_idx * 31) % 100) < abort_percent as usize;
             if should_abort {
                 let id = reservation.id;
-                // Dropping reservation aborts pending state without commit, returning item to Redis pool
                 drop(reservation);
                 local_excluded.push(id);
                 aborted_count += 1;
             } else {
-                let t1 = Instant::now();
-                if reservation.commit().await.is_some() {
-                    commit_win_latencies.push(t1.elapsed());
-                    committed_count += 1;
-                } else {
-                    commit_loss_latencies.push(t1.elapsed());
-                }
+                let start = Instant::now();
+                metrics[1].record_optional(start, reservation.commit().await.is_some());
             }
         }
-
-        (
-            peek_latencies,
-            commit_win_latencies,
-            commit_loss_latencies,
-            deliberation_latencies,
-            aborted_count,
-            committed_count,
-        )
+        (metrics, deliberation_latencies, aborted_count)
     }
 
     /// Helper task for racing contenders to take artifacts concurrently over Redis.
@@ -616,28 +573,14 @@ impl SimulatedParticipant {
         barrier: Arc<Barrier>,
         target_ids: Vec<u64>,
         owner: Participant,
-    ) -> (Vec<Duration>, Vec<Duration>, usize, usize) {
+    ) -> MeasuredOp {
         barrier.wait().await;
-        let mut win_latencies = Vec::new();
-        let mut conflict_latencies = Vec::new();
-        let mut wins = 0;
-        let mut conflicts = 0;
-
+        let mut metric = MeasuredOp::default();
         for id in target_ids {
-            let t0 = Instant::now();
-            let res = self.triples.take(id, owner).await;
-            let elapsed = t0.elapsed();
-
-            if res.is_some() {
-                win_latencies.push(elapsed);
-                wins += 1;
-            } else {
-                conflict_latencies.push(elapsed);
-                conflicts += 1;
-            }
+            let start = Instant::now();
+            metric.record_optional(start, self.triples.take(id, owner).await.is_some());
         }
-
-        (win_latencies, conflict_latencies, wins, conflicts)
+        metric
     }
 }
 
