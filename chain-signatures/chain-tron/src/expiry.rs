@@ -245,7 +245,7 @@ impl<'a> SolidityView<'a> {
         let included = iter(start..=boundary)
             .map(|number| self.contains(tx_id, number))
             .buffer_unordered(MAX_CONCURRENT_PROVIDER_REQUESTS)
-            .try_any(|resident| std::future::ready(resident))
+            .try_any(std::future::ready)
             .await?;
         if included {
             return Ok(ExpiryVerdict::Included);
