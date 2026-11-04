@@ -14,6 +14,8 @@ pub struct RedisHarnessConfig {
     /// Optional external Redis instance URL (e.g. redis://127.0.0.1:6379).
     /// If None, an ephemeral isolated Docker container is spawned.
     pub redis_url: Option<String>,
+    /// Explicitly allow destructive benchmark commands against an external Redis instance.
+    pub allow_external_redis: bool,
     /// Slowlog threshold in microseconds. Commands taking longer than this are recorded (default: 1000us = 1ms).
     pub slowlog_threshold_us: i64,
     /// Maximum number of slowlog entries preserved in Redis memory (default: 1024).
@@ -30,6 +32,7 @@ impl Default for RedisHarnessConfig {
             pool_timeout: Some(Duration::from_secs(5)),
             flush_between: true,
             redis_url: None,
+            allow_external_redis: false,
             slowlog_threshold_us: 1000,
             slowlog_max_len: 1024,
             docker_network: "bench-redis-harness".to_string(),
@@ -62,6 +65,11 @@ impl RedisHarnessConfig {
 
     pub fn with_redis_url(mut self, url: impl Into<String>) -> Self {
         self.redis_url = Some(url.into());
+        self
+    }
+
+    pub fn with_allow_external_redis(mut self, allow: bool) -> Self {
+        self.allow_external_redis = allow;
         self
     }
 

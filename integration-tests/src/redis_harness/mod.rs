@@ -34,13 +34,36 @@ pub struct RedisHarness {
     pub config: RedisHarnessConfig,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{RedisHarness, RedisHarnessConfig};
+
+    #[tokio::test]
+    async fn external_redis_is_rejected_before_connecting_without_opt_in() {
+        let config = RedisHarnessConfig::default().with_redis_url("not a valid Redis URL");
+        let error = match RedisHarness::new(config).await {
+            Ok(_) => panic!("external Redis should require explicit opt-in"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("external Redis requires explicit opt-in"));
+    }
+}
+
 impl RedisHarness {
     /// Initialize the Redis benchmark harness from a `RedisHarnessConfig`.
     ///
-    /// If `config.redis_url` is specified, connects to that instance;
+    /// If `config.redis_url` is specified and `config.allow_external_redis` is true,
+    /// connects to that instance, where benchmarks may flush data, kill clients,
+    /// and change server configuration;
     /// otherwise, automatically spins up an ephemeral isolated Docker Redis container.
     /// All participants strictly share the single configured connection pool.
     pub async fn new(config: RedisHarnessConfig) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            config.redis_url.is_none() || config.allow_external_redis,
+            "external Redis requires explicit opt-in: benchmark commands can flush data, kill clients, and change server configuration"
+        );
         let (redis, redis_url) = if let Some(ref url) = config.redis_url {
             (None, url.clone())
         } else {

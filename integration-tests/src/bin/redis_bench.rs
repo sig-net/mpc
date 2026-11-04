@@ -71,9 +71,13 @@ struct Args {
     #[arg(long, default_value_t = 50)]
     deep_seeks: usize,
 
-    /// Optional external Redis URL (e.g. redis://127.0.0.1:6379). If omitted, spawns an isolated Redis container.
-    #[arg(long)]
+    /// External Redis URL. Requires --allow-external-redis; the benchmark can flush data, kill clients, and change configuration.
+    #[arg(long, requires = "allow_external_redis")]
     redis_url: Option<String>,
+
+    /// Allow destructive benchmark commands against the external Redis server.
+    #[arg(long, requires = "redis_url")]
+    allow_external_redis: bool,
 
     /// Disable flushing Redis between scenarios (by default, FLUSHDB runs between scenarios for isolation).
     #[arg(long)]
@@ -102,6 +106,27 @@ struct Args {
     /// Batch size for Scenario 13 Large ARGV & Batch Prune (default: max(items * 10, 5000), crossing the 4096 unpack limit)
     #[arg(long)]
     large_batch_size: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn external_redis_requires_explicit_opt_in() {
+        assert!(
+            Args::try_parse_from(["redis-bench", "--redis-url", "redis://127.0.0.1/"]).is_err()
+        );
+        assert!(Args::try_parse_from([
+            "redis-bench",
+            "--redis-url",
+            "redis://127.0.0.1/",
+            "--allow-external-redis",
+        ])
+        .is_ok());
+        assert!(Args::try_parse_from(["redis-bench"]).is_ok());
+    }
 }
 
 #[tokio::main]
@@ -160,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
     let mut config = RedisHarnessConfig::new(args.participants)
         .with_pool_size(effective_pool_size)
         .with_flush_between(should_flush)
+        .with_allow_external_redis(args.allow_external_redis)
         .with_slowlog_threshold(args.slowlog_threshold);
     if let Some(ref url) = args.redis_url {
         config = config.with_redis_url(url);
