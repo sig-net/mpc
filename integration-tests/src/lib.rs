@@ -300,7 +300,8 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         for (i, account) in spawner.accounts.iter().enumerate() {
             let participant = Participant::from(i as u32);
             if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
-                let mut keystore = storage::keystore::init(&storage_options, account.id()).await?;
+                let mut keystore =
+                    storage::keystore::Keystore::init(&storage_options, account.id()).await?;
 
                 let persistent_data = mpc_node::protocol::state::KeyShare {
                     epoch: 0,

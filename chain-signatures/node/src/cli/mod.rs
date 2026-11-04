@@ -712,7 +712,7 @@ impl StorageHandles {
         account_id: &AccountId,
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
-        let keystore = storage::keystore::init(storage_options, account_id).await?;
+        let keystore = Keystore::init(storage_options, account_id).await?;
         let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);

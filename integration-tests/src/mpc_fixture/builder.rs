@@ -27,11 +27,11 @@ use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::state::NodeKeyInfo;
+use mpc_node::protocol::state::{KeyShare, NodeKeyInfo};
 use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
-use mpc_node::storage::keystore::{self, Keystore, MemoryKeystore};
+use mpc_node::storage::keystore::{Keystore, MemoryKeystore};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::stream::StreamContext;
 use mpc_primitives::Chain;
@@ -618,10 +618,12 @@ impl MpcFixtureNodeBuilder {
         context: &MockedNodeContext,
         fixture_input: &mut Option<FixtureInput>,
     ) -> protocol::test_setup::TestProtocolStorage {
-        let keystore = match &self.key_info {
-            Some(key) => keystore::test_store(0, key.private_share, key.public_key),
-            None => Keystore::Memory(MemoryKeystore::default()),
-        };
+        let record = self.key_info.as_ref().map(|key| KeyShare {
+            epoch: 0,
+            private_share: key.private_share,
+            public_key: key.public_key,
+        });
+        let keystore = Keystore::Memory(MemoryKeystore::new(record));
 
         let triple_storage =
             TriplePair::storage(&context.redis_pool, &self.participant_info.account_id);
