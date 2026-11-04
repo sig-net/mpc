@@ -31,7 +31,7 @@ use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
-use mpc_node::storage::secret_storage::{self, MemoryNodeStorage, SecretNodeStorageVariant};
+use mpc_node::storage::keystore::{self, Keystore, MemoryKeystore};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::stream::StreamContext;
 use mpc_primitives::Chain;
@@ -612,15 +612,15 @@ impl MpcFixtureNodeBuilder {
         node
     }
 
-    /// Build a node's triple, presignature, and secret storage.
+    /// Build a node's triple, presignature and key-share stores.
     async fn build_storage(
         &self,
         context: &MockedNodeContext,
         fixture_input: &mut Option<FixtureInput>,
     ) -> protocol::test_setup::TestProtocolStorage {
-        let secret_storage = match &self.key_info {
-            Some(key) => secret_storage::test_store(0, key.private_share, key.public_key),
-            None => SecretNodeStorageVariant::Memory(MemoryNodeStorage::default()),
+        let keystore = match &self.key_info {
+            Some(key) => keystore::test_store(0, key.private_share, key.public_key),
+            None => Keystore::Memory(MemoryKeystore::default()),
         };
 
         let triple_storage =
@@ -678,7 +678,7 @@ impl MpcFixtureNodeBuilder {
         }
 
         protocol::test_setup::TestProtocolStorage {
-            secret_storage,
+            keystore,
             triple_storage,
             presignature_storage,
         }
