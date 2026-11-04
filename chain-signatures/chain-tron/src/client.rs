@@ -240,6 +240,8 @@ struct NowBlockRawData {
 /// solidity router; `{}` (not solidified) reads as an absent header.
 #[derive(Deserialize)]
 struct SolidBlockResponse {
+    #[serde(default, rename = "blockID")]
+    block_id: Option<String>,
     #[serde(default)]
     block_header: Option<NowBlockHeader>,
     #[serde(default)]
@@ -256,9 +258,18 @@ struct SolidBlockTx {
 impl SolidBlockResponse {
     fn into_block(self) -> Option<SolidifiedBlock> {
         let raw = self.block_header?.raw_data;
+        // A malformed blockID reads as an unmatchable slice — the
+        // reference check defers.
+        let ref_slice = self
+            .block_id
+            .as_deref()
+            .and_then(|id| id.parse::<B256>().ok())
+            .map_or([0; 8], |id| id.0[8..16].try_into().expect("8 of 32 bytes"));
+
         Some(SolidifiedBlock {
             number: raw.number,
             timestamp: raw.timestamp as i64,
+            ref_slice,
             txids: self
                 .transactions
                 .iter()

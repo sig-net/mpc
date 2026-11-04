@@ -5,8 +5,12 @@
 //! messages, canonical parse, signing derivations, addresses — lives in
 //! [`mpc_tron_wire`].
 
+#[cfg(test)]
+mod test_utils;
+
 mod client;
 mod config;
+mod expiry;
 mod types;
 mod watcher;
 

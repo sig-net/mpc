@@ -27,10 +27,11 @@ Core pieces:
   `Executing` entries whose validity window closed as unexecutable,
   keyed off the backlog so a duplicate flat txID that displaced a watch
   still resolves; an entry found executed instead re-registers its
-  watch and resolves through the receipt arm. The attested height is
-  deterministic — the first solidified block at or past the window's
-  end, proved absent over the packable span — so every node signs
-  the same message.
+  watch and resolves through the receipt arm. The expiry attestation
+  sits at the deterministic boundary — the first solidified block at
+  or past the window's end — so every node signs the same message;
+  the walk's bounds, deferrals, and cross-pass memoization are
+  documented on `TronWatcher` and in `doc/bidirectional-calls.md` (M6).
   Implements `ChainIndexer` purely as the supervision vehicle (no
   block scanning, no catchup).
 

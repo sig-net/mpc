@@ -81,8 +81,14 @@ impl RawTransaction {
     /// An empty or inverted window can never pack; the ceiling is
     /// [`MAX_WINDOW_MS`].
     fn validate_reference_fields(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.ref_block_bytes.is_empty(), "missing ref_block_bytes");
-        anyhow::ensure!(!self.ref_block_hash.is_empty(), "missing ref_block_hash");
+        anyhow::ensure!(
+            self.ref_block_bytes.len() == 2,
+            "ref_block_bytes must be TaPoS' two bytes"
+        );
+        anyhow::ensure!(
+            self.ref_block_hash.len() == 8,
+            "ref_block_hash must be TaPoS' eight bytes"
+        );
         anyhow::ensure!(self.expiration > 0, "missing expiration");
         anyhow::ensure!(self.timestamp > 0, "missing timestamp");
         anyhow::ensure!(
