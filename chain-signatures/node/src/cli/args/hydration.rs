@@ -42,7 +42,7 @@ impl HydrationArgs {
             signer_uri: self.signer_uri.context("signer_uri is required")?,
             genesis_hash: self
                 .genesis_hash
-                .context("genesis_hash is required")
+                .context("genesis_hash is required")?
                 .parse()
                 .context("invalid genesis hash")?,
         }))
@@ -73,7 +73,7 @@ mod tests {
             "--hydration-genesis-hash",
             genesis_hash,
         ];
-        HydrationArgs::parse_from(argv.into_iter())
+        HydrationArgs::parse_from(argv)
     }
 
     #[test]
