@@ -34,7 +34,6 @@ use clap::Parser;
 use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
 use k256::sha2::Sha256;
-use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
@@ -106,13 +105,9 @@ pub enum Cli {
         /// Tron execution watcher options
         #[command(flatten)]
         tron: TronArgs,
-        /// Local address that other peers can use to message this node.
-        /// mainnet nodes: this should be set to their domain name
-        /// testnet nodes: this should be set to their http://ip:web_port
-        /// dev nodes: this should be set to their local network domain name
-        /// integration test nodes: this should be set to None
+        /// URL at which other nodes reach this node's web port, e.g. `https://node.example.org`.
         #[arg(long, env("MPC_LOCAL_ADDRESS"))]
-        my_address: Option<Url>,
+        my_address: Url,
         /// Storage options
         #[command(flatten)]
         storage_options: storage::Options,
@@ -177,12 +172,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog,
                 midnight_wallet,
             } = StorageHandles::new(&account_id, &storage_options).await?;
-
-            let my_address = my_address.unwrap_or_else(|| {
-                let my_ip = local_ip().unwrap();
-                Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
-            });
-            tracing::info!(%my_address, "address detected");
 
             // NEAR as a source chain exists for the integration tests only, and the
             // test harness builds this binary with `test-feature`.
