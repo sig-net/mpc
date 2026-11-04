@@ -50,6 +50,7 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 /// Capacity of the SignCommand channel that feeds chain sign events from the
@@ -150,6 +151,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
         } => {
             let _guard = logs::setup(env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
+            // Installed before the slow startup steps, so a stop during them
+            // is an orderly exit rather than the OS default.
+            let shutdown = shutdown_signal();
             crate::metrics::init_metrics(
                 &account_id,
                 env!("CARGO_PKG_VERSION"),
@@ -312,13 +316,20 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             .await;
             tracing::info!("node tasks spawned");
 
-            // A core task never returns in normal operation, so the first to finish ends the node.
-            let err = match tasks.join_next().await {
-                Some(Ok(Err(err))) => err,
-                Some(Err(join)) => anyhow::Error::from(join),
-                _ => anyhow::anyhow!("core task exited"),
+            // A core task never returns in normal operation, so the first to
+            // finish ends the node; a stop signal ends it cleanly.
+            let outcome = tokio::select! {
+                finished = tasks.join_next() => Err(match finished {
+                    Some(Ok(Err(err))) => err,
+                    Some(Err(join)) => anyhow::Error::from(join),
+                    _ => anyhow::anyhow!("core task exited"),
+                }),
+                _ = shutdown.cancelled() => Ok(()),
             };
-            tracing::error!(?err, "core task ended, shutting down");
+            match &outcome {
+                Ok(()) => tracing::info!("shutdown requested, stopping"),
+                Err(err) => tracing::error!(?err, "core task ended, shutting down"),
+            }
             tasks.abort_all();
             while let Some(result) = tasks.join_next().await {
                 match result {
@@ -329,9 +340,41 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     _ => {}
                 }
             }
-            Err(err)
+            outcome
         }
     }
+}
+
+/// Cancelled on SIGTERM or Ctrl-C. If a handler cannot be installed the node
+/// runs without one and stops the way the OS stops it.
+fn shutdown_signal() -> CancellationToken {
+    let token = CancellationToken::new();
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                Err(err) => {
+                    tracing::error!(?err, "no SIGTERM handler; stops will not be orderly");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::select! {
+            _ = terminate => tracing::info!(signal = "SIGTERM", "stop signal received"),
+            result = tokio::signal::ctrl_c() => match result {
+                Ok(()) => tracing::info!(signal = "SIGINT", "stop signal received"),
+                Err(err) => {
+                    tracing::error!(?err, "no SIGINT handler; stops will not be orderly");
+                    std::future::pending::<()>().await;
+                }
+            },
+        }
+        cancel.cancel();
+    });
+    token
 }
 
 #[allow(clippy::type_complexity)]
