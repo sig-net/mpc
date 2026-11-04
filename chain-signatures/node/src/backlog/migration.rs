@@ -32,8 +32,9 @@ pub enum MigratableSignStatus {
 pub struct MigratableBacklogEntry {
     pub request: Arc<IndexedSignRequest>,
     pub status: MigratableSignStatus,
+    /// Absent only in entries from before the field existed.
     #[serde(default)]
-    pub tx_ids: Vec<BidirectionalTxId>,
+    pub tx_ids: Option<Vec<BidirectionalTxId>>,
     #[serde(default)]
     pub unviable_at: Option<u64>,
 }
@@ -87,10 +88,9 @@ impl From<MigratableBacklogEntry> for BacklogEntry {
             }
         };
 
-        let mut tx_ids = entry.tx_ids;
-        if tx_ids.is_empty() {
-            tx_ids.extend(legacy_tx_id(&status));
-        }
+        let tx_ids = entry
+            .tx_ids
+            .unwrap_or_else(|| legacy_tx_id(&status).into_iter().collect());
         BacklogEntry {
             request: entry.request,
             status: with_current_entropy(status),
@@ -163,6 +163,30 @@ mod tests {
         let decoded: BacklogEntry = ciborium::from_reader(bytes.as_slice()).unwrap();
         let args = &decoded.request().args;
         assert_eq!(args.entropy, response_entropy(&args.payload, &args.epsilon));
+    }
+
+    /// A sibling answered unsigned has no transaction: decoding must not name one, or the
+    /// digest changes and this node rejects its peers' bodies.
+    #[test]
+    fn an_answered_unsigned_sibling_keeps_its_digest_through_encoding() {
+        let sign_id = SignId::new([1; 32]);
+        let mut stored = BacklogEntry::new(crate::backlog::mock::mock_bidi_request(
+            sign_id,
+            Chain::Solana,
+        ));
+        stored.status = SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request: crate::backlog::mock::mock_bidi_response_request(
+                sign_id,
+                BidirectionalTxId(sign_id.request_id),
+                Chain::Solana,
+            ),
+            progress: SignProgress::Generating,
+        });
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&stored, &mut bytes).unwrap();
+        let decoded: BacklogEntry = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert!(decoded.tx_ids.is_empty());
+        assert_eq!(decoded.digest_bytes(), stored.digest_bytes());
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]

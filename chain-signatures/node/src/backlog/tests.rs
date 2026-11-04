@@ -1246,6 +1246,87 @@ async fn test_advance_rejects_invalid_publish_transition() {
     assert_eq!(err2, BacklogError::InvalidPublishTransition);
 }
 
+/// A first-leg round that finishes after its request was answered must not fill the response's
+/// progress, or the node publishes the first-leg signature as the response.
+#[tokio::test]
+async fn a_first_leg_round_cannot_publish_into_the_response() {
+    let backlog = Backlog::new();
+    let tx = mock_tx(79);
+    let req = mock_bidi_request(tx.sign_id(), Chain::Solana);
+    let (pk, output) = mock_signature_output(&req.args);
+    let first_leg = backlog.insert_bidirectional(Arc::clone(&req)).await;
+    let answered = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: mock_bidi_response(&tx),
+        progress: SignProgress::Generating,
+    });
+    backlog
+        .pending(&Chain::Solana)
+        .write()
+        .await
+        .requests
+        .get_mut(&tx.sign_id())
+        .unwrap()
+        .status = answered.clone();
+
+    let err = first_leg
+        .advance(pk, &output, mock_participants(), true)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, BacklogError::InvalidPublishTransition);
+    let entry = backlog.entry(Chain::Solana, &tx.sign_id()).await.unwrap();
+    assert_eq!(entry.status, answered);
+}
+
+/// A marked entry is answered Unviable at catchup, so it spends no presignature on a first leg.
+#[tokio::test]
+async fn catchup_does_not_requeue_a_marked_entry() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::from_u8(80);
+    backlog
+        .insert_bidirectional(mock_bidi_request(sign_id, Chain::Solana))
+        .await;
+    assert_eq!(backlog.requeueable_requests(Chain::Solana).await.len(), 1);
+
+    backlog
+        .pending(&Chain::Solana)
+        .write()
+        .await
+        .requests
+        .get_mut(&sign_id)
+        .unwrap()
+        .unviable_at = Some(5);
+
+    assert!(backlog.requeueable_requests(Chain::Solana).await.is_empty());
+}
+
+/// A restart before an answered entry's response is signed must still sign it: no other path
+/// sends it, and the mark stays on the entry.
+#[tokio::test]
+async fn catchup_requeues_a_marked_entry_already_answered() {
+    let backlog = Backlog::new();
+    let tx = mock_tx(81);
+    backlog
+        .insert_bidirectional(mock_bidi_request(tx.sign_id(), Chain::Solana))
+        .await;
+    {
+        let mut pending = backlog.pending(&Chain::Solana).write().await;
+        let entry = pending.requests.get_mut(&tx.sign_id()).unwrap();
+        entry.unviable_at = Some(5);
+        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request: mock_bidi_response(&tx),
+            progress: SignProgress::Generating,
+        });
+    }
+
+    let requeued = backlog.requeueable_requests(Chain::Solana).await;
+    assert_eq!(requeued.len(), 1);
+    assert_matches!(
+        requeued[0].request().kind,
+        SignKind::RespondBidirectional(_)
+    );
+}
+
 #[tokio::test]
 async fn respond_observed_at_survives_the_unwatch_lookup() {
     let backlog = Backlog::new();

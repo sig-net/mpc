@@ -135,7 +135,7 @@ get_checkpoint(chain, digest) -> Checkpoint
 (ii) A node holding `MAX_PENDING` checkpoints above its base processes no block and creates no new checkpoint until it rebases.
 
 **S4 Sufficiency.** A node holding only a settled checkpoint and its key share can do the same as a node that indexed from genesis but didn't participate in signing: join signing rounds, find executions, attest, and vote at the next boundary.
-The exception is attesting Unviable (Section 6).
+The exception is answering a request whose replay protection another request used up, on a source chain whose `Response` does not carry the outcome and height yet (Section 6). Such a chain answers it Failed, from the execution.
 
 ### Liveness, during a long-enough synchronous interval
 
@@ -314,7 +314,8 @@ Each thing a node does for a request reads the entry and nothing older than the 
 Signing and joining a round read the request and the contract, which give the key and the bytes to sign, and `tx_ids`, whose being empty says that no signature is final yet.
 Finding an execution reads `tx_ids`, and attesting reads the request's schema.
 Voting reads the backlog, which the node builds from the checkpoint and the blocks after it (S1).
-Attesting Unviable is the exception: it follows from the execution or the `Response` of another request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3), and once that request has left the backlog the checkpoint holds no trace of it.
+Attesting Unviable follows from the execution or the `Response` of another request ([bidirectional-calls.md](bidirectional-calls.md), Section 4.3).
+After a `Response` it reads `unviable_at`; after an execution, the other request is still in the backlog until its own `Response`, and a node that has not recorded its outcome finds the execution again from that entry's `tx_ids`.
 What the checkpoint cannot give back is node-local: a node that lost its storage has lost the signatures it issued and not yet seen published.
 They are not lost to the network where another correct node was in the round, which keeps and publishes its own ([bidirectional-calls.md](bidirectional-calls.md), Section 6).
 
@@ -351,12 +352,11 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 
 ### Dependencies on features not implemented yet
 
-* The digest covers `tx_ids`, the transaction IDs the published signatures give, since finding an execution needs only those. `unviable_at`, the height at which another request's `Response` says its replay protection was used up, is not set yet.
+* The digest covers `tx_ids`, the transaction IDs the published signatures give, since finding an execution needs only those. `unviable_at`, the height at which another request's `Response` says its replay protection was used up, covers Midnight so far.
 * The body of a checkpoint still carries each entry's progress beside the fields the digest covers, and a node trusts that only from its own storage: adopting a peer's body rebuilds progress from `tx_ids`. Moving it to `local` changes no digest.
 
-* Unviable is attested from another request's execution or answer.
-  A node that starts from a checkpoint taken after that answer holds no trace of it and cannot attest.
-  A request's entry in the backlog must store that another request's response made it unviable.
+* `unviable_at` needs the outcome and height a `Response` reports, which only Midnight's carries so far.
+  On the other source chains a node that starts from a checkpoint taken after another request's answer holds no trace of it and cannot attest.
 
 ### Outside the model: nodes build different backlogs
 

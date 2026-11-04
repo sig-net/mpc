@@ -234,10 +234,8 @@ transaction, one of three kinds:
 
 See [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
-*Code today:* Unviable is attested only for requests from Midnight, and even
-there not when only another request's response shows it
-([#1429](https://github.com/sig-net/mpc/issues/1429),
-[#1430](https://github.com/sig-net/mpc/issues/1430)).
+*Code today:* Unviable is attested only for requests from Midnight
+([#1429](https://github.com/sig-net/mpc/issues/1429)).
 
 ## Owner
 

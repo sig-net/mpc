@@ -199,7 +199,9 @@ impl<State> SignEntry<State> {
         self.map_state(|_| state)
     }
 
-    async fn executing(&self, tx: Arc<BidirectionalTx>) -> Result<(), BacklogError> {
+    /// Record a published signature's transaction; false if the entry was answered meanwhile,
+    /// which keeps its outcome.
+    async fn executing(&self, tx: Arc<BidirectionalTx>) -> Result<bool, BacklogError> {
         let mut pending = self.backlog.pending(&self.chain).write().await;
         let entry = pending
             .requests
@@ -209,8 +211,11 @@ impl<State> SignEntry<State> {
                 id: self.request.id,
             })?;
         entry.add_tx_id(tx.id);
+        if !entry.awaits_execution() {
+            return Ok(false);
+        }
         entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing(tx));
-        Ok(())
+        Ok(true)
     }
 
     async fn responding(
@@ -225,6 +230,10 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
+        // Two streams can pick one sibling; the second must not reset the first's progress.
+        if !entry.awaits_execution() {
+            return Err(BacklogError::AlreadyAnswered);
+        }
         entry.status = SignStatus::Bidirectional(BidirectionalProgress::Final {
             respond_request,
             progress: SignProgress::Generating,
@@ -311,21 +320,24 @@ impl SignEntry<Generating> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
-        match &mut entry.status {
-            SignStatus::Sign(progress)
-            | SignStatus::Bidirectional(BidirectionalProgress::Initial(progress))
-            | SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
-                if !progress.is_generating() {
-                    return Err(BacklogError::InvalidPublishTransition);
-                }
-                *progress = SignProgress::Publishing(publish.clone());
-            }
-            SignStatus::Bidirectional(
-                BidirectionalProgress::Executing(_) | BidirectionalProgress::Parked(_),
-            ) => {
-                return Err(BacklogError::InvalidPublishTransition);
-            }
+        // A round of one leg must not fill the other's progress: a first leg finishing after its
+        // request was answered would publish its signature as the response.
+        let progress = match (&self.request.kind, &mut entry.status) {
+            (SignKind::Sign, SignStatus::Sign(progress))
+            | (
+                SignKind::SignBidirectional(_),
+                SignStatus::Bidirectional(BidirectionalProgress::Initial(progress)),
+            )
+            | (
+                SignKind::RespondBidirectional(_),
+                SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }),
+            ) => progress,
+            _ => return Err(BacklogError::InvalidPublishTransition),
+        };
+        if !progress.is_generating() {
+            return Err(BacklogError::InvalidPublishTransition);
         }
+        *progress = SignProgress::Publishing(publish.clone());
         Ok(())
     }
 }
@@ -488,12 +500,14 @@ impl SignEntry<Bidirectional<Initial<Publishing>>> {
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
-        self.executing(Arc::clone(&tx)).await?;
+        let awaits = self.executing(Arc::clone(&tx)).await?;
         let entry = self.transition(Bidirectional(Executing(ExecutionWatch::new(
             tx,
             Some(Instant::now()),
         ))));
-        entry.watch_execution().await;
+        if awaits {
+            entry.watch_execution().await;
+        }
         Ok(entry)
     }
 }
@@ -504,12 +518,14 @@ impl SignEntry<Bidirectional<Initial<AnyProgress>>> {
         self,
         tx: Arc<BidirectionalTx>,
     ) -> Result<SignEntry<Bidirectional<Executing>>, BacklogError> {
-        self.executing(Arc::clone(&tx)).await?;
+        let awaits = self.executing(Arc::clone(&tx)).await?;
         let entry = self.transition(Bidirectional(Executing(ExecutionWatch::new(
             tx,
             Some(Instant::now()),
         ))));
-        entry.watch_execution().await;
+        if awaits {
+            entry.watch_execution().await;
+        }
         Ok(entry)
     }
 }

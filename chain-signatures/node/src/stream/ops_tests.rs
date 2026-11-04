@@ -3,7 +3,9 @@ use crate::backlog::mock::{
     mock_bidi_request, mock_bidi_response_request, mock_participants, mock_sign_request,
     mock_signature_output, mock_tx, BacklogTestExt,
 };
-use crate::backlog::{Backlog, Bidirectional, Executing, ExecutionWatch, Final, Generating};
+use crate::backlog::{
+    Backlog, BacklogEntry, Bidirectional, Executing, ExecutionWatch, Final, Generating,
+};
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
@@ -259,6 +261,7 @@ async fn process_execution_confirmed_success_creates_respond_request() {
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
         tx.target_chain,
+        test_root_pk(),
     )
     .await
     .unwrap();
@@ -336,29 +339,16 @@ fn nonce_request(
 
 /// `request`'s transaction under some signature, which gives it a tx id other than the
 /// request id; the path stands in for the account.
-fn signed_tx(request: &IndexedSignRequest, nonce: u64) -> Arc<BidirectionalTx> {
+fn signed_tx(request: &IndexedSignRequest, _nonce: u64) -> Arc<BidirectionalTx> {
     let SignKind::SignBidirectional(event) = &request.kind else {
         panic!("expected a first leg");
     };
-    Arc::new(BidirectionalTx {
-        id: BidirectionalTxId([request.id.request_id[0].wrapping_add(100); 32]),
-        sender: event.sender,
-        serialized_transaction: event.serialized_transaction.clone(),
-        source_chain: event.chain,
-        target_chain: Chain::Ethereum,
-        caip2_id: event.caip2_id.clone(),
-        key_version: event.key_version,
-        deposit: event.deposit,
-        path: event.path.clone(),
-        algo: event.algo.clone(),
-        dest: event.dest.clone(),
-        params: event.params.clone(),
-        output_deserialization_schema: event.output_deserialization_schema.clone(),
-        respond_serialization_schema: event.respond_serialization_schema.clone(),
-        request_id: request.id.request_id,
-        from_address: [event.path.as_bytes()[0]; 20],
-        nonce,
-    })
+    let id = BidirectionalTxId([request.id.request_id[0].wrapping_add(100); 32]);
+    Arc::new(
+        event
+            .bidirectional_tx(request.id.request_id, id, test_root_pk())
+            .unwrap(),
+    )
 }
 
 /// The sign ids of the requests `sign_rx` holds.
@@ -372,9 +362,9 @@ fn queued_requests(sign_rx: &mut mpsc::Receiver<SignCommand>) -> Vec<SignId> {
     queued
 }
 
-/// An executed transaction answers every watched request at its account and nonce with other
-/// bytes, at its height: Unviable on Midnight, Failed where Unviable is missing, built from the
-/// sibling's own transaction.
+/// An executed transaction answers every request at its account and nonce with other bytes,
+/// signed or not, at its height: Unviable on Midnight, Failed where Unviable is missing, under
+/// the request's id.
 #[tokio::test]
 async fn execution_answers_the_nonce_siblings_of_its_transaction() {
     for source_chain in [Chain::Midnight, Chain::Solana] {
@@ -408,6 +398,7 @@ async fn execution_answers_the_nonce_siblings_of_its_transaction() {
             ExecutionOutcome::Failed,
             &ctx,
             Chain::Ethereum,
+            test_root_pk(),
         )
         .await
         .unwrap();
@@ -417,28 +408,28 @@ async fn execution_answers_the_nonce_siblings_of_its_transaction() {
         } else {
             mpc_primitives::AttestationOutcomeKind::Failed
         };
-        let entry = ctx.backlog.get(source_chain, &sibling.id).await.unwrap();
-        let SignStatus::Bidirectional(BidirectionalProgress::Final {
-            respond_request,
-            progress: SignProgress::Generating,
-        }) = entry.status()
-        else {
-            panic!("{source_chain}: sibling not answered: {:?}", entry.status());
-        };
-        let SignKind::RespondBidirectional(response) = &respond_request.kind else {
-            panic!("{source_chain}: expected a response");
-        };
-        assert_eq!(response.outcome_kind, Some(expected), "{source_chain}");
-        assert_eq!(response.tx_id, sibling_tx.id, "{source_chain}");
-        if let Some(attestation) = response.attestation {
-            assert_eq!(attestation.block_height, 123, "{source_chain}");
+        for request in [&sibling, &unsigned] {
+            let entry = ctx.backlog.get(source_chain, &request.id).await.unwrap();
+            let SignStatus::Bidirectional(BidirectionalProgress::Final {
+                respond_request,
+                progress: SignProgress::Generating,
+            }) = entry.status()
+            else {
+                panic!("{source_chain}: sibling not answered: {:?}", entry.status());
+            };
+            let SignKind::RespondBidirectional(response) = &respond_request.kind else {
+                panic!("{source_chain}: expected a response");
+            };
+            assert_eq!(response.outcome_kind, Some(expected), "{source_chain}");
+            assert_eq!(
+                response.tx_id,
+                BidirectionalTxId(request.id.request_id),
+                "{source_chain}"
+            );
+            if let Some(attestation) = response.attestation {
+                assert_eq!(attestation.block_height, 123, "{source_chain}");
+            }
         }
-
-        let entry = ctx.backlog.get(source_chain, &unsigned.id).await.unwrap();
-        assert_matches!(
-            entry.status(),
-            SignStatus::Bidirectional(BidirectionalProgress::Initial(_))
-        );
         for request in &untouched {
             let entry = ctx.backlog.get(source_chain, &request.id).await.unwrap();
             assert_matches!(
@@ -458,10 +449,357 @@ async fn execution_answers_the_nonce_siblings_of_its_transaction() {
         queued.sort_by_key(|id| id.request_id);
         assert_eq!(
             queued,
-            vec![SignId::from_u8(1), sibling.id],
+            vec![SignId::from_u8(1), sibling.id, unsigned.id],
             "{source_chain}"
         );
     }
+}
+
+/// The request's response as a node that observed the execution signs it and publishes it.
+fn midnight_response(
+    request: &IndexedSignRequest,
+    kind: AttestationOutcomeKind,
+    height: u64,
+) -> RespondBidirectionalEvent {
+    let output_hash = mpc_compact_hashing::compute_attested_output_hash(&[]);
+    let metadata = mpc_primitives::AttestationMetadata {
+        key_version: 0,
+        block_height: height,
+        outcome_kind: kind,
+    };
+    let attestation = mpc_primitives::PublishedAttestation {
+        block_height: height,
+        outcome_kind: kind,
+        serialized_output_length: 0,
+        output_hash,
+        digest: mpc_compact_hashing::compute_attestation_digest(
+            &request.id.request_id,
+            &metadata,
+            0,
+            &output_hash,
+        ),
+    };
+    let tx = crate::backlog::BacklogEntry::new(Arc::new(request.clone()))
+        .named_tx(test_root_pk())
+        .unwrap();
+    let (epsilon, payload) =
+        crate::respond_bidirectional::published_midnight_signing_args(&tx, &attestation).unwrap();
+    let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
+    RespondBidirectionalEvent {
+        request_id: request.id.request_id,
+        signature: mpc_crypto::generate_signature(
+            &root_sk,
+            &SignArgs {
+                epsilon,
+                payload,
+                ..request.args.clone()
+            },
+        ),
+        chain: request.chain,
+        attestation: Some(attestation),
+        output: None,
+    }
+}
+
+/// A Response saying Executed marks its siblings, signed or not, with the height (#1430);
+/// checkpoints carry it, and each is answered Unviable at once.
+#[tokio::test]
+async fn a_response_answers_the_requests_it_left_unexecutable() {
+    let backlog = Backlog::new();
+    backlog.mark_caught_up(Chain::Midnight);
+    let taker = nonce_request(1, Chain::Midnight, "p", 7, 1);
+    seed_executing_entry(&backlog, Arc::clone(&taker), signed_tx(&taker, 7)).await;
+    let unsigned = nonce_request(2, Chain::Midnight, "p", 7, 2);
+    backlog.insert_bidirectional(Arc::clone(&unsigned)).await;
+    let signed = nonce_request(3, Chain::Midnight, "p", 7, 3);
+    seed_executing_entry(&backlog, Arc::clone(&signed), signed_tx(&signed, 7)).await;
+    let other_nonce = nonce_request(4, Chain::Midnight, "p", 8, 2);
+    backlog.insert_bidirectional(Arc::clone(&other_nonce)).await;
+    let (sign_tx, mut sign_rx) = mpsc::channel(8);
+    let (ctx, _cp, _mesh, _rpc_rx) =
+        make_test_stream_context(backlog, sign_tx, true, test_root_pk(), 1);
+
+    let response = midnight_response(&taker, AttestationOutcomeKind::Executed, 500);
+    process_respond_bidirectional_event(response, &ctx, test_root_pk())
+        .await
+        .unwrap();
+    assert!(ctx.backlog.get(Chain::Midnight, &taker.id).await.is_none());
+    for (request, marked) in [(&unsigned, true), (&signed, true), (&other_nonce, false)] {
+        let entry = ctx
+            .backlog
+            .entry(Chain::Midnight, &request.id)
+            .await
+            .unwrap();
+        assert_eq!(entry.unviable_at, marked.then_some(500), "{:?}", request.id);
+    }
+    let checkpoint = ctx.backlog.checkpoint(Chain::Midnight).await.unwrap();
+    let recovered = Backlog::new();
+    recovered.recover_by_checkpoint(&checkpoint).await;
+    let entry = recovered
+        .entry(Chain::Midnight, &unsigned.id)
+        .await
+        .unwrap();
+    assert_eq!(entry.unviable_at, Some(500));
+
+    let mut answered = queued_requests(&mut sign_rx);
+    answered.sort_by_key(|id| id.request_id);
+    assert_eq!(answered, vec![unsigned.id, signed.id]);
+    assert!(ctx
+        .backlog
+        .take_unviable(Chain::Midnight, test_root_pk())
+        .await
+        .is_empty());
+}
+
+/// Matching needs no key derivation, and picks the requests derivation says share the account.
+#[test]
+fn a_nonce_sibling_shares_the_derived_account_and_nonce() {
+    let named = |request: &Arc<IndexedSignRequest>| {
+        BacklogEntry::new(Arc::clone(request))
+            .named_tx(test_root_pk())
+            .unwrap()
+    };
+    let taker = named(&nonce_request(1, Chain::Solana, "p", 7, 1));
+
+    let sibling = nonce_request(2, Chain::Solana, "p", 7, 2);
+    assert_eq!(named(&sibling).from_address, taker.from_address);
+    assert!(BacklogEntry::new(sibling).is_nonce_sibling(&taker));
+
+    let same_bytes = nonce_request(3, Chain::Solana, "p", 7, 1);
+    assert!(!BacklogEntry::new(same_bytes).is_nonce_sibling(&taker));
+
+    let other_nonce = nonce_request(4, Chain::Solana, "p", 8, 2);
+    assert!(!BacklogEntry::new(other_nonce).is_nonce_sibling(&taker));
+
+    for other_account in [
+        nonce_request(5, Chain::Solana, "q", 7, 2),
+        nonce_request(6, Chain::Midnight, "p", 7, 2),
+    ] {
+        assert_ne!(named(&other_account).from_address, taker.from_address);
+        assert!(!BacklogEntry::new(other_account).is_nonce_sibling(&taker));
+    }
+}
+
+/// A node that has not seen a signature removes the request on its Response like any other:
+/// another node may have answered it as a sibling.
+#[tokio::test]
+async fn a_response_removes_an_entry_without_a_signature() {
+    let backlog = Backlog::new();
+    let request = nonce_request(1, Chain::Midnight, "p", 7, 1);
+    backlog.insert_bidirectional(Arc::clone(&request)).await;
+    let (sign_tx, _sign_rx) = mpsc::channel(8);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+    let response = midnight_response(&request, AttestationOutcomeKind::Unviable, 500);
+    process_respond_bidirectional_event(response, &ctx, test_root_pk())
+        .await
+        .unwrap();
+    assert!(ctx
+        .backlog
+        .get(Chain::Midnight, &request.id)
+        .await
+        .is_none());
+}
+
+/// A signed sibling keeps the time this node started waiting on it, for the latency sample.
+#[tokio::test]
+async fn a_signed_sibling_keeps_its_observation_time() {
+    let backlog = Backlog::new();
+    let taker = nonce_request(1, Chain::Midnight, "p", 7, 1);
+    let sibling = nonce_request(2, Chain::Midnight, "p", 7, 2);
+    seed_executing_entry(&backlog, Arc::clone(&sibling), signed_tx(&sibling, 7)).await;
+    backlog
+        .mark_unviable(Chain::Midnight, &signed_tx(&taker, 7), 500)
+        .await;
+
+    let picked = backlog.take_unviable(Chain::Midnight, test_root_pk()).await;
+
+    assert!(picked[0].respond_observed_at().is_some());
+}
+
+/// Two streams can pick one sibling before either answers it: the second sends nothing and
+/// leaves the first's progress alone.
+#[tokio::test]
+async fn a_second_answer_changes_nothing() {
+    let backlog = Backlog::new();
+    backlog.mark_caught_up(Chain::Midnight);
+    let taker = nonce_request(1, Chain::Midnight, "p", 7, 1);
+    let taker_tx = signed_tx(&taker, 7);
+    let sibling = nonce_request(2, Chain::Midnight, "p", 7, 2);
+    backlog.insert_bidirectional(Arc::clone(&sibling)).await;
+    backlog.mark_unviable(Chain::Midnight, &taker_tx, 500).await;
+    let (sign_tx, mut sign_rx) = mpsc::channel(8);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+    let mut picks = [
+        ctx.backlog
+            .take_unviable(Chain::Midnight, test_root_pk())
+            .await,
+        ctx.backlog
+            .take_unviable(Chain::Midnight, test_root_pk())
+            .await,
+    ];
+    let first = picks[0].pop().unwrap();
+    let second = picks[1].pop().unwrap();
+    let tx_id = first.execution_tx().id;
+
+    answer_execution(first, tx_id, 500, ExecutionOutcome::Unviable, &ctx)
+        .await
+        .unwrap();
+    let Ok(SignCommand::Request(queued)) = sign_rx.try_recv() else {
+        panic!("the first answer is sent");
+    };
+    let (pk, output) = mock_signature_output(&queued.request().args);
+    queued.advance(pk, &output, vec![], true).await.unwrap();
+
+    answer_execution(second, tx_id, 500, ExecutionOutcome::Unviable, &ctx)
+        .await
+        .unwrap();
+
+    assert!(queued_requests(&mut sign_rx).is_empty());
+    let entry = ctx.backlog.get(Chain::Midnight, &sibling.id).await.unwrap();
+    assert!(entry.status().publishing().is_some());
+}
+
+/// A node that read the Response while behind, or holds its mark from a checkpoint, answers
+/// at catchup, and does not sign the request's own transaction first.
+#[tokio::test]
+async fn a_marked_request_is_answered_at_catchup() {
+    let backlog = Backlog::new();
+    let taker = nonce_request(1, Chain::Midnight, "p", 7, 1);
+    seed_executing_entry(&backlog, Arc::clone(&taker), signed_tx(&taker, 7)).await;
+    let sibling = nonce_request(2, Chain::Midnight, "p", 7, 2);
+    backlog.insert_bidirectional(Arc::clone(&sibling)).await;
+    let (sign_tx, mut sign_rx) = mpsc::channel(8);
+    let (mut ctx, _cp, _mesh, _rpc_rx) =
+        make_test_stream_context(backlog, sign_tx, false, test_root_pk(), 1);
+
+    let response = midnight_response(&taker, AttestationOutcomeKind::Executed, 500);
+    process_respond_bidirectional_event(response, &ctx, test_root_pk())
+        .await
+        .unwrap();
+    assert!(queued_requests(&mut sign_rx).is_empty());
+    let entry = ctx.backlog.get(Chain::Midnight, &sibling.id).await.unwrap();
+    assert_matches!(
+        entry.status(),
+        SignStatus::Bidirectional(BidirectionalProgress::Initial(_))
+    );
+
+    crate::stream::handle_chain_event(
+        mpc_primitives::ChainEvent::CatchupCompleted,
+        &mut ctx,
+        &NoopChainTelemetry,
+        test_root_pk(),
+        Chain::Midnight,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(queued_requests(&mut sign_rx), vec![sibling.id]);
+    let entry = ctx.backlog.get(Chain::Midnight, &sibling.id).await.unwrap();
+    assert_matches!(entry.request().kind, SignKind::RespondBidirectional(_));
+}
+
+/// A node that found the taker's execution and one that read its Response sign the same thing,
+/// whichever signatures of the sibling they know.
+#[tokio::test]
+async fn both_paths_answer_a_sibling_alike() {
+    let answer = |from_execution: bool| async move {
+        let backlog = Backlog::new();
+        let taker = nonce_request(1, Chain::Midnight, "p", 7, 1);
+        let taker_tx = signed_tx(&taker, 7);
+        seed_executing_entry(&backlog, Arc::clone(&taker), Arc::clone(&taker_tx)).await;
+        let sibling = nonce_request(2, Chain::Midnight, "p", 7, 2);
+        if from_execution {
+            seed_executing_entry(&backlog, Arc::clone(&sibling), signed_tx(&sibling, 7)).await;
+        } else {
+            backlog.insert_bidirectional(Arc::clone(&sibling)).await;
+        }
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+        if from_execution {
+            process_execution_confirmed(
+                taker_tx.id,
+                500,
+                ExecutionOutcome::Failed,
+                &ctx,
+                Chain::Ethereum,
+                test_root_pk(),
+            )
+            .await
+            .unwrap();
+        } else {
+            let response = midnight_response(&taker, AttestationOutcomeKind::Executed, 500);
+            process_respond_bidirectional_event(response, &ctx, test_root_pk())
+                .await
+                .unwrap();
+        }
+        let entry = ctx.backlog.get(Chain::Midnight, &sibling.id).await.unwrap();
+        let SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request, ..
+        }) = entry.status()
+        else {
+            panic!("not answered: {:?}", entry.status());
+        };
+        respond_request.args.clone()
+    };
+    assert_eq!(answer(true).await, answer(false).await);
+}
+
+/// A signature that lands after a request was answered as a sibling records its transaction
+/// and keeps the outcome. If it is the first and the entry can never advance, the node
+/// quarantines it, like a node that has not answered it.
+#[tokio::test]
+async fn a_signature_after_a_sibling_answer() {
+    let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
+    let taker = nonce_request(1, Chain::Solana, "p", 7, 1);
+    let taker_tx = signed_tx(&taker, 7);
+    let backlog = Backlog::new();
+    seed_executing_entry(&backlog, Arc::clone(&taker), Arc::clone(&taker_tx)).await;
+    let late = nonce_request(2, Chain::Solana, "p", 7, 2);
+    backlog.insert_bidirectional(Arc::clone(&late)).await;
+    let mut poison = (*nonce_request(3, Chain::Solana, "p", 7, 3)).clone();
+    let SignKind::SignBidirectional(event) = &mut poison.kind else {
+        unreachable!()
+    };
+    event.respond_serialization_schema = b"not a schema".to_vec();
+    assert!(event.validate().is_err());
+    let poison = Arc::new(poison);
+    backlog.insert_bidirectional(Arc::clone(&poison)).await;
+    let (sign_tx, _sign_rx) = mpsc::channel(8);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+    process_execution_confirmed(
+        taker_tx.id,
+        123,
+        ExecutionOutcome::Failed,
+        &ctx,
+        Chain::Ethereum,
+        test_root_pk(),
+    )
+    .await
+    .unwrap();
+
+    for request in [&late, &poison] {
+        let event = SignatureRespondedEvent {
+            request_id: request.id.request_id,
+            signature: mpc_crypto::generate_signature(&root_sk, &request.args),
+            chain: Chain::Solana,
+        };
+        process_respond_event(event, &ctx, test_root_pk())
+            .await
+            .unwrap();
+    }
+
+    assert!(ctx.backlog.get(Chain::Solana, &poison.id).await.is_none());
+    let entry = ctx.backlog.entry(Chain::Solana, &late.id).await.unwrap();
+    assert_eq!(entry.tx_ids.len(), 1);
+    assert_matches!(
+        entry.status,
+        SignStatus::Bidirectional(BidirectionalProgress::Final { .. })
+    );
+    assert!(ctx
+        .backlog
+        .get_execution_watchers(Chain::Ethereum)
+        .await
+        .is_empty());
 }
 
 /// A later signature's transaction is watched too; finding either ends the wait on both.
@@ -552,6 +890,7 @@ async fn a_response_names_the_later_transaction_it_found() {
         ExecutionOutcome::Failed,
         &ctx,
         Chain::Ethereum,
+        test_root_pk(),
     )
     .await
     .unwrap();
@@ -576,9 +915,16 @@ async fn adopting_a_body_ignores_its_progress() {
     let executing = unanswered.checkpoint(Chain::Solana).await.unwrap();
     let (sign_tx, _sign_rx) = mpsc::channel(8);
     let ctx = make_test_stream_context_with_generator_pk(peer, sign_tx, true);
-    process_execution_confirmed(tx.id, 123, ExecutionOutcome::Failed, &ctx, Chain::Ethereum)
-        .await
-        .unwrap();
+    process_execution_confirmed(
+        tx.id,
+        123,
+        ExecutionOutcome::Failed,
+        &ctx,
+        Chain::Ethereum,
+        test_root_pk(),
+    )
+    .await
+    .unwrap();
     let answered = ctx.backlog.checkpoint(Chain::Solana).await.unwrap();
     assert_eq!(answered.digest(), executing.digest());
 
@@ -611,6 +957,7 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
         tx.target_chain,
+        test_root_pk(),
     )
     .await
     .unwrap();
@@ -621,6 +968,7 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
         tx.target_chain,
+        test_root_pk(),
     )
     .await
     .unwrap();
@@ -664,6 +1012,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
         tx.target_chain,
+        test_root_pk(),
     )
     .await
     .expect_err("send failure should surface as an error");
@@ -1646,6 +1995,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
         ExecutionOutcome::Failed,
         &ctx,
         tx.target_chain,
+        test_root_pk(),
     )
     .await
     .unwrap();
@@ -1700,6 +2050,7 @@ async fn process_execution_confirmed_waits_for_source_catchup() {
         ExecutionOutcome::Failed,
         &ctx,
         tx.target_chain,
+        test_root_pk(),
     )
     .await
     .unwrap();
@@ -1754,6 +2105,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         ExecutionOutcome::Success { output: vec![1] },
         &ctx,
         tx.target_chain,
+        test_root_pk(),
     )
     .await
     .unwrap();
@@ -2103,7 +2455,7 @@ async fn midnight_execution_response_binds_receipt_height_and_outcome() {
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-        process_execution_confirmed(tx.id, 7123, result, &ctx, Chain::Ethereum)
+        process_execution_confirmed(tx.id, 7123, result, &ctx, Chain::Ethereum, test_root_pk())
             .await
             .unwrap();
         let SignCommand::Request(entry) = sign_rx.try_recv().unwrap() else {
@@ -2284,6 +2636,7 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
                 ExecutionOutcome::ExtractionFailed,
                 &ctx,
                 Chain::Ethereum,
+                test_root_pk(),
             )
             .await
             .unwrap();
@@ -2321,6 +2674,7 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
                 ExecutionOutcome::ExtractionFailed,
                 &ctx,
                 Chain::Ethereum,
+                test_root_pk(),
             )
             .await
             .unwrap();
@@ -2357,6 +2711,7 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
                 ExecutionOutcome::ExtractionFailed,
                 &restored_ctx,
                 Chain::Ethereum,
+                test_root_pk(),
             )
             .await
             .unwrap();
@@ -2404,9 +2759,16 @@ async fn published_midnight_response(
         .await;
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
-    process_execution_confirmed(tx.id, height, outcome, &ctx, Chain::Ethereum)
-        .await
-        .unwrap();
+    process_execution_confirmed(
+        tx.id,
+        height,
+        outcome,
+        &ctx,
+        Chain::Ethereum,
+        test_root_pk(),
+    )
+    .await
+    .unwrap();
     let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
         panic!("the observed outcome must be signed");
     };
@@ -2706,7 +3068,7 @@ async fn unobserved_response_settles_when_it_verifies() {
         attested.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(attested, sign_tx, true);
-        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
+        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum, test_root_pk())
             .await
             .unwrap();
         let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
@@ -2797,7 +3159,7 @@ async fn final_response_latency_follows_the_recorded_outcome() {
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
+        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum, test_root_pk())
             .await
             .unwrap();
         let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
@@ -2837,7 +3199,7 @@ async fn final_response_settles_on_the_published_output() {
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
         let outcome = ExecutionOutcome::Success { output: vec![] };
-        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
+        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum, test_root_pk())
             .await
             .unwrap();
         let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
