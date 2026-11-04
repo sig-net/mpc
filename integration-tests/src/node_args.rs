@@ -128,7 +128,9 @@ impl Args {
     }
 
     fn storage(&mut self, storage: &storage::Options) {
-        self.flag("--gcp-project-id", &storage.gcp_project_id);
+        if let Some(id) = &storage.gcp_project_id {
+            self.flag("--gcp-project-id", id);
+        }
         if let Some(id) = &storage.sk_share_secret_id {
             self.flag("--sk-share-secret-id", id);
         }

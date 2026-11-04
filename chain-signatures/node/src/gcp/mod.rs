@@ -5,8 +5,6 @@ use base64::Engine as _;
 use google_cloud_auth::credentials::AccessTokenCredentials;
 use serde::{Deserialize, Serialize};
 
-use crate::storage;
-
 pub type SecretResult<T> = std::result::Result<T, error::SecretStorageError>;
 
 const SECRET_MANAGER_ENDPOINT: &str = "https://secretmanager.googleapis.com";
@@ -42,6 +40,18 @@ pub struct SecretManagerService {
 }
 
 impl SecretManagerService {
+    pub fn new(project_id: &str) -> anyhow::Result<Self> {
+        let credentials = google_cloud_auth::credentials::Builder::default()
+            .with_scopes([CLOUD_PLATFORM_SCOPE])
+            .build_access_token_credentials()?;
+        let http = reqwest::Client::builder().https_only(true).build()?;
+        Ok(Self {
+            http,
+            credentials,
+            project_id: project_id.to_string(),
+        })
+    }
+
     #[tracing::instrument(level = "debug", skip_all, fields(name = name.as_ref()))]
     pub async fn load_secret<T: AsRef<str>>(&self, name: T) -> SecretResult<Option<Vec<u8>>> {
         let url = format!(
@@ -106,28 +116,6 @@ impl SecretManagerService {
             return Err(error::SecretStorageError::Api { status, message });
         }
         Ok(response)
-    }
-}
-
-#[derive(Clone)]
-pub struct GcpService {
-    pub secret_manager: SecretManagerService,
-}
-
-impl GcpService {
-    pub async fn init(storage_options: &storage::Options) -> anyhow::Result<Self> {
-        let credentials = google_cloud_auth::credentials::Builder::default()
-            .with_scopes([CLOUD_PLATFORM_SCOPE])
-            .build_access_token_credentials()?;
-        let http = reqwest::Client::builder().https_only(true).build()?;
-
-        Ok(Self {
-            secret_manager: SecretManagerService {
-                http,
-                credentials,
-                project_id: storage_options.gcp_project_id.clone(),
-            },
-        })
     }
 }
 

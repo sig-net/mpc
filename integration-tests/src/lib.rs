@@ -286,7 +286,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     }
 
     let storage_options = mpc_node::storage::Options {
-        gcp_project_id: spawner.gcp_project_id.clone(),
+        gcp_project_id: None,
         sk_share_secret_id: None,
         sk_share_local_path: Some(sk_share_local_path),
         redis_url: redis.internal_address.clone(),
@@ -300,11 +300,8 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         for (i, account) in spawner.accounts.iter().enumerate() {
             let participant = Participant::from(i as u32);
             if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
-                let mut secret_storage = storage::secret_storage::init(
-                    None, // No GCP service for tests
-                    &storage_options,
-                    account.id(),
-                );
+                let mut secret_storage =
+                    storage::secret_storage::init(&storage_options, account.id()).await?;
 
                 let persistent_data = mpc_node::protocol::state::PersistentNodeData {
                     epoch: 0,

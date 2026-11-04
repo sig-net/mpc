@@ -70,15 +70,17 @@ fmt-check:
 fmt:
     cargo fmt
 
-# Fast unit tests (mirrors CI: no integration-tests, no Docker)
+# Fast unit tests (mirrors CI: no integration-tests, no Docker). The node
+# gates its test-only stores and flags behind test-feature, so its lib tests
+# run a second time with the feature on.
 # Usage: just test-unit [filter]
 test-unit filter="":
     cargo test --workspace --exclude integration-tests {{filter}}
+    cargo test -p mpc-node --lib --features test-feature {{filter}}
 alias tu := test-unit
 
 # Full CI gate locally: format check + clippy + unit tests
-ci: fmt-check lint
-    cargo test --workspace --exclude integration-tests
+ci: fmt-check lint test-unit
 alias c := ci
 
 # Security audit of dependencies (mirrors CI audit job)
