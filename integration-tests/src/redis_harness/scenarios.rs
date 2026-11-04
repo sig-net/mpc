@@ -7,7 +7,7 @@ use cait_sith::protocol::Participant;
 
 use super::diagnostics::{partition_wall_3, partition_wall_by_active_time, LatencySummary};
 use super::gate::StartingGate;
-use super::participant::{next_id_block, ArtifactKind};
+use super::participant::{next_id_block, ArtifactKind, MeasuredOp};
 use super::RedisHarness;
 
 async fn collect_task_results(
@@ -108,8 +108,8 @@ impl RedisHarness {
         Ok(vec![s1, s2])
     }
 
-    /// SCENARIO 2: Stockpile 100ms Background Polling Contention Comparison.
-    /// Runs a write/read workload without vs. with 100ms background polling (HLEN / SCARD) across all participants,
+    /// SCENARIO 2: Stockpile One-Second Background Polling Contention Comparison.
+    /// Runs a write/read workload without vs. with one-second pipelined stock-count polling across all participants,
     /// returning tagged LatencySummary metrics for direct comparison.
     pub async fn bench_polling_contention(
         &self,
@@ -120,11 +120,11 @@ impl RedisHarness {
         let without_polling = self.run_concurrent_insert_and_take(workload_items).await?;
 
         println!(
-            "    Phase B: Workload WITH 100ms background polling (HLEN/SCARD across {} participants)...",
+            "    Phase B: Workload WITH one-second stock-count polling across {} participants...",
             self.participants.len()
         );
         self.reset_diagnostics().await?;
-        let poller = self.spawn_background_polling(false);
+        let poller = self.spawn_background_polling(true);
         let with_polling = self.run_concurrent_insert_and_take(workload_items).await;
         poller.stop().await;
         let with_polling = with_polling?;
@@ -254,9 +254,7 @@ impl RedisHarness {
 
         let racer_tasks: Vec<_> = (0..num_racers)
             .map(|_| {
-                // Each racer gets an independent storage handle with its own `reserved` RwLock,
-                // matching production where distinct nodes do not share in-memory reservation maps.
-                let racer = p.clone_isolated(&self.client.pool);
+                let racer = p.clone();
                 tokio::spawn(racer.race_proposals(
                     gate.barrier(),
                     base_id,
@@ -295,7 +293,7 @@ impl RedisHarness {
 
     /// SCENARIO 5: Production Cascading Saturation & Head-of-Line Blocking (reproducing 50ms - 6s latencies).
     /// Simulates production conditions:
-    /// 1. 100ms background stockpile polling storms (continuous HLEN/SCARD).
+    /// 1. one-second background stock-count refreshes.
     /// 2. High concurrency (many concurrent tasks competing for connection pool slots).
     /// 3. Intermittent Redis blocking events (simulating long remove_outdated Lua scripts or BGSAVE freezes).
     ///
@@ -317,14 +315,14 @@ impl RedisHarness {
             ]);
         }
 
-        let pool_status = self.client.status();
+        let pool_status = self.participants[0].pool.status();
         println!(
-            "   -> Connection pool status: max_size={} (active={}, available={}, waiting={})",
+            "   -> Participant 0 connection pool status: max_size={} (active={}, available={}, waiting={})",
             pool_status.max_size, pool_status.size, pool_status.available, pool_status.waiting
         );
 
-        // 1. Continuous 100ms polling across all participants
-        let poller = self.spawn_background_polling(false);
+        // 1. One-second stock-count polling across all participants
+        let poller = self.spawn_background_polling(true);
 
         // 2. Intermittent blocking spikes on Redis main thread (simulating large Lua scripts or BGSAVE stalls)
         // Spans insert, peek, and take phases
@@ -535,171 +533,134 @@ impl RedisHarness {
         Ok(vec![s1, s2])
     }
 
-    /// SCENARIO 7: Realistic Mixed MPC Pipeline Contention.
-    /// Simulates production node conditions where a single connection pool is shared
-    /// across concurrent triple generation, presignature generation, sign requests
-    /// (taking 1 triple + 1 presignature), and background 100ms stockpile polling.
+    /// SCENARIO 7: Concurrent triple generation, presignature generation, and signing.
+    /// Each node shares its own pool across these operations and stock-count refreshes.
+    /// Signing excludes newly generated local-only shares because the paired
+    /// deliberator has copies only of the pre-stocked shares.
     pub async fn bench_mixed_pipeline(
         &self,
         items_per_participant: usize,
     ) -> anyhow::Result<Vec<LatencySummary>> {
         self.reset_diagnostics().await?;
-
-        if self.participants.is_empty() || items_per_participant == 0 {
-            return Ok(vec![
-                LatencySummary::empty("mixed_insert_triple"),
-                LatencySummary::empty("mixed_insert_presig"),
-                LatencySummary::empty("mixed_take_triple"),
-                LatencySummary::empty("mixed_take_presig"),
-            ]);
+        const NAMES: [&str; 7] = [
+            "mixed_insert_triple",
+            "mixed_presig_peek_triple",
+            "mixed_presig_commit_triple",
+            "mixed_insert_presig",
+            "mixed_sign_peek_presig",
+            "mixed_sign_commit_presig",
+            "mixed_sign_take_presig",
+        ];
+        let num_p = self.participants.len();
+        if num_p == 0 || items_per_participant == 0 {
+            return Ok(NAMES.into_iter().map(LatencySummary::empty).collect());
         }
 
-        let participant_list = self.participant_ids();
-        let num_p = self.participants.len();
         let total_items = num_p * items_per_participant;
-
-        let stockpile_triples_base = next_id_block(total_items as u64 + 10_000);
-        let stockpile_presigs_base = next_id_block(total_items as u64 + 10_000);
+        let triple_base = next_id_block(total_items as u64 + 10_000);
+        let presig_base = next_id_block(total_items as u64 + 10_000);
         let gen_base = next_id_block((total_items * 2) as u64 + 10_000);
-
-        println!(
-            "   -> Pre-stockpiling {items_per_participant} triples & presignatures per node across {num_p} participants..."
-        );
-        let triple_stockpile_ids = self
-            .populate_all_triples(stockpile_triples_base, items_per_participant)
+        self.populate_all_triples(triple_base, items_per_participant)
             .await?;
-        let presig_stockpile_ids = self
-            .populate_all_presignatures(stockpile_presigs_base, items_per_participant)
-            .await?;
-
-        // 1. Background 100ms polling for all participants (both triples and presignatures)
-        let poller = self.spawn_background_polling(true);
-
-        // 2. Launch concurrent workers:
-        // - Generators creating new triples
-        // - Generators creating new presignatures
-        // - Signers taking 1 triple + 1 presignature
-        let gate = StartingGate::new(num_p * 3);
-
-        let triple_gen_tasks: Vec<_> = self
-            .participants
-            .iter()
-            .enumerate()
-            .map(|(node_idx, p)| {
-                let base_id = gen_base + (node_idx as u64 * items_per_participant as u64 * 2);
-                tokio::spawn(p.clone().insert_measured(
-                    ArtifactKind::Triples,
-                    base_id,
-                    items_per_participant,
-                    participant_list.clone(),
-                    gate.barrier(),
-                ))
-            })
-            .collect();
-
-        let presig_gen_tasks: Vec<_> = self
-            .participants
-            .iter()
-            .enumerate()
-            .map(|(node_idx, p)| {
-                let base_id = gen_base
-                    + (node_idx as u64 * items_per_participant as u64 * 2)
-                    + items_per_participant as u64;
-                tokio::spawn(p.clone().insert_measured(
+        let participant_list = self.participant_ids();
+        for (idx, p) in self.participants.iter().enumerate() {
+            let proposer = idx - idx % 2;
+            p.clone()
+                .populate_owned_by(
                     ArtifactKind::Presignatures,
-                    base_id,
+                    presig_base + (proposer * items_per_participant) as u64,
                     items_per_participant,
                     participant_list.clone(),
-                    gate.barrier(),
-                ))
-            })
-            .collect();
+                    self.participants[proposer].participant,
+                )
+                .await?;
+        }
 
-        let signer_tasks: Vec<_> = self
-            .participants
-            .iter()
-            .enumerate()
-            .map(|(node_idx, p)| {
-                let my_triple_ids = triple_stockpile_ids
-                    .get(node_idx)
-                    .cloned()
-                    .unwrap_or_default();
-                let my_presig_ids = presig_stockpile_ids
-                    .get(node_idx)
-                    .cloned()
-                    .unwrap_or_default();
-                tokio::spawn(p.clone().take_triple_and_presig_pairs(
-                    gate.barrier(),
-                    my_triple_ids,
-                    my_presig_ids,
-                ))
-            })
-            .collect();
+        let poller = self.spawn_background_polling(true);
+        let gate = StartingGate::new(num_p * 3);
+        let mut triple_tasks = Vec::new();
+        let mut presig_tasks = Vec::new();
+        let mut sign_tasks = Vec::new();
+        let mut senders = vec![None; num_p];
+        let mut receivers: Vec<_> = (0..num_p).map(|_| None).collect();
+        for idx in (0..num_p.saturating_sub(1)).step_by(2) {
+            let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+            senders[idx] = Some(sender);
+            receivers[idx + 1] = Some(receiver);
+        }
+        for (idx, p) in self.participants.iter().enumerate() {
+            let base = gen_base + (idx * items_per_participant * 2) as u64;
+            triple_tasks.push(tokio::spawn(p.clone().insert_measured(
+                ArtifactKind::Triples,
+                base,
+                items_per_participant,
+                participant_list.clone(),
+                gate.barrier(),
+            )));
+            presig_tasks.push(tokio::spawn(p.clone().generate_presignatures_measured(
+                gate.barrier(),
+                base + items_per_participant as u64,
+                items_per_participant,
+                participant_list.clone(),
+            )));
+            let p = p.clone();
+            let barrier = gate.barrier();
+            let sender = senders[idx].take();
+            let receiver = receivers[idx].take();
+            // Newly generated shares are local to this simulated node; only
+            // pre-stocked shares have a matching copy at the deliberator.
+            let excluded: Vec<_> = (0..items_per_participant)
+                .map(|i| base + items_per_participant as u64 + i as u64)
+                .collect();
+            let owner = self.participants[idx - idx % 2].participant;
+            sign_tasks.push(tokio::spawn(async move {
+                if idx % 2 == 0 {
+                    let [peek, commit] = p
+                        .sign_measured(barrier, items_per_participant, excluded, sender)
+                        .await;
+                    [peek, commit, MeasuredOp::default()]
+                } else {
+                    let take = p
+                        .sign_deliberator_measured(barrier, receiver.unwrap(), owner)
+                        .await;
+                    [MeasuredOp::default(), MeasuredOp::default(), take]
+                }
+            }));
+        }
 
-        let overall_start = gate.start().await;
-
-        let triple_gen = async {
-            let (all, fails) = collect_task_results(triple_gen_tasks).await?;
-            Ok::<_, anyhow::Error>((all, fails, overall_start.elapsed()))
-        };
-
-        let presig_gen = async {
-            let (all, fails) = collect_task_results(presig_gen_tasks).await?;
-            Ok::<_, anyhow::Error>((all, fails, overall_start.elapsed()))
-        };
-
-        let signers = async {
-            let mut all_t = Vec::with_capacity(num_p * items_per_participant);
-            let mut all_p = Vec::with_capacity(num_p * items_per_participant);
-            let mut fails_t = 0;
-            let mut fails_p = 0;
-            for t in signer_tasks {
-                let (tt, ft, tp, fp) = t.await?;
-                all_t.extend(tt);
-                fails_t += ft;
-                all_p.extend(tp);
-                fails_p += fp;
+        let start = gate.start().await;
+        let mut metrics: [MeasuredOp; 7] = Default::default();
+        for task in triple_tasks {
+            let (latencies, failures) = task.await?;
+            metrics[0].latencies.extend(latencies);
+            metrics[0].failures += failures;
+        }
+        for task in presig_tasks {
+            for (target, result) in metrics[1..4].iter_mut().zip(task.await?) {
+                target.latencies.extend(result.latencies);
+                target.failures += result.failures;
             }
-            Ok::<_, anyhow::Error>((all_t, fails_t, all_p, fails_p, overall_start.elapsed()))
-        };
-
-        let (
-            (mut all_insert_triples, triple_fails, triple_wall),
-            (mut all_insert_presigs, presig_fails, presig_wall),
-            (mut all_take_triples, take_triple_fails, mut all_take_presigs, take_presig_fails, signer_wall),
-        ) = tokio::try_join!(triple_gen, presig_gen, signers)?;
-
+        }
+        for task in sign_tasks {
+            for (target, result) in metrics[4..7].iter_mut().zip(task.await?) {
+                target.latencies.extend(result.latencies);
+                target.failures += result.failures;
+            }
+        }
+        let wall = start.elapsed();
         poller.stop().await;
-
-        let (take_triple_wall, take_presig_wall) =
-            partition_wall_by_active_time(signer_wall, &all_take_triples, &all_take_presigs);
-
-        let s1 = LatencySummary::calculate_with_failures(
-            "mixed_insert_triple",
-            &mut all_insert_triples,
-            triple_wall,
-            triple_fails,
-        );
-        let s2 = LatencySummary::calculate_with_failures(
-            "mixed_insert_presig",
-            &mut all_insert_presigs,
-            presig_wall,
-            presig_fails,
-        );
-        let s3 = LatencySummary::calculate_with_failures(
-            "mixed_take_triple",
-            &mut all_take_triples,
-            take_triple_wall,
-            take_triple_fails,
-        );
-        let s4 = LatencySummary::calculate_with_failures(
-            "mixed_take_presig",
-            &mut all_take_presigs,
-            take_presig_wall,
-            take_presig_fails,
-        );
-
-        Ok(vec![s1, s2, s3, s4])
+        Ok(NAMES
+            .into_iter()
+            .zip(metrics)
+            .map(|(name, mut metric)| {
+                LatencySummary::calculate_with_failures(
+                    name,
+                    &mut metric.latencies,
+                    wall,
+                    metric.failures,
+                )
+            })
+            .collect())
     }
 
     /// SCENARIO 8: State Sync Peer Drop & Pruning (`remove_holder_and_prune`).
@@ -1086,9 +1047,7 @@ impl RedisHarness {
 
         let tasks: Vec<_> = (0..num_seekers)
             .map(|_| {
-                // Each seeker gets an independent storage handle with its own `reserved` RwLock,
-                // matching production where distinct nodes do not share in-memory reservation maps.
-                let seeker = p.clone_isolated(&self.client.pool);
+                let seeker = p.clone();
                 tokio::spawn(seeker.seek_deep_stockpile(
                     gate.barrier(),
                     base_id,
@@ -1151,8 +1110,8 @@ impl RedisHarness {
         let p = &self.participants[0];
         let base_id = next_id_block(initial_stockpile as u64 + 10_000);
 
-        println!("   -> Pre-stockpiling {initial_stockpile} triples on participant 0...");
-        self.populate(ArtifactKind::Triples, 0, base_id, initial_stockpile)
+        println!("   -> Pre-stockpiling {initial_stockpile} presignatures on participant 0...");
+        self.populate(ArtifactKind::Presignatures, 0, base_id, initial_stockpile)
             .await?;
 
         println!(
@@ -1162,9 +1121,7 @@ impl RedisHarness {
 
         let tasks: Vec<_> = (0..num_proposers)
             .map(|proposer_id| {
-                // Each proposer gets an independent storage handle with its own `reserved` RwLock,
-                // matching production where distinct nodes do not share in-memory reservation maps.
-                let proposer = p.clone_isolated(&self.client.pool);
+                let proposer = p.clone();
                 tokio::spawn(proposer.run_proposer_churn(
                     gate.barrier(),
                     proposer_id,
@@ -1237,8 +1194,8 @@ impl RedisHarness {
     }
 
     /// SCENARIO 12: Conflicted Double-Take Race Storm.
-    /// Simulates concurrent attempts by multiple nodes to `take` the exact same artifact IDs,
-    /// reproducing the "WARN: artifact X is not owned by this owner" Lua failure path.
+    /// Uses independent handles for the same node's keys to exercise concurrent
+    /// attempts to take the same artifact IDs. This is a synthetic stress test.
     pub async fn bench_conflicted_take(
         &self,
         num_items: usize,
@@ -1269,10 +1226,9 @@ impl RedisHarness {
 
         let tasks: Vec<_> = (0..contenders_per_item)
             .map(|contender_idx| {
-                // Each contender gets an independent storage handle with its own `reserved` RwLock,
-                // matching production where distinct nodes do not share in-memory reservation maps.
+                // Independent handles intentionally force a synthetic same-key take race.
                 let contender = Participant::from(contender_idx as u32);
-                let mut p_contender = owner.clone_isolated(&self.client.pool);
+                let mut p_contender = owner.clone_isolated(&owner.pool);
                 p_contender.participant = contender;
                 p_contender.triples.set_me(contender);
                 let ids = target_ids.clone();

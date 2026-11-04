@@ -30,11 +30,28 @@ pub enum ArtifactKind {
     Presignatures,
 }
 
+#[derive(Default)]
+pub struct MeasuredOp {
+    pub latencies: Vec<Duration>,
+    pub failures: usize,
+}
+
+impl MeasuredOp {
+    fn record(&mut self, start: Instant, success: bool) {
+        if success {
+            self.latencies.push(start.elapsed());
+        } else {
+            self.failures += 1;
+        }
+    }
+}
+
 /// Simulated participant storage handles in the isolated Redis harness.
 #[derive(Clone)]
 pub struct SimulatedParticipant {
     pub participant: Participant,
     pub account_id: AccountId,
+    pub pool: Pool,
     pub triples: TripleStorage,
     pub presignatures: PresignatureStorage,
 }
@@ -49,13 +66,13 @@ impl SimulatedParticipant {
         Self {
             participant,
             account_id: account_id.clone(),
+            pool: pool.clone(),
             triples,
             presignatures,
         }
     }
 
-    /// Clone participant credentials with fresh, independent in-memory storage handles
-    /// (simulating multiple concurrent threads/tasks within the same node that do not share in-memory reservations).
+    /// Create an independent handle for synthetic same-key conflict tests.
     pub fn clone_isolated(&self, pool: &Pool) -> Self {
         Self::new(pool, &self.account_id, self.participant)
     }
@@ -66,6 +83,7 @@ impl SimulatedParticipant {
         base_id: u64,
         count: usize,
         participants: Vec<Participant>,
+        owner: Participant,
     ) -> Vec<u64> {
         let mut ids = Vec::with_capacity(count);
         for i in 0..count {
@@ -73,18 +91,16 @@ impl SimulatedParticipant {
             let inserted = match kind {
                 ArtifactKind::Triples => {
                     let pair = dummy_pair(id, &participants);
-                    if let Some(mut slot) = self.triples.create_slot(id, self.participant).await {
-                        slot.insert(pair, self.participant).await
+                    if let Some(mut slot) = self.triples.create_slot(id, owner).await {
+                        slot.insert(pair, owner).await
                     } else {
                         false
                     }
                 }
                 ArtifactKind::Presignatures => {
                     let presig = dummy_presignature(id, &participants);
-                    if let Some(mut slot) =
-                        self.presignatures.create_slot(id, self.participant).await
-                    {
-                        slot.insert(presig, self.participant).await
+                    if let Some(mut slot) = self.presignatures.create_slot(id, owner).await {
+                        slot.insert(presig, owner).await
                     } else {
                         false
                     }
@@ -105,6 +121,19 @@ impl SimulatedParticipant {
         base_id: u64,
         count: usize,
         participants: Vec<Participant>,
+    ) -> anyhow::Result<Vec<u64>> {
+        let owner = self.participant;
+        self.populate_owned_by(kind, base_id, count, participants, owner)
+            .await
+    }
+
+    pub async fn populate_owned_by(
+        self,
+        kind: ArtifactKind,
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+        owner: Participant,
     ) -> anyhow::Result<Vec<u64>> {
         if count == 0 {
             return Ok(Vec::new());
@@ -128,12 +157,15 @@ impl SimulatedParticipant {
                 p_base,
                 chunk_count,
                 participants.clone(),
+                owner,
             )));
         }
 
         let mut all_ids = Vec::with_capacity(count);
         for h in handles {
-            let ids = h.await.context("participant populate task failed or panicked")?;
+            let ids = h
+                .await
+                .context("participant populate task failed or panicked")?;
             all_ids.extend(ids);
         }
         all_ids.sort_unstable();
@@ -145,18 +177,19 @@ impl SimulatedParticipant {
         Ok(all_ids)
     }
 
-    /// Run the 100ms background stockpile polling loop until stopped.
+    /// Refresh stock counts once a second, as the production managers do.
     pub async fn run_polling_loop(self, stop: Arc<AtomicBool>, include_presignatures: bool) {
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         while !stop.load(Ordering::Relaxed) {
             interval.tick().await;
-            let _ = self.triples.len_generated().await;
-            let _ = self.triples.len_by_owner(self.participant).await;
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let _ = self.triples.stock_counts(self.participant).await;
             if include_presignatures {
-                let _ = self.presignatures.len_generated().await;
-                let _ = self.presignatures.len_by_owner(self.participant).await;
+                let _ = self.presignatures.stock_counts(self.participant).await;
             }
         }
     }
@@ -313,45 +346,83 @@ impl SimulatedParticipant {
         )
     }
 
-    /// Concurrently take pairs of (triple, presignature), measuring latency for each and tracking failures.
-    pub async fn take_triple_and_presig_pairs(
+    /// Model a presignature proposer consuming a triple pair and creating a presignature.
+    pub async fn generate_presignatures_measured(
         self,
         barrier: Arc<Barrier>,
-        triple_ids: Vec<u64>,
-        presig_ids: Vec<u64>,
-    ) -> (Vec<Duration>, usize, Vec<Duration>, usize) {
+        base_id: u64,
+        count: usize,
+        participants: Vec<Participant>,
+    ) -> [MeasuredOp; 3] {
         barrier.wait().await;
-        let count = triple_ids.len().min(presig_ids.len());
-        let mut take_triple_latencies = Vec::with_capacity(count);
-        let mut take_presig_latencies = Vec::with_capacity(count);
-        let mut triple_failures = 0;
-        let mut presig_failures = 0;
-
+        let mut metrics: [MeasuredOp; 3] = Default::default();
         for i in 0..count {
-            let triple_id = triple_ids[i];
-            let presig_id = presig_ids[i];
+            let start = Instant::now();
+            let reservation = self.triples.peek_mine(&[]).await;
+            metrics[0].record(start, reservation.is_some());
+            let Some(reservation) = reservation else {
+                continue;
+            };
+            let start = Instant::now();
+            let pair = reservation.commit().await;
+            metrics[1].record(start, pair.is_some());
+            let Some(_pair) = pair else { continue };
+            let id = base_id + i as u64;
+            let presig = dummy_presignature(id, &participants);
+            let start = Instant::now();
+            let inserted = match self.presignatures.create_slot(id, self.participant).await {
+                Some(mut slot) => slot.insert(presig, self.participant).await,
+                None => false,
+            };
+            metrics[2].record(start, inserted);
+        }
+        metrics
+    }
 
-            let t0 = Instant::now();
-            if self.triples.take(triple_id, self.participant).await.is_some() {
-                take_triple_latencies.push(t0.elapsed());
-            } else {
-                triple_failures += 1;
-            }
-
-            let t1 = Instant::now();
-            if self.presignatures.take(presig_id, self.participant).await.is_some() {
-                take_presig_latencies.push(t1.elapsed());
-            } else {
-                presig_failures += 1;
+    /// Model a signing proposer reserving and consuming a presignature.
+    pub async fn sign_measured(
+        self,
+        barrier: Arc<Barrier>,
+        count: usize,
+        excluded: Vec<u64>,
+        deliberator: Option<tokio::sync::mpsc::UnboundedSender<u64>>,
+    ) -> [MeasuredOp; 2] {
+        barrier.wait().await;
+        let mut metrics: [MeasuredOp; 2] = Default::default();
+        for _ in 0..count {
+            let start = Instant::now();
+            let reservation = self.presignatures.peek_mine(&excluded).await;
+            metrics[0].record(start, reservation.is_some());
+            let Some(reservation) = reservation else {
+                continue;
+            };
+            let id = reservation.id;
+            let start = Instant::now();
+            let committed = reservation.commit().await.is_some();
+            metrics[1].record(start, committed);
+            if committed {
+                if let Some(sender) = &deliberator {
+                    let _ = sender.send(id);
+                }
             }
         }
+        metrics
+    }
 
-        (
-            take_triple_latencies,
-            triple_failures,
-            take_presig_latencies,
-            presig_failures,
-        )
+    /// Model a signing deliberator taking the presignature named by the proposer.
+    pub async fn sign_deliberator_measured(
+        self,
+        barrier: Arc<Barrier>,
+        mut ids: tokio::sync::mpsc::UnboundedReceiver<u64>,
+        owner: Participant,
+    ) -> MeasuredOp {
+        barrier.wait().await;
+        let mut metric = MeasuredOp::default();
+        while let Some(id) = ids.recv().await {
+            let start = Instant::now();
+            metric.record(start, self.presignatures.take(id, owner).await.is_some());
+        }
+        metric
     }
 
     /// Concurrently peek and commit reservations in a proposer race.
@@ -497,7 +568,7 @@ impl SimulatedParticipant {
 
         for round_idx in 0..rounds {
             let t0 = Instant::now();
-            let reservation = self.triples.peek_mine(&local_excluded).await;
+            let reservation = self.presignatures.peek_mine(&local_excluded).await;
             peek_latencies.push(t0.elapsed());
 
             let Some(reservation) = reservation else {

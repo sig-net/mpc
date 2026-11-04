@@ -28,7 +28,7 @@ impl Default for RedisHarnessConfig {
     fn default() -> Self {
         Self {
             num_participants: 12,
-            max_pool_size: Some(8),
+            max_pool_size: None,
             pool_timeout: Some(Duration::from_secs(5)),
             flush_between: true,
             redis_url: None,

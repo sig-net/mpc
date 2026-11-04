@@ -58,7 +58,7 @@ impl RedisHarness {
     /// connects to that instance, where benchmarks may flush data, kill clients,
     /// and change server configuration;
     /// otherwise, automatically spins up an ephemeral isolated Docker Redis container.
-    /// All participants strictly share the single configured connection pool.
+    /// Each participant uses its own pool, as a production node does.
     pub async fn new(config: RedisHarnessConfig) -> anyhow::Result<Self> {
         anyhow::ensure!(
             config.redis_url.is_none() || config.allow_external_redis,
@@ -90,8 +90,13 @@ impl RedisHarness {
         for i in 0..config.num_participants {
             let participant = Participant::from(i as u32);
             let account_id: AccountId = format!("node-{i}.testnet").parse().unwrap();
+            let pool = RedisDiagnosticsClient::build_pool(
+                &redis_url,
+                config.max_pool_size,
+                config.pool_timeout,
+            )?;
             participants.push(SimulatedParticipant::new(
-                client.pool(),
+                &pool,
                 &account_id,
                 participant,
             ));
@@ -106,7 +111,7 @@ impl RedisHarness {
         })
     }
 
-    /// Access the underlying connection pool.
+    /// Access the diagnostics connection pool.
     pub fn pool(&self) -> &Pool {
         self.client.pool()
     }
@@ -216,7 +221,7 @@ impl RedisHarness {
         self.populate_all(ArtifactKind::Presignatures, base_id, count).await
     }
 
-    /// Spawn 100ms background stockpile polling loop across all participants.
+    /// Spawn one-second background stockpile polling loops across all participants.
     pub fn spawn_background_polling(&self, include_presignatures: bool) -> BackgroundPollerGuard {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let handles = self

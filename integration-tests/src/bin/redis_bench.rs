@@ -47,8 +47,8 @@ struct Args {
     #[arg(short, long, default_value_t = 300)]
     items: usize,
 
-    /// Connection pool max size constraint (default: 8; 0 for unbounded deadpool default)
-    #[arg(long, default_value_t = 8)]
+    /// Per-node connection pool max size (0 uses the deadpool default).
+    #[arg(long, default_value_t = 0)]
     pool_size: usize,
 
     /// Duration of periodic blocking spikes on Redis in milliseconds (default: 250ms)
@@ -165,10 +165,10 @@ async fn main() -> anyhow::Result<()> {
     );
     println!("  Scenario:               {}", args.scenario);
     println!(
-        "  Connection Pool Max:    {}",
+        "  Per-node Pool Max:      {}",
         match effective_pool_size {
             Some(sz) => sz.to_string(),
-            None => "Unbounded".to_string(),
+            None => "deadpool default".to_string(),
         }
     );
     println!(
@@ -193,7 +193,7 @@ async fn main() -> anyhow::Result<()> {
     let harness = RedisHarness::new(config).await?;
     let pool_status = harness.client.status();
     println!("Connected to Redis at: {}", harness.redis_url);
-    println!("Connection pool ready: max_size={}", pool_status.max_size);
+    println!("Diagnostics pool ready: max_size={}", pool_status.max_size);
 
     #[derive(serde::Serialize)]
     struct BenchmarkRecord {
@@ -236,9 +236,9 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if should_run(BenchScenario::Polling) {
-            println!("\n>>> Running Scenario 2: Stockpile 100ms Polling Contention Comparison");
+            println!("\n>>> Running Scenario 2: Stockpile One-Second Polling Contention Comparison");
             let results = harness.bench_polling_contention(args.items / 2).await?;
-            println!("\n  Comparison (Without vs. With 100ms Polling Contention):");
+            println!("\n  Comparison (Without vs. With One-Second Polling Contention):");
             harness.report_results(&results).await?;
             record(results);
         }
@@ -278,7 +278,7 @@ async fn main() -> anyhow::Result<()> {
             let spike_ms = args.spike_ms;
             println!("\n>>> Running Scenario 5: Cascading Saturation & Head-of-Line Blocking (50ms - 6s Grafana conditions)");
             println!(
-                "    Simulating {} concurrent tasks across {} participants, 100ms background polling, and periodic {}ms Redis blocking spikes (insert + take)...",
+                "    Simulating {} concurrent tasks across {} participants, one-second stock-count polling, and periodic {}ms Redis blocking spikes (insert + take)...",
                 args.participants * tasks_per_p,
                 args.participants,
                 spike_ms
@@ -303,8 +303,9 @@ async fn main() -> anyhow::Result<()> {
 
         if should_run(BenchScenario::Mixed) {
             let items = (args.items / 3).max(50);
-            println!("\n>>> Running Scenario 7: Realistic Mixed MPC Pipeline Contention (Triples + Presigs + Signers)");
-            println!("    Running concurrent triple gen, presig gen, sign requests (takes), and 100ms polling on a shared connection pool...");
+            println!("\n>>> Running Scenario 7: Mixed MPC Storage Workload (Triples + Presigs + Signers)");
+            println!("    Running concurrent triple gen, presig gen, sign requests, and one-second polling on per-node connection pools...");
+            println!("    Signing excludes newly generated local-only presignatures; paired deliberators hold pre-stocked shares.");
             let results = harness.bench_mixed_pipeline(items).await?;
             harness.report_results(&results).await?;
             record(results);
