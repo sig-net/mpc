@@ -53,14 +53,19 @@ gh pr view <pr> --json body --jq .body | sed -e '/^## Checklist/,$d' -e '/^- \[ 
 
 Promotion to testnet or mainnet does not create a tag. The version on a branch is the `version` line of its `Cargo.toml`, e.g. `git show origin/mainnet:Cargo.toml | grep ^version`; the latest release on `develop` is `git describe --tags --abbrev=0 origin/develop`.
 
-### Rolling compatibility and deprecations
+### Rolling upgrades and compatibility
 
-Rolling deployments require that current code and the latest tagged release binary can cooperate on the same network:
+Network deployments follow a standard rolling rollout so that the cluster remains online and signing throughout the upgrade:
+1. **Contract upgrade**: The release manager upgrades the MPC smart contract on-chain first.
+2. **Rolling node upgrade**: Nodes are then upgraded one by one (or in small batches) to the new release.
 
-- **Wire compatibility**: Changes to contract views (`View`), contract calls, or node-to-node protocol messages must remain backward-compatible with the latest release tag. The `Prod Compatibility Tests` CI workflow enforces this by running mixed clusters with the latest release binary.
+Because existing nodes are still running the previous release when the contract upgrades, **the code itself makes the rolling upgrade automatic**:
+- **Wire and state compatibility**: The contract must continue supporting queries, views (`View`), and calls expected by the previous release binary. Node-to-node protocol messages must also interoperate across adjacent versions.
+- **CI enforcement**: The `Prod Compatibility Tests` workflow is a **required check**. It spins up a mixed cluster pairing current code against the latest release tag to verify that contract updates and rolling node restarts succeed without downtime.
+  - *Exception*: If a future release intentionally introduces a hard, non-rolling break requiring coordinated downtime, the CI check can be explicitly modified or disabled for that release with team alignment.
 - **Two-phase deprecation (expand-and-contract)**:
-  1. **Phase 1 (Release $N$):** Introduce the new schema while keeping the legacy format (or wire emulation) intact and marked `#[deprecated]`. The contract or node accepts and/or emits both formats.
-  2. **Phase 2 (Release $N+1$):** Once release $N$ is deployed on testnet and mainnet, release $N+1$'s compatibility test baseline becomes release $N$. The legacy format and its deprecated code can then be safely removed.
+  1. **Phase 1 (Release $N$):** Introduce the new schema while keeping the legacy format (or wire emulation) intact and marked `#[deprecated]`. The contract/node accepts and/or emits both formats.
+  2. **Phase 2 (Release $N+1$):** Once release $N$ is deployed on testnet and mainnet, release $N+1$'s compatibility test baseline advances to release $N$. The legacy format and its deprecated code can then be safely removed.
 
 ## Release flow
 
