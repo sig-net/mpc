@@ -208,6 +208,7 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
+        entry.add_tx_id(tx.id);
         entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing(tx));
         Ok(())
     }
@@ -538,9 +539,10 @@ impl SignEntry<Bidirectional<Executing>> {
         self.state.0 .0.respond_observed_at
     }
 
-    /// Restore the observation time onto an entry rebuilt from a status.
-    pub(crate) fn with_respond_observed_at(mut self, at: Option<Instant>) -> Self {
-        self.state.0 .0.respond_observed_at = at;
+    /// This entry as the watch that found its execution, which may be of a later signature than
+    /// the one its status names.
+    pub(crate) fn with_execution_watch(mut self, watch: ExecutionWatch) -> Self {
+        self.state.0 .0 = watch;
         self
     }
 

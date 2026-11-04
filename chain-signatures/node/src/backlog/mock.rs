@@ -191,7 +191,7 @@ pub fn mock_bidi_request(id: SignId, chain: Chain) -> Arc<IndexedSignRequest> {
         0,
         SignBidirectionalEvent {
             sender: Default::default(),
-            serialized_transaction: vec![1, 2, 3],
+            serialized_transaction: mock_unsigned_eth_tx(0, 0),
             dest: SDK_DEST.to_string(),
             caip2_id: target_chain.caip2_chain_id().to_string(),
             key_version: 1,
@@ -217,7 +217,7 @@ pub fn mock_bidirectional_tx(id: SignId, source_chain: Chain) -> BidirectionalTx
     BidirectionalTx {
         id: BidirectionalTxId(id.request_id),
         sender: [0u8; 32],
-        serialized_transaction: vec![1, 2, 3],
+        serialized_transaction: mock_unsigned_eth_tx(0, 0),
         source_chain,
         target_chain,
         caip2_id: target_chain.caip2_chain_id().to_string(),
@@ -236,6 +236,26 @@ pub fn mock_bidirectional_tx(id: SignId, source_chain: Chain) -> BidirectionalTx
 }
 
 /// Create a mock bidirectional transaction from a u8 seed without Arc wrapping.
+/// The root key mock transactions derive their account from.
+pub fn mock_root_pk() -> mpc_primitives::PublicKey {
+    k256::AffinePoint::GENERATOR
+}
+
+/// An unsigned legacy Ethereum transaction on chain id 1, sending `value`.
+pub fn mock_unsigned_eth_tx(nonce: u64, value: u64) -> Vec<u8> {
+    let mut rlp = rlp::RlpStream::new_list(9);
+    rlp.append(&nonce);
+    rlp.append(&0u64);
+    rlp.append(&0u64);
+    rlp.append(&vec![0x11u8; 20]);
+    rlp.append(&value);
+    rlp.append(&Vec::<u8>::new());
+    rlp.append(&1u64);
+    rlp.append(&0u64);
+    rlp.append(&0u64);
+    rlp.out().to_vec()
+}
+
 pub fn mock_tx(id: u8) -> BidirectionalTx {
     mock_bidirectional_tx(SignId::from_u8(id), Chain::Solana)
 }

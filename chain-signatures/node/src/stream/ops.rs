@@ -260,20 +260,21 @@ pub(crate) async fn process_respond_event(
         return advance_bidirectional_to_execution(entry, respond_event, root_pk, ctx).await;
     }
 
-    if entry.is::<Bidirectional<Executing>>() {
-        tracing::info!(
-            ?sign_id,
-            ?source_chain,
-            "respond event backlog entry is already advanced; treating as processed"
-        );
+    // A later signature of the request: an execution under it must be found too (#1428).
+    let Some(first_leg) = ctx.backlog.first_leg(source_chain, &sign_id).await else {
         return Ok(());
-    }
-
-    tracing::info!(
-        ?sign_id,
-        ?source_chain,
-        "respond event is already finalized or pruned; skipping"
-    );
+    };
+    let SignKind::SignBidirectional(event) = &first_leg.kind else {
+        return Ok(());
+    };
+    mpc_crypto::verify_signature(
+        root_pk,
+        first_leg.args.epsilon,
+        first_leg.args.payload,
+        &respond_event.signature,
+    )?;
+    let tx = event.to_bidirectional_tx(sign_id.request_id, respond_event.signature, root_pk)?;
+    ctx.backlog.add_published_tx(Arc::new(tx)).await;
     Ok(())
 }
 

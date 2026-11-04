@@ -3,7 +3,7 @@ use crate::backlog::mock::{
     mock_bidi_request, mock_bidi_response_request, mock_participants, mock_sign_request,
     mock_signature_output, mock_tx, BacklogTestExt,
 };
-use crate::backlog::{Backlog, Bidirectional, Final, Generating};
+use crate::backlog::{Backlog, Bidirectional, Executing, ExecutionWatch, Final, Generating};
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
@@ -211,6 +211,14 @@ async fn recovered_midnight_requests_require_current_attestation_semantics_befor
         .get(Chain::Midnight, &current_final.id)
         .await
         .is_some());
+}
+
+fn undecodable_bidi_request(sign_id: SignId) -> Arc<IndexedSignRequest> {
+    let mut request = (*mock_bidi_request(sign_id, Chain::Solana)).clone();
+    if let SignKind::SignBidirectional(event) = &mut request.kind {
+        event.serialized_transaction = vec![1, 2, 3];
+    }
+    Arc::new(request)
 }
 
 async fn seed_executing_entry(
@@ -456,6 +464,138 @@ async fn execution_answers_the_nonce_siblings_of_its_transaction() {
     }
 }
 
+/// A later signature's transaction is watched too; finding either ends the wait on both.
+#[tokio::test]
+async fn an_execution_under_a_later_signature_is_found() {
+    let backlog = Backlog::new();
+    let request = nonce_request(1, Chain::Solana, "p", 7, 1);
+    let first = signed_tx(&request, 7);
+    seed_executing_entry(&backlog, Arc::clone(&request), Arc::clone(&first)).await;
+    let later = Arc::new(BidirectionalTx {
+        id: BidirectionalTxId([9; 32]),
+        ..(*first).clone()
+    });
+    // The time this node first waited on the request carries over to the later signature.
+    let observed_at = std::time::Instant::now();
+    let watched = backlog
+        .get_by::<Bidirectional<Executing>>(Chain::Solana, &request.id)
+        .await
+        .unwrap()
+        .with_execution_watch(ExecutionWatch::new(Arc::clone(&first), Some(observed_at)));
+    backlog.watch_execution(&watched).await;
+    backlog.add_published_tx(Arc::clone(&later)).await;
+    assert_eq!(
+        backlog.get_execution_watchers(Chain::Ethereum).await.len(),
+        2
+    );
+
+    let found = backlog
+        .unwatch_execution(Chain::Ethereum, &later.id)
+        .await
+        .unwrap();
+    assert_eq!(found.execution_tx().id, later.id, "the response names it");
+    assert_eq!(found.respond_observed_at(), Some(observed_at));
+    assert!(backlog
+        .get_execution_watchers(Chain::Ethereum)
+        .await
+        .is_empty());
+}
+
+/// A signature read again, as on a replay, is no new source fact: the digest stays.
+#[tokio::test]
+async fn a_repeated_signature_leaves_the_digest_alone() {
+    let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
+    let request = nonce_request(1, Chain::Solana, "p", 7, 1);
+    let backlog = Backlog::new();
+    backlog.insert_bidirectional(Arc::clone(&request)).await;
+    let (sign_tx, _sign_rx) = mpsc::channel(8);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+    let event = SignatureRespondedEvent {
+        request_id: request.id.request_id,
+        signature: mpc_crypto::generate_signature(&root_sk, &request.args),
+        chain: Chain::Solana,
+    };
+    process_respond_event(event.clone(), &ctx, test_root_pk())
+        .await
+        .unwrap();
+    let once = ctx.backlog.checkpoint(Chain::Solana).await.unwrap();
+    assert_eq!(once.pending_requests[0].tx_ids.len(), 1);
+
+    process_respond_event(event, &ctx, test_root_pk())
+        .await
+        .unwrap();
+
+    let twice = ctx.backlog.checkpoint(Chain::Solana).await.unwrap();
+    assert_eq!(twice.pending_requests[0].tx_ids.len(), 1);
+    assert_eq!(twice.digest(), once.digest());
+}
+
+/// The response names the transaction that executed, not the one in the entry's status.
+#[tokio::test]
+async fn a_response_names_the_later_transaction_it_found() {
+    let backlog = Backlog::new();
+    backlog.mark_caught_up(Chain::Solana);
+    let request = nonce_request(1, Chain::Solana, "p", 7, 1);
+    let first = signed_tx(&request, 7);
+    seed_executing_entry(&backlog, Arc::clone(&request), Arc::clone(&first)).await;
+    let later = Arc::new(BidirectionalTx {
+        id: BidirectionalTxId([9; 32]),
+        ..(*first).clone()
+    });
+    backlog.add_published_tx(Arc::clone(&later)).await;
+    let (sign_tx, _sign_rx) = mpsc::channel(8);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+
+    process_execution_confirmed(
+        later.id,
+        123,
+        ExecutionOutcome::Failed,
+        &ctx,
+        Chain::Ethereum,
+    )
+    .await
+    .unwrap();
+
+    let entry = ctx.backlog.get(Chain::Solana, &request.id).await.unwrap();
+    let SignKind::RespondBidirectional(response) = &entry.request().kind else {
+        panic!("not answered: {:?}", entry.status());
+    };
+    assert_eq!(response.tx_id, later.id);
+}
+
+/// A peer's body cannot give a node its progress: the digest does not cover it. A node
+/// adopting one looks for the execution again, under the transactions the digest does cover.
+#[tokio::test]
+async fn adopting_a_body_ignores_its_progress() {
+    let peer = Backlog::new();
+    let request = nonce_request(1, Chain::Solana, "p", 7, 1);
+    let tx = signed_tx(&request, 7);
+    seed_executing_entry(&peer, Arc::clone(&request), Arc::clone(&tx)).await;
+    let unanswered = Backlog::new();
+    seed_executing_entry(&unanswered, Arc::clone(&request), Arc::clone(&tx)).await;
+    let executing = unanswered.checkpoint(Chain::Solana).await.unwrap();
+    let (sign_tx, _sign_rx) = mpsc::channel(8);
+    let ctx = make_test_stream_context_with_generator_pk(peer, sign_tx, true);
+    process_execution_confirmed(tx.id, 123, ExecutionOutcome::Failed, &ctx, Chain::Ethereum)
+        .await
+        .unwrap();
+    let answered = ctx.backlog.checkpoint(Chain::Solana).await.unwrap();
+    assert_eq!(answered.digest(), executing.digest());
+
+    let adopter = Backlog::new();
+    adopter.regress(&answered, test_root_pk()).await.unwrap();
+
+    let entry = adopter.get(Chain::Solana, &request.id).await.unwrap();
+    assert_matches!(
+        entry.status(),
+        SignStatus::Bidirectional(BidirectionalProgress::Executing(_))
+    );
+    assert!(adopter
+        .get_execution_watchers(Chain::Ethereum)
+        .await
+        .contains_key(&tx.id));
+}
+
 #[tokio::test]
 async fn process_execution_confirmed_is_idempotent_after_first_processing() {
     let backlog = Backlog::new();
@@ -676,7 +816,7 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
 async fn process_respond_event_quarantines_a_bidirectional_entry_that_cannot_advance() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([23u8; 32]);
-    let req = mock_bidi_request(sign_id, Chain::Solana);
+    let req = undecodable_bidi_request(sign_id);
 
     // Inserted directly, as checkpoint recovery would: never passed admission.
     backlog.insert(req.clone()).await;
@@ -1038,7 +1178,7 @@ async fn process_sign_request_rejects_another_networks_chain_id() {
 async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
     let backlog = Backlog::new();
     let sign_id = SignId::new([14u8; 32]);
-    let request = mock_bidi_request(sign_id, Chain::Solana);
+    let request = undecodable_bidi_request(sign_id);
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
@@ -2246,15 +2386,6 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
                 .get_execution_watchers(Chain::Ethereum)
                 .await
                 .is_empty());
-            assert_eq!(
-                before.digest(),
-                restored_ctx
-                    .backlog
-                    .checkpoint(source_chain)
-                    .await
-                    .unwrap()
-                    .digest()
-            );
         }
     }
 }

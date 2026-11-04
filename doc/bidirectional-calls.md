@@ -383,7 +383,7 @@ never meets a rid from another.
 
 state:
     backlog: RequestId -> Entry
-    Entry = { req, contract, signatures: Set<Signature> }
+    Entry = { req, contract, tx_ids: Set<TxId>, unviable_at: Height? }
     // backlog is a function of the finalised source chain only,
     // the same on every correct node that processed the same height
 
@@ -399,7 +399,7 @@ on SignRequest { contract, rid, req } finalised on the source chain:
         drop
     if rid in backlog or not processable(req):            // M2
         drop
-    backlog[rid] = { req, contract, signatures: {} }
+    backlog[rid] = { req, contract, tx_ids: {} }
     signature = threshold_sign(req.tx, derived_key(contract, req.key))   // M1
     local[rid].issued.add(signature)       // stored before publishing
     publish_signature(rid, signature)
@@ -434,15 +434,15 @@ on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
     if e and signature verifies over e.req.tx
       under derived_key(e.contract, e.req.key):
-        e.signatures.add(signature)
+        e.tx_ids.add(txid(signature, e.req.tx))
 
 on target chain block at height h finalised on chain target:
     for (rid, e) in backlog for target and no local[rid].outcome:
         if txid ignores the signature on target:
             ours = { txid(e.req.tx) }
         else:
-            ours = { txid(s, e.req.tx)
-                     for s in e.signatures + local[rid].issued }
+            ours = e.tx_ids + { txid(s, e.req.tx)
+                                for s in local[rid].issued }
         if some id in ours has receipt r in a final block at height h':  // M3
             for (rid', e') in backlog for target, other than rid, with e's
               account and e.req.tx's replay protection, unsigned bytes

@@ -9,6 +9,7 @@ use mpc_primitives::{
     SignKind,
 };
 use mpc_utils::time::current_unix_timestamp;
+use sha3::{Digest as _, Sha3_256};
 use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
@@ -103,6 +104,16 @@ pub(crate) fn published_midnight_payload(
     );
     Scalar::from_bytes(digest)
         .ok_or_else(|| anyhow::anyhow!("Midnight attestation digest is not a scalar"))
+}
+
+/// The entropy of a response: `delta` then moves with the message signed and the key's tweak,
+/// and every node signing that message under that key derives the same value.
+pub(crate) fn response_entropy(payload: &Scalar, epsilon: &Scalar) -> [u8; 32] {
+    Sha3_256::new()
+        .chain_update(payload.to_bytes())
+        .chain_update(epsilon.to_bytes())
+        .finalize()
+        .into()
 }
 
 pub struct CompletedTx {
@@ -213,7 +224,7 @@ impl CompletedTx {
         );
         let (path, epsilon) = response_key(&self.tx)?;
         let path = path.to_string();
-        let entropy = self.tx.id.0;
+        let entropy = response_entropy(&payload, &epsilon);
         Ok(IndexedSignRequest::respond_bidirectional(
             SignId::new(request_id_bytes),
             SignArgs {
@@ -466,6 +477,16 @@ mod tests {
             panic!("expected RespondBidirectional");
         };
         assert!(!is_failed_execution_response(&succeeded));
+    }
+
+    #[test]
+    fn a_response_entropy_moves_with_the_message_and_the_key() {
+        let (message, other_message) = (Scalar::from(1u64), Scalar::from(2u64));
+        let (key, other_key) = (Scalar::from(3u64), Scalar::from(4u64));
+        let entropy = response_entropy(&message, &key);
+        assert_eq!(entropy, response_entropy(&message, &key));
+        assert_ne!(entropy, response_entropy(&other_message, &key));
+        assert_ne!(entropy, response_entropy(&message, &other_key));
     }
 
     /// A successful output may itself begin with the error prefix.
