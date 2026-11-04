@@ -528,16 +528,26 @@ impl<T: ChainTelemetry> ChainIndexer for HydrationIndexer<T> {
         events_tx: mpsc::Sender<ChainEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
+        let ws_url: &str = self.config.rpc_ws_url.as_str();
+        tracing::info!("connecting to hydration rpc at {ws_url}");
+        let (hydration_api, legacy_rpc) = self.connect_rpc(ws_url).await?;
+
+        // check if `genesis_hash` we get from the rpc matches the one we configured
+        let chain_genesis_hash = hydration_api.genesis_hash();
+        anyhow::ensure!(
+            self.config.genesis_hash == chain_genesis_hash,
+            "hydration chain genesis_hash: {:#x} from ws_url: {} not matching expected genesis_hash: {:#x}",
+            chain_genesis_hash,
+            ws_url,
+            self.config.genesis_hash
+        );
+
         // Hydration is live-only: it streams finalized blocks and performs no
         // catchup/backfill (any gap during a disconnect is a known TODO)
         events_tx
             .send(ChainEvent::CatchupCompleted)
             .await
             .context("failed to send hydration catchup completed event")?;
-
-        let ws_url: &str = self.config.rpc_ws_url.as_str();
-        tracing::info!("connecting to hydration rpc at {ws_url}");
-        let (hydration_api, legacy_rpc) = self.connect_rpc(ws_url).await?;
 
         // `subscribe_finalized` returns a private subxt stream alias, so it is
         // built inline (inferred) rather than inside `connect_rpc`.

@@ -80,6 +80,10 @@ impl Args {
     fn hydration(&mut self, hydration: &HydrationConfig) {
         self.flag("--hydration-rpc-ws-url", &hydration.rpc_ws_url);
         self.flag("--hydration-signer-uri", &hydration.signer_uri);
+        self.flag(
+            "--hydration-genesis-hash",
+            format!("{:#x}", hydration.genesis_hash),
+        );
     }
 
     fn canton(&mut self, canton: &CantonConfig) {

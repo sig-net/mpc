@@ -434,7 +434,7 @@ impl ChainConfigs {
         Ok(Self {
             eth: eth.into_config()?,
             sol: sol.into_config(),
-            hydration: hydration.into_config(),
+            hydration: hydration.into_config()?,
             canton: canton.into_config(),
             midnight: midnight.into_config()?,
             tron: tron.into_config()?,

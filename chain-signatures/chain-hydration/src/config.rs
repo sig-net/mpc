@@ -1,5 +1,6 @@
 use sp_core::sr25519;
 use sp_core::Pair as _;
+use sp_core::H256;
 use sp_runtime::traits::{IdentifyAccount, Verify};
 use sp_runtime::MultiSignature as SpMultiSignature;
 use std::fmt;
@@ -11,6 +12,8 @@ pub struct HydrationConfig {
     pub rpc_ws_url: String,
     /// Hydration signer URI
     pub signer_uri: String,
+    /// Genesis hash of the target chain
+    pub genesis_hash: H256,
 }
 
 impl HydrationConfig {
@@ -27,6 +30,7 @@ impl fmt::Debug for HydrationConfig {
         f.debug_struct("HydrationConfig")
             .field("rpc_ws_url", &"<hidden>") // May contain API keys
             .field("signer_uri", &"<hidden>")
+            .field("genesis_hash", &self.genesis_hash)
             .finish()
     }
 }
