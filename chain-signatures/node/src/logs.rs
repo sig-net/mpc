@@ -39,8 +39,9 @@ pub struct Options {
     )]
     pub otlp_endpoint: String,
 
-    #[arg(long, env("MPC_DISABLE_GCP_LOGS"), default_value = "false")]
-    pub disable_gcp_logs: bool,
+    /// Console log format. `json` is GCP Cloud Logging structured output.
+    #[arg(long, env("MPC_LOG_FORMAT"), value_enum, default_value_t = LogFormat::Plain)]
+    pub log_format: LogFormat,
 }
 
 impl Default for Options {
@@ -48,17 +49,27 @@ impl Default for Options {
         Self {
             opentelemetry_level: OpenTelemetryLevel::default(),
             otlp_endpoint: "http://localhost:4318".to_string(),
-            disable_gcp_logs: false,
+            log_format: LogFormat::Plain,
         }
     }
 }
 
-impl Options {
-    pub fn test() -> Self {
-        Self {
-            disable_gcp_logs: true,
-            ..Default::default()
-        }
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum LogFormat {
+    /// Human-readable lines.
+    #[default]
+    Plain,
+    /// GCP Cloud Logging structured lines.
+    Json,
+}
+
+impl Display for LogFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let str = match self {
+            LogFormat::Plain => "plain",
+            LogFormat::Json => "json",
+        };
+        write!(f, "{str}")
     }
 }
 
@@ -108,26 +119,6 @@ impl Drop for OtlpGuard {
         if let Some(p) = &self.log_otlp_provider {
             p.shutdown().unwrap_or_else(|err| eprintln!("{err:?}"));
         }
-    }
-}
-
-/// This will whether this code is being ran on top of GCP or not.
-async fn is_running_on_gcp() -> bool {
-    // Check if running in Google Cloud Run: https://cloud.google.com/run/docs/container-contract#services-env-vars
-    if std::env::var("K_SERVICE").is_ok() {
-        return true;
-    }
-
-    let resp = reqwest::Client::new()
-        .get("http://metadata.google.internal/computeMetadata/v1/instance/id")
-        .header("Metadata-Flavor", "Google")
-        .timeout(std::time::Duration::from_millis(200))
-        .send()
-        .await;
-
-    match resp {
-        Ok(resp) => resp.status().is_success(),
-        _ => false,
     }
 }
 
@@ -230,8 +221,8 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
     };
     let otlp_filter = options.opentelemetry_level.level_filter();
 
-    let on_gcp = !options.disable_gcp_logs && is_running_on_gcp().await;
-    let log_fmt_layer = (!on_gcp).then(|| {
+    let json = options.log_format == LogFormat::Json;
+    let log_fmt_layer = (!json).then(|| {
         tracing_subscriber::fmt::layer()
             .with_ansi(std::io::stderr().is_terminal())
             .with_line_number(true)
@@ -239,7 +230,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
             .event_format(NodeIdFormatter::new(node_id))
             .with_filter(EnvFilter::from_default_env())
     });
-    let log_gcp_layer = on_gcp.then(|| {
+    let log_gcp_layer = json.then(|| {
         stackdriver_layer()
             .with_writer(std::io::stderr)
             .with_filter(EnvFilter::from_default_env())
@@ -268,7 +259,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
         node_id,
         otel_level = ?options.opentelemetry_level,
         otlp = !matches!(options.opentelemetry_level, OpenTelemetryLevel::OFF),
-        gcp_logs = on_gcp,
+        log_format = %options.log_format,
         "logging configured"
     );
 
