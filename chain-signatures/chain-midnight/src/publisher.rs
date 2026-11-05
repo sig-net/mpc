@@ -1786,14 +1786,14 @@ mod tests {
     #[tokio::test]
     async fn start_rejects_a_configuration_that_can_never_publish() {
         let config = MidnightConfig {
-            node_url: "ftp://127.0.0.1:1".to_string(),
+            node_url: "ftp://127.0.0.1:1".parse().unwrap(),
             central_address: MidnightAddress::from_hex(CENTRAL)
                 .expect("CENTRAL is a 32-byte hex address"),
             publisher: PublisherConfig {
                 funding_seed: "ab".repeat(32),
-                proof_server_url: "http://127.0.0.1:1".to_string(),
-                indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
-                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                proof_server_url: "http://127.0.0.1:1".parse().unwrap(),
+                indexer_url: "http://127.0.0.1:1/api/v3/graphql".parse().unwrap(),
+                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                 ..Default::default()
             },
             rpc: Default::default(),

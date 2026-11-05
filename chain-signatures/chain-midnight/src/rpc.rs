@@ -26,6 +26,7 @@ use crate::config::{MidnightConfig, RpcConfig};
 use crate::emissions::{emissions_in, partial_success_emissions_in, DecodedTransaction};
 use crate::indexer::BlockHold;
 use crate::source::{BlockEmissions, BlockProofSeed, CandidateTransactionEmissions};
+use url::Url;
 
 /// Runtime API name from Midnight node 2.0.0-rc.4 metadata.
 const LEDGER_PARAMETERS_ENTRY: &str = "MidnightRuntimeApi_get_ledger_parameters";
@@ -105,7 +106,7 @@ impl ToRpcParams for Params {
 /// failed request therefore replaces the client and its connection pool, and the next
 /// request dials afresh.
 struct HttpRpcClient {
-    node_url: String,
+    node_url: Url,
     config: RpcConfig,
     max_response_size: u32,
     /// The client plus a generation, so concurrent failures replace it once.
@@ -113,12 +114,12 @@ struct HttpRpcClient {
 }
 
 impl HttpRpcClient {
-    fn new(node_url: &str, config: &RpcConfig) -> anyhow::Result<Self> {
+    fn new(node_url: &Url, config: &RpcConfig) -> anyhow::Result<Self> {
         Self::with_response_cap(node_url, config, MAX_RESPONSE_SIZE)
     }
 
     fn with_response_cap(
-        node_url: &str,
+        node_url: &Url,
         config: &RpcConfig,
         max_response_size: u32,
     ) -> anyhow::Result<Self> {
@@ -127,7 +128,7 @@ impl HttpRpcClient {
                 0,
                 build_http_client(node_url, config, max_response_size)?,
             )),
-            node_url: node_url.to_owned(),
+            node_url: node_url.clone(),
             config: config.clone(),
             max_response_size,
         })
@@ -175,14 +176,14 @@ impl HttpRpcClient {
 }
 
 fn build_http_client(
-    node_url: &str,
+    node_url: &Url,
     config: &RpcConfig,
     max_response_size: u32,
 ) -> anyhow::Result<HttpClient> {
     HttpClientBuilder::default()
         .max_response_size(max_response_size)
         .request_timeout(config.request_timeout)
-        .build(node_url)
+        .build(node_url.as_str())
         .context("failed to build the midnight HTTP RPC client")
 }
 
@@ -339,7 +340,7 @@ fn connect_http(config: &MidnightConfig) -> anyhow::Result<RpcClient> {
     connect_http_endpoint(&config.node_url, &config.rpc)
 }
 
-fn connect_http_endpoint(node_url: &str, config: &RpcConfig) -> anyhow::Result<RpcClient> {
+fn connect_http_endpoint(node_url: &Url, config: &RpcConfig) -> anyhow::Result<RpcClient> {
     Ok(RpcClient::new(HttpRpcClient::new(node_url, config)?))
 }
 
@@ -672,7 +673,7 @@ fn decode_network_id(answer: &[u8]) -> anyhow::Result<String> {
 /// while it has not. Dials afresh on every call, so a sandbox that is still booting
 /// answers with a connection error and the caller keeps polling.
 #[cfg(feature = "sandbox")]
-pub async fn probe_network_id(node_http_url: &str) -> anyhow::Result<Option<String>> {
+pub async fn probe_network_id(node_http_url: &Url) -> anyhow::Result<Option<String>> {
     let rpc = connect_http_endpoint(node_http_url, &RpcConfig::default())?;
     let legacy = LegacyRpcMethods::<SubstrateConfig>::new(rpc);
     let block_one = legacy
@@ -1700,7 +1701,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).expect("create capture output directory");
 
         let config = crate::config::MidnightConfig {
-            node_url,
+            node_url: node_url.parse().expect("MIDNIGHT_NODE_URL must be a URL"),
             central_address: crate::config::MidnightAddress::from_bytes(singleton),
             publisher: Default::default(),
             rpc: Default::default(),
@@ -1799,7 +1800,7 @@ mod tests {
 
     fn http_config(address: SocketAddr) -> crate::config::MidnightConfig {
         crate::config::MidnightConfig {
-            node_url: format!("http://{address}"),
+            node_url: format!("http://{address}").parse().unwrap(),
             central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
@@ -1998,8 +1999,11 @@ mod tests {
 
     #[test]
     fn a_late_failure_does_not_replace_the_client_that_replaced_its_own() {
-        let client = HttpRpcClient::new("http://127.0.0.1:1", &RpcConfig::default())
-            .expect("build request-only client");
+        let client = HttpRpcClient::new(
+            &"http://127.0.0.1:1".parse().unwrap(),
+            &RpcConfig::default(),
+        )
+        .expect("build request-only client");
 
         client.replace(0);
         client.replace(0);
@@ -2390,7 +2394,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
         let mut config = crate::config::MidnightConfig {
-            node_url: format!("http://{address}"),
+            node_url: format!("http://{address}").parse().unwrap(),
             central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
             publisher: Default::default(),
             rpc: Default::default(),
