@@ -494,7 +494,6 @@ impl ChainStack {
         if let Some(hydration) = &self.configs.hydration {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
             let client = rpc::HydrationClient::new(hydration, telemetry)
-                .await
                 .context("failed to create hydration client")?;
             publishers.insert(
                 Chain::Hydration,
@@ -1121,6 +1120,35 @@ mod tests {
 
     /// A Midnight node that is unreachable at startup must not leave the node without a
     /// Midnight publisher for its lifetime: the publisher registers and connects later.
+    /// Hydration's RPC is dialed on first publish: a node whose Hydration
+    /// endpoint is down still starts, and a bad signer still fails startup.
+    #[tokio::test]
+    async fn hydration_publisher_registers_while_its_rpc_is_unreachable() {
+        let chains = |signer_uri: &str| ChainConfigs {
+            eth: None,
+            sol: None,
+            hydration: Some(HydrationConfig {
+                // Nothing listens on port 1.
+                rpc_ws_url: "ws://127.0.0.1:1".to_string(),
+                signer_uri: signer_uri.to_string(),
+            }),
+            canton: None,
+            midnight: None,
+            tron: None,
+        };
+
+        let publishers = ChainStack::new(chains("//Alice"))
+            .publishers(undialed_near_client(), Backlog::new())
+            .await
+            .unwrap();
+        assert!(publishers.contains_key(&Chain::Hydration));
+
+        assert!(ChainStack::new(chains("not a signer uri"))
+            .publishers(undialed_near_client(), Backlog::new())
+            .await
+            .is_err());
+    }
+
     #[tokio::test]
     async fn midnight_publisher_registers_while_its_node_is_unreachable() {
         let chains = ChainConfigs {
