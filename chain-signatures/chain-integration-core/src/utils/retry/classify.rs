@@ -347,6 +347,12 @@ mod tests {
             RpcFailure::read_status(status(429), "rate limited".into()).into();
         assert!(is_retryable(&throttled));
         assert!(is_provider_throttled(&throttled));
+        // 402 keeps both load-bearing: read-retryable, yet the carried
+        // status still engages the credit-refill gate
+        let payment: anyhow::Error =
+            RpcFailure::read_status(status(402), "payment required".into()).into();
+        assert!(is_retryable(&payment));
+        assert!(is_provider_throttled(&payment));
         // 409 is send-terminal but read-retryable
         let conflict: anyhow::Error =
             RpcFailure::read_status(status(409), "conflict".into()).into();
