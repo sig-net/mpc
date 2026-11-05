@@ -635,7 +635,7 @@ async fn a_response_answers_the_requests_it_left_unexecutable() {
     assert_eq!(answered, vec![unsigned.id, signed.id]);
     assert!(ctx
         .backlog
-        .take_unviable(Chain::Midnight, test_root_pk())
+        .unwatch_unviable(Chain::Midnight, test_root_pk())
         .await
         .is_empty());
 }
@@ -700,7 +700,9 @@ async fn a_signed_sibling_keeps_its_observation_time() {
         .mark_unviable(Chain::Midnight, &signed_tx(&taker, 7), 500)
         .await;
 
-    let picked = backlog.take_unviable(Chain::Midnight, test_root_pk()).await;
+    let picked = backlog
+        .unwatch_unviable(Chain::Midnight, test_root_pk())
+        .await;
 
     assert!(picked[0].respond_observed_at().is_some());
 }
@@ -720,10 +722,10 @@ async fn a_second_answer_changes_nothing() {
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
     let mut picks = [
         ctx.backlog
-            .take_unviable(Chain::Midnight, test_root_pk())
+            .unwatch_unviable(Chain::Midnight, test_root_pk())
             .await,
         ctx.backlog
-            .take_unviable(Chain::Midnight, test_root_pk())
+            .unwatch_unviable(Chain::Midnight, test_root_pk())
             .await,
     ];
     let first = picks[0].pop().unwrap();
