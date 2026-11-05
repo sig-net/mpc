@@ -154,6 +154,8 @@ impl Default for PublisherConfig {
 /// Tuning for the indexing pipeline (catchup, live stream, finality waits).
 #[derive(Clone, Debug)]
 pub struct IndexerConfig {
+    /// How often the finalized-head watcher polls the RPC.
+    pub refresh_interval: Duration,
     /// Re-warn interval (seconds) while the finalized head is stalled
     pub stall_rewarn_secs: u64,
     /// Max concurrent JSON-RPC calls when resolving watcher receipts/nonces.
@@ -166,9 +168,21 @@ pub struct IndexerConfig {
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
+            refresh_interval: Duration::from_secs(10),
             stall_rewarn_secs: 300,
             max_concurrent_watcher_rpcs: 8,
             watcher_slow_sweep_interval: 10,
+        }
+    }
+}
+
+impl IndexerConfig {
+    /// Polls the head every 100ms, so unit tests never wait on the production cadence.
+    #[cfg(test)]
+    pub(crate) fn fast_polling() -> Self {
+        Self {
+            refresh_interval: Duration::from_millis(100),
+            ..Self::default()
         }
     }
 }
@@ -183,8 +197,6 @@ pub struct EthConfig {
     pub contract_address: Address,
     /// must be one of sepolia, mainnet, anvil
     pub network: String,
-    /// refresh finalized block interval in milliseconds
-    pub refresh_finalized_interval: u64,
     /// Emit requests without waiting for block finality. Only for demos and
     /// integration tests on dev chains (anvil never reports finalized blocks
     /// and never reorgs); must stay `false` on live networks.
@@ -199,6 +211,12 @@ impl EthConfig {
     /// Ethereum address derived from the configured account secret key.
     pub fn signer_address(&self) -> String {
         self.account_sk.address().to_string()
+    }
+
+    /// Whether requests on `network` are emitted without waiting for finality.
+    /// Only `anvil`: it never reports finalized blocks and never reorgs.
+    pub fn is_optimistic_network(network: &str) -> bool {
+        network == "anvil"
     }
 
     /// The EIP-155 chain id of `network`.
@@ -219,10 +237,6 @@ impl fmt::Debug for EthConfig {
             .field("execution_rpc_http_url", &self.execution_rpc_http_url)
             .field("contract_address", &self.contract_address)
             .field("network", &self.network)
-            .field(
-                "refresh_finalized_interval",
-                &self.refresh_finalized_interval,
-            )
             .field("optimistic_requests", &self.optimistic_requests)
             .field("rpc", &self.rpc)
             .field("gas", &self.gas)
@@ -235,6 +249,19 @@ impl fmt::Debug for EthConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pinned with the node's `mock_indexer_config`, which uses the same 100ms.
+    #[test]
+    fn head_polling_cadences_are_pinned() {
+        assert_eq!(
+            IndexerConfig::default().refresh_interval,
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            IndexerConfig::fast_polling().refresh_interval,
+            Duration::from_millis(100)
+        );
+    }
 
     #[test]
     fn clamp_estimate_buffers_then_clamps() {

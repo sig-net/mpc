@@ -1,7 +1,7 @@
 use super::contract::{ProtocolState, ResharingContractState};
 use super::state::{
-    JoiningState, NodeState, PersistentNodeData, ResharingPhase, ResharingState, RunningState,
-    StartedState, WaitingForConsensusState,
+    JoiningState, KeyShare, NodeState, ResharingPhase, ResharingState, RunningState, StartedState,
+    WaitingForConsensusState,
 };
 use super::MpcSignProtocol;
 use crate::protocol::contract::primitives::Participants;
@@ -33,7 +33,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
         contract_state: ProtocolState,
     ) -> NodeState {
         match self.persistent_node_data {
-            Some(PersistentNodeData {
+            Some(KeyShare {
                 epoch,
                 private_share,
                 public_key,
@@ -99,10 +99,13 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             // Initialize identity for storage; this is an entry point into Running.
                             ctx.triple_storage.set_me(me);
                             ctx.presignature_storage.set_me(me);
-                            let triple_task = TripleSpawnerTask::run(me, threshold, epoch, ctx);
+                            let num_nodes = contract_state.participants.len();
+                            let triple_task =
+                                TripleSpawnerTask::run(me, threshold, num_nodes, epoch, ctx);
                             let presign_task = PresignatureSpawnerTask::run(
                                 me,
                                 threshold,
+                                num_nodes,
                                 epoch,
                                 ctx,
                                 &private_share,
@@ -395,10 +398,13 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                     // Initialize identity for storage; this is an entry point into Running.
                     ctx.triple_storage.set_me(me);
                     ctx.presignature_storage.set_me(me);
-                    let triple_task = TripleSpawnerTask::run(me, self.threshold, self.epoch, ctx);
+                    let num_nodes = contract_state.participants.len();
+                    let triple_task =
+                        TripleSpawnerTask::run(me, self.threshold, num_nodes, self.epoch, ctx);
                     let presign_task = PresignatureSpawnerTask::run(
                         me,
                         self.threshold,
+                        num_nodes,
                         self.epoch,
                         ctx,
                         &self.private_share,
@@ -873,7 +879,7 @@ impl<G: Governance> ConsensusProtocol<G> for NodeState {
     ) -> NodeState {
         match self {
             NodeState::Starting => {
-                let persistent_node_data = match ctx.secret_storage.load().await {
+                let persistent_node_data = match ctx.keystore.load().await {
                     Ok(data) => data,
                     Err(err) => {
                         tracing::error!(?err, "failed to load persistent node data, retrying...");

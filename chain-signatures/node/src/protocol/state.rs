@@ -17,15 +17,15 @@ use std::time::{Duration, Instant};
 pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
-pub struct PersistentNodeData {
+pub struct KeyShare {
     pub epoch: u64,
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
 }
 
-impl fmt::Debug for PersistentNodeData {
+impl fmt::Debug for KeyShare {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PersistentNodeData")
+        f.debug_struct("KeyShare")
             .field("epoch", &self.epoch)
             .field("public_key", &self.public_key)
             .finish()
@@ -34,7 +34,7 @@ impl fmt::Debug for PersistentNodeData {
 
 #[derive(Debug)]
 pub struct StartedState {
-    pub persistent_node_data: Option<PersistentNodeData>,
+    pub persistent_node_data: Option<KeyShare>,
 }
 
 pub struct GeneratingState {

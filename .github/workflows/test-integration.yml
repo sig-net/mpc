@@ -102,7 +102,7 @@ jobs:
         run: just build tests
 
       # Artifacts (contract wasm + node binary) build inside the test recipe via its setup dependency,
-      # so setup.sh runs exactly once per job.
+      # so they build exactly once per job.
       - name: Test
         run: just test-fixture
         env:

@@ -69,21 +69,12 @@ impl Args {
         self.flag("--eth-execution-rpc-http-url", &eth.execution_rpc_http_url);
         self.flag("--eth-contract-address", eth.contract_address);
         self.flag("--eth-network", &eth.network);
-        self.flag(
-            "--eth-refresh-finalized-interval",
-            eth.refresh_finalized_interval,
-        );
-        self.switch("--eth-optimistic-requests", eth.optimistic_requests);
     }
 
     fn sol(&mut self, sol: &SolConfig) {
         self.flag("--sol-account-sk", &sol.account_sk);
         self.flag("--sol-rpc-http-url", &sol.rpc_http_url);
         self.flag("--sol-program-address", &sol.program_address);
-        self.flag(
-            "--sol-poll-interval-ms",
-            sol.indexer.poll_interval.as_millis(),
-        );
     }
 
     fn hydration(&mut self, hydration: &HydrationConfig) {
@@ -137,7 +128,9 @@ impl Args {
     }
 
     fn storage(&mut self, storage: &storage::Options) {
-        self.flag("--gcp-project-id", &storage.gcp_project_id);
+        if let Some(id) = &storage.gcp_project_id {
+            self.flag("--gcp-project-id", id);
+        }
         if let Some(id) = &storage.sk_share_secret_id {
             self.flag("--sk-share-secret-id", id);
         }

@@ -254,6 +254,13 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
                 .with_filter(otlp_filter),
         )
         .init();
+    // Panics go through tracing so the line explaining a restart reaches OTLP.
+    // The default hook still runs afterwards, so `RUST_BACKTRACE` keeps working.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, "task panicked");
+        default_hook(info);
+    }));
     tracing::info!(gcp_logs = on_gcp, "Set global logging subscriber");
 
     tracing::info!(
