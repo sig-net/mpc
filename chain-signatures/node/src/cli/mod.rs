@@ -74,7 +74,8 @@ pub enum Cli {
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
         account_sk: SecretKey,
-        /// Port the node's web server listens on; `--my-address` must point at it.
+        /// Port the node's web server listens on. Whatever `--my-address` resolves to
+        /// (load balancer or direct) must forward to this port.
         #[arg(
             long,
             env("MPC_WEB_PORT"),
