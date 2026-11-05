@@ -134,11 +134,12 @@ struct JsonRpcRequest {
     params: serde_json::Value,
 }
 
+/// Represents a JSON-RPC response, which can either be a successful result or an error.
 #[derive(Deserialize)]
-struct JsonRpcResponse<T> {
-    id: usize,
-    result: Option<T>,
-    error: Option<serde_json::Value>,
+#[serde(untagged)]
+enum JsonRpcResponse<T> {
+    Ok { id: usize, result: T },
+    Err { id: usize, error: serde_json::Value },
 }
 
 #[derive(Clone)]
@@ -347,21 +348,24 @@ impl SolanaClient {
                     .map_err(classify_batch)?;
 
                 let mut results = HashMap::new();
-                for resp_obj in responses {
-                    let slot = slots.get(resp_obj.id).copied();
-                    if let Some(block) = resp_obj.result {
-                        if let Some(slot) = slot {
-                            results.insert(slot, block);
+                for resp in responses {
+                    match resp {
+                        JsonRpcResponse::Ok { id, result } => {
+                            if let Some(slot) = slots.get(id).copied() {
+                                results.insert(slot, result);
+                            }
                         }
-                    } else if let Some(err) = resp_obj.error {
-                        // Only network-skipped slots are silent; node-local
-                        // absence warns — `process_catchup_item` refetch-retries it
-                        let skipped = err
-                            .get("code")
-                            .and_then(serde_json::Value::as_i64)
-                            .is_some_and(slot_skipped);
-                        if !skipped {
-                            tracing::warn!(?err, ?slot, "JSON-RPC batch response error");
+                        JsonRpcResponse::Err { id, error } => {
+                            // Only network-skipped slots are silent; node-local
+                            // absence warns — `process_catchup_item` refetch-retries it
+                            let skipped = error
+                                .get("code")
+                                .and_then(serde_json::Value::as_i64)
+                                .is_some_and(slot_skipped);
+                            let slot = slots.get(id).copied();
+                            if !skipped {
+                                tracing::warn!(?error, ?slot, "JSON-RPC batch response error");
+                            }
                         }
                     }
                 }
@@ -982,6 +986,25 @@ mod tests {
             .await
             .unwrap_err();
         assert!(is_retryable(&err), "{err:#}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn invalid_envelopes_fail_the_batch() {
+        // neither result nor error: unrepresentable, so the batch errors and
+        // retries instead of silently dropping the slot
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[{"id": 0, "jsonrpc": "2.0"}]"#)
+            .expect(3)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        assert!(client.fetch_blocks(&[100]).await.unwrap().is_empty());
         mock.assert_async().await;
     }
 
