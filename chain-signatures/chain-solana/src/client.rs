@@ -303,6 +303,8 @@ impl SolanaClient {
         }
 
         let max_attempts = self.catchup_retry.max_times;
+        let block_config = serde_json::to_value(Self::block_fetch_config())
+            .context("serializing the getBlock config")?;
         let res = retry_rpc!(
             SOL_BATCH_TIMEOUT,
             self.catchup_retry,
@@ -323,14 +325,11 @@ impl SolanaClient {
                 crate::bench::rpc_inc_n("getBlock(batch)", slots.len() as u64);
                 let mut requests = Vec::new();
                 for (i, &slot) in slots.iter().enumerate() {
-                    let config = Self::block_fetch_config();
-                    let config_val =
-                        serde_json::to_value(config).context("serializing the getBlock config")?;
                     requests.push(JsonRpcRequest {
                         jsonrpc: "2.0",
                         id: i,
                         method: "getBlock",
-                        params: json!([slot, config_val]),
+                        params: json!([slot, block_config.clone()]),
                     });
                 }
 
@@ -349,9 +348,9 @@ impl SolanaClient {
 
                 let mut results = HashMap::new();
                 for resp_obj in responses {
+                    let slot = slots.get(resp_obj.id).copied();
                     if let Some(block) = resp_obj.result {
-                        if resp_obj.id < slots.len() {
-                            let slot = slots[resp_obj.id];
+                        if let Some(slot) = slot {
                             results.insert(slot, block);
                         }
                     } else if let Some(err) = resp_obj.error {
@@ -361,7 +360,6 @@ impl SolanaClient {
                             .get("code")
                             .and_then(serde_json::Value::as_i64)
                             .is_some_and(slot_skipped);
-                        let slot = slots.get(resp_obj.id);
                         if !skipped {
                             tracing::warn!(?err, ?slot, "JSON-RPC batch response error");
                         }
@@ -418,10 +416,9 @@ impl SolanaClient {
                     .get_signatures_for_address_with_config(address, config)
                     .await
                     .map_err(classify_read)
-                    .inspect(|batch| {
-                        let _ = batch;
+                    .inspect(|_batch| {
                         #[cfg(feature = "bench")]
-                        crate::bench::inc_sig_page(batch.len() as u64);
+                        crate::bench::inc_sig_page(_batch.len() as u64);
                     })
             }
         )
