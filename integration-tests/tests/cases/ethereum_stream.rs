@@ -187,10 +187,10 @@ impl EthereumTestEnvironment {
             execution_rpc_http_url: self.sandbox.external_http_endpoint.parse().unwrap(),
             contract_address: self.contract_address,
             network: "anvil".to_string(),
-            refresh_finalized_interval: 500,
             optimistic_requests,
             gas: Default::default(),
-            indexer: Default::default(),
+            // The indexer runs in-process here, so poll as fast as a test node.
+            indexer: mpc_node::cli::mock_indexer_config(),
             publisher: Default::default(),
             rpc: Default::default(),
         }
