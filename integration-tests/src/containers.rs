@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use url::Url;
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
@@ -228,7 +229,7 @@ impl Default for DockerClient {
 
 pub struct Redis {
     pub container: Container,
-    pub internal_address: String,
+    pub internal_address: Url,
     pub external_address: String,
 }
 
@@ -272,13 +273,15 @@ impl Redis {
                 }
             }
         };
-        let internal_address = format!("redis://127.0.0.1:{host_port}");
+        let internal_address: Url = format!("redis://127.0.0.1:{host_port}")
+            .parse()
+            .expect("a valid url");
 
         Self::wait_for_host_port_readiness(&internal_address).await;
 
         tracing::info!(
             external_address,
-            internal_address,
+            %internal_address,
             "Redis container is running",
         );
 
@@ -290,10 +293,8 @@ impl Redis {
     }
 
     /// Wait for the Redis container to be reachable via the host port.
-    async fn wait_for_host_port_readiness(internal_address: &str) {
-        let cfg = deadpool_redis::Config::from_url(
-            url::Url::parse(internal_address).expect("valid redis url"),
-        );
+    async fn wait_for_host_port_readiness(internal_address: &Url) {
+        let cfg = deadpool_redis::Config::from_url(internal_address.clone());
         let pool = cfg
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("valid redis pool config");
@@ -319,15 +320,14 @@ impl Redis {
             .is_err()
         {
             tracing::error!(
-                internal_address,
+                %internal_address,
                 "redis never became reachable via host port"
             );
         }
     }
 
     pub fn pool(&self) -> deadpool_redis::Pool {
-        let redis_url = url::Url::parse(self.internal_address.as_str()).unwrap();
-        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+        let redis_cfg = deadpool_redis::Config::from_url(self.internal_address.clone());
         redis_cfg
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .unwrap()
@@ -550,7 +550,7 @@ fn shares_to_triples(
 
 pub struct Solana {
     pub process: Child,
-    pub rpc_address: String,
+    pub rpc_address: Url,
     pub ws_address: String,
     pub program_keypair: SolanaKeypair,
     pub payer_keypair: SolanaKeypair,
@@ -615,7 +615,9 @@ impl Solana {
             let dynamic_port_start = pick_preferred_or_unused_port_block(base_port + 4, 33).await;
             let dynamic_port_end = dynamic_port_start + 32;
 
-            let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
+            let rpc_address: Url = format!("http://127.0.0.1:{}", rpc_port)
+                .parse()
+                .expect("a valid url");
             let ws_address = format!("ws://127.0.0.1:{}", ws_port);
             let ledger_dir =
                 std::env::temp_dir().join(format!("solana-test-ledger-{}", uuid::Uuid::new_v4()));
@@ -651,7 +653,7 @@ impl Solana {
                 .expect("failed to start solana-test-validator");
 
             let rpc_client = SolanaRpcClient::new_with_commitment(
-                rpc_address.clone(),
+                rpc_address.to_string(),
                 solana_commitment_config::CommitmentConfig::confirmed(),
             );
 
@@ -665,7 +667,7 @@ impl Solana {
             {
                 Ok(()) => {
                     tracing::info!(
-                        rpc_address,
+                        %rpc_address,
                         ws_address,
                         attempt,
                         "solana-test-validator process is running",
@@ -837,10 +839,7 @@ impl Solana {
     pub fn get_config(&self, program_address: String) -> SolConfig {
         SolConfig {
             account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
-            rpc_http_url: self
-                .rpc_address
-                .parse()
-                .expect("the validator rpc address is a url"),
+            rpc_http_url: self.rpc_address.clone(),
             program_address,
             indexer: Default::default(),
         }
@@ -958,7 +957,7 @@ impl Solana {
             "close",
             &program_pubkey,
             "--url",
-            &self.rpc_address,
+            self.rpc_address.as_str(),
             "--keypair",
             payer_keypair_path.to_str().unwrap(),
         ];
@@ -984,7 +983,7 @@ impl Solana {
                     "--keypair",
                     payer_keypair_path.to_str().unwrap(),
                     "--url",
-                    &self.rpc_address,
+                    self.rpc_address.as_str(),
                     "--program-id",
                     program_keypair_path.to_str().unwrap(),
                     "-v", // verbose output
