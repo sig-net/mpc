@@ -493,42 +493,35 @@ impl ChainStack {
         }
         if let Some(hydration) = &self.configs.hydration {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
-            match rpc::HydrationClient::new(hydration, telemetry).await {
-                Ok(client) => {
-                    publishers.insert(
-                        Chain::Hydration,
-                        self.gated_publisher(Chain::Hydration, "hydration publish", client),
-                    );
-                }
-                Err(e) => anyhow::bail!("failed to create hydration client: {e:#}"),
-            }
+            let client = rpc::HydrationClient::new(hydration, telemetry)
+                .await
+                .context("failed to create hydration client")?;
+            publishers.insert(
+                Chain::Hydration,
+                self.gated_publisher(Chain::Hydration, "hydration publish", client),
+            );
         }
         if let Some(canton) = &self.configs.canton {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
-            match CantonClient::new(canton, telemetry, self.gate(Chain::Canton)).await {
-                Ok(client) => {
-                    publishers.insert(Chain::Canton, Arc::new(client));
-                }
-                Err(e) => anyhow::bail!("failed to create canton client: {e:#}"),
-            }
+            let client = CantonClient::new(canton, telemetry, self.gate(Chain::Canton))
+                .await
+                .context("failed to create canton client")?;
+            publishers.insert(Chain::Canton, Arc::new(client));
         }
         if let Some(midnight) = &self.configs.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
             let awaiter = Arc::new(rpc::BacklogAwaiter::new(backlog));
-            match RecoveringMidnightPublisher::start(
+            let client = RecoveringMidnightPublisher::start(
                 midnight,
                 telemetry,
                 awaiter,
                 self.midnight_wallet.clone(),
-            ) {
-                Ok(client) => {
-                    publishers.insert(
-                        Chain::Midnight,
-                        self.gated_publisher(Chain::Midnight, "midnight publish", client),
-                    );
-                }
-                Err(e) => anyhow::bail!("failed to create midnight publisher: {e:#}"),
-            }
+            )
+            .context("failed to create midnight publisher")?;
+            publishers.insert(
+                Chain::Midnight,
+                self.gated_publisher(Chain::Midnight, "midnight publish", client),
+            );
         }
 
         Ok(publishers)
@@ -833,62 +826,55 @@ async fn spawn_indexers(
 
     if let Some(eth_config) = eth {
         let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
-        match EthereumIndexer::new(
+        let eth_indexer = EthereumIndexer::new(
             eth_config,
             backlog.clone(),
             eth_telemetry.clone(),
             gates[Chain::Ethereum].clone(),
         )
         .await
-        {
-            Ok(eth_indexer) => {
-                tracing::info!("ethereum indexer created successfully");
-                tasks.spawn(run_supervised(
-                    eth_indexer,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Ethereum].clone(),
-                    )
-                    .with_ethereum_chain_id(ethereum_chain_id),
-                    eth_telemetry,
-                ));
-            }
-            Err(err) => anyhow::bail!("failed to create ethereum indexer: {err:#}"),
-        }
+        .context("failed to create ethereum indexer")?;
+        tracing::info!("ethereum indexer created successfully");
+        tasks.spawn(run_supervised(
+            eth_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Ethereum].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            eth_telemetry,
+        ));
     }
 
     if let Some(sol_config) = sol {
         let sol_telemetry = NodeTelemetry::new(Chain::Solana);
-        match SolanaIndexer::new(
+        let sol_indexer = SolanaIndexer::new(
             sol_config,
             backlog.clone(),
             sol_telemetry.clone(),
             gates[Chain::Solana].clone(),
-        ) {
-            Ok(sol_indexer) => {
-                tracing::info!("solana indexer created successfully");
-                tasks.spawn(run_supervised(
-                    sol_indexer,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Solana].clone(),
-                    )
-                    .with_ethereum_chain_id(ethereum_chain_id),
-                    sol_telemetry,
-                ));
-            }
-            Err(err) => anyhow::bail!("failed to create solana indexer: {err:#}"),
-        }
+        )
+        .context("failed to create solana indexer")?;
+        tracing::info!("solana indexer created successfully");
+        tasks.spawn(run_supervised(
+            sol_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Solana].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            sol_telemetry,
+        ));
     }
 
     if let Some(hydration_config) = hydration {
@@ -916,33 +902,29 @@ async fn spawn_indexers(
 
     if let Some(canton_config) = canton {
         let canton_telemetry = NodeTelemetry::new(Chain::Canton);
-        match CantonIndexer::new(
+        let canton_indexer = CantonIndexer::new(
             canton_config,
             backlog.clone(),
             canton_telemetry.clone(),
             gates[Chain::Canton].clone(),
         )
         .await
-        {
-            Ok(canton_indexer) => {
-                tracing::info!("canton indexer created successfully");
-                tasks.spawn(run_supervised(
-                    canton_indexer,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Canton].clone(),
-                    )
-                    .with_ethereum_chain_id(ethereum_chain_id),
-                    canton_telemetry,
-                ));
-            }
-            Err(err) => anyhow::bail!("failed to create canton indexer: {err:#}"),
-        }
+        .context("failed to create canton indexer")?;
+        tracing::info!("canton indexer created successfully");
+        tasks.spawn(run_supervised(
+            canton_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Canton].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            canton_telemetry,
+        ));
     }
 
     if let Some(midnight_config) = midnight {
@@ -956,59 +938,52 @@ async fn spawn_indexers(
             .wait_public_key()
             .await
             .context("midnight indexer: no network public key")?;
-        match MidnightIndexer::new(
+        let midnight_indexer = MidnightIndexer::new(
             midnight_config,
             backlog.clone(),
             midnight_telemetry.clone(),
             root_pk,
         )
         .await
-        {
-            Ok(midnight_indexer) => {
-                tracing::info!("midnight indexer created successfully");
-                tasks.spawn(run_supervised(
-                    midnight_indexer,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Midnight].clone(),
-                    )
-                    .with_ethereum_chain_id(ethereum_chain_id),
-                    midnight_telemetry,
-                ));
-            }
-            Err(err) => anyhow::bail!("failed to create midnight indexer: {err:#}"),
-        }
+        .context("failed to create midnight indexer")?;
+        tracing::info!("midnight indexer created successfully");
+        tasks.spawn(run_supervised(
+            midnight_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Midnight].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            midnight_telemetry,
+        ));
     }
 
     // Target-only: no source indexer — the watcher serves every source
     // chain's Tron-targeted requests.
     if let Some(tron_config) = tron {
         let tron_telemetry = NodeTelemetry::new(Chain::Tron);
-        match TronWatcher::new(tron_config, backlog.clone(), tron_telemetry.clone()) {
-            Ok(watcher) => {
-                tracing::info!("tron execution watcher created successfully");
-                tasks.spawn(run_supervised(
-                    watcher,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Tron].clone(),
-                    )
-                    .with_ethereum_chain_id(ethereum_chain_id),
-                    tron_telemetry,
-                ));
-            }
-            Err(err) => anyhow::bail!("failed to create tron watcher: {err:#}"),
-        }
+        let watcher = TronWatcher::new(tron_config, backlog.clone(), tron_telemetry.clone())
+            .context("failed to create tron watcher")?;
+        tracing::info!("tron execution watcher created successfully");
+        tasks.spawn(run_supervised(
+            watcher,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Tron].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            tron_telemetry,
+        ));
     }
     Ok(())
 }
