@@ -138,8 +138,8 @@ struct JsonRpcRequest {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum JsonRpcResponse<T> {
-    Ok { id: usize, result: T },
     Err { id: usize, error: serde_json::Value },
+    Ok { id: usize, result: Option<T> },
 }
 
 #[derive(Clone)]
@@ -350,11 +350,17 @@ impl SolanaClient {
                 let mut results = HashMap::new();
                 for resp in responses {
                     match resp {
-                        JsonRpcResponse::Ok { id, result } => {
+                        JsonRpcResponse::Ok {
+                            id,
+                            result: Some(block),
+                        } => {
                             if let Some(slot) = slots.get(id).copied() {
-                                results.insert(slot, result);
+                                results.insert(slot, block);
                             }
                         }
+                        // null result: absent block — Missing, the per-slot
+                        // refetch resolves ground truth
+                        JsonRpcResponse::Ok { .. } => {}
                         JsonRpcResponse::Err { id, error } => {
                             // Only network-skipped slots are silent; node-local
                             // absence warns — `process_catchup_item` refetch-retries it
@@ -990,21 +996,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_envelopes_fail_the_batch() {
-        // neither result nor error: unrepresentable, so the batch errors and
-        // retries instead of silently dropping the slot
+    async fn null_results_map_to_absent() {
+        // null is a legal success for absent blocks; one null item must not
+        // fail the batch — usize::MAX retries would stall the drain
+        const HEIGHT_1: u64 = 100;
+        const NULL_SLOT: u64 = 101;
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"[{"id": 0, "jsonrpc": "2.0"}]"#)
-            .expect(3)
+            .with_body(
+                json!([make_block_response(0, HEIGHT_1), {"id": 1, "result": null}]).to_string(),
+            )
+            .expect(1) // the null item is not a batch failure
             .create_async()
             .await;
 
         let client = test_client(&server.url());
-        assert!(client.fetch_blocks(&[100]).await.unwrap().is_empty());
+        let blocks = client
+            .fetch_blocks_for_slots(BTreeSet::from([HEIGHT_1, NULL_SLOT]))
+            .await
+            .unwrap();
+        assert!(matches!(
+            blocks.get(&HEIGHT_1),
+            Some(SolanaCatchupBlock::Block(_))
+        ));
+        assert!(matches!(
+            blocks.get(&NULL_SLOT),
+            Some(SolanaCatchupBlock::Missing)
+        ));
         mock.assert_async().await;
     }
 
