@@ -107,32 +107,16 @@ pub struct PublisherConfig {
     pub restart_backoff: RetryConfig,
 }
 
-impl Default for PublisherConfig {
-    fn default() -> Self {
-        Self {
-            output_storage: None,
-            // The `bin` name the TypeScript package installs, resolved on the fixed child PATH.
-            intent_gen_command: vec!["midnight-publisher".to_string()],
-            funding_seed: String::new(),
-            // Never dialed: a default config has no funding seed, so it fails validation.
-            proof_server_url: "http://placeholder.invalid"
-                .parse()
-                .expect("a valid literal"),
-            indexer_url: "http://placeholder.invalid"
-                .parse()
-                .expect("a valid literal"),
-            indexer_ws_url: "ws://placeholder.invalid".parse().expect("a valid literal"),
-            request_timeout: Duration::from_secs(120),
-            // The child owns the 360 second submit deadline. Rust is only its looser
-            // process-supervision backstop, checked against the child's ready reply.
-            submit_timeout: Duration::from_secs(420),
-            restart_backoff: RetryConfig {
-                min_delay: Duration::from_millis(500),
-                max_delay: Duration::from_secs(10),
-                max_times: 5,
-                jitter: true,
-            },
-        }
+#[cfg(test)]
+impl PublisherConfig {
+    /// For tests that never start the builder.
+    pub(crate) fn unused() -> Self {
+        Self::new(
+            String::new(),
+            "http://placeholder.invalid".parse().unwrap(),
+            "http://placeholder.invalid".parse().unwrap(),
+            "ws://placeholder.invalid".parse().unwrap(),
+        )
     }
 }
 
@@ -144,9 +128,9 @@ impl fmt::Debug for PublisherConfig {
             .field("output_storage", &self.output_storage)
             .field("intent_gen_command", &self.intent_gen_command)
             .field("funding_seed", &"<redacted>")
-            .field("proof_server_url", &self.proof_server_url)
-            .field("indexer_url", &self.indexer_url)
-            .field("indexer_ws_url", &self.indexer_ws_url)
+            .field("proof_server_url", &self.proof_server_url.as_str())
+            .field("indexer_url", &self.indexer_url.as_str())
+            .field("indexer_ws_url", &self.indexer_ws_url.as_str())
             .field("request_timeout", &self.request_timeout)
             .field("submit_timeout", &self.submit_timeout)
             .field("restart_backoff", &self.restart_backoff)
@@ -203,6 +187,34 @@ impl MidnightConfig {
 }
 
 impl PublisherConfig {
+    /// The required values; everything else takes its production default.
+    pub fn new(
+        funding_seed: String,
+        proof_server_url: Url,
+        indexer_url: Url,
+        indexer_ws_url: Url,
+    ) -> Self {
+        Self {
+            output_storage: None,
+            // The `bin` name the TypeScript package installs, resolved on the fixed child PATH.
+            intent_gen_command: vec!["midnight-publisher".to_string()],
+            funding_seed,
+            proof_server_url,
+            indexer_url,
+            indexer_ws_url,
+            request_timeout: Duration::from_secs(120),
+            // The child owns the 360 second submit deadline. Rust is only its looser
+            // process-supervision backstop, checked against the child's ready reply.
+            submit_timeout: Duration::from_secs(420),
+            restart_backoff: RetryConfig {
+                min_delay: Duration::from_millis(500),
+                max_delay: Duration::from_secs(10),
+                max_times: 5,
+                jitter: true,
+            },
+        }
+    }
+
     pub fn validate_output_storage(&self) -> anyhow::Result<()> {
         if let Some(config) = &self.output_storage {
             config.validate()?;
@@ -327,13 +339,12 @@ mod tests {
         MidnightConfig {
             node_url: "http://127.0.0.1:9944".parse().unwrap(),
             central_address: MidnightAddress::from_bytes([0xab; 32]),
-            publisher: PublisherConfig {
-                funding_seed: "0f".repeat(32),
-                proof_server_url: "http://127.0.0.1:6300".parse().unwrap(),
-                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".parse().unwrap(),
-                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
-                ..Default::default()
-            },
+            publisher: PublisherConfig::new(
+                "0f".repeat(32),
+                "http://127.0.0.1:6300".parse().unwrap(),
+                "http://127.0.0.1:8088/api/v3/graphql".parse().unwrap(),
+                "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
+            ),
             rpc: Default::default(),
             indexer: Default::default(),
         }
@@ -342,7 +353,7 @@ mod tests {
     #[test]
     fn publisher_defaults_are_pinned() {
         // The timeouts have no flags, so only this assert observes a retune.
-        let publisher = PublisherConfig::default();
+        let publisher = PublisherConfig::unused();
         assert_eq!(publisher.request_timeout, Duration::from_secs(120));
         assert_eq!(publisher.submit_timeout, Duration::from_secs(420));
     }

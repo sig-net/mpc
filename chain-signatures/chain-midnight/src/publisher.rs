@@ -718,7 +718,7 @@ mod tests {
         PublisherConfig {
             request_timeout: Duration::from_secs(5),
             submit_timeout: Duration::from_secs(30),
-            ..Default::default()
+            ..PublisherConfig::unused()
         }
     }
 
@@ -1789,13 +1789,12 @@ mod tests {
             node_url: "ftp://127.0.0.1:1".parse().unwrap(),
             central_address: MidnightAddress::from_hex(CENTRAL)
                 .expect("CENTRAL is a 32-byte hex address"),
-            publisher: PublisherConfig {
-                funding_seed: "ab".repeat(32),
-                proof_server_url: "http://127.0.0.1:1".parse().unwrap(),
-                indexer_url: "http://127.0.0.1:1/api/v3/graphql".parse().unwrap(),
-                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
-                ..Default::default()
-            },
+            publisher: PublisherConfig::new(
+                "ab".repeat(32),
+                "http://127.0.0.1:1".parse().unwrap(),
+                "http://127.0.0.1:1/api/v3/graphql".parse().unwrap(),
+                "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
+            ),
             rpc: Default::default(),
             indexer: Default::default(),
         };

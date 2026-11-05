@@ -553,11 +553,12 @@ fn responder_config(
                 node_executable,
                 publisher_entrypoint.to_string_lossy().into_owned(),
             ],
-            funding_seed: bootstrap.publisher_seed.clone(),
-            proof_server_url: endpoints.proof_server_url.parse()?,
-            indexer_url: endpoints.indexer_url.parse()?,
-            indexer_ws_url: endpoints.indexer_ws_url.parse()?,
-            ..Default::default()
+            ..PublisherConfig::new(
+                bootstrap.publisher_seed.clone(),
+                endpoints.proof_server_url.parse()?,
+                endpoints.indexer_url.parse()?,
+                endpoints.indexer_ws_url.parse()?,
+            )
         },
         rpc: Default::default(),
         indexer: Default::default(),
