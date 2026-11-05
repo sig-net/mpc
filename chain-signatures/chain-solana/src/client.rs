@@ -94,9 +94,11 @@ fn classify_read(e: ClientError) -> anyhow::Error {
         {
             RpcFailure::terminal_code(*code, format!("{e}"))
         }
-        // structural default: node-local absence, NodeUnhealthy, not yet
-        // available, request/parse shapes retry on another LB backend; a
-        // bare error lets the fallback misread "behind by 401/429 slots"
+        // structural default: node-local gaps retry on another LB backend —
+        // block absence (-32001/-32004), no signatures history (-32011),
+        // long-term storage (-32019, returns), NodeUnhealthy, not yet
+        // available, request/parse shapes; bare errors let the fallback
+        // misread "behind by 401/429 slots"
         _ => RpcFailure::retryable(format!("{e}")),
     };
     anyhow::Error::new(carrier)
@@ -371,8 +373,7 @@ impl SolanaClient {
 
         match res {
             Ok(results) => Ok(results),
-            // swallowing a terminal failure would fan it out into a
-            // sequential per-slot refetch storm
+            // swallowed terminal failures fan out into a per-slot refetch storm
             Err(e) if !is_retryable(&e) => Err(e),
             // a per-slot refetch can succeed where the batch failed
             Err(e) => {
@@ -549,7 +550,9 @@ mod tests {
     };
     use solana_client::rpc_custom_error::{
         JSON_RPC_SERVER_ERROR_BLOCK_CLEANED_UP, JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
-        JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET, JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY,
+        JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET,
+        JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_UNREACHABLE, JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY,
+        JSON_RPC_SERVER_ERROR_TRANSACTION_HISTORY_NOT_AVAILABLE,
     };
     use solana_client::rpc_request::RpcResponseErrorData;
     use solana_sdk::{pubkey::Pubkey, signature::Signature};
@@ -955,6 +958,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_signatures_history_stays_retryable() {
+        // deterministic per node, but another LB backend may keep history
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {
+                        "code": JSON_RPC_SERVER_ERROR_TRANSACTION_HISTORY_NOT_AVAILABLE,
+                        "message": "Transaction history is not available from this node"
+                    }
+                })
+                .to_string(),
+            )
+            .expect(3)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let err = client
+            .fetch_signatures_from_latest(&Pubkey::new_unique(), None)
+            .await
+            .unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn network_skipped_slots_are_terminal_with_their_code() {
         for (code, message) in [
             (JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "Slot was skipped"),
@@ -1001,6 +1035,10 @@ mod tests {
                 "Block not available for slot 1234",
             ),
             (JSON_RPC_SERVER_ERROR_BLOCK_CLEANED_UP, "Block cleaned up"),
+            (
+                JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_UNREACHABLE,
+                "Failed to query long-term storage; please try again",
+            ),
             (
                 JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET,
                 "Block status not yet available",
@@ -1089,8 +1127,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_statuses_follow_the_read_partition() {
-        // 409 is send-terminal; the read table retries the full budget and
-        // degrades to a refetch — the send table would abort after 1 attempt
+        // 409 is send-terminal — the read table must retry it to exhaustion
         let mut server = mockito::Server::new_async().await;
         let conflict = server
             .mock("POST", "/")
