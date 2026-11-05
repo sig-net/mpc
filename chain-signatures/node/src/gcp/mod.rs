@@ -2,6 +2,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use google_cloud_auth::credentials::AccessTokenCredentials;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -22,6 +23,8 @@ pub enum Error {
 
 const SECRET_MANAGER_ENDPOINT: &str = "https://secretmanager.googleapis.com";
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
+/// A Secret Manager call that has not completed by then fails instead of hanging.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 struct AccessSecretVersionResponse {
@@ -57,7 +60,10 @@ impl SecretManagerService {
         let credentials = google_cloud_auth::credentials::Builder::default()
             .with_scopes([CLOUD_PLATFORM_SCOPE])
             .build_access_token_credentials()?;
-        let http = reqwest::Client::builder().https_only(true).build()?;
+        let http = reqwest::Client::builder()
+            .https_only(true)
+            .timeout(REQUEST_TIMEOUT)
+            .build()?;
         Ok(Self {
             http,
             credentials,
