@@ -33,7 +33,6 @@ pub use args::{
 use clap::Parser;
 use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
-use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonIndexer};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
@@ -103,13 +102,9 @@ pub enum Cli {
         /// Tron execution watcher options
         #[command(flatten)]
         tron: TronArgs,
-        /// Local address that other peers can use to message this node.
-        /// mainnet nodes: this should be set to their domain name
-        /// testnet nodes: this should be set to their http://ip:web_port
-        /// dev nodes: this should be set to their local network domain name
-        /// integration test nodes: this should be set to None
-        #[arg(long, env("MPC_LOCAL_ADDRESS"))]
-        my_address: Option<Url>,
+        /// URL at which other nodes reach this node's web port, e.g. `https://node.example.org`.
+        #[arg(long, env("MPC_LOCAL_ADDRESS"), value_parser = parse_peer_address)]
+        my_address: Url,
         /// Storage options
         #[command(flatten)]
         storage_options: storage::Options,
@@ -117,6 +112,18 @@ pub enum Cli {
         #[command(flatten)]
         log_options: logs::Options,
     },
+}
+
+/// `Url` alone accepts `node.example.org:8080`, reading the host as the scheme,
+/// and the contract cannot change a participant's URL once it has joined.
+fn parse_peer_address(s: &str) -> Result<Url, String> {
+    let url = Url::parse(s).map_err(|e| format!("`{s}` is not a valid URL: {e}"))?;
+    match (url.scheme(), url.host()) {
+        ("http" | "https", Some(_)) => Ok(url),
+        (scheme, _) => Err(format!(
+            "`--my-address` must be an http/https URL with a host, got scheme `{scheme}`"
+        )),
+    }
 }
 
 pub async fn run(cmd: Cli) -> anyhow::Result<()> {
@@ -164,12 +171,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog,
                 midnight_wallet,
             } = StorageHandles::new(&account_id, &storage_options).await?;
-
-            let my_address = my_address.unwrap_or_else(|| {
-                let my_ip = local_ip().unwrap();
-                Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
-            });
-            tracing::info!(%my_address, "address detected");
 
             // NEAR as a source chain exists for the integration tests only, and the
             // test harness builds this binary with `test-feature`.
@@ -987,6 +988,22 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn peer_address_must_be_http_or_https_with_a_host() {
+        for ok in ["http://10.0.0.1:3000", "https://node.example.org"] {
+            assert!(parse_peer_address(ok).is_ok(), "{ok} must be accepted");
+        }
+        for bad in [
+            "node.example.org:8080",
+            "localhost:3000",
+            "ws://node.example.org",
+            "file:///tmp/node",
+            "node.example.org",
+        ] {
+            assert!(parse_peer_address(bad).is_err(), "{bad} must be rejected");
+        }
+    }
 
     /// A listener that never replies stands in for a stalled Redis.
     #[tokio::test]
