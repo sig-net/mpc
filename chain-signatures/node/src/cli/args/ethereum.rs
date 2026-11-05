@@ -140,7 +140,10 @@ mod tests {
             config.execution_rpc_http_url.as_str(),
             "http://127.0.0.1:8545/"
         );
-        assert_eq!(config.contract_address.to_string().to_lowercase(), CONTRACT);
+        assert_eq!(
+            config.contract_address,
+            CONTRACT.parse::<Address>().unwrap()
+        );
         assert_eq!(config.network, "mainnet");
         assert_eq!(
             config.indexer.refresh_interval,

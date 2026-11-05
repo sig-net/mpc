@@ -35,3 +35,28 @@ impl SolArgs {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser as _;
+
+    #[test]
+    fn the_cli_rejects_a_malformed_program_address() {
+        let error = SolArgs::try_parse_from([
+            "test",
+            "--sol-account-sk",
+            "sk",
+            "--sol-rpc-http-url",
+            "http://127.0.0.1:8899",
+            "--sol-program-address",
+            "not-a-pubkey",
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("--sol-program-address"),
+            "unexpected address error: {error}"
+        );
+    }
+}
