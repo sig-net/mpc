@@ -260,21 +260,11 @@ pub(crate) async fn process_respond_event(
         return advance_bidirectional_to_execution(entry, respond_event, root_pk, ctx).await;
     }
 
-    // A later signature of the request: an execution under it must be found too (#1428).
-    let Some(first_leg) = ctx.backlog.first_leg(source_chain, &sign_id).await else {
-        return Ok(());
-    };
-    let SignKind::SignBidirectional(event) = &first_leg.kind else {
-        return Ok(());
-    };
-    mpc_crypto::verify_signature(
-        root_pk,
-        first_leg.args.epsilon,
-        first_leg.args.payload,
-        &respond_event.signature,
-    )?;
-    let tx = event.to_bidirectional_tx(sign_id.request_id, respond_event.signature, root_pk)?;
-    ctx.backlog.add_published_tx(Arc::new(tx)).await;
+    if let Some(entry) = entry.cast::<Bidirectional<BidirectionalProgress>>() {
+        entry
+            .record_published_transaction_signature(respond_event.signature, root_pk)
+            .await?;
+    }
     Ok(())
 }
 
