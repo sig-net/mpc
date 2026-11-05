@@ -310,7 +310,7 @@ async fn test_checkpoint_creation() {
     // Guard the checkpoint digest wire format; update only for intentional changes.
     assert_eq!(
         checkpoint.digest(),
-        digest_hex("05a0fe7b2a3546a652a21f2f0003fe49b6bf6c8ece39f27dd073c0ec5537144b")
+        digest_hex("562a733c296c0cb20f568b1e370c1f0311eb371964d450ab67dc3b2fb343fdbe")
     );
 }
 
@@ -537,7 +537,7 @@ fn test_checkpoint_digest_invariants() {
     assert_ne!(cp_diff1.digest(), cp_diff2.digest());
     assert_eq!(
         cp_diff1.digest(),
-        digest_hex("40dbe3f5aba0ab212cc9e7a3cdd992e278f3cb9796b88c6b859ed17199bbab8c")
+        digest_hex("7a70129d584242b811b117f5072b4f965468fab006c8caa6ca45e3fdd0ff30a1")
     );
 }
 
@@ -624,7 +624,7 @@ fn test_checkpoint_serialization() {
     assert_eq!(checkpoint, deserialized);
     assert_eq!(
         checkpoint.digest(),
-        digest_hex("4d35080e6b80ebe6501767b61e8320068f6870920106fc8f09f4f2be6ea79e12")
+        digest_hex("bea87e72f589447390ccc8440fb3653b1886350835d1ff0c57f6c758e653b23a")
     );
     assert_eq!(checkpoint.digest(), deserialized.digest());
 

@@ -691,8 +691,6 @@ pub struct BacklogEntry {
     pub status: SignStatus,
     /// The transactions the request's published signatures give, in id order.
     pub tx_ids: Vec<BidirectionalTxId>,
-    /// The height another request's Response attests, which left this one unexecutable (M4).
-    pub unviable_at: Option<u64>,
 }
 
 impl BacklogEntry {
@@ -713,7 +711,6 @@ impl BacklogEntry {
             request,
             status,
             tx_ids: Vec::new(),
-            unviable_at: None,
         }
     }
 
@@ -744,7 +741,6 @@ impl BacklogEntry {
             request.chain,
             &request.kind,
             &self.tx_ids,
-            self.unviable_at,
         );
         let mut bytes = Vec::new();
         ciborium::into_writer(&fields, &mut bytes).expect("encoding into memory cannot fail");
@@ -784,7 +780,6 @@ impl BacklogEntry {
     pub(crate) fn without_progress(&self, root_pk: PublicKey) -> Self {
         let mut bare = Self::new(Arc::clone(&self.request));
         bare.tx_ids = self.tx_ids.clone();
-        bare.unviable_at = self.unviable_at;
         let (SignKind::SignBidirectional(event), Some(id)) =
             (&self.request.kind, self.tx_ids.first())
         else {

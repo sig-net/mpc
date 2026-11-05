@@ -351,7 +351,7 @@ Where no node can produce a checkpoint at all there is no recovery here (Section
 
 ### Dependencies on features not implemented yet
 
-* The digest covers `tx_ids`, the transaction IDs the published signatures give, since finding an execution needs only those. `unviable_at`, the height at which another request's `Response` says its replay protection was used up, is not set yet.
+* The digest covers `tx_ids`, the transaction IDs the published signatures give, since finding an execution needs only those. `unviable_at`, the height at which another request's `Response` says its replay protection was used up, is not stored yet.
 * The body of a checkpoint still carries each entry's progress beside the fields the digest covers, and a node trusts that only from its own storage: adopting a peer's body rebuilds progress from `tx_ids`. Moving it to `local` changes no digest.
 
 * Unviable is attested from another request's execution or answer.
@@ -420,11 +420,11 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
 ### Node: backlog and digest
 
 3. Entries (§1 Backlog, which [bidirectional-calls.md](bidirectional-calls.md) also needs).
-   Now: an entry is the request, `tx_ids`, `unviable_at` and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
+   Now: an entry is the request, `tx_ids` and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
    There is no `local` store.
    Design: an entry holds the rid, the request, the contract, `tx_ids` and `unviable_at`, and the node's own progress is node-local in `local`, outside checkpoints.
 4. Digest (§2).
-   Now: the digest covers each entry's request, `tx_ids` and `unviable_at`, in the request's serialized form, so a new field on a request event breaks checkpoints across versions unless it is left out when empty.
+   Now: the digest covers each entry's request and `tx_ids`, in the request's serialized form, so a new field on a request event breaks checkpoints across versions unless it is left out when empty.
    Design: it also covers the contract, in the canonical encoding of Section 2.
 
 ### Node: indexing

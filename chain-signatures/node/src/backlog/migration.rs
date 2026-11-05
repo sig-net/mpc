@@ -34,8 +34,6 @@ pub struct MigratableBacklogEntry {
     pub status: MigratableSignStatus,
     #[serde(default)]
     pub tx_ids: Vec<BidirectionalTxId>,
-    #[serde(default)]
-    pub unviable_at: Option<u64>,
 }
 
 impl From<MigratableBacklogEntry> for BacklogEntry {
@@ -95,7 +93,6 @@ impl From<MigratableBacklogEntry> for BacklogEntry {
             request: entry.request,
             status: with_current_entropy(status),
             tx_ids,
-            unviable_at: entry.unviable_at,
         }
     }
 }
