@@ -63,8 +63,9 @@ fn catchup_retry_strategy() -> RetryConfig {
     }
 }
 
-/// Network-skipped slots (solana-rpc-client-api 3.1.14 custom_error.rs):
-/// no backend can ever serve these blocks.
+/// Slot-unavailable codes (solana-rpc-client-api 3.1.14 custom_error.rs):
+/// "skipped, or missing due to ledger jump to recent snapshot" (-32007) /
+/// "skipped, or missing in long-term storage" (-32009) — backend-local gaps.
 fn slot_skipped(code: i64) -> bool {
     matches!(
         code,
@@ -72,12 +73,12 @@ fn slot_skipped(code: i64) -> bool {
     )
 }
 
-/// Whether the error carries the network-skipped-slot verdict.
-pub(crate) fn is_network_skipped(err: &anyhow::Error) -> bool {
+/// The carried slot-unavailable code, if any.
+pub(crate) fn skipped_code(err: &anyhow::Error) -> Option<i64> {
     err.chain()
         .find_map(|c| c.downcast_ref::<RpcFailure>())
         .and_then(RpcFailure::code)
-        .is_some_and(slot_skipped)
+        .filter(|&code| slot_skipped(code))
 }
 
 /// Boundary classification — `ClientError`'s `#[source] Box<ErrorKind>`
@@ -358,8 +359,7 @@ impl SolanaClient {
                                 results.insert(slot, block);
                             }
                         }
-                        // null result: absent block — Missing, the per-slot
-                        // refetch resolves ground truth
+                        // null result: absent block — the per-slot refetch resolves it
                         JsonRpcResponse::Ok { .. } => {}
                         JsonRpcResponse::Err { id, error } => {
                             // Only network-skipped slots are silent; node-local

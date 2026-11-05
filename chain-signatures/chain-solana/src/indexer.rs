@@ -18,7 +18,7 @@ use solana_transaction_status::{EncodedTransactionWithStatusMeta, UiConfirmedBlo
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::{is_network_skipped, SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
+use crate::client::{skipped_code, SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
 use crate::config::SolIndexerConfig;
 use crate::events::emit_events;
 use crate::{SolConfig, SolanaClient};
@@ -386,15 +386,27 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                 let started_at = Instant::now();
                 let block = match self.client.get_block(slot).await {
                     Ok(block) => block,
-                    // Skipped slot — no backend can ever serve it, mark inactive and advance
-                    Err(err) if is_network_skipped(&err) => {
+                    Err(err) => {
+                        let Some(code) = skipped_code(&err) else {
+                            return Err(err);
+                        };
+                        // Slot-unavailable on this backend: consumed as
+                        // least-loss (false advance loses one slot, a
+                        // false stall loses everything after it).
+                        tracing::warn!(
+                            slot,
+                            code,
+                            "signature walk claimed activity but this backend reports the slot skipped or missing; advancing as least-loss"
+                        );
                         events_tx
                             .send(ChainEvent::Block(slot))
                             .await
                             .context("failed to send solana block marker event")?;
+                        self.telemetry.block_indexed(slot);
+                        #[cfg(feature = "bench")]
+                        crate::bench::inc_marker();
                         return Ok(());
                     }
-                    Err(err) => return Err(err),
                 };
                 #[cfg(feature = "bench")]
                 crate::bench::add_refetch_time(started_at.elapsed());
@@ -631,6 +643,14 @@ mod tests {
         url: &str,
         state_manager: MockStateManager,
     ) -> SolanaIndexer<MockStateManager, NoopChainTelemetry> {
+        test_indexer_with_telemetry(url, state_manager, NoopChainTelemetry)
+    }
+
+    fn test_indexer_with_telemetry<T: ChainTelemetry>(
+        url: &str,
+        state_manager: MockStateManager,
+        telemetry: T,
+    ) -> SolanaIndexer<MockStateManager, T> {
         let program_id = Pubkey::new_unique();
         let client = SolanaClient::for_indexer(
             url.to_string(),
@@ -645,7 +665,27 @@ mod tests {
             config: SolIndexerConfig::default(),
             slot_stall_timeout: Duration::from_secs(30),
             state_manager,
-            telemetry: NoopChainTelemetry,
+            telemetry,
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingTelemetry {
+        indexed: Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+
+    impl ChainTelemetry for RecordingTelemetry {
+        fn block_indexed(&self, block_number: u64) {
+            self.indexed.lock().unwrap().push(block_number);
+        }
+        fn block_finalized(&self, _block_number: u64) {}
+        fn checkpoint_created(&self, _block_number: u64) {}
+        fn request_indexed_at(&self, _block_timestamp: u64, _kind: mpc_primitives::RequestKind) {}
+        fn request_indexed(&self, _kind: mpc_primitives::RequestKind) {}
+        fn bidirectional_extraction_failed(
+            &self,
+            _kind: mpc_chain_integration_core::ExtractionFailureKind,
+        ) {
         }
     }
 
@@ -1784,6 +1824,38 @@ mod tests {
             events_rx.recv().await,
             Some(ChainEvent::Block(slot)) if slot == 7
         ));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn skipped_slots_advance_the_indexed_gauge_with_the_marker() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "message": "Slot was skipped"}
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let telemetry = RecordingTelemetry::default();
+        let indexer =
+            test_indexer_with_telemetry(&server.url(), MockStateManager::new(), telemetry.clone());
+        let (events_tx, _events_rx) = mpsc::channel(16);
+
+        indexer
+            .process_catchup_item(&events_tx, 7, &SolanaCatchupBlock::Missing)
+            .await
+            .unwrap();
+
+        // The consume pairs the marker with telemetry, like every other emitter.
+        assert_eq!(*telemetry.indexed.lock().unwrap(), vec![7]);
         mock.assert_async().await;
     }
 
