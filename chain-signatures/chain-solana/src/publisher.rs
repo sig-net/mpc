@@ -35,7 +35,7 @@ impl Verdict {
         match self {
             Verdict::Terminal => RpcFailure::terminal(message),
             Verdict::Retryable => RpcFailure::retryable(message),
-            Verdict::Status(status) => RpcFailure::with_status(status, message),
+            Verdict::Status(status) => RpcFailure::send_status(status, message),
         }
     }
 }

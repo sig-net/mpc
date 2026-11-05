@@ -276,7 +276,7 @@ impl CantonClient {
                     let failure = if in_flight {
                         RpcFailure::retryable_with_status(status, message)
                     } else {
-                        RpcFailure::with_status(status, message)
+                        RpcFailure::send_status(status, message)
                     };
                     return Err(anyhow::Error::new(failure));
                 }
@@ -318,7 +318,7 @@ async fn check_response(
         let text = resp.text().await.unwrap_or_default();
         // typed carrier: classification reads the status, not the hex-laden body
         // TODO: fold reads into the same code-aware classification as the submit path
-        let failure = RpcFailure::with_status(status, format!("{context} failed: {status} {text}"));
+        let failure = RpcFailure::send_status(status, format!("{context} failed: {status} {text}"));
         return Err(anyhow::Error::new(failure));
     }
     Ok(resp)

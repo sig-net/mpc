@@ -50,9 +50,8 @@ pub struct RpcFailure {
 }
 
 impl RpcFailure {
-    /// Constructs a new `RpcFailure` with the given HTTP status and message.
-    /// The verdict is derived from the status via [`http_status_retryable`].
-    pub fn with_status(status: StatusCode, message: String) -> Self {
+    /// Send-path verdict for a status, per [`http_status_retryable`].
+    pub fn send_status(status: StatusCode, message: String) -> Self {
         Self::with_verdict(status, !http_status_retryable(status), message)
     }
 
@@ -136,7 +135,7 @@ impl RpcFailure {
                 terminal: failure.terminal,
             });
         }
-        status.map(|status| Self::with_status(status, format!("{e:#}")))
+        status.map(|status| Self::send_status(status, format!("{e:#}")))
     }
 }
 
@@ -384,8 +383,8 @@ mod tests {
 
     #[test]
     fn rpc_failure_verdict_is_authoritative_over_message_text() {
-        // with_status derives the verdict from the status, not the message
-        let throttled: anyhow::Error = RpcFailure::with_status(
+        // send_status derives the verdict from the status, not the message
+        let throttled: anyhow::Error = RpcFailure::send_status(
             StatusCode::TOO_MANY_REQUESTS,
             "nothing suspicious in this text".into(),
         )
@@ -394,7 +393,7 @@ mod tests {
         assert!(is_provider_throttled(&throttled));
 
         // 409 is terminal by status, even though the body text mentions 429
-        let terminal: anyhow::Error = RpcFailure::with_status(
+        let terminal: anyhow::Error = RpcFailure::send_status(
             StatusCode::CONFLICT,
             "conflict; body says 429 retry now".into(),
         )
@@ -421,7 +420,7 @@ mod tests {
     #[test]
     fn rpc_failure_under_context_still_classifies() {
         // context wrappers must not hide the typed carrier
-        let err = anyhow::Error::new(RpcFailure::with_status(
+        let err = anyhow::Error::new(RpcFailure::send_status(
             StatusCode::TOO_MANY_REQUESTS,
             "rate limited".into(),
         ))
