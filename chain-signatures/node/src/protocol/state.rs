@@ -34,7 +34,7 @@ impl fmt::Debug for KeyShare {
 
 #[derive(Debug)]
 pub struct StartedState {
-    pub persistent_node_data: Option<KeyShare>,
+    pub key_share: Option<KeyShare>,
 }
 
 pub struct GeneratingState {
@@ -320,15 +320,10 @@ pub struct NodeKeyInfo {
 impl NodeState {
     fn key_info(&self) -> Option<NodeKeyInfo> {
         match &self {
-            NodeState::Started(state) => {
-                state
-                    .persistent_node_data
-                    .as_ref()
-                    .map(|stored| NodeKeyInfo {
-                        private_share: stored.private_share,
-                        public_key: stored.public_key,
-                    })
-            }
+            NodeState::Started(state) => state.key_share.as_ref().map(|stored| NodeKeyInfo {
+                private_share: stored.private_share,
+                public_key: stored.public_key,
+            }),
             NodeState::Generating(_state) => None,
             NodeState::WaitingForConsensus(state) => Some(NodeKeyInfo {
                 private_share: state.private_share,

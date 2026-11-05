@@ -32,7 +32,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
         _gov: &mut G,
         contract_state: ProtocolState,
     ) -> NodeState {
-        match self.persistent_node_data {
+        match self.key_share {
             Some(KeyShare {
                 epoch,
                 private_share,

@@ -143,14 +143,12 @@ impl MpcSignProtocol {
                 .as_secs() as i64,
         );
 
-        let persistent_node_data = self
+        let key_share = self
             .keystore
             .load()
             .await
             .context("failed to read the key share store")?;
-        let mut state = NodeState::Started(StartedState {
-            persistent_node_data,
-        });
+        let mut state = NodeState::Started(StartedState { key_share });
         loop {
             let protocol_time = Instant::now();
             crate::metrics::protocols::PROTOCOL_ITER_CNT.inc();
