@@ -18,6 +18,15 @@ pub trait StateManager: Send + Sync + Clone + 'static {
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>;
 
+    /// All `Executing` backlog entries targeting `chain`, from every
+    /// source chain — the authoritative set; the watch map is its
+    /// derived, lossy index (the mock keeps the two independent).
+    async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)>;
+
+    /// Registers under `tx.id`, replacing any previous watch while
+    /// carrying over its observation time.
+    async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>);
+
     /// Set the processed block height for a specific chain.
     async fn set_processed_block(&self, chain: Chain, height: u64);
 }
@@ -34,6 +43,7 @@ type Watchers =
 pub struct MockStateManager {
     processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
     watchers: Watchers,
+    pending: Arc<RwLock<Vec<Arc<BidirectionalTx>>>>,
 }
 
 #[async_trait::async_trait]
@@ -54,8 +64,28 @@ impl StateManager for MockStateManager {
             .unwrap_or_default()
     }
 
+    async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+        self.pending
+            .read()
+            .await
+            .iter()
+            .filter(|tx| tx.target_chain == chain)
+            .map(|tx| (tx.sign_id(), Arc::clone(tx)))
+            .collect()
+    }
+
     async fn set_processed_block(&self, chain: Chain, height: u64) {
         self.processed_blocks.write().await.insert(chain, height);
+    }
+
+    async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
+        let sign_id = tx.sign_id();
+        self.watchers
+            .write()
+            .await
+            .entry(chain)
+            .or_default()
+            .insert(tx.id, (sign_id, tx));
     }
 }
 
@@ -64,13 +94,41 @@ impl MockStateManager {
         Self::default()
     }
 
-    /// Register a bidirectional transaction awaiting execution on `chain`.
-    pub async fn watch_execution(&self, chain: Chain, sign_id: SignId, tx: Arc<BidirectionalTx>) {
+    /// Watch under an explicit sign_id — displacement tests pair one
+    /// the tx does not derive.
+    pub async fn watch_execution_as(
+        &self,
+        chain: Chain,
+        sign_id: SignId,
+        tx: Arc<BidirectionalTx>,
+    ) {
         self.watchers
             .write()
             .await
             .entry(chain)
             .or_default()
             .insert(tx.id, (sign_id, tx));
+    }
+
+    /// Register an `Executing` backlog entry targeting `tx.target_chain`.
+    /// Independent of [`StateManager::watch_execution`]: an entry can be
+    /// pending with no watch.
+    pub async fn add_pending_execution(&self, tx: Arc<BidirectionalTx>) {
+        self.pending.write().await.push(tx);
+    }
+
+    /// Removes the entry — what the node's confirmation handling does.
+    pub async fn remove_pending_execution(&self, sign_id: SignId) {
+        self.pending
+            .write()
+            .await
+            .retain(|tx| tx.sign_id() != sign_id);
+    }
+
+    /// Removes the watch under the flat id.
+    pub async fn remove_execution_watch(&self, chain: Chain, tx_id: &BidirectionalTxId) {
+        if let Some(watches) = self.watchers.write().await.get_mut(&chain) {
+            watches.remove(tx_id);
+        }
     }
 }

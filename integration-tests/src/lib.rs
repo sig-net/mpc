@@ -292,7 +292,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         redis_url: redis.internal_address.clone(),
     };
 
-    let log_options = logs::Options::test();
+    let log_options = logs::Options::default();
 
     // If using pregenerated keys, inject them into storage before nodes start
     if spawner.pregenerated_keys.is_enabled() {

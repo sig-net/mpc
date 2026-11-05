@@ -38,12 +38,6 @@ impl Args {
         self.0.push(value.to_string());
     }
 
-    fn switch(&mut self, name: &str, on: bool) {
-        if on {
-            self.0.push(name.to_string());
-        }
-    }
-
     fn chains(&mut self, cfg: &NodeConfig) {
         if let Some(eth) = &cfg.eth {
             self.eth(eth);
@@ -144,6 +138,6 @@ impl Args {
     fn logs(&mut self, logs: &logs::Options) {
         self.flag("--opentelemetry-level", logs.opentelemetry_level);
         self.flag("--otlp-endpoint", &logs.otlp_endpoint);
-        self.switch("--disable-gcp-logs", logs.disable_gcp_logs);
+        self.flag("--log-format", logs.log_format);
     }
 }

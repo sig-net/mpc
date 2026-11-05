@@ -35,10 +35,11 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request_target'
     steps:
-      # The section must have one state: `None`, or one or more types. A ticked
-      # type needs `!` in the title and `None` must not have it. Release,
-      # promotion and hotfix PRs use their own templates and are skipped.
-      - name: Check the Breaking changes section against the title
+      # Breaking changes must have one state: `None`, or one or more types. A
+      # ticked type needs `!` in the title and `None` must not have it. Design
+      # must not keep the template's placeholder link. Release, promotion and
+      # hotfix PRs have neither section and are skipped.
+      - name: Check the Breaking changes and Design sections
         env:
           TITLE: ${{ github.event.pull_request.title }}
           BODY: ${{ github.event.pull_request.body }}
@@ -55,4 +56,6 @@ jobs:
           [ "$none" -eq 0 ] || [ "$types" -eq 0 ] || fail "Breaking changes: None cannot be ticked together with a type"
           [ "$types" -eq 0 ] || [ "$bang" -eq 1 ] || fail "Breaking changes ticked: add '!' to the title, e.g. 'feat(node)!: ...'"
           [ "$bang" -eq 0 ] || [ "$types" -gt 0 ] || fail "Title has '!' but no breaking type is ticked"
+          design=$(printf '%s\n' "$BODY" | tr -d '\r' | awk '/^## Design/{f=1;next} /^## /{f=0} f')
+          ! printf '%s\n' "$design" | grep -q -E '^- \[[xX]\] .*\[(issue )?link\]' || fail "Design: replace the [link] placeholder"
           echo "ok: none=$none types=$types bang=$bang"
