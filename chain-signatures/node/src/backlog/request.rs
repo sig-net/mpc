@@ -600,6 +600,7 @@ impl SignEntry<Bidirectional<Executing>> {
             chain_ctx,
             origin_indexed_at,
             block_height,
+            self.request.args.entropy,
         );
         let sign_request = match outcome {
             ExecutionOutcome::Success { output } => {

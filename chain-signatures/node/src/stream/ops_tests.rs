@@ -563,6 +563,32 @@ async fn a_response_names_the_later_transaction_it_found() {
     assert_eq!(response.tx_id, later.id);
 }
 
+/// Two first legs alike but for their entropy answer with the same message and key. Without the
+/// first leg's entropy in the hash, their responses would share theirs.
+#[tokio::test]
+async fn a_response_entropy_moves_with_the_first_leg_entropy() {
+    let mut entropies = Vec::new();
+    for first_leg_entropy in [[1; 32], [2; 32]] {
+        let backlog = Backlog::new();
+        backlog.mark_caught_up(Chain::Solana);
+        let mut request = (*nonce_request(1, Chain::Solana, "p", 7, 1)).clone();
+        request.args.entropy = first_leg_entropy;
+        let request = Arc::new(request);
+        let tx = signed_tx(&request, 7);
+        seed_executing_entry(&backlog, Arc::clone(&request), Arc::clone(&tx)).await;
+        let (sign_tx, _sign_rx) = mpsc::channel(8);
+        let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+
+        process_execution_confirmed(tx.id, 123, ExecutionOutcome::Failed, &ctx, Chain::Ethereum)
+            .await
+            .unwrap();
+
+        let entry = ctx.backlog.get(Chain::Solana, &request.id).await.unwrap();
+        entropies.push(entry.request().args.entropy);
+    }
+    assert_ne!(entropies[0], entropies[1]);
+}
+
 /// A peer's body cannot give a node its progress: the digest does not cover it. A node
 /// adopting one looks for the execution again, under the transactions the digest does cover.
 #[tokio::test]

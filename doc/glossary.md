@@ -141,7 +141,7 @@ A value from the block that holds a [request](#request). The requester cannot
 know or influence it before that block is validated. Nodes read it from a final
 block, so every node derives the same delta (`SignArgs::entropy`,
 `chain-signatures/primitives/src/crypto.rs`). A response has no such block: its
-entropy comes from the message it signs and its key. It also seeds the
+entropy hashes the first leg's with the message it signs and its key. It also seeds the
 [proposer](#proposer) election. See
 [delta-derivation.md](delta-derivation.md).
 
