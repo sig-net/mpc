@@ -88,17 +88,18 @@ pub(crate) fn is_network_skipped(err: &anyhow::Error) -> bool {
 // classify typed verdict enums instead of walking anyhow chains.
 fn classify_read(e: ClientError) -> anyhow::Error {
     let carrier = match e.kind() {
-        ClientErrorKind::Reqwest(req) => Some(read_carrier(req)),
-        ClientErrorKind::RpcError(RpcError::RpcResponseError { code, .. }) => {
-            slot_skipped(*code).then(|| RpcFailure::terminal_code(*code, format!("{e}")))
+        ClientErrorKind::Reqwest(req) => read_carrier(req),
+        ClientErrorKind::RpcError(RpcError::RpcResponseError { code, .. })
+            if slot_skipped(*code) =>
+        {
+            RpcFailure::terminal_code(*code, format!("{e}"))
         }
-        // deliberate default: node-local absence, NodeUnhealthy, not yet
-        // available, request/parse shapes stay retryable — another LB
-        // backend may serve them
-        _ => None,
+        // structural default: node-local absence, NodeUnhealthy, not yet
+        // available, request/parse shapes retry on another LB backend; a
+        // bare error lets the fallback misread "behind by 401/429 slots"
+        _ => RpcFailure::retryable(format!("{e}")),
     };
-    let err = anyhow::Error::new(e);
-    carrier.map_or(err, anyhow::Error::new)
+    anyhow::Error::new(carrier)
 }
 
 /// Read carrier for a bare reqwest error.
@@ -532,8 +533,9 @@ mod tests {
     };
     use solana_client::rpc_custom_error::{
         JSON_RPC_SERVER_ERROR_BLOCK_CLEANED_UP, JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
-        JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET,
+        JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET, JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY,
     };
+    use solana_client::rpc_request::RpcResponseErrorData;
     use solana_sdk::{pubkey::Pubkey, signature::Signature};
 
     /// Helper to create a SolanaClient for testing with mockito
@@ -917,6 +919,23 @@ mod tests {
         assert_eq!(sigs.len(), 2);
         assert_eq!(sigs[0].slot, 200);
         assert_eq!(sigs[1].slot, 150);
+    }
+
+    #[test]
+    fn node_unhealthy_renders_do_not_invert_the_default() {
+        // 401 and 429 collide with the fallback's status-code matching
+        for slots_behind in [401u64, 429] {
+            let e = ClientError::from(ClientErrorKind::RpcError(RpcError::RpcResponseError {
+                code: JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY,
+                message: format!("Node is behind by {slots_behind} slots"),
+                data: RpcResponseErrorData::NodeUnhealthy {
+                    num_slots_behind: Some(slots_behind),
+                },
+            }));
+            let err = classify_read(e);
+            assert!(is_retryable(&err), "{slots_behind}: {err:#}");
+            assert!(!is_provider_throttled(&err), "{slots_behind}: {err:#}");
+        }
     }
 
     #[tokio::test]
