@@ -666,15 +666,18 @@ fn intent_gen_command(config: &MidnightConfig, network_id: &str) -> anyhow::Resu
         .env("PATH", CHILD_PATH)
         .env("MIDNIGHT_PUB_FUNDING_SEED", &config.publisher.funding_seed)
         .env("MIDNIGHT_PUB_NETWORK_ID", network_id)
-        .env("MIDNIGHT_PUB_NODE_URL", &config.node_url)
+        .env("MIDNIGHT_PUB_NODE_URL", config.node_url.as_str())
         .env(
             "MIDNIGHT_PUB_PROOF_SERVER_URL",
-            &config.publisher.proof_server_url,
+            config.publisher.proof_server_url.as_str(),
         )
-        .env("MIDNIGHT_PUB_INDEXER_URL", &config.publisher.indexer_url)
+        .env(
+            "MIDNIGHT_PUB_INDEXER_URL",
+            config.publisher.indexer_url.as_str(),
+        )
         .env(
             "MIDNIGHT_PUB_INDEXER_WS_URL",
-            &config.publisher.indexer_ws_url,
+            config.publisher.indexer_ws_url.as_str(),
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -872,14 +875,14 @@ mod tests {
             r#"read -r ready; ready_id=$(printf "%s" "$ready" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{{"id":%s,"ok":true,"ready":true,"protocolVersion":3,"submitTimeoutMs":2,"recipeTtlMs":1}}\n' "$ready_id"; {script}"#
         );
         MidnightConfig {
-            node_url: NODE_URL.to_string(),
+            node_url: NODE_URL.parse().unwrap(),
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             publisher: PublisherConfig {
                 intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script],
                 funding_seed: "ab".repeat(32),
-                proof_server_url: "http://127.0.0.1:6300".to_string(),
-                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
-                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
+                proof_server_url: "http://127.0.0.1:6300".parse().unwrap(),
+                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".parse().unwrap(),
+                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
                 request_timeout: Duration::from_secs(5),
                 restart_backoff: RetryConfig {
                     min_delay: Duration::from_millis(1),
@@ -1475,20 +1478,23 @@ mod tests {
                 ),
                 (
                     "MIDNIGHT_PUB_INDEXER_URL".to_string(),
-                    config.publisher.indexer_url.clone(),
+                    config.publisher.indexer_url.to_string(),
                 ),
                 (
                     "MIDNIGHT_PUB_INDEXER_WS_URL".to_string(),
-                    config.publisher.indexer_ws_url.clone(),
+                    config.publisher.indexer_ws_url.to_string(),
                 ),
                 (
                     "MIDNIGHT_PUB_NETWORK_ID".to_string(),
                     NETWORK_ID.to_string(),
                 ),
-                ("MIDNIGHT_PUB_NODE_URL".to_string(), config.node_url.clone()),
+                (
+                    "MIDNIGHT_PUB_NODE_URL".to_string(),
+                    config.node_url.to_string()
+                ),
                 (
                     "MIDNIGHT_PUB_PROOF_SERVER_URL".to_string(),
-                    config.publisher.proof_server_url.clone(),
+                    config.publisher.proof_server_url.to_string(),
                 ),
                 (
                     "PATH".to_string(),

@@ -127,9 +127,9 @@ impl MidnightArgs {
         };
         let mut publisher = PublisherConfig {
             funding_seed: funding_seed.expose_secret().to_string(),
-            proof_server_url: proof_server_url.to_string(),
-            indexer_url: indexer_url.to_string(),
-            indexer_ws_url: indexer_ws_url.to_string(),
+            proof_server_url,
+            indexer_url,
+            indexer_ws_url,
             output_storage: self.midnight_output_storage_bucket.map(|bucket| {
                 OutputStorageConfig::new(
                     bucket,
@@ -152,7 +152,7 @@ impl MidnightArgs {
         let central_address = MidnightAddress::from_hex(&central_address)
             .context("midnight config: central_address must be 32 bytes of hex")?;
         let config = MidnightConfig {
-            node_url: node_url.to_string(),
+            node_url,
             central_address,
             publisher,
             rpc: Default::default(),
@@ -207,7 +207,7 @@ mod tests {
     /// assertion cannot pass on a dropped flag.
     fn configured() -> MidnightConfig {
         MidnightConfig {
-            node_url: "http://127.0.0.1:9944/".into(),
+            node_url: "http://127.0.0.1:9944/".parse().unwrap(),
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
@@ -217,9 +217,9 @@ mod tests {
                     "/opt/midnight publisher/dist/main.js".into(),
                     "--child-option".into(),
                 ],
-                proof_server_url: "http://127.0.0.1:6300/".into(),
-                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".into(),
-                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".into(),
+                proof_server_url: "http://127.0.0.1:6300/".parse().unwrap(),
+                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".parse().unwrap(),
+                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
                 output_storage: Some(OutputStorageConfig::new(
                     "midnight-results".into(),
                     "staging/testnet".into(),

@@ -1,6 +1,5 @@
 //! Midnight node configuration.
 
-use anyhow::Context as _;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::fmt;
 use std::path::Path;
@@ -96,10 +95,10 @@ pub struct PublisherConfig {
     /// Funds respond transactions.
     pub funding_seed: String,
     /// These contracts are zkir-v3, which cannot be proven in process.
-    pub proof_server_url: String,
+    pub proof_server_url: Url,
     /// Spendable DUST derives only from the ledger events the indexer serves.
-    pub indexer_url: String,
-    pub indexer_ws_url: String,
+    pub indexer_url: Url,
+    pub indexer_ws_url: Url,
     /// Ceiling on one build.
     pub request_timeout: Duration,
     /// Ceiling on getting a built intent accepted by the node.
@@ -115,9 +114,14 @@ impl Default for PublisherConfig {
             // The `bin` name the TypeScript package installs, resolved on the fixed child PATH.
             intent_gen_command: vec!["midnight-publisher".to_string()],
             funding_seed: String::new(),
-            proof_server_url: String::new(),
-            indexer_url: String::new(),
-            indexer_ws_url: String::new(),
+            // Never dialed: a default config has no funding seed, so it fails validation.
+            proof_server_url: "http://placeholder.invalid"
+                .parse()
+                .expect("a valid literal"),
+            indexer_url: "http://placeholder.invalid"
+                .parse()
+                .expect("a valid literal"),
+            indexer_ws_url: "ws://placeholder.invalid".parse().expect("a valid literal"),
             request_timeout: Duration::from_secs(120),
             // The child owns the 360 second submit deadline. Rust is only its looser
             // process-supervision backstop, checked against the child's ready reply.
@@ -179,7 +183,7 @@ impl MidnightAddress {
 /// Midnight chain integration configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MidnightConfig {
-    pub node_url: String,
+    pub node_url: Url,
     /// Address of the central singleton contract.
     pub central_address: MidnightAddress,
     pub publisher: PublisherConfig,
@@ -189,11 +193,7 @@ pub struct MidnightConfig {
 
 impl MidnightConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.node_url.starts_with("http://") || self.node_url.starts_with("https://"),
-            "midnight config: node_url must use a lowercase http or https scheme"
-        );
-        validate_url("node_url", &self.node_url, &["http", "https"])?;
+        validate_scheme("node_url", &self.node_url, &["http", "https"])?;
         anyhow::ensure!(
             !self.indexer.poll_interval.is_zero(),
             "midnight config: indexer.poll_interval must be greater than zero"
@@ -231,17 +231,17 @@ impl PublisherConfig {
              absolute path"
         );
         validate_funding_seed(&self.funding_seed)?;
-        validate_url(
+        validate_scheme(
             "publisher.proof_server_url",
             &self.proof_server_url,
             &["http", "https"],
         )?;
-        validate_url(
+        validate_scheme(
             "publisher.indexer_url",
             &self.indexer_url,
             &["http", "https"],
         )?;
-        validate_url(
+        validate_scheme(
             "publisher.indexer_ws_url",
             &self.indexer_ws_url,
             &["ws", "wss"],
@@ -274,14 +274,12 @@ pub(crate) fn validate_publisher_network_id(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_url(field: &str, value: &str, schemes: &[&str]) -> anyhow::Result<()> {
-    let parsed = Url::parse(value)
-        .with_context(|| format!("midnight config: {field} must be an absolute URL"))?;
+fn validate_scheme(field: &str, url: &Url, schemes: &[&str]) -> anyhow::Result<()> {
     anyhow::ensure!(
-        schemes.contains(&parsed.scheme()),
+        schemes.contains(&url.scheme()),
         "midnight config: {field} must use one of {}, got {}",
         schemes.join(", "),
-        parsed.scheme()
+        url.scheme()
     );
     Ok(())
 }
@@ -327,13 +325,13 @@ mod tests {
 
     fn valid_config() -> MidnightConfig {
         MidnightConfig {
-            node_url: "http://127.0.0.1:9944".to_string(),
+            node_url: "http://127.0.0.1:9944".parse().unwrap(),
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
-                proof_server_url: "http://127.0.0.1:6300".to_string(),
-                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
-                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
+                proof_server_url: "http://127.0.0.1:6300".parse().unwrap(),
+                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".parse().unwrap(),
+                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
                 ..Default::default()
             },
             rpc: Default::default(),
@@ -472,11 +470,6 @@ mod tests {
 
     #[test]
     fn validate_names_offending_field() {
-        let mut uppercase_url = valid_config();
-        uppercase_url.node_url = "HTTP://127.0.0.1:9944".to_string();
-        let err = uppercase_url.validate().unwrap_err().to_string();
-        assert!(err.contains("lowercase"), "unexpected error: {err}");
-
         let mut zero_poll = valid_config();
         zero_poll.indexer.poll_interval = Duration::ZERO;
         let err = zero_poll.validate().unwrap_err().to_string();
@@ -498,13 +491,13 @@ mod tests {
                 }) as fn(&mut MidnightConfig),
             ),
             ("proof_server_url", |config: &mut MidnightConfig| {
-                config.publisher.proof_server_url = "ws://127.0.0.1:6300".to_string();
+                config.publisher.proof_server_url = "ws://127.0.0.1:6300".parse().unwrap();
             }),
             ("indexer_url", |config: &mut MidnightConfig| {
-                config.publisher.indexer_url = "not a URL".to_string();
+                config.publisher.indexer_url = "ws://127.0.0.1:8088".parse().unwrap();
             }),
             ("indexer_ws_url", |config: &mut MidnightConfig| {
-                config.publisher.indexer_ws_url = "http://127.0.0.1:8088".to_string();
+                config.publisher.indexer_ws_url = "http://127.0.0.1:8088".parse().unwrap();
             }),
         ] {
             let mut invalid = valid_config();
