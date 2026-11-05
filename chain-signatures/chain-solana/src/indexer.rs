@@ -1743,6 +1743,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drain_range_marks_each_slot_once_across_gap_skip_and_block() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Program activity at 10 and 12; slot 9 (< start 10) ends pagination
+        let entries: Vec<_> = [12, 10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // the batch serves neither slot (legal null results → Missing)
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[\{.*getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!([
+                    { "id": 0, "result": null },
+                    { "id": 1, "result": null }
+                ])
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        // refetch: slot 10 skipped on this backend, slot 12 served
+        let _skipped = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#"^\{.*"params":\[10,"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {
+                        "code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+                        "message": "Slot was skipped"
+                    }
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let _served = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                r#"^\{.*"params":\[12,"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": block_response(0, 12)["result"]
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.drain_range(&events_tx, 13, 10, &cancel),
+        )
+        .await
+        .expect("drain must finish")
+        .unwrap();
+
+        _batch.assert_async().await;
+        _skipped.assert_async().await;
+        _served.assert_async().await;
+
+        // exactly one marker per slot in [10, 12]: 10 consumed-skip, 11 gap,
+        // 12 block — pins the next_marker bookkeeping across all emitters
+        let mut seen = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), events_rx.recv()).await {
+                Ok(Some(ChainEvent::Block(slot))) => seen.push(slot),
+                Ok(Some(other)) => panic!("expected a Block marker, got {other:?}"),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![10, 11, 12],
+            "markers must be exactly-once, in order"
+        );
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_batch_failures_hand_the_drain_to_the_supervisor() {
+        let mut server = mockito::Server::new_async().await;
+
+        // walk claims slot 10; slot 9 ends pagination
+        let entries: Vec<_> = [10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r"^\[\{.*getBlock".to_string()))
+            .with_status(401)
+            // terminal aborts after the first attempt
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(30),
+            indexer.drain_range(&events_tx, 11, 10, &cancel),
+        )
+        .await
+        .expect("drain must fail fast")
+        .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        // nothing emitted: the supervisor restart decides what happens next
+        assert!(events_rx.try_recv().is_err());
+        batch.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn run_block_sequence_is_poll_phase_invariant() {
         // Identical chain content drained under different tick phases must
         // emit identical Block heights. Activity at 10 and 12 leaves an
