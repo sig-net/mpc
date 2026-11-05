@@ -351,13 +351,14 @@ impl SolanaClient {
                             results.insert(slot, block);
                         }
                     } else if let Some(err) = resp_obj.error {
-                        let is_skipped = err
+                        // Only network-skipped slots are silent; node-local
+                        // absence warns — `process_catchup_item` refetch-retries it
+                        let skipped = err
                             .get("code")
-                            .and_then(|c| c.as_i64())
-                            .map(|c| c == -32007)
-                            .unwrap_or(false);
+                            .and_then(serde_json::Value::as_i64)
+                            .is_some_and(slot_skipped);
                         let slot = slots.get(resp_obj.id);
-                        if !is_skipped {
+                        if !skipped {
                             tracing::warn!(?err, ?slot, "JSON-RPC batch response error");
                         }
                     }
@@ -721,7 +722,7 @@ mod tests {
         // Slot 101 is skipped (error code -32007), slot 100 is present
         let body = serde_json::json!([
             make_block_response(0, HEIGHT_1),
-            { "id": 1, "result": null, "error": { "code": -32007, "message": "Slot was skipped" } }
+            { "id": 1, "result": null, "error": { "code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "message": "Slot was skipped" } }
         ])
         .to_string();
 
