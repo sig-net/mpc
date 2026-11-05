@@ -58,6 +58,16 @@ use url::Url;
 /// indexers/streams into the SignatureSpawner.
 const MAX_SIGN_COMMANDS: usize = 16384;
 
+/// The contract and peers verify ed25519 signatures only; a secp256k1 key
+/// would be accepted here and rejected at first use.
+fn ed25519_secret_key(value: &str) -> Result<SecretKey, String> {
+    let key: SecretKey = value.parse().map_err(|err| format!("{err}"))?;
+    match key.key_type() {
+        near_crypto::KeyType::ED25519 => Ok(key),
+        other => Err(format!("{other} key given, ed25519 required")),
+    }
+}
+
 #[derive(Parser, Debug)]
 pub enum Cli {
     Start {
@@ -75,7 +85,12 @@ pub enum Cli {
         #[arg(long, env("MPC_ENV"))]
         env: String,
         /// This node's account ed25519 secret key
-        #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
+        #[arg(
+            long,
+            env("MPC_ACCOUNT_SK"),
+            hide_env_values = true,
+            value_parser = ed25519_secret_key
+        )]
         account_sk: SecretKey,
         /// The web port for this server
         /// this is default to 3000 for all nodes now.
@@ -85,8 +100,13 @@ pub enum Cli {
         /// The cipher secret key used to decrypt messages between nodes.
         #[arg(long, env("MPC_CIPHER_SK"), hide_env_values = true)]
         cipher_sk: String,
-        /// The secret key used to sign messages to be sent between nodes.
-        #[arg(long, env("MPC_SIGN_SK"), hide_env_values = true)]
+        /// The ed25519 secret key used to sign messages to be sent between nodes.
+        #[arg(
+            long,
+            env("MPC_SIGN_SK"),
+            hide_env_values = true,
+            value_parser = ed25519_secret_key
+        )]
         sign_sk: SecretKey,
         /// Ethereum Indexer options
         #[command(flatten)]
@@ -1056,6 +1076,16 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn only_ed25519_secret_keys_are_accepted() {
+        let ed25519 = SecretKey::from_random(near_crypto::KeyType::ED25519);
+        assert_eq!(ed25519_secret_key(&ed25519.to_string()).unwrap(), ed25519);
+        let secp256k1 = SecretKey::from_random(near_crypto::KeyType::SECP256K1);
+        let err = ed25519_secret_key(&secp256k1.to_string()).unwrap_err();
+        assert!(err.contains("ed25519 required"), "{err}");
+        assert!(ed25519_secret_key("not a key").is_err());
+    }
 
     const ETH_CONTRACT_ADDRESS: &str = "f8bdC0612361a1E49a8E01423d4C0cFc5dF4791A";
 
