@@ -63,7 +63,9 @@ const ENV: &str = "test";
 
 /// Dummy endpoint, replaced once the chain's test container is running.
 fn placeholder_url() -> url::Url {
-    "http://placeholder.invalid".parse().expect("a valid literal")
+    "http://placeholder.invalid"
+        .parse()
+        .expect("a valid literal")
 }
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
 ///
