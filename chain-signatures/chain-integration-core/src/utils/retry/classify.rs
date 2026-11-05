@@ -61,10 +61,15 @@ impl RpcFailure {
         Self::with_verdict(status, !http_status_read_retryable(status), message)
     }
 
-    /// Constructs a new `RpcFailure` with an explicit verdict, for cases where
-    /// a chain error code overrules the status (e.g. a concurrent-submission
-    /// 409 that is worth retrying). Throttle detection still reads the status.
-    pub fn with_verdict(status: StatusCode, terminal: bool, message: String) -> Self {
+    /// Retryable verdict that keeps the status — throttle detection still
+    /// reads it — for a chain error code overruling the envelope (a
+    /// concurrent-submission 409, a mempool rejection riding a 4xx).
+    pub fn retryable_with_status(status: StatusCode, message: String) -> Self {
+        Self::with_verdict(status, false, message)
+    }
+
+    /// Constructs an `RpcFailure` with the given status, terminal flag, and message.
+    fn with_verdict(status: StatusCode, terminal: bool, message: String) -> Self {
         Self {
             message,
             status: Some(status),

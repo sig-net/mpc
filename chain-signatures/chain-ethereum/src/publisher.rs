@@ -448,7 +448,8 @@ fn send_error(err: ContractError) -> anyhow::Error {
         {
             return match status {
                 Some(status) => {
-                    RpcFailure::with_verdict(status, false, format!("RPC Error: {message}")).into()
+                    RpcFailure::retryable_with_status(status, format!("RPC Error: {message}"))
+                        .into()
                 }
                 None => RpcFailure::retryable(format!("RPC Error: {message}")).into(),
             };

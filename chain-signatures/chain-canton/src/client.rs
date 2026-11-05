@@ -274,7 +274,7 @@ impl CantonClient {
                     let in_flight = code.as_deref() == Some("SUBMISSION_ALREADY_IN_FLIGHT");
                     let message = format!("{context} failed: {status} {body}");
                     let failure = if in_flight {
-                        RpcFailure::with_verdict(status, false, message)
+                        RpcFailure::retryable_with_status(status, message)
                     } else {
                         RpcFailure::with_status(status, message)
                     };
