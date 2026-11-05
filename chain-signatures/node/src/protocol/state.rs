@@ -150,6 +150,7 @@ pub struct JoiningState {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum NodeStatus {
+    /// No longer reported by this version; older peers still send it.
     Starting,
     Started,
     Generating {
@@ -174,11 +175,8 @@ pub enum NodeStatus {
     },
 }
 
-#[derive(Default)]
 #[allow(clippy::large_enum_variant)]
 pub enum NodeState {
-    #[default]
-    Starting,
     Started(StartedState),
     Generating(GeneratingState),
     WaitingForConsensus(WaitingForConsensusState),
@@ -190,7 +188,6 @@ pub enum NodeState {
 impl Display for NodeState {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match *self {
-            NodeState::Starting => write!(f, "Starting"),
             NodeState::Started(_) => write!(f, "Started"),
             NodeState::Generating(_) => write!(f, "Generating"),
             NodeState::WaitingForConsensus(_) => write!(f, "WaitingForConsensus"),
@@ -209,15 +206,10 @@ pub struct Node {
     test_key_info_watcher_tx: watch::Sender<Option<NodeKeyInfo>>,
 }
 
-impl Default for Node {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Node {
-    pub fn new() -> Self {
-        let (watcher_tx, watcher_rx) = watch::channel(NodeStatus::Starting);
+    /// A node that starts from the key share read at startup, `None` for a fresh node.
+    pub fn new(persistent_node_data: Option<KeyShare>) -> Self {
+        let (watcher_tx, watcher_rx) = watch::channel(NodeStatus::Started);
         #[cfg(feature = "test-feature")]
         let (test_key_info_watcher_tx, test_key_info_watcher) = watch::channel(None);
         let watcher = NodeStateWatcher {
@@ -226,7 +218,9 @@ impl Node {
             test_key_info_watcher,
         };
         Self {
-            state: NodeState::Starting,
+            state: NodeState::Started(StartedState {
+                persistent_node_data,
+            }),
             watcher_tx,
             watcher,
             #[cfg(feature = "test-feature")]
@@ -242,9 +236,6 @@ impl Node {
         match &self.state {
             NodeState::Started(_) => {
                 let _ = self.watcher_tx.send(NodeStatus::Started);
-            }
-            NodeState::Starting => {
-                let _ = self.watcher_tx.send(NodeStatus::Starting);
             }
             NodeState::Generating(state) => {
                 let _ = self.watcher_tx.send(NodeStatus::Generating {
@@ -339,7 +330,6 @@ impl NodeState {
                         public_key: stored.public_key,
                     })
             }
-            NodeState::Starting => None,
             NodeState::Generating(_state) => None,
             NodeState::WaitingForConsensus(state) => Some(NodeKeyInfo {
                 private_share: state.private_share,

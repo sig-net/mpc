@@ -168,7 +168,6 @@ impl MpcSignProtocol {
                 NodeState::Resharing(_) => 500,
                 NodeState::Running(_) => 100,
 
-                NodeState::Starting => 1000,
                 NodeState::Started(_) => 1000,
                 NodeState::WaitingForConsensus(_) => 1000,
                 NodeState::Joining(_) => 1000,

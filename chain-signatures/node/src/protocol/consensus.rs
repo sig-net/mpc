@@ -878,18 +878,6 @@ impl<G: Governance> ConsensusProtocol<G> for NodeState {
         contract_state: ProtocolState,
     ) -> NodeState {
         match self {
-            NodeState::Starting => {
-                let persistent_node_data = match ctx.keystore.load().await {
-                    Ok(data) => data,
-                    Err(err) => {
-                        tracing::error!(?err, "failed to load persistent node data, retrying...");
-                        return NodeState::Starting;
-                    }
-                };
-                NodeState::Started(StartedState {
-                    persistent_node_data,
-                })
-            }
             NodeState::Started(state) => state.advance(ctx, gov, contract_state).await,
             NodeState::Generating(state) => state.advance(ctx, gov, contract_state).await,
             NodeState::WaitingForConsensus(state) => state.advance(ctx, gov, contract_state).await,

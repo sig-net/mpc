@@ -523,6 +523,7 @@ impl MpcFixtureNodeBuilder {
         ));
 
         let backlog = Backlog::new();
+        let key_share = storage.keystore.load().await.unwrap();
 
         let protocol = MpcSignProtocol::new_test(
             self.participant_info.account_id.clone(),
@@ -534,7 +535,7 @@ impl MpcFixtureNodeBuilder {
 
         // start task running the protocol
         let account_id = protocol.my_account_id().clone();
-        let node = protocol::Node::new();
+        let node = protocol::Node::new(key_share);
         let node_state = node.watch();
         let _protocol_handle = tokio::spawn(protocol.run(
             node,
