@@ -265,3 +265,44 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
 
     otlp_guard
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{LogFormat, Options};
+    use clap::{CommandFactory as _, Parser as _};
+
+    fn parse(extra: &[&str]) -> Result<Options, clap::Error> {
+        Options::try_parse_from(["test"].into_iter().chain(extra.iter().copied()))
+    }
+
+    /// The declared defaults, pinned: a change here changes every deployment that
+    /// sets nothing. Read from the command so `MPC_*` variables in the shell do not
+    /// leak in.
+    #[test]
+    fn defaults_are_pinned() {
+        let command = Options::command();
+        let default = |id: &str| {
+            let arg = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .unwrap_or_else(|| panic!("{id} exists"));
+            arg.get_default_values()[0].to_string_lossy().into_owned()
+        };
+        assert_eq!(default("log_format"), "plain");
+        assert_eq!(default("opentelemetry_level"), "off");
+        assert_eq!(default("otlp_endpoint"), "http://localhost:4318");
+    }
+
+    #[test]
+    fn log_format_accepts_plain_and_json_only() {
+        assert_eq!(
+            parse(&["--log-format", "json"]).unwrap().log_format,
+            LogFormat::Json
+        );
+        assert_eq!(
+            parse(&["--log-format", "plain"]).unwrap().log_format,
+            LogFormat::Plain
+        );
+        assert!(parse(&["--log-format", "gcp"]).is_err());
+    }
+}
