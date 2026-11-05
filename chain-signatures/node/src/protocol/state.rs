@@ -150,8 +150,6 @@ pub struct JoiningState {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum NodeStatus {
-    /// No longer reported by this version; older peers still send it.
-    Starting,
     Started,
     Generating {
         participants: Vec<Participant>,
