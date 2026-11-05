@@ -106,7 +106,7 @@ pub enum Cli {
         #[command(flatten)]
         tron: TronArgs,
         /// URL at which other nodes reach this node's web port, e.g. `https://node.example.org`.
-        #[arg(long, env("MPC_LOCAL_ADDRESS"))]
+        #[arg(long, env("MPC_LOCAL_ADDRESS"), value_parser = parse_peer_address)]
         my_address: Url,
         /// Storage options
         #[command(flatten)]
@@ -115,6 +115,18 @@ pub enum Cli {
         #[command(flatten)]
         log_options: logs::Options,
     },
+}
+
+/// `Url` alone accepts `node.example.org:8080`, reading the host as the scheme,
+/// and the contract cannot change a participant's URL once it has joined.
+fn parse_peer_address(s: &str) -> Result<Url, String> {
+    let url = Url::parse(s).map_err(|e| format!("`{s}` is not a valid URL: {e}"))?;
+    match (url.scheme(), url.host()) {
+        ("http" | "https", Some(_)) => Ok(url),
+        (scheme, _) => Err(format!(
+            "`--my-address` must be an http/https URL with a host, got scheme `{scheme}`"
+        )),
+    }
 }
 
 pub async fn run(cmd: Cli) -> anyhow::Result<()> {
@@ -1047,6 +1059,22 @@ mod tests {
     use super::*;
 
     const ETH_CONTRACT_ADDRESS: &str = "f8bdC0612361a1E49a8E01423d4C0cFc5dF4791A";
+
+    #[test]
+    fn peer_address_must_be_http_or_https_with_a_host() {
+        for ok in ["http://10.0.0.1:3000", "https://node.example.org"] {
+            assert!(parse_peer_address(ok).is_ok(), "{ok} must be accepted");
+        }
+        for bad in [
+            "node.example.org:8080",
+            "localhost:3000",
+            "ws://node.example.org",
+            "file:///tmp/node",
+            "node.example.org",
+        ] {
+            assert!(parse_peer_address(bad).is_err(), "{bad} must be rejected");
+        }
+    }
 
     /// A listener that never replies stands in for a stalled Redis.
     #[tokio::test]
