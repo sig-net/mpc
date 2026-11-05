@@ -1,3 +1,4 @@
+use solana_sdk::pubkey::Pubkey;
 use std::fmt;
 use std::time::Duration;
 
@@ -25,7 +26,7 @@ pub struct SolConfig {
     /// Solana RPC http URL
     pub rpc_http_url: String,
     /// The program address to watch
-    pub program_address: String,
+    pub program_address: Pubkey,
     /// Indexer polling tunables.
     pub indexer: SolIndexerConfig,
 }

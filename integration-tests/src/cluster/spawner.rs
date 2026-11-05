@@ -289,9 +289,9 @@ impl ClusterSpawner {
         // Enable Solana by setting a placeholder if not already configured
         if self.cfg.sol.is_none() {
             self.cfg.sol = Some(SolConfig {
-                account_sk: String::new(),      // Will be filled in later
-                rpc_http_url: String::new(),    // Will be filled in later
-                program_address: String::new(), // Will be filled in later
+                account_sk: String::new(),           // Will be filled in later
+                rpc_http_url: String::new(),         // Will be filled in later
+                program_address: Default::default(), // Will be filled in later
                 indexer: Default::default(),
             });
         }

@@ -838,7 +838,9 @@ impl Solana {
         SolConfig {
             account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
             rpc_http_url: self.rpc_address.clone(),
-            program_address,
+            program_address: program_address
+                .parse()
+                .expect("the deployed program address is a pubkey"),
             indexer: Default::default(),
         }
     }
