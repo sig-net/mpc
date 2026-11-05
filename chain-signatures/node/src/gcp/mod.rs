@@ -8,6 +8,8 @@ use std::time::Duration;
 pub enum Error {
     #[error("GCP auth error: {0}")]
     Auth(#[from] google_cloud_auth::errors::CredentialsError),
+    #[error("GCP access token not issued within {REQUEST_TIMEOUT:?}")]
+    TokenTimeout,
     #[error("GCP API error ({status}): {message}")]
     Api {
         status: reqwest::StatusCode,
@@ -23,7 +25,8 @@ pub enum Error {
 
 const SECRET_MANAGER_ENDPOINT: &str = "https://secretmanager.googleapis.com";
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
-/// A Secret Manager call that has not completed by then fails instead of hanging.
+/// The access token fetch and the Secret Manager call each fail after this
+/// instead of hanging.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
@@ -122,7 +125,9 @@ impl SecretManagerService {
         url: &str,
         body: Option<Vec<u8>>,
     ) -> Result<reqwest::Response, Error> {
-        let token = self.credentials.access_token().await?;
+        let token = tokio::time::timeout(REQUEST_TIMEOUT, self.credentials.access_token())
+            .await
+            .map_err(|_| Error::TokenTimeout)??;
         let mut request = self.http.request(method, url).bearer_auth(token.token);
         if let Some(body) = body {
             request = request.header(reqwest::header::CONTENT_TYPE, "application/json");
