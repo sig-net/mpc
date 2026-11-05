@@ -124,7 +124,12 @@ impl CantonClient {
     }
 
     fn json_api_endpoint(&self, path: &str) -> String {
-        format!("{}{}", self.config.json_api_url, path)
+        // A host-only `Url` renders with a trailing slash; `path` brings its own.
+        format!(
+            "{}{}",
+            self.config.json_api_url.as_str().trim_end_matches('/'),
+            path
+        )
     }
 
     pub async fn auth_post(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
@@ -445,10 +450,10 @@ mod tests {
 
     fn mock_canton_config(url: &str) -> CantonConfig {
         CantonConfig {
-            json_api_url: url.to_string(),
-            json_api_ws_url: url.replace("http", "ws"),
+            json_api_url: url.parse().unwrap(),
+            json_api_ws_url: url.replace("http", "ws").parse().unwrap(),
             auth: CantonAuthConfig {
-                token_url: format!("{url}/token"),
+                token_url: format!("{url}/token").parse().unwrap(),
                 client_id: "test-client".to_string(),
                 client_secret: "test-secret".to_string(),
                 audience: "test-audience".to_string(),

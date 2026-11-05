@@ -146,7 +146,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         })?;
 
         let client = SolanaClient::for_indexer(
-            config.rpc_http_url.clone(),
+            config.rpc_http_url.to_string(),
             program_id,
             Arc::new(NoopPublisherTelemetry), // Indexer does not publish
             shared_backoff,

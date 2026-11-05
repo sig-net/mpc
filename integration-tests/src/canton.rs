@@ -535,10 +535,14 @@ canton.participants.sandbox.ledger-api {{
         // MPC runtime config must use the runtime user plus the SigNetwork party,
         // not the app/test user that submits SignRequest workflow commands.
         CantonConfig {
-            json_api_url: self.json_api_url.clone(),
-            json_api_ws_url: self.json_api_ws_url.clone(),
+            json_api_url: self.json_api_url.parse().expect("a sandbox url"),
+            json_api_ws_url: self.json_api_ws_url.parse().expect("a sandbox url"),
             auth: CantonAuthConfig {
-                token_url: self.oidc_provider.token_url().to_string(),
+                token_url: self
+                    .oidc_provider
+                    .token_url()
+                    .parse()
+                    .expect("a sandbox url"),
                 client_id: self.ledger_api_user.clone(),
                 client_secret: LOCAL_OIDC_CLIENT_SECRET.to_string(),
                 audience: LOCAL_OIDC_AUDIENCE.to_string(),
@@ -875,10 +879,10 @@ fn canton_test_client_config(
     party_id: &str,
 ) -> CantonConfig {
     CantonConfig {
-        json_api_url: base_url.to_string(),
-        json_api_ws_url: ws_url.to_string(),
+        json_api_url: base_url.parse().expect("a sandbox url"),
+        json_api_ws_url: ws_url.parse().expect("a sandbox url"),
         auth: CantonAuthConfig {
-            token_url: token_url.to_string(),
+            token_url: token_url.parse().expect("a sandbox url"),
             client_id: ledger_api_user.to_string(),
             client_secret: LOCAL_OIDC_CLIENT_SECRET.to_string(),
             audience: LOCAL_OIDC_AUDIENCE.to_string(),

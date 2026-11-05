@@ -61,7 +61,7 @@ pub enum Cli {
     Start {
         /// NEAR RPC address
         #[arg(long, env("MPC_NEAR_RPC"), hide_env_values = true)]
-        near_rpc: String,
+        near_rpc: Url,
         /// MPC contract id
         #[arg(long, env("MPC_CONTRACT_ID"))]
         mpc_contract_id: AccountId,
@@ -176,7 +176,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // NEAR as a source chain exists for the integration tests only, and the
             // test harness builds this binary with `test-feature`.
             if cfg!(feature = "test-feature") {
-                let rpc_client = near_fetch::Client::new(&near_rpc);
+                let rpc_client = near_fetch::Client::new(near_rpc.as_str());
                 let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
                 mpc_chain_near::run(
                     &mpc_contract_id,
@@ -213,7 +213,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 rpc_channel,
                 rpc_executor,
             } = RpcHandles::new(
-                &near_rpc,
+                near_rpc.as_str(),
                 &my_address,
                 &network,
                 &mpc_contract_id,
@@ -646,7 +646,7 @@ impl StorageHandles {
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
         let keystore = Keystore::init(storage_options, account_id).await?;
-        let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
+        let redis_pool = redis_pool(storage_options.redis_url.clone())?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
@@ -1167,7 +1167,7 @@ mod tests {
     fn sol_config_with_bogus_rpc() -> SolConfig {
         SolConfig {
             account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
-            rpc_http_url: "http://127.0.0.1:1".into(),
+            rpc_http_url: "http://127.0.0.1:1".parse().unwrap(),
             program_address: mpc_chain_solana::Pubkey::new_unique().to_string(),
             indexer: Default::default(),
         }
