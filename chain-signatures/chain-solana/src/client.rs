@@ -1009,6 +1009,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undecodable_batch_bodies_retry() {
+        // a misrouted gateway answering 200 with HTML: the decode failure is
+        // statusless and must classify retryable, not terminal
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body("<html>502 Bad Gateway</html>")
+            .expect(3)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        assert!(client.fetch_blocks(&[100]).await.unwrap().is_empty());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn network_skipped_slots_are_terminal_with_their_code() {
         for (code, message) in [
             (JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "Slot was skipped"),
