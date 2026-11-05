@@ -85,16 +85,9 @@ fn block_absent(code: i64) -> bool {
 // classify typed verdict enums instead of walking anyhow chains.
 fn classify_read(e: ClientError) -> anyhow::Error {
     let carrier = match e.kind() {
-        ClientErrorKind::Reqwest(req) => Some(match req.status() {
-            Some(status) => RpcFailure::read_status(status, format!("{req:#}")),
-            // statusless (connection): explicit retryable so the fallback
-            // can't misread a ":429" port
-            None => RpcFailure::retryable(format!("{req:#}")),
-        }),
-        ClientErrorKind::RpcError(RpcError::RpcResponseError { code, .. })
-            if block_absent(*code) =>
-        {
-            Some(RpcFailure::terminal(format!("{e}")))
+        ClientErrorKind::Reqwest(req) => Some(read_carrier(req)),
+        ClientErrorKind::RpcError(RpcError::RpcResponseError { code, .. }) => {
+            block_absent(*code).then(|| RpcFailure::terminal(format!("{e}")))
         }
         // deliberate default: NodeUnhealthy, not-yet-available, request/parse
         // shapes stay retryable
@@ -104,14 +97,20 @@ fn classify_read(e: ClientError) -> anyhow::Error {
     carrier.map_or(err, anyhow::Error::new)
 }
 
+/// Read carrier for a bare reqwest error.
+fn read_carrier(e: &reqwest::Error) -> RpcFailure {
+    match e.status() {
+        Some(status) => RpcFailure::read_status(status, format!("{e:#}")),
+        // statusless (connection): explicit retryable so the fallback
+        // can't misread a ":429" port
+        None => RpcFailure::retryable(format!("{e:#}")),
+    }
+}
+
 /// The batch fetch bypasses the solana client, so its errors arrive bare.
 // TODO: transitional boundary helper — same replacement as `classify_read`.
 fn classify_batch(e: reqwest::Error) -> anyhow::Error {
-    let carrier = match e.status() {
-        Some(status) => RpcFailure::read_status(status, format!("{e}")),
-        None => RpcFailure::retryable(format!("{e}")),
-    };
-    anyhow::Error::new(carrier)
+    anyhow::Error::new(read_carrier(&e))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -332,10 +331,9 @@ impl SolanaClient {
                     .json(&requests)
                     .send()
                     .await
+                    .and_then(|resp| resp.error_for_status())
                     .map_err(classify_batch)?;
                 let responses = resp
-                    .error_for_status()
-                    .map_err(classify_batch)?
                     .json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>()
                     .await
                     .map_err(classify_batch)?;
