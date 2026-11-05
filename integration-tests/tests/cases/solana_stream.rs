@@ -104,7 +104,10 @@ async fn next_sign_command(
 async fn spawn_supervised_stream(
     config: SolConfig,
     backlog: Backlog,
-) -> Result<(tokio::task::JoinHandle<()>, mpsc::Receiver<SignCommand>)> {
+) -> Result<(
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    mpsc::Receiver<SignCommand>,
+)> {
     let indexer = SolanaIndexer::new(
         config,
         backlog.clone(),
@@ -114,8 +117,11 @@ async fn spawn_supervised_stream(
     .context("failed to create SolanaIndexer")?;
 
     let (sign_tx, sign_rx) = mpsc::channel::<SignCommand>(16);
-    let (rpc_tx, _rpc_rx) = mpsc::channel::<RpcAction>(16);
+    let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(16);
     let rpc = RpcChannel { tx: rpc_tx };
+    // Checkpoint votes go out on this channel; drain it so a restart can
+    // resubmit the votes it recovers instead of failing on a closed channel.
+    tokio::spawn(async move { while rpc_rx.recv().await.is_some() {} });
 
     let account_id: AccountId = "test.near".parse().unwrap();
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
@@ -154,7 +160,7 @@ async fn spawn_supervised_stream(
             ),
             NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     Ok((run_handle, sign_rx))
@@ -587,7 +593,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             ),
             NoopChainTelemetry,
         )
-        .await;
+        .await
     });
 
     solana
