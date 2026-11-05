@@ -26,7 +26,8 @@ jobs:
 
     steps:
       - name: Comment on PR if this is a re-run
-        if: github.run_attempt > 1 && github.event_name == 'pull_request'
+        # Fork PRs get a read-only token, so commenting would fail the job.
+        if: github.run_attempt > 1 && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -117,7 +118,8 @@ jobs:
 
     steps:
       - name: Comment on PR if this is a re-run
-        if: github.run_attempt > 1 && github.event_name == 'pull_request'
+        # Fork PRs get a read-only token, so commenting would fail the job.
+        if: github.run_attempt > 1 && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           RUN_ATTEMPT: ${{ github.run_attempt }}
