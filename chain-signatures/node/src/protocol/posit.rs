@@ -396,6 +396,11 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         self.posits.len()
     }
 
+    /// Whether `id` has an open posit, proposed by us or accepted from a peer.
+    pub fn contains(&self, id: &Id) -> bool {
+        self.posits.contains_key(id)
+    }
+
     pub fn len_proposed(&self) -> usize {
         self.posits
             .values()

@@ -557,7 +557,7 @@ properties of the network make that legitimate. None is specific to this
 design. The network is n nodes, at most f < n/3 of them faulty, the rest
 correct, with a signing threshold t, f+1 <= t <= n - f.
 
-* Threshold (Section 2 of protocol-properties.md). Fewer than t nodes cannot
+* Threshold (system-model.md). Fewer than t nodes cannot
   produce a signature or an attestation, correct nodes alone can, and
   correct nodes eventually produce and publish what a request in their
   backlog needs.

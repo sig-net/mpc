@@ -75,6 +75,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn attestation_metadata_preserves_checkpoint_encoding() {
+        for (outcome, fixture) in [
+            (AttestationOutcomeKind::Executed, "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a6c6f7574636f6d655f6b696e64684578656375746564"),
+            (AttestationOutcomeKind::Failed, "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a6c6f7574636f6d655f6b696e64664661696c6564"),
+            (AttestationOutcomeKind::Unviable, "a36b6b65795f76657273696f6e016c626c6f636b5f686569676874182a6c6f7574636f6d655f6b696e6468556e766961626c65"),
+        ] {
+            let metadata = AttestationMetadata {
+                key_version: 1,
+                block_height: 42,
+                outcome_kind: outcome,
+            };
+            let fixture = hex::decode(fixture).unwrap();
+            let mut encoded = Vec::new();
+            ciborium::into_writer(&metadata, &mut encoded).unwrap();
+            assert_eq!(encoded, fixture);
+            let recovered: AttestationMetadata = ciborium::from_reader(fixture.as_slice()).unwrap();
+            assert_eq!(recovered, metadata);
+        }
+    }
+
+    #[test]
     fn outcome_tags_match_the_sdk_enum() {
         for (kind, tag) in [
             (AttestationOutcomeKind::Executed, 0),
