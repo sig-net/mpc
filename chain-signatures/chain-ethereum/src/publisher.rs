@@ -17,7 +17,7 @@ use alloy::transports::{
 use http::StatusCode;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
-    utils::retry::{http_status_read_retryable, retry_rpc, RpcFailure, SharedBackoff},
+    utils::retry::{retry_rpc, RpcFailure, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{SignId, Signature};
@@ -463,12 +463,7 @@ fn send_error(err: ContractError) -> anyhow::Error {
 fn receipt_poll_error(err: AlloyTransportError) -> anyhow::Error {
     let (status, message) = rpc_error_parts(&err);
     match status.and_then(|status| StatusCode::from_u16(status).ok()) {
-        Some(status) => RpcFailure::with_verdict(
-            status,
-            !http_status_read_retryable(status),
-            format!("RPC Error: {message}"),
-        )
-        .into(),
+        Some(status) => RpcFailure::read_status(status, format!("RPC Error: {message}")).into(),
         None => anyhow::Error::new(err),
     }
 }

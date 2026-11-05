@@ -32,8 +32,10 @@ pub fn http_status_read_retryable(status: StatusCode) -> bool {
 }
 
 /// Typed RPC failure chain for classifying errors in the retry logic.
-// TODO: once every chain client attaches typed failures, the string-matching
-// fallbacks in `is_retryable`/`is_provider_throttled` get deleted.
+// TODO: two-step transition — the string fallbacks in `is_retryable`/
+// `is_provider_throttled` go once every chain attaches typed failures; the
+// carrier and chain-side classify helpers go once retry/publish boundaries
+// return typed verdict enums (variant matching, not chain walks).
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{message}")]
 pub struct RpcFailure {
@@ -50,6 +52,11 @@ impl RpcFailure {
     /// The verdict is derived from the status via [`http_status_retryable`].
     pub fn with_status(status: StatusCode, message: String) -> Self {
         Self::with_verdict(status, !http_status_retryable(status), message)
+    }
+
+    /// Read-path verdict for a status, per [`http_status_read_retryable`].
+    pub fn read_status(status: StatusCode, message: String) -> Self {
+        Self::with_verdict(status, !http_status_read_retryable(status), message)
     }
 
     /// Constructs a new `RpcFailure` with an explicit verdict, for cases where
@@ -309,6 +316,23 @@ mod tests {
         for n in [402, 408, 409, 410, 422, 429, 301, 500] {
             assert!(http_status_read_retryable(status(n)), "{n}");
         }
+    }
+
+    #[test]
+    fn read_status_derives_the_verdict_from_the_read_partition() {
+        let status = |n: u16| StatusCode::from_u16(n).unwrap();
+        let throttled: anyhow::Error =
+            RpcFailure::read_status(status(429), "rate limited".into()).into();
+        assert!(is_retryable(&throttled));
+        assert!(is_provider_throttled(&throttled));
+        // 409 is send-terminal but read-retryable
+        let conflict: anyhow::Error =
+            RpcFailure::read_status(status(409), "conflict".into()).into();
+        assert!(is_retryable(&conflict));
+        assert!(!is_provider_throttled(&conflict));
+        let not_found: anyhow::Error =
+            RpcFailure::read_status(status(404), "not found".into()).into();
+        assert!(!is_retryable(&not_found));
     }
 
     #[test]
