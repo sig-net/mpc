@@ -349,7 +349,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
                 let client = client.clone();
                 async move {
                     let slots = res?;
-                    let mut blocks = client.fetch_blocks_for_slots(slots.clone()).await;
+                    let mut blocks = client.fetch_blocks_for_slots(slots.clone()).await?;
                     let items: Vec<CatchupBlockItem> = slots
                         .into_iter()
                         .map(|s| {

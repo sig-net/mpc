@@ -1,7 +1,7 @@
 use anyhow::Context as _;
 use futures_util::StreamExt;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, RetryConfig, RpcFailure, SharedBackoff},
+    utils::retry::{is_retryable, retry_rpc, RetryConfig, RpcFailure, SharedBackoff},
     PublisherTelemetry,
 };
 use serde::{Deserialize, Serialize};
@@ -292,10 +292,12 @@ impl SolanaClient {
         )
     }
 
-    // TODO: consider returning a Result instead of swallowing errors and returning an empty map. This would allow the caller to handle errors more explicitly.
-    pub async fn fetch_blocks(&self, slots: &[u64]) -> HashMap<u64, UiConfirmedBlock> {
+    pub async fn fetch_blocks(
+        &self,
+        slots: &[u64],
+    ) -> anyhow::Result<HashMap<u64, UiConfirmedBlock>> {
         if slots.is_empty() {
-            return HashMap::new();
+            return Ok(HashMap::new());
         }
 
         let max_attempts = self.catchup_retry.max_times;
@@ -367,8 +369,20 @@ impl SolanaClient {
             }
         );
 
-        // If batch fails entirely, return an empty map
-        res.unwrap_or_default()
+        match res {
+            Ok(results) => Ok(results),
+            // swallowing a terminal failure would fan it out into a
+            // sequential per-slot refetch storm
+            Err(e) if !is_retryable(&e) => Err(e),
+            // a per-slot refetch can succeed where the batch failed
+            Err(e) => {
+                tracing::warn!(
+                    error = %format_args!("{e:#}"),
+                    "batch block fetch failed; degrading to per-slot refetch"
+                );
+                Ok(HashMap::new())
+            }
+        }
     }
 
     pub async fn fetch_signatures_from_latest(
@@ -486,7 +500,7 @@ impl SolanaClient {
     pub async fn fetch_blocks_for_slots(
         &self,
         slots: BTreeSet<u64>,
-    ) -> BTreeMap<u64, SolanaCatchupBlock> {
+    ) -> anyhow::Result<BTreeMap<u64, SolanaCatchupBlock>> {
         tracing::trace!(total_slots = slots.len(), "fetching blocks for slots...");
         #[cfg(feature = "bench")]
         let started_at = std::time::Instant::now();
@@ -498,14 +512,15 @@ impl SolanaClient {
 
         let mut stream = futures_util::stream::iter(chunks)
             .map(|chunk| async move {
-                let results = self.fetch_blocks(&chunk).await;
-                (chunk, results)
+                let results = self.fetch_blocks(&chunk).await?;
+                Ok::<_, anyhow::Error>((chunk, results))
             })
             .buffer_unordered(MAX_CONCURRENT_FETCH);
 
         let mut blocks_by_height = BTreeMap::new();
         let mut count = 0;
-        while let Some((chunk, mut results)) = stream.next().await {
+        while let Some(res) = stream.next().await {
+            let (chunk, mut results) = res?;
             count += chunk.len();
             tracing::trace!(count, "fetched blocks batch progress");
             for slot in chunk {
@@ -520,7 +535,7 @@ impl SolanaClient {
         #[cfg(feature = "bench")]
         crate::bench::add_batch_fetch_time(started_at.elapsed());
 
-        blocks_by_height
+        Ok(blocks_by_height)
     }
 }
 
@@ -697,7 +712,7 @@ mod tests {
             .await;
 
         let client = test_client(&server.url());
-        let result = client.fetch_blocks(&[HEIGHT_1, HEIGHT_2]).await;
+        let result = client.fetch_blocks(&[HEIGHT_1, HEIGHT_2]).await.unwrap();
 
         assert_eq!(result.len(), 2);
         assert!(result.contains_key(&HEIGHT_1));
@@ -709,7 +724,7 @@ mod tests {
         let server = mockito::Server::new_async().await;
         let client = test_client(&server.url());
         // Should short-circuit without any HTTP call
-        let result = client.fetch_blocks(&[]).await;
+        let result = client.fetch_blocks(&[]).await.unwrap();
         assert!(result.is_empty());
     }
 
@@ -735,7 +750,7 @@ mod tests {
             .await;
 
         let client = test_client(&server.url());
-        let result = client.fetch_blocks(&[HEIGHT_1, HEIGHT_2]).await;
+        let result = client.fetch_blocks(&[HEIGHT_1, HEIGHT_2]).await.unwrap();
 
         assert_eq!(result.len(), 1);
         assert!(result.contains_key(&HEIGHT_1));
@@ -743,7 +758,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_blocks_returns_empty_on_persistent_failure() {
+    async fn retryable_batch_failures_degrade_to_a_refetch() {
         let mut server = mockito::Server::new_async().await;
 
         let _mock = server
@@ -756,7 +771,7 @@ mod tests {
         let client = test_client(&server.url());
 
         // fetch_blocks swallows errors and returns empty map
-        let result = client.fetch_blocks(&[100, 101]).await;
+        let result = client.fetch_blocks(&[100, 101]).await.unwrap();
 
         assert!(result.is_empty());
     }
@@ -779,7 +794,7 @@ mod tests {
 
         // Request 110 slots
         let slots: std::collections::BTreeSet<u64> = (1..=110).collect();
-        let result = client.fetch_blocks_for_slots(slots).await;
+        let result = client.fetch_blocks_for_slots(slots).await.unwrap();
 
         assert_eq!(result.len(), 110);
         // Because the mock returned an empty array, all 110 requests should map to Missing
@@ -1060,7 +1075,7 @@ mod tests {
             SharedBackoff::with_cooldowns(Duration::from_millis(300), Duration::from_millis(600));
         let client = test_client_with_gate(&server.url(), gate.clone());
         let start = std::time::Instant::now();
-        let blocks = client.fetch_blocks(&[100, 101]).await;
+        let blocks = client.fetch_blocks(&[100, 101]).await.unwrap();
         assert!(blocks.is_empty());
         // attempts 2 and 3 waited out the 300ms and 600ms windows
         assert!(
@@ -1073,7 +1088,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_classic_client_errors_fail_fast() {
+    async fn terminal_batch_failures_propagate() {
         let mut server = mockito::Server::new_async().await;
         let not_found = server
             .mock("POST", "/")
@@ -1084,9 +1099,30 @@ mod tests {
 
         let gate = SharedBackoff::new();
         let client = test_client_with_gate(&server.url(), gate.clone());
-        assert!(client.fetch_blocks(&[100]).await.is_empty());
+        let err = client.fetch_blocks(&[100]).await.unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
         assert_eq!(gate.remaining(), Duration::ZERO);
         not_found.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn terminal_batch_failures_propagate_through_for_slots() {
+        let mut server = mockito::Server::new_async().await;
+        let unauthorized = server
+            .mock("POST", "/")
+            .with_status(401)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        // Err, not an Ok full of Missing — no per-slot refetch fan-out
+        let err = client
+            .fetch_blocks_for_slots(BTreeSet::from([100, 101]))
+            .await
+            .unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        unauthorized.assert_async().await;
     }
 
     #[tokio::test]
