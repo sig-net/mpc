@@ -59,7 +59,7 @@ fn thread_network_name(docker: &DockerClient) -> String {
     })
 }
 
-const ENV: &str = "integration-tests";
+const ENV: &str = "test";
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
 ///
 /// When enabled, uses hardcoded key shares from fixture data to start nodes in

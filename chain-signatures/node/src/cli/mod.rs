@@ -68,10 +68,9 @@ pub enum Cli {
         /// This node's account id
         #[arg(long, env("MPC_ACCOUNT_ID"))]
         account_id: AccountId,
-        /// Environment this node runs in (e.g. `testnet`, `mainnet`). Labels logs
-        /// and telemetry.
-        #[arg(long, env("MPC_ENV"))]
-        env: String,
+        /// Deployment this node belongs to. Labels logs and telemetry.
+        #[arg(long, env("MPC_ENV"), value_enum)]
+        env: logs::Env,
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
         account_sk: SecretKey,
@@ -141,7 +140,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             storage_options,
             log_options,
         } => {
-            let _guard = logs::setup(&env, account_id.as_str(), &log_options).await;
+            let _guard = logs::setup(env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
             crate::metrics::init_metrics(
                 &account_id,
