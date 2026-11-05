@@ -187,6 +187,60 @@ impl IndexerConfig {
     }
 }
 
+/// The networks the integration knows; the only ones an operator may select.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EthNetwork {
+    Sepolia,
+    Mainnet,
+    /// Local dev chain: never reports finalized blocks and never reorgs.
+    Anvil,
+}
+
+impl EthNetwork {
+    /// Every variant, in `--help` order.
+    pub const ALL: [Self; 3] = [Self::Sepolia, Self::Mainnet, Self::Anvil];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sepolia => "sepolia",
+            Self::Mainnet => "mainnet",
+            Self::Anvil => "anvil",
+        }
+    }
+
+    /// Whether requests are emitted without waiting for finality. Only anvil:
+    /// it never reports finalized blocks and never reorgs.
+    pub const fn is_optimistic(self) -> bool {
+        matches!(self, Self::Anvil)
+    }
+
+    /// The EIP-155 chain id.
+    pub const fn chain_id(self) -> u64 {
+        match self {
+            Self::Mainnet => 1,
+            Self::Sepolia => 11_155_111,
+            Self::Anvil => 31_337,
+        }
+    }
+}
+
+impl fmt::Display for EthNetwork {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for EthNetwork {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|network| network.as_str() == s)
+            .ok_or_else(|| anyhow::anyhow!("unknown ethereum network {s:?}"))
+    }
+}
+
 #[derive(Clone)]
 pub struct EthConfig {
     /// The ethereum account secret key used to sign eth respond txn.
@@ -195,8 +249,7 @@ pub struct EthConfig {
     pub execution_rpc_http_url: Url,
     /// The contract address to watch
     pub contract_address: Address,
-    /// must be one of sepolia, mainnet, anvil
-    pub network: String,
+    pub network: EthNetwork,
     /// Emit requests without waiting for block finality. Only for demos and
     /// integration tests on dev chains (anvil never reports finalized blocks
     /// and never reorgs); must stay `false` on live networks.
@@ -213,20 +266,9 @@ impl EthConfig {
         self.account_sk.address().to_string()
     }
 
-    /// Whether requests on `network` are emitted without waiting for finality.
-    /// Only `anvil`: it never reports finalized blocks and never reorgs.
-    pub fn is_optimistic_network(network: &str) -> bool {
-        network == "anvil"
-    }
-
     /// The EIP-155 chain id of `network`.
-    pub fn chain_id(&self) -> Option<u64> {
-        match self.network.as_str() {
-            "mainnet" => Some(1),
-            "sepolia" => Some(11_155_111),
-            "anvil" => Some(31_337),
-            _ => None,
-        }
+    pub fn chain_id(&self) -> u64 {
+        self.network.chain_id()
     }
 }
 

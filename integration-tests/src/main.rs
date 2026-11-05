@@ -22,7 +22,7 @@ enum Cli {
         )]
         eth_account_sk: String,
         #[arg(long, default_value = "anvil")]
-        eth_network: String,
+        eth_network: mpc_chain_ethereum::EthNetwork,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
                     contract_address: eth_contract_address
                         .parse()
                         .map_err(|e| anyhow::anyhow!("invalid eth contract address: {e}"))?,
-                    optimistic_requests: EthConfig::is_optimistic_network(&eth_network),
+                    optimistic_requests: eth_network.is_optimistic(),
                     network: eth_network,
                     gas: Default::default(),
                     indexer: Default::default(),
