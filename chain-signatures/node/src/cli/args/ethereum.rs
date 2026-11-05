@@ -3,6 +3,15 @@ use clap::builder::{PossibleValuesParser, TypedValueParser as _};
 use mpc_chain_ethereum::{EthConfig, EthNetwork, IndexerConfig};
 use secrecy::{ExposeSecret, SecretString};
 
+/// Networks a production node may serve.
+#[cfg(not(feature = "test-feature"))]
+const NETWORKS: &[EthNetwork] = &[EthNetwork::Sepolia, EthNetwork::Mainnet];
+
+/// Test builds add anvil, whose requests skip finality: it never reports
+/// finalized blocks.
+#[cfg(feature = "test-feature")]
+const NETWORKS: &[EthNetwork] = &[EthNetwork::Sepolia, EthNetwork::Mainnet, EthNetwork::Anvil];
+
 /// The indexer's production cadence, as `mpc-chain-ethereum` defines it.
 #[cfg(not(feature = "test-feature"))]
 fn indexer_config() -> IndexerConfig {
@@ -34,7 +43,7 @@ pub struct EthArgs {
         long,
         env("MPC_ETH_ACCOUNT_SK"),
         hide_env_values = true,
-        requires_all = ["eth_execution_rpc_http_url", "eth_contract_address"]
+        requires_all = ["eth_execution_rpc_http_url", "eth_contract_address", "eth_network"]
     )]
     pub eth_account_sk: Option<SecretString>,
     /// The contract address to watch, with or without the `0x` prefix
@@ -51,16 +60,15 @@ pub struct EthArgs {
     )]
     pub eth_execution_rpc_http_url: Option<String>,
 
-    /// The network the RPC serves. On anvil (local dev chains) requests are
-    /// emitted without waiting for finality: it never reports finalized blocks.
+    /// The network the RPC serves.
     #[arg(
         long,
         env("MPC_ETH_NETWORK"),
-        default_value_t = EthNetwork::Sepolia,
-        value_parser = PossibleValuesParser::new(EthNetwork::ALL.map(EthNetwork::as_str))
+        requires = "eth_account_sk",
+        value_parser = PossibleValuesParser::new(NETWORKS.iter().map(|network| network.as_str()))
             .try_map(|name| name.parse::<EthNetwork>()),
     )]
-    pub eth_network: EthNetwork,
+    pub eth_network: Option<EthNetwork>,
 }
 
 impl EthArgs {
@@ -72,6 +80,7 @@ impl EthArgs {
             .expose_secret()
             .parse()
             .context("invalid eth account sk")?;
+        let network = self.eth_network.context("eth network is required")?;
         let execution_rpc_http_url = self
             .eth_execution_rpc_http_url
             .context("eth execution rpc http url is required")?
@@ -87,8 +96,8 @@ impl EthArgs {
             account_sk, // this is safe because EthConfig has custom Debug implementation that redacts the account_sk field
             execution_rpc_http_url,
             contract_address,
-            optimistic_requests: self.eth_network.is_optimistic(),
-            network: self.eth_network,
+            optimistic_requests: network.is_optimistic(),
+            network,
             // TODO: currently we only have Ethereum and Sepolia, so defaults
             // are fine. Make these configurable when we add more chains.
             rpc: Default::default(),
@@ -108,17 +117,22 @@ mod tests {
     const RPC_URL: &str = "http://127.0.0.1:8545";
     const CONTRACT: &str = "0x1234567890123456789012345678901234567890";
 
-    fn configured(extra: &[&str]) -> EthArgs {
-        let argv = [
+    fn configured(network: &str) -> EthArgs {
+        EthArgs::parse_from(argv(network, CONTRACT))
+    }
+
+    fn argv<'a>(network: &'a str, contract: &'a str) -> [&'a str; 9] {
+        [
             "test",
             "--eth-account-sk",
             ACCOUNT_SK,
             "--eth-execution-rpc-http-url",
             RPC_URL,
             "--eth-contract-address",
-            CONTRACT,
-        ];
-        EthArgs::parse_from(argv.into_iter().chain(extra.iter().copied()))
+            contract,
+            "--eth-network",
+            network,
+        ]
     }
 
     #[test]
@@ -131,7 +145,7 @@ mod tests {
 
     #[test]
     fn into_config_parses_the_configured_fields() {
-        let config = configured(&["--eth-network", "mainnet"])
+        let config = configured("mainnet")
             .into_config()
             .unwrap()
             .expect("configured chain");
@@ -147,21 +161,45 @@ mod tests {
         );
     }
 
-    /// Only anvil skips finality; it never reports finalized blocks.
     #[test]
-    fn only_anvil_is_optimistic() {
-        for (network, optimistic) in [("sepolia", false), ("mainnet", false), ("anvil", true)] {
-            let config = configured(&["--eth-network", network])
+    fn production_networks_wait_for_finality() {
+        for network in ["sepolia", "mainnet"] {
+            let config = configured(network)
                 .into_config()
                 .unwrap()
                 .expect("configured chain");
-            assert_eq!(config.optimistic_requests, optimistic, "{network}");
+            assert!(!config.optimistic_requests, "{network}");
         }
+    }
+
+    /// Only anvil skips finality; it never reports finalized blocks.
+    #[cfg(feature = "test-feature")]
+    #[test]
+    fn anvil_is_optimistic_in_test_builds() {
+        let config = configured("anvil")
+            .into_config()
+            .unwrap()
+            .expect("configured chain");
+        assert!(config.optimistic_requests);
+    }
+
+    #[cfg(not(feature = "test-feature"))]
+    #[test]
+    fn anvil_is_rejected_in_production_builds() {
+        assert!(EthArgs::try_parse_from(argv("anvil", CONTRACT)).is_err());
     }
 
     #[test]
     fn unknown_networks_are_rejected_by_the_cli() {
-        assert!(EthArgs::try_parse_from(["test", "--eth-network", "goerli"]).is_err());
+        assert!(EthArgs::try_parse_from(argv("goerli", CONTRACT)).is_err());
+    }
+
+    /// No default network: a configured chain names the network it serves.
+    #[test]
+    fn the_network_is_required_with_the_chain() {
+        let without_network = argv("mainnet", CONTRACT);
+        assert!(EthArgs::try_parse_from(&without_network[..7]).is_err());
+        assert!(EthArgs::try_parse_from(["test", "--eth-network", "mainnet"]).is_err());
     }
 
     #[test]
@@ -174,6 +212,8 @@ mod tests {
             "not a url",
             "--eth-contract-address",
             CONTRACT,
+            "--eth-network",
+            "mainnet",
         ]);
         assert!(args.into_config().is_err());
     }

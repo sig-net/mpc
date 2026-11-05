@@ -10,6 +10,7 @@ use elliptic_curve::CurveArithmetic;
 use integration_tests::{cluster::spawner::ClusterSpawner, containers::Redis};
 use k256::Secp256k1;
 use mpc_node::{
+    config::NetworkConfig,
     mesh::{Mesh, MeshState},
     node_client::NodeClient,
     protocol::{
@@ -123,7 +124,13 @@ fn env() -> (Runtime, SyncEnv) {
             mesh.watch(),
             contract_watcher,
             sync_report_tx,
-            Default::default(),
+            NetworkConfig {
+                sign_sk: near_crypto::SecretKey::from_seed(
+                    near_crypto::KeyType::ED25519,
+                    "sign-encrypt0",
+                ),
+                cipher_sk: mpc_keys::hpke::generate().0,
+            },
         );
 
         SyncEnv {
