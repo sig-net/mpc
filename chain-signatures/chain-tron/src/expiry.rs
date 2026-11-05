@@ -85,9 +85,10 @@ pub(crate) enum ExpiryVerdict {
     Absent { boundary: u64 },
 }
 
-/// Bounds the linear absence walk at one 24 h window of 3 s slots.
-/// tron-wire caps windows at admission (`MAX_WINDOW_MS`), so a breach
-/// means a pre-cap backlog entry or a lying provider.
+/// Bounds the linear absence walk at one 24 h window of 3 s slots,
+/// the ceiling the admission rule sets (doc §4.3, anchored on the
+/// source block's time).
+// TODO: enforce bound at node admission.
 const MAX_WALK_SPAN: u64 = 28_800;
 
 /// Bounds in-flight provider requests across both arms and the span
