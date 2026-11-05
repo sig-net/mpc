@@ -31,11 +31,11 @@ enum Verdict {
 }
 
 impl Verdict {
-    fn carrier(self, message: String) -> Option<RpcFailure> {
+    fn carrier(self, message: String) -> RpcFailure {
         match self {
-            Verdict::Terminal => Some(RpcFailure::terminal(message)),
-            Verdict::Retryable => Some(RpcFailure::retryable(message)),
-            Verdict::Status(status) => Some(RpcFailure::with_status(status, message)),
+            Verdict::Terminal => RpcFailure::terminal(message),
+            Verdict::Retryable => RpcFailure::retryable(message),
+            Verdict::Status(status) => RpcFailure::with_status(status, message),
         }
     }
 }
@@ -45,9 +45,7 @@ impl Verdict {
 fn classify_publish(e: AnchorClientError) -> anyhow::Error {
     let verdict = verdict(&e);
     let err = anyhow::Error::new(e);
-    verdict
-        .carrier(format!("{err:#}"))
-        .map_or(err, anyhow::Error::new)
+    anyhow::Error::new(verdict.carrier(format!("{err:#}")))
 }
 
 /// Determine the verdict for an anchor error.
