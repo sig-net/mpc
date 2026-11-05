@@ -1088,6 +1088,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_statuses_follow_the_read_partition() {
+        // 409 is send-terminal; the read table retries the full budget and
+        // degrades to a refetch — the send table would abort after 1 attempt
+        let mut server = mockito::Server::new_async().await;
+        let conflict = server
+            .mock("POST", "/")
+            .with_status(409)
+            .expect(3)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        assert!(client.fetch_blocks(&[100]).await.unwrap().is_empty());
+        conflict.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn terminal_batch_failures_propagate() {
         let mut server = mockito::Server::new_async().await;
         let not_found = server
