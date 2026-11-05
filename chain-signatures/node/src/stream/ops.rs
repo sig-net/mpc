@@ -579,7 +579,7 @@ pub async fn process_execution_confirmed(
     // An included transaction takes its nonce whatever its outcome.
     let siblings = ctx
         .backlog
-        .take_nonce_siblings(source_chain, entry.execution_tx(), root_pk)
+        .unwatch_nonce_siblings(source_chain, entry.execution_tx(), root_pk)
         .await;
     for sibling in siblings {
         let sibling_id = sibling.execution_tx().id;
@@ -607,7 +607,7 @@ pub(crate) async fn answer_unviable(
     ctx: &StreamContext,
     root_pk: mpc_primitives::PublicKey,
 ) {
-    for entry in ctx.backlog.take_unviable(chain, root_pk).await {
+    for entry in ctx.backlog.unwatch_unviable(chain, root_pk).await {
         let stored = ctx.backlog.entry(chain, &entry.sign_id()).await;
         let Some(height) = stored.and_then(|stored| stored.unviable_at) else {
             continue;

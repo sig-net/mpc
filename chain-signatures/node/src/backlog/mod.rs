@@ -460,9 +460,9 @@ impl Backlog {
         watchers.insert(ExecutionWatch::new(tx, observed_at));
     }
 
-    /// Take the entries of `chain` that `taker`, executed, leaves unexecutable (M4), signed or
-    /// not, that this node has not answered.
-    pub(crate) async fn take_nonce_siblings(
+    /// Unwatch and return the entries of `chain` that `taker`, executed, leaves unexecutable (M4),
+    /// signed or not, that this node has not answered.
+    pub(crate) async fn unwatch_nonce_siblings(
         &self,
         chain: Chain,
         taker: &BidirectionalTx,
@@ -470,7 +470,7 @@ impl Backlog {
     ) -> Vec<SignEntry<Bidirectional<Executing>>> {
         let siblings =
             |entry: &BacklogEntry| entry.awaits_execution() && entry.is_nonce_sibling(taker);
-        self.take_where(chain, siblings, root_pk).await
+        self.unwatch_where(chain, siblings, root_pk).await
     }
 
     /// Record that a Response at `height` reports `taker` included, on every request of `chain`
@@ -485,20 +485,21 @@ impl Backlog {
         }
     }
 
-    /// Take the entries of `chain` a Response left unexecutable that this node has not answered.
-    pub(crate) async fn take_unviable(
+    /// Unwatch and return the entries of `chain` a Response left unexecutable that this node has
+    /// not answered.
+    pub(crate) async fn unwatch_unviable(
         &self,
         chain: Chain,
         root_pk: PublicKey,
     ) -> Vec<SignEntry<Bidirectional<Executing>>> {
         let unviable =
             |entry: &BacklogEntry| entry.unviable_at.is_some() && entry.awaits_execution();
-        self.take_where(chain, unviable, root_pk).await
+        self.unwatch_where(chain, unviable, root_pk).await
     }
 
-    /// Take the entries on `chain` that `pick` selects, to answer them: unwatched, each named
-    /// by its request's id, since nodes may know different transactions of it.
-    async fn take_where(
+    /// Unwatch and return the entries on `chain` that `pick` selects, to answer them. They stay in
+    /// the backlog, each named by its request's id, since nodes may know different transactions.
+    async fn unwatch_where(
         &self,
         chain: Chain,
         pick: impl Fn(&BacklogEntry) -> bool,
@@ -513,7 +514,7 @@ impl Backlog {
                 .cloned()
                 .collect()
         };
-        let mut taken = Vec::new();
+        let mut unwatched = Vec::new();
         for entry in picked {
             let Some(tx) = entry.named_tx(root_pk) else {
                 tracing::error!(sign_id = ?entry.sign_id(), "cannot build a transaction to answer");
@@ -528,14 +529,14 @@ impl Backlog {
                     .remove_owned(&watched.id, watched.source_chain, &watched.sign_id());
                 observed_at = observed_at.or(removed.and_then(|watch| watch.respond_observed_at));
             }
-            taken.push(SignEntry {
+            unwatched.push(SignEntry {
                 chain,
                 request: entry.request,
                 state: Bidirectional(Executing(ExecutionWatch::new(tx, observed_at))),
                 backlog: self.clone(),
             });
         }
-        taken
+        unwatched
     }
 
     /// The executing entry a confirmation attests: by the entry's own
