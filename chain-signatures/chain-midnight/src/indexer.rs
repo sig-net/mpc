@@ -725,13 +725,12 @@ mod tests {
         MidnightConfig {
             node_url: "http://127.0.0.1:1".parse().unwrap(),
             central_address: crate::MidnightAddress::from_bytes(SINGLETON),
-            publisher: crate::PublisherConfig {
-                funding_seed: "ab".repeat(32),
-                proof_server_url: "http://127.0.0.1:1".parse().unwrap(),
-                indexer_url: "http://127.0.0.1:1/api/v3/graphql".parse().unwrap(),
-                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
-                ..Default::default()
-            },
+            publisher: crate::PublisherConfig::new(
+                "ab".repeat(32),
+                "http://127.0.0.1:1".parse().unwrap(),
+                "http://127.0.0.1:1/api/v3/graphql".parse().unwrap(),
+                "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
+            ),
             rpc: Default::default(),
             indexer: Default::default(),
         }

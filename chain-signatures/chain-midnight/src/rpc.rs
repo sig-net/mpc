@@ -1703,7 +1703,7 @@ mod tests {
         let config = crate::config::MidnightConfig {
             node_url: node_url.parse().expect("MIDNIGHT_NODE_URL must be a URL"),
             central_address: crate::config::MidnightAddress::from_bytes(singleton),
-            publisher: Default::default(),
+            publisher: crate::config::PublisherConfig::unused(),
             rpc: Default::default(),
             indexer: Default::default(),
         };
@@ -1802,7 +1802,7 @@ mod tests {
         crate::config::MidnightConfig {
             node_url: format!("http://{address}").parse().unwrap(),
             central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
-            publisher: Default::default(),
+            publisher: crate::config::PublisherConfig::unused(),
             rpc: Default::default(),
             indexer: Default::default(),
         }
@@ -2396,7 +2396,7 @@ mod tests {
         let mut config = crate::config::MidnightConfig {
             node_url: format!("http://{address}").parse().unwrap(),
             central_address: crate::config::MidnightAddress::from_bytes([0xab; 32]),
-            publisher: Default::default(),
+            publisher: crate::config::PublisherConfig::unused(),
             rpc: Default::default(),
             indexer: Default::default(),
         };

@@ -879,10 +879,6 @@ mod tests {
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             publisher: PublisherConfig {
                 intent_gen_command: vec!["sh".to_string(), "-c".to_string(), script],
-                funding_seed: "ab".repeat(32),
-                proof_server_url: "http://127.0.0.1:6300".parse().unwrap(),
-                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".parse().unwrap(),
-                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
                 request_timeout: Duration::from_secs(5),
                 restart_backoff: RetryConfig {
                     min_delay: Duration::from_millis(1),
@@ -890,7 +886,12 @@ mod tests {
                     max_times: 2,
                     jitter: false,
                 },
-                ..Default::default()
+                ..PublisherConfig::new(
+                    "ab".repeat(32),
+                    "http://127.0.0.1:6300".parse().unwrap(),
+                    "http://127.0.0.1:8088/api/v3/graphql".parse().unwrap(),
+                    "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
+                )
             },
             rpc: Default::default(),
             indexer: Default::default(),
