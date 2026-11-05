@@ -271,7 +271,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                 .parse()
                 .context("invalid deployed contract address")?,
             network: "anvil".to_string(),
-            refresh_finalized_interval: 1_000,
             optimistic_requests: true,
             gas: Default::default(),
             indexer: Default::default(),
@@ -287,13 +286,13 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     }
 
     let storage_options = mpc_node::storage::Options {
-        gcp_project_id: spawner.gcp_project_id.clone(),
+        gcp_project_id: None,
         sk_share_secret_id: None,
         sk_share_local_path: Some(sk_share_local_path),
         redis_url: redis.internal_address.clone(),
     };
 
-    let log_options = logs::Options::test();
+    let log_options = logs::Options::default();
 
     // If using pregenerated keys, inject them into storage before nodes start
     if spawner.pregenerated_keys.is_enabled() {
@@ -301,20 +300,17 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         for (i, account) in spawner.accounts.iter().enumerate() {
             let participant = Participant::from(i as u32);
             if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
-                let mut secret_storage = storage::secret_storage::init(
-                    None, // No GCP service for tests
-                    &storage_options,
-                    account.id(),
-                );
+                let mut keystore =
+                    storage::keystore::Keystore::init(&storage_options, account.id()).await?;
 
-                let persistent_data = mpc_node::protocol::state::PersistentNodeData {
+                let persistent_data = mpc_node::protocol::state::KeyShare {
                     epoch: 0,
                     private_share: key_info.private_share,
                     public_key: key_info.public_key,
                 };
 
                 let account_id = account.id().to_string();
-                if let Err(err) = secret_storage.store(&persistent_data).await {
+                if let Err(err) = keystore.store(&persistent_data).await {
                     tracing::error!(?err, "failed to store pregenerated key");
                     continue;
                 }

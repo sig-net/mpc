@@ -26,8 +26,8 @@ pub fn env_u64(name: &str, default: Option<u64>) -> anyhow::Result<u64> {
 
 /// Build an [`EthConfig`] from the standard set of benchmark env vars
 /// (`MPC_ETH_EXECUTION_RPC_HTTP_URL`, `MPC_ETH_CONTRACT_ADDRESS`,
-/// `MPC_ETH_NETWORK`, `MPC_ETH_REFRESH_FINALIZED_INTERVAL`). Like the node,
-/// the bench waits for finality unless the network is `anvil`.
+/// `MPC_ETH_NETWORK`). Like the node, the bench waits for finality unless
+/// the network is `anvil`.
 pub fn make_config() -> anyhow::Result<EthConfig> {
     let network = std::env::var("MPC_ETH_NETWORK").unwrap_or_else(|_| "sepolia".to_string());
     Ok(EthConfig {
@@ -43,8 +43,6 @@ pub fn make_config() -> anyhow::Result<EthConfig> {
             .map_err(|e| anyhow!("invalid MPC_ETH_CONTRACT_ADDRESS: {e}"))?,
         optimistic_requests: EthConfig::is_optimistic_network(&network),
         network,
-        // Production finality-watch cadence.
-        refresh_finalized_interval: env_u64("MPC_ETH_REFRESH_FINALIZED_INTERVAL", Some(10_000))?,
         rpc: Default::default(),
         gas: Default::default(),
         publisher: Default::default(),
@@ -77,9 +75,8 @@ pub async fn run_catchup(
         EthereumIndexer::new(config, state, NoopChainTelemetry, SharedBackoff::new()).await?;
     let (events_tx, mut events_rx) = chain_event_channel();
 
-    // Maintain the finalized head the same way `run()` does, so
-    // MPC_ETH_OPTIMISTIC_REQUESTS=false (the default) exercises the production
-    // finality-watch path.
+    // Maintain the finalized head the same way `run()` does, so a non-anvil
+    // network exercises the production finality-watch path.
     let cancel = CancellationToken::new();
     let _watcher = indexer.spawn_finalized_head_watcher(cancel.clone());
 

@@ -49,9 +49,9 @@ filter:
 
 | Output | Destination | Enabled by | Filter |
 |---|---|---|---|
-| FMT | console (stderr), human-readable | off GCP (Stackdriver replaces it) | `RUST_LOG` |
+| FMT | console (stderr), human-readable | `MPC_LOG_FORMAT=plain` / `--log-format plain` (default) | `RUST_LOG` |
 | OTLP | OpenTelemetry collector → tracing backends | `MPC_OPENTELEMETRY_LEVEL` / `--opentelemetry-level` (default `off`); endpoint `MPC_OTLP_ENDPOINT` / `--otlp-endpoint` | `MPC_OPENTELEMETRY_LEVEL` (info/debug/trace) |
-| Stackdriver | GCP Cloud Logging, structured stderr | on GCP unless `MPC_DISABLE_GCP_LOGS` / `--disable-gcp-logs` | `RUST_LOG` |
+| Stackdriver | GCP Cloud Logging, structured stderr | `MPC_LOG_FORMAT=json` / `--log-format json` | `RUST_LOG` |
 
 ### Local OTLP setup
 

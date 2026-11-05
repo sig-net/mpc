@@ -74,6 +74,7 @@ Three things are held per node rather than kept per request: (i) the mesh's acti
 stateDiagram-v2
     state "<b>Waiting for participants</b><br/>1. round timeout starts ticking<br/>2. wait for t active peers<br/>3. determine role" as WaitingForParticipants
     state "<b>Reserving</b><br/>1. take one of the chain's 4 permits<br/>2. reserve a presignature with at least t active holders<br/>3. send PROPOSE to those active holders" as Reserving
+    state "<b>Sitting out</b><br/>1. release the permit<br/>2. wait for the round to end" as SittingOut
     state "Posit" as PositOut
 
     [*] --> WaitingForParticipants
@@ -82,7 +83,8 @@ stateDiagram-v2
     Reserving --> PositOut: PROPOSE sent
 
     WaitingForParticipants --> WaitingForParticipants: mesh channel closed
-    Reserving --> WaitingForParticipants: no permit or presignature
+    Reserving --> SittingOut: less than ROUND_TIMEOUT_FLOOR left
+    SittingOut --> WaitingForParticipants: round over
 
     classDef outside fill:#eef1f4,stroke:#9aa4b0,color:#48525e,stroke-dasharray:5 3
     class PositOut outside
@@ -94,11 +96,16 @@ mesh channel closes.
 
 The round timeout `round_timeout(r)` is already running while it waits, because
 it started when the round began. If the wait outlasts the round timeout, the
-states after it get no time at all: the proposer's permit wait and presignature
-fetch and the deliberator's wait for `PROPOSE` are each given the time left in the round, which
-is now zero, so they fail on the first poll and round `r` ends without a
+states after it get no time at all: the proposer's wait for a permit and a
+presignature, and the deliberator's wait for `PROPOSE`, fail on the first poll, and round `r` ends without a
 `PROPOSE` going out. The next round restarts the clock, so the cost is one wasted
 round, with a different proposer.
+
+A posit needs at least `ROUND_TIMEOUT_FLOOR`, the shortest round (§6), but
+permits are granted first come, first served, so under a backlog they reach
+proposers near the end of their round. A proposer that still lacks a permit or
+a presignature when only `ROUND_TIMEOUT_FLOOR` is left therefore sits out the
+rest of the round, so its next round starts with everyone else's.
 
 ## 3. Inside Posit
 
@@ -311,7 +318,7 @@ which is why agreeing on `r` is all the nodes need:
 with the round. The clock starts before `t` participants are known, and every
 state shares whatever is left of it.
 
-Round 0 gets 20s. Round 1 starts at a 2s floor and each later round grows 1.15x,
+Round 0 gets 20s. Round 1 starts at a 2s floor (`ROUND_TIMEOUT_FLOOR`) and each later round grows 1.15x,
 up to a 600s ceiling. Short early rounds rotate quickly past dead proposers;
 long later rounds outlast the skew between nodes that indexed the request at
 different times.
@@ -319,7 +326,8 @@ different times.
 | State | Time limit |
 |---|---|
 | Waiting for participants | none |
-| Reserving | round timeout |
+| Reserving | round timeout, less `ROUND_TIMEOUT_FLOOR` |
+| Sitting out | rest of the round timeout |
 | Waiting for Propose | round timeout |
 | Propose sent | round timeout |
 | Waiting for Start | round timeout, but at least `2 * ACCEPT_POSIT_TIMEOUT` |

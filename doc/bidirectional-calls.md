@@ -9,7 +9,8 @@ executed on a target chain, and is told the outcome at most once. The
 response is final when it comes: the transaction executed, it reverted, or
 it can never execute. Until then nothing arrives. A transaction that never
 executes is answered only when another request's transaction takes its
-place; otherwise it is never answered. The rest of the document is what the
+place or its validity window closes; otherwise it is never answered. The
+rest of the document is what the
 MPC, the signet contract and the library have to do for that to hold.
 
 Organization:
@@ -119,8 +120,8 @@ Happy path:
   chain's own numbering (a slot on Solana),
   of the final block that holds the transaction the outcome describes:
   req.tx for Executed and Failed, the transaction that used up its replay
-  protection for Unviable, or for an expired req.tx the first final block
-  past its expiry.
+  protection for Unviable, or for an expired req.tx the first final
+  block at or past the expiry.
 * *Response*: an attestation delivered to the contract that made rid's
   request.
 
@@ -221,7 +222,8 @@ G1 to G3 are safety, G4 and G5 are liveness. G2 and G4 together give
   replay protection as req.tx on the same target chain, the same account
   and nonce on EVM for instance, is included after req was made, and that
   request is answered Executed or Failed; or (b) req.tx has an expiry, no
-  block up to the first final target block past it includes req.tx, and
+  block up to the first final target block at or past it includes
+  req.tx, and
   that block became final after req was made. Then a response to req
   saying Unviable is eventually accepted, unless the response handler
   fails.
@@ -453,9 +455,9 @@ on target chain block at height h finalised on chain target:
             else:
                 local[rid].outcome = Parked, log why        // M3
         else if txid ignores the signature on target
-          and block h is past e.req.tx's expiry:            // M6
-            h_exp = lowest final height past e.req.tx's expiry
-            attest(rid, (h_exp, Unviable, empty))
+          and h is the first block at or past e.req.tx's expiry
+          and no block up to h includes e.req.tx:   // M6
+            attest(rid, (h, Unviable, empty))
 
 attest(rid, att):
     e = backlog[rid]
@@ -548,7 +550,8 @@ Properties:
   in the hash, and describes only target chain state final at that height.
 * M6 The MPC attests Unviable for an expired request only where the
   transaction ID does not depend on the signature, and only if no block
-  up to the first final block past the expiry includes req.tx. It
+  up to the first final block at or past the expiry includes req.tx.
+  It
   attests at that block's height.
 
 ## 5. Why the guarantees hold (sketch)
@@ -558,17 +561,17 @@ properties of the network make that legitimate. None is specific to this
 design. The network is n nodes, at most f < n/3 of them faulty, the rest
 correct, with a signing threshold t, f+1 <= t <= n - f.
 
-* Threshold (Section 2 of protocol-properties.md). Fewer than t nodes cannot
+* Threshold (system-model.md). Fewer than t nodes cannot
   produce a signature or an attestation, correct nodes alone can, and
   correct nodes eventually produce and publish what a request in their
   backlog needs.
 * Agreement. Correct nodes hold the same backlog at a source height, so
   they admit the same requests and hold the same published signatures for
   them, and they compute the same attestation for a rid, as a function of
-  final target chain state and the request's schema only. This needs a
-  node to start processing a source chain at or before the oldest
-  outstanding request, or from a backlog the correct nodes agreed on at
-  its start height; otherwise it never admits the older requests.
+  final target chain state and the request's schema only.
+  This needs a node to start processing a source chain at or before the
+  oldest outstanding request, or from a backlog the correct nodes agreed
+  on at its start height; otherwise it never admits the older requests.
 * Distinct keys (account-derivation.md). The derivation path contains the
   source chain's id and the requesting contract, so different (source
   chain, contract, key parameters) derive different keys, where the key
@@ -672,9 +675,13 @@ a path from B48 through A15; the first at A12 has none.
   the response (C3).
 
   G5 (b): every correct node sees, without a signature (M6), that no
-  block up to the first one past the expiry includes req.tx, and attests
-  Unviable at that block's height, so they agree. That block became
-  final after req was made, so the library accepts the response (C3).
+  block up to the first one at or past the expiry includes req.tx,
+  and
+  attests Unviable at that block's height — the same one on every
+  node, so they sign the same message. The height is at or past the
+  expiry,
+  a block final after req was made, so the library accepts the
+  response (C3).
   The premise needs the chains' clocks roughly in step: admission only
   places the expiry after the source block's time.
 

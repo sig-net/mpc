@@ -11,7 +11,7 @@ const PORT: u16 = 4443;
 pub struct GcsEmulator {
     pub endpoint: String,
     pub bucket: String,
-    _container: ContainerAsync<GenericImage>,
+    container: ContainerAsync<GenericImage>,
     client: Client,
 }
 
@@ -30,7 +30,7 @@ impl GcsEmulator {
         let emulator = Self {
             endpoint,
             bucket: format!("mpc-test-{}", uuid::Uuid::new_v4()),
-            _container: container,
+            container,
             client: Client::builder().timeout(Duration::from_secs(5)).build()?,
         };
         emulator.create_bucket().await?;
@@ -80,5 +80,12 @@ impl GcsEmulator {
             .bytes()
             .await?
             .to_vec())
+    }
+
+    pub async fn stop(&self) -> anyhow::Result<()> {
+        self.container
+            .stop_with_timeout(Some(0))
+            .await
+            .context("stopping the test-owned GCS emulator")
     }
 }

@@ -16,7 +16,7 @@ A node that has run as far ahead of its base as it may stops and waits for a set
 
 ## 1. Background
 
-The model, n nodes of which at most f are faulty, crash-recovery, and the signing threshold t, is that of [protocol-properties.md](protocol-properties.md).
+The model, n nodes of which at most f are faulty, crash-recovery, and the signing threshold t, is that of [system-model.md](system-model.md).
 This doc relies on f < t ≤ n - f: fewer than t nodes cannot sign, and the correct nodes alone can.
 Protocol upgrades, committee and threshold changes are out of scope of this doc.
 

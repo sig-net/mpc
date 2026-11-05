@@ -1,7 +1,6 @@
-<!-- A.B.C is the version in the branch's Cargo.toml: `git show origin/testnet:Cargo.toml | grep ^version`. The diff link resolves once X.Y.Z is tagged. -->
+<!-- A.B.C is the version in the branch's Cargo.toml: `git show origin/testnet:Cargo.toml | grep ^version`. -->
 
-Bumps the workspace version from A.B.C to X.Y.Z on `testnet|mainnet`.
-Full diff: https://github.com/sig-net/mpc/compare/A.B.C...X.Y.Z
+Hotfix for A.B.C on `testnet|mainnet`.
 
 ## Summary
 
@@ -9,7 +8,7 @@ Full diff: https://github.com/sig-net/mpc/compare/A.B.C...X.Y.Z
 
 ## Breaking changes
 
-<!-- Tick `None` or every type that applies, with what breaks and what users must do. Unticked lines can stay or go; they are stripped from the release notes. -->
+<!-- Same types and rules as in a regular PR: tick `None` or every type that applies, with what breaks and what users must do. Unticked lines are stripped from the release notes. -->
 
 - [ ] None
 - [ ] **Node–Node:** …
@@ -26,7 +25,7 @@ Full diff: https://github.com/sig-net/mpc/compare/A.B.C...X.Y.Z
   - [ ] is merged on `develop`
   - [ ] has no counterpart there because the bug no longer exists on `develop`, and the Summary says why
 - [ ] Cherry-picked with `-x`
-- [ ] Patch version bumped and `cargo check` run on this branch only; `develop` untouched
+- [ ] Patch version bumped on this branch only; `develop` untouched
 - [ ] The `regression` issue this closes, if any, is linked
 
 <!-- After merging: tag and publish the release, then hotfix the other branch if it has the bug, see doc/releasing.md. -->

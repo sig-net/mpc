@@ -5,7 +5,9 @@ use anyhow::Context;
 use crate::backlog::{
     AnyProgress, Backlog, BacklogError, Bidirectional, Executing, Final, Initial, Sign, SignEntry,
 };
-use crate::metrics::requests::{record_request_latency, SignRequestStep};
+use crate::metrics::requests::{
+    record_request_latency, SignRequestStep, EXECUTION_WAIT_UNMEASURED,
+};
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
     claims_attestation_key, published_failure, published_midnight_payload,
@@ -504,7 +506,9 @@ async fn settle_unobserved(
 ) -> anyhow::Result<()> {
     let sign_id = entry.sign_id();
     // An unviable transaction is never mined, so no execution event would retire its watch.
-    ctx.backlog.unwatch_execution(tx.target_chain, &tx.id).await;
+    ctx.backlog
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .await;
     entry.complete().await;
     tracing::info!(
         ?sign_id,
@@ -529,8 +533,11 @@ fn execution_status(failed: bool) -> &'static str {
 
 /// Process an execution confirmation emitted by a chain client.
 /// The target chain is the chain where the execution was observed.
+#[allow(clippy::too_many_arguments)]
 pub async fn process_execution_confirmed(
     tx_id: mpc_primitives::BidirectionalTxId,
+    sign_id: SignId,
+    source_chain: Chain,
     block_height: u64,
     result: ExecutionOutcome,
     ctx: &StreamContext,
@@ -539,14 +546,20 @@ pub async fn process_execution_confirmed(
 ) -> anyhow::Result<()> {
     tracing::debug!(
         ?tx_id,
+        ?sign_id,
         ?target_chain,
         block_height,
         "received execution confirmation event"
     );
 
-    let Some(entry) = ctx.backlog.unwatch_execution(target_chain, &tx_id).await else {
+    let Some(entry) = ctx
+        .backlog
+        .executing_entry_for(target_chain, &tx_id, source_chain, &sign_id)
+        .await
+    else {
         tracing::warn!(
             ?tx_id,
+            ?sign_id,
             "executing bidirectional entry not found (maybe already processed)"
         );
         return Ok(());
@@ -717,6 +730,10 @@ async fn answer_execution(
             RequestKind::RespondBidirectional,
             awaiting_execution,
         );
+    } else {
+        EXECUTION_WAIT_UNMEASURED
+            .with_label_values(&[source_chain.as_str()])
+            .inc();
     }
     // The follow-up request belongs to the source chain: a node behind on it may
     // hold a request it has already answered. The requeue at its catchup sends it.
