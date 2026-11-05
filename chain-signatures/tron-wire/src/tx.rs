@@ -39,7 +39,8 @@ impl RawTransaction {
     /// Parses and validates the bytes the multichain API carries for Tron
     /// targets: the bare `raw` message, unsigned by construction. Admission
     /// accepts only what the MPC can faithfully name and sign — canonical
-    /// bytes, one valid trigger contract, reference fields, expiration.
+    /// bytes, one valid trigger contract, reference fields, and
+    /// expiration.
     pub fn parse(bytes: &[u8]) -> anyhow::Result<Self> {
         let raw = RawTransaction::decode(bytes)?;
         // Unknown, duplicated, or non-minimal fields re-encode away, which
@@ -77,10 +78,18 @@ impl RawTransaction {
         Ok((signed.encode_to_vec(), txid))
     }
 
-    /// Validates that the reference fields (`ref_block_bytes`, `ref_block_hash`, and `expiration`) are present and correctly set.
+    /// TaPoS reference fields exactly as the chain encodes them (the
+    /// expiry walk resolves the reference from these) and a present
+    /// expiration.
     fn validate_reference_fields(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.ref_block_bytes.is_empty(), "missing ref_block_bytes");
-        anyhow::ensure!(!self.ref_block_hash.is_empty(), "missing ref_block_hash");
+        anyhow::ensure!(
+            self.ref_block_bytes.len() == 2,
+            "ref_block_bytes must be TaPoS' two bytes"
+        );
+        anyhow::ensure!(
+            self.ref_block_hash.len() == 8,
+            "ref_block_hash must be TaPoS' eight bytes"
+        );
         anyhow::ensure!(self.expiration > 0, "missing expiration");
         Ok(())
     }

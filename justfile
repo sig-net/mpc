@@ -154,11 +154,14 @@ test-tron-tre:
         sleep 1
     done
     [ "$ready" = 1 ] || { echo "TRE did not become ready within 60s" >&2; exit 1; }
+    # Serial: both live gates deploy the same token from the one
+    # deterministic key; concurrent builds share a TRE block window and
+    # produce identical bytes (AlreadyKnown), spread builds do not.
     TRON_ENDPOINT=http://127.0.0.1:{{tre-port}} \
     TRON_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000001 \
     TRON_TOKEN_ARTIFACT=tests/fixtures/tre/gate-token.json \
     TRON_DEADLINE_SECS=60 \
-    cargo test -p mpc-chain-tron --test live_gate -- --ignored --nocapture
+    cargo test -p mpc-chain-tron --test live_gate -- --ignored --nocapture --test-threads 1
 
 # Midnight real-stack tests (ignored by default; each starts a Midnight node/indexer/proof-server,
 # Anvil and an MPC cluster). Runs one named test from cases::midnight_stream, or all of them.
