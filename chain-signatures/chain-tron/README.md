@@ -31,7 +31,7 @@ Core pieces:
   sits at the deterministic boundary — the first solidified block at
   or past the window's end — so every node signs the same message;
   the walk's bounds, deferrals, and cross-pass memoization are
-  documented on `TronWatcher` and in `doc/bidirectional-calls.md` (M6).
+  documented in `src/expiry.rs`.
   Implements `ChainIndexer` purely as the supervision vehicle (no
   block scanning, no catchup).
 
