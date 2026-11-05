@@ -417,7 +417,7 @@ fn batch_publish_error(failure: RpcFailure) -> anyhow::Error {
 /// JSON-RPC message and HTTP status from an RPC error, regardless of
 /// packaging: `ErrorResp` on HTTP 200, or a 4xx envelope (alloy keeps only
 /// the raw body string — alloy-transport-http `reqwest_transport`).
-fn rpc_error_parts(err: &AlloyTransportError) -> (Option<u16>, String) {
+fn rpc_error_parts(err: &AlloyTransportError) -> (Option<StatusCode>, String) {
     match err {
         AlloyRpcError::ErrorResp(payload) => (None, payload.message.to_string()),
         AlloyRpcError::Transport(TransportErrorKind::HttpError(http)) => {
@@ -430,7 +430,7 @@ fn rpc_error_parts(err: &AlloyTransportError) -> (Option<u16>, String) {
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| http.body.clone());
-            (Some(http.status), message)
+            (StatusCode::from_u16(http.status).ok(), message)
         }
         _ => (None, err.to_string()),
     }
@@ -446,7 +446,7 @@ fn send_error(err: ContractError) -> anyhow::Error {
         let lower = message.to_ascii_lowercase();
         if lower.contains("nonce too low") || lower.contains("replacement transaction underpriced")
         {
-            return match status.and_then(|status| StatusCode::from_u16(status).ok()) {
+            return match status {
                 Some(status) => {
                     RpcFailure::with_verdict(status, false, format!("RPC Error: {message}")).into()
                 }
@@ -462,7 +462,7 @@ fn send_error(err: ContractError) -> anyhow::Error {
 /// risk on long polls belongs to the tx-lifecycle TODO.
 fn receipt_poll_error(err: AlloyTransportError) -> anyhow::Error {
     let (status, message) = rpc_error_parts(&err);
-    match status.and_then(|status| StatusCode::from_u16(status).ok()) {
+    match status {
         Some(status) => RpcFailure::read_status(status, format!("RPC Error: {message}")).into(),
         None => anyhow::Error::new(err),
     }
