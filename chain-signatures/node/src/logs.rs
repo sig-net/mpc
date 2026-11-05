@@ -54,6 +54,35 @@ impl Default for Options {
     }
 }
 
+/// Deployment a node belongs to; labels logs and telemetry.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Env {
+    Dev,
+    Testnet,
+    Mainnet,
+    /// Integration tests; test builds only.
+    #[cfg(feature = "test-feature")]
+    Test,
+}
+
+impl Env {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Env::Dev => "dev",
+            Env::Testnet => "testnet",
+            Env::Mainnet => "mainnet",
+            #[cfg(feature = "test-feature")]
+            Env::Test => "test",
+        }
+    }
+}
+
+impl Display for Env {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum LogFormat {
     /// Human-readable lines.
@@ -155,7 +184,7 @@ where
     }
 }
 
-fn get_resource(env: &str, node_id: &str) -> Resource {
+fn get_resource(env: Env, node_id: &str) -> Resource {
     static RESOURCE: OnceLock<Resource> = OnceLock::new();
     RESOURCE
         .get_or_init(|| {
@@ -163,7 +192,7 @@ fn get_resource(env: &str, node_id: &str) -> Resource {
             Resource::builder()
                 .with_service_name("mpc")
                 .with_attributes([
-                    KeyValue::new("deployment.environment.name", env.to_string()),
+                    KeyValue::new("deployment.environment.name", env.as_str()),
                     KeyValue::new("service.instance.id", node_id.to_string()),
                 ])
                 .build()
@@ -171,7 +200,7 @@ fn get_resource(env: &str, node_id: &str) -> Resource {
         .clone()
 }
 
-async fn init_otlp_logs(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkLoggerProvider {
+async fn init_otlp_logs(env: Env, node_id: &str, otlp_endpoint: &str) -> SdkLoggerProvider {
     let exporter = LogExporter::builder()
         .with_http()
         .with_endpoint(format!("{otlp_endpoint}/v1/logs"))
@@ -184,7 +213,7 @@ async fn init_otlp_logs(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkLog
         .build()
 }
 
-async fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkTracerProvider {
+async fn init_otlp_traces(env: Env, node_id: &str, otlp_endpoint: &str) -> SdkTracerProvider {
     let exporter = SpanExporter::builder()
         .with_http()
         .with_endpoint(format!("{otlp_endpoint}/v1/traces"))
@@ -201,7 +230,7 @@ async fn init_otlp_traces(env: &str, node_id: &str, otlp_endpoint: &str) -> SdkT
         .build()
 }
 
-pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
+pub async fn setup(env: Env, node_id: &str, options: &Options) -> OtlpGuard {
     let (otlp_guard, log_otlp_layer, otlp_tracer) = match options.opentelemetry_level {
         OpenTelemetryLevel::OFF => (OtlpGuard::default(), None, None),
         _ => {
@@ -255,7 +284,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
     }));
     // Not logging the endpoint: it may carry a token.
     tracing::info!(
-        env,
+        %env,
         node_id,
         otel_level = ?options.opentelemetry_level,
         otlp = !matches!(options.opentelemetry_level, OpenTelemetryLevel::OFF),
@@ -268,7 +297,7 @@ pub async fn setup(env: &str, node_id: &str, options: &Options) -> OtlpGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogFormat, Options};
+    use super::{Env, LogFormat, Options};
     use clap::{CommandFactory as _, Parser as _};
 
     fn parse(extra: &[&str]) -> Result<Options, clap::Error> {
@@ -304,5 +333,30 @@ mod tests {
             LogFormat::Plain
         );
         assert!(parse(&["--log-format", "gcp"]).is_err());
+    }
+
+    /// The old negative flag is gone, not silently ignored.
+    #[test]
+    fn disable_gcp_logs_is_rejected() {
+        assert!(parse(&["--disable-gcp-logs"]).is_err());
+    }
+
+    /// The `--env` values, pinned: deployments set these names.
+    #[test]
+    fn env_values_are_pinned() {
+        use clap::ValueEnum as _;
+        let names: Vec<_> = Env::value_variants()
+            .iter()
+            .map(|env| env.as_str())
+            .collect();
+        let expected: &[&str] = if cfg!(feature = "test-feature") {
+            &["dev", "testnet", "mainnet", "test"]
+        } else {
+            &["dev", "testnet", "mainnet"]
+        };
+        assert_eq!(names, expected);
+        for env in Env::value_variants() {
+            assert_eq!(Env::from_str(env.as_str(), false).unwrap(), *env);
+        }
     }
 }
