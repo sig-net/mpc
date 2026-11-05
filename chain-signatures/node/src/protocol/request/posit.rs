@@ -211,11 +211,11 @@ impl PositPhase {
 
         let mut remaining = state.budget.remaining();
         if is_deliberator {
-            // We just sent an Accept to the proposer. The proposer might wait up to ACCEPT_POSIT_TIMEOUT
-            // to gather more accepts before sending Start.
+            // We just sent an Accept to the proposer. Before sending Start, the proposer might wait up to
+            // ACCEPT_POSIT_TIMEOUT to gather more accepts, then commit the presignature reservation.
             // We must wait at least that long so we don't abandon the round after promising to participate,
             // which would cause the proposer's generation phase to hang.
-            let min_wait = 2 * ACCEPT_POSIT_TIMEOUT;
+            let min_wait = ROUND_TIMEOUT_FLOOR;
             if remaining < min_wait {
                 remaining = min_wait;
             }

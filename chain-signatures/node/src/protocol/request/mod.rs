@@ -65,8 +65,8 @@ const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "
 const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Shortest a round may be. A round has to fit a Propose broadcast plus accept
-/// gathering, and an accepted deliberator keeps waiting twice
-/// [`ACCEPT_POSIT_TIMEOUT`] no matter what the budget says. Below that, a round
+/// gathering, and an accepted deliberator keeps waiting this long for Start no
+/// matter what the budget says. Below that, a round
 /// cannot complete and rotating through it is pure churn.
 const ROUND_TIMEOUT_FLOOR: Duration = ACCEPT_POSIT_TIMEOUT
     .saturating_mul(2)

@@ -330,7 +330,7 @@ different times.
 | Sitting out | rest of the round timeout |
 | Waiting for Propose | round timeout |
 | Propose sent | round timeout |
-| Waiting for Start | round timeout, but at least `2 * ACCEPT_POSIT_TIMEOUT` |
+| Waiting for Start | round timeout, but at least `ROUND_TIMEOUT_FLOOR` |
 | Acquiring, Signing | the generation protocol's own timeouts |
 
 `Waiting for Start` is the only state with a floor under its wait. That floor
