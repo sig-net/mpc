@@ -186,7 +186,7 @@ impl EthereumTestEnvironment {
             account_sk: self.sandbox.secret_key.parse().unwrap(),
             execution_rpc_http_url: self.sandbox.external_http_endpoint.parse().unwrap(),
             contract_address: self.contract_address,
-            network: "anvil".to_string(),
+            network: mpc_chain_ethereum::EthNetwork::Anvil,
             optimistic_requests,
             gas: Default::default(),
             // The indexer runs in-process here, so poll as fast as a test node.
