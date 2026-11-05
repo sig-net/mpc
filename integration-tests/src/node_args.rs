@@ -37,12 +37,6 @@ impl Args {
         self.0.push(value.to_string());
     }
 
-    fn switch(&mut self, name: &str, on: bool) {
-        if on {
-            self.0.push(name.to_string());
-        }
-    }
-
     fn chains(&mut self, cfg: &NodeConfig) {
         if let Some(eth) = &cfg.eth {
             self.eth(eth);
@@ -69,10 +63,6 @@ impl Args {
         self.flag("--eth-execution-rpc-http-url", &eth.execution_rpc_http_url);
         self.flag("--eth-contract-address", eth.contract_address);
         self.flag("--eth-network", &eth.network);
-        self.flag(
-            "--eth-refresh-finalized-interval",
-            eth.refresh_finalized_interval,
-        );
     }
 
     fn sol(&mut self, sol: &SolConfig) {
@@ -132,7 +122,9 @@ impl Args {
     }
 
     fn storage(&mut self, storage: &storage::Options) {
-        self.flag("--gcp-project-id", &storage.gcp_project_id);
+        if let Some(id) = &storage.gcp_project_id {
+            self.flag("--gcp-project-id", id);
+        }
         if let Some(id) = &storage.sk_share_secret_id {
             self.flag("--sk-share-secret-id", id);
         }
@@ -145,6 +137,6 @@ impl Args {
     fn logs(&mut self, logs: &logs::Options) {
         self.flag("--opentelemetry-level", logs.opentelemetry_level);
         self.flag("--otlp-endpoint", &logs.otlp_endpoint);
-        self.switch("--disable-gcp-logs", logs.disable_gcp_logs);
+        self.flag("--log-format", logs.log_format);
     }
 }
