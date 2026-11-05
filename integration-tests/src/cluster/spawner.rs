@@ -163,7 +163,7 @@ pub struct ClusterSpawner {
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
-    pub program_address: Option<String>,
+    pub program_address: Option<mpc_chain_solana::Pubkey>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
@@ -299,7 +299,7 @@ impl ClusterSpawner {
     }
 
     /// Set the Solana program address to watch for events.
-    pub fn program_address(mut self, address: String) -> Self {
+    pub fn program_address(mut self, address: mpc_chain_solana::Pubkey) -> Self {
         self.program_address = Some(address);
         self
     }
@@ -431,7 +431,7 @@ impl IntoFuture for ClusterSpawner {
                 let solana = self.spawn_solana().await;
 
                 // Deploy the core contracts and get the program address
-                let program_address = if let Some(addr) = self.program_address.clone() {
+                let program_address = if let Some(addr) = self.program_address {
                     // Use provided program address
                     addr
                 } else {
