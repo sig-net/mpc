@@ -261,40 +261,17 @@ pub(crate) async fn process_respond_event(
         return advance_bidirectional_to_execution(entry, respond_event, root_pk, ctx).await;
     }
 
-    // A later signature of the request: an execution under it must be found too (#1428).
-    let Some(stored) = ctx.backlog.entry(source_chain, &sign_id).await else {
-        return Ok(());
-    };
-    let first_leg = &stored.request;
-    let SignKind::SignBidirectional(event) = &first_leg.kind else {
-        return Ok(());
-    };
-    mpc_crypto::verify_signature(
-        root_pk,
-        first_leg.args.epsilon,
-        first_leg.args.payload,
-        &respond_event.signature,
-    )?;
-    // A first signature, on an entry answered as a sibling: a node that has not answered it
-    // quarantines it (see `advance_bidirectional_to_execution`), so this one must too.
-    if stored.tx_ids.is_empty() {
-        if let Err(err) = event.validate() {
-            tracing::error!(
-                ?sign_id,
-                ?source_chain,
-                ?err,
-                "quarantining bidirectional request that can never advance"
-            );
-            ctx.backlog.remove(source_chain, &sign_id).await;
+    if let Some(entry) = entry.cast::<Bidirectional<BidirectionalProgress>>() {
+        let kept = entry
+            .record_published_transaction_signature(respond_event.signature, root_pk)
+            .await?;
+        if !kept {
             ctx.sign_tx
                 .send(SignCommand::Completion(sign_id))
                 .await
                 .context("sign command channel closed")?;
-            return Ok(());
         }
     }
-    let tx = event.to_bidirectional_tx(sign_id.request_id, respond_event.signature, root_pk)?;
-    ctx.backlog.add_published_tx(Arc::new(tx)).await;
     Ok(())
 }
 

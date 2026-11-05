@@ -235,7 +235,6 @@ pub fn mock_bidirectional_tx(id: SignId, source_chain: Chain) -> BidirectionalTx
     }
 }
 
-/// Create a mock bidirectional transaction from a u8 seed without Arc wrapping.
 /// The root key mock transactions derive their account from.
 pub fn mock_root_pk() -> mpc_primitives::PublicKey {
     k256::AffinePoint::GENERATOR
@@ -256,6 +255,7 @@ pub fn mock_unsigned_eth_tx(nonce: u64, value: u64) -> Vec<u8> {
     rlp.out().to_vec()
 }
 
+/// Create a mock bidirectional transaction from a u8 seed without Arc wrapping.
 pub fn mock_tx(id: u8) -> BidirectionalTx {
     mock_bidirectional_tx(SignId::from_u8(id), Chain::Solana)
 }
