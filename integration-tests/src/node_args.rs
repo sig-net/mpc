@@ -23,10 +23,7 @@ pub fn start(ctx: &Context, node: &NodeEnvConfig) -> Vec<String> {
     args.flag("--cipher-sk", hex::encode(node.cipher_sk.to_bytes()));
     args.flag("--sign-sk", &node.sign_sk);
     args.flag("--web-port", node.web_port);
-    args.flag(
-        "--my-address",
-        format!("http://127.0.0.1:{}", node.web_port),
-    );
+    args.flag("--my-address", node.address());
     args.chains(&node.cfg);
     args.storage(&ctx.storage_options);
     args.logs(&ctx.log_options);

@@ -35,6 +35,13 @@ pub struct NodeEnvConfig {
     pub binary_path: Option<PathBuf>,
 }
 
+impl NodeEnvConfig {
+    /// URL peers and the harness use to reach this node; also what it registers in the contract.
+    pub fn address(&self) -> String {
+        format!("http://127.0.0.1:{}", self.web_port)
+    }
+}
+
 impl fmt::Debug for NodeEnvConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NodeConfig")
@@ -125,6 +132,7 @@ impl Node {
 
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
+        let address = config.address();
         let args = node_args::start(ctx, &config);
 
         let mpc_node_id = format!("multichain/{}", config.account.id());
@@ -134,7 +142,6 @@ impl Node {
             &mpc_node_id,
             args,
         )?;
-        let address = format!("http://127.0.0.1:{web_port}");
         tracing::info!("node is starting at {address}");
         utils::ping_until_ok(&mut process, &address, 120).await?;
         tracing::info!(node_account_id = %config.account.id(), ?address, "node started");

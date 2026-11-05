@@ -351,7 +351,7 @@ pub async fn dry_host(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
                 account.id().clone(),
                 CandidateInfo {
                     account_id: account.id().as_str().parse().unwrap(),
-                    url: format!("http://127.0.0.1:{0}", node_cfg.web_port),
+                    url: node_cfg.address(),
                     cipher_pk: node_cfg.cipher_sk.public_key().to_bytes(),
                     sign_pk: node_cfg.sign_sk.public_key().to_string().parse().unwrap(),
                 },
