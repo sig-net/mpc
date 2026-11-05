@@ -780,7 +780,7 @@ async fn spawn_indexers(
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
     backlog: Backlog,
-    mut contract_watcher: ContractStateWatcher,
+    contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
@@ -930,36 +930,39 @@ async fn spawn_indexers(
         let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
         // TODO: read-side gating - this indexer's reads don't share the
         // chain's cooldown gate yet
-        tracing::info!("Midnight indexer waiting for the network public key");
-        // Fails only when the contract watcher is gone, and then the process
-        // is already ending.
-        let root_pk = contract_watcher
-            .wait_public_key()
-            .await
-            .context("midnight indexer: no network public key")?;
-        let midnight_indexer = MidnightIndexer::new(
-            midnight_config,
+        // Waits for the network public key inside the task, so a stop signal or
+        // a failed core task during the wait still ends the node.
+        let mut contract_watcher = contract_watcher.clone();
+        let ctx = StreamContext::new(
             backlog.clone(),
-            midnight_telemetry.clone(),
-            root_pk,
+            sign_tx.clone(),
+            rpc_channel.clone(),
+            contract_watcher.clone(),
+            mesh_state.clone(),
+            node_client.clone(),
+            checkpoints_rx[Chain::Midnight].clone(),
         )
-        .await
-        .context("failed to create midnight indexer")?;
-        tracing::info!("midnight indexer created successfully");
-        tasks.spawn(run_supervised(
-            midnight_indexer,
-            StreamContext::new(
-                backlog.clone(),
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                node_client.clone(),
-                checkpoints_rx[Chain::Midnight].clone(),
+        .with_ethereum_chain_id(ethereum_chain_id);
+        let backlog = backlog.clone();
+        tasks.spawn(async move {
+            tracing::info!("Midnight indexer waiting for the network public key");
+            // Fails only when the contract watcher is gone, and then the process
+            // is already ending.
+            let root_pk = contract_watcher
+                .wait_public_key()
+                .await
+                .context("midnight indexer: no network public key")?;
+            let midnight_indexer = MidnightIndexer::new(
+                midnight_config,
+                backlog,
+                midnight_telemetry.clone(),
+                root_pk,
             )
-            .with_ethereum_chain_id(ethereum_chain_id),
-            midnight_telemetry,
-        ));
+            .await
+            .context("failed to create midnight indexer")?;
+            tracing::info!("midnight indexer created successfully");
+            run_supervised(midnight_indexer, ctx, midnight_telemetry).await
+        });
     }
 
     // Target-only: no source indexer — the watcher serves every source
