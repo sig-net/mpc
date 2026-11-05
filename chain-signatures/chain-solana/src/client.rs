@@ -12,7 +12,6 @@ use solana_client::{
     rpc_client::GetConfirmedSignaturesForAddress2Config,
     rpc_config::RpcBlockConfig,
     rpc_custom_error::{
-        JSON_RPC_SERVER_ERROR_BLOCK_CLEANED_UP, JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
         JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED, JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
     },
     rpc_request::RpcError,
@@ -64,33 +63,30 @@ fn catchup_retry_strategy() -> RetryConfig {
     }
 }
 
-/// Block-absence codes (solana-rpc-client-api 3.1.14 custom_error.rs):
-/// skipped by the network or pruned from the node. `-32014` (status not
-/// yet available) is transient and deliberately excluded.
-fn block_absent(code: i64) -> bool {
+/// Network-skipped slots (solana-rpc-client-api 3.1.14 custom_error.rs):
+/// no backend can ever serve these blocks.
+fn slot_skipped(code: i64) -> bool {
     matches!(
         code,
-        JSON_RPC_SERVER_ERROR_BLOCK_CLEANED_UP
-            | JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE
-            | JSON_RPC_SERVER_ERROR_SLOT_SKIPPED
-            | JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED
+        JSON_RPC_SERVER_ERROR_SLOT_SKIPPED | JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED
     )
 }
 
 /// Boundary classification — `ClientError`'s `#[source] Box<ErrorKind>`
 /// nesting hides inner causes from chain walks (`publisher.rs` resolves the
-/// same blindness for publishes). Block-absent codes stop the tight inner
-/// catchup loop; the indexer's outer `retry_until_ok` still paces them.
+/// same blindness for publishes). The skipped-slot code rides along for the
+/// indexer, which emits an inactive-slot marker and advances.
 // TODO: transitional boundary helper — disappears once the retry macros
 // classify typed verdict enums instead of walking anyhow chains.
 fn classify_read(e: ClientError) -> anyhow::Error {
     let carrier = match e.kind() {
         ClientErrorKind::Reqwest(req) => Some(read_carrier(req)),
         ClientErrorKind::RpcError(RpcError::RpcResponseError { code, .. }) => {
-            block_absent(*code).then(|| RpcFailure::terminal(format!("{e}")))
+            slot_skipped(*code).then(|| RpcFailure::terminal_code(*code, format!("{e}")))
         }
-        // deliberate default: NodeUnhealthy, not-yet-available, request/parse
-        // shapes stay retryable
+        // deliberate default: node-local absence, NodeUnhealthy, not yet
+        // available, request/parse shapes stay retryable — another LB
+        // backend may serve them
         _ => None,
     };
     let err = anyhow::Error::new(e);
@@ -526,7 +522,10 @@ mod tests {
         utils::retry::{is_provider_throttled, is_retryable},
         NoopPublisherTelemetry,
     };
-    use solana_client::rpc_custom_error::JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET;
+    use solana_client::rpc_custom_error::{
+        JSON_RPC_SERVER_ERROR_BLOCK_CLEANED_UP, JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
+        JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET,
+    };
     use solana_sdk::{pubkey::Pubkey, signature::Signature};
 
     /// Helper to create a SolanaClient for testing with mockito
@@ -913,12 +912,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deterministic_block_absence_is_terminal() {
+    async fn network_skipped_slots_are_terminal_with_their_code() {
         for (code, message) in [
             (JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "Slot was skipped"),
             (
-                JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
-                "Block not available for slot 1234",
+                JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED,
+                "Slot was skipped because it is in long-term storage",
             ),
         ] {
             let mut server = mockito::Server::new_async().await;
@@ -930,7 +929,7 @@ mod tests {
                     json!({"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": message}})
                         .to_string(),
                 )
-                // previously the catchup strategy retried usize::MAX times
+                // a retry can never produce the block on any backend
                 .expect(1)
                 .create_async()
                 .await;
@@ -941,35 +940,50 @@ mod tests {
                 !is_retryable(&err),
                 "code {code} should be terminal: {err:#}"
             );
+            let carried = err
+                .chain()
+                .find_map(|c| c.downcast_ref::<RpcFailure>())
+                .and_then(|f| f.code());
+            assert_eq!(carried, Some(code));
             mock.assert_async().await;
         }
     }
 
     #[tokio::test]
-    async fn not_yet_available_blocks_stay_retryable() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("POST", "/")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "jsonrpc": "2.0", "id": 1,
-                    "error": {
-                        "code": JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET,
-                        "message": "Block status not yet available"
-                    }
-                })
-                .to_string(),
-            )
-            .expect(3) // 1 attempt + 2 retries: the read default is retryable
-            .create_async()
-            .await;
+    async fn node_local_absence_stays_retryable() {
+        // another LB backend may still serve these
+        for (code, message) in [
+            (
+                JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
+                "Block not available for slot 1234",
+            ),
+            (JSON_RPC_SERVER_ERROR_BLOCK_CLEANED_UP, "Block cleaned up"),
+            (
+                JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET,
+                "Block status not yet available",
+            ),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(
+                    json!({"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": message}})
+                        .to_string(),
+                )
+                .expect(3) // 1 attempt + 2 retries
+                .create_async()
+                .await;
 
-        let client = test_client(&server.url());
-        let err = client.get_block(1234).await.unwrap_err();
-        assert!(is_retryable(&err), "{err:#}");
-        mock.assert_async().await;
+            let client = test_client(&server.url());
+            let err = client.get_block(1234).await.unwrap_err();
+            assert!(
+                is_retryable(&err),
+                "code {code} should be retryable: {err:#}"
+            );
+            mock.assert_async().await;
+        }
     }
 
     #[tokio::test]

@@ -43,6 +43,8 @@ pub struct RpcFailure {
     message: String,
     /// HTTP status code associated with the failure, if any.
     status: Option<StatusCode>,
+    /// JSON-RPC error code identifying the failure, if any.
+    code: Option<i64>,
     /// Whether this failure is considered terminal.
     terminal: bool,
 }
@@ -66,6 +68,7 @@ impl RpcFailure {
         Self {
             message,
             status: Some(status),
+            code: None,
             terminal,
         }
     }
@@ -75,6 +78,17 @@ impl RpcFailure {
         Self {
             message,
             status: None,
+            code: None,
+            terminal: true,
+        }
+    }
+
+    /// Terminal failure carrying its JSON-RPC error code for consumers that act on it.
+    pub fn terminal_code(code: i64, message: String) -> Self {
+        Self {
+            message,
+            status: None,
+            code: Some(code),
             terminal: true,
         }
     }
@@ -84,6 +98,7 @@ impl RpcFailure {
         Self {
             message,
             status: None,
+            code: None,
             terminal: false,
         }
     }
@@ -92,6 +107,12 @@ impl RpcFailure {
     pub fn status(&self) -> Option<StatusCode> {
         self.status
     }
+
+    /// Returns the JSON-RPC error code associated with this failure, if any.
+    pub fn code(&self) -> Option<i64> {
+        self.code
+    }
+
     /// Returns true if this failure is considered terminal.
     pub fn is_terminal(&self) -> bool {
         self.terminal
@@ -106,6 +127,7 @@ impl RpcFailure {
             return Some(Self {
                 message: format!("{e:#}"),
                 status: failure.status,
+                code: failure.code,
                 terminal: failure.terminal,
             });
         }
@@ -333,6 +355,20 @@ mod tests {
         let not_found: anyhow::Error =
             RpcFailure::read_status(status(404), "not found".into()).into();
         assert!(!is_retryable(&not_found));
+    }
+
+    #[test]
+    fn terminal_code_carries_the_code_through_contexts() {
+        let err = anyhow::Error::new(RpcFailure::terminal_code(-32007, "Slot was skipped".into()))
+            .context("get_block");
+        assert!(!is_retryable(&err));
+        let code = err
+            .chain()
+            .find_map(|c| c.downcast_ref::<RpcFailure>())
+            .and_then(|f| f.code());
+        assert_eq!(code, Some(-32007));
+        // from_chain rebuilds preserve the code for fan-outs
+        assert_eq!(RpcFailure::from_chain(&err).unwrap().code(), Some(-32007));
     }
 
     #[test]
