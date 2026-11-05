@@ -13,8 +13,7 @@ the tracking issue where there is one.
 A node's local, unreliable guess at which [committee](#committee) members are
 reachable, report the `Running` state and have finished a [state
 sync](#state-sync) with the node. No two nodes need the same guess
-(`MeshState::active`, `mesh/state.rs`). See [protocol-properties.md
-§2](protocol-properties.md#2-system-model).
+(`MeshState::active`, `mesh/state.rs`). See [system-model.md](system-model.md).
 
 ## Admitted request
 
@@ -105,15 +104,14 @@ contract](#governance-contract) (`Checkpoint`, `backlog/checkpoints.rs`). See
 Membership, [threshold](#threshold) t and [epoch](#epoch) as fixed by the
 [governance contract](#governance-contract); each node holds its own snapshot
 (`GovernanceInfo`, `rpc/mod.rs`). Committee is contract-scoped; compare
-[participant](#participant). See [protocol-properties.md
-§2](protocol-properties.md#2-system-model).
+[participant](#participant). See [system-model.md](system-model.md).
 
 ## Correct node
 
 A node that follows the protocol, apart from crashing and restarting with its
 durable storage intact. Its RPC provider tells it the truth, and it indexes
 faster than the chains produce blocks. Compare [faulty node](#faulty-node).
-See [protocol-properties.md §2](protocol-properties.md#2-system-model) and
+See [system-model.md](system-model.md) and
 [checkpoints.md §1](checkpoints.md#1-background).
 
 ## Deliberator
@@ -153,15 +151,14 @@ completed resharing raises by one (`RunningContractState::epoch`,
 ## f
 
 The number of [faulty nodes](#faulty-node) the model tolerates. Safety needs f
-< [t](#threshold) and f < 2t − [n](#n). See [protocol-properties.md
-§2](protocol-properties.md#2-system-model).
+< [t](#threshold) and f < 2t − [n](#n). See [system-model.md](system-model.md).
 
 ## Faulty node
 
 A node that may deviate arbitrarily from the protocol; at most [f](#f) of the
 [n](#n) nodes are faulty. A node whose RPC provider misleads it counts as
-faulty. Compare [correct node](#correct-node). See [protocol-properties.md
-§2](protocol-properties.md#2-system-model) and [checkpoints.md
+faulty. Compare [correct node](#correct-node). See
+[system-model.md](system-model.md) and [checkpoints.md
 §1](checkpoints.md#1-background).
 
 ## Final block
@@ -170,8 +167,8 @@ A block the network treats as final, so it will stay in the chain unchanged
 (called solidified on Tron). Nodes read [requests](#request) and attest
 [outcomes](#outcome) only from final blocks; what counts as finalized differs
 per chain. See [bidirectional-calls.md
-§3.3](bidirectional-calls.md#33-assumptions) and [protocol-properties.md
-§2](protocol-properties.md#2-system-model).
+§3.3](bidirectional-calls.md#33-assumptions) and
+[system-model.md](system-model.md).
 
 ## Generation
 
@@ -216,7 +213,7 @@ peers are eligible for a [participant](#participant) list. See
 ## n
 
 The number of nodes in the [committee](#committee). See
-[protocol-properties.md §2](protocol-properties.md#2-system-model).
+[system-model.md](system-model.md).
 
 ## Outcome
 
@@ -386,8 +383,7 @@ executes on (`executionDest` on the wire). See
 
 t, the number of nodes needed to sign, set by the [governance
 contract](#governance-contract) (`vote_threshold`,
-`chain-signatures/contract/src/lib.rs`). See [protocol-properties.md
-§2](protocol-properties.md#2-system-model).
+`chain-signatures/contract/src/lib.rs`). See [system-model.md](system-model.md).
 
 ## Triple pair
 

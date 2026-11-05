@@ -4,7 +4,6 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::backlog::Backlog;
 use crate::config::{Config, NetworkConfig};
-use crate::gcp::GcpService;
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
 use crate::node_client::NodeClient;
@@ -17,13 +16,15 @@ use crate::protocol::sync::{SyncReportSender, SyncTask};
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::storage::keystore::Keystore;
 use crate::storage::midnight_wallet_storage::MidnightWalletStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
-use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::types::SignCommand;
 use crate::{logs, storage, web};
+#[cfg(feature = "test-feature")]
+pub use args::ethereum::mock_indexer_config;
 pub use args::{
     canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
     solana::SolArgs, tron::TronArgs,
@@ -50,6 +51,7 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
 use url::Url;
 
 /// Capacity of the SignCommand channel that feeds chain sign events from the
@@ -169,7 +171,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let (sign_tx, sign_rx) = mpsc::channel(MAX_SIGN_COMMANDS);
 
             let StorageHandles {
-                key_storage,
+                keystore,
                 triple_storage,
                 presignature_storage,
                 backlog,
@@ -266,7 +268,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_rx,
                 &node_client,
                 &contract_watcher,
-                key_storage,
+                keystore,
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
@@ -276,24 +278,25 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             .await;
 
             tracing::info!("protocol initialized");
-            tokio::spawn(sync_task.run());
-            tokio::spawn(rpc_executor.run(
+            let mut tasks = JoinSet::new();
+            tasks.spawn(sync_task.run());
+            tasks.spawn(rpc_executor.run(
                 backlog.clone(),
                 contract_state_tx,
                 config_tx.clone(),
                 checkpoints_tx,
             ));
-
-            tokio::spawn(mesh.run(contract_watcher.clone()));
-            let system_handle = spawn_system_metrics().await;
-            let protocol_handle = tokio::spawn(protocol.run(
+            tasks.spawn(mesh.run(contract_watcher.clone()));
+            // A blocking loop; `main` shuts the runtime down in the background
+            // so it does not keep the process alive.
+            spawn_system_metrics().await;
+            tasks.spawn(protocol.run(
                 node,
                 near_governance_client,
                 contract_watcher.clone(),
                 mesh_state.clone(),
             ));
-            tracing::info!("protocol thread spawned");
-            let web_handle = tokio::spawn(web::run(
+            tasks.spawn(web::run(
                 web_port,
                 message_channel,
                 node_watcher,
@@ -306,6 +309,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             ));
 
             spawn_indexers(
+                &mut tasks,
                 stack,
                 sign_tx,
                 rpc_channel.clone(),
@@ -316,15 +320,28 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 checkpoints_rx,
             )
             .await;
-            tracing::info!("protocol http server spawned");
-            protocol_handle.await?;
-            web_handle.await?;
-            system_handle.abort();
-            tracing::info!("spinning down");
-        }
-    };
+            tracing::info!("node tasks spawned");
 
-    Ok(())
+            // A core task never returns in normal operation, so the first to finish ends the node.
+            let err = match tasks.join_next().await {
+                Some(Ok(Err(err))) => err,
+                Some(Err(join)) => anyhow::Error::from(join),
+                _ => anyhow::anyhow!("core task exited"),
+            };
+            tracing::error!(?err, "core task ended, shutting down");
+            tasks.abort_all();
+            while let Some(result) = tasks.join_next().await {
+                match result {
+                    Ok(Err(err)) => tracing::error!(?err, "core task also failed"),
+                    Err(join) if !join.is_cancelled() => {
+                        tracing::error!(?join, "core task also failed")
+                    }
+                    _ => {}
+                }
+            }
+            Err(err)
+        }
+    }
 }
 
 fn configuration_digest(
@@ -666,7 +683,7 @@ impl RpcHandles {
 }
 
 struct StorageHandles {
-    key_storage: SecretNodeStorageVariant,
+    keystore: Keystore,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     backlog: Backlog,
@@ -695,9 +712,7 @@ impl StorageHandles {
         account_id: &AccountId,
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
-        let gcp_service = GcpService::init(storage_options).await?;
-        let key_storage =
-            storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
+        let keystore = Keystore::init(storage_options, account_id).await?;
         let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
@@ -707,7 +722,7 @@ impl StorageHandles {
         ));
         let midnight_wallet = Arc::new(MidnightWalletStorage::new(redis_pool, account_id));
         Ok(Self {
-            key_storage,
+            keystore,
             triple_storage,
             presignature_storage,
             backlog,
@@ -734,7 +749,7 @@ impl ProtocolHandles {
         sign_rx: mpsc::Receiver<SignCommand>,
         node_client: &NodeClient,
         contract_watcher: &ContractStateWatcher,
-        key_storage: SecretNodeStorageVariant,
+        keystore: Keystore,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
@@ -770,7 +785,7 @@ impl ProtocolHandles {
             resharing: message_channel.subscribe_resharing().await,
             ready: message_channel.subscribe_ready().await,
             sign_task,
-            secret_storage: key_storage,
+            keystore,
             triple_storage,
             presignature_storage,
             config: config_rx,
@@ -791,6 +806,7 @@ impl ProtocolHandles {
 
 #[allow(clippy::too_many_arguments)]
 async fn spawn_indexers(
+    tasks: &mut JoinSet<anyhow::Result<()>>,
     stack: ChainStack,
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
@@ -850,7 +866,7 @@ async fn spawn_indexers(
         {
             Ok(eth_indexer) => {
                 tracing::info!("ethereum indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     eth_indexer,
                     StreamContext::new(
                         backlog.clone(),
@@ -881,7 +897,7 @@ async fn spawn_indexers(
         ) {
             Ok(sol_indexer) => {
                 tracing::info!("solana indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     sol_indexer,
                     StreamContext::new(
                         backlog.clone(),
@@ -909,7 +925,7 @@ async fn spawn_indexers(
         let hydration_indexer =
             HydrationIndexer::new(hydration_config, hydration_telemetry.clone());
         tracing::info!("hydration indexer created successfully");
-        tokio::spawn(run_supervised(
+        tasks.spawn(run_supervised(
             hydration_indexer,
             StreamContext::new(
                 backlog.clone(),
@@ -937,7 +953,7 @@ async fn spawn_indexers(
         {
             Ok(canton_indexer) => {
                 tracing::info!("canton indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     canton_indexer,
                     StreamContext::new(
                         backlog.clone(),
@@ -963,7 +979,15 @@ async fn spawn_indexers(
         // TODO: read-side gating - this indexer's reads don't share the
         // chain's cooldown gate yet
         tracing::info!("Midnight indexer waiting for the network public key");
-        let root_pk = contract_watcher.wait_public_key().await;
+        // Fails only when the contract watcher is gone, and then the process
+        // is already ending.
+        let root_pk = match contract_watcher.wait_public_key().await {
+            Ok(pk) => pk,
+            Err(err) => {
+                tracing::error!(?err, "midnight indexer: no network public key");
+                return;
+            }
+        };
         match MidnightIndexer::new(
             midnight_config,
             backlog.clone(),
@@ -974,7 +998,7 @@ async fn spawn_indexers(
         {
             Ok(midnight_indexer) => {
                 tracing::info!("midnight indexer created successfully");
-                tokio::spawn(run_supervised(
+                tasks.spawn(run_supervised(
                     midnight_indexer,
                     StreamContext::new(
                         backlog.clone(),
