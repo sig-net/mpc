@@ -72,6 +72,14 @@ fn slot_skipped(code: i64) -> bool {
     )
 }
 
+/// Whether the error carries the network-skipped-slot verdict.
+pub(crate) fn is_network_skipped(err: &anyhow::Error) -> bool {
+    err.chain()
+        .find_map(|c| c.downcast_ref::<RpcFailure>())
+        .and_then(RpcFailure::code)
+        .is_some_and(slot_skipped)
+}
+
 /// Boundary classification — `ClientError`'s `#[source] Box<ErrorKind>`
 /// nesting hides inner causes from chain walks (`publisher.rs` resolves the
 /// same blindness for publishes). The skipped-slot code rides along for the

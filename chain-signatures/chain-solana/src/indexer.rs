@@ -18,7 +18,7 @@ use solana_transaction_status::{EncodedTransactionWithStatusMeta, UiConfirmedBlo
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::{SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
+use crate::client::{is_network_skipped, SolanaCatchupBlock, CATCHUP_PAGE_SIZE};
 use crate::config::SolIndexerConfig;
 use crate::events::emit_events;
 use crate::{SolConfig, SolanaClient};
@@ -384,7 +384,18 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
             SolanaCatchupBlock::Missing => {
                 #[cfg(feature = "bench")]
                 let started_at = Instant::now();
-                let block = self.client.get_block(slot).await?;
+                let block = match self.client.get_block(slot).await {
+                    Ok(block) => block,
+                    // Skipped slot — no backend can ever serve it, mark inactive and advance
+                    Err(err) if is_network_skipped(&err) => {
+                        events_tx
+                            .send(ChainEvent::Block(slot))
+                            .await
+                            .context("failed to send solana block marker event")?;
+                        return Ok(());
+                    }
+                    Err(err) => return Err(err),
+                };
                 #[cfg(feature = "bench")]
                 crate::bench::add_refetch_time(started_at.elapsed());
                 self.process_block(events_tx, slot, &block).await
@@ -601,10 +612,14 @@ mod tests {
     use crate::events::SolanaSignEvent;
     use anchor_lang::{AnchorSerialize, Discriminator};
     use mpc_chain_integration_core::{
-        utils::retry::SharedBackoff, MockStateManager, NoopChainTelemetry,
+        utils::retry::{is_retryable, SharedBackoff},
+        MockStateManager, NoopChainTelemetry,
     };
     use mpc_primitives::SignId;
     use signet_program::{SignatureRequestedEvent, SignatureRespondedEvent};
+    use solana_client::rpc_custom_error::{
+        JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE, JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+    };
     use solana_commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::{
@@ -1736,6 +1751,77 @@ mod tests {
 
         assert_eq!(block_heights(&[13, 13]).await, [10, 11, 12]);
         assert_eq!(block_heights(&[10, 10, 13]).await, [10, 11, 12]);
+    }
+
+    #[tokio::test]
+    async fn skipped_missing_slots_emit_a_marker_and_advance() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "message": "Slot was skipped"}
+                })
+                .to_string(),
+            )
+            // the skipped verdict is consumed, not retried
+            .expect(1)
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+
+        indexer
+            .process_catchup_item(&events_tx, 7, &SolanaCatchupBlock::Missing)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(slot)) if slot == 7
+        ));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn node_local_missing_slots_propagate_for_retry() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {
+                        "code": JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
+                        "message": "Block not available for slot 7"
+                    }
+                })
+                .to_string(),
+            )
+            .expect(3) // the inner loop keeps retrying: another LB backend may serve it
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+
+        let err = indexer
+            .process_catchup_item(&events_tx, 7, &SolanaCatchupBlock::Missing)
+            .await
+            .unwrap_err();
+
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(
+            events_rx.try_recv().is_err(),
+            "no marker for a retryable slot"
+        );
+        mock.assert_async().await;
     }
 
     #[tokio::test]
