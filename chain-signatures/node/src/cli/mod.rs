@@ -213,7 +213,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 rpc_channel,
                 rpc_executor,
             } = RpcHandles::new(
-                near_rpc.as_str(),
+                &near_rpc,
                 &my_address,
                 &network,
                 &mpc_contract_id,
@@ -574,7 +574,7 @@ struct RpcHandles {
 
 impl RpcHandles {
     async fn new(
-        near_rpc_url: &str,
+        near_rpc_url: &Url,
         my_address: &Url,
         network: &NetworkConfig,
         mpc_contract_id: &AccountId,
@@ -583,7 +583,7 @@ impl RpcHandles {
         backlog: Backlog,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
-        let near_rpc = near_fetch::Client::new(near_rpc_url);
+        let near_rpc = near_fetch::Client::new(near_rpc_url.as_str());
         // One set of gates for every NEAR call: the publisher and the governance
         // client share the endpoint and the signer.
         let near_gates = NearRpcGates::new(stack.gate(Chain::NEAR));
