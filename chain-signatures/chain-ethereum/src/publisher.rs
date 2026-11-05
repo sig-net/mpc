@@ -836,6 +836,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn receipt_poll_404_fails_fast() {
+        let mut server = Server::new_async().await;
+        let tx_hash = B256::repeat_byte(0xce);
+
+        // the read partition's terminal arm: classic client errors are not
+        // poll quirks — the transient arm is pinned above
+        let not_found = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(404)
+            .with_body("not found")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut publisher = test_publisher(&server.url());
+        publisher.config.receipt_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            max_times: 2,
+            jitter: false,
+        };
+
+        let err = publisher
+            .wait_for_transaction_receipt(tx_hash, &[SignId::new([5u8; 32])])
+            .await
+            .expect_err("404 must fail the receipt poll");
+        assert!(!is_retryable(&err), "{err:#}");
+        not_found.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn nonce_fetch_409_fails_fast() {
         let mut server = Server::new_async().await;
         mock_alloy_background_rpcs(&mut server).await;
