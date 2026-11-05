@@ -87,7 +87,7 @@ pub struct MidnightArgs {
         long,
         env("MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX"),
         default_value = "v1",
-        requires = "midnight_node_url"
+        requires = "midnight_output_storage_bucket"
     )]
     pub midnight_output_storage_prefix: String,
     /// Maximum time for one cache initialization attempt or storing one output, in seconds.
@@ -95,7 +95,7 @@ pub struct MidnightArgs {
         long,
         env("MPC_MIDNIGHT_OUTPUT_STORAGE_TIMEOUT_SECS"),
         default_value_t = 30,
-        requires = "midnight_node_url"
+        requires = "midnight_output_storage_bucket"
     )]
     pub midnight_output_storage_timeout_secs: u64,
     /// Local GCS emulator endpoint for integration tests; uses anonymous credentials.
@@ -311,6 +311,22 @@ mod tests {
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
+    /// Prefix and timeout only mean something with a bucket; without one they
+    /// used to be dropped silently.
+    #[test]
+    fn output_storage_tuning_requires_the_bucket() {
+        crate::cli::tests::assert_midnight_env_unset();
+        for flag in [
+            "--midnight-output-storage-prefix=v2",
+            "--midnight-output-storage-timeout-secs=5",
+        ] {
+            assert!(
+                MidnightArgs::try_parse_from(["test", flag]).is_err(),
+                "{flag}"
+            );
+        }
+    }
+
     #[test]
     fn the_midnight_flags_are_all_or_nothing() {
         // A publisher flag accepted on its own would let a node carry a funding
@@ -365,7 +381,8 @@ mod tests {
             .iter()
             .position(|arg| arg == "--midnight-output-storage-bucket")
             .expect("configured Midnight args include the storage bucket");
-        argv.drain(index..=index + 1);
+        // The bucket, prefix and timeout flags with their values are the last six entries.
+        argv.truncate(index);
         let parsed =
             MidnightArgs::try_parse_from(argv).expect("Midnight can run without GCS storage");
         assert!(parsed.midnight_output_storage_bucket.is_none());
