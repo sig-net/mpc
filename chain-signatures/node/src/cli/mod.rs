@@ -11,7 +11,7 @@ use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
 use crate::protocol::request::{SignatureSpawner, SignatureSpawnerTask};
-use crate::protocol::state::{KeyShare, Node, NodeStateWatcher};
+use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::{SyncReportSender, SyncTask};
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
@@ -23,7 +23,6 @@ use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::types::SignCommand;
 use crate::{logs, storage, web};
-use anyhow::Context as _;
 #[cfg(feature = "test-feature")]
 pub use args::ethereum::mock_indexer_config;
 pub use args::{
@@ -160,7 +159,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let StorageHandles {
                 keystore,
-                key_share,
                 triple_storage,
                 presignature_storage,
                 backlog,
@@ -259,7 +257,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &node_client,
                 &contract_watcher,
                 keystore,
-                key_share,
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
@@ -618,7 +615,6 @@ impl RpcHandles {
 
 struct StorageHandles {
     keystore: Keystore,
-    key_share: Option<KeyShare>,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     backlog: Backlog,
@@ -648,12 +644,6 @@ impl StorageHandles {
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
         let keystore = Keystore::init(storage_options, account_id).await?;
-        // An unreachable store (wrong project or secret id, missing credentials)
-        // fails startup here instead of leaving the node unable to join.
-        let key_share = keystore
-            .load()
-            .await
-            .context("failed to read the key share store")?;
         let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
@@ -664,7 +654,6 @@ impl StorageHandles {
         let midnight_wallet = Arc::new(MidnightWalletStorage::new(redis_pool, account_id));
         Ok(Self {
             keystore,
-            key_share,
             triple_storage,
             presignature_storage,
             backlog,
@@ -692,7 +681,6 @@ impl ProtocolHandles {
         node_client: &NodeClient,
         contract_watcher: &ContractStateWatcher,
         keystore: Keystore,
-        key_share: Option<KeyShare>,
         triple_storage: TripleStorage,
         presignature_storage: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
@@ -701,7 +689,7 @@ impl ProtocolHandles {
     ) -> Self {
         let (config_tx, config_rx) = Config::channel();
         let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
-        let node = Node::new(key_share);
+        let node = Node::new();
         let node_watcher = node.watch();
 
         let message_channel = MessageChannel::spawn(

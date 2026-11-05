@@ -197,16 +197,20 @@ impl Display for NodeState {
 }
 
 pub struct Node {
-    pub state: NodeState,
     pub watcher_tx: watch::Sender<NodeStatus>,
     pub watcher: NodeStateWatcher,
     #[cfg(feature = "test-feature")]
     test_key_info_watcher_tx: watch::Sender<Option<NodeKeyInfo>>,
 }
 
+impl Default for Node {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Node {
-    /// A node that starts from the key share read at startup, `None` for a fresh node.
-    pub fn new(persistent_node_data: Option<KeyShare>) -> Self {
+    pub fn new() -> Self {
         let (watcher_tx, watcher_rx) = watch::channel(NodeStatus::Started);
         #[cfg(feature = "test-feature")]
         let (test_key_info_watcher_tx, test_key_info_watcher) = watch::channel(None);
@@ -216,9 +220,6 @@ impl Node {
             test_key_info_watcher,
         };
         Self {
-            state: NodeState::Started(StartedState {
-                persistent_node_data,
-            }),
             watcher_tx,
             watcher,
             #[cfg(feature = "test-feature")]
@@ -230,8 +231,8 @@ impl Node {
         self.watcher.clone()
     }
 
-    pub async fn update_watchers(&mut self) {
-        match &self.state {
+    pub async fn update_watchers(&mut self, state: &NodeState) {
+        match state {
             NodeState::Started(_) => {
                 let _ = self.watcher_tx.send(NodeStatus::Started);
             }
@@ -272,7 +273,7 @@ impl Node {
         }
 
         #[cfg(feature = "test-feature")]
-        let _ = self.test_key_info_watcher_tx.send(self.state.key_info());
+        let _ = self.test_key_info_watcher_tx.send(state.key_info());
     }
 }
 
