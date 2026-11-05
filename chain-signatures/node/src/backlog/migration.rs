@@ -91,9 +91,10 @@ impl From<MigratableBacklogEntry> for BacklogEntry {
         let tx_ids = entry
             .tx_ids
             .unwrap_or_else(|| legacy_tx_id(&status).into_iter().collect());
+        let status = with_current_entropy(status, &entry.request.args.entropy);
         BacklogEntry {
             request: entry.request,
-            status: with_current_entropy(status),
+            status,
             tx_ids,
             unviable_at: entry.unviable_at,
         }
@@ -117,8 +118,8 @@ pub(super) fn legacy_tx_id(status: &SignStatus) -> Option<BidirectionalTxId> {
 }
 
 /// A response an earlier version stored and has not signed yet: every node derives its entropy
-/// from the message now, and one signing the old value would sign alone.
-fn with_current_entropy(status: SignStatus) -> SignStatus {
+/// from the first leg and the message now, and one signing the old value would sign alone.
+fn with_current_entropy(status: SignStatus, first_leg_entropy: &[u8; 32]) -> SignStatus {
     let SignStatus::Bidirectional(BidirectionalProgress::Final {
         mut respond_request,
         progress: SignProgress::Generating,
@@ -127,7 +128,7 @@ fn with_current_entropy(status: SignStatus) -> SignStatus {
         return status;
     };
     let args = &mut Arc::make_mut(&mut respond_request).args;
-    args.entropy = response_entropy(&args.payload, &args.epsilon);
+    args.entropy = response_entropy(first_leg_entropy, &args.payload, &args.epsilon);
     SignStatus::Bidirectional(BidirectionalProgress::Final {
         respond_request,
         progress: SignProgress::Generating,
@@ -162,7 +163,10 @@ mod tests {
         ciborium::into_writer(&stored, &mut bytes).unwrap();
         let decoded: BacklogEntry = ciborium::from_reader(bytes.as_slice()).unwrap();
         let args = &decoded.request().args;
-        assert_eq!(args.entropy, response_entropy(&args.payload, &args.epsilon));
+        assert_eq!(
+            args.entropy,
+            response_entropy(&decoded.request.args.entropy, &args.payload, &args.epsilon)
+        );
     }
 
     /// A sibling answered unsigned has no transaction: decoding must not name one, or the
