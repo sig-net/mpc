@@ -318,7 +318,7 @@ async fn check_response(
         let text = resp.text().await.unwrap_or_default();
         // typed carrier: classification reads the status, not the hex-laden body
         // TODO: fold reads into the same code-aware classification as the submit path
-        let failure = RpcFailure::send_status(status, format!("{context} failed: {status} {text}"));
+        let failure = RpcFailure::read_status(status, format!("{context} failed: {status} {text}"));
         return Err(anyhow::Error::new(failure));
     }
     Ok(resp)
@@ -1130,13 +1130,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_4xx_fails_fast_and_hex_bodies_do_not_engage_the_gate() {
+    async fn read_statuses_follow_the_read_partition_and_hex_bodies_do_not_engage_the_gate() {
+        // 409 is a cheap-retry LB quirk on reads; the send table terminalizes it
         let mut server = setup_mock_server_with_auth().await;
-        let mock = server
+        let conflict = server
             .mock("GET", "/v2/state/ledger-end")
             .with_status(409)
             // hex ids in the body must not read as status codes
             .with_body("conflict over party 0xa429f and command c402e58")
+            .expect(3) // 1 attempt + 2 retries
+            .create_async()
+            .await;
+
+        let gate = SharedBackoff::new();
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+            gate.clone(),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
+
+        let err = client.fetch_ledger_end().await.unwrap_err();
+        assert!(is_retryable(&err), "read 409 must retry: {err:#}");
+        assert_eq!(gate.remaining(), Duration::ZERO);
+        conflict.assert_async().await;
+
+        // classic client errors stay terminal reads
+        let mut server = setup_mock_server_with_auth().await;
+        let not_found = server
+            .mock("GET", "/v2/state/ledger-end")
+            .with_status(404)
             .expect(1)
             .create_async()
             .await;
@@ -1152,13 +1177,8 @@ mod tests {
         .with_retry_strategy(fast_retry_strategy());
 
         let err = client.fetch_ledger_end().await.unwrap_err();
-
-        // Check_response wraps the response in RpcFailure with the typed status:
-        // 409 is terminal, so the retry loop stops after the single attempt
-        assert!(!is_retryable(&err), "409 must classify as terminal");
-
-        // The gate should not have engaged because the 409 response is terminal and not a throttle.
+        assert!(!is_retryable(&err), "read 404 must fail fast: {err:#}");
         assert_eq!(gate.remaining(), Duration::ZERO);
-        mock.assert_async().await;
+        not_found.assert_async().await;
     }
 }
