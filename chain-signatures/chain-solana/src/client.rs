@@ -1,13 +1,22 @@
+use anyhow::Context as _;
 use futures_util::StreamExt;
 use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, RetryConfig, SharedBackoff},
+    utils::retry::{retry_rpc, RetryConfig, RpcFailure, SharedBackoff},
     PublisherTelemetry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use solana_client::{
-    nonblocking::rpc_client::RpcClient, rpc_client::GetConfirmedSignaturesForAddress2Config,
-    rpc_config::RpcBlockConfig, rpc_response::RpcConfirmedTransactionStatusWithSignature,
+    client_error::{ClientError, ClientErrorKind},
+    nonblocking::rpc_client::RpcClient,
+    rpc_client::GetConfirmedSignaturesForAddress2Config,
+    rpc_config::RpcBlockConfig,
+    rpc_custom_error::{
+        JSON_RPC_SERVER_ERROR_BLOCK_CLEANED_UP, JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
+        JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED, JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+    },
+    rpc_request::RpcError,
+    rpc_response::RpcConfirmedTransactionStatusWithSignature,
 };
 use solana_commitment_config::CommitmentConfig;
 use solana_sdk::{pubkey::Pubkey, signature::Signature, signer::keypair::Keypair};
@@ -53,6 +62,56 @@ fn catchup_retry_strategy() -> RetryConfig {
         max_times: usize::MAX,
         jitter: true,
     }
+}
+
+/// Block-absence codes (solana-rpc-client-api 3.1.14 custom_error.rs):
+/// skipped by the network or pruned from the node. `-32014` (status not
+/// yet available) is transient and deliberately excluded.
+fn block_absent(code: i64) -> bool {
+    matches!(
+        code,
+        JSON_RPC_SERVER_ERROR_BLOCK_CLEANED_UP
+            | JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE
+            | JSON_RPC_SERVER_ERROR_SLOT_SKIPPED
+            | JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED
+    )
+}
+
+/// Boundary classification — `ClientError`'s `#[source] Box<ErrorKind>`
+/// nesting hides inner causes from chain walks (`publisher.rs` resolves the
+/// same blindness for publishes). Block-absent codes stop the tight inner
+/// catchup loop; the indexer's outer `retry_until_ok` still paces them.
+// TODO: transitional boundary helper — disappears once the retry macros
+// classify typed verdict enums instead of walking anyhow chains.
+fn classify_read(e: ClientError) -> anyhow::Error {
+    let carrier = match e.kind() {
+        ClientErrorKind::Reqwest(req) => Some(match req.status() {
+            Some(status) => RpcFailure::read_status(status, format!("{req:#}")),
+            // statusless (connection): explicit retryable so the fallback
+            // can't misread a ":429" port
+            None => RpcFailure::retryable(format!("{req:#}")),
+        }),
+        ClientErrorKind::RpcError(RpcError::RpcResponseError { code, .. })
+            if block_absent(*code) =>
+        {
+            Some(RpcFailure::terminal(format!("{e}")))
+        }
+        // deliberate default: NodeUnhealthy, not-yet-available, request/parse
+        // shapes stay retryable
+        _ => None,
+    };
+    let err = anyhow::Error::new(e);
+    carrier.map_or(err, anyhow::Error::new)
+}
+
+/// The batch fetch bypasses the solana client, so its errors arrive bare.
+// TODO: transitional boundary helper — same replacement as `classify_read`.
+fn classify_batch(e: reqwest::Error) -> anyhow::Error {
+    let carrier = match e.status() {
+        Some(status) => RpcFailure::read_status(status, format!("{e}")),
+        None => RpcFailure::retryable(format!("{e}")),
+    };
+    anyhow::Error::new(carrier)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -195,12 +254,11 @@ impl SolanaClient {
                 self.rpc_client
                     .get_slot_with_commitment(CommitmentConfig::finalized())
                     .await
-                    .map_err(|e| anyhow::anyhow!(e))
+                    .map_err(classify_read)
             }
         )
     }
 
-    // TODO: Do not retry indefinitely on deterministic block errors like SlotWasSkipped or BlockNotAvailable
     pub async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
         let max_attempts = self.catchup_retry.max_times;
         retry_rpc!(
@@ -225,7 +283,7 @@ impl SolanaClient {
                 self.rpc_client
                     .get_block_with_config(slot, Self::block_fetch_config())
                     .await
-                    .map_err(|e| anyhow::anyhow!(e))
+                    .map_err(classify_read)
             }
         )
     }
@@ -258,8 +316,8 @@ impl SolanaClient {
                 let mut requests = Vec::new();
                 for (i, &slot) in slots.iter().enumerate() {
                     let config = Self::block_fetch_config();
-                    let config_val = serde_json::to_value(config)
-                        .map_err(|e| anyhow::anyhow!("serialization error: {e}"))?;
+                    let config_val =
+                        serde_json::to_value(config).context("serializing the getBlock config")?;
                     requests.push(JsonRpcRequest {
                         jsonrpc: "2.0",
                         id: i,
@@ -273,10 +331,14 @@ impl SolanaClient {
                     .post(&self.rpc_http_url)
                     .json(&requests)
                     .send()
-                    .await?;
+                    .await
+                    .map_err(classify_batch)?;
                 let responses = resp
+                    .error_for_status()
+                    .map_err(classify_batch)?
                     .json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>()
-                    .await?;
+                    .await
+                    .map_err(classify_batch)?;
 
                 let mut results = HashMap::new();
                 for resp_obj in responses {
@@ -336,7 +398,7 @@ impl SolanaClient {
                 self.rpc_client
                     .get_signatures_for_address_with_config(address, config)
                     .await
-                    .map_err(|e| anyhow::anyhow!(e))
+                    .map_err(classify_read)
                     .inspect(|batch| {
                         let _ = batch;
                         #[cfg(feature = "bench")]
@@ -462,16 +524,25 @@ impl SolanaClient {
 mod tests {
     use super::*;
     use crate::test_utils::{signature_entry, signatures_response};
-    use mpc_chain_integration_core::NoopPublisherTelemetry;
+    use mpc_chain_integration_core::{
+        utils::retry::{is_provider_throttled, is_retryable},
+        NoopPublisherTelemetry,
+    };
+    use solana_client::rpc_custom_error::JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET;
     use solana_sdk::{pubkey::Pubkey, signature::Signature};
 
     /// Helper to create a SolanaClient for testing with mockito
     fn test_client(url: &str) -> SolanaClient {
+        test_client_with_gate(url, SharedBackoff::new())
+    }
+
+    /// Helper to create a SolanaClient bound to an observable gate
+    fn test_client_with_gate(url: &str, shared_backoff: SharedBackoff) -> SolanaClient {
         SolanaClient::for_indexer(
             url.to_string(),
             Pubkey::new_unique(),
             Arc::new(NoopPublisherTelemetry),
-            SharedBackoff::new(),
+            shared_backoff,
         )
         .with_fast_retry()
     }
@@ -841,5 +912,159 @@ mod tests {
         assert_eq!(sigs.len(), 2);
         assert_eq!(sigs[0].slot, 200);
         assert_eq!(sigs[1].slot, 150);
+    }
+
+    #[tokio::test]
+    async fn deterministic_block_absence_is_terminal() {
+        for (code, message) in [
+            (JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "Slot was skipped"),
+            (
+                JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
+                "Block not available for slot 1234",
+            ),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(
+                    json!({"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": message}})
+                        .to_string(),
+                )
+                // previously the catchup strategy retried usize::MAX times
+                .expect(1)
+                .create_async()
+                .await;
+
+            let client = test_client(&server.url());
+            let err = client.get_block(1234).await.unwrap_err();
+            assert!(
+                !is_retryable(&err),
+                "code {code} should be terminal: {err:#}"
+            );
+            mock.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn not_yet_available_blocks_stay_retryable() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {
+                        "code": JSON_RPC_SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET,
+                        "message": "Block status not yet available"
+                    }
+                })
+                .to_string(),
+            )
+            .expect(3) // 1 attempt + 2 retries: the read default is retryable
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let err = client.get_block(1234).await.unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn read_statuses_follow_the_read_partition() {
+        // 409 is send-terminal; the read partition retries it
+        let mut server = mockito::Server::new_async().await;
+        let conflict = server
+            .mock("POST", "/")
+            .with_status(409)
+            .expect(3) // full budget: 1 attempt + 2 retries
+            .create_async()
+            .await;
+        let client = test_client(&server.url());
+        let err = client.get_slot_finalized().await.unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        conflict.assert_async().await;
+
+        // classic client errors are terminal reads
+        let mut server = mockito::Server::new_async().await;
+        let not_found = server
+            .mock("POST", "/")
+            .with_status(404)
+            .expect(1)
+            .create_async()
+            .await;
+        let gate = SharedBackoff::new();
+        let client = test_client_with_gate(&server.url(), gate.clone());
+        let err = client.get_slot_finalized().await.unwrap_err();
+        assert!(!is_retryable(&err), "{err:#}");
+        assert_eq!(gate.remaining(), Duration::ZERO);
+        not_found.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn batch_throttling_engages_the_shared_gate() {
+        let mut server = mockito::Server::new_async().await;
+        let throttled = server
+            .mock("POST", "/")
+            .with_status(429)
+            .expect(3)
+            .create_async()
+            .await;
+
+        // cooldowns above backon's 1-10ms delays, so the gated waits are observable
+        let gate =
+            SharedBackoff::with_cooldowns(Duration::from_millis(300), Duration::from_millis(600));
+        let client = test_client_with_gate(&server.url(), gate.clone());
+        let start = std::time::Instant::now();
+        let blocks = client.fetch_blocks(&[100, 101]).await;
+        assert!(blocks.is_empty());
+        // attempts 2 and 3 waited out the 300ms and 600ms windows
+        assert!(
+            start.elapsed() >= Duration::from_millis(800),
+            "gated retries must wait out the cooldowns, took {:?}",
+            start.elapsed()
+        );
+        assert!(gate.remaining() > Duration::ZERO);
+        throttled.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn batch_classic_client_errors_fail_fast() {
+        let mut server = mockito::Server::new_async().await;
+        let not_found = server
+            .mock("POST", "/")
+            .with_status(404)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let gate = SharedBackoff::new();
+        let client = test_client_with_gate(&server.url(), gate.clone());
+        assert!(client.fetch_blocks(&[100]).await.is_empty());
+        assert_eq!(gate.remaining(), Duration::ZERO);
+        not_found.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn statusless_failures_are_retryable_and_never_throttled() {
+        // the ":429" port renders in the error; the explicit retryable
+        // carrier keeps the string fallback from reading it as a throttle
+        let client = test_client("http://127.0.0.1:429");
+        let err = client.get_slot_finalized().await.unwrap_err();
+        assert!(is_retryable(&err), "{err:#}");
+        assert!(!is_provider_throttled(&err), "{err:#}");
+
+        let reqwest_err = reqwest::Client::new()
+            .post("http://127.0.0.1:429")
+            .send()
+            .await
+            .unwrap_err();
+        let err = classify_batch(reqwest_err);
+        assert!(is_retryable(&err));
+        assert!(!is_provider_throttled(&err));
     }
 }
