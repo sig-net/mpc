@@ -1118,8 +1118,6 @@ mod tests {
         assert_eq!(tron.endpoint.as_str(), "https://api.trongrid.io/");
     }
 
-    /// A Midnight node that is unreachable at startup must not leave the node without a
-    /// Midnight publisher for its lifetime: the publisher registers and connects later.
     /// Hydration's RPC is dialed on first publish: a node whose Hydration
     /// endpoint is down still starts, and a bad signer still fails startup.
     #[tokio::test]
@@ -1149,6 +1147,8 @@ mod tests {
             .is_err());
     }
 
+    /// A Midnight node that is unreachable at startup must not leave the node without a
+    /// Midnight publisher for its lifetime: the publisher registers and connects later.
     #[tokio::test]
     async fn midnight_publisher_registers_while_its_node_is_unreachable() {
         let chains = ChainConfigs {
