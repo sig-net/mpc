@@ -61,9 +61,9 @@ fn thread_network_name(docker: &DockerClient) -> String {
 
 const ENV: &str = "test";
 
-/// Stands in for a chain endpoint until its sandbox is up.
+/// Dummy endpoint, replaced once the chain's test container is running.
 fn placeholder_url() -> url::Url {
-    "http://127.0.0.1:1".parse().expect("a valid literal")
+    "http://placeholder.invalid".parse().expect("a valid literal")
 }
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
 ///
