@@ -115,6 +115,61 @@ pub enum Cli {
     },
 }
 
+impl Cli {
+    /// `Cli::parse`, except an error never prints what the operator typed:
+    /// values can hold API keys and passwords, and clap echoes them even with
+    /// `hide_env_values`, which only covers `--help`. A rejected value names
+    /// its env var, which is what operators set, and its flag. An unknown
+    /// argument or subcommand is not named at all: it can be a secret split
+    /// off by a missing quote, or glued to a flag.
+    pub fn parse_redacted() -> Self {
+        Self::try_parse_redacted(std::env::args_os()).unwrap_or_else(|err| err.exit())
+    }
+
+    fn try_parse_redacted<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        use clap::error::{ContextKind, ContextValue, ErrorKind};
+        Self::try_parse_from(args).map_err(|err| {
+            let message = match err.kind() {
+                // An empty value is clap's "a value is required": nothing to hide.
+                ErrorKind::InvalidValue
+                    if matches!(err.get(ContextKind::InvalidValue), Some(ContextValue::String(v)) if v.is_empty()) =>
+                {
+                    return err;
+                }
+                ErrorKind::InvalidValue | ErrorKind::ValueValidation | ErrorKind::TooManyValues => {
+                    // Clap names the flag as `--near-rpc <NEAR_RPC>`.
+                    let arg = err.get(ContextKind::InvalidArg).map(ToString::to_string);
+                    let flag = arg.as_deref().unwrap_or_default().split(' ').next().unwrap_or_default();
+                    match env_var_of(flag) {
+                        Some(env) => format!("invalid value for {env} ({flag})"),
+                        None => format!("invalid value for {flag}"),
+                    }
+                }
+                ErrorKind::UnknownArgument => "unexpected argument".to_string(),
+                ErrorKind::InvalidSubcommand => "unrecognized subcommand".to_string(),
+                // The other kinds print flag names only.
+                _ => return err,
+            };
+            clap::Error::raw(err.kind(), format!("{message}\n"))
+        })
+    }
+}
+
+/// The env var behind a `start` flag, such as `MPC_NEAR_RPC` for `--near-rpc`.
+fn env_var_of(flag: &str) -> Option<String> {
+    let command = <Cli as clap::CommandFactory>::command();
+    let start = command.find_subcommand("start")?;
+    let arg = start.get_arguments().find(|arg| {
+        arg.get_long()
+            .is_some_and(|long| flag == format!("--{long}"))
+    })?;
+    Some(arg.get_env()?.to_string_lossy().into_owned())
+}
+
 /// `Url` alone accepts `node.example.org:8080`, reading the host as the scheme,
 /// and the contract cannot change a participant's URL once it has joined.
 fn parse_peer_address(s: &str) -> Result<Url, String> {
@@ -989,6 +1044,42 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// No error echoes what the operator typed: every flag meets every way a
+    /// secret can land in the input.
+    #[test]
+    fn no_error_echoes_the_input() {
+        use clap::CommandFactory as _;
+        let parse = |input: &[String]| {
+            let args = ["mpc-node", "start"].map(String::from).into_iter();
+            Cli::try_parse_redacted(args.chain(input.iter().cloned()))
+                .unwrap_err()
+                .to_string()
+        };
+        let command = Cli::command();
+        let flags = command.find_subcommand("start").unwrap().get_arguments();
+        for flag in flags.map(|arg| format!("--{}", arg.get_long().unwrap())) {
+            for input in [
+                vec![format!("{flag}=s3cr3t")],      // bad value, inline
+                vec![flag.clone(), "s3cr3t".into()], // bad value, separate
+                vec![format!("{flag}s3cr3t")],       // glued to the flag
+                vec![flag.clone(), "s3cr3t".into(), "s3cr3t".into()], // stray after the value
+            ] {
+                let error = parse(&input);
+                assert!(!error.contains("s3cr3t"), "{input:?} echoed: {error}");
+            }
+        }
+
+        // Outside the loop: a secret in the subcommand's place, before `start`.
+        let subcommand = Cli::try_parse_redacted(["mpc-node", "s3cr3t"])
+            .unwrap_err()
+            .to_string();
+        assert!(!subcommand.contains("s3cr3t"), "{subcommand}");
+
+        // Operators set env vars, so a rejected value names the one to fix.
+        let named = parse(&["--near-rpc=s3cr3t".into()]);
+        assert!(named.contains("MPC_NEAR_RPC (--near-rpc)"), "{named}");
+    }
 
     #[test]
     fn peer_address_must_be_http_or_https_with_a_host() {
