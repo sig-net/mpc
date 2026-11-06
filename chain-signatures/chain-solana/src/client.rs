@@ -106,8 +106,6 @@ impl SolanaClient {
             CommitmentConfig::confirmed(),
         );
         let rpc_client = Arc::new(RpcClient::new(sol.rpc_http_url.clone()));
-        let program_id = Pubkey::from_str(&sol.program_address)
-            .expect("Invalid Solana program address provided in configuration");
         Self {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
@@ -118,7 +116,7 @@ impl SolanaClient {
             rpc_client,
             rpc_http_url: sol.rpc_http_url.clone(),
             http_client: reqwest::Client::new(),
-            program_id,
+            program_id: sol.program_address,
             payer,
             telemetry,
         }

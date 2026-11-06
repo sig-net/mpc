@@ -30,7 +30,7 @@ pub fn make_config() -> anyhow::Result<SolConfig> {
         // The bench only indexes; the signer is never used.
         account_sk: String::new(),
         rpc_http_url,
-        program_address: opt_env("PROGRAM_ADDRESS")?,
+        program_address: opt_env("PROGRAM_ADDRESS")?.parse()?,
         indexer: Default::default(),
     })
 }

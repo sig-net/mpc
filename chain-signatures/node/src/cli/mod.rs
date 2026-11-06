@@ -521,7 +521,7 @@ fn log_startup(
         near_rpc_url = %near_client.rpc_addr(),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
         eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
-        sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.as_str()).unwrap_or("None"),
+        sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.to_string()).unwrap_or_else(|| "None".to_string()),
         sol_rpc_url = %chains.sol.as_ref().map(|c| c.rpc_http_url.as_str()).unwrap_or("None"),
         sol_signer_address = %sol_signer_address.as_deref().unwrap_or("None"),
         hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
@@ -1168,7 +1168,7 @@ mod tests {
         SolConfig {
             account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
             rpc_http_url: "http://127.0.0.1:1".into(),
-            program_address: mpc_chain_solana::Pubkey::new_unique().to_string(),
+            program_address: mpc_chain_solana::Pubkey::new_unique(),
             indexer: Default::default(),
         }
     }

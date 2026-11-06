@@ -6,6 +6,7 @@ use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
+use solana_sdk::pubkey::Pubkey as SolanaPubkey;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -60,6 +61,15 @@ fn thread_network_name(docker: &DockerClient) -> String {
 }
 
 const ENV: &str = "test";
+
+/// Stands in for the program address until the contract is deployed. Not the
+/// all-zeros default, which is the System Program.
+fn placeholder_program_address() -> SolanaPubkey {
+    "PLaceho1derProgram1111111111111111111111111"
+        .parse()
+        .expect("a valid literal")
+}
+
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
 ///
 /// When enabled, uses hardcoded key shares from fixture data to start nodes in
@@ -163,7 +173,7 @@ pub struct ClusterSpawner {
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
-    pub program_address: Option<String>,
+    pub program_address: Option<SolanaPubkey>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
@@ -289,9 +299,9 @@ impl ClusterSpawner {
         // Enable Solana by setting a placeholder if not already configured
         if self.cfg.sol.is_none() {
             self.cfg.sol = Some(SolConfig {
-                account_sk: String::new(),      // Will be filled in later
-                rpc_http_url: String::new(),    // Will be filled in later
-                program_address: String::new(), // Will be filled in later
+                account_sk: String::new(),                      // Will be filled in later
+                rpc_http_url: String::new(),                    // Will be filled in later
+                program_address: placeholder_program_address(), // Will be filled in later
                 indexer: Default::default(),
             });
         }
@@ -299,7 +309,7 @@ impl ClusterSpawner {
     }
 
     /// Set the Solana program address to watch for events.
-    pub fn program_address(mut self, address: String) -> Self {
+    pub fn program_address(mut self, address: SolanaPubkey) -> Self {
         self.program_address = Some(address);
         self
     }
@@ -431,7 +441,7 @@ impl IntoFuture for ClusterSpawner {
                 let solana = self.spawn_solana().await;
 
                 // Deploy the core contracts and get the program address
-                let program_address = if let Some(addr) = self.program_address.clone() {
+                let program_address = if let Some(addr) = self.program_address {
                     // Use provided program address
                     addr
                 } else {

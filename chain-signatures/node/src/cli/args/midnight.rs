@@ -26,9 +26,10 @@ pub struct MidnightArgs {
     #[arg(
         long,
         env("MPC_MIDNIGHT_CENTRAL_ADDRESS"),
+        value_parser = MidnightAddress::from_hex,
         requires = "midnight_node_url"
     )]
-    pub midnight_central_address: Option<String>,
+    pub midnight_central_address: Option<MidnightAddress>,
     /// Hex seed of the wallet that funds respond transactions.
     #[arg(
         long,
@@ -104,7 +105,7 @@ pub struct MidnightArgs {
 
 impl MidnightArgs {
     /// Clap's `requires_all` on the node URL makes the flags all-or-nothing before
-    /// this conversion parses the central address and validates the remaining fields.
+    /// this conversion validates the remaining fields.
     pub fn into_config(self) -> anyhow::Result<Option<MidnightConfig>> {
         let (
             Some(node_url),
@@ -148,8 +149,6 @@ impl MidnightArgs {
                 format!("midnight config: --midnight-intent-gen-command must be a JSON array of strings, got {command}")
             })?;
         }
-        let central_address = MidnightAddress::from_hex(&central_address)
-            .context("midnight config: central_address must be 32 bytes of hex")?;
         let config = MidnightConfig {
             node_url,
             central_address,
@@ -265,14 +264,17 @@ mod tests {
     }
 
     #[test]
-    fn central_address_is_parsed_at_the_config_boundary() {
-        for invalid in ["ab".repeat(31), format!("0x{}", "ab".repeat(31))] {
-            let mut args = configured_args();
-            args.midnight_central_address = Some(invalid);
-
-            let error = args.into_config().unwrap_err().to_string();
+    fn the_cli_rejects_a_malformed_central_address() {
+        for invalid in ["ab".repeat(31), format!("0x{}", "ab".repeat(32))] {
+            let mut argv = configured_argv();
+            let flag = argv
+                .iter()
+                .position(|arg| arg == "--midnight-central-address")
+                .unwrap();
+            argv[flag + 1] = invalid;
+            let error = MidnightArgs::try_parse_from(argv).unwrap_err().to_string();
             assert!(
-                error.contains("central_address"),
+                error.contains("--midnight-central-address"),
                 "unexpected address error: {error}"
             );
         }
