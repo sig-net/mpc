@@ -491,6 +491,14 @@ impl ChainStack {
     }
 }
 
+/// Host of `url` for the startup log: RPC URLs may carry API keys.
+fn host_of(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "invalid".to_string())
+}
+
 /// Emit the single structured "starting node" banner describing this node's identity
 /// and which chains it is configured to index.
 #[allow(clippy::too_many_arguments)]
@@ -518,17 +526,17 @@ fn log_startup(
         git_commit_hash = %crate::metrics::git_commit_hash(),
         build_timestamp = %crate::metrics::build_timestamp(),
         sign_pk = %network.sign_sk.public_key(),
-        near_rpc_url = %near_client.rpc_addr(),
+        near_rpc_host = %host_of(&near_client.rpc_addr()),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
         eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
         sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.as_str()).unwrap_or("None"),
-        sol_rpc_url = %chains.sol.as_ref().map(|c| c.rpc_http_url.as_str()).unwrap_or("None"),
+        sol_rpc_host = %chains.sol.as_ref().map(|c| host_of(c.rpc_http_url.as_str())).unwrap_or_else(|| "None".to_string()),
         sol_signer_address = %sol_signer_address.as_deref().unwrap_or("None"),
-        hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
+        hydration_rpc_host = %chains.hydration.as_ref().map(|c| host_of(c.rpc_ws_url.as_str())).unwrap_or_else(|| "None".to_string()),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
-        canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
-        midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
-        tron_endpoint = %chains.tron.as_ref().map(|c| c.endpoint.as_str()).unwrap_or("None"),
+        canton_json_api_host = %chains.canton.as_ref().map(|c| host_of(c.json_api_url.as_str())).unwrap_or_else(|| "None".to_string()),
+        midnight_node_host = %chains.midnight.as_ref().map(|c| host_of(&c.node_url)).unwrap_or_else(|| "None".to_string()),
+        tron_host = %chains.tron.as_ref().map(|c| host_of(c.endpoint.as_str())).unwrap_or_else(|| "None".to_string()),
         "starting node",
     );
 }
