@@ -17,14 +17,12 @@ use alloy::network::TransactionResponse;
 use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Block, BlockId, BlockTransactions, TransactionReceipt};
 use futures_util::{stream, StreamExt};
-use mpc_chain_integration_core::{
-    unexecutable_outcome, ChainTelemetry, ExtractionFailureKind, StateManager,
-};
+use mpc_chain_integration_core::{ChainTelemetry, ExtractionFailureKind, StateManager};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
     SignId,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// Scheduling state for the watcher nonce gate. Persisted across blocks by the
@@ -49,16 +47,12 @@ type WatcherReceipt = (
     anyhow::Result<BackfillOutcome>,
 );
 
-/// Result of a `backfill_execution_confirmation`. `Observed` carries the
-/// confirmation for a mined tx and its inclusion height. `NotObserved` covers
-/// "no receipt yet" (pending or replaced).
+/// Result of a `backfill_execution_confirmation`. `Observed` carries the confirmation
+/// for a mined tx. `NotObserved` covers "no receipt yet" (pending or replaced).
 #[allow(clippy::large_enum_variant)] // value is consumed in one match arm; never stored.
 enum BackfillOutcome {
     NotObserved,
-    Observed {
-        confirmation: ConfirmationOutcome,
-        block_number: u64,
-    },
+    Observed { confirmation: ConfirmationOutcome },
 }
 
 /// Result of resolving a mined transaction into an execution confirmation.
@@ -163,19 +157,9 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             .partition(|(tx_id, _)| block_tx_hashes.contains(&B256::from(tx_id.0)));
 
         // Receipts for watched txs mined in this block
-        let (mut events, consumed_slots, mut failed) = self
+        let (mut events, mut consumed_slots, mut failed) = self
             .resolve_mined_watchers(mined_in_block, block_number)
             .await;
-
-        // Resolve pending watchers replaced by a sibling tx mined in this block
-        let (sibling_events, unmined_watchers) =
-            Self::resolve_replaced_siblings(unmined_watchers, &consumed_slots, block_number);
-
-        events.extend(sibling_events);
-
-        // Candidates for a replacement that the nonce gate below observes late.
-        // TODO: avoid this clone by having the sibling resolvers borrow their watchers.
-        let late_candidates = unmined_watchers.clone();
 
         // Nonce gate: one-shot for new watchers, every block for retries,
         // every WATCHER_SLOW_SWEEP_INTERVAL blocks for edge-case consumption by a tx with no local watcher.
@@ -185,14 +169,13 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             .filter(|(tx_id, _)| sweep_all || new_watchers.contains(tx_id) || retry.contains(tx_id))
             .collect();
 
-        let (gated_events, gated_failed, late_consumed_slots, unknown_takers) =
+        let (gated_events, gated_failed, late_consumed_slots, displaced) =
             self.resolve_gated_watchers(gated, block_number).await;
         events.extend(gated_events);
         failed.extend(gated_failed);
-        let late_events =
-            Self::resolve_late_replaced_siblings(late_candidates, &late_consumed_slots);
-        let unknown_takers = Self::still_unanswered(unknown_takers, &late_events);
-        events.extend(late_events);
+        // The node answers a watcher displaced by a watched tx, from that tx's event (M4).
+        consumed_slots.extend(late_consumed_slots);
+        let unknown_takers = Self::unknown_takers(displaced, &consumed_slots);
 
         if !unknown_takers.is_empty() {
             tracing::info!(
@@ -442,10 +425,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         let confirmation = self
             .execution_confirmed_event(tx_id, sign_id, pending_tx, mined_block_number, &receipt)
             .await;
-        Ok(BackfillOutcome::Observed {
-            confirmation,
-            block_number: mined_block_number,
-        })
+        Ok(BackfillOutcome::Observed { confirmation })
     }
 
     /// Fetches receipts for a batch of watchers with bounded concurrency,
@@ -493,7 +473,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
     /// Resolves watched txs whose hash appears in this block. Returns emitted
     /// events, the (sender, nonce) slots consumed by observed txs (input to
-    /// sibling correlation), and watchers whose RPC attempt failed.
+    /// telling unknown takers apart), and watchers whose RPC attempt failed.
     async fn resolve_mined_watchers(
         &self,
         mined: Vec<WatcherEntry>,
@@ -513,7 +493,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
         for (tx_id, sign_id, _, result) in self.fetch_watcher_receipts(mined, block_number).await {
             match result {
-                Ok(BackfillOutcome::Observed { confirmation, .. }) => match confirmation {
+                Ok(BackfillOutcome::Observed { confirmation }) => match confirmation {
                     ConfirmationOutcome::Confirmed(event) => events.push(event),
                     ConfirmationOutcome::RetryExtraction => {
                         failed.insert(tx_id);
@@ -535,86 +515,26 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         (events, consumed_slots, failed)
     }
 
-    /// Resolves watchers whose nonce a watched tx with other unsigned bytes took in block
-    /// `block_number`, at that height. Returns the events and the unresolved watchers.
-    fn resolve_replaced_siblings(
-        unmined: Vec<WatcherEntry>,
+    /// The sign ids of `displaced` whose nonce no watched tx with other unsigned bytes took.
+    /// A watched taker with equal bytes is another request, but it also executed this one
+    /// (M3); answering that needs matching by bytes, not tx id.
+    fn unknown_takers(
+        displaced: Vec<(SignId, Arc<BidirectionalTx>)>,
         consumed_slots: &HashMap<(Address, u64), Arc<BidirectionalTx>>,
-        block_number: u64,
-    ) -> (Vec<ChainEvent>, Vec<WatcherEntry>) {
-        let mut events = Vec::new();
-        let mut remaining = Vec::new();
-        for (tx_id, (sign_id, tx)) in unmined {
-            // A watched taker is another request, but with equal bytes it also executed this one
-            // (M3); answering that needs matching by bytes, not tx id, so no verdict yet.
-            let displaced = consumed_slots
-                .get(&(Address::from(tx.from_address), tx.nonce))
-                .is_some_and(|consuming| {
-                    consuming.serialized_transaction != tx.serialized_transaction
-                });
-            if !displaced {
-                remaining.push((tx_id, (sign_id, tx)));
-                continue;
-            }
-            tracing::info!(
-                ?tx_id,
-                ?sign_id,
-                nonce = tx.nonce,
-                replacement_block = block_number,
-                "transaction replaced by a watched sibling tx"
-            );
-            let result = unexecutable_outcome(tx.source_chain);
-            events.push(ChainEvent::ExecutionConfirmed {
-                tx_id,
-                sign_id,
-                source_chain: tx.source_chain,
-                block_height: block_number,
-                result,
-            });
-        }
-
-        (events, remaining)
-    }
-
-    /// The watchers in `unknown` that none of `events` answered.
-    fn still_unanswered(mut unknown: Vec<SignId>, events: &[ChainEvent]) -> Vec<SignId> {
-        let answered: HashSet<SignId> = events
-            .iter()
-            .filter_map(|event| match event {
-                ChainEvent::ExecutionConfirmed { sign_id, .. } => Some(*sign_id),
-                _ => None,
+    ) -> Vec<SignId> {
+        displaced
+            .into_iter()
+            .filter(|(_, tx)| {
+                consumed_slots
+                    .get(&(Address::from(tx.from_address), tx.nonce))
+                    .is_none_or(|taker| taker.serialized_transaction == tx.serialized_transaction)
             })
-            .collect();
-        unknown.retain(|id| !answered.contains(id));
-        unknown
+            .map(|(sign_id, _)| sign_id)
+            .collect()
     }
 
-    /// Like `resolve_replaced_siblings` for a tx the nonce gate saw after its inclusion block, at
-    /// that height. Only a taker this node still watches counts; one resolved earlier is unknown.
-    fn resolve_late_replaced_siblings(
-        pending: Vec<WatcherEntry>,
-        consumed_slots: &HashMap<(Address, u64), (Arc<BidirectionalTx>, u64)>,
-    ) -> Vec<ChainEvent> {
-        let mut by_height: BTreeMap<u64, HashMap<(Address, u64), Arc<BidirectionalTx>>> =
-            BTreeMap::new();
-        for (slot, (consuming_tx, block_number)) in consumed_slots {
-            by_height
-                .entry(*block_number)
-                .or_default()
-                .insert(*slot, Arc::clone(consuming_tx));
-        }
-        let mut events = Vec::new();
-        let mut remaining = pending;
-        for (block_number, slots) in by_height {
-            let (resolved, rest) = Self::resolve_replaced_siblings(remaining, &slots, block_number);
-            events.extend(resolved);
-            remaining = rest;
-        }
-        events
-    }
-
-    /// Nonce-gates watchers. Returns events, watchers to retry, slots taken by observed watchers
-    /// with their inclusion heights, and watchers whose nonce an unobserved tx took.
+    /// Nonce-gates watchers. Returns events, watchers to retry, slots taken by observed watchers,
+    /// and watchers whose nonce an unobserved tx took.
     async fn resolve_gated_watchers(
         &self,
         gated: Vec<WatcherEntry>,
@@ -622,8 +542,8 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     ) -> (
         Vec<ChainEvent>,
         HashSet<BidirectionalTxId>,
-        HashMap<(Address, u64), (Arc<BidirectionalTx>, u64)>,
-        Vec<SignId>,
+        HashMap<(Address, u64), Arc<BidirectionalTx>>,
+        Vec<(SignId, Arc<BidirectionalTx>)>,
     ) {
         let unique_senders: HashSet<_> = gated
             .iter()
@@ -663,19 +583,16 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
         let mut events = Vec::new();
         let mut consumed_slots = HashMap::new();
-        let mut unknown_takers = Vec::new();
+        let mut displaced = Vec::new();
         for (tx_id, sign_id, pending_tx, result) in self
             .fetch_watcher_receipts(consumed_txs, block_number)
             .await
         {
             match result {
-                Ok(BackfillOutcome::Observed {
-                    confirmation,
-                    block_number: mined_block_number,
-                }) => {
+                Ok(BackfillOutcome::Observed { confirmation }) => {
                     consumed_slots.insert(
                         (Address::from(pending_tx.from_address), pending_tx.nonce),
-                        (Arc::clone(&pending_tx), mined_block_number),
+                        Arc::clone(&pending_tx),
                     );
                     match confirmation {
                         ConfirmationOutcome::Confirmed(event) => events.push(event), // Late watcher pickup
@@ -686,7 +603,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                 }
                 // An unknown taker may be this request's own tx under a
                 // signature this node does not hold: no outcome is known.
-                Ok(BackfillOutcome::NotObserved) => unknown_takers.push(sign_id),
+                Ok(BackfillOutcome::NotObserved) => displaced.push((sign_id, pending_tx)),
                 Err(err) => {
                     tracing::warn!(
                         ?tx_id,
@@ -699,7 +616,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             }
         }
 
-        (events, failed, consumed_slots, unknown_takers)
+        (events, failed, consumed_slots, displaced)
     }
 }
 
@@ -707,7 +624,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 mod tests {
     use super::ExecutionWatcher;
     use crate::test_utils;
-    use alloy::primitives::{address, b256, Address};
+    use alloy::primitives::{address, b256};
     use alloy::rpc::types::{Block, BlockTransactions};
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::StateManager;
@@ -716,6 +633,7 @@ mod tests {
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     fn test_watcher_tx(
@@ -1798,491 +1716,30 @@ mod tests {
         }
     }
 
+    /// A watcher whose nonce a watched tx with other bytes took is the node's to answer; one
+    /// whose taker has equal bytes, or is not watched, is reported as an unknown taker.
     #[test]
-    fn observed_replacement_resolves_its_displaced_sibling_on_every_source_chain() {
-        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
-        for source_chain in [
-            Chain::Midnight,
-            Chain::Solana,
-            Chain::Canton,
-            Chain::Hydration,
-        ] {
-            let tx_hash = b256!("dddd000000000000000000000000000000000000000000000000000000000000");
-            let mut tx = test_watcher_tx(tx_hash, from_address, 7);
-            Arc::make_mut(&mut tx).source_chain = source_chain;
-            let mut consuming_tx = tx.clone();
-            Arc::make_mut(&mut consuming_tx)
-                .serialized_transaction
-                .push(1);
-            let (events, remaining) = super::ExecutionWatcher::<
-                mpc_chain_integration_core::MockStateManager,
-                test_utils::CountingChainTelemetry,
-            >::resolve_replaced_siblings(
-                vec![(BidirectionalTxId(tx_hash.0), (SignId::new([0xdd; 32]), tx))],
-                &std::collections::HashMap::from([((from_address, 7), consuming_tx)]),
-                5,
-            );
-            assert!(remaining.is_empty());
-            assert_eq!(events.len(), 1);
-            let ChainEvent::ExecutionConfirmed {
-                result,
-                block_height,
-                ..
-            } = &events[0]
-            else {
-                panic!("unexpected event {:?}", events[0]);
-            };
-            assert_eq!(*block_height, 5);
-            if source_chain == Chain::Midnight {
-                assert!(matches!(result, ExecutionOutcome::Unviable));
-            } else {
-                assert!(matches!(result, ExecutionOutcome::Failed));
-            }
-        }
-    }
-
-    #[test]
-    fn displacement_requires_different_unsigned_bytes_at_the_same_nonce() {
-        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
-        let tx_hash = alloy::primitives::B256::repeat_byte(0xdd);
-        for (source_chain, case) in [
-            (Chain::Midnight, "same unsigned transaction"),
-            (Chain::Solana, "same unsigned transaction"),
-            (Chain::Midnight, "different sender"),
-            (Chain::Midnight, "different nonce"),
-            (Chain::Midnight, "no observation"),
-        ] {
-            let mut tx = test_watcher_tx(tx_hash, from_address, 7);
-            Arc::make_mut(&mut tx).source_chain = source_chain;
-            let mut consuming_tx = tx.clone();
-            Arc::make_mut(&mut consuming_tx).id = BidirectionalTxId([0xee; 32]);
-            if case != "same unsigned transaction" {
-                Arc::make_mut(&mut consuming_tx)
-                    .serialized_transaction
-                    .push(1);
-            }
-            let slot = match case {
-                "different sender" => (Address::repeat_byte(0x44), 7),
-                "different nonce" => (from_address, 8),
-                _ => (from_address, 7),
-            };
-            let consumed = if case == "no observation" {
-                std::collections::HashMap::new()
-            } else {
-                std::collections::HashMap::from([(slot, consuming_tx)])
-            };
-            let (events, remaining) = super::ExecutionWatcher::<
-                mpc_chain_integration_core::MockStateManager,
-                test_utils::CountingChainTelemetry,
-            >::resolve_replaced_siblings(
-                vec![(
-                    BidirectionalTxId(tx_hash.0),
-                    (SignId::new([0xdd; 32]), tx.clone()),
-                )],
-                &consumed,
-                5,
-            );
-            assert!(events.is_empty(), "{source_chain} {case}: no outcome");
-            assert_eq!(remaining.len(), 1, "{source_chain} {case}");
-        }
-    }
-
-    #[tokio::test]
-    async fn replacement_does_not_depend_on_receipt_rpc_availability() {
-        for (source_chain, status) in [
-            (Chain::Midnight, 200),
-            (Chain::Midnight, 500),
-            (Chain::Solana, 200),
-            (Chain::Solana, 500),
-        ] {
-            let mut server = Server::new_async().await;
-            let from = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
-            let consuming_hash = alloy::primitives::B256::repeat_byte(0xaa);
-            let displaced_hash = alloy::primitives::B256::repeat_byte(0xbb);
-            let receipt = server.mock("POST", "/")
-                .match_body(Matcher::PartialJson(json!({
-                    "method": "eth_getTransactionReceipt", "params": [format!("{consuming_hash:#x}")]
-                })))
-                .with_status(status)
-                .with_header("content-type", "application/json")
-                .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": null}).to_string())
-                .expect_at_least(1)
-                .create_async().await;
-            let nonce = server
-                .mock("POST", "/")
-                .match_body(Matcher::PartialJson(
-                    json!({"method": "eth_getTransactionCount"}),
-                ))
-                .expect(0)
-                .create_async()
-                .await;
-            let harness = test_utils::WatcherHarness::new(&server.url()).await;
-            for hash in [consuming_hash, displaced_hash] {
-                let mut tx = test_watcher_tx(hash, from, 7);
-                let tx_fields = Arc::make_mut(&mut tx);
-                tx_fields.source_chain = source_chain;
-                tx_fields.serialized_transaction = hash.to_vec();
-                harness
-                    .state_manager
-                    .watch_execution_as(Chain::Ethereum, SignId::new(hash.0), tx)
-                    .await;
-            }
-            let mut block: Block = Block::default();
-            block.header.number = 5;
-            block.transactions = BlockTransactions::Hashes(vec![consuming_hash]);
-            let events = harness.watcher().collect(&block).await.unwrap();
-            assert_eq!(events.len(), 1, "{source_chain} receipt HTTP {status}");
-            let expected = if source_chain == Chain::Midnight {
-                ExecutionOutcome::Unviable
-            } else {
-                ExecutionOutcome::Failed
-            };
-            assert!(matches!(&events[0], ChainEvent::ExecutionConfirmed {
-                tx_id, block_height: 5, result, ..
-            } if tx_id.0 == displaced_hash.0
-                && std::mem::discriminant(result) == std::mem::discriminant(&expected)));
-            receipt.assert_async().await;
-            nonce.assert_async().await;
-        }
-    }
-
-    /// A replacement the nonce gate sees late resolves its displaced sibling at its own inclusion
-    /// height, whatever its outcome, while this node still watches it when it lists the sibling.
-    #[tokio::test]
-    async fn late_replacement_resolves_its_displaced_sibling() {
-        /// When this node lists each watcher, relative to the replacement's
-        /// inclusion in block 5.
-        #[derive(PartialEq)]
-        enum Listing {
-            /// The displaced watcher before block 5, the replacement after it.
-            ReplacementLate,
-            /// Both after block 5, as after a restart or catch-up.
-            BothLate,
-            /// The replacement after block 5, and the displaced watcher while the
-            /// replacement's output extraction is being retried.
-            DisplacedDuringRetry,
-        }
-        for (name, source_chain, replacement_succeeded, listing) in [
-            (
-                "reverted replacement listed late",
-                Chain::Midnight,
-                false,
-                Listing::ReplacementLate,
-            ),
-            (
-                "replacement pending extraction listed late",
-                Chain::Midnight,
-                true,
-                Listing::ReplacementLate,
-            ),
-            (
-                "both listed after inclusion",
-                Chain::Midnight,
-                false,
-                Listing::BothLate,
-            ),
-            (
-                "displaced listed during the replacement's retry",
-                Chain::Midnight,
-                true,
-                Listing::DisplacedDuringRetry,
-            ),
-            (
-                "legacy reverted replacement listed late",
-                Chain::Solana,
-                false,
-                Listing::ReplacementLate,
-            ),
-        ] {
-            let mut server = Server::new_async().await;
-            let from = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
-            let displaced_hash = alloy::primitives::B256::repeat_byte(0xbb);
-            let replacement_hash = alloy::primitives::B256::repeat_byte(0xaa);
-            // The replacement consumes nonce 7 in block 5.
-            for block in 4u64..=7 {
-                server
-                    .mock("POST", "/")
-                    .match_body(Matcher::PartialJson(json!({
-                        "method": "eth_getTransactionCount",
-                        "params": [format!("{from:#x}"), format!("0x{block:x}")]
-                    })))
-                    .with_status(200)
-                    .with_header("content-type", "application/json")
-                    .with_body(
-                        json!({ "jsonrpc": "2.0", "id": 1,
-                        "result": if block < 5 { "0x7" } else { "0x8" } })
-                        .to_string(),
-                    )
-                    .create_async()
-                    .await;
-            }
-            let mut receipt = success_receipt(replacement_hash, from, 5);
-            if !replacement_succeeded {
-                receipt["status"] = json!("0x0");
-            }
-            for (hash, result) in [
-                (replacement_hash, receipt),
-                (displaced_hash, serde_json::Value::Null),
-            ] {
-                server
-                    .mock("POST", "/")
-                    .match_body(Matcher::PartialJson(json!({
-                        "method": "eth_getTransactionReceipt",
-                        "params": [format!("{hash:#x}")]
-                    })))
-                    .with_status(200)
-                    .with_header("content-type", "application/json")
-                    .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string())
-                    .create_async()
-                    .await;
-            }
-            // A successful replacement's output cannot be traced yet.
-            server
-                .mock("POST", "/")
-                .match_body(Matcher::PartialJson(
-                    json!({ "method": "eth_getTransactionByHash" }),
-                ))
-                .with_status(200)
-                .with_header("content-type", "application/json")
-                .with_body(
-                    json!({ "jsonrpc": "2.0", "id": 1,
-                    "result": contract_call_transaction(replacement_hash, from, from) })
-                    .to_string(),
-                )
-                .create_async()
-                .await;
-            server
-                .mock("POST", "/")
-                .match_body(Matcher::PartialJson(
-                    json!({ "method": "debug_traceTransaction" }),
-                ))
-                .with_status(500)
-                .create_async()
-                .await;
-
-            let harness = test_utils::WatcherHarness::new(&server.url()).await;
-            let watch = |hash: alloy::primitives::B256| {
-                let mut tx = test_watcher_tx(hash, from, 7);
-                let tx_fields = Arc::make_mut(&mut tx);
-                tx_fields.source_chain = source_chain;
-                tx_fields.serialized_transaction = hash.to_vec();
-                harness
-                    .state_manager
-                    .watch_execution_as(Chain::Ethereum, SignId::new(hash.0), tx)
-            };
-            let collect = |number: u64, mined: Vec<alloy::primitives::B256>| {
-                let mut block: Block = Block::default();
-                block.header.number = number;
-                block.transactions = BlockTransactions::Hashes(mined);
-                let harness = &harness;
-                async move { harness.watcher().collect(&block).await.unwrap() }
-            };
-
-            if listing == Listing::ReplacementLate {
-                watch(displaced_hash).await;
-            }
-            assert!(collect(4, Vec::new()).await.is_empty(), "{name}");
-            // This node processes the mining block before listing the replacement.
-            assert!(
-                collect(5, vec![replacement_hash]).await.is_empty(),
-                "{name}"
-            );
-            watch(replacement_hash).await;
-            let events = if listing == Listing::DisplacedDuringRetry {
-                assert!(collect(6, Vec::new()).await.is_empty(), "{name}");
-                watch(displaced_hash).await;
-                collect(7, Vec::new()).await
-            } else {
-                if listing == Listing::BothLate {
-                    watch(displaced_hash).await;
-                }
-                collect(6, Vec::new()).await
-            };
-
-            let outcomes = events
-                .iter()
-                .map(|event| match event {
-                    ChainEvent::ExecutionConfirmed {
-                        tx_id,
-                        sign_id,
-                        source_chain,
-                        block_height,
-                        result,
-                    } => (
-                        alloy::primitives::B256::from(tx_id.0),
-                        *sign_id,
-                        *source_chain,
-                        *block_height,
-                        std::mem::discriminant(result),
-                    ),
-                    other => panic!("{name}: unexpected event {other:?}"),
-                })
-                .collect::<Vec<_>>();
-            let mut expected = Vec::new();
-            if !replacement_succeeded {
-                expected.push((
-                    replacement_hash,
-                    SignId::new(replacement_hash.0),
-                    source_chain,
-                    5,
-                    std::mem::discriminant(&ExecutionOutcome::Failed),
-                ));
-            }
-            expected.push((
-                displaced_hash,
-                SignId::new(displaced_hash.0),
-                source_chain,
-                5,
-                std::mem::discriminant(&if source_chain == Chain::Midnight {
-                    ExecutionOutcome::Unviable
-                } else {
-                    ExecutionOutcome::Failed
-                }),
-            ));
-            assert_eq!(outcomes, expected, "{name}");
-            let extraction_attempts = match (replacement_succeeded, &listing) {
-                (false, _) => 0,
-                (true, Listing::DisplacedDuringRetry) => 2,
-                (true, _) => 1,
-            };
-            assert_eq!(
-                harness.telemetry.retryable_failures(),
-                extraction_attempts,
-                "{name}"
-            );
-        }
-    }
-
-    /// A late taker whose receipt fetch fails is retried on the next block, and its displaced
-    /// sibling still resolves at the taker's inclusion height.
-    #[tokio::test]
-    async fn late_replacement_after_a_receipt_error_resolves_at_its_height() {
-        for source_chain in [Chain::Midnight, Chain::Solana] {
-            let mut server = Server::new_async().await;
-            let from = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
-            let displaced_hash = alloy::primitives::B256::repeat_byte(0xbb);
-            let replacement_hash = alloy::primitives::B256::repeat_byte(0xaa);
-            // The replacement consumes nonce 7 in block 5.
-            for block in 4u64..=7 {
-                server
-                    .mock("POST", "/")
-                    .match_body(Matcher::PartialJson(json!({
-                        "method": "eth_getTransactionCount",
-                        "params": [format!("{from:#x}"), format!("0x{block:x}")]
-                    })))
-                    .with_status(200)
-                    .with_header("content-type", "application/json")
-                    .with_body(
-                        json!({ "jsonrpc": "2.0", "id": 1,
-                        "result": if block < 5 { "0x7" } else { "0x8" } })
-                        .to_string(),
-                    )
-                    .create_async()
-                    .await;
-            }
-            let receipt_of = |hash: alloy::primitives::B256| {
-                Matcher::PartialJson(json!({
-                    "method": "eth_getTransactionReceipt",
-                    "params": [format!("{hash:#x}")]
-                }))
-            };
-            server
-                .mock("POST", "/")
-                .match_body(receipt_of(displaced_hash))
-                .with_status(200)
-                .with_header("content-type", "application/json")
-                .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": null }).to_string())
-                .create_async()
-                .await;
-            let failing_receipt = server
-                .mock("POST", "/")
-                .match_body(receipt_of(replacement_hash))
-                .with_status(500)
-                .expect_at_least(1)
-                .create_async()
-                .await;
-
-            let harness = test_utils::WatcherHarness::new(&server.url()).await;
-            for hash in [displaced_hash, replacement_hash] {
-                let mut tx = test_watcher_tx(hash, from, 7);
-                let tx_fields = Arc::make_mut(&mut tx);
-                tx_fields.source_chain = source_chain;
-                tx_fields.serialized_transaction = hash.to_vec();
-                if hash == replacement_hash {
-                    let mut block: Block = Block::default();
-                    block.header.number = 4;
-                    assert!(harness.watcher().collect(&block).await.unwrap().is_empty());
-                    block.header.number = 5;
-                    block.transactions = BlockTransactions::Hashes(vec![replacement_hash]);
-                    assert!(harness.watcher().collect(&block).await.unwrap().is_empty());
-                }
-                harness
-                    .state_manager
-                    .watch_execution_as(Chain::Ethereum, SignId::new(hash.0), tx)
-                    .await;
-            }
-            let mut block: Block = Block::default();
-            block.header.number = 6;
-            assert!(
-                harness.watcher().collect(&block).await.unwrap().is_empty(),
-                "{source_chain}: no verdict without the taker's height"
-            );
-            failing_receipt.assert_async().await;
-            failing_receipt.remove_async().await;
-
-            let mut reverted = success_receipt(replacement_hash, from, 5);
-            reverted["status"] = json!("0x0");
-            server
-                .mock("POST", "/")
-                .match_body(receipt_of(replacement_hash))
-                .with_status(200)
-                .with_header("content-type", "application/json")
-                .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": reverted }).to_string())
-                .create_async()
-                .await;
-            block.header.number = 7;
-            let events = harness.watcher().collect(&block).await.unwrap();
-            let displaced = events.iter().find_map(|event| match event {
-                ChainEvent::ExecutionConfirmed {
-                    tx_id,
-                    block_height,
-                    result,
-                    ..
-                } if tx_id.0 == displaced_hash.0 => {
-                    Some((*block_height, std::mem::discriminant(result)))
-                }
-                _ => None,
-            });
-            let expected = if source_chain == Chain::Midnight {
-                ExecutionOutcome::Unviable
-            } else {
-                ExecutionOutcome::Failed
-            };
-            assert_eq!(
-                displaced,
-                Some((5, std::mem::discriminant(&expected))),
-                "{source_chain}"
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_takers_answered_by_the_late_path_are_not_reported() {
-        let answered = SignId::new([1; 32]);
-        let unanswered = SignId::new([2; 32]);
-        let events = [ChainEvent::ExecutionConfirmed {
-            tx_id: BidirectionalTxId([1; 32]),
-            sign_id: answered,
-            source_chain: Chain::Solana,
-            block_height: 5,
-            result: ExecutionOutcome::Failed,
-        }];
+    fn unknown_takers_exclude_watchers_displaced_by_a_watched_tx() {
+        let from = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let with_bytes = |byte: u8, bytes: u8, nonce: u64| {
+            let mut tx = test_watcher_tx(alloy::primitives::B256::repeat_byte(byte), from, nonce);
+            Arc::make_mut(&mut tx).serialized_transaction = vec![bytes];
+            (SignId::new([byte; 32]), tx)
+        };
+        let (_, taker) = with_bytes(0xaa, 0xaa, 7);
+        let consumed_slots = HashMap::from([((from, 7), taker)]);
+        let displaced = with_bytes(0xbb, 0xbb, 7);
+        let equal_bytes = with_bytes(0xcc, 0xaa, 7);
+        let other_nonce = with_bytes(0xdd, 0xdd, 8);
+        let expected = vec![equal_bytes.0, other_nonce.0];
         assert_eq!(
             ExecutionWatcher::<
                 mpc_chain_integration_core::MockStateManager,
                 test_utils::CountingChainTelemetry,
-            >::still_unanswered(vec![answered, unanswered], &events),
-            vec![unanswered]
+            >::unknown_takers(
+                vec![displaced, equal_bytes, other_nonce], &consumed_slots
+            ),
+            expected
         );
     }
 
@@ -2460,6 +1917,37 @@ mod tests {
                 SignId::new([0xaa; 32]),
                 empty_output_schema_tx(tx_hash, from_address),
             )
+            .await;
+        // A watched sibling at the taker's nonce: the node answers it from the taker's event,
+        // so the watcher stays silent on it during the retry and after.
+        let sibling_hash = alloy::primitives::B256::repeat_byte(0xbb);
+        let mut sibling = test_watcher_tx(sibling_hash, from_address, 0);
+        Arc::make_mut(&mut sibling).serialized_transaction = vec![1];
+        harness
+            .state_manager
+            .watch_execution_as(Chain::Ethereum, SignId::new([0xbb; 32]), sibling)
+            .await;
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+                "params": [format!("{from_address:#x}"), "0x5"]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x1" }).to_string())
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{sibling_hash:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": null }).to_string())
+            .create_async()
             .await;
 
         let mut block5: Block = Block::default();
@@ -2650,162 +2138,5 @@ mod tests {
             "watcher stays pending for retry"
         );
         trace_mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn replaced_sibling_uses_source_policy_at_replacement_block_without_rpc() {
-        for source_chain in [Chain::Solana, Chain::Midnight] {
-            let mut server = Server::new_async().await;
-
-            let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
-            let tx_hash_a =
-                b256!("7777777777777777777777777777777777777777777777777777777777777777");
-            let tx_hash_b =
-                b256!("8888888888888888888888888888888888888888888888888888888888888888");
-            let block_hash =
-                b256!("6e4e53d1de650d5a5ebed19b38321db369ef1dc357904284ecf4d89b8834969c");
-            let receipt_response = json!({
-                "transactionHash": format!("{tx_hash_a:#x}"),
-                "blockHash": format!("{block_hash:#x}"),
-                "blockNumber": "0x5",
-                "transactionIndex": "0x0",
-                "from": format!("{from_address:#x}"),
-                "to": format!("{from_address:#x}"),
-                "gasUsed": "0x5208",
-                "effectiveGasPrice": "0x3a29f0f8",
-                "contractAddress": null,
-                "logsBloom": format!("0x{}", "0".repeat(512)),
-                "cumulativeGasUsed": "0x5208",
-                "type": "0x2",
-                "logs": [],
-                "status": "0x0"
-            });
-
-            // Phase 1 (block 4): both watchers appear; one-shot gate checks the
-            // (deduped) sender once, nonce not yet consumed
-            let nonce_mock = server
-                .mock("POST", "/")
-                .match_body(Matcher::PartialJson(json!({
-                    "method": "eth_getTransactionCount",
-                })))
-                .with_status(200)
-                .with_header("content-type", "application/json")
-                .with_body(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x0" }).to_string())
-                .expect(1)
-                .create_async()
-                .await;
-
-            let receipt_a_mock = server
-                .mock("POST", "/")
-                .match_body(Matcher::PartialJson(json!({
-                    "method": "eth_getTransactionReceipt",
-                    "params": [format!("{tx_hash_a:#x}")]
-                })))
-                .with_status(200)
-                .with_header("content-type", "application/json")
-                .with_body(
-                    json!({ "jsonrpc": "2.0", "id": 1, "result": receipt_response }).to_string(),
-                )
-                .expect(1)
-                .create_async()
-                .await;
-
-            // The replaced sibling must never be queried over RPC
-            let receipt_b_mock = server
-                .mock("POST", "/")
-                .match_body(Matcher::PartialJson(json!({
-                    "method": "eth_getTransactionReceipt",
-                    "params": [format!("{tx_hash_b:#x}")]
-                })))
-                .expect(0)
-                .create_async()
-                .await;
-
-            let harness = test_utils::WatcherHarness::new(&server.url()).await;
-            let create_tx = |hash: alloy::primitives::B256| {
-                Arc::new(BidirectionalTx {
-                    id: BidirectionalTxId(hash.0),
-                    sender: [0u8; 32],
-                    serialized_transaction: hash.to_vec(),
-                    source_chain,
-                    target_chain: Chain::Ethereum,
-                    caip2_id: "eip155:31337".to_string(),
-                    key_version: LATEST_MPC_KEY_VERSION,
-                    deposit: 0,
-                    path: "m/44'/60'/0'/0/0".to_string(),
-                    algo: "secp256k1".to_string(),
-                    dest: Chain::Ethereum.to_string(),
-                    params: "{}".to_string(),
-                    output_deserialization_schema: vec![],
-                    respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-                    request_id: hash.0,
-                    from_address: **from_address,
-                    nonce: 0,
-                })
-            };
-
-            harness
-                .state_manager
-                .watch_execution_as(Chain::Ethereum, SignId::new([7; 32]), create_tx(tx_hash_a))
-                .await;
-            harness
-                .state_manager
-                .watch_execution_as(Chain::Ethereum, SignId::new([8; 32]), create_tx(tx_hash_b))
-                .await;
-
-            let mut block4: Block = Block::default();
-            block4.header.number = 4;
-            block4.transactions = BlockTransactions::Hashes(Vec::new());
-
-            let events = harness
-                .watcher()
-                .collect(&block4)
-                .await
-                .expect("should succeed");
-            assert!(events.is_empty());
-            nonce_mock.assert_async().await;
-            nonce_mock.remove_async().await;
-
-            // Phase 2: the mined transaction reverted; the displaced sibling is
-            // Unviable for Midnight or Failed under the legacy policy. No nonce RPC.
-            let mut block5: Block = Block::default();
-            block5.header.number = 5;
-            block5.transactions = BlockTransactions::Hashes(vec![tx_hash_a]);
-
-            let events = harness
-                .watcher()
-                .collect(&block5)
-                .await
-                .expect("should succeed");
-
-            assert_eq!(events.len(), 2);
-            let mut resolved: Vec<_> = events
-                .iter()
-                .map(|e| match e {
-                    ChainEvent::ExecutionConfirmed {
-                        tx_id,
-                        block_height,
-                        result,
-                        ..
-                    } => {
-                        assert_eq!(*block_height, 5, "both events at the replacement block");
-                        if source_chain == Chain::Midnight && tx_id.0 == tx_hash_b.0 {
-                            assert!(matches!(result, ExecutionOutcome::Unviable));
-                        } else {
-                            assert!(matches!(result, ExecutionOutcome::Failed));
-                        }
-                        tx_id.0
-                    }
-                    other => panic!("expected ExecutionConfirmed, got {other:?}"),
-                })
-                .collect();
-            resolved.sort();
-            let mut expected = vec![tx_hash_a.0, tx_hash_b.0];
-            expected.sort();
-            assert_eq!(resolved, expected);
-
-            receipt_a_mock.assert_async().await;
-            receipt_b_mock.assert_async().await;
-        }
     }
 }
