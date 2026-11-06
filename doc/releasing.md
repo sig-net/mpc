@@ -57,10 +57,12 @@ Promotion to testnet or mainnet does not create a tag. The version on a branch i
 
 Network deployments follow a standard rolling rollout so that the cluster remains online and signing throughout the upgrade:
 1. **Contract upgrade**: The release manager upgrades the MPC smart contract on-chain first.
-2. **Rolling node upgrade**: Nodes are then upgraded one by one (or in small batches) to the new release.
+2. **Rolling node upgrade**: Nodes are then upgraded one by one to the new release.
 
 Because existing nodes are still running the previous release when the contract upgrades, **the code itself makes the rolling upgrade automatic**:
-- **Wire and state compatibility**: The contract must continue supporting queries, views (`View`), and calls expected by the previous release binary. Node-to-node protocol messages must also interoperate across adjacent versions.
+- **Wire and serialization compatibility**:
+   * The contract must continue supporting queries, views (`View`), and calls expected by the previous release binary.
+   * Node-to-node protocol messages must also interoperate across adjacent versions.
 - **CI enforcement**: The `Prod Compatibility Tests` workflow is a **required check**. It spins up a mixed cluster pairing current code against the latest release tag to verify that contract updates and rolling node restarts succeed without downtime.
   - *Exception*: If a future release intentionally introduces a hard, non-rolling break requiring coordinated downtime, the CI check can be explicitly modified or disabled for that release with team alignment.
 - **Two-phase deprecation (expand-and-contract)**:
