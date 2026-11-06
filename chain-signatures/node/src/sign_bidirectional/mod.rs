@@ -18,8 +18,10 @@ pub use mpc_primitives::{
 pub use eth_tx::{derive_user_address, public_key_to_address};
 pub use progress::{BidirectionalProgress, SignProgress, SignStatus};
 pub use signing::sign_and_hash_transaction;
-pub(crate) use signing::{owned_by_requester, pending_destination_id, transaction_chain_id};
-use signing::{transaction_nonce, validate_unsigned_transaction};
+use signing::validate_unsigned_transaction;
+pub(crate) use signing::{
+    owned_by_requester, pending_destination_id, transaction_chain_id, transaction_nonce,
+};
 
 /// The requester's chain-local identity string: Midnight and Canton senders
 /// are 32-byte addresses whose canonical form is the lowercase hex of those

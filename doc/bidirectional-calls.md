@@ -474,9 +474,11 @@ on Response { rid, att, sig } finalised on the source chain:
       under attestation_key(e.contract, e.req.key.key_version):
         if att.kind is Executed or Failed:        // e.req.tx was included
             for (rid', e') in backlog for e.req.target, other than rid,
-              with e's account and e.req.tx's replay protection, unsigned
-              bytes other than e.req.tx, and no local[rid'].outcome:
-                attest(rid', (att.height, Unviable, empty))     // M4
+              with e's account and e.req.tx's replay protection, and
+              unsigned bytes other than e.req.tx:
+                e'.unviable_at = att.height                     // M4
+                if no local[rid'].outcome:
+                    attest(rid', (att.height, Unviable, empty))
         delete backlog[rid], local[rid]
 ```
 
@@ -486,8 +488,9 @@ not sign, attest or publish while it runs the handlers above: its backlog
 still holds requests the chain has already answered, and it cannot tell
 which of the signatures and attestations it holds are already published.
 Once caught up, it acts on each entry only for what is missing: it does
-not sign an entry that has a published signature or one it holds, and does
-not attest an entry it holds an attestation for.
+not sign an entry that has a published signature, one it holds, or an
+`unviable_at`, attests Unviable for an entry with an `unviable_at` and no
+outcome, and does not attest an entry it holds an attestation for.
 
 The MPC looks for a request's execution by transaction ID, under every
 signature published for the request, in any final block, so a node that
@@ -502,8 +505,9 @@ waiting on the same account and replay protection can never execute, and
 the MPC attests Unviable for each, at that transaction's height. A node
 learns of it in one of two ways: it finds the execution itself, or it
 reads the `Response` that reports it. The second reaches every node that
-reads the source chain. A node that is behind notes the outcome and
-attests once caught up.
+reads the source chain, and is recorded in the entry, since a node rebased
+onto a checkpoint never reads that `Response`. A node attests on reading
+it, and if it is behind or was rebased, from the entry once caught up.
 
 A repeated attestation has the same content (Section 5) and is dropped
 (C3a).
@@ -1113,8 +1117,8 @@ Source chains are Midnight, Solana, Hydration and Canton.
 
 Still to change:
 
-* Unviable from another request's response.
-* Finding nonce siblings, and executions under every published signature.
+* Storing issued signatures and attestations before publishing (`local`).
+* Unviable from another request's response, on Solana, Hydration and Canton.
 * Refusing non-canonical request fields, and the reserved paths on every
   source.
 * One key per key version, before a second version.

@@ -11,7 +11,8 @@ pub use request::{
 };
 
 use crate::sign_bidirectional::{
-    BidirectionalProgress, SignBidirectionalEventExt as _, SignProgress, SignStatus,
+    transaction_nonce, BidirectionalProgress, SignBidirectionalEventExt as _, SignProgress,
+    SignStatus,
 };
 use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
@@ -434,14 +435,9 @@ impl Backlog {
         Some(entry.with_execution_watch(watch))
     }
 
-    /// The request as the source chain gave it, whatever leg the entry is on.
-    pub(crate) async fn first_leg(
-        &self,
-        chain: Chain,
-        id: &SignId,
-    ) -> Option<Arc<IndexedSignRequest>> {
-        let pending = self.pending(&chain).read().await;
-        pending.get(id).map(|entry| Arc::clone(&entry.request))
+    /// The entry of `id`, whatever leg it is on.
+    pub(crate) async fn entry(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
+        self.pending(&chain).read().await.get(id).cloned()
     }
 
     /// Record a published signature's transaction for an entry that already left Initial.
@@ -464,26 +460,83 @@ impl Backlog {
         watchers.insert(ExecutionWatch::new(tx, observed_at));
     }
 
-    /// The watched txs that `taker` leaves unexecutable (M4): same account and nonce, other
-    /// bytes. Unsigned siblings are not watched; answering them changes the checkpoint digest.
-    pub async fn nonce_siblings(&self, taker: &BidirectionalTx) -> Vec<Arc<BidirectionalTx>> {
-        // A Tron transaction ID executes once whatever else runs; expiry answers the rest (M6).
-        if taker.target_chain != Chain::Ethereum {
-            return Vec::new();
+    /// Unwatch and return the entries of `chain` that `taker`, executed, leaves unexecutable (M4),
+    /// signed or not, that this node has not answered.
+    pub(crate) async fn unwatch_nonce_siblings(
+        &self,
+        chain: Chain,
+        taker: &BidirectionalTx,
+        root_pk: PublicKey,
+    ) -> Vec<SignEntry<Bidirectional<Executing>>> {
+        let siblings =
+            |entry: &BacklogEntry| entry.awaits_execution() && entry.is_nonce_sibling(taker);
+        self.unwatch_where(chain, siblings, root_pk).await
+    }
+
+    /// Record that a Response at `height` reports `taker` included, on every request of `chain`
+    /// it leaves unexecutable. A source-chain fact, so set whatever this node's progress.
+    pub(crate) async fn mark_unviable(&self, chain: Chain, taker: &BidirectionalTx, height: u64) {
+        let mut pending = self.pending(&chain).write().await;
+        for entry in pending.requests.values_mut() {
+            if entry.unviable_at.is_none() && entry.is_nonce_sibling(taker) {
+                tracing::info!(sign_id = ?entry.sign_id(), height, "nonce used up by a Response");
+                entry.unviable_at = Some(height);
+            }
         }
-        let watchers = self.watchers(&taker.target_chain).read().await;
-        watchers
-            .watchers
-            .values()
-            .map(|watch| &watch.tx)
-            .filter(|tx| {
-                tx.caip2_id == taker.caip2_id
-                    && tx.from_address == taker.from_address
-                    && tx.nonce == taker.nonce
-                    && tx.serialized_transaction != taker.serialized_transaction
-            })
-            .cloned()
-            .collect()
+    }
+
+    /// Unwatch and return the entries of `chain` a Response left unexecutable that this node has
+    /// not answered.
+    pub(crate) async fn unwatch_unviable(
+        &self,
+        chain: Chain,
+        root_pk: PublicKey,
+    ) -> Vec<SignEntry<Bidirectional<Executing>>> {
+        let unviable =
+            |entry: &BacklogEntry| entry.unviable_at.is_some() && entry.awaits_execution();
+        self.unwatch_where(chain, unviable, root_pk).await
+    }
+
+    /// Unwatch and return the entries on `chain` that `pick` selects, to answer them. They stay in
+    /// the backlog, each named by its request's id, since nodes may know different transactions.
+    async fn unwatch_where(
+        &self,
+        chain: Chain,
+        pick: impl Fn(&BacklogEntry) -> bool,
+        root_pk: PublicKey,
+    ) -> Vec<SignEntry<Bidirectional<Executing>>> {
+        let picked: Vec<BacklogEntry> = {
+            let pending = self.pending(&chain).read().await;
+            pending
+                .requests
+                .values()
+                .filter(|entry| pick(entry))
+                .cloned()
+                .collect()
+        };
+        let mut unwatched = Vec::new();
+        for entry in picked {
+            let Some(tx) = entry.named_tx(root_pk) else {
+                tracing::error!(sign_id = ?entry.sign_id(), "cannot build a transaction to answer");
+                continue;
+            };
+            let mut observed_at = None;
+            for watched in entry.watched_txs() {
+                let removed = self
+                    .watchers(&watched.target_chain)
+                    .write()
+                    .await
+                    .remove_owned(&watched.id, watched.source_chain, &watched.sign_id());
+                observed_at = observed_at.or(removed.and_then(|watch| watch.respond_observed_at));
+            }
+            unwatched.push(SignEntry {
+                chain,
+                request: entry.request,
+                state: Bidirectional(Executing(ExecutionWatch::new(tx, observed_at))),
+                backlog: self.clone(),
+            });
+        }
+        unwatched
     }
 
     /// The executing entry a confirmation attests: by the entry's own
@@ -756,6 +809,8 @@ pub enum BacklogError {
     InvalidSignature,
     #[error("cannot mark publishing: status must be pending generation")]
     InvalidPublishTransition,
+    #[error("request was already answered")]
+    AlreadyAnswered,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -765,6 +820,8 @@ pub struct BacklogEntry {
     pub status: SignStatus,
     /// The transactions the request's published signatures give, in id order.
     pub tx_ids: Vec<BidirectionalTxId>,
+    /// The height another request's Response attests, which left this one unexecutable (M4).
+    pub unviable_at: Option<u64>,
 }
 
 impl BacklogEntry {
@@ -785,6 +842,7 @@ impl BacklogEntry {
             request,
             status,
             tx_ids: Vec::new(),
+            unviable_at: None,
         }
     }
 
@@ -796,14 +854,17 @@ impl BacklogEntry {
     }
 
     /// Whether catchup queues this entry for signing. The first leg is not signed again once a
-    /// signature of it is published, which a failed rebuild can leave beside `Initial`.
+    /// signature of it is published, which a failed rebuild can leave beside `Initial`. An
+    /// unanswered marked entry is answered Unviable instead; one already answered still needs
+    /// its response signed.
     fn signs_at_catchup(&self) -> bool {
         let signed_first_leg = !self.tx_ids.is_empty()
             && matches!(
                 self.status,
                 SignStatus::Bidirectional(BidirectionalProgress::Initial(_))
             );
-        self.status.is_pending_generation() && !signed_first_leg
+        let unanswered_mark = self.unviable_at.is_some() && self.awaits_execution();
+        self.status.is_pending_generation() && !signed_first_leg && !unanswered_mark
     }
 
     /// The source-chain facts the digest covers; indexing times are node-local.
@@ -815,10 +876,52 @@ impl BacklogEntry {
             request.chain,
             &request.kind,
             &self.tx_ids,
+            self.unviable_at,
         );
         let mut bytes = Vec::new();
         ciborium::into_writer(&fields, &mut bytes).expect("encoding into memory cannot fail");
         bytes
+    }
+
+    /// Whether this node still has to answer the request.
+    pub(crate) fn awaits_execution(&self) -> bool {
+        matches!(
+            self.status,
+            SignStatus::Bidirectional(
+                BidirectionalProgress::Initial(_) | BidirectionalProgress::Executing(_)
+            )
+        )
+    }
+
+    /// The request's transaction, named by the request's id: it answers for the request
+    /// whatever signatures of it a node knows.
+    pub(crate) fn named_tx(&self, root_pk: PublicKey) -> Option<Arc<BidirectionalTx>> {
+        let SignKind::SignBidirectional(event) = &self.request.kind else {
+            return None;
+        };
+        let request_id = self.request.id.request_id;
+        event
+            .bidirectional_tx(request_id, BidirectionalTxId(request_id), root_pk)
+            .ok()
+            .map(Arc::new)
+    }
+
+    /// Whether `taker`, executed, leaves this request unexecutable (M4): same account and nonce,
+    /// other bytes. The source chain, sender, path and key version fix the account. A Tron
+    /// transaction ID executes once whatever else runs; expiry answers the rest (M6).
+    pub(crate) fn is_nonce_sibling(&self, taker: &BidirectionalTx) -> bool {
+        let SignKind::SignBidirectional(event) = &self.request.kind else {
+            return false;
+        };
+        taker.target_chain == Chain::Ethereum
+            && event.caip2_id == taker.caip2_id
+            && event.chain == taker.source_chain
+            && event.sender == taker.sender
+            && event.path == taker.path
+            && event.key_version == taker.key_version
+            && event.serialized_transaction != taker.serialized_transaction
+            && transaction_nonce(taker.target_chain, &event.serialized_transaction)
+                .is_ok_and(|nonce| nonce == taker.nonce)
     }
 
     /// Add a published signature's transaction; false if it was known.
@@ -854,6 +957,7 @@ impl BacklogEntry {
     pub(crate) fn without_progress(&self, root_pk: PublicKey) -> Self {
         let mut bare = Self::new(Arc::clone(&self.request));
         bare.tx_ids = self.tx_ids.clone();
+        bare.unviable_at = self.unviable_at;
         let (SignKind::SignBidirectional(event), Some(id)) =
             (&self.request.kind, self.tx_ids.first())
         else {

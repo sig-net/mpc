@@ -319,7 +319,7 @@ async fn test_checkpoint_creation() {
     // Guard the checkpoint digest wire format; update only for intentional changes.
     assert_eq!(
         checkpoint.digest(),
-        digest_hex("562a733c296c0cb20f568b1e370c1f0311eb371964d450ab67dc3b2fb343fdbe")
+        digest_hex("05a0fe7b2a3546a652a21f2f0003fe49b6bf6c8ece39f27dd073c0ec5537144b")
     );
 }
 
@@ -546,7 +546,7 @@ fn test_checkpoint_digest_invariants() {
     assert_ne!(cp_diff1.digest(), cp_diff2.digest());
     assert_eq!(
         cp_diff1.digest(),
-        digest_hex("7a70129d584242b811b117f5072b4f965468fab006c8caa6ca45e3fdd0ff30a1")
+        digest_hex("40dbe3f5aba0ab212cc9e7a3cdd992e278f3cb9796b88c6b859ed17199bbab8c")
     );
 }
 
@@ -633,7 +633,7 @@ fn test_checkpoint_serialization() {
     assert_eq!(checkpoint, deserialized);
     assert_eq!(
         checkpoint.digest(),
-        digest_hex("bea87e72f589447390ccc8440fb3653b1886350835d1ff0c57f6c758e653b23a")
+        digest_hex("4d35080e6b80ebe6501767b61e8320068f6870920106fc8f09f4f2be6ea79e12")
     );
     assert_eq!(checkpoint.digest(), deserialized.digest());
 
@@ -1278,6 +1278,87 @@ async fn test_advance_rejects_invalid_publish_transition() {
         .await
         .unwrap_err();
     assert_eq!(err2, BacklogError::InvalidPublishTransition);
+}
+
+/// A first-leg round that finishes after its request was answered must not fill the response's
+/// progress, or the node publishes the first-leg signature as the response.
+#[tokio::test]
+async fn a_first_leg_round_cannot_publish_into_the_response() {
+    let backlog = Backlog::new();
+    let tx = mock_tx(79);
+    let req = mock_bidi_request(tx.sign_id(), Chain::Solana);
+    let (pk, output) = mock_signature_output(&req.args);
+    let first_leg = backlog.insert_bidirectional(Arc::clone(&req)).await;
+    let answered = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: mock_bidi_response(&tx),
+        progress: SignProgress::Generating,
+    });
+    backlog
+        .pending(&Chain::Solana)
+        .write()
+        .await
+        .requests
+        .get_mut(&tx.sign_id())
+        .unwrap()
+        .status = answered.clone();
+
+    let err = first_leg
+        .advance(pk, &output, mock_participants(), true)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, BacklogError::InvalidPublishTransition);
+    let entry = backlog.entry(Chain::Solana, &tx.sign_id()).await.unwrap();
+    assert_eq!(entry.status, answered);
+}
+
+/// A marked entry is answered Unviable at catchup, so it spends no presignature on a first leg.
+#[tokio::test]
+async fn catchup_does_not_requeue_a_marked_entry() {
+    let backlog = Backlog::new();
+    let sign_id = SignId::from_u8(80);
+    backlog
+        .insert_bidirectional(mock_bidi_request(sign_id, Chain::Solana))
+        .await;
+    assert_eq!(backlog.requeueable_requests(Chain::Solana).await.len(), 1);
+
+    backlog
+        .pending(&Chain::Solana)
+        .write()
+        .await
+        .requests
+        .get_mut(&sign_id)
+        .unwrap()
+        .unviable_at = Some(5);
+
+    assert!(backlog.requeueable_requests(Chain::Solana).await.is_empty());
+}
+
+/// A restart before an answered entry's response is signed must still sign it: no other path
+/// sends it, and the mark stays on the entry.
+#[tokio::test]
+async fn catchup_requeues_a_marked_entry_already_answered() {
+    let backlog = Backlog::new();
+    let tx = mock_tx(81);
+    backlog
+        .insert_bidirectional(mock_bidi_request(tx.sign_id(), Chain::Solana))
+        .await;
+    {
+        let mut pending = backlog.pending(&Chain::Solana).write().await;
+        let entry = pending.requests.get_mut(&tx.sign_id()).unwrap();
+        entry.unviable_at = Some(5);
+        entry.status = SignStatus::Bidirectional(BidirectionalProgress::Final {
+            respond_request: mock_bidi_response(&tx),
+            progress: SignProgress::Generating,
+        });
+    }
+
+    let requeued = backlog.requeueable_requests(Chain::Solana).await;
+    assert_eq!(requeued.len(), 1);
+    assert_matches!(
+        requeued[0].request().kind,
+        SignKind::RespondBidirectional(_)
+    );
 }
 
 #[tokio::test]
