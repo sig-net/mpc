@@ -1121,7 +1121,6 @@ Source chains are Midnight, Solana, Hydration and Canton.
 Checked against `develop` at `1d823c4e`. Still to change:
 
 * `local` keeps the latest signature and the latest attestation per request.
-* Reading `local` back after a restart.
 * Unviable from another request's response.
 * Finding nonce siblings, and executions under every published signature.
 * Refusing non-canonical request fields, and the reserved paths on every
