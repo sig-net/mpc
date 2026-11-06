@@ -41,7 +41,9 @@ impl Keystore {
     ) -> anyhow::Result<Self> {
         #[cfg(feature = "test-feature")]
         if let Some(base_path) = &opts.sk_share_local_path {
-            let path = PathBuf::from(format!("{base_path}-{account_id}"));
+            let mut path = base_path.as_os_str().to_owned();
+            path.push(format!("-{account_id}"));
+            let path = PathBuf::from(path);
             tracing::info!(path = %path.display(), "keeping the key share in a file");
             return Ok(Self::File(FileKeystore { path }));
         }
