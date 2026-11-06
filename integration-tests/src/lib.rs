@@ -391,13 +391,17 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let cfg = &spawner.cfg;
 
     let spawn_nodes_start = std::time::Instant::now();
+    let node_cfgs = (0..spawner.accounts.len())
+        .map(|index| spawner.node_config(index))
+        .collect::<Vec<_>>();
     let node_futures = spawner
         .accounts
         .iter()
         .zip(std::mem::take(&mut spawner.node_binary_sources))
-        .map(|(account, source)| {
+        .zip(&node_cfgs)
+        .map(|((account, source), node_cfg)| {
             let binary_path = source.binary_path().unwrap();
-            local::Node::run_with_binary(&ctx, cfg, account, binary_path)
+            local::Node::run_with_binary(&ctx, node_cfg, account, binary_path)
         });
     let nodes = futures::future::join_all(node_futures)
         .await
