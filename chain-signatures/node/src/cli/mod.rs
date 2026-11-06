@@ -20,6 +20,7 @@ use crate::storage::keystore::Keystore;
 use crate::storage::midnight_wallet_storage::MidnightWalletStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
+use crate::storage::Initializing;
 use crate::stream::{supervisor::run_supervised, StreamContext};
 use crate::types::SignCommand;
 use crate::{logs, storage, web};
@@ -616,8 +617,8 @@ impl RpcHandles {
 
 struct StorageHandles {
     keystore: Keystore,
-    triple_storage: TripleStorage,
-    presignature_storage: PresignatureStorage,
+    triple_storage: TripleStorage<Initializing>,
+    presignature_storage: PresignatureStorage<Initializing>,
     backlog: Backlog,
     midnight_wallet: Arc<dyn WalletSnapshotStore>,
 }
@@ -682,8 +683,8 @@ impl ProtocolHandles {
         node_client: &NodeClient,
         contract_watcher: &ContractStateWatcher,
         keystore: Keystore,
-        triple_storage: TripleStorage,
-        presignature_storage: PresignatureStorage,
+        triple_storage: TripleStorage<Initializing>,
+        presignature_storage: PresignatureStorage<Initializing>,
         mesh_state: watch::Receiver<MeshState>,
         rpc_channel: RpcChannel,
         sync_report_tx: SyncReportSender,

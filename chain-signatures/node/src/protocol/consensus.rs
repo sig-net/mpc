@@ -96,9 +96,6 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             );
 
                             let threshold = contract_state.threshold;
-                            // Initialize identity for storage; this is an entry point into Running.
-                            ctx.triple_storage.set_me(me);
-                            ctx.presignature_storage.set_me(me);
                             let num_nodes = contract_state.participants.len();
                             let triple_task =
                                 TripleSpawnerTask::run(me, threshold, num_nodes, epoch, ctx);
@@ -395,9 +392,6 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         return NodeState::WaitingForConsensus(self);
                     };
 
-                    // Initialize identity for storage; this is an entry point into Running.
-                    ctx.triple_storage.set_me(me);
-                    ctx.presignature_storage.set_me(me);
                     let num_nodes = contract_state.participants.len();
                     let triple_task =
                         TripleSpawnerTask::run(me, self.threshold, num_nodes, self.epoch, ctx);
