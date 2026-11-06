@@ -15,6 +15,7 @@ use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig, RpcFailur
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind};
 use std::{sync::Arc, time::Duration};
+use url::Url;
 
 // Constants for Canton JSON Ledger API RPC retry behavior.
 const CANTON_RPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -124,7 +125,7 @@ impl CantonClient {
     }
 
     fn json_api_endpoint(&self, path: &str) -> String {
-        format!("{}{}", self.config.json_api_url, path)
+        endpoint(&self.config.json_api_url, path)
     }
 
     pub async fn auth_post(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
@@ -423,6 +424,12 @@ impl ChainPublisher for CantonClient {
     }
 }
 
+/// `base` plus `path`, which brings its own leading slash. A host-only `Url` renders
+/// with a trailing slash, so it is trimmed first.
+pub(crate) fn endpoint(base: &Url, path: &str) -> String {
+    format!("{}{path}", base.as_str().trim_end_matches('/'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,10 +452,10 @@ mod tests {
 
     fn mock_canton_config(url: &str) -> CantonConfig {
         CantonConfig {
-            json_api_url: url.to_string(),
-            json_api_ws_url: url.replace("http", "ws"),
+            json_api_url: url.parse().unwrap(),
+            json_api_ws_url: url.replace("http", "ws").parse().unwrap(),
             auth: CantonAuthConfig {
-                token_url: format!("{url}/token"),
+                token_url: format!("{url}/token").parse().unwrap(),
                 client_id: "test-client".to_string(),
                 client_secret: "test-secret".to_string(),
                 audience: "test-audience".to_string(),

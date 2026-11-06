@@ -259,7 +259,7 @@ mod tests {
             sk_share_local_path: Some("/tmp/share".into()),
             sk_share_secret_id: None,
             gcp_project_id: None,
-            redis_url: "redis://localhost".to_string(),
+            redis_url: "redis://localhost".parse().unwrap(),
         };
 
         let store = Keystore::init(&opts, &make_test_account_id())
@@ -276,7 +276,7 @@ mod tests {
             #[cfg(feature = "test-feature")]
             sk_share_local_path: None,
             gcp_project_id: Some("test-project".to_string()),
-            redis_url: "redis://localhost".to_string(),
+            redis_url: "redis://localhost".parse().unwrap(),
         };
 
         let store = Keystore::init(&opts, &make_test_account_id())
@@ -295,7 +295,7 @@ mod tests {
             #[cfg(feature = "test-feature")]
             sk_share_local_path: None,
             gcp_project_id: Some("test-project".to_string()),
-            redis_url: "redis://localhost".to_string(),
+            redis_url: "redis://localhost".parse().unwrap(),
         };
 
         let Err(err) = Keystore::init(&opts, &make_test_account_id()).await else {
@@ -315,7 +315,7 @@ mod tests {
             #[cfg(feature = "test-feature")]
             sk_share_local_path: None,
             gcp_project_id: None,
-            redis_url: "redis://localhost".to_string(),
+            redis_url: "redis://localhost".parse().unwrap(),
         };
 
         let Err(err) = Keystore::init(&opts, &make_test_account_id()).await else {
