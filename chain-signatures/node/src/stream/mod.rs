@@ -29,6 +29,9 @@ pub struct StreamContext {
     pub node_client: NodeClient,
     pub checkpoints_rx: CheckpointWatcher,
     pub caught_up: bool,
+    /// Failover deadlines count from here at the earliest: this process's first catch-up on the
+    /// chain since starting or rebasing.
+    pub failover_floor: Option<u64>,
     /// Overrides the failover schedule's observe lag; `None` is production. Fixtures
     /// pin it.
     pub observe_lag: Option<Duration>,
@@ -56,6 +59,7 @@ impl StreamContext {
             node_client,
             checkpoints_rx,
             caught_up: false,
+            failover_floor: None,
             observe_lag: None,
             ethereum_chain_id: None,
         }
@@ -105,6 +109,8 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
                 return Ok(());
             }
             ctx.caught_up = true;
+            ctx.failover_floor
+                .get_or_insert_with(mpc_utils::time::current_unix_timestamp);
             // Set before the requeue scan, so an entry that misses the scan sees it.
             ctx.backlog.set_caught_up(chain, true);
 

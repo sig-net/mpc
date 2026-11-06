@@ -1740,9 +1740,8 @@ async fn next_publish(rx: &mut mpsc::Receiver<RpcAction>) -> Option<RpcAction> {
         .flatten()
 }
 
-/// A restarting proposer republishes from the catchup resume, and its deadline is
-/// long past by then. The resume records what it sent, so the next block does not
-/// put a second copy of the same response on chain.
+/// A restarting proposer republishes from the catchup resume. The resume records what it sent,
+/// so the sweep does not put a second copy of the same response on chain.
 #[tokio::test]
 async fn catchup_resume_suppresses_the_sweep_for_the_same_entry() {
     let backlog = Backlog::new();
@@ -2629,4 +2628,62 @@ async fn final_response_settles_on_the_published_output() {
             "{published}"
         );
     }
+}
+
+/// Failover counts from the process's first catch-up, so nodes restarting together stay spread
+/// over the window however long they were down. A later catch-up moves nothing.
+#[tokio::test]
+async fn failover_counts_from_the_floor() {
+    let chain = Chain::Solana;
+    let backlog = Backlog::new();
+    let entry = backlog
+        .insert_mock_bidirectional(SignId::new([1; 32]), chain)
+        .await;
+    let (pk, output) = mock_signature_output(&entry.request().args);
+    entry
+        .advance(pk, &output, mock_participants(), false)
+        .await
+        .unwrap();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let (ctx, mut rpc_rx) = make_test_stream_context_with_rpc(
+        backlog,
+        sign_tx,
+        false,
+        ProjectivePoint::GENERATOR.to_affine(),
+    );
+    let mut ctx = ctx.with_observe_lag(Some(Duration::ZERO));
+    let before = mpc_utils::time::current_unix_timestamp();
+    crate::stream::handle_chain_event(
+        mpc_primitives::ChainEvent::CatchupCompleted,
+        &mut ctx,
+        &NoopChainTelemetry,
+        pk,
+        chain,
+    )
+    .await
+    .unwrap();
+    let floor = ctx.failover_floor.expect("catching up sets the floor");
+    assert!((before..=mpc_utils::time::current_unix_timestamp()).contains(&floor));
+
+    ctx.failover_floor = Some(mpc_utils::time::current_unix_timestamp() + 3_600);
+    publish_failover_due(&ctx, chain).await;
+    assert!(next_publish(&mut rpc_rx).await.is_none(), "just caught up");
+
+    ctx.failover_floor = Some(1);
+    ctx.caught_up = false;
+    crate::stream::handle_chain_event(
+        mpc_primitives::ChainEvent::CatchupCompleted,
+        &mut ctx,
+        &NoopChainTelemetry,
+        pk,
+        chain,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ctx.failover_floor, Some(1));
+    publish_failover_due(&ctx, chain).await;
+    assert!(
+        next_publish(&mut rpc_rx).await.is_some(),
+        "caught up long ago"
+    );
 }
