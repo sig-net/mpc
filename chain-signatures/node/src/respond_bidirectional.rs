@@ -133,8 +133,8 @@ impl CompletedTx {
 
     pub(crate) fn create_unviable_sign_request(&self) -> anyhow::Result<IndexedSignRequest> {
         anyhow::ensure!(
-            self.tx.source_chain == Chain::Midnight,
-            "unviable attestations are only supported for Midnight"
+            self.tx.source_chain.encodes_unviable(),
+            "unviable attestations are only supported for sources that encode them"
         );
         self.create_respond_bidirectional_sign_request(Vec::new(), AttestationOutcomeKind::Unviable)
     }

@@ -139,6 +139,10 @@ const MIXED_VALUES = [
   "0xdeadbeef",
   `0x${"ab".repeat(32)}`,
 ];
+const TAG_THEN_ADDRESS: Field[] = [
+  { name: "tag", type: "bytes12" },
+  { name: "to", type: "address" },
+];
 
 const handwritten: Case[] = [
   // Every supported type, its boundaries, and schema order.
@@ -162,6 +166,15 @@ const handwritten: Case[] = [
     "reversed mixed fields keep schema order",
     fieldsJson([...MIXED].reverse()),
     encoded([...MIXED].reverse(), [...MIXED_VALUES].reverse()),
+  ),
+  // Exactly fills the real-stack caller's 64-byte output schema field.
+  call(
+    "bytes12 then address keep schema order in a 64-byte schema",
+    fieldsJson(TAG_THEN_ADDRESS),
+    encoded(TAG_THEN_ADDRESS, [
+      "0xa1a2a3a4a5a6a7a8a9aaabac",
+      "0x0102030405060708090a0b0c0d0e0f1011121314",
+    ]),
   ),
 
   // Field names: unique, non-empty Solidity identifiers other than __proto__.

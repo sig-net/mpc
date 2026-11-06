@@ -27,11 +27,12 @@ use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::state::NodeKeyInfo;
+use mpc_node::protocol::state::{KeyShare, NodeKeyInfo};
 use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
-use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
+use mpc_node::storage::keystore::{Keystore, MemoryKeystore};
+use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::stream::StreamContext;
 use mpc_primitives::Chain;
 use near_sdk::AccountId;
@@ -611,26 +612,18 @@ impl MpcFixtureNodeBuilder {
         node
     }
 
-    /// Build a node's triple, presignature, and secret storage.
+    /// Build a node's triple, presignature and key-share stores.
     async fn build_storage(
         &self,
         context: &MockedNodeContext,
         fixture_input: &mut Option<FixtureInput>,
     ) -> protocol::test_setup::TestProtocolStorage {
-        let secret_storage = if let Some(key) = &self.key_info {
-            secret_storage::test_store(0, key.private_share, key.public_key)
-        } else {
-            secret_storage::init(
-                None,
-                &Options {
-                    gcp_project_id: "-".to_owned(),
-                    sk_share_secret_id: None,
-                    sk_share_local_path: None,
-                    redis_url: ".".to_owned(),
-                },
-                &self.participant_info.account_id,
-            )
-        };
+        let record = self.key_info.as_ref().map(|key| KeyShare {
+            epoch: 0,
+            private_share: key.private_share,
+            public_key: key.public_key,
+        });
+        let keystore = Keystore::Memory(MemoryKeystore::new(record));
 
         let triple_storage =
             TriplePair::storage(&context.redis_pool, &self.participant_info.account_id);
@@ -687,7 +680,7 @@ impl MpcFixtureNodeBuilder {
         }
 
         protocol::test_setup::TestProtocolStorage {
-            secret_storage,
+            keystore,
             triple_storage,
             presignature_storage,
         }

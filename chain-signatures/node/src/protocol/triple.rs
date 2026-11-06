@@ -415,13 +415,16 @@ impl TripleSpawner {
         // Generations this node runs or has promised to join: a PROPOSE it
         // accepted commits it before the START arrives.
         let committed = self.ongoing.len() + self.posits.len();
+        // A repeat of a posit we already hold commits nothing new, so the load
+        // bounds do not apply; `act` checks the proposer and refreshes its clock.
+        let repeat = self.posits.contains(&id);
         if self.contains_ongoing(id) {
             tracing::warn!(id, ?from, "triple already generating");
             Some(PositRejectReason::AlreadyGenerating)
-        } else if committed >= limits.ongoing {
+        } else if !repeat && committed >= limits.ongoing {
             tracing::warn!(id, ?from, committed, "triple generations saturated");
             Some(PositRejectReason::Saturated)
-        } else if self.stock.generated >= limits.generated {
+        } else if !repeat && self.stock.generated >= limits.generated {
             tracing::warn!(
                 id,
                 ?from,
