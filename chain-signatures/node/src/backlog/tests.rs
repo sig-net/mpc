@@ -1,17 +1,19 @@
 use super::checkpoint_interval;
 use super::{
     AnyProgress, Backlog, BacklogEntry, BacklogError, Bidirectional, Checkpoint, Checkpoints,
-    Executing, Final, Generating, Initial, PendingRequests, Publishing, Sign,
+    Executing, ExecutionWatch, Final, Generating, Initial, PendingRequests, Publishing, Sign,
 };
 use crate::backlog::mock::{
     bidi_initial_status, mock_bidi_request, mock_bidi_response, mock_bidirectional_tx,
     mock_execution_entry, mock_execution_entry_with_timestamp, mock_participants, mock_publishing,
-    mock_publishing_with_proposer, mock_sign_request, mock_signature_output, mock_tx,
+    mock_publishing_with_proposer, mock_root_pk, mock_sign_request, mock_signature_output, mock_tx,
     pending_execution_status, single_entry_checkpoint, BacklogTestExt,
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use mpc_chain_integration_core::StateManager;
-use mpc_primitives::{BidirectionalTx, Chain, ExecutionOutcome, SignId, SignKind};
+use mpc_primitives::{
+    BidirectionalTx, Chain, ExecutionOutcome, IndexedSignRequest, SignId, SignKind,
+};
 use std::sync::Arc;
 
 fn routed_tx(id: u8, source: Chain, target: Chain) -> BidirectionalTx {
@@ -317,8 +319,175 @@ async fn test_checkpoint_creation() {
     // Guard the checkpoint digest wire format; update only for intentional changes.
     assert_eq!(
         checkpoint.digest(),
-        digest_hex("449d3cbc30e57ae4964916e0366dc88c8b6d9678d4011f9a20da43ba07396836")
+        digest_hex("562a733c296c0cb20f568b1e370c1f0311eb371964d450ab67dc3b2fb343fdbe")
     );
+}
+
+/// A body as earlier versions stored it: no source facts of its own, and a digest field.
+#[derive(serde::Serialize)]
+struct OldEntry {
+    request: Arc<IndexedSignRequest>,
+    status: SignStatus,
+}
+
+#[derive(serde::Serialize)]
+struct OldCheckpoint {
+    chain: Chain,
+    block_height: u64,
+    pending_requests: Vec<OldEntry>,
+    #[serde(with = "serde_bytes")]
+    cumulative_digest: [u8; 32],
+}
+
+/// The two entries, at this height, whose digest earlier versions pinned as
+/// [`OLD_FORMAT_DIGEST`].
+async fn old_format_body() -> Checkpoint {
+    let backlog = Backlog::new();
+    backlog
+        .insert_mock_executing(&mock_bidirectional_tx(SignId::from_u8(1), Chain::Solana))
+        .await;
+    backlog
+        .insert_mock_final(&mock_bidirectional_tx(SignId::from_u8(2), Chain::Solana))
+        .await;
+    backlog.set_processed_block(Chain::Solana, 100).await;
+    let current = backlog.checkpoint(Chain::Solana).await.unwrap();
+    let old = OldCheckpoint {
+        chain: current.chain,
+        block_height: current.block_height,
+        pending_requests: current
+            .pending_requests
+            .into_iter()
+            .map(|entry| OldEntry {
+                request: entry.request,
+                status: entry.status,
+            })
+            .collect(),
+        cumulative_digest: [7; 32],
+    };
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&old, &mut bytes).unwrap();
+    ciborium::from_reader(bytes.as_slice()).unwrap()
+}
+
+const OLD_FORMAT_DIGEST: &str = "449d3cbc30e57ae4964916e0366dc88c8b6d9678d4011f9a20da43ba07396836";
+
+/// A stored body from an earlier version must confirm the digest already settled, or the chain
+/// does not start after an upgrade.
+#[tokio::test]
+async fn an_old_format_body_keeps_its_digest() {
+    let body = old_format_body().await;
+    assert_eq!(body.digest(), digest_hex(OLD_FORMAT_DIGEST));
+    assert!(body
+        .pending_requests
+        .iter()
+        .all(|entry| entry.tx_ids.len() == 1));
+
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&body, &mut bytes).unwrap();
+    let reread: Checkpoint = ciborium::from_reader(bytes.as_slice()).unwrap();
+    assert_eq!(reread.digest(), digest_hex(OLD_FORMAT_DIGEST));
+}
+
+/// What a node stores on adoption is what it holds in memory, as long as the digest allows.
+#[tokio::test]
+async fn adopting_an_old_format_body_stores_it_rebuilt() {
+    let body = old_format_body().await;
+    let backlog = Backlog::new();
+    backlog.regress(&body, mock_root_pk()).await.unwrap();
+
+    let stored = backlog
+        .checkpoints()
+        .latest(Chain::Solana)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.digest(), digest_hex(OLD_FORMAT_DIGEST));
+    assert!(stored.pending_requests.iter().all(|entry| matches!(
+        entry.status,
+        SignStatus::Bidirectional(BidirectionalProgress::Executing(_))
+    )));
+}
+
+/// A rebuild that changes an entry's phase would change an old-format digest, so that body is
+/// stored as sent and still confirms the digest it was adopted under.
+#[tokio::test]
+async fn an_old_format_body_that_cannot_be_rebuilt_is_stored_as_sent() {
+    let mut body = old_format_body().await;
+    let entry = &mut body.pending_requests[0];
+    let mut request = (*entry.request).clone();
+    if let SignKind::SignBidirectional(event) = &mut request.kind {
+        event.caip2_id = "unknown:1".to_string();
+    }
+    entry.request = Arc::new(request);
+
+    let backlog = Backlog::new();
+    backlog.regress(&body, mock_root_pk()).await.unwrap();
+
+    let stored = backlog
+        .checkpoints()
+        .latest(Chain::Solana)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.digest(), digest_hex(OLD_FORMAT_DIGEST));
+    assert_eq!(stored, body);
+}
+
+/// An old-format body is rebuilt on loading too, as it may be one stored as sent. Nothing it
+/// says of a response survives a restart, and a first leg with a published signature is not
+/// signed again.
+#[tokio::test]
+async fn loading_an_old_format_body_rebuilds_its_progress() {
+    let mut body = old_format_body().await;
+    let answered = body
+        .pending_requests
+        .iter_mut()
+        .find(|entry| {
+            matches!(
+                entry.status,
+                SignStatus::Bidirectional(BidirectionalProgress::Final { .. })
+            )
+        })
+        .unwrap();
+    let sign_id = answered.sign_id();
+    let mut request = (*answered.request).clone();
+    if let SignKind::SignBidirectional(event) = &mut request.kind {
+        event.caip2_id = "unknown:1".to_string();
+    }
+    answered.request = Arc::new(request);
+
+    let backlog = Backlog::new();
+    backlog.regress(&body, mock_root_pk()).await.unwrap();
+    assert_eq!(
+        backlog
+            .checkpoints()
+            .latest(Chain::Solana)
+            .await
+            .unwrap()
+            .unwrap(),
+        body,
+        "stored as sent, since a rebuild would change its digest"
+    );
+
+    let restarted = backlog.clone();
+    restarted
+        .recover_local(Chain::Solana, mock_root_pk())
+        .await
+        .unwrap();
+
+    let pending = restarted.pending(&Chain::Solana).read().await;
+    let entry = pending.get(&sign_id).unwrap();
+    assert!(!entry.tx_ids.is_empty());
+    assert!(matches!(
+        entry.status,
+        SignStatus::Bidirectional(BidirectionalProgress::Initial(_))
+    ));
+    drop(pending);
+    assert!(restarted
+        .requeueable_requests(Chain::Solana)
+        .await
+        .iter()
+        .all(|queued| queued.sign_id() != sign_id));
 }
 
 #[test]
@@ -377,7 +546,7 @@ fn test_checkpoint_digest_invariants() {
     assert_ne!(cp_diff1.digest(), cp_diff2.digest());
     assert_eq!(
         cp_diff1.digest(),
-        digest_hex("a31e0d66f5b4fb860cc62e809cc29918b9138550b5cd62e1c752fc40ce6c2779")
+        digest_hex("7a70129d584242b811b117f5072b4f965468fab006c8caa6ca45e3fdd0ff30a1")
     );
 }
 
@@ -464,7 +633,7 @@ fn test_checkpoint_serialization() {
     assert_eq!(checkpoint, deserialized);
     assert_eq!(
         checkpoint.digest(),
-        digest_hex("12f5bc5c4f0fea1debafceb8879644ea545309775b3e2cc266335cd3247d5394")
+        digest_hex("bea87e72f589447390ccc8440fb3653b1886350835d1ff0c57f6c758e653b23a")
     );
     assert_eq!(checkpoint.digest(), deserialized.digest());
 
@@ -1038,31 +1207,6 @@ async fn test_initial_any_progress_advance() {
 }
 
 #[tokio::test]
-async fn test_pending_executions_typestate() {
-    let backlog = Backlog::new();
-    let tx1 = routed_tx(11, Chain::Ethereum, Chain::Solana);
-    let tx2_sol = routed_tx(12, Chain::Solana, Chain::Ethereum);
-
-    backlog.insert_mock_executing(&tx1).await;
-    backlog.insert_mock_executing(&tx2_sol).await;
-
-    // Plain sign on Ethereum (should not appear in pending executions)
-    backlog
-        .insert_mock_sign(SignId::from_u8(99), Chain::Ethereum)
-        .await;
-
-    let eth_execs = backlog.pending_executions(Chain::Ethereum).await;
-    assert_eq!(eth_execs.len(), 1);
-    assert_eq!(eth_execs[0].sign_id(), tx1.sign_id());
-    assert_eq!(eth_execs[0].execution_tx().id, tx1.id);
-
-    let sol_execs = backlog.pending_executions(Chain::Solana).await;
-    assert_eq!(sol_execs.len(), 1);
-    assert_eq!(sol_execs[0].sign_id(), tx2_sol.sign_id());
-    assert_eq!(sol_execs[0].execution_tx().id, tx2_sol.id);
-}
-
-#[tokio::test]
 async fn pending_executions_targeting_spans_sources() {
     let backlog = Backlog::new();
     let tx1 = routed_tx(31, Chain::Ethereum, Chain::Tron);
@@ -1317,7 +1461,10 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
     let entry = backlog
         .insert_mock_executing(&retained)
         .await
-        .with_respond_observed_at(Some(observed_at));
+        .with_execution_watch(ExecutionWatch::new(
+            Arc::new(retained.clone()),
+            Some(observed_at),
+        ));
     backlog.watch_execution(&entry).await;
     backlog.insert_mock_executing(&restored).await;
     let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
@@ -1336,7 +1483,7 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
         .await
         .respond_observed_at();
 
-    backlog.regress(&checkpoint).await.unwrap();
+    backlog.regress(&checkpoint, mock_root_pk()).await.unwrap();
 
     let entry = backlog
         .unwatch_execution(

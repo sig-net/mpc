@@ -262,20 +262,11 @@ pub(crate) async fn process_respond_event(
         return advance_bidirectional_to_execution(entry, respond_event, root_pk, ctx).await;
     }
 
-    if entry.is::<Bidirectional<Executing>>() {
-        tracing::info!(
-            ?sign_id,
-            ?source_chain,
-            "respond event backlog entry is already advanced; treating as processed"
-        );
-        return Ok(());
+    if let Some(entry) = entry.cast::<Bidirectional<BidirectionalProgress>>() {
+        entry
+            .record_published_transaction_signature(respond_event.signature, root_pk)
+            .await?;
     }
-
-    tracing::info!(
-        ?sign_id,
-        ?source_chain,
-        "respond event is already finalized or pruned; skipping"
-    );
     Ok(())
 }
 

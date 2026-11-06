@@ -1,6 +1,8 @@
 use super::{Backlog, BacklogError};
 use crate::respond_bidirectional::CompletedTx;
-use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+use crate::sign_bidirectional::{
+    BidirectionalProgress, SignBidirectionalEventExt as _, SignProgress, SignStatus,
+};
 use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
@@ -208,6 +210,7 @@ impl<State> SignEntry<State> {
                 chain: self.chain,
                 id: self.request.id,
             })?;
+        entry.add_tx_id(tx.id);
         entry.status = SignStatus::Bidirectional(BidirectionalProgress::Executing(tx));
         Ok(())
     }
@@ -538,9 +541,10 @@ impl SignEntry<Bidirectional<Executing>> {
         self.state.0 .0.respond_observed_at
     }
 
-    /// Restore the observation time onto an entry rebuilt from a status.
-    pub(crate) fn with_respond_observed_at(mut self, at: Option<Instant>) -> Self {
-        self.state.0 .0.respond_observed_at = at;
+    /// This entry as the watch that found its execution, which may be of a later signature than
+    /// the one its status names.
+    pub(crate) fn with_execution_watch(mut self, watch: ExecutionWatch) -> Self {
+        self.state.0 .0 = watch;
         self
     }
 
@@ -596,6 +600,7 @@ impl SignEntry<Bidirectional<Executing>> {
             chain_ctx,
             origin_indexed_at,
             block_height,
+            self.request.args.entropy,
         );
         let sign_request = match outcome {
             ExecutionOutcome::Success { output } => {
@@ -620,6 +625,32 @@ impl SignEntry<Bidirectional<Executing>> {
             state: Bidirectional(Final(Generating)),
             backlog: self.backlog,
         })
+    }
+}
+
+impl SignEntry<Bidirectional<BidirectionalProgress>> {
+    /// Record a later signature of the request: an execution under it must be found too (#1428).
+    /// Checked against the first leg, as this entry's own request is the response once in Final.
+    pub(crate) async fn record_published_transaction_signature(
+        self,
+        signature: Signature,
+        root_pk: PublicKey,
+    ) -> anyhow::Result<()> {
+        let Some(first_leg) = self.backlog.first_leg(self.chain, &self.request.id).await else {
+            return Ok(());
+        };
+        let SignKind::SignBidirectional(event) = &first_leg.kind else {
+            return Ok(());
+        };
+        mpc_crypto::verify_signature(
+            root_pk,
+            first_leg.args.epsilon,
+            first_leg.args.payload,
+            &signature,
+        )?;
+        let tx = event.to_bidirectional_tx(self.request.id.request_id, signature, root_pk)?;
+        self.backlog.add_published_tx(Arc::new(tx)).await;
+        Ok(())
     }
 }
 
@@ -804,6 +835,15 @@ impl SignState for Bidirectional<Final<AnyProgress>> {
             SignStatus::Bidirectional(BidirectionalProgress::Final { progress, .. }) => {
                 Some(Bidirectional(Final(progress.clone())))
             }
+            _ => None,
+        }
+    }
+}
+
+impl SignState for Bidirectional<BidirectionalProgress> {
+    fn try_from_status(status: &SignStatus) -> Option<Self> {
+        match status {
+            SignStatus::Bidirectional(progress) => Some(Bidirectional(progress.clone())),
             _ => None,
         }
     }
