@@ -178,10 +178,8 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
         }
 
         let sign_id = entry.sign_id();
-        // This is the proposer's only retry for a publish that reported success but
-        // never landed, so it republishes even if it already dispatched one. Marking
-        // stops the sweep from putting a second copy on chain on the next block: the
-        // deadline was anchored before the restart, so it is already past.
+        // The proposer's only retry for a publish that reported success but never landed, so it
+        // republishes even if already dispatched. Marking keeps the sweep from adding a second copy.
         entry.mark_publish_dispatched().await;
         ctx.rpc.publish(entry);
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
@@ -190,7 +188,8 @@ pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_
 
 /// Publish entries whose proposer stayed silent past this node's deadline.
 ///
-/// Only one of the `m` participants needs a healthy stream for failover to happen.
+/// One of the `m` participants with a healthy stream is enough, if it stays up for the observe
+/// lag plus its draw.
 pub(crate) async fn publish_failover_due(ctx: &StreamContext, chain: Chain) {
     if !ctx.caught_up {
         return;
@@ -207,8 +206,13 @@ pub(crate) async fn publish_failover_due(ctx: &StreamContext, chain: Chain) {
         if entry.publish_dispatched() {
             continue;
         }
-        let Some(deadline) = publish_deadline(&entry.sign_id(), entry.publishing(), &me, lag)
-        else {
+        let Some(deadline) = publish_deadline(
+            &entry.sign_id(),
+            entry.publishing(),
+            &me,
+            lag,
+            ctx.failover_floor,
+        ) else {
             continue;
         };
         if now < deadline {
