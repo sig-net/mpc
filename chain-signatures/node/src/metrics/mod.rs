@@ -54,11 +54,13 @@ pub fn init_metrics(
     }
 }
 
+/// Test builds label metrics registered before `init_metrics` with a
+/// placeholder; a production node must never emit such a series.
 pub fn node_account_id() -> &'static str {
-    NODE_ACCOUNT_ID
-        .get()
-        .map(String::as_str)
-        .unwrap_or("default-account.near")
+    let account_id = NODE_ACCOUNT_ID.get().map(String::as_str);
+    #[cfg(any(test, feature = "test-feature"))]
+    let account_id = account_id.or(Some("test-account.near"));
+    account_id.expect("init_metrics runs before any metric is registered")
 }
 
 pub fn version() -> &'static str {
