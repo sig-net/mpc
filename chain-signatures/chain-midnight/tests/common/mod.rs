@@ -45,15 +45,16 @@ pub fn base_live_config() -> MidnightConfig {
         package.display()
     );
     MidnightConfig {
-        node_url: "http://127.0.0.1:9944".to_string(),
+        node_url: "http://127.0.0.1:9944".parse().unwrap(),
         central_address: MidnightAddress::from_bytes([0xab; 32]),
         publisher: PublisherConfig {
             intent_gen_command: vec![node_executable(), path_arg(&entry)],
-            funding_seed: "ab".repeat(32),
-            proof_server_url: "http://127.0.0.1:6300".to_string(),
-            indexer_url: "http://127.0.0.1:8088/api/v3/graphql".to_string(),
-            indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".to_string(),
-            ..Default::default()
+            ..PublisherConfig::new(
+                "ab".repeat(32),
+                "http://127.0.0.1:6300".parse().unwrap(),
+                "http://127.0.0.1:8088/api/v3/graphql".parse().unwrap(),
+                "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
+            )
         },
         rpc: Default::default(),
         indexer: Default::default(),

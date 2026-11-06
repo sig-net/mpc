@@ -544,7 +544,7 @@ fn responder_config(
     output_storage: Option<OutputStorageConfig>,
 ) -> anyhow::Result<MidnightConfig> {
     Ok(MidnightConfig {
-        node_url: endpoints.node_http_url.clone(),
+        node_url: endpoints.node_http_url.parse()?,
         central_address: MidnightAddress::from_hex(&bootstrap.central_address)
             .context("decoding Midnight central address")?,
         publisher: PublisherConfig {
@@ -553,11 +553,12 @@ fn responder_config(
                 node_executable,
                 publisher_entrypoint.to_string_lossy().into_owned(),
             ],
-            funding_seed: bootstrap.publisher_seed.clone(),
-            proof_server_url: endpoints.proof_server_url.clone(),
-            indexer_url: endpoints.indexer_url.clone(),
-            indexer_ws_url: endpoints.indexer_ws_url.clone(),
-            ..Default::default()
+            ..PublisherConfig::new(
+                bootstrap.publisher_seed.clone(),
+                endpoints.proof_server_url.parse()?,
+                endpoints.indexer_url.parse()?,
+                endpoints.indexer_ws_url.parse()?,
+            )
         },
         rpc: Default::default(),
         indexer: Default::default(),
@@ -809,8 +810,9 @@ where
 
 /// The node's network id, once its RPC answers and it has imported block 1.
 async fn wait_for_node(node_http_url: &str) -> anyhow::Result<String> {
+    let url = node_http_url.parse()?;
     wait_until_ready("node", node_http_url, 120, || async {
-        probe_network_id(node_http_url)
+        probe_network_id(&url)
             .await?
             .context("block 1 is not imported yet")
     })
