@@ -443,8 +443,7 @@ on target chain block at height h finalised on chain target:
         if txid ignores the signature on target:
             ours = { txid(e.req.tx) }
         else:
-            ours = e.tx_ids + { txid(s, e.req.tx)
-                                for s in local[rid].issued }
+            ours = e.tx_ids
         if some id in ours has receipt r in a final block at height h':  // M3
             for (rid', e') in backlog for target, other than rid, with e's
               account and e.req.tx's replay protection, unsigned bytes
@@ -491,11 +490,12 @@ not sign an entry that has a published signature or one it holds, and does
 not attest an entry it holds an attestation for.
 
 The MPC looks for a request's execution by transaction ID, under every
-signature it holds for the request, in any final block, so a node that
-starts looking late still finds it. A node holds the signatures published
-for the request and those it took part in producing. An execution under a
-signature it does not hold is not found (see Section 6 for alternatives),
-except where the transaction ID ignores the signature: there it needs none.
+signature published for the request, in any final block, so a node that
+starts looking late still finds it. A signature a node took part in
+producing is looked for once it is published, which every node reads. An
+execution under a signature that is never published is not found (see
+Section 6 for alternatives), except where the transaction ID ignores the
+signature: there it needs none.
 
 When the transaction of one request is included, every other request
 waiting on the same account and replay protection can never execute, and
@@ -1111,7 +1111,7 @@ or forged bytes fail verification.
 Target chains are Ethereum and Tron (`Chain::supports_bidirectional_signing`).
 Source chains are Midnight, Solana, Hydration and Canton.
 
-Checked against `develop` at `1d823c4e`. Still to change:
+Still to change:
 
 * Unviable from another request's response.
 * Finding nonce siblings, and executions under every published signature.
