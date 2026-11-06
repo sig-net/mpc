@@ -401,7 +401,7 @@ Each closes one of the limits above, at a price.
 
 ## 7. Implementation status
 
-The code, checked at `65b8d41b`, differs from the design as listed below, grouped by component.
+The code differs from the design as listed below, grouped by component.
 Each item says what the code does now and what the design asks for instead.
 
 Code under `chain-signatures/`: the contract in `contract/src/lib.rs`; the node in `node/src/`, mainly `backlog/checkpoints.rs`, `backlog/consensus.rs`, `storage/checkpoint_storage.rs`, `stream/supervisor.rs` and `stream/recovery.rs`.
