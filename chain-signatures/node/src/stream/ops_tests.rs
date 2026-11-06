@@ -659,6 +659,103 @@ async fn a_response_names_the_later_transaction_it_found() {
     assert_eq!(response.tx_id, later.id);
 }
 
+/// Past execution a later signature only adds its transaction ID: the entry keeps its progress,
+/// and nothing is watched or queued again.
+#[tokio::test]
+async fn a_later_signature_past_execution_only_records_its_id() {
+    let root_sk = k256::SecretKey::from_slice(&[1; 32]).unwrap();
+    for parked in [false, true] {
+        let request = nonce_request(1, Chain::Solana, "p", 7, 1);
+        let tx = signed_tx(&request, 7);
+        let backlog = Backlog::new();
+        backlog.mark_caught_up(Chain::Solana);
+        seed_executing_entry(&backlog, Arc::clone(&request), Arc::clone(&tx)).await;
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+        let executing = ctx
+            .backlog
+            .get_by::<Bidirectional<Executing>>(Chain::Solana, &request.id)
+            .await
+            .unwrap();
+        executing.watch_execution().await;
+        if parked {
+            executing.park().await.unwrap();
+            ctx.backlog
+                .unwatch_execution(Chain::Ethereum, &tx.id, tx.source_chain, &tx.sign_id())
+                .await;
+        } else {
+            process_execution_confirmed(
+                tx.id,
+                tx.sign_id(),
+                tx.source_chain,
+                123,
+                ExecutionOutcome::Failed,
+                &ctx,
+                Chain::Ethereum,
+            )
+            .await
+            .unwrap();
+            let generating = ctx
+                .backlog
+                .get_by::<Bidirectional<Final<Generating>>>(Chain::Solana, &request.id)
+                .await
+                .unwrap();
+            let (pk, output) = mock_signature_output(&generating.respond_request().args);
+            generating.advance(pk, &output, vec![], true).await.unwrap();
+        }
+        queued_requests(&mut sign_rx);
+        let entry = ctx.backlog.get(Chain::Solana, &request.id).await.unwrap();
+        let status = entry.status().clone();
+        assert_matches!(
+            (&status, parked),
+            (
+                SignStatus::Bidirectional(BidirectionalProgress::Parked(_)),
+                true
+            ) | (
+                SignStatus::Bidirectional(BidirectionalProgress::Final {
+                    progress: SignProgress::Publishing(_),
+                    ..
+                }),
+                false
+            )
+        );
+
+        let signature = mpc_crypto::generate_signature(&root_sk, &request.args);
+        let SignKind::SignBidirectional(first_leg) = &request.kind else {
+            panic!("expected a first leg");
+        };
+        let later = first_leg
+            .to_bidirectional_tx(request.id.request_id, signature, test_root_pk())
+            .unwrap();
+        assert_ne!(later.id, tx.id);
+        process_respond_event(
+            SignatureRespondedEvent {
+                request_id: request.id.request_id,
+                signature,
+                chain: Chain::Solana,
+            },
+            &ctx,
+            test_root_pk(),
+        )
+        .await
+        .unwrap();
+
+        let checkpoint = ctx.backlog.checkpoint(Chain::Solana).await.unwrap();
+        assert!(
+            checkpoint.pending_requests[0].tx_ids.contains(&later.id),
+            "parked: {parked}"
+        );
+        let entry = ctx.backlog.get(Chain::Solana, &request.id).await.unwrap();
+        assert_eq!(entry.status(), &status, "parked: {parked}");
+        assert!(ctx
+            .backlog
+            .get_execution_watchers(Chain::Ethereum)
+            .await
+            .is_empty());
+        assert!(queued_requests(&mut sign_rx).is_empty());
+    }
+}
+
 /// Two first legs alike but for their entropy answer with the same message and key. Without the
 /// first leg's entropy in the hash, their responses would share theirs.
 #[tokio::test]
