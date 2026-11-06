@@ -58,7 +58,8 @@ struct MidnightStack {
 struct BootstrapResult {
     central_address: String,
     caller_address: String,
-    publisher_seed: String,
+    /// One funding seed per MPC node, each wallet funded and generating DUST.
+    publisher_seeds: Vec<String>,
 }
 
 /// Where the ledger runs one contract call of a submitted transaction, as the driver read
@@ -200,6 +201,8 @@ pub struct MidnightContext {
     _stack: MidnightStack,
     pub output_storage: crate::gcs::GcsEmulator,
     pub config: MidnightConfig,
+    /// Funding seeds by node index.
+    pub publisher_seeds: Vec<String>,
     driver: Mutex<MidnightDriver>,
 }
 
@@ -216,9 +219,16 @@ impl MidnightContext {
                 "op": "bootstrap",
                 "config": DriverConfig::new(&stack),
                 "artifactDir": stack.artifact_dir,
+                "publishers": spawner.cfg.nodes,
             }))
             .await
             .context("bootstrapping fresh Midnight wallets and contracts")?;
+        anyhow::ensure!(
+            bootstrap.publisher_seeds.len() == spawner.cfg.nodes,
+            "the Midnight driver funded {} publisher wallets for {} nodes",
+            bootstrap.publisher_seeds.len(),
+            spawner.cfg.nodes
+        );
         let caller = bootstrap.caller_address.trim_start_matches("0x");
         let caller_bytes = hex::decode(caller).context("decoding Midnight caller address")?;
         anyhow::ensure!(
@@ -267,6 +277,7 @@ impl MidnightContext {
             _stack: stack,
             output_storage,
             config,
+            publisher_seeds: bootstrap.publisher_seeds,
             driver: Mutex::new(driver),
         })
     }
@@ -553,7 +564,7 @@ fn responder_config(
                 node_executable,
                 publisher_entrypoint.to_string_lossy().into_owned(),
             ],
-            funding_seed: bootstrap.publisher_seed.clone(),
+            funding_seed: bootstrap.publisher_seeds[0].clone(),
             proof_server_url: endpoints.proof_server_url.clone(),
             indexer_url: endpoints.indexer_url.clone(),
             indexer_ws_url: endpoints.indexer_ws_url.clone(),

@@ -168,6 +168,8 @@ pub struct ClusterSpawner {
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
     pub use_midnight: bool,
+    /// Midnight funding seeds by node index; see [`Self::node_config`].
+    pub midnight_funding_seeds: Vec<String>,
     /// Tracks which binary source to use for each node index
     pub node_binary_sources: Vec<NodeBinarySource>,
 }
@@ -209,6 +211,7 @@ impl Default for ClusterSpawner {
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
             use_midnight: false,
+            midnight_funding_seeds: Vec::new(),
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
     }
@@ -322,6 +325,19 @@ impl ClusterSpawner {
     pub fn midnight(mut self) -> Self {
         self.use_midnight = true;
         self
+    }
+
+    /// Node `index`'s config. A Midnight publisher assumes it alone spends its funding
+    /// wallet's DUST, so each node gets its own seed when the harness funded one per node.
+    pub fn node_config(&self, index: usize) -> NodeConfig {
+        let mut cfg = self.cfg.clone();
+        if let (Some(midnight), Some(seed)) = (
+            cfg.midnight.as_mut(),
+            self.midnight_funding_seeds.get(index),
+        ) {
+            midnight.publisher.funding_seed = seed.clone();
+        }
+        cfg
     }
 
     pub fn canton(mut self) -> Self {
@@ -462,6 +478,7 @@ impl IntoFuture for ClusterSpawner {
                 let midnight =
                     crate::midnight::MidnightContext::run(&self, root_public_key).await?;
                 self.cfg.midnight = Some(midnight.config.clone());
+                self.midnight_funding_seeds = midnight.publisher_seeds.clone();
                 Some(midnight)
             } else {
                 None
