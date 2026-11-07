@@ -133,7 +133,7 @@ jobs:
         env:
           REAL_STACK_CONTRACTS_RESTORED: ${{ steps.real-stack-contracts.outputs.cache-hit }}
 
-      # ~57 MB compressed. Merge-queue refs are unique per attempt, so saving there is waste.
+      # ~210 MB compressed. Merge-queue refs are unique per attempt, so saving there is waste.
       - name: Save compiled real-stack contracts
         if: steps.real-stack-contracts.outputs.cache-hit != 'true' && github.event_name != 'merge_group'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
