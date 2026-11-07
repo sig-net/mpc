@@ -10,7 +10,7 @@ use crate::metrics::requests::{
 };
 use crate::protocol::publish_failover::{observe_lag, publish_deadline};
 use crate::respond_bidirectional::{
-    claims_attestation_key, published_failure, published_midnight_payload,
+    claims_reserved_path, published_failure, published_midnight_payload,
     published_midnight_signing_args, published_output_payload, published_output_signing_args,
 };
 use crate::sign_bidirectional::{
@@ -84,13 +84,13 @@ pub(crate) async fn process_sign_request(
         SignKind::Sign => {}
     }
 
-    // The attestation key is derived from the requesting contract under a fixed
-    // path, so a request naming that path forges a response to itself. Here
-    // rather than in `validate`, which plain `sign` never reaches.
+    // The attestation path forges a response from the requesting contract; the namespace keeps
+    // plain sign off bidirectional nonces. Here because plain `sign` never reaches `validate`.
     anyhow::ensure!(
-        !claims_attestation_key(&sign_request),
-        "rejecting sign request {:?} on the reserved attestation path",
-        sign_request.id
+        !claims_reserved_path(&sign_request),
+        "rejecting sign request {:?} on reserved path {:?}",
+        sign_request.id,
+        sign_request.args.path
     );
 
     let sign_id = sign_request.id;
