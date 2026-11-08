@@ -1049,6 +1049,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn both_field_envelopes_classify_by_their_error() {
+        // invalid per JSON-RPC 2.0, but "error present ⇒ Err" is total — the
+        // paired result must not deliver the block
+        const HEIGHT_1: u64 = 100;
+        const CONTESTED: u64 = 101;
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!([
+                    {
+                        "id": 0,
+                        "result": make_block_response(0, CONTESTED)["result"],
+                        "error": {
+                            "code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+                            "message": "Slot was skipped"
+                        }
+                    },
+                    make_block_response(1, HEIGHT_1)
+                ])
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let result = client.fetch_blocks(&[CONTESTED, HEIGHT_1]).await.unwrap();
+        assert_eq!(result.len(), 1, "the error side must win the envelope");
+        assert!(result.contains_key(&HEIGHT_1));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn network_skipped_slots_are_terminal_with_their_code() {
         for (code, message) in [
             (JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "Slot was skipped"),
