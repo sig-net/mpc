@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
-use futures_util::{SinkExt as _, StreamExt as _};
+use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _};
 use midnight_base_crypto::time::Timestamp;
 use mpc_utils::task::AbortOnDrop;
 use serde::Deserialize;
@@ -14,7 +14,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 /// A connection that answers no keepalive within this long is dead.
 const KEEPALIVE: Duration = Duration::from_secs(30);
@@ -213,10 +213,13 @@ type Socket =
 /// Forwards events until the socket fails, the subscription ends, or a keepalive
 /// goes unanswered: a silent connection is otherwise indistinguishable from a quiet
 /// chain.
-async fn pump(
-    mut socket: Socket,
+async fn pump<S>(
+    mut socket: S,
     sender: &mpsc::Sender<anyhow::Result<DustEventUpdate>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: Stream<Item = Result<Message, WsError>> + Sink<Message, Error = WsError> + Unpin,
+{
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await;
     let mut answered = true;
@@ -382,6 +385,63 @@ mod tests {
         }
         let end = updates[3].as_ref().unwrap_err();
         assert!(format!("{end:#}").contains("ended"), "{end:#}");
+    }
+
+    /// A client websocket over an in-memory pipe, and the indexer's end of it.
+    async fn pipe() -> (
+        WebSocketStream<tokio::io::DuplexStream>,
+        WebSocketStream<tokio::io::DuplexStream>,
+    ) {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        (
+            WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+            WebSocketStream::from_raw_socket(server, Role::Server, None).await,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_indexer_answering_keepalives_keeps_a_quiet_subscription_open() {
+        let (client, mut server) = pipe().await;
+        let event = fixture_events().remove(0);
+        let served = event.clone();
+        let indexer = tokio::spawn(async move {
+            // Reading answers each keepalive ping; nothing else is sent for a while.
+            let quiet_until = tokio::time::Instant::now() + KEEPALIVE * 5;
+            while let Ok(frame) = tokio::time::timeout_at(quiet_until, server.next()).await {
+                frame.unwrap().unwrap();
+            }
+            let next = json!({ "id": "1", "type": "next", "payload": { "data": { "dustLedgerEvents": served } } });
+            server.send(Message::text(next.to_string())).await.unwrap();
+            // Held open: only the event may end the wait below.
+            let _ = server.next().await;
+        });
+        let (sender, mut receiver) = mpsc::channel(1);
+        let pumping = AbortOnDrop(tokio::spawn(async move {
+            // Ending drops the sender, which ends the wait below without an event.
+            let _ = pump(client, &sender).await;
+        }));
+
+        let update = receiver
+            .recv()
+            .await
+            .expect("the subscription outlived the quiet stretch")
+            .unwrap();
+        assert_eq!(update.id, event["id"].as_u64().unwrap());
+        drop(pumping);
+        indexer.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_indexer_answering_no_keepalive_ends_the_subscription() {
+        // Never read, so the indexer's end never answers a ping.
+        let (client, _server) = pipe().await;
+        let (sender, _receiver) = mpsc::channel(1);
+        let error = tokio::time::timeout(KEEPALIVE * 3, pump(client, &sender))
+            .await
+            .expect("the second unanswered keepalive ends it")
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("keepalive"), "{error:#}");
     }
 
     #[tokio::test]

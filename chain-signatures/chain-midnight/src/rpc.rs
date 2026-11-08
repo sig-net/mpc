@@ -510,7 +510,7 @@ impl MidnightRpc {
             let tx = decode_applied_transaction(&found.value.midnight_tx, ledger_tx_hash).map_err(
                 |err| {
                     BlockHold::new(
-                        "singleton-tx-undecodable",
+                        "contract-tx-undecodable",
                         height,
                         err.context(format!(
                             "candidate extrinsic {} ledger transaction {}",
@@ -560,7 +560,7 @@ impl MidnightRpc {
                 ledger_tx_hash,
                 extrinsic_index: found.details.index(),
                 partial_success: status == AppliedStatus::PartialSuccess,
-                calls: decode(singleton)?,
+                singleton_calls: decode(singleton)?,
                 responder_calls: decode(responder)?,
             });
         }
@@ -1563,9 +1563,9 @@ mod tests {
                 "ba41ac43f2cfa97e32357877b85210a7f2105f4930b60515e19aa9ec00bb0f5d"
             )
         );
-        assert_eq!(candidate.calls.len(), 1);
+        assert_eq!(candidate.singleton_calls.len(), 1);
         assert!(candidate.responder_calls.is_empty());
-        let call = &candidate.calls[0];
+        let call = &candidate.singleton_calls[0];
         assert_eq!(call.call_index, 1);
         assert_eq!(call.physical_segment, 49592);
         assert_eq!(call.phase, crate::emissions::TranscriptPhase::Fallible);
@@ -1602,7 +1602,7 @@ mod tests {
         let [candidate] = block.candidates.as_slice() else {
             panic!("expected one candidate: {:?}", block.candidates);
         };
-        assert!(candidate.calls.is_empty());
+        assert!(candidate.singleton_calls.is_empty());
         let [call] = candidate.responder_calls.as_slice() else {
             panic!(
                 "expected one responder call: {:?}",
@@ -1694,7 +1694,7 @@ mod tests {
             .unwrap();
         assert_eq!(block.candidates.len(), 1);
         assert_eq!(block.candidates[0].ledger_tx_hash, hash);
-        let calls = &block.candidates[0].calls;
+        let calls = &block.candidates[0].singleton_calls;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].call_index, 1);
         assert_eq!(calls[0].physical_segment, segment);
@@ -1768,7 +1768,7 @@ mod tests {
             .unwrap();
         assert_eq!(block.candidates.len(), 1);
         assert_eq!(block.candidates[0].ledger_tx_hash, hash);
-        assert_eq!(block.candidates[0].calls, expected);
+        assert_eq!(block.candidates[0].singleton_calls, expected);
     }
 
     /// The captured fallible deposit with its singleton call's fallible transcript edited,
@@ -1835,7 +1835,7 @@ mod tests {
             .unwrap();
         drop(subscriber_guard);
         assert_eq!(block.candidates.len(), 1);
-        assert!(block.candidates[0].calls.is_empty());
+        assert!(block.candidates[0].singleton_calls.is_empty());
         let skipped = recorder
             .snapshot()
             .into_iter()
@@ -1919,7 +1919,7 @@ mod tests {
             .expect_err("a different transaction's status must hold the block");
         let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
         assert_eq!(hold.height, 432);
-        assert_eq!(hold.reason, "singleton-tx-undecodable");
+        assert_eq!(hold.reason, "contract-tx-undecodable");
         assert!(format!("{:#}", hold.cause).contains("hash does not match"));
     }
 

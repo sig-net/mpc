@@ -24,15 +24,13 @@ use midnight_onchain_runtime::cost_model::INITIAL_COST_MODEL;
 use midnight_onchain_state::state::ContractState;
 use midnight_storage::DefaultDB;
 use minocrab_publisher::intent::{build_intent, preimage_tx, PreimageIntent};
-use minocrab_publisher::{
-    Attestation, Deployment, EcdsaSignature, InProcessProver, ManagedDir, SignerResolver,
-};
+use minocrab_publisher::{Deployment, InProcessProver, ManagedDir, SignerResolver};
 use rand::rngs::StdRng;
 use rand::{Rng as _, SeedableRng as _};
 use tokio::time::Instant;
 
 use crate::funding::{dust_deficit, FeePayer, SealedTx, UnprovenTx};
-use crate::intent::{IntentRequest, Submitted, WireAttestation, WireSignature};
+use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::publisher::IntentClient;
 use crate::rpc::{Landing, PinnedReads, SubmitRefusal};
 use crate::submit_error::SubmitError;
@@ -135,58 +133,43 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
     }
 
     fn build_intent(&self, request: &IntentRequest) -> Result<Vec<u8>, SubmitError> {
-        let address = ContractAddress(HashOutput(hex32(
-            "contractAddress",
-            &request.contract_address,
-        )?));
-        let request_id = hex32("requestId", &request.request_id)?;
-        let signature = parse_signature(&request.signature)?;
-        let state: ContractState<DefaultDB> = midnight_serialize::tagged_deserialize(
-            &mut &hex_bytes("contractState", &request.contract_state)?[..],
-        )
-        .map_err(|error| {
-            SubmitError::BadRequest(format!("contractState did not decode: {error}"))
-        })?;
+        let state: ContractState<DefaultDB> =
+            midnight_serialize::tagged_deserialize(&mut &request.contract_state[..]).map_err(
+                |error| SubmitError::BadRequest(format!("contractState did not decode: {error}")),
+            )?;
         let parameters: LedgerParameters = midnight_serialize::tagged_deserialize(
-            &mut &hex_bytes("ledgerParameters", &request.ledger_parameters)?[..],
+            &mut &request.ledger_parameters[..],
         )
         .map_err(|error| {
             SubmitError::BadRequest(format!("ledgerParameters did not decode: {error}"))
         })?;
-
-        let circuit = request.circuit;
-        // Before the key read: the package holds no key for any other circuit.
-        if !matches!(circuit, "respond" | "respondBidirectional") {
-            return Err(SubmitError::BadRequest(format!(
-                "unknown circuit `{circuit}`"
-            )));
-        }
+        let circuit = request.circuit.name();
         let packaged = self
             .provers
             .managed
             .verifier_key_hash(circuit)
             .map_err(|error| SubmitError::ContractMismatch(error.to_string()))?;
-        let deployment = Deployment::new(address, [(circuit.to_string(), packaged)]);
+        let deployment = Deployment::new(
+            ContractAddress(HashOutput(request.contract_address)),
+            [(circuit.to_string(), packaged)],
+        );
         deployment
             .check_deployed(&state)
             .map_err(|error| SubmitError::ContractMismatch(error.to_string()))?;
 
-        let call = match (circuit, &request.attestation) {
-            ("respond", None) => {
-                minocrab_publisher::respond::<DefaultDB>(&deployment, &request_id, &signature)
-            }
-            ("respondBidirectional", Some(attestation)) => {
+        let call = match &request.circuit {
+            RespondCircuit::Respond => minocrab_publisher::respond::<DefaultDB>(
+                &deployment,
+                &request.request_id,
+                &request.signature,
+            ),
+            RespondCircuit::RespondBidirectional(attestation) => {
                 minocrab_publisher::respond_bidirectional::<DefaultDB>(
                     &deployment,
-                    &request_id,
-                    &parse_attestation(attestation)?,
-                    &signature,
+                    &request.request_id,
+                    attestation,
+                    &request.signature,
                 )
-            }
-            _ => {
-                return Err(SubmitError::BadRequest(
-                    "attestation is required only for respondBidirectional".to_string(),
-                ))
             }
         }
         .map_err(|error| SubmitError::BadRequest(error.to_string()))?;
@@ -223,25 +206,15 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         let base = self.prove_respond(intent, deadline).await?;
         let prove_respond = stage.elapsed();
 
-        let head = self.chain.finalized_head().await.map_err(internal)?;
+        let head = self.chain.finalized_head().await.map_err(node)?;
         let parameters: LedgerParameters = midnight_serialize::tagged_deserialize(
-            &mut &self
-                .chain
-                .ledger_parameters(&head)
-                .await
-                .map_err(internal)?[..],
+            &mut &self.chain.ledger_parameters(&head).await.map_err(node)?[..],
         )
         .map_err(|error| {
             SubmitError::Internal(format!("ledger parameters did not decode: {error}"))
         })?;
-        let head_number = self.chain.block_number(&head).await.map_err(internal)?;
-        let head_time = self.chain.block_time(&head).await.map_err(internal)?;
-        let indexed_time = self.wallet.indexed_time().await?;
-        // Events indexed up to `indexed_time` may still be on their way to the replay.
-        self.wallet
-            .ready_by(deadline.checked_sub(WORK_RESERVE).unwrap_or(deadline))
-            .await?;
-        let ctime = fee_ctime(head_time, indexed_time, self.wallet.sync_time());
+        let head_number = self.chain.block_number(&head).await.map_err(node)?;
+        let ctime = self.fee_ctime_at(&head, deadline).await?;
 
         let wall = mpc_utils::time::current_unix_timestamp();
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -267,23 +240,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         let stage = Instant::now();
         let fee_sealed = self.prove_fee(fee_tx, deadline).await?;
         let prove_fee = stage.elapsed();
-        let transaction = base
-            .merge(&fee_sealed)
-            .map_err(|error| SubmitError::Internal(format!("merging the fee: {error:?}")))?;
-        let fee = transaction.fees(&parameters, false).map_err(|error| {
-            SubmitError::Internal(format!("pricing the transaction: {error:?}"))
-        })?;
-        let short = dust_deficit(&transaction, fee)?;
-        if short > 0 {
-            return Err(SubmitError::Internal(format!(
-                "the proven transaction is {short} SPECKS short of its fee; nothing was posted"
-            )));
-        }
-        let tx_hash = transaction.transaction_hash().0 .0;
-        let mut bytes = Vec::new();
-        midnight_serialize::tagged_serialize(&transaction, &mut bytes).map_err(|error| {
-            SubmitError::Internal(format!("serializing the transaction: {error}"))
-        })?;
+        let (bytes, tx_hash) = paid_transaction(&base, &fee_sealed, &parameters)?;
 
         tracing::info!(
             fee = plan.fee,
@@ -304,6 +261,18 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         })
     }
 
+    /// The fee's `ctime` at `head`, once the replay has caught up with what the
+    /// indexer reports; see [`fee_ctime`].
+    async fn fee_ctime_at(&self, head: &str, deadline: Instant) -> Result<Timestamp, SubmitError> {
+        let head_time = self.chain.block_time(head).await.map_err(node)?;
+        let indexed_time = self.wallet.indexed_time().await?;
+        // Events indexed up to `indexed_time` may still be on their way to the replay.
+        self.wallet
+            .ready_by(deadline.checked_sub(WORK_RESERVE).unwrap_or(deadline))
+            .await?;
+        Ok(fee_ctime(head_time, indexed_time, self.wallet.sync_time()))
+    }
+
     /// The respond call proven under the packaged contract keys (zkir v3).
     async fn prove_respond(
         &self,
@@ -312,16 +281,13 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
     ) -> Result<SealedTx, SubmitError> {
         let respond = preimage_tx(&self.network_id, RESPOND_SEGMENT, intent);
         let provers = self.provers.clone();
-        let proven = prove_blocking(deadline, move || {
-            let provers = provers;
-            async move {
-                let prover = InProcessProver {
-                    rng: StdRng::from_entropy(),
-                    resolver: &provers.contract,
-                    params: &provers.params,
-                };
-                respond.prove(prover, &INITIAL_COST_MODEL).await
-            }
+        let proven = prove_blocking(deadline, move || async move {
+            let prover = InProcessProver {
+                rng: StdRng::from_entropy(),
+                resolver: &provers.contract,
+                params: &provers.params,
+            };
+            respond.prove(prover, &INITIAL_COST_MODEL).await
         })
         .await?;
         Ok(proven.seal(StdRng::from_entropy()))
@@ -334,16 +300,13 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         deadline: Instant,
     ) -> Result<SealedTx, SubmitError> {
         let provers = self.provers.clone();
-        let proven = prove_blocking(deadline, move || {
-            let provers = provers;
-            async move {
-                let prover = midnight_zkir::LocalProvingProvider {
-                    rng: StdRng::from_entropy(),
-                    resolver: &provers.dust,
-                    params: &provers.params,
-                };
-                fee_tx.prove(prover, &INITIAL_COST_MODEL).await
-            }
+        let proven = prove_blocking(deadline, move || async move {
+            let prover = midnight_zkir::LocalProvingProvider {
+                rng: StdRng::from_entropy(),
+                resolver: &provers.dust,
+                params: &provers.params,
+            };
+            fee_tx.prove(prover, &INITIAL_COST_MODEL).await
         })
         .await?;
         Ok(proven.seal(StdRng::from_entropy()))
@@ -378,7 +341,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             }
             Err(SubmitRefusal::Unsent(error)) => {
                 self.wallet.release(spent);
-                return Err(SubmitError::Internal(format!(
+                return Err(SubmitError::Node(format!(
                     "the transaction could not be sent: {error:#}; nothing was posted"
                 )));
             }
@@ -399,19 +362,18 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             outcome = ?landing,
             "midnight: respond settled"
         );
-        match landing {
+        match landing? {
             // The respond's only transcript and the DUST spends are guaranteed, which
             // a partial success commits and readers read; the reservation ends when
             // the replay sees the spends.
-            Ok(Landing::Applied | Landing::PartialSuccess) => Ok(hex::encode(tx_hash)),
-            Ok(Landing::Expired) => {
+            Landing::Applied | Landing::PartialSuccess => Ok(hex::encode(tx_hash)),
+            Landing::Expired => {
                 self.wallet.release(spent);
                 Err(SubmitError::StateConflict(format!(
                     "transaction {} expired without landing; nothing was posted",
                     hex::encode(tx_hash)
                 )))
             }
-            Err(error) => Err(error),
         }
     }
 
@@ -466,7 +428,8 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             }
         }
         Err(SubmitError::Ambiguous(format!(
-            "transaction {} was not seen finalized within the submit budget",
+            "transaction {} was not seen finalized within the submit budget; it may still land, \
+             and a later publisher retry may post the response again",
             hex::encode(tx_hash)
         )))
     }
@@ -479,13 +442,14 @@ where
     C: SubmitChain + 'static,
 {
     async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
-        self.build_intent(request).map_err(SubmitError::into_anyhow)
+        self.build_intent(request)
+            .map_err(SubmitError::into_publish_error)
     }
 
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
         self.submit_intent(intent)
             .await
-            .map_err(SubmitError::into_anyhow)
+            .map_err(SubmitError::into_publish_error)
     }
 }
 
@@ -497,6 +461,31 @@ where
 /// leaves the roots stale; the node then refuses the spend and the publish retries.
 fn fee_ctime(head_time: Timestamp, indexed_time: Timestamp, sync_time: Timestamp) -> Timestamp {
     head_time.min(indexed_time).max(sync_time)
+}
+
+/// The respond merged with its proven fee, serialized, and its ledger hash. The plan
+/// priced the fee over a mock proof, so the real one is checked to still pay.
+fn paid_transaction(
+    base: &SealedTx,
+    fee: &SealedTx,
+    parameters: &LedgerParameters,
+) -> Result<(Vec<u8>, [u8; 32]), SubmitError> {
+    let transaction = base
+        .merge(fee)
+        .map_err(|error| SubmitError::Internal(format!("merging the fee: {error:?}")))?;
+    let owed = transaction
+        .fees(parameters, false)
+        .map_err(|error| SubmitError::Internal(format!("pricing the transaction: {error:?}")))?;
+    let short = dust_deficit(&transaction, owed)?;
+    if short > 0 {
+        return Err(SubmitError::Internal(format!(
+            "the proven transaction is {short} SPECKS short of its fee; nothing was posted"
+        )));
+    }
+    let mut bytes = Vec::new();
+    midnight_serialize::tagged_serialize(&transaction, &mut bytes)
+        .map_err(|error| SubmitError::Internal(format!("serializing the transaction: {error}")))?;
+    Ok((bytes, transaction.transaction_hash().0 .0))
 }
 
 /// How long the fee intent stays includable with `remaining` of the budget left:
@@ -528,68 +517,14 @@ where
     }
 }
 
-fn internal(error: anyhow::Error) -> SubmitError {
-    SubmitError::Internal(format!("{error:#}"))
-}
-
-fn hex_bytes(field: &str, value: &str) -> Result<Vec<u8>, SubmitError> {
-    if value.bytes().any(|byte| byte.is_ascii_uppercase()) || value.starts_with("0x") {
-        return Err(SubmitError::BadRequest(format!(
-            "{field} must be bare lowercase hex"
-        )));
-    }
-    hex::decode(value)
-        .map_err(|_| SubmitError::BadRequest(format!("{field} must be bare lowercase hex")))
-}
-
-fn hex32(field: &str, value: &str) -> Result<[u8; 32], SubmitError> {
-    hex_bytes(field, value)?
-        .try_into()
-        .map_err(|_| SubmitError::BadRequest(format!("{field} must be 32 bytes")))
-}
-
-fn parse_signature(wire: &WireSignature) -> Result<EcdsaSignature, SubmitError> {
-    if wire.recovery_id > 1 {
-        return Err(SubmitError::BadRequest(
-            "recoveryId must be 0 or 1".to_string(),
-        ));
-    }
-    Ok(EcdsaSignature {
-        big_r_x: hex32("signature.bigR.x", &wire.big_r.x)?,
-        big_r_y: hex32("signature.bigR.y", &wire.big_r.y)?,
-        s: hex32("signature.s", &wire.s)?,
-        recovery_id: wire.recovery_id,
-    })
-}
-
-fn parse_attestation(wire: &WireAttestation) -> Result<Attestation, SubmitError> {
-    let uint64 = |field: &str, value: &str| {
-        value
-            .parse::<u64>()
-            .ok()
-            .filter(|parsed| parsed.to_string() == value)
-            .ok_or_else(|| SubmitError::BadRequest(format!("{field} must be a decimal uint64")))
-    };
-    if wire.output_kind > 2 {
-        return Err(SubmitError::BadRequest(
-            "outputKind must be 0, 1 or 2".to_string(),
-        ));
-    }
-    Ok(Attestation {
-        block_height: uint64("attestation.blockHeight", &wire.block_height)?,
-        output_kind: wire.output_kind,
-        serialized_output_length: uint64(
-            "attestation.serializedOutputLength",
-            &wire.serialized_output_length,
-        )?,
-        output_hash: hex32("attestation.outputHash", &wire.output_hash)?,
-        digest: hex32("attestation.digest", &wire.digest)?,
-    })
+fn node(error: anyhow::Error) -> SubmitError {
+    SubmitError::Node(format!("{error:#}"))
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
     use midnight_ledger_v9::structure::{
@@ -599,8 +534,9 @@ mod tests {
 
     use super::*;
     use crate::emissions::{emissions_of_call, Emission, EmissionKind, MISC_PAYLOAD_LEN};
-    use crate::funding::FeePlan;
-    use crate::intent::WirePoint;
+    use crate::funding::tests::{base, funded_key, replayed};
+    use crate::funding::{plan_fee, FeePlan};
+    use minocrab_publisher::{Attestation, EcdsaSignature};
 
     /// The responder's initial state with the package's verifier keys
     /// (`midnight-devtools`' `gen:initial-state`).
@@ -616,20 +552,30 @@ mod tests {
     #[derive(Default)]
     pub(super) struct RecordingWallet {
         reserved: Mutex<Vec<Vec<DustNullifier>>>,
+        reserved_until: Mutex<Vec<Timestamp>>,
         released: Mutex<Vec<Vec<DustNullifier>>>,
+        waited_until: Mutex<Vec<Instant>>,
+        sync_secs: AtomicU64,
+        indexed_secs: u64,
+        /// Where the replay stands once `ready_by` has waited for it, if it moves.
+        caught_up_secs: Option<u64>,
     }
 
     impl FeePayer for RecordingWallet {
-        async fn ready_by(&self, _deadline: Instant) -> Result<(), SubmitError> {
+        async fn ready_by(&self, deadline: Instant) -> Result<(), SubmitError> {
+            self.waited_until.lock().unwrap().push(deadline);
+            if let Some(secs) = self.caught_up_secs {
+                self.sync_secs.store(secs, Ordering::SeqCst);
+            }
             Ok(())
         }
 
         fn sync_time(&self) -> Timestamp {
-            Timestamp::from_secs(0)
+            Timestamp::from_secs(self.sync_secs.load(Ordering::SeqCst))
         }
 
         async fn indexed_time(&self) -> Result<Timestamp, SubmitError> {
-            Ok(Timestamp::from_secs(0))
+            Ok(Timestamp::from_secs(self.indexed_secs))
         }
 
         fn plan(
@@ -644,8 +590,9 @@ mod tests {
             unimplemented!("these tests never price a fee")
         }
 
-        fn reserve(&self, spent: &[DustNullifier], _until: Timestamp) {
+        fn reserve(&self, spent: &[DustNullifier], until: Timestamp) {
             self.reserved.lock().unwrap().push(spent.to_vec());
+            self.reserved_until.lock().unwrap().push(until);
         }
 
         fn release(&self, spent: &[DustNullifier]) {
@@ -661,6 +608,8 @@ mod tests {
         submit: Mutex<Option<SubmitRefusal>>,
         landing: Option<(u64, Landing)>,
         landing_reads: Mutex<VecDeque<u64>>,
+        /// A block whose first landing read fails.
+        failing_read: Mutex<Option<u64>>,
     }
 
     impl ScriptedChain {
@@ -671,7 +620,13 @@ mod tests {
                 submit: Mutex::new(None),
                 landing,
                 landing_reads: Mutex::new(VecDeque::new()),
+                failing_read: Mutex::new(None),
             }
+        }
+
+        fn failing_once_at(self, number: u64) -> Self {
+            *self.failing_read.lock().unwrap() = Some(number);
+            self
         }
 
         fn refusing(self, refusal: SubmitRefusal) -> Self {
@@ -731,6 +686,11 @@ mod tests {
             assert_eq!(tx_hash, TX_HASH);
             let number = block_number_of(at_hash_0x);
             self.landing_reads.lock().unwrap().push_back(number);
+            let mut failing = self.failing_read.lock().unwrap();
+            if *failing == Some(number) {
+                *failing = None;
+                anyhow::bail!("the node dropped the read of block {number}");
+            }
             Ok(self
                 .landing
                 .filter(|(at, _)| *at == number)
@@ -740,14 +700,11 @@ mod tests {
 
     /// A managed directory holding the verifier keys the fixture state carries, as
     /// `keys/<circuit>.verifier`.
-    fn managed_dir(verifier: impl Fn(&str, Vec<u8>) -> Vec<u8>) -> std::path::PathBuf {
+    fn managed_dir(verifier: impl Fn(&str, Vec<u8>) -> Vec<u8>) -> tempfile::TempDir {
         let state: ContractState<DefaultDB> =
             midnight_serialize::tagged_deserialize(&mut &RESPONDER_STATE[..]).unwrap();
-        let dir = std::env::temp_dir().join(format!(
-            "mpc-midnight-native-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
         std::fs::create_dir_all(dir.join("keys")).unwrap();
         std::fs::create_dir_all(dir.join("zkir")).unwrap();
         for circuit in ["respond", "respondBidirectional"] {
@@ -768,50 +725,75 @@ mod tests {
             )
             .unwrap();
         }
-        dir
+        temp
     }
 
-    fn client_over(
-        dir: &std::path::Path,
-        chain: ScriptedChain,
-    ) -> NativeIntentClient<RecordingWallet, ScriptedChain> {
-        NativeIntentClient::new(
-            Arc::new(chain),
-            RecordingWallet::default(),
-            Arc::new(Provers::new(dir, dir).unwrap()),
-            "undeployed",
-            Duration::from_secs(420),
-        )
+    /// A client over a managed directory that lives as long as the client: the
+    /// build reads the verifier keys from it.
+    struct TestClient {
+        client: NativeIntentClient<RecordingWallet, ScriptedChain>,
+        _dir: tempfile::TempDir,
     }
 
-    fn client() -> NativeIntentClient<RecordingWallet, ScriptedChain> {
+    impl std::ops::Deref for TestClient {
+        type Target = NativeIntentClient<RecordingWallet, ScriptedChain>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.client
+        }
+    }
+
+    impl std::ops::DerefMut for TestClient {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.client
+        }
+    }
+
+    fn client_over(dir: tempfile::TempDir, chain: ScriptedChain) -> TestClient {
+        TestClient {
+            client: NativeIntentClient::new(
+                Arc::new(chain),
+                RecordingWallet::default(),
+                Arc::new(Provers::new(dir.path(), dir.path()).unwrap()),
+                "undeployed",
+                Duration::from_secs(420),
+            ),
+            _dir: dir,
+        }
+    }
+
+    fn client() -> TestClient {
         client_over(
-            &managed_dir(|_, bytes| bytes),
+            managed_dir(|_, bytes| bytes),
             ScriptedChain::new(0, 0, None),
         )
     }
 
-    fn ledger_parameters() -> String {
+    fn ledger_parameters() -> Vec<u8> {
         let mut bytes = Vec::new();
         midnight_serialize::tagged_serialize(&INITIAL_PARAMETERS, &mut bytes).unwrap();
-        hex::encode(bytes)
+        bytes
+    }
+
+    fn hex32(value: &str) -> [u8; 32] {
+        hex::decode(format!("{value:0>64}"))
+            .unwrap()
+            .try_into()
+            .unwrap()
     }
 
     pub(super) fn respond_request() -> IntentRequest {
         IntentRequest {
-            circuit: "respond",
-            contract_address: RESPONDER.to_string(),
-            request_id: REQUEST_ID.to_string(),
-            signature: WireSignature {
-                big_r: WirePoint {
-                    x: "11".repeat(32),
-                    y: "22".repeat(32),
-                },
-                s: "33".repeat(32),
+            circuit: RespondCircuit::Respond,
+            contract_address: hex32(RESPONDER),
+            request_id: hex32(REQUEST_ID),
+            signature: EcdsaSignature {
+                big_r_x: [0x11; 32],
+                big_r_y: [0x22; 32],
+                s: [0x33; 32],
                 recovery_id: 1,
             },
-            attestation: None,
-            contract_state: hex::encode(RESPONDER_STATE),
+            contract_state: RESPONDER_STATE.to_vec(),
             ledger_parameters: ledger_parameters(),
             ttl_seconds: TTL,
         }
@@ -824,24 +806,22 @@ mod tests {
             serde_json::from_str(include_str!("../fixtures/api-parity-vectors.json")).unwrap();
         let event = &fixtures["responseEvent"];
         let text = |value: &serde_json::Value| value.as_str().unwrap().to_string();
+        let uint64 = |value: &serde_json::Value| text(value).parse::<u64>().unwrap();
         IntentRequest {
-            circuit: "respondBidirectional",
-            request_id: text(&event["requestId"]),
-            signature: WireSignature {
-                big_r: WirePoint {
-                    x: format!("{:0>64}", text(&event["signature"]["bigR"]["x"])),
-                    y: format!("{:0>64}", text(&event["signature"]["bigR"]["y"])),
-                },
-                s: format!("{:0>64}", text(&event["signature"]["s"])),
+            circuit: RespondCircuit::RespondBidirectional(Attestation {
+                block_height: uint64(&event["blockHeight"]),
+                output_kind: event["outputKind"].as_u64().unwrap() as u8,
+                serialized_output_length: uint64(&event["serializedOutputLength"]),
+                output_hash: hex32(&text(&event["outputHash"])),
+                digest: hex32(&text(&event["digest"])),
+            }),
+            request_id: hex32(&text(&event["requestId"])),
+            signature: EcdsaSignature {
+                big_r_x: hex32(&text(&event["signature"]["bigR"]["x"])),
+                big_r_y: hex32(&text(&event["signature"]["bigR"]["y"])),
+                s: hex32(&text(&event["signature"]["s"])),
                 recovery_id: event["signature"]["recoveryId"].as_u64().unwrap() as u8,
             },
-            attestation: Some(WireAttestation {
-                block_height: text(&event["blockHeight"]),
-                output_kind: event["outputKind"].as_u64().unwrap() as u8,
-                serialized_output_length: text(&event["serializedOutputLength"]),
-                output_hash: text(&event["outputHash"]),
-                digest: text(&event["digest"]),
-            }),
             ..respond_request()
         }
     }
@@ -917,7 +897,7 @@ mod tests {
                 bytes
             }
         });
-        let client = client_over(&dir, ScriptedChain::new(0, 0, None));
+        let client = client_over(dir, ScriptedChain::new(0, 0, None));
         let error = client.build_intent(&respond_request()).unwrap_err();
         assert!(matches!(error, SubmitError::ContractMismatch(_)), "{error}");
 
@@ -926,7 +906,7 @@ mod tests {
             .unwrap();
         let error = client
             .build_intent(&IntentRequest {
-                contract_state: hex::encode(empty),
+                contract_state: empty,
                 ..respond_request()
             })
             .unwrap_err();
@@ -936,8 +916,8 @@ mod tests {
     #[test]
     fn provers_refuse_a_directory_without_the_packaged_artifacts() {
         let dir = managed_dir(|_, bytes| bytes);
-        std::fs::remove_file(dir.join("zkir/respondBidirectional.bzkir")).unwrap();
-        let error = Provers::new(&dir, &dir)
+        std::fs::remove_file(dir.path().join("zkir/respondBidirectional.bzkir")).unwrap();
+        let error = Provers::new(dir.path(), dir.path())
             .err()
             .expect("an artifact is missing");
         assert!(
@@ -946,76 +926,48 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_publisher_sees_build_and_submit_failures_with_their_verdict() {
+        let client = client();
+        let built = client
+            .build(&IntentRequest {
+                contract_state: vec![0xff],
+                ..respond_request()
+            })
+            .await
+            .unwrap_err();
+        let submitted = client.submit(&[0xff]).await.unwrap_err();
+        for error in [built, submitted] {
+            assert_eq!(
+                crate::submit_error::refusal_code(&error),
+                Some("bad_request")
+            );
+            assert!(
+                error
+                    .downcast_ref::<mpc_chain_integration_core::utils::retry::RpcFailure>()
+                    .is_some(),
+                "a classified failure carries its verdict: {error:#}"
+            );
+        }
+    }
+
     #[test]
     fn malformed_requests_are_refused_before_anything_is_built() {
-        let attestation = WireAttestation {
-            block_height: "42".into(),
-            output_kind: 0,
-            serialized_output_length: "32".into(),
-            output_hash: "44".repeat(32),
-            digest: "55".repeat(32),
-        };
-        let bidirectional = IntentRequest {
-            circuit: "respondBidirectional",
-            attestation: Some(attestation.clone()),
-            ..respond_request()
-        };
         let cases: Vec<(&str, IntentRequest)> = vec![
             (
-                "attestation on respond",
+                "undecodable contract state",
                 IntentRequest {
-                    attestation: Some(attestation.clone()),
+                    contract_state: vec![0xff],
                     ..respond_request()
                 },
             ),
             (
-                "no attestation on respondBidirectional",
+                "undecodable ledger parameters",
                 IntentRequest {
-                    attestation: None,
-                    ..bidirectional.clone()
-                },
-            ),
-            (
-                "unknown circuit",
-                IntentRequest {
-                    circuit: "signBidirectional",
+                    ledger_parameters: vec![0xff],
                     ..respond_request()
                 },
             ),
-            (
-                "uppercase hex",
-                IntentRequest {
-                    request_id: REQUEST_ID.to_ascii_uppercase(),
-                    ..respond_request()
-                },
-            ),
-            (
-                "0x prefix",
-                IntentRequest {
-                    contract_address: format!("0x{}", &RESPONDER[2..]),
-                    ..respond_request()
-                },
-            ),
-            ("recovery id 2", {
-                let mut request = respond_request();
-                request.signature.recovery_id = 2;
-                request
-            }),
-            ("output kind 3", {
-                let mut request = bidirectional.clone();
-                request.attestation.as_mut().unwrap().output_kind = 3;
-                request
-            }),
-            ("non-canonical decimal", {
-                let mut request = bidirectional.clone();
-                request.attestation.as_mut().unwrap().block_height = "042".into();
-                request
-            }),
-            ("short output hash", {
-                let mut request = bidirectional.clone();
-                request.attestation.as_mut().unwrap().output_hash = "44".repeat(31);
-                request
-            }),
         ];
         let client = client();
         for (case, request) in cases {
@@ -1041,7 +993,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_transaction_that_lands_is_answered_with_its_hash() {
         let client = client_over(
-            &managed_dir(|_, bytes| bytes),
+            managed_dir(|_, bytes| bytes),
             ScriptedChain::new(10, 20, Some((13, Landing::Applied))),
         );
         let landed = client
@@ -1057,6 +1009,11 @@ mod tests {
             .unwrap();
         assert_eq!(landed, hex::encode(TX_HASH));
         assert_eq!(*client.wallet.reserved.lock().unwrap(), vec![spent()]);
+        assert_eq!(
+            *client.wallet.reserved_until.lock().unwrap(),
+            vec![Timestamp::from_secs(5000 + FINALITY_SLACK.as_secs())],
+            "the reservation outlives the TTL by the finality slack"
+        );
         assert!(client.wallet.released.lock().unwrap().is_empty());
         let reads: Vec<u64> = client
             .chain
@@ -1076,7 +1033,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_refused_submit_releases_its_utxos() {
         let client = client_over(
-            &managed_dir(|_, bytes| bytes),
+            managed_dir(|_, bytes| bytes),
             ScriptedChain::new(10, 20, None)
                 .refusing(SubmitRefusal::Refused("1010: Invalid Transaction".into())),
         );
@@ -1099,7 +1056,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_unsent_transaction_releases_its_utxos_without_blaming_the_chain() {
         let client = client_over(
-            &managed_dir(|_, bytes| bytes),
+            managed_dir(|_, bytes| bytes),
             ScriptedChain::new(10, 20, None)
                 .refusing(SubmitRefusal::Unsent(anyhow::anyhow!("connection refused"))),
         );
@@ -1114,7 +1071,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, SubmitError::Internal(_)), "{error}");
+        assert!(matches!(error, SubmitError::Node(_)), "{error}");
         assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
         assert!(client.chain.landing_reads.lock().unwrap().is_empty());
     }
@@ -1122,7 +1079,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_unanswered_submit_is_still_watched_for() {
         let client = client_over(
-            &managed_dir(|_, bytes| bytes),
+            managed_dir(|_, bytes| bytes),
             ScriptedChain::new(10, 20, Some((12, Landing::Applied))).refusing(
                 SubmitRefusal::Unanswered(anyhow::anyhow!("connection reset")),
             ),
@@ -1144,7 +1101,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_partial_success_answers_the_publish() {
         let client = client_over(
-            &managed_dir(|_, bytes| bytes),
+            managed_dir(|_, bytes| bytes),
             ScriptedChain::new(10, 20, Some((12, Landing::PartialSuccess))),
         );
         let landed = client
@@ -1176,6 +1133,76 @@ mod tests {
         assert_eq!(fee_ctime(at(100), at(110), at(105)), at(105));
     }
 
+    #[tokio::test]
+    async fn the_fee_ctime_reads_the_head_the_indexer_and_the_caught_up_replay() {
+        // Block 10 is at 1060.
+        let mut client = client();
+        client.wallet.indexed_secs = 1050;
+        let deadline = deadline();
+        let ctime = client
+            .fee_ctime_at(&block_hash(10), deadline)
+            .await
+            .unwrap();
+        assert_eq!(ctime, Timestamp::from_secs(1050), "the indexer bounds it");
+
+        // The replay was behind the indexer, and delivered an event past it once waited for.
+        client.wallet.sync_secs = AtomicU64::new(1040);
+        client.wallet.caught_up_secs = Some(1055);
+        let ctime = client
+            .fee_ctime_at(&block_hash(10), deadline)
+            .await
+            .unwrap();
+        assert_eq!(
+            ctime,
+            Timestamp::from_secs(1055),
+            "the replay, once waited for"
+        );
+        assert_eq!(
+            *client.wallet.waited_until.lock().unwrap(),
+            vec![deadline - WORK_RESERVE; 2],
+            "the wait leaves the work its reserve"
+        );
+    }
+
+    #[test]
+    fn the_proven_fee_is_merged_and_checked_to_pay_before_posting() {
+        let local = replayed();
+        let ctime = local.sync_time;
+        let ttl = Timestamp::from_secs(ctime.to_secs() + 180);
+        let mut rng = StdRng::seed_from_u64(7);
+        let base = base(&mut rng, ttl);
+        let plan = plan_fee(
+            &funded_key(),
+            &local,
+            &[],
+            &base,
+            &INITIAL_PARAMETERS,
+            ctime,
+            ttl,
+            "undeployed",
+            &mut rng,
+        )
+        .unwrap();
+        let fee = plan.tx.mock_prove().unwrap();
+
+        let (bytes, tx_hash) = paid_transaction(&base, &fee, &INITIAL_PARAMETERS).unwrap();
+        let posted: SealedTx = midnight_serialize::tagged_deserialize(&mut &bytes[..]).unwrap();
+        assert_eq!(posted.transaction_hash().0 .0, tx_hash);
+        assert_eq!(
+            base.merge(&fee).unwrap().transaction_hash().0 .0,
+            tx_hash,
+            "the posted transaction is the respond and its fee"
+        );
+
+        // Priced higher than the plan was: the fee no longer pays.
+        let mut dearer = INITIAL_PARAMETERS.clone();
+        dearer.fee_prices.overall_price =
+            midnight_base_crypto::cost_model::FixedPoint::from_u64_div(1 << 40, 1);
+        let error = paid_transaction(&base, &fee, &dearer).unwrap_err();
+        assert!(matches!(error, SubmitError::Internal(_)), "{error}");
+        assert!(format!("{error}").contains("short of its fee"), "{error}");
+    }
+
     #[test]
     fn the_fee_ttl_leaves_the_landing_its_finality_slack() {
         let secs = Duration::from_secs;
@@ -1187,25 +1214,23 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_transaction_past_its_ttl_unlanded_releases_its_utxos() {
-        // Block 14 is at 1084, past the 1080 TTL, and nothing landed up to it.
+    async fn a_failed_landing_read_is_retried_on_the_same_block() {
         let client = client_over(
-            &managed_dir(|_, bytes| bytes),
-            ScriptedChain::new(10, 20, None),
+            managed_dir(|_, bytes| bytes),
+            ScriptedChain::new(10, 20, Some((13, Landing::Applied))).failing_once_at(13),
         );
-        let error = client
+        let landed = client
             .post(
                 b"tx",
                 TX_HASH,
                 &spent(),
                 10,
-                Timestamp::from_secs(1080),
+                Timestamp::from_secs(5000),
                 deadline(),
             )
             .await
-            .unwrap_err();
-        assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
-        assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+            .unwrap();
+        assert_eq!(landed, hex::encode(TX_HASH));
         let reads: Vec<u64> = client
             .chain
             .landing_reads
@@ -1214,14 +1239,61 @@ mod tests {
             .iter()
             .copied()
             .collect();
-        assert_eq!(reads, vec![11, 12, 13, 14]);
+        assert_eq!(reads, vec![11, 12, 13, 13]);
+    }
+
+    #[tokio::test]
+    async fn proving_past_the_deadline_is_a_proving_timeout() {
+        // Already due: the proof is still running when the deadline is checked.
+        let error = prove_blocking(Instant::now(), || async {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(error, SubmitError::ProvingTimeout(_)), "{error}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transaction_past_its_ttl_unlanded_releases_its_utxos() {
+        // Block 14 is at 1084: past a 1080 TTL. At exactly 1084 the ledger still
+        // takes the intent (it expires only when the TTL is below the block time),
+        // so block 15, at 1090, is the first past it.
+        for (ttl, last_read) in [(1080, 14), (1084, 15)] {
+            let client = client_over(
+                managed_dir(|_, bytes| bytes),
+                ScriptedChain::new(10, 20, None),
+            );
+            let error = client
+                .post(
+                    b"tx",
+                    TX_HASH,
+                    &spent(),
+                    10,
+                    Timestamp::from_secs(ttl),
+                    deadline(),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, SubmitError::StateConflict(_)), "{error}");
+            assert_eq!(*client.wallet.released.lock().unwrap(), vec![spent()]);
+            let reads: Vec<u64> = client
+                .chain
+                .landing_reads
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect();
+            assert_eq!(reads, (11..=last_read).collect::<Vec<_>>(), "TTL {ttl}");
+        }
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_transaction_unseen_by_the_deadline_stays_reserved_and_is_ambiguous() {
         // The head stalls at 12, inside the TTL, so the outcome stays unknown.
         let client = client_over(
-            &managed_dir(|_, bytes| bytes),
+            managed_dir(|_, bytes| bytes),
             ScriptedChain::new(10, 12, None),
         );
         let error = client
@@ -1236,8 +1308,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::Ambiguous(_)), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("a later publisher retry may post the response again"),
+            "{error}"
+        );
         assert!(client.wallet.released.lock().unwrap().is_empty());
-        assert!(crate::intent::is_ambiguous_submit(&error.into_anyhow()));
     }
 }
 
@@ -1294,7 +1371,7 @@ mod bench {
                 let started = Instant::now();
                 let sealed = client.prove_respond(preimage, deadline).await.unwrap();
                 sample(
-                    request.circuit,
+                    request.circuit.name(),
                     run,
                     started.elapsed(),
                     serde_json::Value::Null,
@@ -1351,8 +1428,8 @@ mod live {
     use crate::config::{MidnightAddress, MidnightConfig, PublisherConfig};
     use crate::dust_feed::IndexerDustEvents;
     use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
-    use crate::intent::WirePoint;
     use crate::rpc::MidnightPublisherRpc;
+    use minocrab_publisher::{Attestation, EcdsaSignature};
 
     fn env(name: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"))
@@ -1401,7 +1478,18 @@ mod live {
             config.publisher.submit_timeout,
         );
         let responder = config.responder_address.to_hex();
-        for circuit in ["respond", "respondBidirectional", "respond"] {
+        let bidirectional = RespondCircuit::RespondBidirectional(Attestation {
+            block_height: 123_456,
+            output_kind: 0,
+            serialized_output_length: 32,
+            output_hash: [0x44; 32],
+            digest: [0x55; 32],
+        });
+        for circuit in [
+            RespondCircuit::Respond,
+            bidirectional,
+            RespondCircuit::Respond,
+        ] {
             let head = rpc.finalized_head().await.unwrap();
             let state = rpc
                 .contract_state(&responder, &head)
@@ -1411,25 +1499,16 @@ mod live {
             let parameters = rpc.ledger_parameters(&head).await.unwrap();
             let request = IntentRequest {
                 circuit,
-                contract_address: responder.clone(),
-                request_id: hex::encode(rand::random::<[u8; 32]>()),
-                signature: WireSignature {
-                    big_r: WirePoint {
-                        x: "11".repeat(32),
-                        y: "22".repeat(32),
-                    },
-                    s: "33".repeat(32),
+                contract_address: *config.responder_address.as_bytes(),
+                request_id: rand::random(),
+                signature: EcdsaSignature {
+                    big_r_x: [0x11; 32],
+                    big_r_y: [0x22; 32],
+                    s: [0x33; 32],
                     recovery_id: 1,
                 },
-                attestation: (circuit == "respondBidirectional").then(|| WireAttestation {
-                    block_height: "123456".into(),
-                    output_kind: 0,
-                    serialized_output_length: "32".into(),
-                    output_hash: "44".repeat(32),
-                    digest: "55".repeat(32),
-                }),
-                contract_state: hex::encode(state),
-                ledger_parameters: hex::encode(parameters),
+                contract_state: state,
+                ledger_parameters: parameters,
                 ttl_seconds: mpc_utils::time::current_unix_timestamp() + 600,
             };
             let started = std::time::Instant::now();
@@ -1437,9 +1516,10 @@ mod live {
             let landed = client
                 .submit(&intent)
                 .await
-                .unwrap_or_else(|error| panic!("{circuit}: {error:#}"));
+                .unwrap_or_else(|error| panic!("{}: {error:#}", circuit.name()));
             println!(
-                "{circuit}: landed {} in {:?}",
+                "{}: landed {} in {:?}",
+                circuit.name(),
                 landed.tx_id,
                 started.elapsed()
             );

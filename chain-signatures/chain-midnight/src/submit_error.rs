@@ -2,7 +2,7 @@
 //! apart. Every class is retried by the publish loop; they differ in what the retry
 //! may assume about the chain.
 
-use crate::intent::AmbiguousSubmit;
+use mpc_chain_integration_core::utils::retry::RpcFailure;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SubmitError {
@@ -34,6 +34,10 @@ pub(crate) enum SubmitError {
     Ambiguous(String),
     #[error("[internal] {0}")]
     Internal(String),
+    /// A read from or a send to the node failed. Counted as `internal`; its text
+    /// may hold the provider's own status, which the core's checks read.
+    #[error("[internal] {0}")]
+    Node(String),
 }
 
 impl SubmitError {
@@ -48,18 +52,20 @@ impl SubmitError {
             Self::ProvingTimeout(_) => "proving_timeout",
             Self::StateConflict(_) => "state_conflict",
             Self::Ambiguous(_) => "ambiguous_submit",
-            Self::Internal(_) => "internal",
+            Self::Internal(_) | Self::Node(_) => "internal",
         }
     }
 
-    /// As the publisher's error, marked when the transaction may still land.
-    pub(crate) fn into_anyhow(self) -> anyhow::Error {
-        let ambiguous = matches!(self, Self::Ambiguous(_));
-        let error = anyhow::Error::new(self);
-        if ambiguous {
-            error.context(AmbiguousSubmit)
-        } else {
-            error
+    /// As the publisher's error. Every failure but the node's carries a retryable
+    /// verdict, so the core's retry and throttle checks never read its message,
+    /// whose event ids and amounts can include a standalone 429 or 402.
+    pub(crate) fn into_publish_error(self) -> anyhow::Error {
+        match self {
+            Self::Node(_) => anyhow::Error::new(self),
+            local => anyhow::Error::new(RpcFailure::retryable(
+                "retried by the publish loop".to_string(),
+            ))
+            .context(local),
         }
     }
 }
@@ -75,7 +81,7 @@ mod tests {
 
     #[test]
     fn every_class_is_counted_under_the_code_its_message_carries() {
-        let classes: [fn(String) -> SubmitError; 9] = [
+        let classes: [fn(String) -> SubmitError; 10] = [
             SubmitError::BadRequest,
             SubmitError::ContractMismatch,
             SubmitError::WalletUnsynced,
@@ -85,6 +91,7 @@ mod tests {
             SubmitError::StateConflict,
             SubmitError::Ambiguous,
             SubmitError::Internal,
+            SubmitError::Node,
         ];
         for class in classes {
             let error = class("reason".to_string());
@@ -92,9 +99,37 @@ mod tests {
             let code = error.code();
             assert_eq!(message, format!("[{code}] reason"));
             assert_eq!(
-                refusal_code(&error.into_anyhow().context("publishing")),
+                refusal_code(&error.into_publish_error().context("publishing")),
                 Some(code)
             );
         }
+    }
+
+    #[test]
+    fn a_classified_failure_is_retried_and_never_read_as_throttling() {
+        use mpc_chain_integration_core::utils::retry::{is_provider_throttled, is_retryable};
+        let error = SubmitError::WalletUnsynced(
+            "DUST replay is at event Some(429) of 403 (subscription live)".to_string(),
+        )
+        .into_publish_error()
+        .context("submitting failed after 1200ms");
+        assert!(!is_provider_throttled(&error), "{error:#}");
+        assert!(is_retryable(&error), "{error:#}");
+        assert_eq!(refusal_code(&error), Some("wallet_unsynced"));
+        assert!(
+            format!("{error:#}").contains("Some(429) of 403"),
+            "{error:#}"
+        );
+
+        let error = SubmitError::Internal("the fee did not settle in 429 passes".to_string())
+            .into_publish_error();
+        assert!(!is_provider_throttled(&error), "{error:#}");
+        assert_eq!(refusal_code(&error), Some("internal"));
+
+        // The node's failure may be the provider's own throttle, which stays visible.
+        let error = SubmitError::Node("the node answered 429 Too Many Requests".to_string())
+            .into_publish_error();
+        assert!(is_provider_throttled(&error), "{error:#}");
+        assert_eq!(refusal_code(&error), Some("internal"));
     }
 }

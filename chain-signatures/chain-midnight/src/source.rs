@@ -24,10 +24,11 @@ pub(crate) struct BlockProofSeed {
 pub(crate) struct CandidateTransactionEmissions {
     pub ledger_tx_hash: [u8; 32],
     pub extrinsic_index: u32,
-    /// `TxPartialSuccess`: any fallible phase in `calls` may have rolled back.
+    /// `TxPartialSuccess`: any fallible phase of either contract's calls may have
+    /// rolled back.
     pub partial_success: bool,
     /// Calls to the singleton, where clients notify their requests.
-    pub calls: Vec<ContractCallEmissions>,
+    pub singleton_calls: Vec<ContractCallEmissions>,
     /// Calls to the responder, where responses are posted.
     pub responder_calls: Vec<ContractCallEmissions>,
 }
@@ -134,7 +135,7 @@ mod proof_seed_tests {
                 ledger_tx_hash: [0x55; 32],
                 extrinsic_index: 1,
                 partial_success: false,
-                calls: vec![ContractCallEmissions {
+                singleton_calls: vec![ContractCallEmissions {
                     phase: crate::emissions::TranscriptPhase::Guaranteed,
                     physical_segment: 1,
                     call_index: 1,
@@ -157,9 +158,9 @@ mod proof_seed_tests {
         let carried = expected.clone();
         assert_eq!(carried, expected);
         assert_eq!(carried.candidates[0].extrinsic_index, 1);
-        assert_eq!(carried.candidates[0].calls[0].call_index, 1);
+        assert_eq!(carried.candidates[0].singleton_calls[0].call_index, 1);
         assert_eq!(
-            carried.candidates[0].calls[0].emissions[1].kind,
+            carried.candidates[0].singleton_calls[0].emissions[1].kind,
             EmissionKind::SignatureResponded
         );
     }

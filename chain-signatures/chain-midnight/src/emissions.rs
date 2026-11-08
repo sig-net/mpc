@@ -1,4 +1,4 @@
-//! Singleton contract emissions recovered by executing transaction transcripts with the ledger VM.
+//! Signet contract emissions recovered by executing transaction transcripts with the ledger VM.
 
 use anyhow::Context as _;
 use midnight_base_crypto::fab::{AlignedValue, AlignmentAtom, AlignmentSegment, Value};
@@ -102,7 +102,7 @@ fn log_items<P: ProofKind<DefaultDB>>(
             && pairs
                 .iter()
                 .all(|pair| matches!(pair, [Op::Push { storage: false, .. }, Op::Log])),
-        "unsupported-singleton-transcript: expected literal non-storage Push/Log pairs with Noops and checkpoints"
+        "unsupported-contract-transcript: expected literal non-storage Push/Log pairs with Noops and checkpoints"
     );
     // The ledger starts each phase with a fresh query context. The accepted subset
     // cannot observe its omitted contract state, balance or block context.
@@ -112,7 +112,7 @@ fn log_items<P: ProofKind<DefaultDB>>(
     );
     let result = context
         .query::<ResultModeVerify>(&program, None, &INITIAL_COST_MODEL)
-        .context("singleton transcript rejected by the ledger VM")?;
+        .context("contract transcript rejected by the ledger VM")?;
     // Push/Log pairs produce no effects, so the ledger fails such a phase in any contract
     // state, with `EffectsMismatch` if nothing fails it earlier.
     if result.context.effects != transcript.effects {
@@ -173,7 +173,7 @@ struct DeclaredEffectsMismatch;
 impl std::fmt::Display for DeclaredEffectsMismatch {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(
-            "unsupported-singleton-transcript: declared effects differ from the replayed effects",
+            "unsupported-contract-transcript: declared effects differ from the replayed effects",
         )
     }
 }
@@ -224,7 +224,7 @@ fn emission_from_log_item(item: &VersionedLogItem<DefaultDB>) -> anyhow::Result<
         SIGNATURE_RESPONDED_EVENT => EmissionKind::SignatureResponded,
         RESPOND_BIDIRECTIONAL_EVENT => EmissionKind::RespondBidirectional,
         _ => anyhow::bail!(
-            "emission-schema: unknown singleton event name {}",
+            "emission-schema: unknown signet event name {}",
             String::from_utf8_lossy(&name)
         ),
     };
@@ -262,7 +262,7 @@ pub fn emissions_of_call<P: ProofKind<DefaultDB>>(
     Ok(emissions)
 }
 
-/// A fallible singleton phase [`partial_success_emissions_in`] leaves out, and why.
+/// A fallible phase [`partial_success_emissions_in`] leaves out, and why.
 #[derive(Debug)]
 pub struct SkippedFallibleCall {
     pub call_index: u32,
@@ -274,9 +274,9 @@ pub struct SkippedFallibleCall {
 /// A partial-success transaction uses [`partial_success_emissions_in`].
 pub fn emissions_in(
     tx: &DecodedTransaction,
-    singleton: &[u8; 32],
+    contract: &[u8; 32],
 ) -> anyhow::Result<Vec<ContractCallEmissions>> {
-    let (decoded, skipped) = decode_singleton_calls(tx, singleton, false)?;
+    let (decoded, skipped) = decode_contract_calls(tx, contract, false)?;
     debug_assert!(skipped.is_empty());
     Ok(decoded)
 }
@@ -290,21 +290,21 @@ pub fn emissions_in(
 /// as in [`emissions_in`].
 pub fn partial_success_emissions_in(
     tx: &DecodedTransaction,
-    singleton: &[u8; 32],
+    contract: &[u8; 32],
 ) -> anyhow::Result<(Vec<ContractCallEmissions>, Vec<SkippedFallibleCall>)> {
-    decode_singleton_calls(tx, singleton, true)
+    decode_contract_calls(tx, contract, true)
 }
 
-fn decode_singleton_calls(
+fn decode_contract_calls(
     tx: &DecodedTransaction,
-    singleton: &[u8; 32],
+    contract: &[u8; 32],
     partial_success: bool,
 ) -> anyhow::Result<(Vec<ContractCallEmissions>, Vec<SkippedFallibleCall>)> {
     let all_calls: Vec<_> = tx.calls().collect();
     let mut calls = all_calls
         .iter()
         .enumerate()
-        .filter(|(_, (_, call))| call.address.0 .0 == *singleton)
+        .filter(|(_, (_, call))| call.address.0 .0 == *contract)
         .map(|(call_index, (physical_segment, call))| {
             Ok((
                 *physical_segment,
@@ -327,7 +327,7 @@ fn decode_singleton_calls(
             };
             let emissions = if let Some(transcript) = transcript {
                 let emissions = emissions_of_transcript(call, transcript).with_context(|| {
-                    format!("singleton call {call_index}, segment {physical_segment}, {phase:?}")
+                    format!("contract call {call_index}, segment {physical_segment}, {phase:?}")
                 });
                 if partial_success && phase == TranscriptPhase::Fallible {
                     let mut skip = |reason| {
@@ -344,7 +344,7 @@ fn decode_singleton_calls(
                         // Holding on this one would let anyone halt the reader: the node checks
                         // a fallible phase's declared effects against its program only when it
                         // applies the phase. Every other failure comes from the proven program,
-                        // which each singleton circuit makes decodable, so only a format change
+                        // which each signet circuit makes decodable, so only a format change
                         // reaches it, and that change holds fully applied calls too.
                         Err(reason)
                             if reason.downcast_ref::<DeclaredEffectsMismatch>().is_some() =>
@@ -897,7 +897,7 @@ mod tests {
                     call(SINGLETON, Some(program.clone()), None)
                 };
                 let error = emissions_in(&transaction(vec![call]), &SINGLETON).unwrap_err();
-                assert!(format!("{error:#}").contains("unsupported-singleton-transcript"));
+                assert!(format!("{error:#}").contains("unsupported-contract-transcript"));
             }
         }
     }
@@ -1443,8 +1443,8 @@ mod tests {
             data_cell(&SIGN_BIDIRECTIONAL_EVENT, &FALLIBLE, 288),
         ));
         for (program, expected) in [
-            (vec![Op::Root, Op::Log], "unsupported-singleton-transcript"),
-            (vec![Op::Log], "unsupported-singleton-transcript"),
+            (vec![Op::Root, Op::Log], "unsupported-contract-transcript"),
+            (vec![Op::Log], "unsupported-contract-transcript"),
             (schema_drift, "emission-schema"),
         ] {
             let tx = transaction(vec![

@@ -7579,6 +7579,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "subxt",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.29.0",

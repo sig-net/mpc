@@ -68,5 +68,6 @@ sandbox = ["dep:google-cloud-auth"]
 google-cloud-auth = { version = "1.15", default-features = false }
 mockito.workspace = true
 jsonrpsee = { version = "0.24.10", features = ["server"] }
+tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true

@@ -21,12 +21,11 @@ use midnight_ledger_v9::dust::{
 };
 use midnight_ledger_v9::events::Event;
 use midnight_ledger_v9::structure::{
-    Intent, LedgerParameters, ProofMarker, ProofPreimageMarker, Signature, Transaction,
-    INITIAL_PARAMETERS,
+    Intent, LedgerParameters, ProofPreimageMarker, Signature, Transaction, INITIAL_PARAMETERS,
 };
 use midnight_storage::arena::Sp;
 use midnight_storage::DefaultDB;
-use midnight_transient_crypto::commitment::{PedersenRandomness, PureGeneratorPedersen};
+use midnight_transient_crypto::commitment::PedersenRandomness;
 use mpc_utils::task::AbortOnDrop;
 use rand::rngs::StdRng;
 use rand::{CryptoRng, Rng};
@@ -37,10 +36,9 @@ use crate::dust_feed::{DustEventSource, DustEventUpdate};
 use crate::submit_error::SubmitError;
 
 /// A proven respond transaction, sealed: what the fee is paid for.
-pub(crate) type SealedTx = Transaction<Signature, ProofMarker, PureGeneratorPedersen, DefaultDB>;
+pub(crate) type SealedTx = minocrab_publisher::intent::SealedTx<DefaultDB>;
 /// The fee-paying transaction, before its DUST spend proof.
-pub(crate) type UnprovenTx =
-    Transaction<Signature, ProofPreimageMarker, PedersenRandomness, DefaultDB>;
+pub(crate) type UnprovenTx = minocrab_publisher::intent::PreimageTx<DefaultDB>;
 
 /// The fee is priced as the wallet SDK prices it: this many blocks of the largest
 /// price rise the ledger allows, so a transaction priced now still pays when it lands.
@@ -616,7 +614,7 @@ pub(crate) mod tests {
     }
 
     /// A transaction with one empty intent: the smallest base a fee is paid for.
-    fn base(rng: &mut StdRng, ttl: Timestamp) -> SealedTx {
+    pub(crate) fn base(rng: &mut StdRng, ttl: Timestamp) -> SealedTx {
         let intent: Intent<Signature, ProofPreimageMarker, PedersenRandomness, DefaultDB> =
             Intent::empty(rng, ttl);
         let intents = midnight_storage::storage::HashMap::new().insert(1u16, intent);
@@ -842,6 +840,19 @@ pub(crate) mod tests {
         assert!(shared.state().is_ready());
     }
 
+    #[test]
+    fn a_resubscription_that_only_fails_is_not_ready() {
+        let shared = shared();
+        apply(&shared, fixture_updates().into_iter().map(Ok).collect()).unwrap();
+        // What `follow` records when a subscription ends.
+        shared.state().connected = false;
+        apply(&shared, vec![Err(anyhow::anyhow!("the indexer went away"))]).unwrap_err();
+        assert!(
+            !shared.state().is_ready(),
+            "a subscription that delivered nothing is not live"
+        );
+    }
+
     /// Delivers the fixture once, then nothing.
     struct OnceSource(Vec<DustEventUpdate>);
 
@@ -906,6 +917,58 @@ pub(crate) mod tests {
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
             .unwrap();
+    }
+
+    /// Delivers the fixture and ends; every later subscription stays silent.
+    struct EndsOnce {
+        subscriptions: std::sync::atomic::AtomicUsize,
+        updates: Vec<DustEventUpdate>,
+    }
+
+    #[async_trait]
+    impl DustEventSource for EndsOnce {
+        async fn subscribe(
+            &self,
+            _from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            let first = self
+                .subscriptions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0;
+            Ok(if first {
+                futures_util::stream::iter(self.updates.clone().into_iter().map(Ok)).boxed()
+            } else {
+                futures_util::stream::pending().boxed()
+            })
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_caught_up_wallet_whose_subscription_ended_is_not_ready() {
+        let source = Arc::new(EndsOnce {
+            subscriptions: Default::default(),
+            updates: fixture_updates(),
+        });
+        let wallet = FundingWallet::start(funded_key(), source.clone());
+        // The second subscription starts only after the first one ended.
+        while source
+            .subscriptions
+            .load(std::sync::atomic::Ordering::SeqCst)
+            < 2
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(wallet.shared.state().is_caught_up());
+
+        let error = wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(1))
+            .await
+            .expect_err("an indexer that stopped delivering may be missing events");
+        assert!(matches!(error, SubmitError::WalletUnsynced(_)), "{error}");
     }
 
     /// A subscription that never ends, holding `alive` while it is open.
@@ -986,6 +1049,41 @@ pub(crate) mod tests {
         assert!(
             wallet.shared.state().reservations.is_empty(),
             "a reservation whose UTXOs the chain spent ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reservation_the_replay_has_seen_partly_spent_still_holds_the_rest() {
+        let wallet = FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())));
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
+        let local = replayed();
+        let key = funded_key();
+        let unspent = local.utxos().next().unwrap().nullifier(&key);
+        let spent = DustNullifier(midnight_transient_crypto::curve::Fr::from(9u64));
+        let ctime = local.sync_time;
+        let ttl = Timestamp::from_secs(ctime.to_secs() + 180);
+        let mut rng = StdRng::seed_from_u64(6);
+        let base = base(&mut rng, ttl);
+
+        // The spend of `unspent` is in a batch the replay has not applied yet.
+        wallet.reserve(&[spent, unspent], Timestamp::from_secs(u64::MAX / 2));
+        if let Ok(plan) = wallet.plan(
+            &base,
+            &INITIAL_PARAMETERS,
+            ctime,
+            ttl,
+            "undeployed",
+            &mut rng,
+        ) {
+            assert!(!plan.spent.contains(&unspent), "a held UTXO was planned");
+        }
+        assert_eq!(
+            wallet.shared.state().reservations.len(),
+            1,
+            "a reservation ends only once the chain spent every UTXO it holds"
         );
     }
 

@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 
+/// The network ids the publisher builds transactions for; it refuses to connect to a
+/// node that reports another.
 const PUBLISHER_NETWORK_IDS: &[&str] = &["undeployed", "stagenet", "preview", "preprod", "mainnet"];
 
 /// Timeouts and retry budget for the subxt node RPC client.
@@ -103,7 +105,7 @@ pub struct PublisherConfig {
     /// Midnight's parameter store and checked against the ledger's pinned hash.
     pub zk_params_dir: PathBuf,
     /// The build's share of a respond intent's TTL, which `submit_timeout` completes.
-    pub request_timeout: Duration,
+    pub build_budget: Duration,
     /// Ceiling on one submit, from the DUST wait to the finalized landing.
     pub submit_timeout: Duration,
 }
@@ -117,7 +119,7 @@ impl Default for PublisherConfig {
             // Where the node image installs them.
             contract_artifacts_dir: PathBuf::from("/usr/local/share/midnight/signet-responder"),
             zk_params_dir: PathBuf::from("/usr/local/share/midnight/zk-params"),
-            request_timeout: Duration::from_secs(120),
+            build_budget: Duration::from_secs(120),
             submit_timeout: Duration::from_secs(420),
         }
     }
@@ -133,7 +135,7 @@ impl fmt::Debug for PublisherConfig {
             .field("indexer_ws_url", &self.indexer_ws_url)
             .field("contract_artifacts_dir", &self.contract_artifacts_dir)
             .field("zk_params_dir", &self.zk_params_dir)
-            .field("request_timeout", &self.request_timeout)
+            .field("build_budget", &self.build_budget)
             .field("submit_timeout", &self.submit_timeout)
             .finish()
     }
@@ -234,16 +236,9 @@ impl PublisherConfig {
 }
 
 fn validate_funding_seed(value: &str) -> anyhow::Result<()> {
-    let trimmed = value.trim();
-    let compact = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-        .unwrap_or(trimmed);
+    // The parse error is dropped: it may quote a character of the seed.
     anyhow::ensure!(
-        compact.len() >= 32
-            && compact.len() <= 128
-            && compact.len().is_multiple_of(2)
-            && compact.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        crate::funding::parse_seed(value).is_ok_and(|seed| (16..=64).contains(&seed.len())),
         "midnight config: publisher.funding_seed must be 16 to 64 bytes of hex"
     );
     Ok(())
@@ -325,9 +320,9 @@ mod tests {
 
     #[test]
     fn publisher_defaults_are_pinned() {
-        // The timeouts have no flags, so only this assert observes a retune.
+        // The budgets have no flags, so only this assert observes a retune.
         let publisher = PublisherConfig::default();
-        assert_eq!(publisher.request_timeout, Duration::from_secs(120));
+        assert_eq!(publisher.build_budget, Duration::from_secs(120));
         assert_eq!(publisher.submit_timeout, Duration::from_secs(420));
     }
 
@@ -522,9 +517,9 @@ mod tests {
     }
 
     #[test]
-    fn publisher_network_ids_match_the_sdk() {
+    fn publisher_network_ids_are_the_only_ones_accepted() {
         for network_id in PUBLISHER_NETWORK_IDS {
-            validate_publisher_network_id(network_id).expect("the SDK supports this network");
+            validate_publisher_network_id(network_id).expect("a listed network is accepted");
         }
         let error = validate_publisher_network_id("unknown-network").unwrap_err();
         assert!(error.to_string().contains("network_id"), "{error:#}");
