@@ -61,6 +61,8 @@ import { createCallerPrivateState } from "./witnesses.js";
 
 const DEPLOYER_SEED = "02".repeat(32);
 const INVOKER_SEED = "03".repeat(32);
+// The responder deploys from its own wallet, so it runs beside the central deploy.
+const RESPONDER_DEPLOYER_SEED = "f0".repeat(32);
 // One funding wallet per MPC node: a publisher assumes it alone spends its wallet's DUST,
 // and nodes sharing one wallet refuse each other's submissions as DUST double spends.
 const publisherSeed = (node: number) => (4 + node).toString(16).padStart(2, "0").repeat(32);
@@ -327,6 +329,7 @@ async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): 
   const roles = [
     ["deployer", DEPLOYER_SEED],
     ["invoker", INVOKER_SEED],
+    ["responder deployer", RESPONDER_DEPLOYER_SEED],
     ...publisherSeeds.map((seed, node) => [`publisher ${node}`, seed] as const),
   ] as const;
   const receivers = await Promise.all(
@@ -418,12 +421,19 @@ async function bootstrap(request: BootstrapRequest) {
     waitFor(`the indexer to serve the contract deployed at ${contractAddress}`, async () =>
       (await publicData.queryContractState(contractAddress)) ? true : undefined,
     );
-  diagnostics("deploying central Signet contract");
-  const central = await deploySignetContract(deployEnv(request.config, DEPLOYER_SEED));
-  await indexed(central.contractAddress);
-  diagnostics("deploying Signet responder");
-  const responder = await deploySignetResponder(deployEnv(request.config, DEPLOYER_SEED));
-  await indexed(responder.contractAddress);
+  diagnostics("deploying central Signet contract and Signet responder");
+  const [central, responder] = await Promise.all([
+    deploySignetContract(deployEnv(request.config, DEPLOYER_SEED)).then(async (deployed) => {
+      await indexed(deployed.contractAddress);
+      return deployed;
+    }),
+    deploySignetResponder(deployEnv(request.config, RESPONDER_DEPLOYER_SEED)).then(
+      async (deployed) => {
+        await indexed(deployed.contractAddress);
+        return deployed;
+      },
+    ),
+  ]);
 
   const deployerKeys = deriveAccountKeys(DEPLOYER_SEED, request.config.networkId);
   const deployerSecret = bytes(DEPLOYER_SEED, 32);
