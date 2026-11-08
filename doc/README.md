@@ -6,6 +6,7 @@ How to write and update these docs: [Documentation conventions](../CONTRIBUTING.
 
 ## Protocol
 
+- [System model](system-model.md): what the protocol docs assume about nodes, faults, the network and the chains.
 - [Protocol properties](protocol-properties.md): safety, liveness and efficiency properties of the coordination layer, and how the code enforces them.
 - [Posit state machine](posit-state-machine.md): the per-request signing state machine, rounds and timeouts, as implemented.
 - [Bidirectional calls](bidirectional-calls.md): entities, API and properties of a call signed for a target chain whose outcome is reported back to the source chain.

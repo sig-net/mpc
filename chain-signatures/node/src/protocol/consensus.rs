@@ -1,7 +1,7 @@
 use super::contract::{ProtocolState, ResharingContractState};
 use super::state::{
-    JoiningState, NodeState, PersistentNodeData, ResharingPhase, ResharingState, RunningState,
-    StartedState, WaitingForConsensusState,
+    JoiningState, KeyShare, NodeState, ResharingPhase, ResharingState, RunningState, StartedState,
+    WaitingForConsensusState,
 };
 use super::MpcSignProtocol;
 use crate::protocol::contract::primitives::Participants;
@@ -32,8 +32,8 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
         _gov: &mut G,
         contract_state: ProtocolState,
     ) -> NodeState {
-        match self.persistent_node_data {
-            Some(PersistentNodeData {
+        match self.key_share {
+            Some(KeyShare {
                 epoch,
                 private_share,
                 public_key,
@@ -96,9 +96,6 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             );
 
                             let threshold = contract_state.threshold;
-                            // Initialize identity for storage; this is an entry point into Running.
-                            ctx.triple_storage.set_me(me);
-                            ctx.presignature_storage.set_me(me);
                             let num_nodes = contract_state.participants.len();
                             let triple_task =
                                 TripleSpawnerTask::run(me, threshold, num_nodes, epoch, ctx);
@@ -395,9 +392,6 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         return NodeState::WaitingForConsensus(self);
                     };
 
-                    // Initialize identity for storage; this is an entry point into Running.
-                    ctx.triple_storage.set_me(me);
-                    ctx.presignature_storage.set_me(me);
                     let num_nodes = contract_state.participants.len();
                     let triple_task =
                         TripleSpawnerTask::run(me, self.threshold, num_nodes, self.epoch, ctx);
@@ -878,18 +872,6 @@ impl<G: Governance> ConsensusProtocol<G> for NodeState {
         contract_state: ProtocolState,
     ) -> NodeState {
         match self {
-            NodeState::Starting => {
-                let persistent_node_data = match ctx.secret_storage.load().await {
-                    Ok(data) => data,
-                    Err(err) => {
-                        tracing::error!(?err, "failed to load persistent node data, retrying...");
-                        return NodeState::Starting;
-                    }
-                };
-                NodeState::Started(StartedState {
-                    persistent_node_data,
-                })
-            }
             NodeState::Started(state) => state.advance(ctx, gov, contract_state).await,
             NodeState::Generating(state) => state.advance(ctx, gov, contract_state).await,
             NodeState::WaitingForConsensus(state) => state.advance(ctx, gov, contract_state).await,

@@ -102,6 +102,16 @@ impl TronReceipt {
 /// Receipt logs, EVM-shaped
 pub type TronLog = Log<LogData>;
 
+/// One solidified block's absence-scan surface.
+#[derive(Debug, Clone)]
+pub struct SolidifiedBlock {
+    pub number: u64,
+    pub timestamp: i64,
+    /// The reference slice derived from the block ID (bytes 8..16).
+    pub ref_slice: [u8; 8],
+    pub txids: Vec<[u8; 32]>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

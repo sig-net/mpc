@@ -145,6 +145,17 @@ pub(crate) static SIGN_REQUEST_LOOPS: LazyLock<CounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Executions resolved without a wait start — displaced or recovered
+/// watches — excluded from the awaiting-execution latency histogram.
+pub(crate) static EXECUTION_WAIT_UNMEASURED: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec_with_node_and_version(
+        "multichain_execution_wait_unmeasured_total",
+        "Executions resolved without a wait start, excluded from the awaiting-execution latency histogram, by source chain.",
+        &["chain"],
+    )
+    .unwrap()
+});
+
 pub(crate) static SIGN_QUEUE_SIZE: LazyLock<IntGauge> = LazyLock::new(|| {
     super::try_create_int_gauge_vec_with_node_account_id(
         "multichain_sign_queue_size",

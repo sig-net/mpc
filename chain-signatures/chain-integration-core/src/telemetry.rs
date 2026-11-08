@@ -22,6 +22,10 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
     /// execution on this chain. Counts *attempts*: a retryable failure on the
     /// same transaction increments once per retry.
     fn bidirectional_extraction_failed(&self, kind: ExtractionFailureKind);
+
+    /// Records an expiry scan deferred by a solidity head-fetch
+    /// failure (Tron), at most once per poll tick.
+    fn expiry_scan_deferred(&self) {}
 }
 
 /// Consensus-safety classification of a bidirectional output extraction
