@@ -630,7 +630,8 @@ mod tests {
     use mpc_primitives::SignId;
     use signet_program::{SignatureRequestedEvent, SignatureRespondedEvent};
     use solana_client::rpc_custom_error::{
-        JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE, JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
+        JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
+        JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED, JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
     };
     use solana_commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
@@ -1947,36 +1948,44 @@ mod tests {
 
     #[tokio::test]
     async fn skipped_missing_slots_emit_a_marker_and_advance() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("POST", "/")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                serde_json::json!({
-                    "jsonrpc": "2.0", "id": 1,
-                    "error": {"code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "message": "Slot was skipped"}
-                })
-                .to_string(),
-            )
-            // the skipped verdict is consumed, not retried
-            .expect(1)
-            .create_async()
-            .await;
+        for (code, message) in [
+            (JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "Slot was skipped"),
+            (
+                JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED,
+                "Slot was skipped because it is in long-term storage",
+            ),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "error": {"code": code, "message": message}
+                    })
+                    .to_string(),
+                )
+                // the skipped verdict is consumed, not retried
+                .expect(1)
+                .create_async()
+                .await;
 
-        let indexer = test_indexer(&server.url(), MockStateManager::new());
-        let (events_tx, mut events_rx) = mpsc::channel(16);
+            let indexer = test_indexer(&server.url(), MockStateManager::new());
+            let (events_tx, mut events_rx) = mpsc::channel(16);
 
-        indexer
-            .process_catchup_item(&events_tx, 7, &SolanaCatchupBlock::Missing)
-            .await
-            .unwrap();
+            indexer
+                .process_catchup_item(&events_tx, 7, &SolanaCatchupBlock::Missing)
+                .await
+                .unwrap();
 
-        assert!(matches!(
-            events_rx.recv().await,
-            Some(ChainEvent::Block(slot)) if slot == 7
-        ));
-        mock.assert_async().await;
+            assert!(
+                matches!(events_rx.recv().await, Some(ChainEvent::Block(slot)) if slot == 7),
+                "code {code} must consume into a marker"
+            );
+            mock.assert_async().await;
+        }
     }
 
     #[tokio::test]
@@ -2028,7 +2037,10 @@ mod tests {
                 })
                 .to_string(),
             )
-            .expect(3) // the inner loop keeps retrying: another LB backend may serve it
+            // production retries node-local absence inside get_block
+            // (usize::MAX); the finite budget here pins only the exhausted
+            // handoff — still retryable for retry_until_ok
+            .expect(3)
             .create_async()
             .await;
 

@@ -743,12 +743,15 @@ mod tests {
     async fn fetch_blocks_skips_skipped_slots() {
         const HEIGHT_1: u64 = 100;
         const HEIGHT_2: u64 = 101;
+        const HEIGHT_3: u64 = 102;
         let mut server = mockito::Server::new_async().await;
 
-        // Slot 101 is skipped (error code -32007), slot 100 is present
+        // Slot 101 skipped (-32007), 102 skipped in long-term storage
+        // (-32009); slot 100 present
         let body = serde_json::json!([
             make_block_response(0, HEIGHT_1),
-            { "id": 1, "result": null, "error": { "code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "message": "Slot was skipped" } }
+            { "id": 1, "result": null, "error": { "code": JSON_RPC_SERVER_ERROR_SLOT_SKIPPED, "message": "Slot was skipped" } },
+            { "id": 2, "result": null, "error": { "code": JSON_RPC_SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED, "message": "Slot was skipped because it is in long-term storage" } }
         ])
         .to_string();
 
@@ -761,11 +764,15 @@ mod tests {
             .await;
 
         let client = test_client(&server.url());
-        let result = client.fetch_blocks(&[HEIGHT_1, HEIGHT_2]).await.unwrap();
+        let result = client
+            .fetch_blocks(&[HEIGHT_1, HEIGHT_2, HEIGHT_3])
+            .await
+            .unwrap();
 
         assert_eq!(result.len(), 1);
         assert!(result.contains_key(&HEIGHT_1));
         assert!(!result.contains_key(&HEIGHT_2));
+        assert!(!result.contains_key(&HEIGHT_3));
     }
 
     #[tokio::test]
