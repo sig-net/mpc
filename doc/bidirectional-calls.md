@@ -1119,6 +1119,7 @@ Checked against `develop` at `1d823c4e`. Still to change:
   source.
 * One key per key version, before a second version.
 * Catch-up for Hydration.
-* Tron: Unviable at expiry, expiry bound at admission, output
-  schemas.
+* Hydration and Canton: source block time, so §4.3's expiry bound
+  anchors for them too.
+* Tron: output schemas.
 * Solana, Hydration and Canton: structures of Section 7, and Unviable.
