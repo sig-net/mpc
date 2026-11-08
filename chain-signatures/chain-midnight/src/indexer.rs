@@ -122,6 +122,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         block: &BlockRef,
     ) -> anyhow::Result<Vec<ChainEvent>> {
         let Some(BlockEmissions {
+            block_time_ms,
             proof_seed,
             candidates,
         }) = source
@@ -193,7 +194,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                 );
                                 events.push(ChainEvent::SignRequest {
                                     request: Arc::new(request),
-                                    block_timestamp: None,
+                                    block_timestamp: Some(block_time_ms / 1000),
                                 });
                             } else {
                                 tracing::warn!(
@@ -763,6 +764,7 @@ mod tests {
 
     fn batch(height: u64, calls: Vec<SingletonCallEmissions>) -> BlockEmissions {
         BlockEmissions {
+            block_time_ms: fixture_block_ms(height),
             proof_seed: proof_seed(height),
             candidates: vec![CandidateTransactionEmissions {
                 ledger_tx_hash: LEDGER_TX_HASH,
@@ -771,6 +773,10 @@ mod tests {
                 calls,
             }],
         }
+    }
+
+    fn fixture_block_ms(height: u64) -> u64 {
+        1_700_000_000_000 + height * 1_000
     }
 
     fn one_call(kind: EmissionKind, payload: [u8; 256]) -> Vec<SingletonCallEmissions> {
@@ -1074,7 +1080,10 @@ mod tests {
             panic!("expected SignRequest");
         };
         assert_eq!(request.id, SignId::new(rid));
-        assert_eq!(block_timestamp, None);
+        assert!(
+            block_timestamp.is_some(),
+            "the request carries its block time"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1221,6 +1230,31 @@ mod tests {
         for event in events {
             assert_request(event, rid);
         }
+    }
+
+    #[tokio::test]
+    async fn process_block_carries_the_block_time_in_seconds() {
+        let (record, rid) = named_record_and_rid(7);
+        let mut source = FixtureSource::default();
+        source.set_emissions(
+            9,
+            one_call(EmissionKind::SignBidirectional, notification(rid)),
+        );
+        source.set_state(CALLER, 9, caller_state(&record, rid));
+
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("block processes");
+
+        let ChainEvent::SignRequest {
+            block_timestamp, ..
+        } = events[0].clone()
+        else {
+            panic!("expected SignRequest");
+        };
+        assert_eq!(block_timestamp, Some(fixture_block_ms(9) / 1000));
     }
 
     #[tokio::test]

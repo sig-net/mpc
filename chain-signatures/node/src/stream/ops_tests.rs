@@ -851,7 +851,7 @@ async fn process_sign_request_rejects_a_window_beyond_the_cap() {
     );
 }
 
-/// No block time yet (Midnight, Canton, Hydration): the bound skips.
+/// No block time yet (Canton, Hydration): the bound skips.
 #[tokio::test]
 async fn process_sign_request_skips_the_expiry_bound_without_a_source_block_time() {
     admit_tron_request_with_expiry(

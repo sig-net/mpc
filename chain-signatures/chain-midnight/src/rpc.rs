@@ -235,6 +235,19 @@ impl subxt::blocks::StaticExtrinsic for SendMnTransaction {
     const CALL: &'static str = "send_mn_transaction";
 }
 
+/// The substrate timestamp inherent (`Timestamp::set`), present in the
+/// captured Midnight runtime metadata (node 2.0.0-rc.4 fixture).
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct TimestampSet {
+    now: u64,
+}
+
+impl subxt::blocks::StaticExtrinsic for TimestampSet {
+    const PALLET: &'static str = "Timestamp";
+    const CALL: &'static str = "set";
+}
+
 #[derive(DecodeAsType)]
 #[decode_as_type(crate_path = "subxt::ext::scale_decode")]
 struct TxAppliedDetails {
@@ -470,6 +483,28 @@ impl MidnightRpc {
         }
 
         let height = u64::from(block.number());
+        // One timestamp inherent per block by substrate protocol; §4.3's
+        // admission bound anchors on it, so a traffic block without a
+        // decodable one holds instead of emitting without a time.
+        let block_time_ms = match extrinsics.find::<TimestampSet>().next() {
+            Some(Ok(found)) => found.value.now,
+            Some(Err(err)) => {
+                return Err(BlockHold::new(
+                    "block-time-hold",
+                    height,
+                    anyhow::Error::new(err).context("timestamp set did not match metadata"),
+                )
+                .into())
+            }
+            None => {
+                return Err(BlockHold::new(
+                    "block-time-hold",
+                    height,
+                    anyhow::anyhow!("block carries no timestamp inherent"),
+                )
+                .into())
+            }
+        };
         let mut decoded_candidates = Vec::with_capacity(candidates.len());
         let mut scale_system_events = None;
         for found in candidates {
@@ -557,6 +592,7 @@ impl MidnightRpc {
         }
 
         Ok(Some(BlockEmissions {
+            block_time_ms,
             proof_seed: BlockProofSeed {
                 reported_genesis_hash: *self.client.genesis_hash().as_fixed_bytes(),
                 reported_block_number: height,
@@ -1033,6 +1069,9 @@ mod tests {
     use subxt::ext::subxt_rpcs::UserError;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    /// The `Timestamp::set` moment the synthetic test body carries, unix ms.
+    const FIXTURE_BLOCK_TIME_MS: u64 = 1_700_000_000_000;
+
     #[derive(DecodeAsType)]
     #[decode_as_type(crate_path = "subxt::ext::scale_decode")]
     struct CaptureCallDetails {
@@ -1210,6 +1249,12 @@ mod tests {
         // unrelated calls, so status association is exercised by Subxt itself.
         let mut body = vec![format!("0x{}", hex::encode(filler.encoded())); 4];
         body.push(format!("0x{}", hex::encode(candidate.encoded())));
+        let timestamp = client.tx().create_unsigned(&subxt::dynamic::tx(
+            "Timestamp",
+            "set",
+            vec![subxt::dynamic::Value::from(FIXTURE_BLOCK_TIME_MS)],
+        ))?;
+        body.push(format!("0x{}", hex::encode(timestamp.encoded())));
         let header = json!({
             "parentHash": hash_of_byte(0x42),
             "number": "0x1b0",
@@ -1274,8 +1319,9 @@ mod tests {
             .expect("block contains a singleton candidate");
         assert_eq!(block.proof_seed.reported_block_number, 432);
         assert_eq!(block.proof_seed.reported_block_hash, [0x43; 32]);
-        assert_eq!(block.proof_seed.scale_body.len(), 5);
+        assert_eq!(block.proof_seed.scale_body.len(), 6);
         assert_eq!(block.proof_seed.scale_system_events, events);
+        assert_eq!(block.block_time_ms, FIXTURE_BLOCK_TIME_MS);
         assert_eq!(block.candidates.len(), 1);
         let candidate = &block.candidates[0];
         assert_eq!(candidate.extrinsic_index, 4);
