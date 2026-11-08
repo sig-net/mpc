@@ -4,7 +4,6 @@ use std::sync::Arc;
 use alloy::sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_lang::Discriminator;
-use anyhow::Context as _;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::utils::hashing::compute_request_id;

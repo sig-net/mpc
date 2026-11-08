@@ -5,7 +5,7 @@ use crate::protocol::Chain;
 use k256::elliptic_curve::point::AffineCoordinates as _;
 use k256::elliptic_curve::scalar::IsHigh as _;
 use mpc_primitives::{BidirectionalTxId, SignBidirectionalEvent, Signature};
-use mpc_tron_wire::{pb::RawTransaction, TronAddress};
+use mpc_tron_wire::{pb::RawTransaction, TronAddress, MAX_EXPIRATION_SPAN_MS};
 use rlp::Rlp;
 
 use super::eth_tx::{
@@ -43,6 +43,22 @@ pub(crate) fn pending_destination_id(
     match target {
         Chain::Tron => Ok(Some(BidirectionalTxId(
             RawTransaction::parse(unsigned)?.txid(),
+        ))),
+        _ => Ok(None),
+    }
+}
+
+/// The expiry the unsigned bytes carry pre-signing, `(expiration, cap)`
+/// in ms — Tron's `expiration`; Ethereum carries none.
+pub(crate) fn destination_expiry(
+    target: Chain,
+    unsigned: &[u8],
+) -> anyhow::Result<Option<(u64, u64)>> {
+    match target {
+        // `parse` rejects a non-positive expiration.
+        Chain::Tron => Ok(Some((
+            RawTransaction::parse(unsigned)?.expiration as u64,
+            MAX_EXPIRATION_SPAN_MS,
         ))),
         _ => Ok(None),
     }

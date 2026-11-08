@@ -123,7 +123,7 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             let kind = request.request_kind();
 
             // Record the request's indexed timestamp if it's a new request
-            let is_new = process_sign_request(request, ctx, root_pk)
+            let is_new = process_sign_request(request, ctx, root_pk, block_timestamp)
                 .await
                 .context("failed to process sign request")?;
 

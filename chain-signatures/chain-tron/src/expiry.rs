@@ -88,7 +88,6 @@ pub(crate) enum ExpiryVerdict {
 /// Bounds the linear absence walk at one 24 h window of 3 s slots,
 /// the ceiling the admission rule sets (doc §4.3, anchored on the
 /// source block's time).
-// TODO: enforce bound at node admission.
 const MAX_WALK_SPAN: u64 = 28_800;
 
 /// Bounds in-flight provider requests across both arms and the span
