@@ -793,14 +793,14 @@ const SOURCE_BLOCK_S: u64 = 1_700_000_000;
 async fn admit_tron_request_with_expiry(
     expiration_ms: i64,
     block_timestamp: Option<u64>,
+    backlog: Backlog,
 ) -> anyhow::Result<bool> {
-    let backlog = Backlog::new();
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
     let root_pk = test_root_pk();
     let event = tron_bidirectional_event(Vec::new());
     let request = Arc::new(IndexedSignRequest::sign_bidirectional(
-        SignId::new([0x7e; 32]),
+        EXPIRY_SIGN_ID,
         test_sign_args(0x7e),
         Chain::Solana,
         current_unix_timestamp(),
@@ -812,6 +812,9 @@ async fn admit_tron_request_with_expiry(
     process_sign_request(request, &ctx, root_pk, block_timestamp).await
 }
 
+/// The sign id used for the expiry-bound tests.
+const EXPIRY_SIGN_ID: SignId = SignId::new([0x7e; 32]);
+
 /// Both boundaries: open strictly after the source block, closed within
 /// the cap.
 #[tokio::test]
@@ -820,17 +823,24 @@ async fn process_sign_request_admits_a_window_within_the_cap() {
         SOURCE_BLOCK_S * 1000 + 1,
         SOURCE_BLOCK_S * 1000 + MAX_EXPIRATION_SPAN_MS,
     ] {
-        admit_tron_request_with_expiry(expiration_ms as i64, Some(SOURCE_BLOCK_S))
+        let backlog = Backlog::new();
+        admit_tron_request_with_expiry(expiration_ms as i64, Some(SOURCE_BLOCK_S), backlog.clone())
             .await
             .expect("open window, within the cap");
+        assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_some());
     }
 }
 
 #[tokio::test]
 async fn process_sign_request_rejects_a_window_closed_at_the_source_block() {
-    let err = admit_tron_request_with_expiry((SOURCE_BLOCK_S * 1000) as i64, Some(SOURCE_BLOCK_S))
-        .await
-        .expect_err("the window must open strictly after the source block");
+    let backlog = Backlog::new();
+    let err = admit_tron_request_with_expiry(
+        (SOURCE_BLOCK_S * 1000) as i64,
+        Some(SOURCE_BLOCK_S),
+        backlog.clone(),
+    )
+    .await
+    .expect_err("the window must open strictly after the source block");
     let rendered = format!("{err:#}");
     assert!(
         rendered.contains("rejecting bidirectional sign request"),
@@ -840,13 +850,16 @@ async fn process_sign_request_rejects_a_window_closed_at_the_source_block() {
         rendered.contains("validity window closed at the source block"),
         "unexpected error: {rendered}"
     );
+    assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_none());
 }
 
 #[tokio::test]
 async fn process_sign_request_rejects_a_window_beyond_the_cap() {
+    let backlog = Backlog::new();
     let err = admit_tron_request_with_expiry(
         (SOURCE_BLOCK_S * 1000 + MAX_EXPIRATION_SPAN_MS + 1) as i64,
         Some(SOURCE_BLOCK_S),
+        backlog.clone(),
     )
     .await
     .expect_err("the window must close within the cap");
@@ -854,18 +867,22 @@ async fn process_sign_request_rejects_a_window_beyond_the_cap() {
         format!("{err:#}").contains("exceeds the cap over source block"),
         "unexpected error: {err:#}"
     );
+    assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_none());
 }
 
 /// No block time (Canton, Hydration, or a Solana block whose estimate is
 /// absent): the bound skips, and M6 answers at expiry.
 #[tokio::test]
 async fn process_sign_request_skips_the_expiry_bound_without_a_source_block_time() {
+    let backlog = Backlog::new();
     admit_tron_request_with_expiry(
         (SOURCE_BLOCK_S * 1000 + MAX_EXPIRATION_SPAN_MS * 10) as i64,
         None,
+        backlog.clone(),
     )
     .await
     .expect("no anchor: the bound skips");
+    assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_some());
 }
 
 /// An Ethereum target carries no expiry; block time is ignored.
