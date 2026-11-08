@@ -486,28 +486,20 @@ impl MidnightRpc {
         // One timestamp inherent per block by substrate protocol; §4.3's
         // admission bound anchors on it, so a traffic block without a
         // decodable one holds instead of emitting without a time.
-        let block_time_ms = match extrinsics.find::<TimestampSet>().next() {
-            Some(Ok(found)) => found.value.now,
-            // Arg corruption fails `extrinsics()` first (subxt eagerly
-            // decodes call data); this arm is metadata drift — the payload
-            // decodes per the node's metadata but not as `TimestampSet`.
-            Some(Err(err)) => {
-                return Err(BlockHold::new(
-                    "block-time-hold",
-                    height,
-                    anyhow::Error::new(err).context("timestamp set did not match metadata"),
-                )
-                .into())
-            }
-            None => {
-                return Err(BlockHold::new(
-                    "block-time-hold",
-                    height,
-                    anyhow::anyhow!("block carries no timestamp inherent"),
-                )
-                .into())
-            }
-        };
+        // Arg corruption fails `extrinsics()` first (subxt eagerly decodes
+        // call data); the decode arm is metadata drift — the payload decodes
+        // per the node's metadata but not as `TimestampSet`.
+        let block_time_ms = extrinsics
+            .find::<TimestampSet>()
+            .next()
+            .transpose()
+            .map_err(|err| anyhow::Error::new(err).context("timestamp set did not match metadata"))
+            .and_then(|found| {
+                found.ok_or_else(|| anyhow::anyhow!("block carries no timestamp inherent"))
+            })
+            .map_err(|cause| BlockHold::new("block-time-hold", height, cause))?
+            .value
+            .now;
         let mut decoded_candidates = Vec::with_capacity(candidates.len());
         let mut scale_system_events = None;
         for found in candidates {
