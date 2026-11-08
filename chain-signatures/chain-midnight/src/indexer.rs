@@ -1071,7 +1071,7 @@ mod tests {
         );
     }
 
-    fn assert_request(event: ChainEvent, rid: [u8; 32]) {
+    fn assert_request(event: ChainEvent, rid: [u8; 32], height: u64) {
         let ChainEvent::SignRequest {
             request,
             block_timestamp,
@@ -1080,10 +1080,7 @@ mod tests {
             panic!("expected SignRequest");
         };
         assert_eq!(request.id, SignId::new(rid));
-        assert!(
-            block_timestamp.is_some(),
-            "the request carries its block time"
-        );
+        assert_eq!(block_timestamp, Some(fixture_block_ms(height) / 1000));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1228,7 +1225,7 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         for event in events {
-            assert_request(event, rid);
+            assert_request(event, rid, 9);
         }
     }
 
@@ -1475,7 +1472,7 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         for event in events {
-            assert_request(event, rid);
+            assert_request(event, rid, 9);
         }
 
         let recorded = recorder.snapshot();
@@ -1859,7 +1856,11 @@ mod tests {
             .await
             .expect("caller data failures do not hold");
         assert_eq!(events.len(), 1);
-        assert_request(events.into_iter().next().expect("good request"), good_rid);
+        assert_request(
+            events.into_iter().next().expect("good request"),
+            good_rid,
+            9,
+        );
     }
 
     #[tokio::test]
@@ -1928,10 +1929,9 @@ mod tests {
         );
         source.set_state(CALLER, 7, caller_state(&record, rid));
         live_tx.send(block_ref(9)).await.expect("queue live block");
-
         let mut harness = RunFixture::spawn(source, 5).await;
         assert_block(harness.next_event().await, 6);
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, rid, 7);
         assert_block(harness.next_event().await, 7);
         assert_block(harness.next_event().await, 8);
         assert!(matches!(
@@ -1954,7 +1954,7 @@ mod tests {
         source.set_transient_emission_error(7, 1, "connection reset by peer");
 
         let mut harness = RunFixture::spawn(source, 6).await;
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, rid, 7);
         assert_block(harness.next_event().await, 7);
         assert_block(harness.next_event().await, 8);
         assert!(matches!(
@@ -2071,7 +2071,7 @@ mod tests {
             ChainEvent::CatchupCompleted
         ));
         live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, rid, 9);
         assert_block(harness.next_event().await, 9);
         harness.cancel_and_join().await;
     }
@@ -2170,7 +2170,7 @@ mod tests {
 
             assert_eq!(events.len(), usize::from(signed), "{case}");
             for event in events {
-                assert_request(event, rid);
+                assert_request(event, rid, 9);
             }
         }
     }
@@ -2262,7 +2262,7 @@ mod tests {
                 .expect("block processes");
 
             assert_eq!(events.len(), 1, "{case}");
-            assert_request(events.into_iter().next().unwrap(), rid);
+            assert_request(events.into_iter().next().unwrap(), rid, 9);
         }
     }
 
@@ -2356,7 +2356,11 @@ mod tests {
             .await
             .expect("per-entry failures do not hold the block");
         assert_eq!(events.len(), 1);
-        assert_request(events.into_iter().next().expect("good request"), good_rid);
+        assert_request(
+            events.into_iter().next().expect("good request"),
+            good_rid,
+            9,
+        );
     }
 
     #[tokio::test]
