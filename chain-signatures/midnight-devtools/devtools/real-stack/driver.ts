@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { findDeployedContract, type FoundContract } from "@midnight-ntwrk/midnight-js/contracts";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js/network-id";
+import { indexerPublicDataProvider } from "@midnight-ntwrk/midnight-js-indexer-public-data-provider";
 import {
   buildDeployTransaction,
   deploySignetContract,
@@ -360,10 +361,25 @@ async function bootstrap(request: BootstrapRequest) {
   );
   diagnostics("funding real-stack role wallets");
   await fundRoles(request.config, publisherSeeds);
+  // Each deploy pays from a freshly synced deployer facade, and a facade syncs from the
+  // indexer, which indexes a block a moment after the node reports it final. A facade
+  // synced in that gap still holds the DUST the previous deploy spent, and the node
+  // refuses the new deploy's DUST spend (InvalidDustSpendProof), so wait for each deploy
+  // to be indexed before the deployer wallet pays again.
+  const publicData = indexerPublicDataProvider({
+    queryURL: request.config.indexerUrl,
+    subscriptionURL: request.config.indexerWsUrl,
+  });
+  const indexed = (contractAddress: string) =>
+    waitFor(`the indexer to serve the contract deployed at ${contractAddress}`, async () =>
+      (await publicData.queryContractState(contractAddress)) ? true : undefined,
+    );
   diagnostics("deploying central Signet contract");
   const central = await deploySignetContract(deployEnv(request.config, DEPLOYER_SEED));
+  await indexed(central.contractAddress);
   diagnostics("deploying Signet responder");
   const responder = await deploySignetResponder(deployEnv(request.config, DEPLOYER_SEED));
+  await indexed(responder.contractAddress);
 
   const deployerKeys = deriveAccountKeys(DEPLOYER_SEED, request.config.networkId);
   const deployerSecret = bytes(DEPLOYER_SEED, 32);
@@ -382,8 +398,10 @@ async function bootstrap(request: BootstrapRequest) {
       return { contractAddress: built.contractAddress };
     });
   const callerDeployment = await deployCaller();
+  await indexed(callerDeployment.contractAddress);
   diagnostics("deploying impersonating Compact caller");
   const impersonatorDeployment = await deployCaller();
+  await indexed(impersonatorDeployment.contractAddress);
   const invokerKeys = deriveAccountKeys(INVOKER_SEED, request.config.networkId);
   const facade = await initialiseWalletFacade(invokerKeys, request.config);
   await facade.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
