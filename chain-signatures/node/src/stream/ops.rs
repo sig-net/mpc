@@ -157,16 +157,18 @@ fn expiry_bound(
             return Ok(());
         }
     };
-    match expiration_ms {
-        ms if ms <= source_ms => anyhow::bail!(
+    if expiration_ms <= source_ms {
+        anyhow::bail!(
             "validity window closed at the source block: \
-             expiration {ms} ms, source block {source_ms} ms"
-        ),
-        ms if ms > source_ms + cap_ms => {
-            anyhow::bail!("expiration {ms} ms exceeds the cap over source block {source_ms} ms")
-        }
-        _ => Ok(()),
+             expiration {expiration_ms} ms, source block {source_ms} ms"
+        );
     }
+    if expiration_ms > source_ms + cap_ms {
+        anyhow::bail!(
+            "expiration {expiration_ms} ms exceeds the cap over source block {source_ms} ms"
+        );
+    }
+    Ok(())
 }
 
 /// A flat destination id names one transaction per set of raw bytes: a second
