@@ -125,6 +125,8 @@ impl RpcFailure {
     /// Carrier reproducing `e`'s classification — verdict carrier or first
     /// typed status — with the full chain render as its message, so fan-out
     /// copies keep outer contexts. `None` when `e` has no typed signal.
+    /// The bare-status fallback is send-partitioned; read-side fan-outs
+    /// rebuild with `read_status`.
     pub fn from_chain(e: &anyhow::Error) -> Option<Self> {
         let (failure, status) = typed_signals(e);
         if let Some(failure) = failure {
