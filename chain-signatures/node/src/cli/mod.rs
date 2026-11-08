@@ -1366,6 +1366,80 @@ mod tests {
         );
     }
 
+    fn start_argv(extra: &[&str]) -> Vec<String> {
+        let sk = SecretKey::from_seed(near_crypto::KeyType::ED25519, "test").to_string();
+        let mut argv = vec![
+            "mpc-node".to_string(),
+            "start".to_string(),
+            "--near-rpc".to_string(),
+            "http://127.0.0.1:3030".to_string(),
+            "--mpc-contract-id".to_string(),
+            "mpc.near".to_string(),
+            "--account-id".to_string(),
+            "node.near".to_string(),
+            "--env".to_string(),
+            "dev".to_string(),
+            "--account-sk".to_string(),
+            sk.clone(),
+            "--cipher-sk".to_string(),
+            "aa".to_string(),
+            "--sign-sk".to_string(),
+            sk,
+            "--my-address".to_string(),
+            "http://127.0.0.1:3000".to_string(),
+            "--redis-url".to_string(),
+            "redis://127.0.0.1/".to_string(),
+            "--gcp-project-id".to_string(),
+            "p".to_string(),
+            "--sk-share-secret-id".to_string(),
+            "s".to_string(),
+        ];
+        argv.extend(extra.iter().map(|arg| (*arg).to_string()));
+        argv
+    }
+
+    fn start_offers_test_cadence() -> bool {
+        use clap::CommandFactory;
+        Cli::command()
+            .find_subcommand("start")
+            .expect("start subcommand must exist")
+            .get_arguments()
+            .any(|arg| arg.get_long() == Some("test-cadence"))
+    }
+
+    /// A release binary has no `--test-cadence` flag, so clap rejects it.
+    #[cfg(not(feature = "test-feature"))]
+    #[test]
+    fn release_build_rejects_test_cadence() {
+        use clap::Parser as _;
+        assert!(
+            !start_offers_test_cadence(),
+            "a release build must not offer --test-cadence"
+        );
+        let err = Cli::try_parse_from(start_argv(&["--test-cadence"])).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unexpected argument '--test-cadence'"),
+            "{err}"
+        );
+    }
+
+    /// A binary with test-features accepts  `--test-cadence`.
+    #[cfg(feature = "test-feature")]
+    #[test]
+    fn test_build_accepts_test_cadence() {
+        use clap::Parser as _;
+        assert!(
+            start_offers_test_cadence(),
+            "a test build must offer --test-cadence"
+        );
+        let Cli::Start { test_cadence, .. } = Cli::try_parse_from(start_argv(&[])).unwrap();
+        assert!(!test_cadence);
+        let Cli::Start { test_cadence, .. } =
+            Cli::try_parse_from(start_argv(&["--test-cadence"])).unwrap();
+        assert!(test_cadence);
+    }
+
     #[test]
     fn hide_env_values_configured_on_secret_arguments() {
         use clap::CommandFactory;
