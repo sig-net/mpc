@@ -62,7 +62,9 @@ import { createCallerPrivateState } from "./witnesses.js";
 
 const DEPLOYER_SEED = "02".repeat(32);
 const INVOKER_SEED = "03".repeat(32);
-const PUBLISHER_SEED = "04".repeat(32);
+// One funding wallet per MPC node: a publisher assumes it alone spends its wallet's DUST,
+// and nodes sharing one wallet refuse each other's submissions as DUST double spends.
+const publisherSeed = (node: number) => (4 + node).toString(16).padStart(2, "0").repeat(32);
 
 type CallerHandle = FoundContract<CallerContract>;
 
@@ -70,6 +72,8 @@ interface BootstrapRequest {
   op: "bootstrap";
   config: MidnightNodeConfig;
   artifactDir: string;
+  /** How many MPC nodes publish, each from its own funding wallet. */
+  publishers: number;
 }
 
 interface InitialiseRequest {
@@ -274,13 +278,13 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 // root facade re-syncs from genesis once (that re-sync dominates wall time),
 // funds every role wallet sequentially from that live facade, and the
 // independent child verifications run concurrently afterwards.
-async function fundRoles(config: MidnightNodeConfig): Promise<void> {
+async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): Promise<void> {
   const networkId = config.networkId;
   const rootKeys = deriveAccountKeys(GENESIS_MINT_WALLET_SEED, networkId);
   const roles = [
     ["deployer", DEPLOYER_SEED],
     ["invoker", INVOKER_SEED],
-    ["publisher", PUBLISHER_SEED],
+    ...publisherSeeds.map((seed, node) => [`publisher ${node}`, seed] as const),
   ] as const;
 
   await withSyncedWalletFacade(rootKeys, config, async (rootFacade, initialState) => {
@@ -294,7 +298,7 @@ async function fundRoles(config: MidnightNodeConfig): Promise<void> {
         state = await rootFacade.waitForSyncedState();
       }
     }
-    const amount = totalNight(state) / 5n;
+    const amount = totalNight(state) / BigInt(roles.length + 2);
     if (amount === 0n) throw new Error("local genesis wallet cannot fund role wallets");
     await registerNightForDustGeneration(rootFacade, rootKeys, state);
     if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade, 1n);
@@ -348,8 +352,14 @@ async function fundRoles(config: MidnightNodeConfig): Promise<void> {
 async function bootstrap(request: BootstrapRequest) {
   if (session !== undefined) throw new Error("driver is already bootstrapped");
   setNetworkId(request.config.networkId);
+  if (!Number.isInteger(request.publishers) || request.publishers < 1) {
+    throw new Error(`expected a positive publisher count, got ${String(request.publishers)}`);
+  }
+  const publisherSeeds = Array.from({ length: request.publishers }, (_, node) =>
+    publisherSeed(node),
+  );
   diagnostics("funding real-stack role wallets");
-  await fundRoles(request.config);
+  await fundRoles(request.config, publisherSeeds);
   diagnostics("deploying central Signet contract");
   const central = await deploySignetContract(deployEnv(request.config, DEPLOYER_SEED));
   diagnostics("deploying Signet responder");
@@ -419,7 +429,7 @@ async function bootstrap(request: BootstrapRequest) {
     centralAddress: central.contractAddress,
     responderAddress: responder.contractAddress,
     callerAddress: callerDeployment.contractAddress,
-    publisherSeed: PUBLISHER_SEED,
+    publisherSeeds,
   };
 }
 
