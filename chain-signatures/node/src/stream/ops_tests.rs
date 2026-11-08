@@ -851,7 +851,8 @@ async fn process_sign_request_rejects_a_window_beyond_the_cap() {
     );
 }
 
-/// No block time yet (Canton, Hydration): the bound skips.
+/// No block time (Canton, Hydration, or a Solana block whose estimate is
+/// absent): the bound skips, and M6 answers at expiry.
 #[tokio::test]
 async fn process_sign_request_skips_the_expiry_bound_without_a_source_block_time() {
     admit_tron_request_with_expiry(

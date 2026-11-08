@@ -271,19 +271,13 @@ pub async fn emit_events(
                     bidirectional,
                     "solana sign request parsed",
                 );
-                // §4.3's admission bound anchors on this timestamp; without
-                // one, nodes would split the verdict. Failing the block holds
-                // it — the time is immutable, so retries converge.
-                let block_timestamp = match (bidirectional, block_time) {
-                    (_, Some(seconds)) => Some(seconds),
-                    (true, None) => {
-                        anyhow::bail!("block carries a bidirectional request but no block time")
-                    }
-                    (false, None) => None,
-                };
+                // `blockTime` is a nullable estimate; holding on null
+                // wedges the chain. `None` skips §4.3's bound — M6 still
+                // answers at expiry (`Unviable` on Midnight, `Failed`
+                // elsewhere).
                 ChainEvent::SignRequest {
                     request: Arc::new(request),
-                    block_timestamp,
+                    block_timestamp: block_time,
                 }
             }
             CpiEvent::RespondBidirectional(ev) => {

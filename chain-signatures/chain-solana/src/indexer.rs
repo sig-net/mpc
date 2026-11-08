@@ -772,16 +772,26 @@ mod tests {
             slot_stall_timeout: Duration,
         ) -> Self {
             let server = mockito::Server::new_async().await;
-            Self::spawn_with_server(server, slots, processed, config, slot_stall_timeout).await
+            Self::spawn_with_server(
+                server,
+                slots,
+                processed,
+                config,
+                slot_stall_timeout,
+                Pubkey::new_unique(),
+            )
+            .await
         }
 
-        /// Variant taking a pre-built mockito server
+        /// Variant taking a pre-built mockito server; the indexer watches
+        /// `program_id`.
         async fn spawn_with_server(
             mut server: mockito::ServerGuard,
             slots: &[u64],
             processed: Option<u64>,
             config: impl Into<Option<SolIndexerConfig>>,
             slot_stall_timeout: Duration,
+            program_id: Pubkey,
         ) -> Self {
             // Serve the slots in order, repeating the last one forever
             let bodies = Arc::new(std::sync::Mutex::new(
@@ -817,6 +827,9 @@ mod tests {
                     .await;
             }
             let mut indexer = test_indexer(&server.url(), state_manager);
+            // Test bodies embed CPI instructions under this program; the
+            // client's only feeds request URLs the mocks ignore.
+            indexer.program_id = program_id;
             indexer.config = config.into().unwrap_or(SolIndexerConfig {
                 poll_interval: Duration::from_millis(5),
             });
@@ -1275,7 +1288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn holds_a_bidirectional_block_without_block_time() {
+    async fn emits_a_time_less_bidirectional_block_without_holding() {
         let indexer = test_indexer("http://localhost:1", MockStateManager::new());
         let transaction = event_transaction(
             indexer.program_id,
@@ -1290,17 +1303,69 @@ mod tests {
             let block: UiConfirmedBlock =
                 serde_json::from_value(response["result"].clone()).unwrap();
 
-            let err = indexer
-                .process_block(&events_tx, 7, &block)
-                .await
-                .unwrap_err();
+            indexer.process_block(&events_tx, 7, &block).await.unwrap();
 
-            assert_eq!(
-                format!("{err:#}"),
-                "block carries a bidirectional request but no block time"
-            );
-            assert!(events_rx.try_recv().is_err());
+            assert!(matches!(
+                events_rx.recv().await,
+                Some(ChainEvent::SignRequest {
+                    block_timestamp: None,
+                    ..
+                })
+            ));
+            // The Block marker is the watermark: the drain advances past
+            // this slot.
+            assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
         }
+    }
+
+    /// One `RespondBidirectional` Anchor CPI event under the generator key.
+    fn respond_bidirectional_ix_data() -> String {
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+        fn coord(bytes: Option<&k256::FieldBytes>) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(bytes.expect("the generator has both coordinates"));
+            out
+        }
+        let generator = k256::ProjectivePoint::GENERATOR
+            .to_affine()
+            .to_encoded_point(false);
+        let event = signet_program::RespondBidirectionalEvent {
+            request_id: [0x31; 32],
+            responder: Pubkey::new_from_array([0x32; 32]),
+            serialized_output: vec![1, 2, 3],
+            signature: signet_program::Signature {
+                big_r: signet_program::AffinePoint {
+                    x: coord(generator.x()),
+                    y: coord(generator.y()),
+                },
+                s: [0x33; 32],
+                recovery_id: 0,
+            },
+        };
+        let mut data = anchor_lang::event::EVENT_IX_TAG_LE.to_vec();
+        data.extend(anchor_lang::Event::data(&event));
+        solana_sdk::bs58::encode(data).into_string()
+    }
+
+    #[tokio::test]
+    async fn respond_bidirectional_events_do_not_hold_a_time_less_block() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            respond_bidirectional_ix_data(),
+        );
+        let response = event_block_response(0, 7, transaction);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::RespondBidirectional(_))
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
     }
 
     #[tokio::test]
@@ -1707,6 +1772,7 @@ mod tests {
             Some(9),
             None,
             Duration::from_secs(30),
+            Pubkey::new_unique(),
         )
         .await;
 
@@ -1726,6 +1792,76 @@ mod tests {
             f.events_rx.try_recv().is_err(),
             "an unchanged anchor covers no new slots, so no events may be emitted"
         );
+
+        f.cancel_and_join().await;
+    }
+
+    /// A permanently time-less block must not wedge the drain: the request
+    /// emits without a time and every slot still gets its marker.
+    #[tokio::test]
+    async fn run_advances_through_a_time_less_bidirectional_block() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Program activity at 10 and 11; slot 9 (< start 10) ends pagination.
+        let entries: Vec<_> = [11, 10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let mut block_with_request = event_block_response(0, 10, transaction);
+        block_with_request["result"]["blockTime"] = serde_json::json!(null);
+        let blocks = serde_json::json!([block_with_request, block_response(1, 11)]).to_string();
+        let _blocks = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("getBlock".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(blocks)
+            .expect(1)
+            .create_async()
+            .await;
+
+        // getSlot script: seed 10, then 12 — one pass drains [10, 12).
+        let mut f = RunFixture::spawn_with_server(
+            server,
+            &[10, 12, 12],
+            Some(9),
+            None,
+            Duration::from_secs(30),
+            indexer.program_id,
+        )
+        .await;
+
+        let first = f.next_event().await;
+        assert!(
+            matches!(
+                first,
+                Some(ChainEvent::SignRequest {
+                    block_timestamp: None,
+                    ..
+                })
+            ),
+            "expected the time-less request first, got {first:?}"
+        );
+        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(10))));
+        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(11))));
+        assert!(matches!(
+            f.next_event().await,
+            Some(ChainEvent::CatchupCompleted)
+        ));
 
         f.cancel_and_join().await;
     }
@@ -1816,6 +1952,7 @@ mod tests {
                 Some(9),
                 None,
                 Duration::from_secs(30),
+                Pubkey::new_unique(),
             )
             .await;
             let mut heights = Vec::new();
