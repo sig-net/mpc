@@ -61,9 +61,11 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git fetch --quiet --depth=1 origin develop
-          git diff --name-only FETCH_HEAD...HEAD |
-            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
-            echo changed=true >> "$GITHUB_OUTPUT" || true
+          # Two trees, no merge base: the shallow checkout has no common history.
+          files=$(git diff --name-only FETCH_HEAD HEAD)
+          if grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' <<< "$files"; then
+            echo changed=true >> "$GITHUB_OUTPUT"
+          fi
 
       # Cache policy: doc/ci-caching.md
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
