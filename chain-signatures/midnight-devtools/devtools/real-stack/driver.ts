@@ -61,8 +61,10 @@ import { createCallerPrivateState } from "./witnesses.js";
 
 const DEPLOYER_SEED = "02".repeat(32);
 const INVOKER_SEED = "03".repeat(32);
-// The responder deploys from its own wallet, so it runs beside the central deploy.
+// The responder and the impersonating caller deploy from wallets of their own, so they
+// run beside the deploys the deployer wallet pays for.
 const RESPONDER_DEPLOYER_SEED = "f0".repeat(32);
+const IMPERSONATOR_DEPLOYER_SEED = "f1".repeat(32);
 // One funding wallet per MPC node: a publisher assumes it alone spends its wallet's DUST,
 // and nodes sharing one wallet refuse each other's submissions as DUST double spends.
 const publisherSeed = (node: number) => (4 + node).toString(16).padStart(2, "0").repeat(32);
@@ -330,6 +332,7 @@ async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): 
     ["deployer", DEPLOYER_SEED],
     ["invoker", INVOKER_SEED],
     ["responder deployer", RESPONDER_DEPLOYER_SEED],
+    ["impersonator deployer", IMPERSONATOR_DEPLOYER_SEED],
     ...publisherSeeds.map((seed, node) => [`publisher ${node}`, seed] as const),
   ] as const;
   const receivers = await Promise.all(
@@ -421,41 +424,47 @@ async function bootstrap(request: BootstrapRequest) {
     waitFor(`the indexer to serve the contract deployed at ${contractAddress}`, async () =>
       (await publicData.queryContractState(contractAddress)) ? true : undefined,
     );
-  diagnostics("deploying central Signet contract and Signet responder");
-  const [central, responder] = await Promise.all([
-    deploySignetContract(deployEnv(request.config, DEPLOYER_SEED)).then(async (deployed) => {
-      await indexed(deployed.contractAddress);
-      return deployed;
-    }),
-    deploySignetResponder(deployEnv(request.config, RESPONDER_DEPLOYER_SEED)).then(
-      async (deployed) => {
-        await indexed(deployed.contractAddress);
-        return deployed;
-      },
-    ),
-  ]);
-
-  const deployerKeys = deriveAccountKeys(DEPLOYER_SEED, request.config.networkId);
   const deployerSecret = bytes(DEPLOYER_SEED, 32);
   const deployerCommitment = pureCircuits.deployerCommitment(deployerSecret);
-  const deployCaller = () =>
-    withSyncedWalletFacade(deployerKeys, request.config, async (facade) => {
+  // The constructor stores only its arguments, so the wallet paying for a caller deploy
+  // leaves no trace in the contract: the impersonator pays from its own wallet.
+  const deployCaller = (centralAddress: string, payerSeed: string) => {
+    const payerKeys = deriveAccountKeys(payerSeed, request.config.networkId);
+    return withSyncedWalletFacade(payerKeys, request.config, async (facade) => {
       const built = await buildDeployTransaction(
         callerCompiledContract,
         request.config.networkId,
-        deployerKeys.shieldedSecretKeys.coinPublicKey,
+        payerKeys.shieldedSecretKeys.coinPublicKey,
         createCallerPrivateState(deployerSecret),
         deployerCommitment,
-        contractAddressFromHex(central.contractAddress),
+        contractAddressFromHex(centralAddress),
       );
-      await submitUnprovenTransaction(facade, deployerKeys, built.serializedTransaction);
+      await submitUnprovenTransaction(facade, payerKeys, built.serializedTransaction);
+      await indexed(built.contractAddress);
       return { contractAddress: built.contractAddress };
     });
-  const callerDeployment = await deployCaller();
-  await indexed(callerDeployment.contractAddress);
-  diagnostics("deploying impersonating Compact caller");
-  const impersonatorDeployment = await deployCaller();
-  await indexed(impersonatorDeployment.contractAddress);
+  };
+  const deployCentralAndCallers = async () => {
+    diagnostics("deploying central Signet contract");
+    const central = await deploySignetContract(deployEnv(request.config, DEPLOYER_SEED));
+    await indexed(central.contractAddress);
+    diagnostics("deploying Compact caller and impersonating Compact caller");
+    const [caller, impersonator] = await Promise.all([
+      deployCaller(central.contractAddress, DEPLOYER_SEED),
+      deployCaller(central.contractAddress, IMPERSONATOR_DEPLOYER_SEED),
+    ]);
+    return { central, caller, impersonator };
+  };
+  const deployResponder = async () => {
+    diagnostics("deploying Signet responder");
+    const responder = await deploySignetResponder(
+      deployEnv(request.config, RESPONDER_DEPLOYER_SEED),
+    );
+    await indexed(responder.contractAddress);
+    return responder;
+  };
+  const [{ central, caller: callerDeployment, impersonator: impersonatorDeployment }, responder] =
+    await Promise.all([deployCentralAndCallers(), deployResponder()]);
   const invokerKeys = deriveAccountKeys(INVOKER_SEED, request.config.networkId);
   const facade = await initialiseWalletFacade(invokerKeys, request.config);
   await facade.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
