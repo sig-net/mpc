@@ -227,6 +227,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: midnight-real-stack-logs-${{ matrix.test }}
+          # A re-run replaces an artifact of the same name, so keep each attempt's logs apart.
+          name: midnight-real-stack-logs-${{ matrix.test }}-attempt-${{ github.run_attempt }}
           path: target/tmp_*/midnight
           if-no-files-found: warn
