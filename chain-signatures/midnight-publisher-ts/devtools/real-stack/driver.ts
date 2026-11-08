@@ -34,6 +34,7 @@ import {
   type Secp256k1Point,
   type SignetPublicStateSource,
 } from "@sig-net/midnight";
+import { describeFailure } from "../../src/errors.js";
 import {
   fireTwin,
   prepareTwin,
@@ -238,6 +239,15 @@ async function waitFor<T>(description: string, read: () => Promise<T | undefined
   throw new Error(`timed out waiting for ${description}`);
 }
 
+// The SDK reports every failed submission with the same error, so name the bootstrap step.
+async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    throw new Error(`${name} failed`, { cause: error });
+  }
+}
+
 async function callerHasRequest(active: Session, requestId: RequestIdHex): Promise<boolean> {
   const state = await active.publicDataProvider.queryContractState(active.callerAddress);
   if (!state) throw new Error(`no caller state found at ${active.callerAddress}`);
@@ -327,12 +337,14 @@ async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): 
     ["invoker", INVOKER_SEED],
     ...publisherSeeds.map((seed, node) => [`publisher ${node}`, seed] as const),
   ] as const;
-  const receivers = await Promise.all(
-    roles.map(([, seed]) =>
-      withSyncedWalletFacade(
-        deriveAccountKeys(seed, networkId),
-        config,
-        async (_facade, state) => state.unshielded.address,
+  const receivers = await step("syncing the role wallets' addresses", () =>
+    Promise.all(
+      roles.map(([, seed]) =>
+        withSyncedWalletFacade(
+          deriveAccountKeys(seed, networkId),
+          config,
+          async (_facade, state) => state.unshielded.address,
+        ),
       ),
     ),
   );
@@ -350,23 +362,30 @@ async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): 
     }
     const amount = totalNight(state) / BigInt(roles.length + 2);
     if (amount === 0n) throw new Error("local genesis wallet cannot fund role wallets");
-    await registerNightForDustGeneration(rootFacade, rootKeys, state);
-    if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade, 1n);
+    await step("registering the root wallet's NIGHT for DUST", async () => {
+      await registerNightForDustGeneration(rootFacade, rootKeys, state);
+      if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade, 1n);
+    });
 
     const startedAt = Date.now();
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        await transferNightToEach(rootFacade, rootKeys, state, receivers, amount);
-        break;
-      } catch (error) {
-        if (attempt >= 11 || !isDustBalancingShortfall(error)) throw error;
-        diagnostics(
-          `root DUST is not yet enough to cover the role transfer; retrying (attempt ${attempt + 1})`,
-        );
-        await sleep(5_000);
-        state = await rootFacade.waitForSyncedState();
-      }
-    }
+    await step(
+      `transferring NIGHT from the root wallet to ${roles.length} role wallets`,
+      async () => {
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            await transferNightToEach(rootFacade, rootKeys, state, receivers, amount);
+            break;
+          } catch (error) {
+            if (attempt >= 11 || !isDustBalancingShortfall(error)) throw error;
+            diagnostics(
+              `root DUST is not yet enough to cover the role transfer; retrying (attempt ${attempt + 1})`,
+            );
+            await sleep(5_000);
+            state = await rootFacade.waitForSyncedState();
+          }
+        }
+      },
+    );
     diagnostics(`funded ${roles.length} role wallets in ${Date.now() - startedAt}ms`);
   });
 
@@ -384,8 +403,10 @@ async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): 
         if (totalNight(state) === 0n) {
           throw new Error(`${name} wallet shows no NIGHT after funding from root`);
         }
-        await registerNightForDustGeneration(facade, keys, state);
-        if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade, 1n);
+        await step(`registering the ${name} wallet's NIGHT for DUST`, async () => {
+          await registerNightForDustGeneration(facade, keys, state);
+          if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade, 1n);
+        });
       });
       diagnostics(`verified ${name} wallet in ${Date.now() - startedAt}ms`);
     }),
@@ -417,7 +438,9 @@ async function bootstrap(request: BootstrapRequest) {
       (await publicData.queryContractState(contractAddress)) ? true : undefined,
     );
   diagnostics("deploying central Signet contract");
-  const central = await deploySignetContract(deployEnv(request.config, DEPLOYER_SEED));
+  const central = await step("deploying the central Signet contract", () =>
+    deploySignetContract(deployEnv(request.config, DEPLOYER_SEED)),
+  );
   await indexed(central.contractAddress);
 
   const deployerKeys = deriveAccountKeys(DEPLOYER_SEED, request.config.networkId);
@@ -436,15 +459,21 @@ async function bootstrap(request: BootstrapRequest) {
       await submitUnprovenTransaction(facade, deployerKeys, built.serializedTransaction);
       return { contractAddress: built.contractAddress };
     });
-  const callerDeployment = await deployCaller();
+  const callerDeployment = await step("deploying the Compact caller", deployCaller);
   await indexed(callerDeployment.contractAddress);
   diagnostics("deploying impersonating Compact caller");
-  const impersonatorDeployment = await deployCaller();
+  const impersonatorDeployment = await step(
+    "deploying the impersonating Compact caller",
+    deployCaller,
+  );
   await indexed(impersonatorDeployment.contractAddress);
   const invokerKeys = deriveAccountKeys(INVOKER_SEED, request.config.networkId);
-  const facade = await initialiseWalletFacade(invokerKeys, request.config);
-  await facade.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
-  await facade.waitForSyncedState();
+  const facade = await step("syncing the invoker wallet", async () => {
+    const started = await initialiseWalletFacade(invokerKeys, request.config);
+    await started.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
+    await started.waitForSyncedState();
+    return started;
+  });
   const providers = buildCallerProviders(
     facade,
     invokerKeys,
@@ -744,9 +773,13 @@ for await (const line of lines) {
     const result = await dispatch(JSON.parse(line) as Request);
     process.stdout.write(`${JSON.stringify({ ok: true, result })}\n`);
   } catch (error) {
-    process.stdout.write(
-      `${JSON.stringify({ ok: false, error: error instanceof Error ? (error.stack ?? error.message) : String(error) })}\n`,
-    );
+    // The SDK's errors keep the node's own refusal (its `1010: Invalid Transaction` code, say)
+    // in their cause chain, which the stack does not show.
+    const described = describeFailure(error);
+    const reply =
+      error instanceof Error && error.stack ? `${described}\n${error.stack}` : described;
+    diagnostics(`request failed: ${reply}`);
+    process.stdout.write(`${JSON.stringify({ ok: false, error: reply })}\n`);
   }
 }
 await session?.facade.stop().catch(() => undefined);
