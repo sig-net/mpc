@@ -497,8 +497,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 
         if let Some(transactions) = &block.transactions {
             let program_id = self.program_id.to_string();
+            let block_time = block.block_time.and_then(|t| u64::try_from(t).ok());
             for tx in transactions {
-                process_transaction(events_tx, &program_id, tx).await?;
+                process_transaction(events_tx, &program_id, block_time, tx).await?;
             }
         }
 
@@ -525,6 +526,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 async fn process_transaction(
     events_tx: &mpsc::Sender<ChainEvent>,
     program_id: &str,
+    block_time: Option<u64>,
     tx: &EncodedTransactionWithStatusMeta,
 ) -> anyhow::Result<()> {
     let Some(meta) = tx.meta.as_ref() else {
@@ -533,7 +535,7 @@ async fn process_transaction(
     if meta.err.is_some() {
         return Ok(());
     }
-    emit_events(events_tx, program_id, tx).await
+    emit_events(events_tx, program_id, block_time, tx).await
 }
 
 #[async_trait]
@@ -599,6 +601,7 @@ mod tests {
 
     use super::*;
     use crate::events::SolanaSignEvent;
+    use crate::test_utils::sign_bidirectional_ix_data;
     use anchor_lang::{AnchorSerialize, Discriminator};
     use mpc_chain_integration_core::{
         utils::retry::SharedBackoff, MockStateManager, NoopChainTelemetry,
@@ -1236,13 +1239,104 @@ mod tests {
 
         assert!(matches!(
             events_rx.recv().await,
-            Some(ChainEvent::SignRequest { request, .. }) if request.id == SignId::new(request_id)
+            Some(ChainEvent::SignRequest { request, block_timestamp: None, .. })
+                if request.id == SignId::new(request_id)
         ));
         assert!(matches!(
             events_rx.recv().await,
             Some(ChainEvent::Respond(event)) if event.request_id == request_id
         ));
         assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+    }
+
+    #[tokio::test]
+    async fn emits_block_time_with_a_bidirectional_request() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let mut response = event_block_response(0, 7, transaction);
+        response["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(1_700_000_000),
+                ..
+            })
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+    }
+
+    #[tokio::test]
+    async fn holds_a_bidirectional_block_without_block_time() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        for block_time in [serde_json::json!(null), serde_json::json!(-1)] {
+            let mut response = event_block_response(0, 7, transaction.clone());
+            response["result"]["blockTime"] = block_time;
+            let block: UiConfirmedBlock =
+                serde_json::from_value(response["result"].clone()).unwrap();
+
+            let err = indexer
+                .process_block(&events_tx, 7, &block)
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                "block carries a bidirectional request but no block time"
+            );
+            assert!(events_rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_block_time_for_plain_sign_requests() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let request = SignatureRequestedEvent {
+            sender: Pubkey::new_unique(),
+            payload: [1; 32],
+            key_version: 0,
+            deposit: 1,
+            chain_id: "solana".to_string(),
+            path: "test".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "test".to_string(),
+            params: String::new(),
+            fee_payer: None,
+        };
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            cpi_event_instruction(&request),
+        );
+        let mut response = event_block_response(0, 7, transaction);
+        response["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(1_700_000_000),
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

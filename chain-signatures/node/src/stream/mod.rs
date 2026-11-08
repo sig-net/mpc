@@ -129,10 +129,10 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
 
             if is_new {
                 if let Some(ts) = block_timestamp {
-                    // Ethereum (~15 min finality) reports the block timestamp.
+                    // Ethereum and Solana report block timestamps; Canton and
+                    // Hydration do not yet.
                     telemetry.request_indexed_at(ts, kind);
                 } else {
-                    // Faster chains (Solana, Canton, Hydration) report no timestamp.
                     telemetry.request_indexed(kind);
                 }
             }
