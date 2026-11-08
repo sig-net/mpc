@@ -97,7 +97,7 @@ alias ts := test-seq
 # Build artifacts: `just build` = whole Rust workspace (via setup),
 # `just build eth` = EVM artifacts, `just build contract` = NEAR contract wasm,
 # `just build test-node` = mpc-node with test-feature, the binary the integration harness spawns (not the release build),
-# `just build midnight` = midnight-publisher-ts fixtures,
+# `just build midnight` = midnight-devtools real-stack fixtures,
 # `just build tests` = integration test binaries without running them,
 # `just build compat` = latest release node binary for the compat test
 # Usage: just build [target] (target="" | eth | contract | test-node | midnight | tests | compat)

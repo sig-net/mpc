@@ -17,7 +17,6 @@ use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::keystore::Keystore;
-use crate::storage::midnight_wallet_storage::MidnightWalletStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::storage::Initializing;
