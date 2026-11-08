@@ -383,7 +383,8 @@ impl SolanaClient {
             Ok(results) => Ok(results),
             // swallowed terminal failures fan out into a per-slot refetch storm
             Err(e) if !is_retryable(&e) => Err(e),
-            // a per-slot refetch can succeed where the batch failed
+            // a per-slot refetch can succeed where the batch failed; reachable
+            // only under a finite budget — catchup's usize::MAX never exhausts
             Err(e) => {
                 tracing::warn!(
                     error = %format_args!("{e:#}"),
