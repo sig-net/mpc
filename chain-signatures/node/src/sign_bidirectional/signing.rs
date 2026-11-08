@@ -298,10 +298,26 @@ fn is_eip1559(unsigned_rlp: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::super::eth_tx::legacy_tx;
-    use super::{sign_and_hash_transaction, validate_unsigned_transaction};
+    use super::{destination_expiry, sign_and_hash_transaction, validate_unsigned_transaction};
     use alloy::consensus::{SignableTransaction as _, TxEip1559};
     use alloy::primitives::TxKind;
     use mpc_primitives::Chain;
+
+    const TRON_RAW_HEX: &str = "0a02db6f220815ff9c9c504ad4a8409a80f5a491345aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a154120eb85916a10d2c6542613e4c9517b5e99b2dee9121541a614f803b6fd780986a42c78ec9c7f77e6ded13c2244a9059cbb000000000000000000000000d9e02baf48ed306afc63cfa816a2b6be8442036a0000000000000000000000000000000000000000000000000000000008f428f870bad8e2a49134900180e1eb17";
+
+    #[test]
+    fn destination_expiry_is_some_for_tron_only() {
+        let tron = hex::decode(TRON_RAW_HEX).unwrap();
+        let bounded = enum_map::enum_map! {
+            Chain::Tron => true,
+            Chain::NEAR | Chain::Ethereum | Chain::Solana | Chain::Bitcoin
+                | Chain::Hydration | Chain::Canton | Chain::Midnight => false,
+        };
+        for (chain, wants_some) in bounded {
+            let expiry = destination_expiry(chain, &tron).expect("the Tron arm parses");
+            assert_eq!(expiry.is_some(), wants_some, "{chain}");
+        }
+    }
 
     #[test]
     fn transaction_chain_id_reads_legacy_and_eip1559() {
