@@ -81,9 +81,12 @@ pub(crate) async fn process_sign_request(
                     sign_request.id
                 );
             }
-            expiry_bound(event, block_timestamp).with_context(|| {
-                format!("rejecting bidirectional sign request {:?}", sign_request.id)
-            })?;
+            if let Err(err) = expiry_bound(event, block_timestamp) {
+                anyhow::bail!(
+                    "rejecting bidirectional sign request {:?}: {err:#}",
+                    sign_request.id
+                );
+            }
         }
         SignKind::Sign => {}
     }

@@ -831,9 +831,14 @@ async fn process_sign_request_rejects_a_window_closed_at_the_source_block() {
     let err = admit_tron_request_with_expiry((SOURCE_BLOCK_S * 1000) as i64, Some(SOURCE_BLOCK_S))
         .await
         .expect_err("the window must open strictly after the source block");
+    let rendered = format!("{err:#}");
     assert!(
-        format!("{err:#}").contains("validity window closed at the source block"),
-        "unexpected error: {err:#}"
+        rendered.contains("rejecting bidirectional sign request"),
+        "unexpected error: {rendered}"
+    );
+    assert!(
+        rendered.contains("validity window closed at the source block"),
+        "unexpected error: {rendered}"
     );
 }
 
