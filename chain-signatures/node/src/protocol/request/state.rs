@@ -3,6 +3,7 @@ use super::organize::OrganizingPhase;
 use super::task::SignPhase;
 use super::*;
 use crate::backlog::{Generating, SignEntry};
+use crate::util::cadence::Cadence;
 
 pub struct SignState {
     round: usize,
@@ -28,6 +29,8 @@ pub struct SignState {
     /// Shared with `SignEntry` so a respawn resumes at the round it left off;
     /// peers rely on our rounds never going down.
     carried_round: Arc<AtomicUsize>,
+    /// Shared cadence. Read-only, so a respawn keeps the same `Arc`.
+    cadence: Arc<Cadence>,
 }
 
 impl SignState {
@@ -35,7 +38,9 @@ impl SignState {
         entry: SignEntry<Generating>,
         mesh_state: watch::Receiver<MeshState>,
         carried_round: Arc<AtomicUsize>,
+        cadence: impl Into<Arc<Cadence>>,
     ) -> Self {
+        let cadence = cadence.into();
         let round = carried_round.load(Ordering::Relaxed);
         Self {
             round,
@@ -44,11 +49,14 @@ impl SignState {
             mesh_state,
             // A respawn restarts the round clock, and the skew it injects does
             // not shrink with the round, so floor the budget at round 0's.
-            budget: TimeoutBudget::new(round_timeout(round).max(ORGANIZE_POSIT_TIMEOUT)),
+            budget: TimeoutBudget::new(
+                round_timeout(round, &cadence).max(cadence.organize_posit_timeout()),
+            ),
             permit: None,
             highest_seen_round: 0,
             buffered_messages: HashMap::new(),
             carried_round,
+            cadence,
         }
     }
 
@@ -100,7 +108,7 @@ impl SignState {
             self.round.saturating_add(1),
             self.highest_seen_round,
         ));
-        self.budget.reset(round_timeout(self.round));
+        self.budget.reset(round_timeout(self.round, &self.cadence));
         self.permit = None;
         tracing::debug!(prev_round, new_round = self.round, "bumped round");
     }
@@ -149,6 +157,7 @@ mod tests {
     use super::*;
     use crate::backlog::mock::mock_sign_request;
     use crate::backlog::Backlog;
+    use crate::util::cadence::Cadence;
 
     /// A respawn rebuilds `SignState`; the round must resume from the carried
     /// value, not restart at 0 — peers read a round reset as time travel.
@@ -156,13 +165,18 @@ mod tests {
     fn round_survives_a_respawn() {
         let carried = Arc::new(AtomicUsize::new(0));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let entry = SignEntry::generating(
             mock_sign_request(SignId::new([0u8; 32]), Chain::Ethereum),
             &backlog,
         );
 
-        let mut state = SignState::new(entry.clone(), mesh_rx.clone(), Arc::clone(&carried));
+        let mut state = SignState::new(
+            entry.clone(),
+            mesh_rx.clone(),
+            Arc::clone(&carried),
+            Cadence::default(),
+        );
         state.reorganize("test");
         state.highest_seen_round = 9;
         state.reorganize("test");
@@ -173,12 +187,17 @@ mod tests {
     fn warn_watermark_survives_round_jumps() {
         let carried = Arc::new(AtomicUsize::new(0));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let entry = SignEntry::generating(
             mock_sign_request(SignId::new([0u8; 32]), Chain::Ethereum),
             &backlog,
         );
-        let mut state = SignState::new(entry.clone(), mesh_rx.clone(), Arc::clone(&carried));
+        let mut state = SignState::new(
+            entry.clone(),
+            mesh_rx.clone(),
+            Arc::clone(&carried),
+            Cadence::default(),
+        );
 
         state.reorganize("test");
         assert_eq!(state.last_warned_round, 0);
@@ -199,7 +218,7 @@ mod tests {
         // A respawned incarnation resumes at the carried round; its watermark
         // starts fresh, but the high carried round re-arms the next warn.
         drop(state);
-        let respawned = SignState::new(entry, mesh_rx, carried);
+        let respawned = SignState::new(entry, mesh_rx, carried, Cadence::default());
         assert_eq!(respawned.round(), 21);
         assert_eq!(respawned.last_warned_round, 0);
     }
@@ -210,22 +229,28 @@ mod tests {
     #[test]
     fn respawn_budget_is_the_carried_round_floored_at_round_zero() {
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::default());
         let entry = SignEntry::generating(
             mock_sign_request(SignId::new([0u8; 32]), Chain::Ethereum),
             &backlog,
         );
 
-        // 0 and 3 sit below the floor and 18 and 40 above it, in both the
-        // production and `test-feature` constants.
+        // 0 and 3 sit below the organize timeout and 18 and 40 above it.
+        let cadence = Cadence::default();
         for round in [0, 3, 18, 40] {
             let carried = Arc::new(AtomicUsize::new(round));
-            let first = SignState::new(entry.clone(), mesh_rx.clone(), Arc::clone(&carried));
+            let first = SignState::new(
+                entry.clone(),
+                mesh_rx.clone(),
+                Arc::clone(&carried),
+                cadence.clone(),
+            );
             drop(first);
-            let respawned = SignState::new(entry.clone(), mesh_rx.clone(), carried);
+            let respawned =
+                SignState::new(entry.clone(), mesh_rx.clone(), carried, cadence.clone());
 
             assert_eq!(respawned.round(), round);
-            let expected = round_timeout(round).max(ORGANIZE_POSIT_TIMEOUT);
+            let expected = round_timeout(round, &cadence).max(cadence.organize_posit_timeout());
             let remaining = respawned.budget.remaining();
             assert!(
                 remaining <= expected && expected - remaining < Duration::from_millis(100),
@@ -235,9 +260,9 @@ mod tests {
 
         // Non-vacuous only if the set spans both sides of the floor.
         assert_eq!(
-            round_timeout(3).max(ORGANIZE_POSIT_TIMEOUT),
-            ORGANIZE_POSIT_TIMEOUT
+            round_timeout(3, &cadence).max(cadence.organize_posit_timeout()),
+            cadence.organize_posit_timeout()
         );
-        assert!(round_timeout(18) > ORGANIZE_POSIT_TIMEOUT);
+        assert!(round_timeout(18, &cadence) > cadence.organize_posit_timeout());
     }
 }

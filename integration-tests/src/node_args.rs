@@ -27,6 +27,11 @@ pub fn start(ctx: &Context, node: &NodeEnvConfig) -> Vec<String> {
     args.chains(&node.cfg);
     args.storage(&ctx.storage_options, node.binary_path.is_none());
     args.logs(&ctx.log_options, node.binary_path.is_none());
+
+    if ctx.test_cadence {
+        args.0.push("--test-cadence".to_string());
+    }
+
     args.0
 }
 

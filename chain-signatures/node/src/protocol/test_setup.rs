@@ -6,6 +6,7 @@ use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::keystore::Keystore;
 use crate::storage::{Initializing, PresignatureStorage, TripleStorage};
 use crate::types::SignCommand;
+use crate::util::cadence::Cadence;
 use near_sdk::AccountId;
 use tokio::sync::{mpsc, watch};
 
@@ -44,6 +45,7 @@ impl MpcSignProtocol {
             channels.msg_channel.clone(),
             channels.rpc_channel.clone(),
             sync_report_tx,
+            Cadence::test(),
         );
         let sign_task =
             SignatureSpawnerTask::run(spawner, channels.sign_rx, channels.config.clone());

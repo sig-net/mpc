@@ -35,6 +35,7 @@ use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::storage::keystore::{Keystore, MemoryKeystore};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::stream::StreamContext;
+use mpc_node::util::cadence::Cadence;
 use mpc_primitives::Chain;
 use near_sdk::AccountId;
 use std::collections::HashMap;
@@ -523,7 +524,7 @@ impl MpcFixtureNodeBuilder {
             context.contract_state.clone(),
         ));
 
-        let backlog = Backlog::new();
+        let backlog = Backlog::new(Cadence::test());
 
         let protocol = MpcSignProtocol::new_test(
             self.participant_info.account_id.clone(),
