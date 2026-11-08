@@ -2,9 +2,6 @@
 
 use signet_program::SignBidirectionalEvent;
 
-/// One `SignBidirectionalRequested` Anchor CPI event, base58-encoded as an
-/// inner-instruction payload targeting `caip2_id`.
-
 /// One entry of a `getSignaturesForAddress` response.
 pub(crate) fn signature_entry(slot: u64, sig: &str) -> serde_json::Value {
     serde_json::json!({
