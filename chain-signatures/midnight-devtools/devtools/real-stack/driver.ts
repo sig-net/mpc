@@ -9,13 +9,11 @@ import {
   deploySignetContract,
   deploySignetResponder,
   deriveAccountKeys,
-  deriveWalletAddresses,
   GENESIS_MINT_WALLET_SEED,
   initialiseWalletFacade,
   isLocalStandaloneNetwork,
   registerNightForDustGeneration,
   submitUnprovenTransaction,
-  transferNight,
   waitForSpendableDust,
   withSyncedWalletFacade,
   type FacadeState,
@@ -275,10 +273,54 @@ function totalNight(state: FacadeState): bigint {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-// Mirrors the package's per-child flow but amortizes the expensive part: a
-// root facade re-syncs from genesis once (that re-sync dominates wall time),
-// funds every role wallet sequentially from that live facade, and the
-// independent child verifications run concurrently afterwards.
+type UnshieldedAddress = FacadeState["unshielded"]["address"];
+
+// The package's `transferNight` with one output per receiver, so one transaction funds
+// every role instead of one finalized transfer each.
+async function transferNightToEach(
+  facade: WalletFacade,
+  keys: ReturnType<typeof deriveAccountKeys>,
+  state: FacadeState,
+  receivers: readonly UnshieldedAddress[],
+  amount: bigint,
+): Promise<void> {
+  const nightTokenType = Object.keys(state.unshielded.balances)[0];
+  if (nightTokenType === undefined) throw new Error("root holds no unshielded NIGHT to transfer");
+  const ttl = new Date(Date.now() + 30 * 60 * 1000);
+  const secretKeys = {
+    shieldedSecretKeys: keys.shieldedSecretKeys,
+    dustSecretKey: keys.dustSecretKey,
+  };
+  const transfer = await facade.transferTransaction(
+    [
+      {
+        type: "unshielded",
+        outputs: receivers.map((receiverAddress) => ({
+          type: nightTokenType,
+          receiverAddress,
+          amount,
+        })),
+      },
+    ],
+    secretKeys,
+    { ttl, payFees: false },
+  );
+  const recipe = await facade
+    .balanceUnprovenTransaction(transfer.transaction, secretKeys, {
+      ttl,
+      tokenKindsToBalance: ["dust"],
+    })
+    .catch(async (error: unknown) => {
+      await facade.revert(transfer).catch(() => undefined);
+      throw error;
+    });
+  const signed = await facade.signRecipe(recipe, keys.unshieldedKeystore.signDataAsync);
+  await facade.submitTransaction(await facade.finalizeRecipe(signed));
+}
+
+// Mirrors the package's per-child flow but amortizes the expensive parts: a root
+// facade re-syncs from genesis once (that re-sync dominates wall time) and funds every
+// role wallet in one transfer, and the independent child verifications run concurrently.
 async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): Promise<void> {
   const networkId = config.networkId;
   const rootKeys = deriveAccountKeys(GENESIS_MINT_WALLET_SEED, networkId);
@@ -287,6 +329,15 @@ async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): 
     ["invoker", INVOKER_SEED],
     ...publisherSeeds.map((seed, node) => [`publisher ${node}`, seed] as const),
   ] as const;
+  const receivers = await Promise.all(
+    roles.map(([, seed]) =>
+      withSyncedWalletFacade(
+        deriveAccountKeys(seed, networkId),
+        config,
+        async (_facade, state) => state.unshielded.address,
+      ),
+    ),
+  );
 
   await withSyncedWalletFacade(rootKeys, config, async (rootFacade, initialState) => {
     // Local standalone genesis funds root by construction, but the indexer can
@@ -304,28 +355,21 @@ async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): 
     await registerNightForDustGeneration(rootFacade, rootKeys, state);
     if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade, 1n);
 
-    // Sequential: every transfer spends root UTXOs selected from `state`.
-    for (const [name, seed] of roles) {
-      const startedAt = Date.now();
-      const unshielded = deriveWalletAddresses(seed, config).unshielded;
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          await transferNight(rootFacade, rootKeys, state, unshielded, networkId, amount);
-          break;
-        } catch (error) {
-          if (attempt >= 11 || !isDustBalancingShortfall(error)) throw error;
-          diagnostics(
-            `root DUST is not yet enough to cover the ${name} transfer; retrying (attempt ${attempt + 1})`,
-          );
-          await sleep(5_000);
-          state = await rootFacade.waitForSyncedState();
-        }
+    const startedAt = Date.now();
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await transferNightToEach(rootFacade, rootKeys, state, receivers, amount);
+        break;
+      } catch (error) {
+        if (attempt >= 11 || !isDustBalancingShortfall(error)) throw error;
+        diagnostics(
+          `root DUST is not yet enough to cover the role transfer; retrying (attempt ${attempt + 1})`,
+        );
+        await sleep(5_000);
+        state = await rootFacade.waitForSyncedState();
       }
-      // Let the transfer block land before selecting UTXOs for the next one.
-      await sleep(3_000);
-      state = await rootFacade.waitForSyncedState();
-      diagnostics(`funded ${name} wallet in ${Date.now() - startedAt}ms`);
     }
+    diagnostics(`funded ${roles.length} role wallets in ${Date.now() - startedAt}ms`);
   });
 
   await Promise.all(
