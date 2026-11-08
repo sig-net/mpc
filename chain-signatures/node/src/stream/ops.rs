@@ -15,7 +15,7 @@ use crate::respond_bidirectional::{
 };
 use crate::sign_bidirectional::{
     destination_expiry, owned_by_requester, transaction_chain_id, BidirectionalProgress,
-    BidirectionalTxId, SignBidirectionalEventExt, SignStatus,
+    BidirectionalTxId, ExpiryWindow, SignBidirectionalEventExt, SignStatus,
 };
 use crate::stream::StreamContext;
 use crate::types::SignCommand;
@@ -131,7 +131,10 @@ fn expiry_bound(
     block_timestamp: Option<u64>,
 ) -> anyhow::Result<()> {
     // `validate` owns rejecting unknown targets; no expiry, no bound.
-    let Some((expiration_ms, cap_ms)) = event
+    let Some(ExpiryWindow {
+        expiration_ms,
+        cap_ms,
+    }) = event
         .target_chain()
         .ok()
         .map(|target| destination_expiry(target, &event.serialized_transaction))

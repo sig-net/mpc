@@ -48,18 +48,24 @@ pub(crate) fn pending_destination_id(
     }
 }
 
-/// The expiry the unsigned bytes carry pre-signing, `(expiration, cap)`
-/// in ms — Tron's `expiration`; Ethereum carries none.
+/// Unsigned tx expiry window
+pub(crate) struct ExpiryWindow {
+    pub(crate) expiration_ms: u64,
+    pub(crate) cap_ms: u64,
+}
+
+/// The expiry the unsigned bytes carry pre-signing — Tron's `expiration`;
+/// Ethereum carries none.
 pub(crate) fn destination_expiry(
     target: Chain,
     unsigned: &[u8],
-) -> anyhow::Result<Option<(u64, u64)>> {
+) -> anyhow::Result<Option<ExpiryWindow>> {
     match target {
         // `parse` rejects a non-positive expiration.
-        Chain::Tron => Ok(Some((
-            RawTransaction::parse(unsigned)?.expiration as u64,
-            MAX_EXPIRATION_SPAN_MS,
-        ))),
+        Chain::Tron => Ok(Some(ExpiryWindow {
+            expiration_ms: RawTransaction::parse(unsigned)?.expiration as u64,
+            cap_ms: MAX_EXPIRATION_SPAN_MS,
+        })),
         _ => Ok(None),
     }
 }

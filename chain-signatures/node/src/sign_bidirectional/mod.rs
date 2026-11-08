@@ -21,6 +21,7 @@ pub use signing::sign_and_hash_transaction;
 use signing::validate_unsigned_transaction;
 pub(crate) use signing::{
     destination_expiry, owned_by_requester, pending_destination_id, transaction_chain_id,
+    ExpiryWindow,
 };
 
 /// The requester's chain-local identity string: Midnight and Canton senders
