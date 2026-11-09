@@ -2,7 +2,8 @@
 //!
 //! Spendable DUST is derived by replaying the ledger's DUST events into a
 //! `DustLocalState`, the same state the Midnight wallet SDK keeps; no node RPC serves
-//! it. The state is in memory and rebuilt from the first event on every start.
+//! it. The state lives in memory. A checkpoint of it, kept in the node's store, lets a
+//! restart resume the replay instead of starting it over from the first event.
 //!
 //! The wallet never adopts the pending marks `DustLocalState::spend` sets on its
 //! scratch copy. It reserves the UTXOs a submitted transaction spends instead, and a
@@ -29,6 +30,7 @@ use midnight_transient_crypto::commitment::PedersenRandomness;
 use mpc_utils::task::AbortOnDrop;
 use rand::rngs::StdRng;
 use rand::{CryptoRng, Rng};
+use sha2::Digest as _;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -49,6 +51,13 @@ const FEE_PASSES: usize = 8;
 const REPLAY_BATCH: usize = 512;
 /// Backoff between subscription attempts.
 const RESUBSCRIBE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+/// The longest backoff between replays that keep restarting from the first event.
+const MAX_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(600);
+/// The least time between two kept checkpoints of a caught-up replay.
+const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+/// How long loading or keeping a checkpoint may take.
+const CHECKPOINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CHECKPOINT_MAGIC: &[u8; 16] = b"mpc-dust-ckpt-v1";
 
 /// The DUST key of account 0 at index 0, derived the way the Midnight wallet SDK
 /// derives it from the same seed: BIP-32 `m/44'/2400'/0'/2/0`, then the ledger's
@@ -146,14 +155,86 @@ struct Reservation {
     until: Timestamp,
 }
 
+/// Where the funding wallet keeps a checkpoint of its replay across restarts. The
+/// checkpoint holds the replayed DUST state, never the secret key.
+#[async_trait::async_trait]
+pub trait DustCheckpointStore: Send + Sync {
+    async fn load(&self) -> anyhow::Result<Option<Vec<u8>>>;
+    async fn save(&self, checkpoint: &[u8]) -> anyhow::Result<()>;
+}
+
+/// The replayed state after event `applied`, for the key whose public key hashes to
+/// `owner`. A restart resumes from it only when the indexer still serves the same
+/// event at `applied`, which `event_hash` checks.
+pub(crate) struct Checkpoint {
+    pub(crate) owner: [u8; 32],
+    pub(crate) applied: u64,
+    pub(crate) event_hash: [u8; 32],
+    pub(crate) local: DustLocalState<DefaultDB>,
+}
+
+impl Checkpoint {
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(CHECKPOINT_MAGIC);
+        bytes.extend_from_slice(&self.owner);
+        bytes.extend_from_slice(&self.applied.to_le_bytes());
+        bytes.extend_from_slice(&self.event_hash);
+        midnight_serialize::tagged_serialize(&self.local, &mut bytes)
+            .expect("serializing into a Vec cannot fail");
+        bytes
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        let rest = bytes
+            .strip_prefix(CHECKPOINT_MAGIC.as_slice())
+            .context("not a DUST checkpoint of this format")?;
+        anyhow::ensure!(rest.len() >= 72, "the DUST checkpoint is truncated");
+        let (owner, rest) = rest.split_at(32);
+        let (applied, rest) = rest.split_at(8);
+        let (event_hash, mut state) = rest.split_at(32);
+        Ok(Self {
+            owner: owner.try_into().expect("split at 32"),
+            applied: u64::from_le_bytes(applied.try_into().expect("split at 8")),
+            event_hash: event_hash.try_into().expect("split at 32"),
+            local: midnight_serialize::tagged_deserialize(&mut state)
+                .context("the checkpointed DUST state did not decode")?,
+        })
+    }
+}
+
+/// Which funding key a checkpoint belongs to: the hash of its public key.
+pub(crate) fn owner_of(key: &DustSecretKey) -> [u8; 32] {
+    let public = midnight_ledger_v9::dust::DustPublicKey::from(key.clone());
+    let mut bytes = Vec::new();
+    midnight_serialize::tagged_serialize(&public, &mut bytes)
+        .expect("serializing into a Vec cannot fail");
+    sha2::Sha256::digest(&bytes).into()
+}
+
+pub(crate) fn event_hash(raw: &[u8]) -> [u8; 32] {
+    sha2::Sha256::digest(raw).into()
+}
+
+/// The replay restarted from the first event: the stream and the state disagree.
+#[derive(Debug, thiserror::Error)]
+#[error("restarting the DUST replay from the first event")]
+struct Restarted;
+
 struct Synced {
     local: DustLocalState<DefaultDB>,
     /// The id of the newest event replayed, `None` before the first.
     applied: Option<u64>,
+    /// The hash of event `applied`, as the indexer served it.
+    applied_hash: Option<[u8; 32]>,
     /// The newest event id the indexer has reported.
     max_id: u64,
     /// Whether a subscription is currently delivering.
     connected: bool,
+    /// The event a restored checkpoint expects the next subscription to start with.
+    resume: Option<(u64, [u8; 32])>,
+    /// When a checkpoint was last kept, and of which event.
+    checkpointed: Option<(Instant, u64)>,
     reservations: Vec<Reservation>,
 }
 
@@ -162,10 +243,20 @@ impl Synced {
         Self {
             local: DustLocalState::new(INITIAL_PARAMETERS.dust),
             applied: None,
+            applied_hash: None,
             max_id: 0,
             connected: false,
+            resume: None,
+            checkpointed: None,
             reservations: Vec::new(),
         }
+    }
+
+    /// Back to the first event, keeping the reservations of submits in flight.
+    fn restart(&mut self) {
+        let reservations = std::mem::take(&mut self.reservations);
+        *self = Self::fresh();
+        self.reservations = reservations;
     }
 
     fn is_ready(&self) -> bool {
@@ -180,6 +271,7 @@ impl Synced {
 
 struct Shared {
     key: DustSecretKey,
+    owner: [u8; 32],
     state: Mutex<Synced>,
     progress: watch::Sender<()>,
 }
@@ -201,16 +293,25 @@ pub(crate) struct FundingWallet {
 }
 
 impl FundingWallet {
-    /// Starts replaying from the first event at once, so the first publish does not
-    /// pay for the catch-up.
-    pub(crate) fn start(key: DustSecretKey, source: Arc<dyn DustEventSource>) -> Self {
+    /// Starts replaying at once, from the checkpoint in `checkpoints` when it has one
+    /// for this key, so the first publish does not pay for the catch-up.
+    pub(crate) fn start(
+        key: DustSecretKey,
+        source: Arc<dyn DustEventSource>,
+        checkpoints: Option<Arc<dyn DustCheckpointStore>>,
+    ) -> Self {
         let (progress, _) = watch::channel(());
         let shared = Arc::new(Shared {
+            owner: owner_of(&key),
             key,
             state: Mutex::new(Synced::fresh()),
             progress,
         });
-        let sync = AbortOnDrop(tokio::spawn(follow(shared.clone(), source.clone())));
+        let sync = AbortOnDrop(tokio::spawn(follow(
+            shared.clone(),
+            source.clone(),
+            checkpoints,
+        )));
         Self {
             shared,
             source,
@@ -221,33 +322,127 @@ impl FundingWallet {
 
 /// Follows the event stream for the wallet's lifetime: resubscribes after any
 /// failure from the newest applied event, and starts over from the first event when
-/// the replayed state can no longer absorb what the indexer sends.
-async fn follow(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) {
+/// the replayed state can no longer absorb what the indexer sends, backing off while
+/// that keeps happening.
+async fn follow(
+    shared: Arc<Shared>,
+    source: Arc<dyn DustEventSource>,
+    checkpoints: Option<Arc<dyn DustCheckpointStore>>,
+) {
+    if let Some(store) = &checkpoints {
+        restore(&shared, store.as_ref()).await;
+    }
+    let mut delay = RESUBSCRIBE_DELAY;
     loop {
         // Its own task, so a panic below ends one subscription rather than the
         // wallet; held so that dropping the wallet aborts it too.
-        let mut attempt = AbortOnDrop(tokio::spawn(subscribe_once(shared.clone(), source.clone())));
+        let restarted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut attempt = AbortOnDrop(tokio::spawn({
+            let (shared, source, checkpoints) =
+                (shared.clone(), source.clone(), checkpoints.clone());
+            let restarted = restarted.clone();
+            async move {
+                let ended = subscribe_once(shared, source, checkpoints).await;
+                restarted.store(ended, std::sync::atomic::Ordering::Relaxed);
+            }
+        }));
         if let Err(error) = (&mut attempt.0).await {
             tracing::error!(
                 ?error,
                 "midnight funding wallet: DUST event subscription panicked"
             );
         }
+        let restarted = restarted.load(std::sync::atomic::Ordering::Relaxed);
         shared.state().connected = false;
         shared.progress.send_replace(());
-        tokio::time::sleep(RESUBSCRIBE_DELAY).await;
+        delay = if restarted {
+            (delay * 2).min(MAX_RESTART_DELAY)
+        } else {
+            RESUBSCRIBE_DELAY
+        };
+        tokio::time::sleep(delay).await;
     }
 }
 
-async fn subscribe_once(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) {
+/// Resumes from the stored checkpoint when it belongs to this key. The first
+/// subscription then checks it against the indexer.
+async fn restore(shared: &Shared, store: &dyn DustCheckpointStore) {
+    let bytes = match tokio::time::timeout(CHECKPOINT_TIMEOUT, store.load()).await {
+        Ok(Ok(Some(bytes))) => bytes,
+        Ok(Ok(None)) => return,
+        Ok(Err(error)) => {
+            tracing::warn!(
+                ?error,
+                "midnight funding wallet: loading the DUST checkpoint failed"
+            );
+            return;
+        }
+        Err(_) => {
+            tracing::warn!("midnight funding wallet: loading the DUST checkpoint timed out");
+            return;
+        }
+    };
+    let decoded = tokio::task::spawn_blocking(move || Checkpoint::decode(&bytes)).await;
+    let checkpoint = match decoded {
+        Ok(Ok(checkpoint)) => checkpoint,
+        Ok(Err(error)) => {
+            tracing::warn!(
+                ?error,
+                "midnight funding wallet: ignoring an unreadable DUST checkpoint"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                "midnight funding wallet: decoding the DUST checkpoint failed"
+            );
+            return;
+        }
+    };
+    if checkpoint.owner != shared.owner {
+        tracing::info!("midnight funding wallet: the DUST checkpoint belongs to another funding key; replaying from the first event");
+        return;
+    }
+    tracing::info!(
+        event = checkpoint.applied,
+        "midnight funding wallet: resuming the DUST replay from its checkpoint"
+    );
+    let mut state = shared.state();
+    state.local = checkpoint.local;
+    state.applied = Some(checkpoint.applied);
+    state.applied_hash = Some(checkpoint.event_hash);
+    state.max_id = checkpoint.applied;
+    state.resume = Some((checkpoint.applied, checkpoint.event_hash));
+    state.checkpointed = Some((Instant::now(), checkpoint.applied));
+}
+
+/// Applies one subscription until it ends; whether it ended by restarting the replay.
+async fn subscribe_once(
+    shared: Arc<Shared>,
+    source: Arc<dyn DustEventSource>,
+    checkpoints: Option<Arc<dyn DustCheckpointStore>>,
+) -> bool {
     let from = shared.state().applied;
     match source.subscribe(from).await {
         Ok(stream) => {
             let mut batches = stream.ready_chunks(REPLAY_BATCH);
             while let Some(batch) = batches.next().await {
-                if let Err(error) = apply(&shared, batch) {
-                    tracing::warn!(?error, "midnight funding wallet: DUST replay failed");
-                    return;
+                // Replaying is CPU work; it stays off the async workers.
+                let applying = shared.clone();
+                match tokio::task::spawn_blocking(move || apply(&applying, batch)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(?error, "midnight funding wallet: DUST replay failed");
+                        return error.is::<Restarted>();
+                    }
+                    Err(error) => {
+                        tracing::error!(?error, "midnight funding wallet: DUST replay panicked");
+                        return false;
+                    }
+                }
+                if let Some(store) = &checkpoints {
+                    keep_checkpoint(&shared, store.as_ref()).await;
                 }
             }
         }
@@ -258,10 +453,61 @@ async fn subscribe_once(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) {
             );
         }
     }
+    false
+}
+
+/// Keeps a checkpoint of a caught-up replay that moved since the last one, at most
+/// once per `CHECKPOINT_INTERVAL`. A failure only costs the next restart its resume.
+async fn keep_checkpoint(shared: &Shared, store: &dyn DustCheckpointStore) {
+    let checkpoint = {
+        let state = shared.state();
+        let (Some(applied), Some(event_hash)) = (state.applied, state.applied_hash) else {
+            return;
+        };
+        let due = state
+            .checkpointed
+            .is_none_or(|(at, kept)| kept != applied && at.elapsed() >= CHECKPOINT_INTERVAL);
+        if !state.is_caught_up() || !due {
+            return;
+        }
+        Checkpoint {
+            owner: shared.owner,
+            applied,
+            event_hash,
+            local: state.local.clone(),
+        }
+    };
+    let applied = checkpoint.applied;
+    shared.state().checkpointed = Some((Instant::now(), applied));
+    let encoded = match tokio::task::spawn_blocking(move || checkpoint.encode()).await {
+        Ok(encoded) => encoded,
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                "midnight funding wallet: encoding the DUST checkpoint failed"
+            );
+            return;
+        }
+    };
+    match tokio::time::timeout(CHECKPOINT_TIMEOUT, store.save(&encoded)).await {
+        Ok(Ok(())) => tracing::info!(
+            event = applied,
+            bytes = encoded.len(),
+            "midnight funding wallet: kept a DUST checkpoint"
+        ),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                ?error,
+                "midnight funding wallet: keeping the DUST checkpoint failed"
+            );
+        }
+        Err(_) => tracing::warn!("midnight funding wallet: keeping the DUST checkpoint timed out"),
+    }
 }
 
 /// Replays one batch. An event the state cannot absorb means the stream and the
-/// state disagree about history, so the state restarts from the first event.
+/// state disagree about history, so the state restarts from the first event; so does
+/// a restored checkpoint whose event the indexer no longer serves.
 fn apply(shared: &Shared, batch: Vec<anyhow::Result<DustEventUpdate>>) -> anyhow::Result<()> {
     let mut updates = Vec::with_capacity(batch.len());
     let mut failure = None;
@@ -275,6 +521,19 @@ fn apply(shared: &Shared, batch: Vec<anyhow::Result<DustEventUpdate>>) -> anyhow
         }
     }
     let mut state = shared.state();
+    if let (Some((id, hash)), Some(first)) = (state.resume, updates.first()) {
+        if first.id != id || event_hash(&first.raw) != hash {
+            state.restart();
+            drop(state);
+            shared.progress.send_replace(());
+            return Err(anyhow::Error::new(Restarted).context(format!(
+                "the DUST checkpoint at event {id} does not match the indexer, which served \
+                 event {} first",
+                first.id
+            )));
+        }
+        state.resume = None;
+    }
     if let Some(last) = updates.last() {
         state.max_id = last.max_id;
     }
@@ -301,14 +560,13 @@ fn apply(shared: &Shared, batch: Vec<anyhow::Result<DustEventUpdate>>) -> anyhow
             Ok(local) => {
                 state.local = local.process_ttls(now());
                 state.applied = Some(newest.id);
+                state.applied_hash = Some(event_hash(&newest.raw));
             }
             Err(error) => {
-                let reservations = std::mem::take(&mut state.reservations);
-                *state = Synced::fresh();
-                state.reservations = reservations;
+                state.restart();
                 drop(state);
                 shared.progress.send_replace(());
-                return Err(error.context("restarting the DUST replay from the first event"));
+                return Err(anyhow::Error::new(Restarted).context(format!("{error:#}")));
             }
         }
     }
@@ -766,6 +1024,7 @@ pub(crate) mod tests {
     fn shared() -> Shared {
         Shared {
             key: funded_key(),
+            owner: owner_of(&funded_key()),
             state: Mutex::new(Synced::fresh()),
             progress: watch::channel(()).0,
         }
@@ -881,7 +1140,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_started_wallet_becomes_ready_on_its_own() {
-        let wallet = FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())));
+        let wallet =
+            FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())), None);
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
@@ -912,7 +1172,7 @@ pub(crate) mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_panicking_subscription_is_retried_rather_than_ending_the_replay() {
         let source = PanicsFirst(Default::default(), fixture_updates());
-        let wallet = FundingWallet::start(funded_key(), Arc::new(source));
+        let wallet = FundingWallet::start(funded_key(), Arc::new(source), None);
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
@@ -953,7 +1213,7 @@ pub(crate) mod tests {
             subscriptions: Default::default(),
             updates: fixture_updates(),
         });
-        let wallet = FundingWallet::start(funded_key(), source.clone());
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
         // The second subscription starts only after the first one ended.
         while source
             .subscriptions
@@ -997,7 +1257,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn dropping_the_wallet_ends_its_subscription() {
         let alive = Arc::new(());
-        let wallet = FundingWallet::start(funded_key(), Arc::new(Held(alive.clone())));
+        let wallet = FundingWallet::start(funded_key(), Arc::new(Held(alive.clone())), None);
         while Arc::strong_count(&alive) < 3 {
             tokio::task::yield_now().await;
         }
@@ -1013,7 +1273,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_reservation_holds_until_its_utxos_are_spent_released_or_expired() {
-        let wallet = FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())));
+        let wallet =
+            FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())), None);
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
@@ -1054,7 +1315,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_reservation_the_replay_has_seen_partly_spent_still_holds_the_rest() {
-        let wallet = FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())));
+        let wallet =
+            FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())), None);
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
@@ -1089,7 +1351,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_replay_restarted_after_ready_plans_nothing_and_keeps_its_reservations() {
-        let wallet = FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())));
+        let wallet =
+            FundingWallet::start(funded_key(), Arc::new(OnceSource(fixture_updates())), None);
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(30))
             .await
@@ -1104,10 +1367,7 @@ pub(crate) mod tests {
         wallet.reserve(&all, Timestamp::from_secs(u64::MAX / 2));
         {
             // What `apply` leaves after a failed replay.
-            let mut state = wallet.shared.state();
-            let reservations = std::mem::take(&mut state.reservations);
-            *state = Synced::fresh();
-            state.reservations = reservations;
+            wallet.shared.state().restart();
         }
 
         let Err(error) = wallet.plan(
@@ -1130,12 +1390,215 @@ pub(crate) mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_wallet_that_cannot_sync_reports_unsynced_at_its_deadline() {
-        let wallet = FundingWallet::start(funded_key(), Arc::new(OnceSource(Vec::new())));
+        let wallet = FundingWallet::start(funded_key(), Arc::new(OnceSource(Vec::new())), None);
         let error = wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(5))
             .await
             .unwrap_err();
         assert!(matches!(error, SubmitError::WalletUnsynced(_)), "{error}");
+    }
+
+    #[derive(Default)]
+    struct MemoryCheckpoints(Mutex<Option<Vec<u8>>>);
+
+    #[async_trait]
+    impl DustCheckpointStore for MemoryCheckpoints {
+        async fn load(&self) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        async fn save(&self, checkpoint: &[u8]) -> anyhow::Result<()> {
+            *self.0.lock().unwrap() = Some(checkpoint.to_vec());
+            Ok(())
+        }
+    }
+
+    impl MemoryCheckpoints {
+        fn holding(checkpoint: Checkpoint) -> Self {
+            Self(Mutex::new(Some(checkpoint.encode())))
+        }
+
+        fn decoded(&self) -> Option<Checkpoint> {
+            let bytes = self.0.lock().unwrap().clone()?;
+            Some(Checkpoint::decode(&bytes).unwrap())
+        }
+    }
+
+    /// Serves the fixture from any id, inclusive, and records where each
+    /// subscription started.
+    struct RecordingSource {
+        updates: Vec<DustEventUpdate>,
+        froms: Mutex<Vec<Option<u64>>>,
+    }
+
+    impl RecordingSource {
+        fn new(updates: Vec<DustEventUpdate>) -> Arc<Self> {
+            Arc::new(Self {
+                updates,
+                froms: Mutex::default(),
+            })
+        }
+
+        fn froms(&self) -> Vec<Option<u64>> {
+            self.froms.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl DustEventSource for RecordingSource {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            self.froms.lock().unwrap().push(from);
+            OnceSource(self.updates.clone()).subscribe(from).await
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    /// The state a replay of the first `count` fixture events reaches, as a checkpoint
+    /// of `key`.
+    fn checkpoint_after(count: usize, key: &DustSecretKey) -> Checkpoint {
+        let updates = fixture_updates();
+        let events: Vec<Event<DefaultDB>> = updates[..count]
+            .iter()
+            .map(|update| midnight_serialize::tagged_deserialize(&mut &update.raw[..]).unwrap())
+            .collect();
+        let newest = &updates[count - 1];
+        Checkpoint {
+            owner: owner_of(key),
+            applied: newest.id,
+            event_hash: event_hash(&newest.raw),
+            local: DustLocalState::new(INITIAL_PARAMETERS.dust)
+                .replay_events(key, events.iter())
+                .unwrap(),
+        }
+    }
+
+    async fn ready(wallet: &FundingWallet) {
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
+    }
+
+    fn assert_fully_replayed(wallet: &FundingWallet) {
+        let full = replayed();
+        let state = wallet.shared.state();
+        assert_eq!(state.applied, Some(fixture_updates().last().unwrap().id));
+        assert_eq!(state.local.sync_time, full.sync_time);
+        let key = funded_key();
+        let nullifiers = |local: &DustLocalState<DefaultDB>| {
+            let mut all: Vec<_> = local.utxos().map(|utxo| utxo.nullifier(&key)).collect();
+            all.sort_by_key(|nullifier| format!("{nullifier:?}"));
+            all
+        };
+        assert_eq!(nullifiers(&state.local), nullifiers(&full));
+    }
+
+    #[tokio::test]
+    async fn a_caught_up_wallet_keeps_a_checkpoint_of_its_replay() {
+        let store = Arc::new(MemoryCheckpoints::default());
+        let wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(OnceSource(fixture_updates())),
+            Some(store.clone()),
+        );
+        ready(&wallet).await;
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let checkpoint = loop {
+            if let Some(checkpoint) = store.decoded() {
+                break checkpoint;
+            }
+            assert!(Instant::now() < deadline, "no checkpoint was kept");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        let newest = fixture_updates().pop().unwrap();
+        assert_eq!(checkpoint.applied, newest.id);
+        assert_eq!(checkpoint.event_hash, event_hash(&newest.raw));
+        assert_eq!(checkpoint.owner, owner_of(&funded_key()));
+        assert_eq!(checkpoint.local.sync_time, replayed().sync_time);
+    }
+
+    #[tokio::test]
+    async fn a_restarted_wallet_resumes_from_its_checkpoint() {
+        let key = funded_key();
+        let checkpoint = checkpoint_after(10, &key);
+        let resumed_at = checkpoint.applied;
+        let source = RecordingSource::new(fixture_updates());
+        let wallet = FundingWallet::start(
+            key,
+            source.clone(),
+            Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+        );
+        ready(&wallet).await;
+        assert_eq!(source.froms(), vec![Some(resumed_at)]);
+        assert_fully_replayed(&wallet);
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_the_indexer_disagrees_with_is_replayed_from_the_first_event() {
+        let key = funded_key();
+        let mut checkpoint = checkpoint_after(10, &key);
+        let resumed_at = checkpoint.applied;
+        checkpoint.event_hash = event_hash(b"another chain's event");
+        let source = RecordingSource::new(fixture_updates());
+        let wallet = FundingWallet::start(
+            key,
+            source.clone(),
+            Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+        );
+        ready(&wallet).await;
+        assert_eq!(source.froms(), vec![Some(resumed_at), None]);
+        assert_fully_replayed(&wallet);
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_of_another_funding_key_is_ignored() {
+        let other = dust_secret_key(&[0x42; 32]).unwrap();
+        let source = RecordingSource::new(fixture_updates());
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            Some(Arc::new(MemoryCheckpoints::holding(checkpoint_after(
+                10, &other,
+            )))),
+        );
+        ready(&wallet).await;
+        assert_eq!(source.froms(), vec![None]);
+        assert_fully_replayed(&wallet);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_checkpoint_is_ignored() {
+        let source = RecordingSource::new(fixture_updates());
+        let wallet = FundingWallet::start(
+            funded_key(),
+            source.clone(),
+            Some(Arc::new(MemoryCheckpoints(Mutex::new(Some(
+                b"not a checkpoint".to_vec(),
+            ))))),
+        );
+        ready(&wallet).await;
+        assert_eq!(source.froms(), vec![None]);
+        assert_fully_replayed(&wallet);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replay_that_keeps_failing_backs_off() {
+        let mut updates = fixture_updates();
+        updates[5].raw.truncate(10);
+        let source = RecordingSource::new(updates);
+        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+        let subscriptions = source.froms().len();
+        assert!(
+            (2..=20).contains(&subscriptions),
+            "{subscriptions} full replays in 30 minutes"
+        );
     }
 
     /// Vectors from `@midnightntwrk/wallet-sdk-hd` 3.1.0-beta.1 and
@@ -1202,27 +1665,62 @@ mod live {
     use super::*;
     use crate::dust_feed::IndexerDustEvents;
 
+    /// A checkpoint in a file, as the node keeps one in Redis.
+    struct FileCheckpoints(std::path::PathBuf);
+
+    #[async_trait::async_trait]
+    impl DustCheckpointStore for FileCheckpoints {
+        async fn load(&self) -> anyhow::Result<Option<Vec<u8>>> {
+            match std::fs::read(&self.0) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        }
+
+        async fn save(&self, checkpoint: &[u8]) -> anyhow::Result<()> {
+            Ok(std::fs::write(&self.0, checkpoint)?)
+        }
+    }
+
+    /// With `MIDNIGHT_LIVE_DUST_CHECKPOINT` naming a file, a first run replays and
+    /// keeps its checkpoint there, and a second run resumes from it.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs MIDNIGHT_LIVE_INDEXER_WS_URL; replays that indexer's whole DUST history"]
     async fn a_wallet_replays_a_live_indexer_to_its_newest_event() {
         let url = std::env::var("MIDNIGHT_LIVE_INDEXER_WS_URL")
             .expect("MIDNIGHT_LIVE_INDEXER_WS_URL must be set");
+        let file = std::env::var("MIDNIGHT_LIVE_DUST_CHECKPOINT")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let resuming = file.as_ref().is_some_and(|file| file.exists());
+        let checkpoints = file
+            .clone()
+            .map(|file| Arc::new(FileCheckpoints(file)) as Arc<dyn DustCheckpointStore>);
         let started = std::time::Instant::now();
         let key = dust_secret_key(&[0x42; 32]).unwrap();
-        let wallet = FundingWallet::start(key, Arc::new(IndexerDustEvents::new(url)));
+        let wallet = FundingWallet::start(key, Arc::new(IndexerDustEvents::new(url)), checkpoints);
         wallet
             .ready_by(Instant::now() + std::time::Duration::from_secs(1800))
             .await
             .unwrap();
+        let ready_after = started.elapsed();
+        if let (Some(file), false) = (&file, resuming) {
+            while !file.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            println!(
+                "kept a {} byte checkpoint",
+                std::fs::metadata(file).unwrap().len()
+            );
+        }
         let indexed = wallet.indexed_time().await.unwrap();
         let state = wallet.shared.state();
         println!("the indexer's newest block is at {indexed:?}");
         println!(
-            "replayed to event {:?} of {} in {:?}; synced to {:?}",
-            state.applied,
-            state.max_id,
-            started.elapsed(),
-            state.local.sync_time
+            "replayed to event {:?} of {} in {:?} (resumed from a checkpoint: {resuming}); \
+             synced to {:?}",
+            state.applied, state.max_id, ready_after, state.local.sync_time
         );
     }
 }

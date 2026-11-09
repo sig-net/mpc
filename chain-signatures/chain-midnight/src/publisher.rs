@@ -19,7 +19,7 @@ use crate::config::{
     validate_publisher_network_id, MidnightAddress, MidnightConfig, PublisherConfig,
 };
 use crate::dust_feed::IndexerDustEvents;
-use crate::funding::{dust_secret_key, parse_seed, FundingWallet};
+use crate::funding::{dust_secret_key, parse_seed, DustCheckpointStore, FundingWallet};
 use crate::intent::{IntentRequest, RespondCircuit, Submitted};
 use crate::native::{NativeIntentClient, Provers};
 use crate::output_storage::{OutputStore, RecoveringOutputStore};
@@ -85,6 +85,7 @@ impl MidnightPublisher {
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
         awaiter: Arc<dyn ResponseAwaiter>,
+        checkpoints: Option<Arc<dyn DustCheckpointStore>>,
     ) -> anyhow::Result<Self> {
         config.publisher.validate_output_storage()?;
         let rpc = Arc::new(MidnightPublisherRpc::connect(config).await?);
@@ -106,6 +107,7 @@ impl MidnightPublisher {
             Arc::new(IndexerDustEvents::new(
                 config.publisher.indexer_ws_url.clone(),
             )),
+            checkpoints,
         );
         let client = Arc::new(NativeIntentClient::new(
             rpc.clone(),
@@ -296,11 +298,13 @@ pub struct RecoveringMidnightPublisher {
 
 impl RecoveringMidnightPublisher {
     /// Validates `config` now, so a configuration that can never publish still fails at
-    /// startup, then connects in the background.
+    /// startup, then connects in the background. `checkpoints` keeps the funding
+    /// wallet's DUST replay across restarts.
     pub fn start(
         config: &MidnightConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
         awaiter: Arc<dyn ResponseAwaiter>,
+        checkpoints: Option<Arc<dyn DustCheckpointStore>>,
     ) -> anyhow::Result<Self> {
         config.validate()?;
         let config = config.clone();
@@ -308,7 +312,8 @@ impl RecoveringMidnightPublisher {
             let config = config.clone();
             let telemetry = telemetry.clone();
             let awaiter = awaiter.clone();
-            async move { MidnightPublisher::connect(&config, telemetry, awaiter).await }
+            let checkpoints = checkpoints.clone();
+            async move { MidnightPublisher::connect(&config, telemetry, awaiter, checkpoints).await }
         }))
     }
 
@@ -1774,6 +1779,7 @@ mod tests {
             &config,
             Arc::new(NoopPublisherTelemetry),
             ScriptedAwaiter::new(&[]),
+            None,
         )
         .err()
         .expect("an ftp node_url is refused before any connection attempt");

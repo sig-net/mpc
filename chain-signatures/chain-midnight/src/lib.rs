@@ -30,6 +30,7 @@ pub use attestation::validate_attestation_response;
 pub use config::{
     IndexerConfig, MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig, RpcConfig,
 };
+pub use funding::DustCheckpointStore;
 pub use indexer::MidnightIndexer;
 pub use publisher::{RecoveringMidnightPublisher, ResponseAwaiter};
 #[cfg(feature = "sandbox")]

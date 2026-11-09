@@ -1462,6 +1462,7 @@ mod live {
             Arc::new(IndexerDustEvents::new(
                 config.publisher.indexer_ws_url.clone(),
             )),
+            None,
         );
         let provers = Arc::new(
             Provers::new(
