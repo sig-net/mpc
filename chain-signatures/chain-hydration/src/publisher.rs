@@ -175,7 +175,7 @@ impl HydrationClient {
         config: &HydrationConfig,
         telemetry: Arc<dyn PublisherTelemetry>,
     ) -> anyhow::Result<Self> {
-        let api = OnlineClient::<HydradxConfig>::from_url(&config.rpc_ws_url).await?;
+        let api = OnlineClient::<HydradxConfig>::from_url(config.rpc_ws_url.as_str()).await?;
         let signer = HydrationSigner::from_uri(&config.signer_uri)?;
         Ok(Self {
             api,

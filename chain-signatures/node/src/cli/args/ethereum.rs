@@ -2,6 +2,7 @@ use anyhow::Context as _;
 use clap::builder::{PossibleValuesParser, TypedValueParser as _};
 use mpc_chain_ethereum::{EthConfig, EthNetwork, IndexerConfig};
 use secrecy::{ExposeSecret, SecretString};
+use url::Url;
 
 /// Networks a production node may serve.
 #[cfg(not(feature = "test-feature"))]
@@ -58,7 +59,7 @@ pub struct EthArgs {
         hide_env_values = true,
         requires = "eth_account_sk"
     )]
-    pub eth_execution_rpc_http_url: Option<String>,
+    pub eth_execution_rpc_http_url: Option<Url>,
 
     /// The network the RPC serves.
     #[arg(
@@ -83,9 +84,7 @@ impl EthArgs {
         let network = self.eth_network.context("eth network is required")?;
         let execution_rpc_http_url = self
             .eth_execution_rpc_http_url
-            .context("eth execution rpc http url is required")?
-            .parse()
-            .context("invalid eth execution rpc http url")?;
+            .context("eth execution rpc http url is required")?;
         let contract_address = self
             .eth_contract_address
             .context("eth contract address is required")?
@@ -203,8 +202,8 @@ mod tests {
     }
 
     #[test]
-    fn into_config_rejects_an_invalid_rpc_url() {
-        let args = EthArgs::parse_from([
+    fn the_cli_rejects_an_invalid_rpc_url() {
+        assert!(EthArgs::try_parse_from([
             "test",
             "--eth-account-sk",
             ACCOUNT_SK,
@@ -214,8 +213,8 @@ mod tests {
             CONTRACT,
             "--eth-network",
             "mainnet",
-        ]);
-        assert!(args.into_config().is_err());
+        ])
+        .is_err());
     }
 
     /// The two cadences, pinned: 100ms is also what the Ethereum crate's own

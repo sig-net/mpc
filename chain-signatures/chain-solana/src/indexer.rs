@@ -654,7 +654,7 @@ mod tests {
     ) -> SolanaIndexer<MockStateManager, T> {
         let program_id = Pubkey::new_unique();
         let client = SolanaClient::for_indexer(
-            url.to_string(),
+            url.parse().unwrap(),
             program_id,
             Arc::new(NoopPublisherTelemetry),
             SharedBackoff::new(),
@@ -2100,7 +2100,7 @@ mod tests {
         let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
 
         let client = SolanaClient::for_indexer(
-            http_url.clone(),
+            http_url.parse().unwrap(),
             Pubkey::from_str(&sol_addr).unwrap(),
             Arc::new(NoopPublisherTelemetry),
             SharedBackoff::new(),

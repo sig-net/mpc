@@ -1,9 +1,10 @@
 use std::fmt;
+use url::Url;
 
 /// Canton OIDC client-credentials authentication configuration.
 #[derive(Clone)]
 pub struct CantonAuthConfig {
-    pub token_url: String,
+    pub token_url: Url,
     pub client_id: String,
     pub client_secret: String,
     pub audience: String,
@@ -19,8 +20,8 @@ impl CantonAuthConfig {
 /// Canton JSON Ledger API configuration.
 #[derive(Clone)]
 pub struct CantonConfig {
-    pub json_api_url: String,
-    pub json_api_ws_url: String,
+    pub json_api_url: Url,
+    pub json_api_ws_url: Url,
     pub auth: CantonAuthConfig,
     pub ledger_api_user: String,
     pub party_id: String,

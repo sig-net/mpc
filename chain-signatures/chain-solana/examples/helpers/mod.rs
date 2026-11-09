@@ -25,11 +25,10 @@ pub fn env_u64(name: &str, default: Option<u64>) -> anyhow::Result<u64> {
 /// Build a [`SolConfig`] from the standard set of benchmark env vars
 /// (`RPC_URL`, `PROGRAM_ADDRESS`).
 pub fn make_config() -> anyhow::Result<SolConfig> {
-    let rpc_http_url = opt_env("RPC_URL")?;
     Ok(SolConfig {
         // The bench only indexes; the signer is never used.
         account_sk: String::new(),
-        rpc_http_url,
+        rpc_http_url: opt_env("RPC_URL")?.parse()?,
         program_address: opt_env("PROGRAM_ADDRESS")?,
         indexer: Default::default(),
     })

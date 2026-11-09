@@ -20,6 +20,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
+use url::Url;
 
 #[derive(Debug, Clone, clap::Parser)]
 pub struct Options {
@@ -37,7 +38,7 @@ pub struct Options {
         default_value = "http://localhost:4318",
         hide_env_values = true
     )]
-    pub otlp_endpoint: String,
+    pub otlp_endpoint: Url,
 
     /// Console log format. `json` is GCP Cloud Logging structured output.
     #[arg(long, env("MPC_LOG_FORMAT"), value_enum, default_value_t = LogFormat::Plain)]
@@ -190,10 +191,15 @@ fn get_resource(env: Env, node_id: &str) -> Resource {
         .clone()
 }
 
-async fn init_otlp_logs(env: Env, node_id: &str, otlp_endpoint: &str) -> SdkLoggerProvider {
+/// `otlp_endpoint` plus `path`; a host-only `Url` renders with a trailing slash.
+fn otlp_url(otlp_endpoint: &Url, path: &str) -> String {
+    format!("{}/{path}", otlp_endpoint.as_str().trim_end_matches('/'))
+}
+
+async fn init_otlp_logs(env: Env, node_id: &str, otlp_endpoint: &Url) -> SdkLoggerProvider {
     let exporter = LogExporter::builder()
         .with_http()
-        .with_endpoint(format!("{otlp_endpoint}/v1/logs"))
+        .with_endpoint(otlp_url(otlp_endpoint, "v1/logs"))
         .build()
         .expect("Failed to create log exporter");
 
@@ -203,10 +209,10 @@ async fn init_otlp_logs(env: Env, node_id: &str, otlp_endpoint: &str) -> SdkLogg
         .build()
 }
 
-async fn init_otlp_traces(env: Env, node_id: &str, otlp_endpoint: &str) -> SdkTracerProvider {
+async fn init_otlp_traces(env: Env, node_id: &str, otlp_endpoint: &Url) -> SdkTracerProvider {
     let exporter = SpanExporter::builder()
         .with_http()
-        .with_endpoint(format!("{otlp_endpoint}/v1/traces"))
+        .with_endpoint(otlp_url(otlp_endpoint, "v1/traces"))
         .build()
         .expect("Failed to create trace exporter");
 
