@@ -266,6 +266,7 @@ mod tests {
 
     #[test]
     fn the_cli_rejects_a_malformed_central_address() {
+        crate::cli::tests::assert_midnight_env_unset();
         for invalid in ["ab".repeat(31), format!("0x{}", "ab".repeat(32))] {
             let mut argv = configured_argv();
             let flag = argv
