@@ -1342,9 +1342,7 @@ mod tests {
                 recovery_id: 0,
             },
         };
-        let mut data = anchor_lang::event::EVENT_IX_TAG_LE.to_vec();
-        data.extend(anchor_lang::Event::data(&event));
-        solana_sdk::bs58::encode(data).into_string()
+        cpi_event_instruction(&event)
     }
 
     #[tokio::test]
