@@ -433,10 +433,28 @@ async function bootstrap(request: BootstrapRequest) {
     queryURL: request.config.indexerUrl,
     subscriptionURL: request.config.indexerWsUrl,
   });
-  const indexed = (contractAddress: string) =>
-    waitFor(`the indexer to serve the contract deployed at ${contractAddress}`, async () =>
-      (await publicData.queryContractState(contractAddress)) ? true : undefined,
-    );
+  // A failed query counts as not indexed yet, so a transient indexer error does not end the
+  // bootstrap; a timeout names the last one.
+  const indexed = async (contractAddress: string) => {
+    let lastError: unknown;
+    try {
+      await waitFor(`the indexer to serve the contract deployed at ${contractAddress}`, () =>
+        publicData.queryContractState(contractAddress).then(
+          (state) => (state ? true : undefined),
+          (error: unknown) => {
+            lastError = error;
+            return undefined;
+          },
+        ),
+      );
+    } catch (error) {
+      if (lastError === undefined) throw error;
+      const timeout = error instanceof Error ? error.message : String(error);
+      throw new Error(`${timeout} (last query error: ${describeFailure(lastError)})`, {
+        cause: error,
+      });
+    }
+  };
   diagnostics("deploying central Signet contract");
   const central = await step("deploying the central Signet contract", () =>
     deploySignetContract(deployEnv(request.config, DEPLOYER_SEED)),
