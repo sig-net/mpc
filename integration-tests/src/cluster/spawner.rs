@@ -70,6 +70,12 @@ fn placeholder_program_address() -> SolanaPubkey {
         .expect("a valid literal")
 }
 
+/// Dummy endpoint, replaced once the chain's test container is running.
+fn placeholder_url() -> url::Url {
+    "http://placeholder.invalid"
+        .parse()
+        .expect("a valid literal")
+}
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
 ///
 /// When enabled, uses hardcoded key shares from fixture data to start nodes in
@@ -300,7 +306,7 @@ impl ClusterSpawner {
         if self.cfg.sol.is_none() {
             self.cfg.sol = Some(SolConfig {
                 account_sk: String::new(),                      // Will be filled in later
-                rpc_http_url: String::new(),                    // Will be filled in later
+                rpc_http_url: placeholder_url(),                // Will be filled in later
                 program_address: placeholder_program_address(), // Will be filled in later
                 indexer: Default::default(),
             });
@@ -337,10 +343,10 @@ impl ClusterSpawner {
     pub fn canton(mut self) -> Self {
         if self.cfg.canton.is_none() {
             self.cfg.canton = Some(CantonConfig {
-                json_api_url: String::new(),
-                json_api_ws_url: String::new(),
+                json_api_url: placeholder_url(),
+                json_api_ws_url: placeholder_url(),
                 auth: CantonAuthConfig {
-                    token_url: String::new(),
+                    token_url: placeholder_url(),
                     client_id: String::new(),
                     client_secret: String::new(),
                     audience: String::new(),

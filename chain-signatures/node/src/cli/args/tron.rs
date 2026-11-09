@@ -1,7 +1,7 @@
-use anyhow::Context as _;
 use mpc_chain_tron::TronConfig;
 use secrecy::{ExposeSecret as _, SecretString};
 use std::time::Duration;
+use url::Url;
 
 /// CLI arguments for the Tron execution watcher (target-only chain).
 #[derive(Debug, Clone, clap::Parser)]
@@ -9,7 +9,7 @@ use std::time::Duration;
 pub struct TronArgs {
     /// Tron HTTP API endpoint (e.g. https://api.trongrid.io).
     #[arg(long, env("MPC_TRON_ENDPOINT"), hide_env_values = true)]
-    pub tron_endpoint: Option<String>,
+    pub tron_endpoint: Option<Url>,
     /// `TRON-PRO-API-KEY` header value when the provider is TronGrid.
     #[arg(
         long,
@@ -33,7 +33,7 @@ impl TronArgs {
             return Ok(None);
         };
         let config = TronConfig {
-            endpoint: tron_endpoint.parse().context("invalid tron endpoint")?,
+            endpoint: tron_endpoint,
             api_key: self.tron_api_key.map(|key| key.expose_secret().to_string()),
             poll_interval: Duration::from_millis(self.tron_poll_interval_ms),
             ..TronConfig::default()
@@ -47,7 +47,6 @@ impl TronArgs {
 mod tests {
     use super::*;
     use clap::Parser as _;
-    use url::Url;
 
     #[test]
     fn unconfigured_yields_no_config() {
@@ -60,7 +59,7 @@ mod tests {
     #[test]
     fn into_config_parses_the_configured_fields() {
         let args = TronArgs {
-            tron_endpoint: Some("https://api.trongrid.io".to_string()),
+            tron_endpoint: Some("https://api.trongrid.io".parse().unwrap()),
             tron_api_key: Some("tron-key".to_string().into()),
             tron_poll_interval_ms: 250,
         };
@@ -74,16 +73,15 @@ mod tests {
     }
 
     #[test]
-    fn into_config_rejects_an_invalid_endpoint() {
-        let args = TronArgs::parse_from(["test", "--tron-endpoint", "not a url"]);
-        assert!(args.into_config().is_err());
+    fn the_cli_rejects_an_invalid_endpoint() {
+        assert!(TronArgs::try_parse_from(["test", "--tron-endpoint", "not a url"]).is_err());
     }
 
     /// `validate` gates what `spawn_indexers` builds the watcher from.
     #[test]
     fn into_config_runs_config_validation() {
         let args = TronArgs {
-            tron_endpoint: Some("https://api.trongrid.io".to_string()),
+            tron_endpoint: Some("https://api.trongrid.io".parse().unwrap()),
             tron_api_key: None,
             tron_poll_interval_ms: 0,
         };
