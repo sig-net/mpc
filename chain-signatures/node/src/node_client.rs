@@ -226,7 +226,7 @@ impl NodeClient {
 
         if status.is_success() {
             let response = decode_checkpoint_response(body.as_ref())?;
-            Ok(response.checkpoints.get(&chain).cloned())
+            Ok(response.adoptable(chain))
         } else {
             let resp = std::str::from_utf8(&body).map_err(RequestError::MalformedResponse)?;
             Err(RequestError::Unsuccessful(status, resp.into(), request_id))
@@ -246,6 +246,7 @@ mod tests {
         let versioned = CheckpointResponse {
             version: crate::CHECKPOINT_VERSION,
             checkpoints: checkpoints.clone(),
+            ..Default::default()
         };
         let mut versioned_body = Vec::new();
         ciborium::into_writer(&versioned, &mut versioned_body).unwrap();
@@ -279,7 +280,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let response = CheckpointResponse {
             version: crate::CHECKPOINT_VERSION + 1,
-            checkpoints: HashMap::new(),
+            ..Default::default()
         };
         let mut body = Vec::new();
         ciborium::into_writer(&response, &mut body).unwrap();

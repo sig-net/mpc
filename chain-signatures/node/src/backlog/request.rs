@@ -609,7 +609,7 @@ impl SignEntry<Bidirectional<Executing>> {
         // `Bidirectional<Executing>` is reachable only from the initial leg, so
         // this request's indexing time is when the round trip began. The
         // follow-up request stamps itself with "now", so it must be carried.
-        let origin_indexed_at = Some(self.request.unix_timestamp_indexed);
+        let origin_indexed_at = self.request.unix_timestamp_indexed;
 
         let completed_tx = CompletedTx::new(
             Arc::clone(self.execution_tx()),

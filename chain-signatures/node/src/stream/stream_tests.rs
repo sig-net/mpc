@@ -514,7 +514,10 @@ async fn test_stream_keeps_the_recovered_ethereum_entry_over_a_replay() {
         SignCommand::Request(req) => {
             assert_eq!(req.sign_id(), sign_id);
             // The replay does not replace the entry, so the first index time stands.
-            assert_eq!(req.request().unix_timestamp_indexed, recovered_timestamp);
+            assert_eq!(
+                req.request().unix_timestamp_indexed,
+                Some(recovered_timestamp)
+            );
         }
         other => panic!("expected the recovered request after catchup, got {other:?}"),
     }
@@ -523,7 +526,10 @@ async fn test_stream_keeps_the_recovered_ethereum_entry_over_a_replay() {
         .get(Chain::Ethereum, &sign_id)
         .await
         .expect("recovered entry should remain in backlog");
-    assert_eq!(entry.request().unix_timestamp_indexed, recovered_timestamp);
+    assert_eq!(
+        entry.request().unix_timestamp_indexed,
+        Some(recovered_timestamp)
+    );
 }
 
 #[tokio::test]

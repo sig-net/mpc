@@ -313,7 +313,7 @@ pub fn mock_execution_entry_with_timestamp(
         mock_bidi_request(tx.sign_id(), chain)
     } else {
         let mut req = (*mock_bidi_request(tx.sign_id(), chain)).clone();
-        req.unix_timestamp_indexed = unix_timestamp_indexed;
+        req.unix_timestamp_indexed = Some(unix_timestamp_indexed);
         Arc::new(req)
     };
 
