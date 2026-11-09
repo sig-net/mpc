@@ -45,12 +45,13 @@ A `build` request for `respondBidirectional` requires `attestation: { blockHeigh
 
 Each submit gets one absolute 360-second budget. Wallet startup, DUST readiness, base-transaction proof, DUST balancing, balancing-transaction proof/finalization, and submission all consume that same deadline rather than starting phase-specific clocks. Readiness and base proof still own cancellation at their respective boundaries; wallet-critical work does not.
 
-Four errors have especially important retry semantics:
+Five errors have especially important retry semantics:
 
 - `wallet_unsynced`: wallet startup, DUST readiness, or a resync exhausted the submit deadline. Nothing was posted, so retrying is safe; the background startup or resync continues.
 - `proving_timeout`: base proving exhausted the remaining submit deadline. No wallet operation started, so retrying is safe.
 - `state_conflict`: the node refused the transaction, so nothing was posted. Either it rejected the transaction as invalid, which is how a stale contract read, an expired TTL, or any other pool rejection surfaces (the node does not say which), or it could not validate the transaction at all (RPC error `1002`), which another node may still accept. Rebuild the intent against fresh contract state and retry.
 - `ambiguous_submit`: the absolute deadline expired after wallet-critical work may have started. The transaction can still land in the background, and the MPC retries automatically, so it may publish the response more than once. Duplicate response events are acceptable and require no operator reconciliation.
+- `not_submitted`: about three blocks (18 seconds) after submitting, and every block after, the node is asked over JSON-RPC whether it holds the transaction in its ready pool or in a block since the submit started. When the node answers that it holds it nowhere, the submit fails at once instead of waiting out the deadline on a node subscription a dropped socket ended silently. Retrying is safe; should this attempt still reach the node later, the response posts twice, which is acceptable. A transaction the node finalizes counts as landed even if the SDK never says so; one still pending keeps the submit waiting, up to the deadline. When the node answered and the SDK did not, the wallet is then reopened once that transaction has settled, so the next submit does not go out on the same dead socket.
 
 Right before balancing, the submit asks the indexer over a fresh websocket for its latest DUST ledger event. The SDK's own sockets have no pong timeout, so a half-open one leaves the wallet reporting "synced" on a DUST tree the node no longer accepts spends against (ledger error 170). If the indexer holds events the wallet has not applied within five seconds, the wallet is restored from its own current state next to the stale one and swapped in once synced, at most 60 seconds into the submit; an indexer that does not answer the probe leaves the submit as it was.
 

@@ -9,6 +9,7 @@ export type ErrorCode =
   | "proving_timeout"
   | "state_conflict"
   | "ambiguous_submit"
+  | "not_submitted"
   | "internal";
 
 export class PublisherError extends Error {

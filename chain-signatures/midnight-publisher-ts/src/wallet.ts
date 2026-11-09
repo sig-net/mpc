@@ -23,6 +23,7 @@ import { filter, firstValueFrom, of, ReplaySubject, throwError, timeout } from "
 
 import type { Endpoints } from "./config.js";
 import { latestDustEventId } from "./dust-probe.js";
+import { nodeRpc, watchLanding } from "./landing.js";
 import { describeFailure, PublisherError } from "./errors.js";
 import type { UnboundTransaction } from "./prover.js";
 import { decodeSnapshot, encodeSnapshot, type WalletSnapshot } from "./snapshot.js";
@@ -154,6 +155,11 @@ const DUST_PROBE_MS = 3_000;
 const DUST_CATCH_UP_MS = 5_000;
 // Restoring from the wallet's own current state replays seconds of events.
 const RESYNC_BUDGET_MS = 60_000;
+// The SDK hears of finality from its own subscription; past this after the node, it never will.
+const SDK_ANSWER_GRACE_MS = 2_000;
+// How long a reopen waits for the landed transaction to settle, so the restored state does
+// not carry its coin as in flight.
+const REOPEN_SETTLE_MS = 30_000;
 // A submit returns before the wallet's own sync has seen its transaction confirmed, about a
 // second later; a node publishing back to back is only ever asked inside that second.
 const SNAPSHOT_SETTLE_MS = 5_000;
@@ -334,10 +340,29 @@ async function openFacade(
   // A replacement restoring next to the stale facade, which stays in use until it is synced.
   let resyncing: Promise<void> | undefined;
 
-  function resync(): Promise<void> {
+  // `stale`: the indexer sockets fell behind. `silent`: the node socket stopped answering,
+  // and a restored facade opens a new one.
+  function resync(reason: "stale" | "silent"): Promise<void> {
     resyncing ??= (async () => {
       const startedMs = Date.now();
       try {
+        if (reason === "silent") {
+          const settled = await firstValueFrom(
+            facade
+              .state()
+              .pipe(
+                filter(isSettled),
+                timeout({ first: REOPEN_SETTLE_MS, with: () => of(undefined) }),
+              ),
+            { defaultValue: undefined },
+          );
+          if (settled === undefined) {
+            console.error(
+              `not reopening the funding wallet: still unsettled after ${REOPEN_SETTLE_MS} ms`,
+            );
+            return;
+          }
+        }
         const fresh = await restoreUntilSynced(keys, config, await currentStates(facade));
         if (closed) {
           await fresh.stop().catch(() => undefined);
@@ -345,7 +370,9 @@ async function openFacade(
         }
         const stale = facade;
         facade = fresh;
-        console.error(`funding wallet resynced in ${seconds(startedMs)}`);
+        console.error(
+          `funding wallet ${reason === "stale" ? "resynced" : "reopened"} in ${seconds(startedMs)}`,
+        );
         await stale.stop().catch(() => undefined);
       } catch (error) {
         // The stale facade stays; the next submit's check tries again.
@@ -424,7 +451,7 @@ async function openFacade(
         `funding wallet DUST is behind the indexer (applied ${applied}, indexer at ${latest}, ` +
           `checked in ${seconds(startedMs)}); resyncing before the submit`,
       );
-      return awaitResync(resync(), budgetMs);
+      return awaitResync(resync("stale"), budgetMs);
     },
     dustBalance: () => readDustBalance(facade),
     async balanceTx(tx) {
@@ -443,9 +470,42 @@ async function openFacade(
       if (tx.identifiers().at(-1) === undefined) {
         throw new Error("the finalized transaction carries no identifier");
       }
-      const txId = await facade.submitTransaction(tx);
-      if (txId === undefined) throw new Error("the finalized transaction carries no identifier");
-      return { txId };
+      // The SDK answers only from its node subscription, which a dropped or frozen socket
+      // ends silently; the node itself says whether the transaction went anywhere.
+      const watch = watchLanding(
+        nodeRpc(config.nodeUrl),
+        Buffer.from(tx.serialize()).toString("hex"),
+        tx.identifiers().at(-1)!,
+      );
+      const fromSdk = facade.submitTransaction(tx);
+      try {
+        const answer = await Promise.race([
+          fromSdk.then((txId) => ({ txId, fromNode: false })),
+          watch.verdict.then((txId) => ({ txId, fromNode: true })),
+        ]);
+        if (answer.txId === undefined) {
+          throw new Error("the finalized transaction carries no identifier");
+        }
+        if (answer.fromNode) {
+          const late = await Promise.race([
+            fromSdk.then(
+              () => false,
+              () => false,
+            ),
+            new Promise<boolean>((resolve) => setTimeout(() => resolve(true), SDK_ANSWER_GRACE_MS)),
+          ]);
+          if (late) {
+            // Its next submit would go out on the same dead socket.
+            console.error(
+              `the node finalized ${answer.txId} but the SDK never answered; reopening the wallet`,
+            );
+            void resync("silent");
+          }
+        }
+        return { txId: answer.txId };
+      } finally {
+        watch.stop();
+      }
     },
     async snapshot() {
       if (resyncing !== undefined) {
