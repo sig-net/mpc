@@ -19,7 +19,7 @@ import {
 } from "@midnightntwrk/wallet-sdk-facade";
 import { ShieldedWallet } from "@midnightntwrk/wallet-sdk-shielded";
 import { UnshieldedWallet } from "@midnightntwrk/wallet-sdk-unshielded-wallet";
-import { filter, firstValueFrom, of, throwError, timeout } from "rxjs";
+import { filter, firstValueFrom, of, ReplaySubject, throwError, timeout } from "rxjs";
 
 import type { Endpoints } from "./config.js";
 import { describeFailure, PublisherError } from "./errors.js";
@@ -130,8 +130,15 @@ async function startFacade(
 }
 
 // A restored wallet only replays what happened since its snapshot, which takes seconds; one
-// still behind after this long falls back to a full sync rather than holding the publisher.
+// that makes no progress against an answering indexer for this long falls back to a full sync
+// rather than holding the publisher.
 const RESTORED_SYNC_TIMEOUT_MS = 3 * 60 * 1000;
+// The SDK retries a failed indexer subscription on a backoff that grows to two minutes, so a
+// restore begun during an indexer outage can stay offline that long after the indexer is
+// back; one with no progress over this interval while the indexer answers is restarted from
+// the snapshot, which reconnects at once.
+const RESTORE_PROGRESS_CHECK_MS = 10_000;
+const INDEXER_PROBE_MS = 2_000;
 
 const DESCRIBE_TIMEOUT_MS = 1_000;
 // A submit returns before the wallet's own sync has seen its transaction confirmed, about a
@@ -186,6 +193,94 @@ async function syncFromStart(keys: AccountKeys, config: MidnightNodeConfig): Pro
   return facade;
 }
 
+// Whether the indexer answers a GraphQL request at all; never throws.
+async function indexerAnswers(indexerUrl: string): Promise<boolean> {
+  try {
+    const response = await fetch(indexerUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: "{ __typename }" }),
+      signal: AbortSignal.timeout(INDEXER_PROBE_MS),
+    });
+    await response.body?.cancel();
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function currentStates(facade: WalletFacade): Promise<WalletSnapshot> {
+  return {
+    shielded: await facade.shielded.serializeState(),
+    unshielded: await facade.unshielded.serializeState(),
+    dust: await facade.dust.serializeState(),
+  };
+}
+
+function appliedMark(state: FacadeState): string {
+  const { dust, shielded, unshielded } = state;
+  return `${shielded.progress.appliedIndex}/${unshielded.progress.appliedId}/${dust.progress.appliedIndex}`;
+}
+
+// Starts the restored facade, and again from where it got to each time it stalls against an
+// answering indexer. Throws once it has stalled for RESTORED_SYNC_TIMEOUT_MS in total. An
+// unreachable indexer never counts: a full sync could not get further.
+async function restoreUntilSynced(
+  keys: AccountKeys,
+  config: MidnightNodeConfig,
+  snapshot: WalletSnapshot,
+): Promise<WalletFacade> {
+  let stalledMs = 0;
+  let states = snapshot;
+  // Kept across restarts, which resume where the last one stalled.
+  let mark: string | undefined;
+  for (;;) {
+    const facade = await startFacade(keys, config, states);
+    // One subscription for the whole wait, so no state lands between two reads of it.
+    const latestState = new ReplaySubject<FacadeState>(1);
+    const subscription = facade.state().subscribe(latestState);
+    try {
+      for (;;) {
+        const synced = await firstValueFrom(
+          latestState.pipe(
+            filter((state) => state.isSynced),
+            timeout({ first: RESTORE_PROGRESS_CHECK_MS, with: () => of(undefined) }),
+          ),
+          { defaultValue: undefined },
+        );
+        if (synced !== undefined) return facade;
+        const latest = await firstValueFrom(
+          latestState.pipe(timeout({ first: DESCRIBE_TIMEOUT_MS, with: () => of(undefined) })),
+          { defaultValue: undefined },
+        );
+        const now = latest === undefined ? mark : appliedMark(latest);
+        if (now !== mark) {
+          mark = now;
+          continue;
+        }
+        if (!(await indexerAnswers(config.indexerUrl))) continue;
+        stalledMs += RESTORE_PROGRESS_CHECK_MS;
+        if (stalledMs >= RESTORED_SYNC_TIMEOUT_MS) {
+          throw new Error(`no sync progress in ${stalledMs} ms against an answering indexer`);
+        }
+        console.error(
+          `restarting the wallet restore: no sync progress in ${RESTORE_PROGRESS_CHECK_MS} ms ` +
+            `while the indexer answers`,
+        );
+        // Unreadable state only costs the replay since the snapshot.
+        states = await currentStates(facade).catch(() => states);
+        break;
+      }
+    } catch (error) {
+      await facade.stop().catch(() => undefined);
+      throw error;
+    } finally {
+      subscription.unsubscribe();
+    }
+    await facade.stop().catch(() => undefined);
+  }
+}
+
 // Any snapshot problem costs a full sync, never a refusal: the snapshot only saves time.
 async function startFromSnapshot(
   keys: AccountKeys,
@@ -201,18 +296,7 @@ async function startFromSnapshot(
   }
   const startedMs = Date.now();
   try {
-    const facade = await startFacade(keys, config, decoded.states);
-    try {
-      await firstValueFrom(
-        facade.state().pipe(
-          filter((state) => state.isSynced),
-          timeout({ first: RESTORED_SYNC_TIMEOUT_MS }),
-        ),
-      );
-    } catch (error) {
-      await facade.stop().catch(() => undefined);
-      throw error;
-    }
+    const facade = await restoreUntilSynced(keys, config, decoded.states);
     console.error(
       `funding wallet restored from a snapshot taken ${seconds(decoded.takenAt.getTime())} ` +
         `ago; caught up in ${seconds(startedMs)}`,
