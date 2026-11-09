@@ -1,4 +1,5 @@
 use mpc_chain_solana::{SolConfig, SolIndexerConfig};
+use url::Url;
 
 /// Configures Solana indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -19,7 +20,7 @@ pub struct SolArgs {
         hide_env_values = true,
         requires = "sol_account_sk"
     )]
-    pub sol_rpc_http_url: Option<String>,
+    pub sol_rpc_http_url: Option<Url>,
     /// The program address to watch
     #[arg(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]
     pub sol_program_address: Option<String>,
