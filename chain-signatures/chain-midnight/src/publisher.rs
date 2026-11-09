@@ -284,13 +284,7 @@ impl ChainPublisher for MidnightPublisher {
             .submit(&bytes)
             .await
             .inspect_err(|error| self.record_refusal(error))
-            .with_context(|| {
-                format!(
-                    "submitting the midnight respond intent built over the chain at {} failed after {:?}",
-                    chain.at_hash,
-                    submitting.elapsed()
-                )
-            })?;
+            .with_context(|| submit_failed(&chain.at_hash, submitting.elapsed()))?;
         let submit_took = submitting.elapsed();
         if let Some(speck) = submitted.dust_balance {
             self.telemetry
@@ -386,6 +380,16 @@ impl ChainPublisher for RecoveringMidnightPublisher {
             .publish_signature(action)
             .await
     }
+}
+
+/// The publish loop reads a standalone 4xx in an error's text as terminal and drops
+/// the publish, and `Duration`'s `Debug` can print one ("400.5ms"); whole
+/// milliseconds glued to the unit cannot.
+fn submit_failed(at_hash: &str, elapsed: Duration) -> String {
+    format!(
+        "submitting the midnight respond intent built over the chain at {at_hash} failed after {}ms",
+        elapsed.as_millis()
+    )
 }
 
 /// The action as one respond call, or a refusal: every gate is here, ahead of the
@@ -1738,6 +1742,33 @@ mod tests {
                 ),
             })
         );
+    }
+
+    #[test]
+    fn a_failed_submit_stays_retryable_whatever_it_took() {
+        let at_hash = format!("0x{}", "ab".repeat(32));
+        let elapsed = (400..406)
+            .flat_map(|whole| {
+                [
+                    Duration::from_millis(whole),
+                    Duration::from_micros(whole * 1000 + 123),
+                    Duration::from_secs(whole),
+                    Duration::from_millis(whole * 1000 + 250),
+                ]
+            })
+            .chain([Duration::from_micros(1_400_500), Duration::ZERO]);
+        for took in elapsed {
+            let error = anyhow::anyhow!("the node refused the transaction")
+                .context(submit_failed(&at_hash, took));
+            assert!(
+                mpc_chain_integration_core::utils::retry::is_retryable(&error),
+                "a submit failing after {took:?} must stay retryable: {error}"
+            );
+            assert!(
+                !mpc_chain_integration_core::utils::retry::is_provider_throttled(&error),
+                "a submit failing after {took:?} is not a throttle: {error:#}"
+            );
+        }
     }
 
     #[tokio::test]
