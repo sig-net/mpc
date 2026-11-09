@@ -4,6 +4,7 @@
 import { createInterface } from "node:readline";
 
 import { configFromEnv } from "./config.js";
+import { logIndexerSocketCloses } from "./indexer-sockets.js";
 import { handleLine } from "./protocol.js";
 import { shutdownPublisher } from "./submit.js";
 
@@ -11,6 +12,8 @@ import { shutdownPublisher } from "./submit.js";
 console.log = console.error;
 console.info = console.error;
 console.debug = console.error;
+// Before any wallet opens a socket.
+logIndexerSocketCloses();
 
 const config = configFromEnv();
 
