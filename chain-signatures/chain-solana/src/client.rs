@@ -137,10 +137,10 @@ struct JsonRpcRequest {
 
 /// Represents a JSON-RPC response, which can either be a successful result or an error.
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum JsonRpcResponse<T> {
-    Err { id: usize, error: serde_json::Value },
-    Ok { id: usize, result: Option<T> },
+struct JsonRpcResponse<T> {
+    id: usize,
+    result: Option<T>,
+    error: Option<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -350,29 +350,28 @@ impl SolanaClient {
 
                 let mut results = HashMap::new();
                 for resp in responses {
-                    match resp {
-                        JsonRpcResponse::Ok {
-                            id,
-                            result: Some(block),
-                        } => {
-                            if let Some(slot) = slots.get(id).copied() {
-                                results.insert(slot, block);
-                            }
-                        }
-                        // null result: absent block — the per-slot refetch resolves it
-                        JsonRpcResponse::Ok { .. } => {}
-                        JsonRpcResponse::Err { id, error } => {
-                            // Only network-skipped slots are silent; node-local
-                            // absence warns — `process_catchup_item` refetch-retries it
+                    match (resp.result, resp.error) {
+                        // error present ⇒ the error side wins, both-field
+                        // envelopes included; Only network-skipped slots are
+                        // silent — node-local absence warns because
+                        // `process_catchup_item` refetch-retries it
+                        (_, Some(error)) => {
                             let skipped = error
                                 .get("code")
                                 .and_then(serde_json::Value::as_i64)
                                 .is_some_and(slot_skipped);
-                            let slot = slots.get(id).copied();
+                            let slot = slots.get(resp.id).copied();
                             if !skipped {
                                 tracing::warn!(?error, ?slot, "JSON-RPC batch response error");
                             }
                         }
+                        (Some(block), None) => {
+                            if let Some(slot) = slots.get(resp.id).copied() {
+                                results.insert(slot, block);
+                            }
+                        }
+                        // null result: absent block — the per-slot refetch resolves it
+                        (None, None) => {}
                     }
                 }
                 Ok::<HashMap<u64, UiConfirmedBlock>, anyhow::Error>(results)
