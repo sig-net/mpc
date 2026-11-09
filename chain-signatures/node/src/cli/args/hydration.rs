@@ -1,4 +1,5 @@
 use mpc_chain_hydration::HydrationConfig;
+use url::Url;
 
 /// Configures Hydration indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -11,7 +12,7 @@ pub struct HydrationArgs {
         hide_env_values = true,
         requires = "signer_uri"
     )]
-    pub rpc_ws_url: Option<String>,
+    pub rpc_ws_url: Option<Url>,
     /// Hydration signer URI
     #[arg(
         long = "hydration-signer-uri",

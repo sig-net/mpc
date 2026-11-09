@@ -61,7 +61,7 @@ pub enum Cli {
     Start {
         /// NEAR RPC address
         #[arg(long, env("MPC_NEAR_RPC"), hide_env_values = true)]
-        near_rpc: String,
+        near_rpc: Url,
         /// MPC contract id
         #[arg(long, env("MPC_CONTRACT_ID"))]
         mpc_contract_id: AccountId,
@@ -113,6 +113,61 @@ pub enum Cli {
         #[command(flatten)]
         log_options: logs::Options,
     },
+}
+
+impl Cli {
+    /// `Cli::parse`, except an error never prints what the operator typed:
+    /// values can hold API keys and passwords, and clap echoes them even with
+    /// `hide_env_values`, which only covers `--help`. A rejected value names
+    /// its env var, which is what operators set, and its flag. An unknown
+    /// argument or subcommand is not named at all: it can be a secret split
+    /// off by a missing quote, or glued to a flag.
+    pub fn parse_redacted() -> Self {
+        Self::try_parse_redacted(std::env::args_os()).unwrap_or_else(|err| err.exit())
+    }
+
+    fn try_parse_redacted<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        use clap::error::{ContextKind, ContextValue, ErrorKind};
+        Self::try_parse_from(args).map_err(|err| {
+            let message = match err.kind() {
+                // An empty value is clap's "a value is required": nothing to hide.
+                ErrorKind::InvalidValue
+                    if matches!(err.get(ContextKind::InvalidValue), Some(ContextValue::String(v)) if v.is_empty()) =>
+                {
+                    return err;
+                }
+                ErrorKind::InvalidValue | ErrorKind::ValueValidation | ErrorKind::TooManyValues => {
+                    // Clap names the flag as `--near-rpc <NEAR_RPC>`.
+                    let arg = err.get(ContextKind::InvalidArg).map(ToString::to_string);
+                    let flag = arg.as_deref().unwrap_or_default().split(' ').next().unwrap_or_default();
+                    match env_var_of(flag) {
+                        Some(env) => format!("invalid value for {env} ({flag})"),
+                        None => format!("invalid value for {flag}"),
+                    }
+                }
+                ErrorKind::UnknownArgument => "unexpected argument".to_string(),
+                ErrorKind::InvalidSubcommand => "unrecognized subcommand".to_string(),
+                // The other kinds print flag names only.
+                _ => return err,
+            };
+            clap::Error::raw(err.kind(), format!("{message}\n"))
+        })
+    }
+}
+
+/// The env var behind a `start` flag, such as `MPC_NEAR_RPC` for `--near-rpc`.
+fn env_var_of(flag: &str) -> Option<String> {
+    let command = <Cli as clap::CommandFactory>::command();
+    let start = command.find_subcommand("start")?;
+    let arg = start.get_arguments().find(|arg| {
+        arg.get_long()
+            .is_some_and(|long| flag == format!("--{long}"))
+    })?;
+    Some(arg.get_env()?.to_string_lossy().into_owned())
 }
 
 /// `Url` alone accepts `node.example.org:8080`, reading the host as the scheme,
@@ -176,7 +231,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // NEAR as a source chain exists for the integration tests only, and the
             // test harness builds this binary with `test-feature`.
             if cfg!(feature = "test-feature") {
-                let rpc_client = near_fetch::Client::new(&near_rpc);
+                let rpc_client = near_fetch::Client::new(near_rpc.as_str());
                 let near_sign_tx = SignCommand::forward_near(sign_tx.clone(), backlog.clone());
                 mpc_chain_near::run(
                     &mpc_contract_id,
@@ -574,7 +629,7 @@ struct RpcHandles {
 
 impl RpcHandles {
     async fn new(
-        near_rpc_url: &str,
+        near_rpc_url: &Url,
         my_address: &Url,
         network: &NetworkConfig,
         mpc_contract_id: &AccountId,
@@ -583,7 +638,7 @@ impl RpcHandles {
         backlog: Backlog,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
-        let near_rpc = near_fetch::Client::new(near_rpc_url);
+        let near_rpc = near_fetch::Client::new(near_rpc_url.as_str());
         // One set of gates for every NEAR call: the publisher and the governance
         // client share the endpoint and the signer.
         let near_gates = NearRpcGates::new(stack.gate(Chain::NEAR));
@@ -646,7 +701,7 @@ impl StorageHandles {
         storage_options: &storage::Options,
     ) -> anyhow::Result<Self> {
         let keystore = Keystore::init(storage_options, account_id).await?;
-        let redis_pool = redis_pool(Url::parse(storage_options.redis_url.as_str())?)?;
+        let redis_pool = redis_pool(storage_options.redis_url.clone())?;
         let triple_storage = TriplePair::storage(&redis_pool, account_id);
         let presignature_storage = Presignature::storage(&redis_pool, account_id);
         let backlog = Backlog::persisted(CheckpointStorage::Redis(
@@ -990,6 +1045,42 @@ mod tests {
 
     use super::*;
 
+    /// No error echoes what the operator typed: every flag meets every way a
+    /// secret can land in the input.
+    #[test]
+    fn no_error_echoes_the_input() {
+        use clap::CommandFactory as _;
+        let parse = |input: &[String]| {
+            let args = ["mpc-node", "start"].map(String::from).into_iter();
+            Cli::try_parse_redacted(args.chain(input.iter().cloned()))
+                .unwrap_err()
+                .to_string()
+        };
+        let command = Cli::command();
+        let flags = command.find_subcommand("start").unwrap().get_arguments();
+        for flag in flags.map(|arg| format!("--{}", arg.get_long().unwrap())) {
+            for input in [
+                vec![format!("{flag}=s3cr3t")],      // bad value, inline
+                vec![flag.clone(), "s3cr3t".into()], // bad value, separate
+                vec![format!("{flag}s3cr3t")],       // glued to the flag
+                vec![flag.clone(), "s3cr3t".into(), "s3cr3t".into()], // stray after the value
+            ] {
+                let error = parse(&input);
+                assert!(!error.contains("s3cr3t"), "{input:?} echoed: {error}");
+            }
+        }
+
+        // Outside the loop: a secret in the subcommand's place, before `start`.
+        let subcommand = Cli::try_parse_redacted(["mpc-node", "s3cr3t"])
+            .unwrap_err()
+            .to_string();
+        assert!(!subcommand.contains("s3cr3t"), "{subcommand}");
+
+        // Operators set env vars, so a rejected value names the one to fix.
+        let named = parse(&["--near-rpc=s3cr3t".into()]);
+        assert!(named.contains("MPC_NEAR_RPC (--near-rpc)"), "{named}");
+    }
+
     #[test]
     fn peer_address_must_be_http_or_https_with_a_host() {
         for ok in ["http://10.0.0.1:3000", "https://node.example.org"] {
@@ -1167,7 +1258,7 @@ mod tests {
     fn sol_config_with_bogus_rpc() -> SolConfig {
         SolConfig {
             account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
-            rpc_http_url: "http://127.0.0.1:1".into(),
+            rpc_http_url: "http://127.0.0.1:1".parse().unwrap(),
             program_address: mpc_chain_solana::Pubkey::new_unique().to_string(),
             indexer: Default::default(),
         }
