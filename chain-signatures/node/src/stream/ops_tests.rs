@@ -886,6 +886,49 @@ async fn process_sign_request_skips_the_expiry_bound_without_a_source_block_time
     assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_some());
 }
 
+/// The block time from the event is forwarded to the bound, ensuring that the expiration window is correctly enforced.
+#[tokio::test]
+async fn handle_chain_event_forwards_the_block_time_to_the_bound() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let mut ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+    let root_pk = test_root_pk();
+    let event = tron_bidirectional_event(Vec::new());
+    let request = Arc::new(IndexedSignRequest::sign_bidirectional(
+        EXPIRY_SIGN_ID,
+        test_sign_args(0x7e),
+        Chain::Solana,
+        current_unix_timestamp(),
+        SignBidirectionalEvent {
+            serialized_transaction: owned_tron_bytes_with_expiry(
+                root_pk,
+                &event,
+                (SOURCE_BLOCK_S * 1000 + MAX_EXPIRATION_SPAN_MS + 1) as i64,
+            ),
+            ..event
+        },
+    ));
+
+    let err = crate::stream::handle_chain_event(
+        mpc_primitives::ChainEvent::SignRequest {
+            request,
+            block_timestamp: Some(SOURCE_BLOCK_S),
+        },
+        &mut ctx,
+        &NoopChainTelemetry,
+        root_pk,
+        Chain::Solana,
+    )
+    .await
+    .expect_err("the out-of-cap window is rejected at the event boundary");
+
+    assert!(
+        format!("{err:#}").contains("exceeds the cap"),
+        "unexpected error: {err:#}"
+    );
+    assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_none());
+}
+
 /// An Ethereum target carries no expiry; block time is ignored.
 #[tokio::test]
 async fn process_sign_request_ignores_block_time_for_targets_without_an_expiry() {
