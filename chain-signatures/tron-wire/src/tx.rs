@@ -18,6 +18,12 @@ use mpc_primitives::{Calldata, CompactMaybe, TronTxParams};
 use prost_types::Any;
 use sha2::{Digest, Sha256};
 
+/// java-tron's own cap: `expiration` at most 24 h past the producing
+/// head (`Constant.MAXIMUM_TIME_UNTIL_EXPIRATION`,
+/// `Manager.validateCommon` at b33eed89a6a4) — §4.3's cap, anchored
+/// at the source block.
+pub const MAX_EXPIRATION_SPAN_MS: u64 = 24 * 60 * 60 * 1000;
+
 impl RawTransaction {
     /// txID as defined by java-tron: sha256 over the serialized `raw` message.
     pub fn txid(&self) -> [u8; 32] {
@@ -210,6 +216,11 @@ mod tests {
         let raw = RawTransaction::parse(bytes).unwrap();
         let any = raw.contract[0].parameter.as_ref().unwrap();
         TriggerSmartContract::decode(any.value.as_slice()).unwrap()
+    }
+
+    #[test]
+    fn max_expiration_span_is_java_trons_24h() {
+        assert_eq!(MAX_EXPIRATION_SPAN_MS, 86_400_000);
     }
 
     #[test]

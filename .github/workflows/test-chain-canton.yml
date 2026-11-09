@@ -1,8 +1,12 @@
 name: Canton Tests
 
+# On demand only: the Canton suites need a dpm + JDK toolchain and a full
+# integration build per job, which is costly to repeat on every PR. Canton code
+# is still compiled and linted by `just lint` and unit-tested by `just test-unit`
+# in the Unit Tests workflow, the same coverage Hydration gets (it has no
+# integration suite). Run this from the Actions tab for Canton changes.
 on:
-  pull_request:
-  merge_group:
+  workflow_dispatch:
 
 env:
   RUSTFLAGS: -D warnings

@@ -1,3 +1,4 @@
+import { ChargedState, type StateValue } from "@midnight-ntwrk/compact-runtime";
 import {
   createUnprovenCallTx,
   type CallTxOptionsWithPrivateStateId,
@@ -87,6 +88,8 @@ export interface BuiltCall {
   tx: UnprovenTransaction;
   segment: number;
   requests: string[];
+  /** The caller's state once this call applies. */
+  nextState: StateValue;
 }
 
 const normalizeAddress = (address: string) => address.replace(/^0x/i, "").toLowerCase();
@@ -117,18 +120,51 @@ export async function buildCall<K extends CallerCircuitId>(
     tx: built.private.unprovenTx,
     segment,
     requests: requests.map((requestId) => bytesToHex(requestId as Uint8Array)),
+    nextState: built.public.nextContractState,
   };
+}
+
+/**
+ * `context` reading the caller as it stands once `earlier` applies. A transcript's declared
+ * gas is costed against the state it was built on, and its state writes cost more once
+ * another call in the same transaction has written the same map first, so a call the
+ * ledger applies after `earlier` and must commit is built on this view (as midnight-js
+ * does for calls in one scoped transaction); built on the shared pre-state it can run out
+ * of gas.
+ */
+export function afterCall(context: PlacementContext, earlier: BuiltCall): PlacementContext {
+  const reads = context.providers.publicDataProvider;
+  const caller = normalizeAddress(context.callerAddress);
+  const queryZSwapAndContractState: typeof reads.queryZSwapAndContractState = async (
+    address,
+    config,
+  ) => {
+    const states = await reads.queryZSwapAndContractState(address, config);
+    if (states === null || normalizeAddress(address) !== caller) return states;
+    const [zswap, contract, parameters] = states;
+    contract.data = new ChargedState(earlier.nextState);
+    return [zswap, contract, parameters];
+  };
+  // The provider is a class instance: forward everything else to it, bound to it.
+  const publicDataProvider = new Proxy(reads, {
+    get(target, property) {
+      if (property === "queryZSwapAndContractState") return queryZSwapAndContractState;
+      const value: unknown = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { ...context, providers: { ...context.providers, publicDataProvider } };
 }
 
 // midnight-js randomizes each intent's segment; rebuild both calls until the first lands in
 // the lower segment.
 export async function buildOrdered(
   buildLower: () => Promise<BuiltCall>,
-  buildHigher: () => Promise<BuiltCall>,
+  buildHigher: (lower: BuiltCall) => Promise<BuiltCall>,
 ): Promise<[BuiltCall, BuiltCall]> {
   for (let attempt = 0; attempt < 32; attempt += 1) {
     const lower = await buildLower();
-    const higher = await buildHigher();
+    const higher = await buildHigher(lower);
     if (lower.segment < higher.segment) return [lower, higher];
   }
   throw new Error("could not order the two intents' segments");
@@ -199,8 +235,8 @@ export async function submitPlacement(
 ): Promise<PlacementOutcome> {
   const [first, second] = calls;
   if (first === undefined) throw new Error(`${scenario} needs a call`);
-  const placed = (call: IsEvenCall, fallible: boolean) =>
-    buildCall(context, "submitPlacedRequest", [call, context.schema, fallible]);
+  const placed = (call: IsEvenCall, fallible: boolean, on = context) =>
+    buildCall(on, "submitPlacedRequest", [call, context.schema, fallible]);
 
   let parts: BuiltCall[];
   let phases: Map<number, "guaranteed" | "fallible">;
@@ -238,7 +274,7 @@ export async function submitPlacement(
   } else if (scenario === PlacementScenario.FallibleSegmentPair) {
     const [lower, higher] = await buildOrdered(
       () => placed(second, true),
-      () => placed(first, true),
+      (lower) => placed(first, true, afterCall(context, lower)),
     );
     parts = [higher, lower];
     phases = new Map([
@@ -246,7 +282,7 @@ export async function submitPlacement(
       [higher.segment, "fallible"],
     ]);
   } else {
-    let buildHigher = () => placed(second, true);
+    let buildHigher = (lower: BuiltCall) => placed(second, true, afterCall(context, lower));
     const failing =
       scenario === PlacementScenario.PartialSuccess ||
       scenario === PlacementScenario.FallibleThenFailing;
