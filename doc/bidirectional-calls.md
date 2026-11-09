@@ -502,7 +502,8 @@ signature: there it needs none.
 
 When the transaction of one request is included, every other request
 waiting on the same account and replay protection can never execute, and
-the MPC attests Unviable for each, at that transaction's height. A node
+the MPC attests Unviable for each, at that transaction's height, once it
+has recovered that transaction's output, decodable or not. A node
 learns of it in one of two ways: it finds the execution itself, or it
 reads the `Response` that reports it. The second reaches every node that
 reads the source chain, and is recorded in the entry, since a node rebased

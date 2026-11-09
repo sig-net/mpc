@@ -589,7 +589,7 @@ pub async fn process_execution_confirmed(
             block_height,
             "nonce taken by another request's transaction"
         );
-        let outcome = unexecutable_outcome(sibling.chain);
+        let outcome = mpc_chain_integration_core::unexecutable_outcome(sibling.chain);
         // Logged, not propagated: a `?` would skip the rest and leave the
         // taker, unwatched above, without an answer.
         if let Err(err) = answer_execution(sibling, sibling_id, block_height, outcome, ctx).await {
@@ -613,7 +613,7 @@ pub(crate) async fn answer_unviable(
             continue;
         };
         let tx_id = entry.execution_tx().id;
-        let outcome = unexecutable_outcome(entry.chain);
+        let outcome = mpc_chain_integration_core::unexecutable_outcome(entry.chain);
         if let Err(err) = answer_execution(entry, tx_id, height, outcome, ctx).await {
             tracing::error!(
                 ?tx_id,
@@ -626,14 +626,6 @@ pub(crate) async fn answer_unviable(
 
 /// What a request that can no longer execute is answered with: Unviable where the source
 /// chain encodes it, Failed elsewhere, as those applications refund on Failed.
-fn unexecutable_outcome(source_chain: Chain) -> ExecutionOutcome {
-    if source_chain == Chain::Midnight {
-        ExecutionOutcome::Unviable
-    } else {
-        ExecutionOutcome::Failed
-    }
-}
-
 /// A verified Midnight Response saying Executed or Failed reports its request's transaction
 /// included: mark what that leaves unexecutable (#1430). The event carries the height only on
 /// Midnight so far (#1429).
