@@ -28,8 +28,12 @@ pub fn make_config() -> anyhow::Result<SolConfig> {
     Ok(SolConfig {
         // The bench only indexes; the signer is never used.
         account_sk: String::new(),
-        rpc_http_url: opt_env("MPC_SOL_RPC_HTTP_URL")?.parse()?,
-        program_address: opt_env("MPC_SOL_PROGRAM_ADDRESS")?,
+        rpc_http_url: opt_env("MPC_SOL_RPC_HTTP_URL")?
+            .parse()
+            .map_err(|e| anyhow!("invalid MPC_SOL_RPC_HTTP_URL: {e}"))?,
+        program_address: opt_env("MPC_SOL_PROGRAM_ADDRESS")?
+            .parse()
+            .map_err(|e| anyhow!("invalid MPC_SOL_PROGRAM_ADDRESS: {e}"))?,
         indexer: Default::default(),
     })
 }

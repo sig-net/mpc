@@ -69,7 +69,7 @@ impl Args {
     fn sol(&mut self, sol: &SolConfig) {
         self.flag("--sol-account-sk", &sol.account_sk);
         self.flag("--sol-rpc-http-url", &sol.rpc_http_url);
-        self.flag("--sol-program-address", &sol.program_address);
+        self.flag("--sol-program-address", sol.program_address);
     }
 
     fn hydration(&mut self, hydration: &HydrationConfig) {

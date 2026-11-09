@@ -836,7 +836,7 @@ impl Solana {
         anyhow::bail!("validator did not resume block production after restart")
     }
 
-    pub fn get_config(&self, program_address: String) -> SolConfig {
+    pub fn get_config(&self, program_address: SolanaPubkey) -> SolConfig {
         SolConfig {
             account_sk: bs58::encode(self.payer_keypair.to_bytes()).into_string(),
             rpc_http_url: self.rpc_address.clone(),
@@ -846,7 +846,7 @@ impl Solana {
     }
 
     /// Deploy the Solana core contracts and return the program address
-    pub async fn deploy_contract(&self) -> anyhow::Result<String> {
+    pub async fn deploy_contract(&self) -> anyhow::Result<SolanaPubkey> {
         // Check if solana CLI is available
         if let Err(err) = tokio::process::Command::new("solana")
             .arg("--version")
@@ -922,7 +922,7 @@ impl Solana {
     }
 
     /// Perform real contract deployment using Solana CLI
-    async fn deploy(&self) -> anyhow::Result<String> {
+    async fn deploy(&self) -> anyhow::Result<SolanaPubkey> {
         let contract_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -1024,7 +1024,7 @@ impl Solana {
         let stdout = String::from_utf8_lossy(&deploy_output.stdout);
         tracing::info!(%stdout, "solana deploy successful");
 
-        let program_address = self.program_keypair.pubkey().to_string();
+        let program_address = self.program_keypair.pubkey();
         tracing::info!(
             program_address = %program_address,
             contract_path = ?contract_path,
