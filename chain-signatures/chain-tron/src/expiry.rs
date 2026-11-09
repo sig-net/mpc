@@ -11,7 +11,7 @@ use futures_util::stream::{iter, StreamExt};
 use futures_util::TryStreamExt;
 use mpc_chain_integration_core::unexecutable_outcome;
 use mpc_primitives::{BidirectionalTx, BidirectionalTxId, ChainEvent, SignId};
-use mpc_tron_wire::pb::RawTransaction;
+use mpc_tron_wire::{pb::RawTransaction, MAX_EXPIRATION_SPAN_MS};
 use tokio::sync::Mutex;
 
 use crate::client::TronHttp;
@@ -85,11 +85,13 @@ pub(crate) enum ExpiryVerdict {
     Absent { boundary: u64 },
 }
 
+/// One 3 s slot.
+const SLOT_MS: u64 = 3_000;
+
 /// Bounds the linear absence walk at one 24 h window of 3 s slots,
 /// the ceiling the admission rule sets (doc §4.3, anchored on the
-/// source block's time).
-// TODO: enforce bound at node admission.
-const MAX_WALK_SPAN: u64 = 28_800;
+/// source block's time) — derived from [`MAX_EXPIRATION_SPAN_MS`].
+const MAX_WALK_SPAN: u64 = MAX_EXPIRATION_SPAN_MS / SLOT_MS;
 
 /// Bounds in-flight provider requests across both arms and the span
 /// walk.
