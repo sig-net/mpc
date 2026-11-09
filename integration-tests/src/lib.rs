@@ -393,7 +393,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let spawn_nodes_start = std::time::Instant::now();
     let node_cfgs = (0..spawner.accounts.len())
         .map(|index| spawner.node_config(index))
-        .collect::<Vec<_>>();
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let node_futures = spawner
         .accounts
         .iter()
