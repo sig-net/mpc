@@ -197,7 +197,11 @@ mod tests {
             .map(|args| args.eth_contract_address.unwrap())
         };
         assert_eq!(parse(CONTRACT).unwrap(), parse(&CONTRACT[2..]).unwrap());
-        assert!(parse("0x1234").is_err());
+        let error = parse("0x1234").unwrap_err().to_string();
+        assert!(
+            error.contains("--eth-contract-address"),
+            "unexpected address error: {error}"
+        );
     }
 
     /// The two cadences, pinned: 100ms is also what the Ethereum crate's own
