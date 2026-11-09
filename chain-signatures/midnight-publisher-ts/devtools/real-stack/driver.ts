@@ -284,7 +284,8 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 type UnshieldedAddress = FacadeState["unshielded"]["address"];
 
 // The package's `transferNight` with one output per receiver, so one transaction funds
-// every role instead of one finalized transfer each.
+// every role instead of one finalized transfer each. Unlike it, this does not wait for
+// DUST to generate: the caller retries a DUST shortfall.
 async function transferNightToEach(
   facade: WalletFacade,
   keys: ReturnType<typeof deriveAccountKeys>,
