@@ -107,6 +107,9 @@ describe("handleSubmit: the flow", () => {
         unproven = tx;
         return proven;
       },
+      ensureCurrent: async () => {
+        order.push("current");
+      },
       balanceTx: async (tx) => {
         order.push("balance");
         balanced = tx;
@@ -133,7 +136,24 @@ describe("handleSubmit: the flow", () => {
     expect(submitted).toBe(proven);
     expect(proofBudgetMs).toBeGreaterThan(0);
     expect(proofBudgetMs).toBeLessThanOrEqual(SUBMIT_TIMEOUT_MS);
-    expect(order).toEqual(["ready", "prove", "balance", "finalize", "submit"]);
+    expect(order).toEqual(["ready", "prove", "current", "balance", "finalize", "submit"]);
+  });
+
+  it("posts nothing and leaves the gate free when a stale wallet cannot resync in time", async () => {
+    const balanceTx = vi.fn(async (tx: unknown) => tx);
+    primeStub({
+      ensureCurrent: async () => {
+        throw new PublisherError("wallet_unsynced", "still resyncing; nothing was posted");
+      },
+      balanceTx,
+    });
+
+    const refusal = await refused(2);
+
+    expect(refusal).toMatchObject({ code: "wallet_unsynced", walletUsed: false });
+    expect(balanceTx).not.toHaveBeenCalled();
+    primeStub();
+    await expect(handleSubmit(CONFIG, 3, intent)).resolves.toMatchObject({ txId: STUB_TX_ID });
   });
 
   it("does not start wallet work when proving consumes the absolute deadline", async () => {

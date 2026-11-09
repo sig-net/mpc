@@ -35,6 +35,9 @@ vi.mock("@midnightntwrk/wallet-sdk-unshielded-wallet", () => ({
 }));
 vi.mock("@midnightntwrk/wallet-sdk-dust-wallet", () => ({ DustWallet: sdk.restored("dust") }));
 
+const probe = vi.hoisted(() => ({ latestDustEventId: vi.fn() }));
+vi.mock("../src/dust-probe.js", () => probe);
+
 import { openFundingWallet } from "../src/wallet.js";
 import { PublisherError } from "../src/errors.js";
 import type { UnboundTransaction } from "../src/prover.js";
@@ -513,5 +516,146 @@ describe("openFundingWallet with a snapshot", () => {
     const described = (await openFundingWallet(KEYS, "undeployed", ENDPOINTS)).describe();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(await described).toMatch(/^unavailable \(/);
+  });
+});
+
+describe("ensureCurrent", () => {
+  const dustAt = (appliedIndex: bigint) => ({
+    progress: { appliedIndex, isStrictlyComplete: () => true },
+  });
+
+  // A synced wallet whose DUST sub-wallet has applied events up to `applied`.
+  async function openAt(applied: bigint) {
+    const dust = new BehaviorSubject<ReturnType<typeof dustAt>>(dustAt(applied));
+    const stale = stubFacade(dust as never, true);
+    sdk.initialiseWalletFacade.mockResolvedValueOnce(stale);
+    const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
+    return { wallet, stale, dust };
+  }
+
+  it("asks the indexer from the wallet's applied event and leaves a current wallet alone", async () => {
+    const { wallet } = await openAt(5n);
+    probe.latestDustEventId.mockResolvedValueOnce(5n);
+
+    await wallet.ensureCurrent(60_000);
+
+    expect(probe.latestDustEventId).toHaveBeenCalledExactlyOnceWith(
+      ENDPOINTS.indexerWsUrl,
+      5n,
+      expect.any(Number),
+    );
+    expect(sdk.init).not.toHaveBeenCalled();
+  });
+
+  it("submits as before when the indexer does not answer the probe", async () => {
+    const { wallet } = await openAt(5n);
+    probe.latestDustEventId.mockResolvedValueOnce(undefined);
+
+    await wallet.ensureCurrent(60_000);
+
+    expect(sdk.init).not.toHaveBeenCalled();
+  });
+
+  it("gives the wallet's own sockets a few seconds to apply what the probe saw", async () => {
+    vi.useFakeTimers();
+    const { wallet, dust } = await openAt(5n);
+    probe.latestDustEventId.mockResolvedValueOnce(7n);
+
+    const checked = wallet.ensureCurrent(60_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    dust.next(dustAt(7n));
+    await checked;
+
+    expect(sdk.init).not.toHaveBeenCalled();
+  });
+
+  it("resyncs a wallet behind the indexer from its own state, and spends with the new facade", async () => {
+    vi.useFakeTimers();
+    const { wallet, stale } = await openAt(5n);
+    // One event behind is behind.
+    probe.latestDustEventId.mockResolvedValueOnce(6n);
+    const fresh = stubFacade(new BehaviorSubject(dustAt(7n)) as never, true);
+    sdk.init.mockResolvedValueOnce(fresh);
+
+    const checked = wallet.ensureCurrent(60_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await checked;
+
+    const resumed = sdk.init.mock.calls[0]![0];
+    expect(resumed.shielded({})).toMatchObject({ kind: "shielded", state: "shielded-state" });
+    expect(resumed.unshielded({})).toMatchObject({ kind: "unshielded", state: "unshielded-state" });
+    expect(resumed.dust({})).toMatchObject({ kind: "dust", state: "dust-state" });
+    expect(stale.stop).toHaveBeenCalledOnce();
+    expect(fresh.stop).not.toHaveBeenCalled();
+    await wallet.submitTx({
+      identifiers: () => ["ab".repeat(32)],
+    } as unknown as FinalizedTransaction);
+    expect(fresh.submitTransaction).toHaveBeenCalledOnce();
+    expect(stale.submitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("refuses wallet_unsynced while a resync runs over budget, and the next check waits for it", async () => {
+    vi.useFakeTimers();
+    const { wallet, stale } = await openAt(5n);
+    probe.latestDustEventId.mockResolvedValueOnce(7n);
+    const fresh = stubFacade(new BehaviorSubject(dustAt(7n)) as never, true);
+    let restored!: (facade: WalletFacade) => void;
+    sdk.init.mockReturnValueOnce(new Promise((resolve) => (restored = resolve)));
+
+    const first = wallet.ensureCurrent(10_000).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    const refusal = await first;
+    expect(refusal).toBeInstanceOf(PublisherError);
+    expect(refusal).toMatchObject({ code: "wallet_unsynced" });
+    // Still the stale facade, which keeps running until its replacement has synced.
+    expect(stale.stop).not.toHaveBeenCalled();
+    await expect(wallet.snapshot()).rejects.toMatchObject({ code: "wallet_busy" });
+
+    const second = wallet.ensureCurrent(60_000);
+    restored(fresh);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await second;
+
+    expect(sdk.init).toHaveBeenCalledOnce();
+    expect(probe.latestDustEventId).toHaveBeenCalledOnce();
+    expect(stale.stop).toHaveBeenCalledOnce();
+  });
+
+  it("waits at most a minute for a resync, whatever the submit has left", async () => {
+    vi.useFakeTimers();
+    const { wallet } = await openAt(5n);
+    probe.latestDustEventId.mockResolvedValueOnce(7n);
+    sdk.init.mockReturnValueOnce(new Promise(() => undefined));
+    let refusal: unknown;
+    void wallet.ensureCurrent(300_000).catch((error: unknown) => (refusal = error));
+
+    await vi.advanceTimersByTimeAsync(5_000 + 59_000);
+    expect(refusal).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(refusal).toMatchObject({ code: "wallet_unsynced" });
+  });
+
+  it("keeps the stale facade when the resync fails, and checks again next time", async () => {
+    vi.useFakeTimers();
+    const { wallet, stale } = await openAt(5n);
+    probe.latestDustEventId.mockResolvedValue(7n);
+    sdk.init.mockRejectedValueOnce(new Error("indexer gone"));
+
+    const first = wallet.ensureCurrent(60_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await first;
+    expect(stale.stop).not.toHaveBeenCalled();
+    await wallet.submitTx({
+      identifiers: () => ["ab".repeat(32)],
+    } as unknown as FinalizedTransaction);
+    expect(stale.submitTransaction).toHaveBeenCalledOnce();
+
+    const fresh = stubFacade(new BehaviorSubject(dustAt(7n)) as never, true);
+    sdk.init.mockResolvedValueOnce(fresh);
+    const second = wallet.ensureCurrent(60_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await second;
+    expect(probe.latestDustEventId).toHaveBeenCalledTimes(2);
+    expect(stale.stop).toHaveBeenCalledOnce();
   });
 });

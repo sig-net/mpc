@@ -22,6 +22,7 @@ import { UnshieldedWallet } from "@midnightntwrk/wallet-sdk-unshielded-wallet";
 import { filter, firstValueFrom, of, ReplaySubject, throwError, timeout } from "rxjs";
 
 import type { Endpoints } from "./config.js";
+import { latestDustEventId } from "./dust-probe.js";
 import { describeFailure, PublisherError } from "./errors.js";
 import type { UnboundTransaction } from "./prover.js";
 import { decodeSnapshot, encodeSnapshot, type WalletSnapshot } from "./snapshot.js";
@@ -36,6 +37,11 @@ export interface Landed {
 
 export interface FundingWallet {
   requireReady(timeoutMs: number): Promise<void>;
+  /**
+   * Resyncs the wallet first if the indexer holds DUST events it has not applied: spends
+   * proven against a stale DUST tree are refused. Never posts; refuses `wallet_unsynced`.
+   */
+  ensureCurrent(timeoutMs: number): Promise<void>;
   dustBalance(): Promise<bigint | undefined>;
   balanceTx(tx: UnboundTransaction): Promise<BalancingRecipe>;
   finalizeTx(recipe: BalancingRecipe): Promise<FinalizedTransaction>;
@@ -141,6 +147,13 @@ const RESTORE_PROGRESS_CHECK_MS = 10_000;
 const INDEXER_PROBE_MS = 2_000;
 
 const DESCRIBE_TIMEOUT_MS = 1_000;
+// How long the indexer gets to report its latest DUST event over a fresh socket.
+const DUST_PROBE_MS = 3_000;
+// How long the wallet gets to apply events the probe saw before it counts as stale: its
+// own sockets receive a new block's events when the probe does.
+const DUST_CATCH_UP_MS = 5_000;
+// Restoring from the wallet's own current state replays seconds of events.
+const RESYNC_BUDGET_MS = 60_000;
 // A submit returns before the wallet's own sync has seen its transaction confirmed, about a
 // second later; a node publishing back to back is only ever asked inside that second.
 const SNAPSHOT_SETTLE_MS = 5_000;
@@ -316,7 +329,51 @@ async function openFacade(
   snapshot: string | undefined,
 ): Promise<FundingWallet> {
   const owner = keys.unshieldedKeystore.getBech32Address().asString();
-  const facade = await startFromSnapshot(keys, config, owner, snapshot);
+  let facade = await startFromSnapshot(keys, config, owner, snapshot);
+  let closed = false;
+  // A replacement restoring next to the stale facade, which stays in use until it is synced.
+  let resyncing: Promise<void> | undefined;
+
+  function resync(): Promise<void> {
+    resyncing ??= (async () => {
+      const startedMs = Date.now();
+      try {
+        const fresh = await restoreUntilSynced(keys, config, await currentStates(facade));
+        if (closed) {
+          await fresh.stop().catch(() => undefined);
+          return;
+        }
+        const stale = facade;
+        facade = fresh;
+        console.error(`funding wallet resynced in ${seconds(startedMs)}`);
+        await stale.stop().catch(() => undefined);
+      } catch (error) {
+        // The stale facade stays; the next submit's check tries again.
+        console.error(`resyncing the funding wallet failed (${describeFailure(error)})`);
+      } finally {
+        resyncing = undefined;
+      }
+    })();
+    return resyncing;
+  }
+
+  async function awaitResync(pending: Promise<void>, timeoutMs: number): Promise<void> {
+    const unsynced = new PublisherError(
+      "wallet_unsynced",
+      `the funding wallet was still resyncing after ${timeoutMs} ms; nothing was posted`,
+    );
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        pending,
+        new Promise<never>(
+          (_, reject) => void (timer = setTimeout(() => reject(unsynced), timeoutMs)),
+        ),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   return {
     async requireReady(timeoutMs) {
@@ -338,6 +395,36 @@ async function openFacade(
           { cause: error },
         );
       }
+    },
+    async ensureCurrent(timeoutMs) {
+      const budgetMs = Math.min(timeoutMs, RESYNC_BUDGET_MS);
+      const pending = resyncing;
+      if (pending !== undefined) return awaitResync(pending, budgetMs);
+      const startedMs = Date.now();
+      const dust = facade.dust.state;
+      const applied = (
+        await firstValueFrom(
+          dust.pipe(timeout({ first: DESCRIBE_TIMEOUT_MS, with: () => of(undefined) })),
+          { defaultValue: undefined },
+        )
+      )?.progress.appliedIndex;
+      if (applied === undefined) return;
+      const latest = await latestDustEventId(config.indexerWsUrl, applied, DUST_PROBE_MS);
+      // An indexer that does not answer leaves nothing to compare: submit as before.
+      if (latest === undefined || latest <= applied) return;
+      const caughtUp = await firstValueFrom(
+        dust.pipe(
+          filter((state) => state.progress.appliedIndex >= latest),
+          timeout({ first: DUST_CATCH_UP_MS, with: () => of(undefined) }),
+        ),
+        { defaultValue: undefined },
+      );
+      if (caughtUp !== undefined) return;
+      console.error(
+        `funding wallet DUST is behind the indexer (applied ${applied}, indexer at ${latest}, ` +
+          `checked in ${seconds(startedMs)}); resyncing before the submit`,
+      );
+      return awaitResync(resync(), budgetMs);
     },
     dustBalance: () => readDustBalance(facade),
     async balanceTx(tx) {
@@ -361,6 +448,9 @@ async function openFacade(
       return { txId };
     },
     async snapshot() {
+      if (resyncing !== undefined) {
+        throw new PublisherError("wallet_busy", "the funding wallet is resyncing");
+      }
       const state = await firstValueFrom(facade.state());
       if (!state.isSynced) {
         throw new PublisherError("wallet_unsynced", "the funding wallet has not finished syncing");
@@ -406,7 +496,10 @@ async function openFacade(
         return `unavailable (${describeFailure(error)})`;
       }
     },
-    close: () => facade.stop(),
+    close: () => {
+      closed = true;
+      return facade.stop();
+    },
   };
 }
 
