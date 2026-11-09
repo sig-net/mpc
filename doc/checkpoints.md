@@ -82,7 +82,6 @@ digest(height, backlog) = H(
     for each entry, in rid order:
         rid
         request
-        contract
         tx_ids
         unviable_at
 )
@@ -92,7 +91,7 @@ The request goes in whole because the rid does not cover all of it, e.g., the sc
 `tx_ids` and `unviable_at` go in because a node rebased onto a checkpoint never reads the `Signature` and `Response` events below its height again.
 A peer that served a checkpoint without a transaction ID would leave that node looking for too few executions: each signature fixes one transaction ID to look for, and a request can have several, one per signing round whose signature was published ([bidirectional-calls.md](bidirectional-calls.md), Section 2).
 
-The encoding of the entry must be canonical, one byte string per entry; the request has variable-length fields, so each gets its length before it.
+Each entry is encoded as the CBOR of these fields, which puts a length before every variable-length field.
 The order must be fixed too: entries go in rid order, and an entry's transaction IDs in the order of their bytes.
 
 ### Governance contract
@@ -423,9 +422,6 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
    Now: an entry is the request, `tx_ids`, `unviable_at` and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
    There is no `local` store.
    Design: an entry holds the rid, the request, the contract, `tx_ids` and `unviable_at`, and the node's own progress is node-local in `local`, outside checkpoints.
-4. Digest (§2).
-   Now: the digest covers each entry's request, `tx_ids` and `unviable_at`, in the request's serialized form, so a new field on a request event breaks checkpoints across versions unless it is left out when empty.
-   Design: it also covers the contract, in the canonical encoding of Section 2.
 
 ### Node: indexing
 
