@@ -1,3 +1,4 @@
+use alloy::primitives::Address;
 use anyhow::Context as _;
 use mpc_chain_ethereum::{EthConfig, IndexerConfig};
 use secrecy::{ExposeSecret, SecretString};
@@ -41,7 +42,7 @@ pub struct EthArgs {
     pub eth_account_sk: Option<SecretString>,
     /// The contract address to watch, with or without the `0x` prefix
     #[arg(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
-    pub eth_contract_address: Option<String>,
+    pub eth_contract_address: Option<Address>,
 
     // -- RPC endpoints --
     /// Ethereum execution RPC URL
@@ -80,9 +81,7 @@ impl EthArgs {
             .context("eth execution rpc http url is required")?;
         let contract_address = self
             .eth_contract_address
-            .context("eth contract address is required")?
-            .parse()
-            .context("invalid eth contract address")?;
+            .context("eth contract address is required")?;
 
         Ok(Some(EthConfig {
             account_sk, // this is safe because EthConfig has custom Debug implementation that redacts the account_sk field
@@ -140,7 +139,10 @@ mod tests {
             config.execution_rpc_http_url.as_str(),
             "http://127.0.0.1:8545/"
         );
-        assert_eq!(config.contract_address.to_string().to_lowercase(), CONTRACT);
+        assert_eq!(
+            config.contract_address,
+            CONTRACT.parse::<Address>().unwrap()
+        );
         assert_eq!(config.network, "mainnet");
         assert_eq!(
             config.indexer.refresh_interval,
@@ -177,6 +179,29 @@ mod tests {
             CONTRACT,
         ])
         .is_err());
+    }
+
+    /// The help text promises both spellings.
+    #[test]
+    fn the_contract_address_parses_with_and_without_the_0x_prefix() {
+        let parse = |address| {
+            EthArgs::try_parse_from([
+                "test",
+                "--eth-account-sk",
+                ACCOUNT_SK,
+                "--eth-execution-rpc-http-url",
+                RPC_URL,
+                "--eth-contract-address",
+                address,
+            ])
+            .map(|args| args.eth_contract_address.unwrap())
+        };
+        assert_eq!(parse(CONTRACT).unwrap(), parse(&CONTRACT[2..]).unwrap());
+        let error = parse("0x1234").unwrap_err().to_string();
+        assert!(
+            error.contains("--eth-contract-address"),
+            "unexpected address error: {error}"
+        );
     }
 
     /// The two cadences, pinned: 100ms is also what the Ethereum crate's own
