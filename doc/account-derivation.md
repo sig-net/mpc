@@ -25,15 +25,25 @@ We are using an extended version of the [CAIP-10](https://chainagnostic.org/CAIP
 
 ### Derivation Path Structure
 
-The full derivation path consists of the following variables:
-```
-{EPSILON_DERIVATION_PREFIX}:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}
-```
+The derivation path depends on the key's kind, which is what the key signs:
+
+| Key kind | Signs | `KEY_KIND` | Derivation path |
+|---|---|---|---|
+| Plain | [plain sign requests](glossary.md#plain-sign-request) | none | `{EPSILON_DERIVATION_PREFIX}:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}` |
+| Bidirectional | [bidirectional requests](glossary.md#bidirectional-request) | `bidirectional` | `{EPSILON_DERIVATION_PREFIX}:{KEY_KIND}:{CAIP2_CHAIN_ID}:{SENDER}:{DERIVATION_PATH}` |
+| Attestation | [attestations](glossary.md#attestation) of bidirectional requests | `attestation` | `{EPSILON_DERIVATION_PREFIX}:{KEY_KIND}:{CAIP2_CHAIN_ID}:{SENDER}` |
+
 Where:
 - **EPSILON_DERIVATION_PREFIX** = `sig.network v2.0.0 epsilon derivation`
 - **CAIP2_CHAIN_ID** - CAIP-2 chain_id, for example `eip155:1`
 - **SENDER** - Account ID, often a public key, of the account that sent the signature request
 - **DERIVATION_PATH** - A string provided by the SENDER, that is included at the end of the derivation path
+
+Two kinds never derive the same key, whatever the sender and path: the field after the prefix is either `KEY_KIND` or the namespace of `CAIP2_CHAIN_ID`, which [CAIP-2](https://chainagnostic.org/CAIPs/caip-2) limits to 8 characters, too short for `bidirectional` or `attestation`.
+
+The attestation key has no `DERIVATION_PATH`: a contract has one, used for all its attestations. For bidirectional and attestation keys, `SENDER` is the contract that made the request.
+
+These formats belong to key version 1. Key version 0 is unchanged and has only the plain kind: bidirectional requests need key version 1 or later ([bidirectional-calls.md §7.1](bidirectional-calls.md#71-request-signbidirectionaleventv1)).
 
 ### Contract-Based Derivation
 
