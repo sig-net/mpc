@@ -1,4 +1,3 @@
-use anyhow::Context as _;
 use mpc_chain_midnight::{MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 use std::time::Duration;
@@ -22,7 +21,8 @@ pub struct MidnightArgs {
         ]
     )]
     pub midnight_node_url: Option<Url>,
-    /// Address of the central singleton contract: 64 hex characters, no `0x` prefix.
+    /// Address of the central singleton contract, where clients notify their
+    /// requests: 64 hex characters, no `0x` prefix.
     #[arg(
         long,
         env("MPC_MIDNIGHT_CENTRAL_ADDRESS"),
@@ -30,6 +30,15 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_central_address: Option<MidnightAddress>,
+    /// Address of the signet responder contract, where responses are posted:
+    /// 64 hex characters, no `0x` prefix.
+    #[arg(
+        long,
+        env("MPC_MIDNIGHT_RESPONDER_ADDRESS"),
+        value_parser = MidnightAddress::from_hex,
+        requires = "midnight_node_url"
+    )]
+    pub midnight_responder_address: Option<MidnightAddress>,
     /// Hex seed of the wallet that funds respond transactions.
     #[arg(
         long,
@@ -38,36 +47,9 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_funding_seed: Option<SecretString>,
-    /// argv of the intent builder child process, JSON-encoded:
-    /// `["node","dist/main.js"]`. One clap value rather than a multi-value
-    /// flag, whose forms stop at anything flag-shaped; JSON escapes instead
-    /// of terminating, so every argv survives the round trip.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_RESPONDER_ADDRESS"),
-        requires = "midnight_node_url"
-    )]
-    pub midnight_intent_gen_command: Option<String>,
-    /// Proof server URL. Required to respond: these contracts are zkir-v3 and
-    /// cannot be proven in process.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_PROOF_SERVER_URL"),
-        hide_env_values = true,
-        requires = "midnight_node_url"
-    )]
-    pub midnight_proof_server_url: Option<Url>,
-    /// Indexer GraphQL URL. Required to respond: the funding wallet's spendable
-    /// DUST is only derivable from the ledger events the indexer serves.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_FUNDING_SEED"),
-        hide_env_values = true,
-        requires = "midnight_node_url"
-    )]
-    pub midnight_indexer_url: Option<Url>,
-    /// Indexer GraphQL subscription URL: the wallet catches up over the URL
-    /// above and follows over this one.
+    /// Indexer GraphQL subscription URL. Required to respond: the funding
+    /// wallet's spendable DUST is only derivable from the ledger events the
+    /// indexer serves.
     #[arg(
         long,
         env("MPC_MIDNIGHT_INDEXER_WS_URL"),
@@ -137,8 +119,6 @@ impl MidnightArgs {
         #[cfg_attr(not(feature = "test-feature"), allow(unused_mut))]
         let mut publisher = PublisherConfig {
             funding_seed: funding_seed.expose_secret().to_string(),
-            proof_server_url: proof_server_url.to_string(),
-            indexer_url: indexer_url.to_string(),
             indexer_ws_url: indexer_ws_url.to_string(),
             output_storage: self.midnight_output_storage_bucket.map(|bucket| {
                 OutputStorageConfig::new(
@@ -220,14 +200,6 @@ mod tests {
             responder_address: MidnightAddress::from_bytes([0xcd; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
-                // A space and a leading dash, which only a structured encoding gets back out intact.
-                intent_gen_command: vec![
-                    "node".into(),
-                    "/opt/midnight publisher/dist/main.js".into(),
-                    "--child-option".into(),
-                ],
-                proof_server_url: "http://127.0.0.1:6300/".into(),
-                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".into(),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".into(),
                 output_storage: Some(OutputStorageConfig::new(
                     "midnight-results".into(),
@@ -275,20 +247,16 @@ mod tests {
     }
 
     #[test]
-    fn the_cli_rejects_a_malformed_central_address() {
+    fn the_cli_rejects_malformed_contract_addresses() {
         crate::cli::tests::assert_midnight_env_unset();
         for invalid in ["ab".repeat(31), format!("0x{}", "ab".repeat(32))] {
-            let mut argv = configured_argv();
-            let flag = argv
-                .iter()
-                .position(|arg| arg == "--midnight-central-address")
-                .unwrap();
-            argv[flag + 1] = invalid;
-            let error = MidnightArgs::try_parse_from(argv).unwrap_err().to_string();
-            assert!(
-                error.contains("--midnight-central-address"),
-                "unexpected address error: {error}"
-            );
+            for flag in ["--midnight-central-address", "--midnight-responder-address"] {
+                let mut argv = configured_argv();
+                let index = argv.iter().position(|arg| arg == flag).unwrap();
+                argv[index + 1] = invalid.clone();
+                let error = MidnightArgs::try_parse_from(argv).unwrap_err().to_string();
+                assert!(error.contains(flag), "unexpected address error: {error}");
+            }
         }
     }
 
@@ -332,11 +300,10 @@ mod tests {
 
         // Well-formed values, so the rejection is the missing node url and
         // not the value itself.
+        let responder_address = "cd".repeat(32);
         for (flag, value) in [
+            ("--midnight-responder-address", responder_address.as_str()),
             ("--midnight-funding-seed", "1"),
-            ("--midnight-intent-gen-command", "1"),
-            ("--midnight-proof-server-url", "http://127.0.0.1:1"),
-            ("--midnight-indexer-url", "http://127.0.0.1:1"),
             ("--midnight-indexer-ws-url", "ws://127.0.0.1:1"),
             ("--midnight-output-storage-bucket", "1"),
             ("--midnight-output-storage-prefix", "1"),

@@ -843,8 +843,8 @@ mod tests {
         1_700_000_000_000 + height * 1_000
     }
 
-    fn one_call(kind: EmissionKind, payload: [u8; 256]) -> Vec<SingletonCallEmissions> {
-        vec![SingletonCallEmissions {
+    fn one_call(kind: EmissionKind, payload: [u8; 256]) -> Vec<ContractCallEmissions> {
+        vec![ContractCallEmissions {
             phase: crate::emissions::TranscriptPhase::Guaranteed,
             physical_segment: 1,
             call_index: 1,

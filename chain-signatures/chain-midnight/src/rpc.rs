@@ -1492,6 +1492,7 @@ mod tests {
             transaction,
             crate::test_utils::hex_32(CAPTURE_SINGLETON),
             ABSENT_RESPONDER,
+            timestamp,
         )
         .await
     }
@@ -1501,6 +1502,7 @@ mod tests {
         transaction: &[u8],
         singleton: [u8; 32],
         responder: [u8; 32],
+        timestamp: FixtureTimestamp,
     ) -> anyhow::Result<Option<BlockEmissions>> {
         let metadata = subxt::Metadata::decode_all(
             &mut &include_bytes!("../fixtures/fallible-block-432-metadata.scale")[..],
@@ -1645,6 +1647,37 @@ mod tests {
                 "ee3385dda706877d30e802a0df57c228310016889104b8fb361c830a58d1e500"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn block_reader_finds_calls_by_the_responder_address_too() {
+        // The decoder keys on the address alone, so the captured call stands in for a
+        // responder call when the responder is configured at its address.
+        let block = read_fallible_transaction_as(
+            include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
+            include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
+            [0xab; 32],
+            crate::test_utils::hex_32(CAPTURE_SINGLETON),
+            FixtureTimestamp::Set,
+        )
+        .await
+        .expect("read captured fallible transaction")
+        .expect("block contains a responder candidate");
+        assert_eq!(
+            block.proof_seed.responder_address,
+            crate::test_utils::hex_32(CAPTURE_SINGLETON)
+        );
+        let [candidate] = block.candidates.as_slice() else {
+            panic!("expected one candidate: {:?}", block.candidates);
+        };
+        assert!(candidate.singleton_calls.is_empty());
+        let [call] = candidate.responder_calls.as_slice() else {
+            panic!(
+                "expected one responder call: {:?}",
+                candidate.responder_calls
+            );
+        };
+        assert_eq!((call.call_index, call.physical_segment), (1, 49592));
     }
 
     #[tokio::test]

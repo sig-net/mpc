@@ -13,9 +13,9 @@ on:
       - "rust-toolchain*"
       - .github/workflows/test-chain-midnight.yml
       # Inputs of the compiled real-stack contracts cache.
-      - "chain-signatures/midnight-publisher-ts/devtools/real-stack/*.compact"
-      - chain-signatures/midnight-publisher-ts/devtools/real-stack/compile.mjs
-      - chain-signatures/midnight-publisher-ts/package-lock.json
+      - "chain-signatures/midnight-devtools/devtools/real-stack/*.compact"
+      - chain-signatures/midnight-devtools/devtools/real-stack/compile.mjs
+      - chain-signatures/midnight-devtools/package-lock.json
   workflow_dispatch:
 
 env:
@@ -124,9 +124,9 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
-            chain-signatures/midnight-publisher-ts/devtools/real-stack/managed/caller
-            chain-signatures/midnight-publisher-ts/devtools/real-stack/managed/erc20-vault
-          key: real-stack-contracts-compactc0.33.0-rc.2-${{ hashFiles('chain-signatures/midnight-publisher-ts/devtools/real-stack/*.compact', 'chain-signatures/midnight-publisher-ts/devtools/real-stack/compile.mjs', 'chain-signatures/midnight-publisher-ts/package-lock.json') }}
+            chain-signatures/midnight-devtools/devtools/real-stack/managed/caller
+            chain-signatures/midnight-devtools/devtools/real-stack/managed/erc20-vault
+          key: real-stack-contracts-compactc0.33.0-rc.2-${{ hashFiles('chain-signatures/midnight-devtools/devtools/real-stack/*.compact', 'chain-signatures/midnight-devtools/devtools/real-stack/compile.mjs', 'chain-signatures/midnight-devtools/package-lock.json') }}
 
       - name: Build real-stack TypeScript fixtures
         run: just build midnight
@@ -139,8 +139,8 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
-            chain-signatures/midnight-publisher-ts/devtools/real-stack/managed/caller
-            chain-signatures/midnight-publisher-ts/devtools/real-stack/managed/erc20-vault
+            chain-signatures/midnight-devtools/devtools/real-stack/managed/caller
+            chain-signatures/midnight-devtools/devtools/real-stack/managed/erc20-vault
           key: ${{ steps.real-stack-contracts.outputs.cache-primary-key }}
 
       - name: Install Rust (1.93.0)
