@@ -219,6 +219,11 @@ mod tests {
     }
 
     #[test]
+    fn max_expiration_span_is_java_trons_24h() {
+        assert_eq!(MAX_EXPIRATION_SPAN_MS, 86_400_000);
+    }
+
+    #[test]
     fn absent_calldata_assembles_a_plain_transfer() {
         let mut params = params();
         params.call_value = 1_000_000;
