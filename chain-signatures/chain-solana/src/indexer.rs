@@ -424,11 +424,24 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         block: &SolanaCatchupBlock,
         cancel: &CancellationToken,
     ) {
+        // The first attempt uses the captured block. If it fails, it may be due to
+        // transient RPC faults (e.g., a served-null `blockTime`), so retries will
+        // re-fetch live data.
+        if self
+            .process_catchup_item(events_tx, slot, block)
+            .await
+            .is_ok()
+        {
+            return;
+        }
         retry_until_ok(
             cancel,
             Self::RETRY_DELAY,
             &format!("solana catchup block processing (slot {slot})"),
-            || async { self.process_catchup_item(events_tx, slot, block).await },
+            || async {
+                self.process_catchup_item(events_tx, slot, &SolanaCatchupBlock::Missing)
+                    .await
+            },
         )
         .await;
     }
@@ -520,8 +533,9 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 
         if let Some(transactions) = &block.transactions {
             let program_id = self.program_id.to_string();
+            let block_time = block.block_time.and_then(|t| u64::try_from(t).ok());
             for tx in transactions {
-                process_transaction(events_tx, &program_id, tx).await?;
+                process_transaction(events_tx, &program_id, block_time, tx).await?;
             }
         }
 
@@ -548,6 +562,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
 async fn process_transaction(
     events_tx: &mpsc::Sender<ChainEvent>,
     program_id: &str,
+    block_time: Option<u64>,
     tx: &EncodedTransactionWithStatusMeta,
 ) -> anyhow::Result<()> {
     let Some(meta) = tx.meta.as_ref() else {
@@ -556,7 +571,7 @@ async fn process_transaction(
     if meta.err.is_some() {
         return Ok(());
     }
-    emit_events(events_tx, program_id, tx).await
+    emit_events(events_tx, program_id, block_time, tx).await
 }
 
 #[async_trait]
@@ -622,6 +637,7 @@ mod tests {
 
     use super::*;
     use crate::events::SolanaSignEvent;
+    use crate::test_utils::sign_bidirectional_ix_data;
     use anchor_lang::{AnchorSerialize, Discriminator};
     use mpc_chain_integration_core::{
         utils::retry::{is_retryable, SharedBackoff},
@@ -825,16 +841,26 @@ mod tests {
             slot_stall_timeout: Duration,
         ) -> Self {
             let server = mockito::Server::new_async().await;
-            Self::spawn_with_server(server, slots, processed, config, slot_stall_timeout).await
+            Self::spawn_with_server(
+                server,
+                slots,
+                processed,
+                config,
+                slot_stall_timeout,
+                Pubkey::new_unique(),
+            )
+            .await
         }
 
-        /// Variant taking a pre-built mockito server
+        /// Variant taking a pre-built mockito server; the indexer watches
+        /// `program_id`.
         async fn spawn_with_server(
             mut server: mockito::ServerGuard,
             slots: &[u64],
             processed: Option<u64>,
             config: impl Into<Option<SolIndexerConfig>>,
             slot_stall_timeout: Duration,
+            program_id: Pubkey,
         ) -> Self {
             // Serve the slots in order, repeating the last one forever
             let bodies = Arc::new(std::sync::Mutex::new(
@@ -870,6 +896,9 @@ mod tests {
                     .await;
             }
             let mut indexer = test_indexer(&server.url(), state_manager);
+            // Test bodies embed CPI instructions under this program; the
+            // client's only feeds request URLs the mocks ignore.
+            indexer.program_id = program_id;
             indexer.config = config.into().unwrap_or(SolIndexerConfig {
                 poll_interval: Duration::from_millis(5),
             });
@@ -1292,13 +1321,152 @@ mod tests {
 
         assert!(matches!(
             events_rx.recv().await,
-            Some(ChainEvent::SignRequest { request, .. }) if request.id == SignId::new(request_id)
+            Some(ChainEvent::SignRequest { request, block_timestamp: None, .. })
+                if request.id == SignId::new(request_id)
         ));
         assert!(matches!(
             events_rx.recv().await,
             Some(ChainEvent::Respond(event)) if event.request_id == request_id
         ));
         assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+    }
+
+    #[tokio::test]
+    async fn emits_block_time_with_a_bidirectional_request() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let mut response = event_block_response(0, 7, transaction);
+        response["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(1_700_000_000),
+                ..
+            })
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+    }
+
+    #[tokio::test]
+    async fn holds_a_bidirectional_block_without_block_time() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        for block_time in [serde_json::json!(null), serde_json::json!(-1)] {
+            let mut response = event_block_response(0, 7, transaction.clone());
+            response["result"]["blockTime"] = block_time;
+            let block: UiConfirmedBlock =
+                serde_json::from_value(response["result"].clone()).unwrap();
+
+            let err = indexer
+                .process_block(&events_tx, 7, &block)
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                "block carries a bidirectional request but no block time"
+            );
+            assert!(events_rx.try_recv().is_err());
+        }
+    }
+
+    /// One `RespondBidirectional` Anchor CPI event under the generator key.
+    fn respond_bidirectional_ix_data() -> String {
+        use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+        fn coord(bytes: Option<&k256::FieldBytes>) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(bytes.expect("the generator has both coordinates"));
+            out
+        }
+        let generator = k256::ProjectivePoint::GENERATOR
+            .to_affine()
+            .to_encoded_point(false);
+        let event = signet_program::RespondBidirectionalEvent {
+            request_id: [0x31; 32],
+            responder: Pubkey::new_from_array([0x32; 32]),
+            serialized_output: vec![1, 2, 3],
+            signature: signet_program::Signature {
+                big_r: signet_program::AffinePoint {
+                    x: coord(generator.x()),
+                    y: coord(generator.y()),
+                },
+                s: [0x33; 32],
+                recovery_id: 0,
+            },
+        };
+        cpi_event_instruction(&event)
+    }
+
+    #[tokio::test]
+    async fn respond_bidirectional_events_do_not_hold_a_time_less_block() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            respond_bidirectional_ix_data(),
+        );
+        let response = event_block_response(0, 7, transaction);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::RespondBidirectional(_))
+        ));
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+    }
+
+    #[tokio::test]
+    async fn reports_block_time_for_plain_sign_requests() {
+        let indexer = test_indexer("http://localhost:1", MockStateManager::new());
+        let request = SignatureRequestedEvent {
+            sender: Pubkey::new_unique(),
+            payload: [1; 32],
+            key_version: 0,
+            deposit: 1,
+            chain_id: "solana".to_string(),
+            path: "test".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "test".to_string(),
+            params: String::new(),
+            fee_payer: None,
+        };
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            cpi_event_instruction(&request),
+        );
+        let mut response = event_block_response(0, 7, transaction);
+        response["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let block: UiConfirmedBlock = serde_json::from_value(response["result"].clone()).unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+
+        indexer.process_block(&events_tx, 7, &block).await.unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(1_700_000_000),
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -1669,6 +1837,7 @@ mod tests {
             Some(9),
             None,
             Duration::from_secs(30),
+            Pubkey::new_unique(),
         )
         .await;
 
@@ -1690,6 +1859,88 @@ mod tests {
         );
 
         f.cancel_and_join().await;
+    }
+
+    /// A captured null `blockTime` holds the block; the retry re-fetches,
+    /// and once the provider serves the time the drain advances.
+    #[tokio::test]
+    async fn drain_range_refetches_until_a_time_less_block_is_served() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Program activity at 10 and 11; slot 9 (< start 10) ends pagination.
+        let entries: Vec<_> = [11, 10, 9].into_iter().map(signature_entry).collect();
+        let _signatures = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(
+                "getSignaturesForAddress".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&entries))
+            .create_async()
+            .await;
+
+        let indexer = test_indexer(&server.url(), MockStateManager::new());
+        let transaction = event_transaction(
+            indexer.program_id,
+            Signature::new_unique(),
+            sign_bidirectional_ix_data("eip155:1"),
+        );
+        // The batched fetch (array body) captures slot 10 without a time;
+        // the retry's single-slot re-fetch (object body, `jsonrpc` envelope
+        // for `solana_client`) serves one.
+        let mut null_time = event_block_response(0, 10, transaction.clone());
+        null_time["result"]["blockTime"] = serde_json::json!(null);
+        let _batch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\["#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([null_time, block_response(1, 11)]).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let mut served = event_block_response(0, 10, transaction);
+        served["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let refetch = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": served["result"],
+        })
+        .to_string();
+        let _refetch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\{.*getBlock"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(refetch)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        indexer
+            .drain_range(&events_tx, 12, 10, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(10))
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(11))
+        ));
+        assert!(events_rx.try_recv().is_err());
+        // `.expect(1)` pins one batch fetch and one re-fetch.
     }
 
     #[tokio::test]
@@ -1930,6 +2181,7 @@ mod tests {
                 Some(9),
                 None,
                 Duration::from_secs(30),
+                Pubkey::new_unique(),
             )
             .await;
             let mut heights = Vec::new();

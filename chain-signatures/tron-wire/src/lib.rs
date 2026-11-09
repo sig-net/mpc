@@ -12,5 +12,5 @@ mod types;
 
 pub use address::{parse_hex, ParseTronAddressError, TronAddress, TRON_ADDRESS_PREFIX};
 pub use pb::Message;
-pub use tx::to_unsigned_tron_tx;
+pub use tx::{to_unsigned_tron_tx, MAX_EXPIRATION_SPAN_MS};
 pub use types::NowBlock;
