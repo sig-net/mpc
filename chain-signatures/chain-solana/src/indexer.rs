@@ -401,11 +401,24 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         block: &SolanaCatchupBlock,
         cancel: &CancellationToken,
     ) {
+        // The first attempt uses the captured block. If it fails, it may be due to
+        // transient RPC faults (e.g., a served-null `blockTime`), so retries will
+        // re-fetch live data.
+        if self
+            .process_catchup_item(events_tx, slot, block)
+            .await
+            .is_ok()
+        {
+            return;
+        }
         retry_until_ok(
             cancel,
             Self::RETRY_DELAY,
             &format!("solana catchup block processing (slot {slot})"),
-            || async { self.process_catchup_item(events_tx, slot, block).await },
+            || async {
+                self.process_catchup_item(events_tx, slot, &SolanaCatchupBlock::Missing)
+                    .await
+            },
         )
         .await;
     }
@@ -1288,7 +1301,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emits_a_time_less_bidirectional_block_without_holding() {
+    async fn holds_a_bidirectional_block_without_block_time() {
         let indexer = test_indexer("http://localhost:1", MockStateManager::new());
         let transaction = event_transaction(
             indexer.program_id,
@@ -1303,18 +1316,16 @@ mod tests {
             let block: UiConfirmedBlock =
                 serde_json::from_value(response["result"].clone()).unwrap();
 
-            indexer.process_block(&events_tx, 7, &block).await.unwrap();
+            let err = indexer
+                .process_block(&events_tx, 7, &block)
+                .await
+                .unwrap_err();
 
-            assert!(matches!(
-                events_rx.recv().await,
-                Some(ChainEvent::SignRequest {
-                    block_timestamp: None,
-                    ..
-                })
-            ));
-            // The Block marker is the watermark: the drain advances past
-            // this slot.
-            assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(7))));
+            assert_eq!(
+                format!("{err:#}"),
+                "block carries a bidirectional request but no block time"
+            );
+            assert!(events_rx.try_recv().is_err());
         }
     }
 
@@ -1794,10 +1805,10 @@ mod tests {
         f.cancel_and_join().await;
     }
 
-    /// A permanently time-less block must not wedge the drain: the request
-    /// emits without a time and every slot still gets its marker.
+    /// A captured null `blockTime` holds the block; the retry re-fetches,
+    /// and once the provider serves the time the drain advances.
     #[tokio::test]
-    async fn run_advances_through_a_time_less_bidirectional_block() {
+    async fn drain_range_refetches_until_a_time_less_block_is_served() {
         let mut server = mockito::Server::new_async().await;
 
         // Program activity at 10 and 11; slot 9 (< start 10) ends pagination.
@@ -1819,49 +1830,61 @@ mod tests {
             Signature::new_unique(),
             sign_bidirectional_ix_data("eip155:1"),
         );
-        let mut block_with_request = event_block_response(0, 10, transaction);
-        block_with_request["result"]["blockTime"] = serde_json::json!(null);
-        let blocks = serde_json::json!([block_with_request, block_response(1, 11)]).to_string();
-        let _blocks = server
+        // The batched fetch (array body) captures slot 10 without a time;
+        // the retry's single-slot re-fetch (object body, `jsonrpc` envelope
+        // for `solana_client`) serves one.
+        let mut null_time = event_block_response(0, 10, transaction.clone());
+        null_time["result"]["blockTime"] = serde_json::json!(null);
+        let _batch = server
             .mock("POST", "/")
-            .match_body(mockito::Matcher::Regex("getBlock".to_string()))
+            .match_body(mockito::Matcher::Regex(r#"^\["#.to_string()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(blocks)
+            .with_body(serde_json::json!([null_time, block_response(1, 11)]).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let mut served = event_block_response(0, 10, transaction);
+        served["result"]["blockTime"] = serde_json::json!(1_700_000_000);
+        let refetch = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": served["result"],
+        })
+        .to_string();
+        let _refetch = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex(r#"^\{.*getBlock"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(refetch)
             .expect(1)
             .create_async()
             .await;
 
-        // getSlot script: seed 10, then 12 — one pass drains [10, 12).
-        let mut f = RunFixture::spawn_with_server(
-            server,
-            &[10, 12, 12],
-            Some(9),
-            None,
-            Duration::from_secs(30),
-            indexer.program_id,
-        )
-        .await;
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        indexer
+            .drain_range(&events_tx, 12, 10, &CancellationToken::new())
+            .await
+            .unwrap();
 
-        let first = f.next_event().await;
-        assert!(
-            matches!(
-                first,
-                Some(ChainEvent::SignRequest {
-                    block_timestamp: None,
-                    ..
-                })
-            ),
-            "expected the time-less request first, got {first:?}"
-        );
-        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(10))));
-        assert!(matches!(f.next_event().await, Some(ChainEvent::Block(11))));
         assert!(matches!(
-            f.next_event().await,
-            Some(ChainEvent::CatchupCompleted)
+            events_rx.recv().await,
+            Some(ChainEvent::SignRequest {
+                block_timestamp: Some(_),
+                ..
+            })
         ));
-
-        f.cancel_and_join().await;
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(10))
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(11))
+        ));
+        assert!(events_rx.try_recv().is_err());
+        // `.expect(1)` pins one batch fetch and one re-fetch.
     }
 
     #[tokio::test]
