@@ -346,7 +346,9 @@ The contract on a [source chain](#source-chain) that takes
 [requests](#request) and receives [published](#publish) signatures and
 [attestations](#attestation), for example `ChainSignatures.sol` on EVM chains
 (`chain-signatures/contract-eth/contracts/`) and `chain-signatures/contract-sol`
-on Solana. See [bidirectional-calls.md
+on Solana. On Midnight it is two contracts: the Signet singleton takes
+requests and the signet responder receives published signatures and
+attestations. See [bidirectional-calls.md
 §4.2](bidirectional-calls.md#42-signet-contract-per-source-chain).
 
 ## Source chain

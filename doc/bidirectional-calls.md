@@ -38,7 +38,9 @@ Organization:
   own.
 * *Signet contract*: our contract on the source chain, through which
   requests, signatures and responses are published. It holds no per-
-  application state.
+  application state. On Midnight it is two contracts: requests go through
+  the Signet singleton, signatures and responses through the signet
+  responder (Section 4.2).
 * *MPC network*: the nodes that sign and attest.
 * *Broadcaster*: whoever submits the signed transaction to the target
   chain. Untrusted; the design does not depend on who it is.
@@ -374,6 +376,11 @@ call. It emits three events:
   directly, which is how a response is delivered where the signet contract
   cannot call it, and again after a failed handler.
 
+On Midnight the singleton emits `SignRequest` and the responder emits
+`Signature` and `Response`, and the MPC reads each event only from the
+contract that emits it. A signature or response posted to the singleton is
+not published: clients read responses from the responder alone.
+
 ### 4.3 MPC network
 
 Written as if the network were one process; the real one is a threshold
@@ -689,8 +696,8 @@ a path from B48 through A15; the first at A12 has none.
   not follow each node's RPC response cap. A read the RPC node refuses for
   size is a drop only if the refusing cap fits every state within the
   limit; a smaller cap is that node's misconfiguration and holds the block.
-  The limit binds admission only; the publisher's read of the central
-  contract is exempt.
+  The limit binds admission only; the publisher's read of the responder
+  is exempt.
 * Solana with a recent blockhash has no replay protection in the sense of
   Section 3.3. It can be made to work if the MPC remembers completed rids
   for as long as a differently signed copy could still execute, about a
@@ -1090,7 +1097,8 @@ make `debug_traceTransaction` available only on paid tiers.
 A node configured to provide this cache writes the serialised output to
 `<prefix>/<networkId>/<signetContractAddress>/<requestId>.bin` before posting
 the attestation to the source chain. Here `networkId` identifies the source
-network and `signetContractAddress` its signet contract. Clients can fetch
+network and `signetContractAddress` its signet contract (on Midnight, the
+singleton, not the responder). Clients can fetch
 the bytes by request ID from the endpoint advertised for their deployment
 and retry while they are not yet available. Providing a cache is optional.
 
