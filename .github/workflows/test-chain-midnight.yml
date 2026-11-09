@@ -13,9 +13,9 @@ on:
       - "rust-toolchain*"
       - .github/workflows/test-chain-midnight.yml
       # Inputs of the compiled real-stack contracts cache.
-      - "chain-signatures/midnight-devtools/devtools/real-stack/*.compact"
-      - chain-signatures/midnight-devtools/devtools/real-stack/compile.mjs
-      - chain-signatures/midnight-devtools/package-lock.json
+      - "chain-signatures/midnight-publisher-ts/devtools/real-stack/*.compact"
+      - chain-signatures/midnight-publisher-ts/devtools/real-stack/compile.mjs
+      - chain-signatures/midnight-publisher-ts/package-lock.json
   workflow_dispatch:
 
 env:
@@ -51,7 +51,7 @@ jobs:
       - name: Install just
         run: |
           mkdir -p "$HOME/.cargo/bin"
-          curl --proto '=https' --tlsv1.2 -sSfL --retry 4 "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL --retry 8 --retry-delay 15 "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Login to GitHub Container Registry
@@ -124,9 +124,9 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
-            chain-signatures/midnight-devtools/devtools/real-stack/managed/caller
-            chain-signatures/midnight-devtools/devtools/real-stack/managed/erc20-vault
-          key: real-stack-contracts-compactc0.33.0-rc.2-${{ hashFiles('chain-signatures/midnight-devtools/devtools/real-stack/*.compact', 'chain-signatures/midnight-devtools/devtools/real-stack/compile.mjs', 'chain-signatures/midnight-devtools/package-lock.json') }}
+            chain-signatures/midnight-publisher-ts/devtools/real-stack/managed/caller
+            chain-signatures/midnight-publisher-ts/devtools/real-stack/managed/erc20-vault
+          key: real-stack-contracts-compactc0.33.0-rc.2-${{ hashFiles('chain-signatures/midnight-publisher-ts/devtools/real-stack/*.compact', 'chain-signatures/midnight-publisher-ts/devtools/real-stack/compile.mjs', 'chain-signatures/midnight-publisher-ts/package-lock.json') }}
 
       - name: Build real-stack TypeScript fixtures
         run: just build midnight
@@ -139,8 +139,8 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
-            chain-signatures/midnight-devtools/devtools/real-stack/managed/caller
-            chain-signatures/midnight-devtools/devtools/real-stack/managed/erc20-vault
+            chain-signatures/midnight-publisher-ts/devtools/real-stack/managed/caller
+            chain-signatures/midnight-publisher-ts/devtools/real-stack/managed/erc20-vault
           key: ${{ steps.real-stack-contracts.outputs.cache-primary-key }}
 
       - name: Install Rust (1.93.0)
@@ -229,6 +229,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: midnight-real-stack-logs-${{ matrix.test }}
+          # A re-run replaces an artifact of the same name, so keep each attempt's logs apart.
+          name: midnight-real-stack-logs-${{ matrix.test }}-attempt-${{ github.run_attempt }}
           path: target/tmp_*/midnight
           if-no-files-found: warn

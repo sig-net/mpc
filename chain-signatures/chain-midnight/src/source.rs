@@ -35,6 +35,8 @@ pub(crate) struct CandidateTransactionEmissions {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BlockEmissions {
+    /// The block's timestamp inherent (`Timestamp::set`), unix ms.
+    pub block_time_ms: u64,
     pub proof_seed: BlockProofSeed,
     pub candidates: Vec<CandidateTransactionEmissions>,
 }
@@ -121,6 +123,7 @@ mod proof_seed_tests {
     #[test]
     fn block_emissions_preserves_the_proof_seed_and_locator() {
         let expected = BlockEmissions {
+            block_time_ms: 1_700_000_000_000,
             proof_seed: BlockProofSeed {
                 reported_genesis_hash: [0x11; 32],
                 reported_block_number: 42,

@@ -564,7 +564,13 @@ fn responder_config(
             .context("decoding Midnight responder address")?,
         publisher: PublisherConfig {
             output_storage,
+            intent_gen_command: vec![
+                node_executable,
+                publisher_entrypoint.to_string_lossy().into_owned(),
+            ],
             funding_seed: bootstrap.publisher_seeds[0].clone(),
+            proof_server_url: endpoints.proof_server_url.clone(),
+            indexer_url: endpoints.indexer_url.clone(),
             indexer_ws_url: endpoints.indexer_ws_url.clone(),
             contract_artifacts_dir,
             zk_params_dir,

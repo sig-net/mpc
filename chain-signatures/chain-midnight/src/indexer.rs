@@ -131,6 +131,7 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
         block: &BlockRef,
     ) -> anyhow::Result<Vec<ChainEvent>> {
         let Some(BlockEmissions {
+            block_time_ms,
             proof_seed,
             candidates,
         }) = source
@@ -228,9 +229,12 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     sign_id = ?request.id,
                                     "midnight signature requested"
                                 );
+                                // Seconds for the event field; truncation adds
+                                // <1 s of slack to the bound - negligible
+                                // against the 24 h cap and the walk's 3 s slots.
                                 events.push(ChainEvent::SignRequest {
                                     request: Arc::new(request),
-                                    block_timestamp: None,
+                                    block_timestamp: Some(block_time_ms / 1000),
                                 });
                             } else {
                                 tracing::warn!(
@@ -823,6 +827,7 @@ mod tests {
 
     fn batch(height: u64, calls: Vec<ContractCallEmissions>) -> BlockEmissions {
         BlockEmissions {
+            block_time_ms: fixture_block_ms(height),
             proof_seed: proof_seed(height),
             candidates: vec![CandidateTransactionEmissions {
                 ledger_tx_hash: LEDGER_TX_HASH,
@@ -834,8 +839,12 @@ mod tests {
         }
     }
 
-    fn one_call(kind: EmissionKind, payload: [u8; 256]) -> Vec<ContractCallEmissions> {
-        vec![ContractCallEmissions {
+    fn fixture_block_ms(height: u64) -> u64 {
+        1_700_000_000_000 + height * 1_000
+    }
+
+    fn one_call(kind: EmissionKind, payload: [u8; 256]) -> Vec<SingletonCallEmissions> {
+        vec![SingletonCallEmissions {
             phase: crate::emissions::TranscriptPhase::Guaranteed,
             physical_segment: 1,
             call_index: 1,
@@ -1134,7 +1143,7 @@ mod tests {
         );
     }
 
-    fn assert_request(event: ChainEvent, rid: [u8; 32]) {
+    fn assert_request(event: ChainEvent, rid: [u8; 32], height: u64) {
         let ChainEvent::SignRequest {
             request,
             block_timestamp,
@@ -1143,7 +1152,7 @@ mod tests {
             panic!("expected SignRequest");
         };
         assert_eq!(request.id, SignId::new(rid));
-        assert_eq!(block_timestamp, None);
+        assert_eq!(block_timestamp, Some(fixture_block_ms(height) / 1000));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1288,8 +1297,33 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         for event in events {
-            assert_request(event, rid);
+            assert_request(event, rid, 9);
         }
+    }
+
+    #[tokio::test]
+    async fn process_block_carries_the_block_time_in_seconds() {
+        let (record, rid) = named_record_and_rid(7);
+        let mut source = FixtureSource::default();
+        source.set_emissions(
+            9,
+            one_call(EmissionKind::SignBidirectional, notification(rid)),
+        );
+        source.set_state(CALLER, 9, caller_state(&record, rid));
+
+        let events = direct_indexer()
+            .await
+            .process_block(&source, &block_ref(9))
+            .await
+            .expect("block processes");
+
+        let ChainEvent::SignRequest {
+            block_timestamp, ..
+        } = events[0].clone()
+        else {
+            panic!("expected SignRequest");
+        };
+        assert_eq!(block_timestamp, Some(fixture_block_ms(9) / 1000));
     }
 
     #[tokio::test]
@@ -1510,7 +1544,7 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         for event in events {
-            assert_request(event, rid);
+            assert_request(event, rid, 9);
         }
 
         let recorded = recorder.snapshot();
@@ -2025,7 +2059,11 @@ mod tests {
             .await
             .expect("caller data failures do not hold");
         assert_eq!(events.len(), 1);
-        assert_request(events.into_iter().next().expect("good request"), good_rid);
+        assert_request(
+            events.into_iter().next().expect("good request"),
+            good_rid,
+            9,
+        );
     }
 
     #[tokio::test]
@@ -2094,10 +2132,9 @@ mod tests {
         );
         source.set_state(CALLER, 7, caller_state(&record, rid));
         live_tx.send(block_ref(9)).await.expect("queue live block");
-
         let mut harness = RunFixture::spawn(source, 5).await;
         assert_block(harness.next_event().await, 6);
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, rid, 7);
         assert_block(harness.next_event().await, 7);
         assert_block(harness.next_event().await, 8);
         assert!(matches!(
@@ -2120,7 +2157,7 @@ mod tests {
         source.set_transient_emission_error(7, 1, "connection reset by peer");
 
         let mut harness = RunFixture::spawn(source, 6).await;
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, rid, 7);
         assert_block(harness.next_event().await, 7);
         assert_block(harness.next_event().await, 8);
         assert!(matches!(
@@ -2237,7 +2274,7 @@ mod tests {
             ChainEvent::CatchupCompleted
         ));
         live_tx.send(block_ref(9)).await.expect("send live block");
-        assert_request(harness.next_event().await, rid);
+        assert_request(harness.next_event().await, rid, 9);
         assert_block(harness.next_event().await, 9);
         harness.cancel_and_join().await;
     }
@@ -2336,7 +2373,7 @@ mod tests {
 
             assert_eq!(events.len(), usize::from(signed), "{case}");
             for event in events {
-                assert_request(event, rid);
+                assert_request(event, rid, 9);
             }
         }
     }
@@ -2428,7 +2465,7 @@ mod tests {
                 .expect("block processes");
 
             assert_eq!(events.len(), 1, "{case}");
-            assert_request(events.into_iter().next().unwrap(), rid);
+            assert_request(events.into_iter().next().unwrap(), rid, 9);
         }
     }
 
@@ -2522,7 +2559,11 @@ mod tests {
             .await
             .expect("per-entry failures do not hold the block");
         assert_eq!(events.len(), 1);
-        assert_request(events.into_iter().next().expect("good request"), good_rid);
+        assert_request(
+            events.into_iter().next().expect("good request"),
+            good_rid,
+            9,
+        );
     }
 
     #[tokio::test]

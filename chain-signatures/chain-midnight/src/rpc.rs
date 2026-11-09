@@ -235,6 +235,19 @@ impl subxt::blocks::StaticExtrinsic for SendMnTransaction {
     const CALL: &'static str = "send_mn_transaction";
 }
 
+/// The substrate timestamp inherent (`Timestamp::set`), present in the
+/// captured Midnight runtime metadata (node 2.0.0-rc.4 fixture).
+#[derive(DecodeAsType)]
+#[decode_as_type(crate_path = "subxt::ext::scale_decode")]
+struct TimestampSet {
+    now: u64,
+}
+
+impl subxt::blocks::StaticExtrinsic for TimestampSet {
+    const PALLET: &'static str = "Timestamp";
+    const CALL: &'static str = "set";
+}
+
 #[derive(DecodeAsType)]
 #[decode_as_type(crate_path = "subxt::ext::scale_decode")]
 struct TxAppliedDetails {
@@ -474,6 +487,23 @@ impl MidnightRpc {
         }
 
         let height = u64::from(block.number());
+        // One timestamp inherent per block by substrate protocol; §4.3's
+        // admission bound anchors on it, so a traffic block without a
+        // decodable one holds instead of emitting without a time.
+        // Arg corruption fails `extrinsics()` first (subxt eagerly decodes
+        // call data); the decode arm is metadata drift — the payload decodes
+        // per the node's metadata but not as `TimestampSet`.
+        let block_time_ms = extrinsics
+            .find::<TimestampSet>()
+            .next()
+            .transpose()
+            .map_err(|err| anyhow::Error::new(err).context("timestamp set did not match metadata"))
+            .and_then(|found| {
+                found.ok_or_else(|| anyhow::anyhow!("block carries no timestamp inherent"))
+            })
+            .map_err(|cause| BlockHold::new("block-time-hold", height, cause))?
+            .value
+            .now;
         let mut decoded_candidates = Vec::with_capacity(candidates.len());
         let mut scale_system_events = None;
         for found in candidates {
@@ -566,6 +596,7 @@ impl MidnightRpc {
         }
 
         Ok(Some(BlockEmissions {
+            block_time_ms,
             proof_seed: BlockProofSeed {
                 reported_genesis_hash: *self.client.genesis_hash().as_fixed_bytes(),
                 reported_block_number: height,
@@ -1293,6 +1324,17 @@ mod tests {
     use subxt::ext::subxt_rpcs::UserError;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    /// The `Timestamp::set` moment the synthetic test body carries, unix ms.
+    const FIXTURE_BLOCK_TIME_MS: u64 = 1_700_000_000_000;
+
+    /// The timestamp extrinsic the synthetic test body carries.
+    enum FixtureTimestamp {
+        Set,
+        /// Trailing garbage inside the call payload: framing valid, decode not.
+        Corrupted,
+        Absent,
+    }
+
     #[derive(DecodeAsType)]
     #[decode_as_type(crate_path = "subxt::ext::scale_decode")]
     struct CaptureCallDetails {
@@ -1429,6 +1471,7 @@ mod tests {
         read_fallible_transaction(
             events,
             include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
+            FixtureTimestamp::Set,
         )
         .await
     }
@@ -1442,6 +1485,7 @@ mod tests {
     async fn read_fallible_transaction(
         events: Vec<u8>,
         transaction: &[u8],
+        timestamp: FixtureTimestamp,
     ) -> anyhow::Result<Option<BlockEmissions>> {
         read_fallible_transaction_as(
             events,
@@ -1491,6 +1535,26 @@ mod tests {
         // unrelated calls, so status association is exercised by Subxt itself.
         let mut body = vec![format!("0x{}", hex::encode(filler.encoded())); 4];
         body.push(format!("0x{}", hex::encode(candidate.encoded())));
+        let set_call = client.tx().create_unsigned(&subxt::dynamic::tx(
+            "Timestamp",
+            "set",
+            vec![subxt::dynamic::Value::from(FIXTURE_BLOCK_TIME_MS)],
+        ))?;
+        match timestamp {
+            FixtureTimestamp::Set => {
+                body.push(format!("0x{}", hex::encode(set_call.encoded())));
+            }
+            FixtureTimestamp::Corrupted => {
+                let encoded = set_call.encoded();
+                let (prefix, payload) = encoded.split_first().expect("encoded extrinsic");
+                assert!(payload.len() < 62, "single-byte compact prefix");
+                let mut corrupted = vec![prefix + 4];
+                corrupted.extend_from_slice(payload);
+                corrupted.push(0x00);
+                body.push(format!("0x{}", hex::encode(corrupted)));
+            }
+            FixtureTimestamp::Absent => {}
+        }
         let header = json!({
             "parentHash": hash_of_byte(0x42),
             "number": "0x1b0",
@@ -1552,8 +1616,9 @@ mod tests {
             .expect("block contains a singleton candidate");
         assert_eq!(block.proof_seed.reported_block_number, 432);
         assert_eq!(block.proof_seed.reported_block_hash, [0x43; 32]);
-        assert_eq!(block.proof_seed.scale_body.len(), 5);
+        assert_eq!(block.proof_seed.scale_body.len(), 6);
         assert_eq!(block.proof_seed.scale_system_events, events);
+        assert_eq!(block.block_time_ms, FIXTURE_BLOCK_TIME_MS);
         assert_eq!(block.candidates.len(), 1);
         let candidate = &block.candidates[0];
         assert_eq!(candidate.extrinsic_index, 4);
@@ -1583,33 +1648,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn block_reader_finds_calls_by_the_responder_address_too() {
-        // The decoder keys on the address alone, so the captured call stands in for a
-        // responder call when the responder is configured at its address.
-        let block = read_fallible_transaction_as(
-            include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec(),
-            include_bytes!("../fixtures/fallible-deposit-tx-432.mn"),
-            [0xab; 32],
-            crate::test_utils::hex_32(CAPTURE_SINGLETON),
-        )
-        .await
-        .expect("read captured fallible transaction")
-        .expect("block contains a responder candidate");
-        assert_eq!(
-            block.proof_seed.responder_address,
-            crate::test_utils::hex_32(CAPTURE_SINGLETON)
+    async fn a_traffic_block_without_a_timestamp_inherent_holds() {
+        let events = include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec();
+        let transaction = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
+        let err = read_fallible_transaction(events, transaction, FixtureTimestamp::Absent)
+            .await
+            .expect_err("a traffic block must carry its timestamp inherent");
+        let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
+        assert_eq!(hold.reason, "block-time-hold");
+        assert_eq!(hold.height, 432);
+        assert!(
+            format!("{:#}", hold.cause).contains("block carries no timestamp inherent"),
+            "unexpected cause: {:#}",
+            hold.cause
         );
-        let [candidate] = block.candidates.as_slice() else {
-            panic!("expected one candidate: {:?}", block.candidates);
-        };
-        assert!(candidate.singleton_calls.is_empty());
-        let [call] = candidate.responder_calls.as_slice() else {
-            panic!(
-                "expected one responder call: {:?}",
-                candidate.responder_calls
-            );
-        };
-        assert_eq!((call.call_index, call.physical_segment), (1, 49592));
+    }
+
+    #[tokio::test]
+    async fn corrupted_timestamp_arguments_fail_the_body_fetch() {
+        // subxt eagerly decodes call data at the body fetch, so arg
+        // corruption never reaches the reader — the fetch fails and the
+        // supervised run restarts.
+        let events = include_bytes!("../fixtures/fallible-block-432-events.scale").to_vec();
+        let transaction = include_bytes!("../fixtures/fallible-deposit-tx-432.mn");
+        let err = read_fallible_transaction(events, transaction, FixtureTimestamp::Corrupted)
+            .await
+            .expect_err("a traffic block must carry a decodable timestamp");
+        assert!(
+            err.downcast_ref::<BlockHold>().is_none(),
+            "arg corruption is a fetch failure, not a hold: {err:#}"
+        );
+        assert!(format!("{err:#}").contains("failed to fetch a midnight block body"));
+        assert!(format!("{err:#}").contains("bytes were left"));
     }
 
     fn captured_applied_status_record() -> Vec<u8> {
@@ -1688,10 +1758,14 @@ mod tests {
         // This reader fixture does not reseal the outer intent or pay changed fees.
         // Its matching status is synthetic; the assertions above establish the
         // contract-proof inputs and VM behavior, not acceptance by a live node.
-        let block = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
-            .await
-            .expect("a harmless noop must not hold block processing")
-            .unwrap();
+        let block = read_fallible_transaction(
+            encode_status_records(&[applied]),
+            &bytes,
+            FixtureTimestamp::Set,
+        )
+        .await
+        .expect("a harmless noop must not hold block processing")
+        .unwrap();
         assert_eq!(block.candidates.len(), 1);
         assert_eq!(block.candidates[0].ledger_tx_hash, hash);
         let calls = &block.candidates[0].singleton_calls;
@@ -1762,10 +1836,14 @@ mod tests {
 
         // Modified program and matching status are synthetic. This exercises the
         // production reader, not proof validity, gas admission or node acceptance.
-        let block = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
-            .await
-            .expect("checkpoints must not hide the captured event")
-            .unwrap();
+        let block = read_fallible_transaction(
+            encode_status_records(&[applied]),
+            &bytes,
+            FixtureTimestamp::Set,
+        )
+        .await
+        .expect("checkpoints must not hide the captured event")
+        .unwrap();
         assert_eq!(block.candidates.len(), 1);
         assert_eq!(block.candidates[0].ledger_tx_hash, hash);
         assert_eq!(block.candidates[0].singleton_calls, expected);
@@ -1829,10 +1907,14 @@ mod tests {
             recorder.clone(),
         );
         let subscriber_guard = tracing::subscriber::set_default(subscriber);
-        let block = read_fallible_transaction(encode_status_records(&[partial]), &bytes)
-            .await
-            .expect("a fallible effects mismatch in a partial success does not hold")
-            .unwrap();
+        let block = read_fallible_transaction(
+            encode_status_records(&[partial]),
+            &bytes,
+            FixtureTimestamp::Set,
+        )
+        .await
+        .expect("a fallible effects mismatch in a partial success does not hold")
+        .unwrap();
         drop(subscriber_guard);
         assert_eq!(block.candidates.len(), 1);
         assert!(block.candidates[0].singleton_calls.is_empty());
@@ -1850,9 +1932,13 @@ mod tests {
         assert_eq!(skipped.get("call_index").map(String::as_str), Some("1"));
         assert!(skipped["error"].contains("declared effects differ"));
 
-        let err = read_fallible_transaction(encode_status_records(&[applied]), &bytes)
-            .await
-            .expect_err("the same phase of a fully applied transaction holds");
+        let err = read_fallible_transaction(
+            encode_status_records(&[applied]),
+            &bytes,
+            FixtureTimestamp::Set,
+        )
+        .await
+        .expect_err("the same phase of a fully applied transaction holds");
         let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
         assert_eq!(hold.reason, "emission-schema-hold");
     }
@@ -1866,9 +1952,13 @@ mod tests {
         });
 
         for status in [partial, applied] {
-            let err = read_fallible_transaction(encode_status_records(&[status]), &bytes)
-                .await
-                .expect_err("an unsupported fallible program holds");
+            let err = read_fallible_transaction(
+                encode_status_records(&[status]),
+                &bytes,
+                FixtureTimestamp::Set,
+            )
+            .await
+            .expect_err("an unsupported fallible program holds");
             let hold = err.downcast_ref::<BlockHold>().expect("typed block hold");
             assert_eq!(hold.reason, "emission-schema-hold");
         }

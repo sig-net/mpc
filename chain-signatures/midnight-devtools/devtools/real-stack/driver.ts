@@ -35,6 +35,7 @@ import {
   type Secp256k1Point,
   type SignetPublicStateSource,
 } from "@sig-net/midnight";
+import { describeFailure } from "../../src/errors.js";
 import {
   fireTwin,
   prepareTwin,
@@ -61,10 +62,6 @@ import { createCallerPrivateState } from "./witnesses.js";
 
 const DEPLOYER_SEED = "02".repeat(32);
 const INVOKER_SEED = "03".repeat(32);
-// The responder and the impersonating caller deploy from wallets of their own, so they
-// run beside the deploys the deployer wallet pays for.
-const RESPONDER_DEPLOYER_SEED = "f0".repeat(32);
-const IMPERSONATOR_DEPLOYER_SEED = "f1".repeat(32);
 // One funding wallet per MPC node: a publisher assumes it alone spends its wallet's DUST,
 // and nodes sharing one wallet refuse each other's submissions as DUST double spends.
 const publisherSeed = (node: number) => (4 + node).toString(16).padStart(2, "0").repeat(32);
@@ -244,6 +241,15 @@ async function waitFor<T>(description: string, read: () => Promise<T | undefined
   throw new Error(`timed out waiting for ${description}`);
 }
 
+// The SDK reports every failed submission with the same error, so name the bootstrap step.
+async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    throw new Error(`${name} failed`, { cause: error });
+  }
+}
+
 async function callerHasRequest(active: Session, requestId: RequestIdHex): Promise<boolean> {
   const state = await active.publicDataProvider.queryContractState(active.callerAddress);
   if (!state) throw new Error(`no caller state found at ${active.callerAddress}`);
@@ -280,7 +286,8 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 type UnshieldedAddress = FacadeState["unshielded"]["address"];
 
 // The package's `transferNight` with one output per receiver, so one transaction funds
-// every role instead of one finalized transfer each.
+// every role instead of one finalized transfer each. Unlike it, this does not wait for
+// DUST to generate: the caller retries a DUST shortfall.
 async function transferNightToEach(
   facade: WalletFacade,
   keys: ReturnType<typeof deriveAccountKeys>,
@@ -331,16 +338,16 @@ async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): 
   const roles = [
     ["deployer", DEPLOYER_SEED],
     ["invoker", INVOKER_SEED],
-    ["responder deployer", RESPONDER_DEPLOYER_SEED],
-    ["impersonator deployer", IMPERSONATOR_DEPLOYER_SEED],
     ...publisherSeeds.map((seed, node) => [`publisher ${node}`, seed] as const),
   ] as const;
-  const receivers = await Promise.all(
-    roles.map(([, seed]) =>
-      withSyncedWalletFacade(
-        deriveAccountKeys(seed, networkId),
-        config,
-        async (_facade, state) => state.unshielded.address,
+  const receivers = await step("syncing the role wallets' addresses", () =>
+    Promise.all(
+      roles.map(([, seed]) =>
+        withSyncedWalletFacade(
+          deriveAccountKeys(seed, networkId),
+          config,
+          async (_facade, state) => state.unshielded.address,
+        ),
       ),
     ),
   );
@@ -358,23 +365,30 @@ async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): 
     }
     const amount = totalNight(state) / BigInt(roles.length + 2);
     if (amount === 0n) throw new Error("local genesis wallet cannot fund role wallets");
-    await registerNightForDustGeneration(rootFacade, rootKeys, state);
-    if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade, 1n);
+    await step("registering the root wallet's NIGHT for DUST", async () => {
+      await registerNightForDustGeneration(rootFacade, rootKeys, state);
+      if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(rootFacade, 1n);
+    });
 
     const startedAt = Date.now();
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        await transferNightToEach(rootFacade, rootKeys, state, receivers, amount);
-        break;
-      } catch (error) {
-        if (attempt >= 11 || !isDustBalancingShortfall(error)) throw error;
-        diagnostics(
-          `root DUST is not yet enough to cover the role transfer; retrying (attempt ${attempt + 1})`,
-        );
-        await sleep(5_000);
-        state = await rootFacade.waitForSyncedState();
-      }
-    }
+    await step(
+      `transferring NIGHT from the root wallet to ${roles.length} role wallets`,
+      async () => {
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            await transferNightToEach(rootFacade, rootKeys, state, receivers, amount);
+            break;
+          } catch (error) {
+            if (attempt >= 11 || !isDustBalancingShortfall(error)) throw error;
+            diagnostics(
+              `root DUST is not yet enough to cover the role transfer; retrying (attempt ${attempt + 1})`,
+            );
+            await sleep(5_000);
+            state = await rootFacade.waitForSyncedState();
+          }
+        }
+      },
+    );
     diagnostics(`funded ${roles.length} role wallets in ${Date.now() - startedAt}ms`);
   });
 
@@ -392,8 +406,10 @@ async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): 
         if (totalNight(state) === 0n) {
           throw new Error(`${name} wallet shows no NIGHT after funding from root`);
         }
-        await registerNightForDustGeneration(facade, keys, state);
-        if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade, 1n);
+        await step(`registering the ${name} wallet's NIGHT for DUST`, async () => {
+          await registerNightForDustGeneration(facade, keys, state);
+          if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade, 1n);
+        });
       });
       diagnostics(`verified ${name} wallet in ${Date.now() - startedAt}ms`);
     }),
@@ -420,10 +436,35 @@ async function bootstrap(request: BootstrapRequest) {
     queryURL: request.config.indexerUrl,
     subscriptionURL: request.config.indexerWsUrl,
   });
-  const indexed = (contractAddress: string) =>
-    waitFor(`the indexer to serve the contract deployed at ${contractAddress}`, async () =>
-      (await publicData.queryContractState(contractAddress)) ? true : undefined,
-    );
+  // A failed query counts as not indexed yet, so a transient indexer error does not end the
+  // bootstrap; a timeout names the last one.
+  const indexed = async (contractAddress: string) => {
+    let lastError: unknown;
+    try {
+      await waitFor(`the indexer to serve the contract deployed at ${contractAddress}`, () =>
+        publicData.queryContractState(contractAddress).then(
+          (state) => (state ? true : undefined),
+          (error: unknown) => {
+            lastError = error;
+            return undefined;
+          },
+        ),
+      );
+    } catch (error) {
+      if (lastError === undefined) throw error;
+      const timeout = error instanceof Error ? error.message : String(error);
+      throw new Error(`${timeout} (last query error: ${describeFailure(lastError)})`, {
+        cause: error,
+      });
+    }
+  };
+  diagnostics("deploying central Signet contract");
+  const central = await step("deploying the central Signet contract", () =>
+    deploySignetContract(deployEnv(request.config, DEPLOYER_SEED)),
+  );
+  await indexed(central.contractAddress);
+
+  const deployerKeys = deriveAccountKeys(DEPLOYER_SEED, request.config.networkId);
   const deployerSecret = bytes(DEPLOYER_SEED, 32);
   const deployerCommitment = pureCircuits.deployerCommitment(deployerSecret);
   // The constructor stores only its arguments, so the wallet paying for a caller deploy
@@ -443,32 +484,21 @@ async function bootstrap(request: BootstrapRequest) {
       await indexed(built.contractAddress);
       return { contractAddress: built.contractAddress };
     });
-  };
-  const deployCentralAndCallers = async () => {
-    diagnostics("deploying central Signet contract");
-    const central = await deploySignetContract(deployEnv(request.config, DEPLOYER_SEED));
-    await indexed(central.contractAddress);
-    diagnostics("deploying Compact caller and impersonating Compact caller");
-    const [caller, impersonator] = await Promise.all([
-      deployCaller(central.contractAddress, DEPLOYER_SEED),
-      deployCaller(central.contractAddress, IMPERSONATOR_DEPLOYER_SEED),
-    ]);
-    return { central, caller, impersonator };
-  };
-  const deployResponder = async () => {
-    diagnostics("deploying Signet responder");
-    const responder = await deploySignetResponder(
-      deployEnv(request.config, RESPONDER_DEPLOYER_SEED),
-    );
-    await indexed(responder.contractAddress);
-    return responder;
-  };
-  const [{ central, caller: callerDeployment, impersonator: impersonatorDeployment }, responder] =
-    await Promise.all([deployCentralAndCallers(), deployResponder()]);
+  const callerDeployment = await step("deploying the Compact caller", deployCaller);
+  await indexed(callerDeployment.contractAddress);
+  diagnostics("deploying impersonating Compact caller");
+  const impersonatorDeployment = await step(
+    "deploying the impersonating Compact caller",
+    deployCaller,
+  );
+  await indexed(impersonatorDeployment.contractAddress);
   const invokerKeys = deriveAccountKeys(INVOKER_SEED, request.config.networkId);
-  const facade = await initialiseWalletFacade(invokerKeys, request.config);
-  await facade.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
-  await facade.waitForSyncedState();
+  const facade = await step("syncing the invoker wallet", async () => {
+    const started = await initialiseWalletFacade(invokerKeys, request.config);
+    await started.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
+    await started.waitForSyncedState();
+    return started;
+  });
   const providers = buildCallerProviders(
     facade,
     invokerKeys,
@@ -771,9 +801,13 @@ for await (const line of lines) {
     const result = await dispatch(JSON.parse(line) as Request);
     process.stdout.write(`${JSON.stringify({ ok: true, result })}\n`);
   } catch (error) {
-    process.stdout.write(
-      `${JSON.stringify({ ok: false, error: error instanceof Error ? (error.stack ?? error.message) : String(error) })}\n`,
-    );
+    // The SDK's errors keep the node's own refusal (its `1010: Invalid Transaction` code, say)
+    // in their cause chain, which the stack does not show.
+    const described = describeFailure(error);
+    const reply =
+      error instanceof Error && error.stack ? `${described}\n${error.stack}` : described;
+    diagnostics(`request failed: ${reply}`);
+    process.stdout.write(`${JSON.stringify({ ok: false, error: reply })}\n`);
   }
 }
 await session?.facade.stop().catch(() => undefined);

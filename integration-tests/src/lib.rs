@@ -242,7 +242,6 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     let sk_share_local_path = spawner.tmp_dir.join("secrets");
     std::fs::create_dir_all(&sk_share_local_path).expect("could not create secrets dir");
-    let sk_share_local_path = sk_share_local_path.to_string_lossy().to_string();
 
     let mut ethereum = None;
     if spawner.use_ethereum {
@@ -393,7 +392,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let spawn_nodes_start = std::time::Instant::now();
     let node_cfgs = (0..spawner.accounts.len())
         .map(|index| spawner.node_config(index))
-        .collect::<Vec<_>>();
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let node_futures = spawner
         .accounts
         .iter()
