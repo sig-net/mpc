@@ -275,6 +275,14 @@ async function submitOnce(config: Config, id: number, intent: Uint8Array): Promi
   }
 
   if (remaining() <= 0) throw provingTimeout;
+  // After proving, which takes seconds and needs no wallet: the closer to the spend, the
+  // shorter the window in which a stalled indexer socket goes unseen.
+  try {
+    await ready.wallet.ensureCurrent(remaining());
+  } catch (error) {
+    throw asPublisherError(error);
+  }
+  if (remaining() <= 0) throw provingTimeout;
 
   inFlightId = id;
   const work = spend(ready, proven);

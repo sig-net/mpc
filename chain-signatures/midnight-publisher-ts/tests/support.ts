@@ -76,6 +76,7 @@ export async function respondInput(
 
 export interface StubEdges {
   readonly requireReady?: (timeoutMs: number) => Promise<void>;
+  readonly ensureCurrent?: (timeoutMs: number) => Promise<void>;
   readonly proveTx?: (tx: unknown, proofBudgetMs: number) => Promise<unknown>;
   readonly balanceTx?: (tx: unknown) => Promise<unknown>;
   readonly finalizeTx?: (recipe: unknown) => Promise<unknown>;
@@ -92,6 +93,7 @@ export function primeStub(edges: StubEdges = {}): void {
       proveTx: edges.proveTx ?? (async (tx: unknown, _proofBudgetMs: number) => tx),
       wallet: {
         requireReady: edges.requireReady ?? (async () => undefined),
+        ensureCurrent: edges.ensureCurrent ?? (async () => undefined),
         dustBalance: edges.dustBalance ?? (async () => undefined),
         balanceTx: edges.balanceTx ?? (async (tx: unknown) => tx),
         finalizeTx: edges.finalizeTx ?? (async (recipe: unknown) => recipe),
