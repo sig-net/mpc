@@ -17,7 +17,7 @@ use alloy::transports::{
 use http::StatusCode;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
-    utils::retry::{http_status_read_retryable, retry_rpc, RpcFailure, SharedBackoff},
+    utils::retry::{retry_rpc, RpcFailure, SharedBackoff},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{SignId, Signature};
@@ -417,7 +417,7 @@ fn batch_publish_error(failure: RpcFailure) -> anyhow::Error {
 /// JSON-RPC message and HTTP status from an RPC error, regardless of
 /// packaging: `ErrorResp` on HTTP 200, or a 4xx envelope (alloy keeps only
 /// the raw body string — alloy-transport-http `reqwest_transport`).
-fn rpc_error_parts(err: &AlloyTransportError) -> (Option<u16>, String) {
+fn rpc_error_parts(err: &AlloyTransportError) -> (Option<StatusCode>, String) {
     match err {
         AlloyRpcError::ErrorResp(payload) => (None, payload.message.to_string()),
         AlloyRpcError::Transport(TransportErrorKind::HttpError(http)) => {
@@ -430,7 +430,7 @@ fn rpc_error_parts(err: &AlloyTransportError) -> (Option<u16>, String) {
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| http.body.clone());
-            (Some(http.status), message)
+            (StatusCode::from_u16(http.status).ok(), message)
         }
         _ => (None, err.to_string()),
     }
@@ -446,9 +446,10 @@ fn send_error(err: ContractError) -> anyhow::Error {
         let lower = message.to_ascii_lowercase();
         if lower.contains("nonce too low") || lower.contains("replacement transaction underpriced")
         {
-            return match status.and_then(|status| StatusCode::from_u16(status).ok()) {
+            return match status {
                 Some(status) => {
-                    RpcFailure::with_verdict(status, false, format!("RPC Error: {message}")).into()
+                    RpcFailure::retryable_with_status(status, format!("RPC Error: {message}"))
+                        .into()
                 }
                 None => RpcFailure::retryable(format!("RPC Error: {message}")).into(),
             };
@@ -462,13 +463,8 @@ fn send_error(err: ContractError) -> anyhow::Error {
 /// risk on long polls belongs to the tx-lifecycle TODO.
 fn receipt_poll_error(err: AlloyTransportError) -> anyhow::Error {
     let (status, message) = rpc_error_parts(&err);
-    match status.and_then(|status| StatusCode::from_u16(status).ok()) {
-        Some(status) => RpcFailure::with_verdict(
-            status,
-            !http_status_read_retryable(status),
-            format!("RPC Error: {message}"),
-        )
-        .into(),
+    match status {
+        Some(status) => RpcFailure::read_status(status, format!("RPC Error: {message}")).into(),
         None => anyhow::Error::new(err),
     }
 }
@@ -837,6 +833,40 @@ mod tests {
                 panic!("transient 409 must not abandon the receipt poll: {err:#}")
             });
         assert!(receipt.status());
+    }
+
+    #[tokio::test]
+    async fn receipt_poll_404_fails_fast() {
+        let mut server = Server::new_async().await;
+        let tx_hash = B256::repeat_byte(0xce);
+
+        // the read partition's terminal arm: classic client errors are not
+        // poll quirks — the transient arm is pinned above
+        let not_found = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(404)
+            .with_body("not found")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut publisher = test_publisher(&server.url());
+        publisher.config.receipt_retry = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            max_times: 2,
+            jitter: false,
+        };
+
+        let err = publisher
+            .wait_for_transaction_receipt(tx_hash, &[SignId::new([5u8; 32])])
+            .await
+            .expect_err("404 must fail the receipt poll");
+        assert!(!is_retryable(&err), "{err:#}");
+        not_found.assert_async().await;
     }
 
     #[tokio::test]
