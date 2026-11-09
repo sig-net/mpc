@@ -279,9 +279,20 @@ impl IntentGen {
     /// Keeps the child's wallet snapshot when one is due. Called between publishes, where no
     /// intent's TTL is running, and never spawns a child only to ask.
     pub async fn refresh_snapshot(&self) {
-        if !self.snapshots.due() {
-            return;
+        if self.snapshots.due() {
+            self.take_snapshot().await;
         }
+    }
+
+    /// `refresh_snapshot` for a publish: only once the latest snapshot is overdue, because
+    /// the publisher was never idle long enough to take it.
+    pub async fn refresh_overdue_snapshot(&self) {
+        if self.snapshots.overdue() {
+            self.take_snapshot().await;
+        }
+    }
+
+    async fn take_snapshot(&self) {
         let outcome = {
             let mut session = self.session.lock().await;
             if session.is_none() {
@@ -1774,6 +1785,34 @@ mod tests {
 
         assert_eq!(asked.lines().len(), 1);
         assert_eq!(store.saves(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_publish_asks_for_a_snapshot_only_once_one_is_overdue() {
+        let (readies, asked) = (
+            StubLog::new("snap-overdue-ready"),
+            StubLog::new("snap-overdue-asked"),
+        );
+        let store = Arc::new(MemoryStore::default());
+        let builder = spawn_with(
+            &snapshot_stub(&readies, &asked, &[FRESH, FRESH], LANDED),
+            store.clone(),
+        )
+        .await;
+
+        // None kept yet: overdue.
+        builder.refresh_overdue_snapshot().await;
+        assert_eq!(asked.lines().len(), 1);
+        *builder.snapshots.kept_at_for_test() =
+            Some(Instant::now() - crate::wallet_snapshot::SNAPSHOT_INTERVAL);
+        builder.refresh_overdue_snapshot().await;
+        assert_eq!(asked.lines().len(), 1, "due is not yet overdue");
+        *builder.snapshots.kept_at_for_test() =
+            Some(Instant::now() - crate::wallet_snapshot::SNAPSHOT_OVERDUE);
+        builder.refresh_overdue_snapshot().await;
+
+        assert_eq!(asked.lines().len(), 2);
+        assert_eq!(store.saves(), 2);
     }
 
     #[tokio::test]

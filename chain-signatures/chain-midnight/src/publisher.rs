@@ -47,6 +47,8 @@ pub(crate) trait IntentClient: Send + Sync {
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted>;
     /// Keeps a due wallet snapshot; never fails a publish.
     async fn refresh_snapshot(&self) {}
+    /// Keeps an overdue wallet snapshot; never fails a publish.
+    async fn refresh_overdue_snapshot(&self) {}
 }
 
 #[async_trait]
@@ -61,6 +63,31 @@ impl IntentClient for IntentGen {
 
     async fn refresh_snapshot(&self) {
         IntentGen::refresh_snapshot(self).await;
+    }
+
+    async fn refresh_overdue_snapshot(&self) {
+        IntentGen::refresh_overdue_snapshot(self).await;
+    }
+}
+
+/// How often an idle publisher takes a due wallet snapshot.
+const IDLE_SNAPSHOT_CHECK: Duration = Duration::from_secs(30);
+
+/// Takes due wallet snapshots between publishes, off their path. Only while the flow is
+/// free: a publish that arrives meanwhile waits for at most this one snapshot.
+async fn snapshot_when_idle(client: Arc<dyn IntentClient>, flow: Arc<tokio::sync::Mutex<()>>) {
+    // Not at once: a child spawned just now is still syncing and refuses.
+    let mut checks = tokio::time::interval_at(
+        tokio::time::Instant::now() + IDLE_SNAPSHOT_CHECK,
+        IDLE_SNAPSHOT_CHECK,
+    );
+    checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        checks.tick().await;
+        let Ok(_flow) = flow.try_lock() else {
+            continue;
+        };
+        client.refresh_snapshot().await;
     }
 }
 
@@ -107,7 +134,8 @@ pub struct MidnightPublisher {
     telemetry: Arc<dyn PublisherTelemetry>,
     awaiter: Arc<dyn ResponseAwaiter>,
     /// One funding wallet and one DUST UTXO mean build-to-submit is one serial flow.
-    flow: tokio::sync::Mutex<()>,
+    flow: Arc<tokio::sync::Mutex<()>>,
+    _idle_snapshots: AbortOnDrop,
 }
 
 impl MidnightPublisher {
@@ -149,6 +177,8 @@ impl MidnightPublisher {
         telemetry: Arc<dyn PublisherTelemetry>,
         awaiter: Arc<dyn ResponseAwaiter>,
     ) -> Self {
+        let flow = Arc::new(tokio::sync::Mutex::new(()));
+        let idle_snapshots = tokio::spawn(snapshot_when_idle(client.clone(), flow.clone()));
         Self {
             config: config.clone(),
             central_address,
@@ -157,7 +187,8 @@ impl MidnightPublisher {
             output_store,
             telemetry,
             awaiter,
-            flow: tokio::sync::Mutex::new(()),
+            flow,
+            _idle_snapshots: AbortOnDrop(idle_snapshots),
         }
     }
 
@@ -240,7 +271,7 @@ impl ChainPublisher for MidnightPublisher {
             return Ok(());
         }
         // Before the reads that fix this intent's TTL, so a slow snapshot never shortens it.
-        self.client.refresh_snapshot().await;
+        self.client.refresh_overdue_snapshot().await;
         let central_address = self.central_address.to_hex();
         let sign_id = action.request.id;
         tracing::info!(
@@ -598,8 +629,9 @@ mod tests {
         /// The DUST a landed submit reports.
         dust_balance: Option<u128>,
         refreshes: std::sync::atomic::AtomicUsize,
-        /// `refreshes` as the first build saw it.
-        refreshes_before_build: std::sync::OnceLock<usize>,
+        overdue_refreshes: std::sync::atomic::AtomicUsize,
+        /// `overdue_refreshes` as the first build saw it.
+        overdue_refreshes_before_build: std::sync::OnceLock<usize>,
     }
 
     impl StubClient {
@@ -633,9 +665,10 @@ mod tests {
     #[async_trait]
     impl IntentClient for StubClient {
         async fn build(&self, request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
-            let _ = self
-                .refreshes_before_build
-                .set(self.refreshes.load(std::sync::atomic::Ordering::SeqCst));
+            let _ = self.overdue_refreshes_before_build.set(
+                self.overdue_refreshes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            );
             anyhow::ensure!(!self.refuse_build, "{BUILD_REFUSAL}");
             if let Some(code) = self.build_refusal {
                 return Err(refused(code));
@@ -646,6 +679,11 @@ mod tests {
 
         async fn refresh_snapshot(&self) {
             self.refreshes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        async fn refresh_overdue_snapshot(&self) {
+            self.overdue_refreshes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
 
@@ -693,12 +731,18 @@ mod tests {
         attempts: std::sync::atomic::AtomicUsize,
         entered: tokio::sync::Notify,
         release: tokio::sync::Notify,
+        refreshes: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait]
     impl IntentClient for BlockingClient {
         async fn build(&self, _request: &IntentRequest) -> anyhow::Result<Vec<u8>> {
             Ok(GRANTED_INTENT.to_vec())
+        }
+
+        async fn refresh_snapshot(&self) {
+            self.refreshes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
 
         async fn submit(&self, _intent: &[u8]) -> anyhow::Result<Submitted> {
@@ -1572,19 +1616,88 @@ mod tests {
         assert_eq!(client.submissions(), 1);
     }
 
-    #[tokio::test]
-    async fn a_publish_refreshes_the_wallet_snapshot_before_its_intent_s_ttl_starts() {
+    fn refreshes(counter: &std::sync::atomic::AtomicUsize) -> usize {
+        counter.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Lets the idle snapshot task run whatever its last tick released.
+    async fn settle() {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_publish_takes_only_an_overdue_snapshot_before_its_intent_s_ttl_starts() {
         let client = StubClient::new();
         let publisher =
             awaiting_publisher(StubReads::new(), client.clone(), ScriptedAwaiter::new(&[]));
+        settle().await;
+        let idle = refreshes(&client.refreshes);
 
         publisher
             .publish_signature(&respond_action())
             .await
             .expect("the stub client grants and accepts");
 
-        assert_eq!(client.refreshes_before_build.get(), Some(&1));
+        assert_eq!(client.overdue_refreshes_before_build.get(), Some(&1));
+        assert_eq!(
+            refreshes(&client.refreshes),
+            idle,
+            "a due snapshot is left to idle time"
+        );
         assert_eq!(client.submissions(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_publisher_takes_due_snapshots_until_it_is_dropped() {
+        let client = StubClient::new();
+        let publisher = publisher(StubReads::new(), client.clone());
+        settle().await;
+        assert_eq!(refreshes(&client.refreshes), 0, "not checked at start");
+
+        for _ in 0..3 {
+            tokio::time::advance(IDLE_SNAPSHOT_CHECK).await;
+            settle().await;
+        }
+        assert_eq!(refreshes(&client.refreshes), 3);
+
+        drop(publisher);
+        for _ in 0..2 {
+            tokio::time::advance(IDLE_SNAPSHOT_CHECK).await;
+            settle().await;
+        }
+        assert_eq!(
+            refreshes(&client.refreshes),
+            3,
+            "stopped with its publisher"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_idle_snapshot_is_taken_while_a_publish_holds_the_flow() {
+        let client = Arc::new(BlockingClient::default());
+        let publisher = Arc::new(publisher(StubReads::new(), client.clone()));
+        settle().await;
+        let entered = client.entered.notified();
+        let publish = tokio::spawn({
+            let publisher = publisher.clone();
+            async move { publisher.publish_signature(&respond_action()).await }
+        });
+        entered.await;
+        let before = refreshes(&client.refreshes);
+
+        for _ in 0..3 {
+            tokio::time::advance(IDLE_SNAPSHOT_CHECK).await;
+            settle().await;
+        }
+        assert_eq!(refreshes(&client.refreshes), before);
+
+        client.release.notify_one();
+        publish.await.unwrap().expect("the publish lands");
+        tokio::time::advance(IDLE_SNAPSHOT_CHECK).await;
+        settle().await;
+        assert_eq!(refreshes(&client.refreshes), before + 1);
     }
 
     /// The publish queued behind another asks only once its turn comes, so a response
