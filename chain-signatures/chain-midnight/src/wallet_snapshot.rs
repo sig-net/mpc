@@ -20,6 +20,10 @@ pub trait WalletSnapshotStore: Send + Sync {
 /// replays from its last settled publish.
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// Snapshots are taken while the publisher is idle; a publish takes one itself only once
+/// the latest is this old, on a node busy for that long without a pause.
+pub(crate) const SNAPSHOT_OVERDUE: Duration = Duration::from_secs(15 * 60);
+
 /// Restored children that fail in a row, with no submit landing in between, before their
 /// snapshot is dropped. Above one, because a healthy wallet is also refused at times.
 pub(crate) const RESTORE_STRIKES: u32 = 3;
@@ -69,7 +73,20 @@ impl Snapshots {
     }
 
     pub(crate) fn due(&self) -> bool {
-        locked(&self.kept_at).is_none_or(|kept| kept.elapsed() >= SNAPSHOT_INTERVAL)
+        self.older_than(SNAPSHOT_INTERVAL)
+    }
+
+    pub(crate) fn overdue(&self) -> bool {
+        self.older_than(SNAPSHOT_OVERDUE)
+    }
+
+    fn older_than(&self, age: Duration) -> bool {
+        locked(&self.kept_at).is_none_or(|kept| kept.elapsed() >= age)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn kept_at_for_test(&self) -> MutexGuard<'_, Option<Instant>> {
+        locked(&self.kept_at)
     }
 
     /// Kept in memory even when the store refuses it: the next respawn still resumes.
