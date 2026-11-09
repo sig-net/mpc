@@ -181,7 +181,7 @@ impl HydrationClient {
     ) -> anyhow::Result<Self> {
         let signer = HydrationSigner::from_uri(&config.signer_uri)?;
         Ok(Self {
-            rpc_ws_url: config.rpc_ws_url.clone(),
+            rpc_ws_url: config.rpc_ws_url.to_string(),
             api: Arc::default(),
             signer,
             telemetry,

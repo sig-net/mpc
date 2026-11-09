@@ -10,7 +10,10 @@ pub use checkpoint_storage::CheckpointStorage;
 pub use midnight_wallet_storage::MidnightWalletStorage;
 pub use presignature_storage::PresignatureStorage;
 pub use protocol_storage::{Initializing, Ready, StorageError};
+#[cfg(feature = "test-feature")]
+use std::path::PathBuf;
 pub use triple_storage::TripleStorage;
+use url::Url;
 
 // Can be used to "clear" redis storage in case of a breaking change
 pub const STORAGE_VERSION: &str = "v12";
@@ -35,9 +38,9 @@ pub struct Options {
     /// Keep the key share in a file at this path, suffixed with the account id.
     #[cfg(feature = "test-feature")]
     #[arg(long, env("MPC_SK_SHARE_LOCAL_PATH"), group = "sk_share")]
-    pub sk_share_local_path: Option<String>,
+    pub sk_share_local_path: Option<PathBuf>,
     #[arg(long, env("MPC_REDIS_URL"), hide_env_values = true)]
-    pub redis_url: String,
+    pub redis_url: Url,
 }
 
 fn owner_key(base: &str, owner: Participant) -> String {
