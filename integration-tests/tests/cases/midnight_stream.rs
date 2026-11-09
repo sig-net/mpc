@@ -4,11 +4,13 @@ use std::time::Duration;
 
 use alloy::primitives::{keccak256, Address, Bytes, U256};
 use alloy::providers::ext::AnvilApi as _;
-use alloy::providers::{Provider as _, ProviderBuilder};
-use alloy::rpc::types::{TransactionInput, TransactionRequest};
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::types::{TransactionInput, TransactionReceipt, TransactionRequest};
 use anyhow::Context as _;
 use integration_tests::cluster;
-use integration_tests::midnight::{AdversarialScenario, CallPlacement, PlacementScenario};
+use integration_tests::midnight::{
+    AdversarialScenario, CallPlacement, MidnightContext, PlacementScenario,
+};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_chain_integration_core::utils::test::ChainIndexerStream;
 use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
@@ -182,6 +184,142 @@ async fn wait_for_completed_checkpoint(
     Ok(())
 }
 
+/// An output case filed on Midnight and indexed, with the EVM call its request must sign.
+struct FiledCase<'a> {
+    case: &'a OutputCase,
+    request: Arc<IndexedSignRequest>,
+    target: Address,
+    expected_input: Vec<u8>,
+}
+
+/// Waits for the MPC signature of `filed`'s request, checks the signed transaction against
+/// the filed call and executes it.
+async fn execute_output_case(
+    anvil: &impl Provider,
+    midnight: &MidnightContext,
+    observed: &mut Observed,
+    events: &mut ChainIndexerStream,
+    root_pk: mpc_crypto::PublicKey,
+    filed: &FiledCase<'_>,
+) -> anyhow::Result<TransactionReceipt> {
+    let case = filed.case;
+    let request_id = filed.request.id.request_id;
+    let SignKind::SignBidirectional(sign_event) = &filed.request.kind else {
+        anyhow::bail!("{}: expected a bidirectional request", case.name);
+    };
+    assert_eq!(sign_event.caip2_id, Chain::Ethereum.caip2_chain_id());
+    observed
+        .until(events, "the finalized respond entry", |observed| {
+            observed.responded.contains(&request_id)
+        })
+        .await?;
+    let expected_sender = derive_user_address(root_pk, sign_event.epsilon()?);
+    let signed = midnight
+        .signed_evm_transaction(request_id, &format!("{expected_sender:#x}"))
+        .await?;
+    assert_eq!(signed.from.parse::<Address>()?, expected_sender);
+    assert_eq!(signed.to.parse::<Address>()?, filed.target);
+    assert_eq!(signed.chain_id, "31337");
+    assert_eq!(
+        signed.unsigned_hash,
+        format!("{:#x}", keccak256(&sign_event.serialized_transaction))
+    );
+    assert_eq!(
+        hex::decode(signed.data.trim_start_matches("0x"))?,
+        filed.expected_input
+    );
+    anvil
+        .anvil_set_balance(expected_sender, U256::from(10_000_000_000_000_000_000u128))
+        .await?;
+    if case.cache_outage {
+        // Accepted deviation: configured-cache failure does not gate publication.
+        // This final output case leaves the test-owned cache unavailable.
+        midnight.output_storage.stop().await?;
+    }
+    let receipt = anvil
+        .send_raw_transaction(&hex::decode(signed.serialized.trim_start_matches("0x"))?)
+        .await?
+        .get_receipt()
+        .await?;
+    assert_eq!(
+        receipt.status(),
+        !case.failed,
+        "unexpected EVM execution status"
+    );
+    Ok(receipt)
+}
+
+/// Waits for the attestation of `filed`'s executed request, checks it binds the expected
+/// output at the execution height, and settles it on the caller.
+async fn settle_output_case(
+    midnight: &MidnightContext,
+    observed: &mut Observed,
+    events: &mut ChainIndexerStream,
+    filed: &FiledCase<'_>,
+    receipt: &TransactionReceipt,
+) -> anyhow::Result<()> {
+    let case = filed.case;
+    let request_id = filed.request.id.request_id;
+    let SignKind::SignBidirectional(sign_event) = &filed.request.kind else {
+        anyhow::bail!("{}: expected a bidirectional request", case.name);
+    };
+    observed
+        .until(
+            events,
+            "the finalized respondBidirectional entry",
+            |observed| observed.attested.contains_key(&request_id),
+        )
+        .await?;
+    let metadata = observed.attested[&request_id];
+    let output = if case.cache_outage {
+        let error = midnight.stored_output(request_id).await.unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_connect),
+            "expected unavailable configured cache, got {error:#}"
+        );
+        // The independently checked Solidity/SDK output still settles the
+        // published attestation, without claiming cache recovery succeeded.
+        case.expected_output.clone()
+    } else {
+        midnight.stored_output(request_id).await?
+    };
+    assert_eq!(metadata.serialized_output_length, output.len() as u64);
+    let signing_metadata = mpc_primitives::AttestationMetadata {
+        key_version: sign_event.key_version,
+        block_height: metadata.block_height,
+        outcome_kind: metadata.outcome_kind,
+    };
+    assert_eq!(
+        metadata.digest,
+        mpc_compact_hashing::compute_attestation_hash(&request_id, &signing_metadata, &output)?
+    );
+    assert_eq!(
+        metadata.block_height,
+        receipt
+            .block_number
+            .context("receipt has no inclusion height")?
+    );
+    assert_eq!(
+        metadata.outcome_kind,
+        if case.failed {
+            mpc_primitives::AttestationOutcomeKind::Failed
+        } else {
+            mpc_primitives::AttestationOutcomeKind::Executed
+        }
+    );
+    assert_eq!(
+        output, case.expected_output,
+        "{}: output bytes differ",
+        case.name
+    );
+    midnight
+        .settle_response(request_id, &output, case.failed)
+        .await?;
+    Ok(())
+}
+
 #[ignore = "starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster"]
 #[serial]
 #[test(tokio::test)]
@@ -214,10 +352,17 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
         ProviderBuilder::new().connect_http(ethereum.sandbox.external_http_endpoint.parse()?);
     let mut argument = [0; 32];
     argument[31] = 6;
-    for (nonce, case) in cases.into_iter().enumerate() {
+    anyhow::ensure!(
+        cases.iter().rev().skip(1).all(|case| !case.cache_outage),
+        "only the last output case may take the output cache down"
+    );
+    // Every case is filed before any is awaited, so the MPC signs earlier cases while later
+    // ones are still being filed.
+    let mut filings = Vec::new();
+    for (nonce, case) in cases.iter().enumerate() {
         tracing::info!(case = case.name, nonce, "checking Midnight API conformance");
         let target = Address::repeat_byte(0x42 + nonce as u8);
-        anvil.anvil_set_code(target, case.runtime).await?;
+        anvil.anvil_set_code(target, case.runtime.clone()).await?;
         let mut expected_input = hex::decode("2a2e1320")?;
         expected_input.extend_from_slice(&argument);
         if let Some(expected_call_result) = &case.expected_call_result {
@@ -247,142 +392,62 @@ async fn midnight_to_ethereum_to_midnight_consumes_caller_response() -> anyhow::
             "{}: the caller request must notify in the guaranteed transcript",
             case.name
         );
-        let ChainEvent::SignRequest { request, .. } = events
-            .wait_for(
-                |event| {
-                    matches!(
-                        event,
-                        ChainEvent::SignRequest { request, .. }
-                            if request.chain == Chain::Midnight
-                                && matches!(request.kind, SignKind::SignBidirectional(_))
-                    )
-                },
-                EVENT_TIMEOUT,
-            )
-            .await
-            .context("waiting for the caller SignRequest")?
-        else {
-            unreachable!("filtered above")
-        };
-        let request_id = request.id.request_id;
-        assert_eq!(hex::encode(request_id), submitted.request_id);
-        let SignKind::SignBidirectional(sign_event) = &request.kind else {
-            unreachable!("filtered above")
-        };
-        assert_eq!(sign_event.caip2_id, Chain::Ethereum.caip2_chain_id());
+        filings.push((submitted.request_id, target, expected_input));
+    }
+    // Blocks index in order, so the caller's requests are indexed in filing order.
+    let mut observed = Observed::default();
+    let bidirectional = |observed: &Observed| {
+        observed
+            .sign_requests
+            .iter()
+            .filter(|request| matches!(request.kind, SignKind::SignBidirectional(_)))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    observed
+        .until(&mut events, "the caller SignRequests", |observed| {
+            bidirectional(observed).len() >= filings.len()
+        })
+        .await?;
+    let mut filed = Vec::new();
+    for ((case, (submitted_id, target, expected_input)), request) in
+        cases.iter().zip(filings).zip(bidirectional(&observed))
+    {
+        assert_eq!(hex::encode(request.id.request_id), submitted_id);
+        filed.push(FiledCase {
+            case,
+            request,
+            target,
+            expected_input,
+        });
+    }
 
-        events
-        .wait_for(
-            |event| matches!(event, ChainEvent::Respond(response) if response.request_id == request_id),
-            EVENT_TIMEOUT,
-        )
-        .await
-        .context("waiting for the finalized respond entry")?;
-        let expected_sender = derive_user_address(root_pk, sign_event.epsilon()?);
-        let signed = midnight
-            .signed_evm_transaction(request_id, &format!("{expected_sender:#x}"))
-            .await?;
-        assert_eq!(signed.from.parse::<Address>()?, expected_sender);
-        assert_eq!(signed.to.parse::<Address>()?, target);
-        assert_eq!(signed.chain_id, "31337");
-        assert_eq!(
-            signed.unsigned_hash,
-            format!("{:#x}", keccak256(&sign_event.serialized_transaction))
+    // Executions consume the signer's EVM nonces in case order. The cache outage case
+    // runs last, once every earlier output has been read from the cache.
+    let (outage, cached) = filed.split_last().context("no output cases")?;
+    let mut receipts = Vec::new();
+    for filed in cached {
+        receipts.push(
+            execute_output_case(&anvil, midnight, &mut observed, &mut events, root_pk, filed)
+                .await?,
         );
-        assert_eq!(
-            hex::decode(signed.data.trim_start_matches("0x"))?,
-            expected_input
-        );
-        anvil
-            .anvil_set_balance(expected_sender, U256::from(10_000_000_000_000_000_000u128))
-            .await?;
-        if case.cache_outage {
-            // Accepted deviation: configured-cache failure does not gate publication.
-            // This final output case leaves the test-owned cache unavailable.
-            midnight.output_storage.stop().await?;
-        }
-        let pending = anvil
-            .send_raw_transaction(&hex::decode(signed.serialized.trim_start_matches("0x"))?)
-            .await?;
-        let receipt = pending.get_receipt().await?;
-        assert_eq!(
-            receipt.status(),
-            !case.failed,
-            "unexpected EVM execution status"
-        );
-
-        let response_event = events
-        .wait_for(
-            |event| {
-                matches!(
-                    event,
-                    ChainEvent::RespondBidirectional(response) if response.request_id == request_id
-                )
-            },
-            EVENT_TIMEOUT,
-        )
-        .await
-        .context("waiting for the finalized respondBidirectional entry")?;
-        let ChainEvent::RespondBidirectional(response_event) = response_event else {
-            unreachable!()
-        };
-        let metadata = response_event
-            .attestation
-            .context("Midnight event has no attestation metadata")?;
-        let output = if case.cache_outage {
-            let error = midnight.stored_output(request_id).await.unwrap_err();
-            assert!(
-                error
-                    .downcast_ref::<reqwest::Error>()
-                    .is_some_and(reqwest::Error::is_connect),
-                "expected unavailable configured cache, got {error:#}"
-            );
-            // The independently checked Solidity/SDK output still settles the
-            // published attestation, without claiming cache recovery succeeded.
-            case.expected_output.clone()
-        } else {
-            midnight.stored_output(request_id).await?
-        };
-        assert_eq!(metadata.serialized_output_length, output.len() as u64);
-        let signing_metadata = mpc_primitives::AttestationMetadata {
-            key_version: sign_event.key_version,
-            block_height: metadata.block_height,
-            outcome_kind: metadata.outcome_kind,
-        };
-        assert_eq!(
-            metadata.digest,
-            mpc_compact_hashing::compute_attestation_hash(&request_id, &signing_metadata, &output)?
-        );
-        assert_eq!(
-            metadata.block_height,
-            receipt
-                .block_number
-                .context("receipt has no inclusion height")?
-        );
-        assert_eq!(
-            metadata.outcome_kind,
-            if case.failed {
-                mpc_primitives::AttestationOutcomeKind::Failed
-            } else {
-                mpc_primitives::AttestationOutcomeKind::Executed
-            }
-        );
-        assert_eq!(
-            output, case.expected_output,
-            "{}: output bytes differ",
-            case.name
-        );
-        midnight
-            .settle_response(request_id, &output, case.failed)
-            .await?;
-        let ChainEvent::Block(final_block) = events
-            .wait_for(|event| matches!(event, ChainEvent::Block(_)), EVENT_TIMEOUT)
-            .await
-            .context("waiting for a block after respondBidirectional")?
-        else {
-            unreachable!("filtered above")
-        };
-        wait_for_completed_checkpoint(&cluster, request_id, final_block).await?;
+    }
+    for (filed, receipt) in cached.iter().zip(&receipts) {
+        settle_output_case(midnight, &mut observed, &mut events, filed, receipt).await?;
+    }
+    let receipt = execute_output_case(
+        &anvil,
+        midnight,
+        &mut observed,
+        &mut events,
+        root_pk,
+        outage,
+    )
+    .await?;
+    settle_output_case(midnight, &mut observed, &mut events, outage, &receipt).await?;
+    let final_block = observed.next_block(&mut events).await?;
+    for filed in &filed {
+        wait_for_completed_checkpoint(&cluster, filed.request.id.request_id, final_block).await?;
     }
 
     // Impersonation: another contract notifies the central Signet contract naming the caller's
