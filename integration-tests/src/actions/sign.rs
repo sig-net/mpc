@@ -494,12 +494,12 @@ impl<'a> SolSignAction<'a> {
 const RESPOND_EVENT_HINT: &str = "Program log: Instruction: Respond";
 
 async fn wait_for_signature_responded_event(
-    rpc_http_url: String,
+    rpc_http_url: url::Url,
     rpc_ws_url: String,
     program_id: Pubkey,
     timeout: Duration,
 ) -> anyhow::Result<SolSignatureResponse> {
-    let rpc_client = RpcClient::new(rpc_http_url);
+    let rpc_client = RpcClient::new(rpc_http_url.to_string());
     let pubsub_client = PubsubClient::new(rpc_ws_url.as_str()).await?;
 
     let filter = RpcTransactionLogsFilter::Mentions(vec![program_id.to_string()]);
@@ -686,8 +686,10 @@ pub async fn wait_for_respond_bidirectional(
     // Scan at `confirmed`, like the rest of this file: the default is
     // `finalized`, which trails by 32 slots and on a slow CI validator can
     // exceed the whole timeout.
-    let rpc =
-        RpcClient::new_with_commitment(solana.rpc_address.clone(), CommitmentConfig::confirmed());
+    let rpc = RpcClient::new_with_commitment(
+        solana.rpc_address.to_string(),
+        CommitmentConfig::confirmed(),
+    );
 
     tracing::info!(
         request_id = %hex::encode(expected_request_id),

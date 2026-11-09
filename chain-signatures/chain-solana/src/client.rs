@@ -28,6 +28,7 @@ use std::{
 };
 
 use crate::config::SolConfig;
+use url::Url;
 
 /// Shared upper bound for signature pages and globally ordered slot chunks.
 pub(crate) const CATCHUP_PAGE_SIZE: usize = 1_000;
@@ -153,7 +154,7 @@ pub struct SolanaClient {
     /// Shared 429 cooldown across all RPC call sites
     shared_backoff: SharedBackoff,
     pub rpc_client: Arc<RpcClient>,
-    pub rpc_http_url: String,
+    pub rpc_http_url: Url,
     pub http_client: reqwest::Client,
     pub program_id: Pubkey,
     pub payer: Arc<Keypair>,
@@ -166,13 +167,13 @@ impl SolanaClient {
         let keypair = Keypair::from_base58_string(&sol.account_sk);
         let payer = Arc::new(keypair);
         // Empty ws slot: nothing subscribes (the indexer polls finalized blocks).
-        let cluster = anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), String::new());
+        let cluster = anchor_client::Cluster::Custom(sol.rpc_http_url.to_string(), String::new());
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
             CommitmentConfig::confirmed(),
         );
-        let rpc_client = Arc::new(RpcClient::new(sol.rpc_http_url.clone()));
+        let rpc_client = Arc::new(RpcClient::new(sol.rpc_http_url.to_string()));
         let program_id = Pubkey::from_str(&sol.program_address)
             .expect("Invalid Solana program address provided in configuration");
         Self {
@@ -192,7 +193,7 @@ impl SolanaClient {
     }
 
     pub fn for_indexer(
-        rpc_http_url: String,
+        rpc_http_url: Url,
         program_address: Pubkey,
         telemetry: Arc<dyn PublisherTelemetry>,
         shared_backoff: SharedBackoff,
@@ -200,13 +201,13 @@ impl SolanaClient {
         let keypair = Keypair::new(); // Dummy keypair for indexer mode
         let payer = Arc::new(keypair);
         // Empty ws slot: nothing subscribes.
-        let cluster = anchor_client::Cluster::Custom(rpc_http_url.clone(), String::new());
+        let cluster = anchor_client::Cluster::Custom(rpc_http_url.to_string(), String::new());
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
             CommitmentConfig::finalized(),
         );
-        let rpc_client = Arc::new(RpcClient::new(rpc_http_url.clone()));
+        let rpc_client = Arc::new(RpcClient::new(rpc_http_url.to_string()));
         Self {
             client: Arc::new(client),
             rpc_retry: default_retry_strategy(),
@@ -337,7 +338,7 @@ impl SolanaClient {
 
                 let resp = self
                     .http_client
-                    .post(&self.rpc_http_url)
+                    .post(self.rpc_http_url.clone())
                     .json(&requests)
                     .send()
                     .await
@@ -572,7 +573,7 @@ mod tests {
     /// Helper to create a SolanaClient bound to an observable gate
     fn test_client_with_gate(url: &str, shared_backoff: SharedBackoff) -> SolanaClient {
         SolanaClient::for_indexer(
-            url.to_string(),
+            url.parse().unwrap(),
             Pubkey::new_unique(),
             Arc::new(NoopPublisherTelemetry),
             shared_backoff,
