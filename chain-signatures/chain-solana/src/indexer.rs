@@ -138,22 +138,15 @@ impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
         telemetry: T,
         shared_backoff: SharedBackoff,
     ) -> anyhow::Result<Self> {
-        let program_id = Pubkey::from_str(&config.program_address).with_context(|| {
-            format!(
-                "failed to parse solana program address: {}",
-                config.program_address
-            )
-        })?;
-
         let client = SolanaClient::for_indexer(
             config.rpc_http_url.clone(),
-            program_id,
+            config.program_address,
             Arc::new(NoopPublisherTelemetry), // Indexer does not publish
             shared_backoff,
         );
 
         Ok(Self {
-            program_id,
+            program_id: config.program_address,
             client,
             config: config.indexer,
             slot_stall_timeout: Duration::from_secs(Chain::Solana.feed_stall_timeout_secs()),
