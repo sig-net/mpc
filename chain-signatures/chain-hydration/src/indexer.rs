@@ -443,6 +443,9 @@ impl<T: ChainTelemetry> HydrationIndexer<T> {
         }
 
         // Bidirectional request
+        // TODO: decode the block's timestamp inherent (one
+        // chain_getBlock) so §4.3's expiry bound anchors for Hydration
+        // sources too.
         if ev.pallet_name() == PALLET_SIGNET
             && ev.variant_name() == EVENT_SIGN_BIDIRECTIONAL_REQUESTED
         {
