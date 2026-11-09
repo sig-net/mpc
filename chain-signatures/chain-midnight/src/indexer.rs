@@ -192,6 +192,9 @@ impl<S: StateManager, T: ChainTelemetry> MidnightIndexer<S, T> {
                                     sign_id = ?request.id,
                                     "midnight signature requested"
                                 );
+                                // Seconds for the event field; truncation adds
+                                // <1 s of slack to the bound - negligible
+                                // against the 24 h cap and the walk's 3 s slots.
                                 events.push(ChainEvent::SignRequest {
                                     request: Arc::new(request),
                                     block_timestamp: Some(block_time_ms / 1000),
