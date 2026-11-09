@@ -871,7 +871,8 @@ async fn process_sign_request_rejects_a_window_beyond_the_cap() {
 }
 
 /// No block time (Canton, Hydration, or a Solana block whose estimate is
-/// absent): the bound skips, and M6 answers at expiry.
+/// absent): the bound skips; M6 answers at expiry where the walk spans
+/// the window.
 #[tokio::test]
 async fn process_sign_request_skips_the_expiry_bound_without_a_source_block_time() {
     let backlog = Backlog::new();

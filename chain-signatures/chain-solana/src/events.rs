@@ -272,9 +272,9 @@ pub async fn emit_events(
                     "solana sign request parsed",
                 );
                 // `blockTime` is a nullable estimate; holding on null
-                // wedges the chain. `None` skips §4.3's bound — M6 still
-                // answers at expiry (`Unviable` on Midnight, `Failed`
-                // elsewhere).
+                // wedges the chain. `None` skips §4.3's bound; M6 answers
+                // at expiry where the walk spans the window (`Unviable` on
+                // Midnight, `Failed` elsewhere).
                 ChainEvent::SignRequest {
                     request: Arc::new(request),
                     block_timestamp: block_time,
