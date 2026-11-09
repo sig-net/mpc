@@ -5,6 +5,7 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::time::{sleep, Duration};
+use url::Url;
 
 pub(crate) const LOCAL_OIDC_AUDIENCE: &str = "https://canton.network.global";
 pub(crate) const LOCAL_OIDC_CLIENT_SECRET: &str = "local-canton-client-secret";
@@ -19,7 +20,7 @@ const LOCAL_OIDC_TOKEN_TTL_SECS: u64 = 300;
 
 pub(crate) struct OidcTestProvider {
     base_url: String,
-    token_url: String,
+    token_url: Url,
     jwks_url: String,
     _container: ContainerAsync<GenericImage>,
 }
@@ -48,7 +49,7 @@ impl OidcTestProvider {
         })
     }
 
-    pub(crate) fn token_url(&self) -> &str {
+    pub(crate) fn token_url(&self) -> &Url {
         &self.token_url
     }
 
@@ -133,8 +134,10 @@ fn token_callback(issuer_id: &str) -> Value {
     })
 }
 
-fn issuer_token_url(base_url: &str, issuer_id: &str) -> String {
+fn issuer_token_url(base_url: &str, issuer_id: &str) -> Url {
     format!("{base_url}/{issuer_id}/token")
+        .parse()
+        .expect("a valid url")
 }
 
 fn issuer_jwks_url(base_url: &str, issuer_id: &str) -> String {
