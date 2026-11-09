@@ -573,12 +573,7 @@ pub async fn process_execution_confirmed(
             block_height,
             "nonce taken by another request's transaction"
         );
-        // Other source chains cannot encode Unviable yet; their applications refund on Failed.
-        let outcome = if sibling.chain == Chain::Midnight {
-            ExecutionOutcome::Unviable
-        } else {
-            ExecutionOutcome::Failed
-        };
+        let outcome = mpc_chain_integration_core::unexecutable_outcome(sibling.chain);
         // Logged, not propagated: a `?` would skip the rest and leave the
         // taker, unwatched above, without an answer.
         if let Err(err) = answer_execution(sibling, sibling_id, block_height, outcome, ctx).await {

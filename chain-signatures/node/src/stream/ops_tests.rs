@@ -519,9 +519,13 @@ async fn execution_answers_the_nonce_siblings_of_its_transaction() {
         };
         assert_eq!(response.outcome_kind, Some(expected), "{source_chain}");
         assert_eq!(response.tx_id, sibling_tx.id, "{source_chain}");
-        if let Some(attestation) = response.attestation {
-            assert_eq!(attestation.block_height, 123, "{source_chain}");
-        }
+        assert_eq!(
+            response
+                .attestation
+                .map(|attestation| attestation.block_height),
+            (source_chain == Chain::Midnight).then_some(123),
+            "{source_chain}"
+        );
 
         let entry = ctx.backlog.get(source_chain, &unsigned.id).await.unwrap();
         assert_matches!(
