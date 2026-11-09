@@ -30,18 +30,24 @@ run-ci args="": (setup "act")
 # Run all integration tests
 # Usage: just t [filter]
 test filter="": (setup "")
+    #!/usr/bin/env bash
+    trap './scripts/docker-cleanup.sh; exit 100' INT
     cargo nextest run -p integration-tests {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias t := test
 
 # Run only lightweight fixture tests (no full cluster or Docker beyond Redis)
 # Usage: just tf [filter]
 test-fixture filter="": (setup "")
+    #!/usr/bin/env bash
+    trap './scripts/docker-cleanup.sh; exit 100' INT
     cargo nextest run -p integration-tests --profile fixture {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias tf := test-fixture
 
 # Run only full cluster tests
 # Usage: just tc [filter]
 test-cluster filter="": (setup "")
+    #!/usr/bin/env bash
+    trap './scripts/docker-cleanup.sh; exit 100' INT
     cargo nextest run -p integration-tests --profile cluster {{ if filter != "" { "-E 'test(" + filter + ")'" } else { "" } }}
 alias tc := test-cluster
 
