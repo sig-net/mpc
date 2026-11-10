@@ -1,3 +1,4 @@
+import { ContractState } from "@midnight-ntwrk/compact-runtime";
 import type { UnprovenTransaction } from "@midnightntwrk/ledger-v9";
 import { hexToBytes } from "@sig-net/midnight";
 import {
@@ -49,7 +50,9 @@ async function holds(context: PlacementContext, requestId: string): Promise<bool
     context.callerAddress,
   );
   if (!state) throw new Error(`no caller state found at ${context.callerAddress}`);
-  return ledger(state.data).requests.member(hexToBytes(requestId));
+  return ledger(state.contractState.deserialize({ v9: ContractState }).data).requests.member(
+    hexToBytes(requestId),
+  );
 }
 
 // reviewShape's request id argument where its mode ignores it.

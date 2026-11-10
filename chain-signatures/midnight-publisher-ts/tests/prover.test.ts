@@ -67,7 +67,8 @@ async function proofRequest(circuit: "respond" | "respondBidirectional" = "respo
   return captured;
 }
 
-describe("the proving provider", () => {
+// Each case loads the packaged ~113 MB ZKIR v3 prover keys, past vitest's default 5 s.
+describe("the proving provider", { timeout: 30_000 }, () => {
   it("carries the compiled contract's key material for its supported circuits", async () => {
     for (const circuit of ["respond", "respondBidirectional"] as const) {
       const material = await provider().lookupKey(contractKeyLocation(circuit));

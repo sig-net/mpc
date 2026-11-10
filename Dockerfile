@@ -34,7 +34,7 @@ RUN chmod +x /opt/midnight-publisher/dist/main.js \
       midnight-publisher 2>/dev/null)" = \
       '{"id":0,"ok":true,"ready":true,"protocolVersion":3,"submitTimeoutMs":360000,"recipeTtlMs":300000}'
 
-FROM rust:1.93-bookworm AS node-builder
+FROM rust:1.95-bookworm AS node-builder
 RUN rustc --version --verbose
 WORKDIR /usr/src/app
 ARG GIT_COMMIT_HASH

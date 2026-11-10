@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
+import type { FinalizedTx } from "@midnightntwrk/wallet-sdk-abstractions";
 import { deriveAccountKeys, type WalletFacade } from "@sig-net/midnight-contract-deploy";
 import { BehaviorSubject, concat, of, Subject } from "rxjs";
 
@@ -20,15 +20,28 @@ const sdk = vi.hoisted(() => {
   return { initialiseWalletFacade: vi.fn(), init: vi.fn(), restored, stops };
 });
 
+// The identifiers the submit guard reads from a finalized transaction's ledger encoding.
+const ledger = vi.hoisted(() => ({ identifiers: vi.fn(() => ["ab".repeat(32)]) }));
+vi.mock("@midnightntwrk/ledger-v9", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@midnightntwrk/ledger-v9")>()),
+  Transaction: { deserialize: () => ({ identifiers: ledger.identifiers }) },
+}));
+
 vi.mock("@sig-net/midnight-contract-deploy", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@sig-net/midnight-contract-deploy")>()),
   initialiseWalletFacade: sdk.initialiseWalletFacade,
 }));
 
-vi.mock("@midnightntwrk/wallet-sdk-facade", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@midnightntwrk/wallet-sdk-facade")>()),
-  WalletFacade: { init: sdk.init },
-}));
+vi.mock("@midnightntwrk/wallet-sdk-facade", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@midnightntwrk/wallet-sdk-facade")>();
+  return {
+    ...actual,
+    WalletFacade: {
+      init: sdk.init,
+      resolveConfiguration: actual.WalletFacade.resolveConfiguration.bind(actual.WalletFacade),
+    },
+  };
+});
 vi.mock("@midnightntwrk/wallet-sdk-shielded", () => ({ ShieldedWallet: sdk.restored("shielded") }));
 vi.mock("@midnightntwrk/wallet-sdk-unshielded-wallet", () => ({
   UnshieldedWallet: sdk.restored("unshielded"),
@@ -68,7 +81,7 @@ const syncProgress = (appliedIndex: bigint, highestIndex: bigint) => ({
 function facadeState(isSynced: boolean) {
   return {
     isSynced,
-    pending: { all: [] as unknown[] },
+    lifecycle: [] as unknown[],
     shielded: { pendingCoins: [] as unknown[], progress: syncProgress(4n, 4n) },
     unshielded: {
       pendingCoins: [] as unknown[],
@@ -91,6 +104,7 @@ function stubFacade(dustState = new Subject<DustStateStub>(), isSynced = false) 
     shielded: { serializeState: vi.fn(async () => "shielded-state") },
     unshielded: { serializeState: vi.fn(async () => "unshielded-state") },
     dust: { state: dustState, serializeState: vi.fn(async () => "dust-state") },
+    adoptTransaction: vi.fn((bytes: Uint8Array, stage: string) => ({ adopted: stage, bytes })),
     balanceUnboundTransaction: vi.fn(),
     signRecipe: vi.fn(),
     finalizeRecipe: vi.fn(),
@@ -114,10 +128,7 @@ describe("openFundingWallet", () => {
       ...ENDPOINTS,
       networkId: "undeployed",
     });
-    expect(facade.start).toHaveBeenCalledExactlyOnceWith(
-      KEYS.shieldedSecretKeys,
-      KEYS.dustSecretKey,
-    );
+    expect(facade.start).toHaveBeenCalledExactlyOnceWith(KEYS.seeds);
     expect(facade.stop).not.toHaveBeenCalled();
   });
 
@@ -201,37 +212,34 @@ describe("openFundingWallet", () => {
     const facade = stubFacade();
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
     const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
-    const tx = { identifiers: () => ["ab".repeat(32)] } as unknown as FinalizedTransaction;
+    const tx = { serialize: () => Uint8Array.of(1) } as unknown as FinalizedTx;
 
     await expect(wallet.submitTx(tx)).resolves.toEqual({ txId: "ab".repeat(32) });
-    await expect(
-      wallet.submitTx({ identifiers: () => [] } as unknown as FinalizedTransaction),
-    ).rejects.toThrow("carries no identifier");
+    ledger.identifiers.mockReturnValueOnce([]);
+    await expect(wallet.submitTx(tx)).rejects.toThrow("carries no identifier");
     expect(facade.submitTransaction).toHaveBeenCalledExactlyOnceWith(tx);
 
     await wallet.close();
     expect(facade.stop).toHaveBeenCalledOnce();
   });
 
-  it("balances with wallet keys and a five-minute recipe before finalizing", async () => {
+  it("balances the adopted transaction with a five-minute recipe before finalizing", async () => {
     const facade = stubFacade();
     const recipe = { recipe: true } as unknown as UnboundRecipe;
     const signed = { signed: true } as unknown as BalancingRecipe;
-    const finalized = { finalized: true } as unknown as FinalizedTransaction;
+    const finalized = { finalized: true } as unknown as FinalizedTx;
     vi.mocked(facade.balanceUnboundTransaction).mockResolvedValueOnce(recipe);
     vi.mocked(facade.signRecipe).mockResolvedValueOnce(signed);
     vi.mocked(facade.finalizeRecipe).mockResolvedValueOnce(finalized);
     sdk.initialiseWalletFacade.mockResolvedValueOnce(facade);
     const wallet = await openFundingWallet(KEYS, "undeployed", ENDPOINTS);
-    const tx = { unbound: true } as unknown as UnboundTransaction;
+    const tx = { serialize: () => Uint8Array.of(2) } as unknown as UnboundTransaction;
     const before = Date.now();
 
     await expect(wallet.balanceTx(tx)).resolves.toBe(signed);
-    const [, keys, options] = vi.mocked(facade.balanceUnboundTransaction).mock.calls[0]!;
-    expect(keys).toMatchObject({
-      shieldedSecretKeys: expect.anything(),
-      dustSecretKey: expect.anything(),
-    });
+    expect(facade.adoptTransaction).toHaveBeenCalledExactlyOnceWith(Uint8Array.of(2), "Unbound");
+    const [adopted, options] = vi.mocked(facade.balanceUnboundTransaction).mock.calls[0]!;
+    expect(adopted).toEqual({ adopted: "Unbound", bytes: Uint8Array.of(2) });
     expect(options.tokenKindsToBalance).toEqual(["dust"]);
     expect(options.ttl.getTime()).toBeGreaterThanOrEqual(before + 5 * 60 * 1_000);
     expect(options.ttl.getTime()).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1_000);
@@ -265,10 +273,7 @@ describe("openFundingWallet with a snapshot", () => {
       relayURL: new URL("ws://127.0.0.1:9944"),
       costParameters: { feeBlocksMargin: 5 },
     });
-    expect(facade.start).toHaveBeenCalledExactlyOnceWith(
-      KEYS.shieldedSecretKeys,
-      KEYS.dustSecretKey,
-    );
+    expect(facade.start).toHaveBeenCalledExactlyOnceWith(KEYS.seeds);
   });
 
   it("syncs from the start when the snapshot belongs elsewhere or does not decode", async () => {
@@ -370,7 +375,7 @@ describe("openFundingWallet with a snapshot", () => {
     for (const unsettled of ["shielded", "unshielded", "dust", "pending"] as const) {
       const busy = stubFacade(new Subject(), true);
       const state = facadeState(true);
-      if (unsettled === "pending") state.pending.all = [{ tx: "submitted" }];
+      if (unsettled === "pending") state.lifecycle = [{ status: { _tag: "Submitted" } }];
       else state[unsettled].pendingCoins = [{ coin: unsettled }];
       vi.mocked(busy.state).mockReturnValue(of(state) as never);
       sdk.initialiseWalletFacade.mockResolvedValueOnce(busy);
@@ -386,7 +391,7 @@ describe("openFundingWallet with a snapshot", () => {
   it("waits a few seconds for the transaction a submit just returned for to settle", async () => {
     vi.useFakeTimers();
     const inFlight = facadeState(true);
-    inFlight.pending.all = [{ tx: "submitted" }];
+    inFlight.lifecycle = [{ status: { _tag: "Submitted" } }];
     const confirmed = new Subject<ReturnType<typeof facadeState>>();
     const facade = stubFacade(new Subject(), true);
     vi.mocked(facade.state).mockImplementation(() => concat(of(inFlight), confirmed) as never);

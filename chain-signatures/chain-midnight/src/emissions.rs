@@ -1,7 +1,7 @@
 //! Singleton contract emissions recovered by executing transaction transcripts with the ledger VM.
 
 use anyhow::Context as _;
-use midnight_base_crypto::fab::{AlignedValue, AlignmentAtom, AlignmentSegment, Value};
+use midnight_base_crypto::fab::{AlignmentAtom, AlignmentSegment};
 use midnight_ledger_v9::structure::{ContractCall, ProofKind, ProofMarker, Signature, Transaction};
 use midnight_onchain_runtime::context::QueryContext;
 use midnight_onchain_runtime::cost_model::INITIAL_COST_MODEL;
@@ -9,7 +9,6 @@ use midnight_onchain_runtime::ops::{LogEventType, Op, VersionedLogItem};
 use midnight_onchain_runtime::result_mode::ResultModeVerify;
 use midnight_onchain_runtime::state::{ChargedState, StateValue};
 use midnight_onchain_runtime::transcript::Transcript;
-use midnight_storage::arena::Sp;
 use midnight_storage::storage::Array;
 use midnight_storage::DefaultDB;
 
@@ -86,7 +85,7 @@ fn log_items<P: ProofKind<DefaultDB>>(
     call: &ContractCall<P, DefaultDB>,
     transcript: &Transcript<DefaultDB>,
 ) -> anyhow::Result<Vec<VersionedLogItem<DefaultDB>>> {
-    let program = proven_program(Vec::from(&transcript.program));
+    let program = Vec::from(&transcript.program);
     // Live ingestion establishes the node status first; transaction normalization is
     // the ledger's responsibility. Only constrain what we can replay correctly.
     // Noops and checkpoints only consume gas during VM execution; they cannot
@@ -119,50 +118,6 @@ fn log_items<P: ProofKind<DefaultDB>>(
         return Err(DeclaredEffectsMismatch.into());
     }
     Ok(result.events)
-}
-
-/// The program as its proof covers it. Ledger 9.1.0-rc.3, which this crate pins and Stagenet
-/// runs, accepts `idx []`, which has no field representation, and atoms past a pushed cell's
-/// alignment, which the field representation drops, so a transaction's author can add either
-/// to a proven program. Midnight closed both in 9.1.0-rc.5, so this can go once every
-/// ledger-9 network we read runs rc.5 or later.
-fn proven_program(
-    program: Vec<Op<ResultModeVerify, DefaultDB>>,
-) -> Vec<Op<ResultModeVerify, DefaultDB>> {
-    program
-        .into_iter()
-        .filter(|op| !matches!(op, Op::Idx { path, .. } if path.is_empty()))
-        .map(|op| match op {
-            Op::Push { storage, value } => Op::Push {
-                storage,
-                value: proven_value(&value),
-            },
-            op => op,
-        })
-        .collect()
-}
-
-fn proven_value(value: &StateValue<DefaultDB>) -> StateValue<DefaultDB> {
-    match value {
-        StateValue::Cell(cell) => {
-            let Some((_, surplus)) = cell.alignment.consume(&cell.value) else {
-                return value.clone();
-            };
-            let proven = cell.value.0.len() - surplus.0.len();
-            StateValue::Cell(Sp::new(AlignedValue {
-                value: Value(cell.value.0[..proven].to_vec()),
-                alignment: cell.alignment.clone(),
-            }))
-        }
-        StateValue::Array(items) => StateValue::Array(
-            items
-                .iter()
-                .map(|item| proven_value(&item))
-                .collect::<Vec<_>>()
-                .into(),
-        ),
-        _ => value.clone(),
-    }
 }
 
 /// A transcript declaring effects its program does not produce. The circuit does not
@@ -388,8 +343,9 @@ fn decode_singleton_calls(
 mod tests {
     use super::*;
 
-    use crate::test_utils::{array_of, cell_from_atoms, hex_32, trim};
+    use crate::test_utils::{alignment_of, array_of, cell_from_atoms, hex_32, trim};
     use midnight_base_crypto::cost_model::RunningCost;
+    use midnight_base_crypto::fab::{AlignedValue, Value, ValueAtom};
     use midnight_base_crypto::time::Timestamp;
     use midnight_ledger_v9::structure::{
         ContractAction, ContractCall, Intent, ProofMarker, ProofVersioned, StandardTransaction,
@@ -397,7 +353,7 @@ mod tests {
     use midnight_onchain_runtime::context::{ClaimedContractCallsValue, Effects};
     use midnight_onchain_runtime::ops::{Key, LogEventType, Op, VersionedLogItem};
     use midnight_onchain_runtime::result_mode::ResultModeVerify;
-    use midnight_onchain_runtime::state::{EntryPointBuf, StateValue};
+    use midnight_onchain_runtime::state::{AlignedValueChecked, EntryPointBuf, StateValue};
     use midnight_onchain_runtime::transcript::Transcript;
     use midnight_storage::arena::Sp;
     use midnight_storage::storage::{Array, HashMap};
@@ -453,7 +409,7 @@ mod tests {
         vec![
             Op::Push {
                 storage: false,
-                value,
+                value: value.try_into_checked().expect("canonical test value"),
             },
             Op::Log,
         ]
@@ -1363,61 +1319,40 @@ mod tests {
         assert!(error.downcast_ref::<DeclaredEffectsMismatch>().is_some());
     }
 
-    /// Programs with the honest program's field representation, each accepted by ledger
-    /// 9.1.0-rc.3.
-    fn malleated_emit_ops(payload: [u8; MISC_PAYLOAD_LEN]) -> Vec<Vec<TestOp>> {
-        let mut data = SIGN_BIDIRECTIONAL_EVENT.to_vec();
-        data.extend_from_slice(&payload);
-        let width = (MISC_NAME_LEN + MISC_PAYLOAD_LEN) as u32;
-        let item = |version: Vec<Vec<u8>>, data: Vec<Vec<u8>>| {
-            logging(array_of(vec![
-                cell_from_atoms(&version, &[4]),
-                cell_from_atoms(&[trim(&[LogEventType::Misc as u8])], &[1]),
-                cell_from_atoms(&data, &[width]),
-            ]))
-        };
-        let version = trim(&LOG_ITEM_VERSION.to_le_bytes());
-        let honest = emit_ops(SIGN_BIDIRECTIONAL_EVENT, payload);
-        let mut programs = vec![
-            item(vec![version.clone()], vec![trim(&data), vec![1]]),
-            item(vec![version, vec![1]], vec![trim(&data)]),
-            [vec![Op::Noop { n: 0 }], honest.clone()].concat(),
-        ];
-        for (cached, push_path) in [(false, false), (true, false), (false, true), (true, true)] {
-            let idx = Op::Idx {
-                cached,
-                push_path,
-                path: Vec::new().into_iter().collect(),
-            };
-            programs.push([vec![idx.clone()], honest.clone()].concat());
-            programs.push(vec![honest[0].clone(), idx, honest[1].clone()]);
-        }
-        programs
-    }
-
+    /// An `idx []` and atoms past a pushed cell's alignment keep the proven field
+    /// representation; the ledger crates refuse to decode either, so neither reaches the
+    /// emission reader.
     #[test]
-    fn decodes_the_proven_program_of_a_malleated_transcript() {
-        let expected = vec![Emission {
-            kind: EmissionKind::SignBidirectional,
-            payload: FALLIBLE,
-        }];
-        for program in malleated_emit_ops(FALLIBLE) {
-            for fallible in [false, true] {
-                let call = if fallible {
-                    call(SINGLETON, None, Some(program.clone()))
-                } else {
-                    call(SINGLETON, Some(program.clone()), None)
-                };
-                let tx = transaction(vec![call]);
-                let (decoded, skipped) = partial_success_emissions_in(&tx, &SINGLETON).unwrap();
-                assert!(skipped.is_empty(), "{skipped:?}");
-                assert_eq!(decoded[0].emissions, expected, "{program:?}");
-                assert_eq!(
-                    emissions_in(&tx, &SINGLETON).unwrap()[0].emissions,
-                    expected
-                );
-            }
-        }
+    fn the_ledger_refuses_to_decode_a_malleated_program() {
+        let honest = emit_ops(SIGN_BIDIRECTIONAL_EVENT, FALLIBLE);
+        let empty_idx: TestOp = Op::Idx {
+            cached: false,
+            push_path: false,
+            path: Vec::new().into_iter().collect(),
+        };
+        let tx = transaction(vec![call(
+            SINGLETON,
+            None,
+            Some([vec![empty_idx], honest].concat()),
+        )]);
+        let mut bytes = Vec::new();
+        midnight_serialize::tagged_serialize(&tx, &mut bytes).unwrap();
+        assert!(
+            midnight_serialize::tagged_deserialize::<DecodedTransaction>(&mut &bytes[..]).is_err()
+        );
+
+        let surplus = AlignedValue {
+            value: Value(vec![
+                ValueAtom(trim(&LOG_ITEM_VERSION.to_le_bytes())),
+                ValueAtom(vec![1]),
+            ]),
+            alignment: alignment_of(&[4]),
+        };
+        let mut bytes = Vec::new();
+        midnight_serialize::tagged_serialize(&surplus, &mut bytes).unwrap();
+        assert!(
+            midnight_serialize::tagged_deserialize::<AlignedValueChecked>(&mut &bytes[..]).is_err()
+        );
     }
 
     #[test]

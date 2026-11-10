@@ -52,9 +52,11 @@ type CircuitArguments<K extends RespondCircuit> =
     ? Arguments
     : never;
 
-const RESPOND_CIRCUIT_ID = ProvableCircuitId<CompiledSignetContract>("respond");
-const RESPOND_BIDIRECTIONAL_CIRCUIT_ID =
-  ProvableCircuitId<CompiledSignetContract>("respondBidirectional");
+const RESPOND_CIRCUIT_ID = ProvableCircuitId<CompiledSignetContract, "respond">("respond");
+const RESPOND_BIDIRECTIONAL_CIRCUIT_ID = ProvableCircuitId<
+  CompiledSignetContract,
+  "respondBidirectional"
+>("respondBidirectional");
 
 export interface WireSignature {
   readonly bigR: { readonly x: string; readonly y: string };

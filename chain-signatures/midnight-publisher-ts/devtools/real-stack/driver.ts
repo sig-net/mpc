@@ -2,7 +2,7 @@ import { Transaction, hexlify, recoverAddress } from "ethers";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { findDeployedContract, type FoundContract } from "@midnight-ntwrk/midnight-js/contracts";
-import { setNetworkId } from "@midnight-ntwrk/midnight-js/network-id";
+import { ContractState } from "@midnight-ntwrk/compact-runtime";
 import { indexerPublicDataProvider } from "@midnight-ntwrk/midnight-js-indexer-public-data-provider";
 import {
   buildDeployTransaction,
@@ -59,17 +59,38 @@ import {
 import { runVault, runVaultPartialSend } from "./vault.js";
 import { createCallerPrivateState } from "./witnesses.js";
 
-const DEPLOYER_SEED = "02".repeat(32);
-const INVOKER_SEED = "03".repeat(32);
-// One funding wallet per MPC node: a publisher assumes it alone spends its wallet's DUST,
-// and nodes sharing one wallet refuse each other's submissions as DUST double spends.
-const publisherSeed = (node: number) => (4 + node).toString(16).padStart(2, "0").repeat(32);
+interface RoleSeeds {
+  deployer: string;
+  invoker: string;
+  // One funding wallet per MPC node: a publisher assumes it alone spends its wallet's DUST,
+  // and nodes sharing one wallet refuse each other's submissions as DUST double spends.
+  publishers: string[];
+}
+
+/** The fixed role wallets the local genesis wallet funds. */
+const localRoleSeeds = (publishers: number): RoleSeeds => ({
+  deployer: "02".repeat(32),
+  invoker: "03".repeat(32),
+  publishers: Array.from({ length: publishers }, (_, node) =>
+    (4 + node).toString(16).padStart(2, "0").repeat(32),
+  ),
+});
+
+type RoleWallet = readonly [name: string, seed: string];
+
+const roleWallets = (seeds: RoleSeeds): RoleWallet[] => [
+  ["deployer", seeds.deployer],
+  ["invoker", seeds.invoker],
+  ...seeds.publishers.map((seed, node): RoleWallet => [`publisher ${node}`, seed]),
+];
 
 type CallerHandle = FoundContract<CallerContract>;
 
 interface BootstrapRequest {
   op: "bootstrap";
   config: MidnightNodeConfig;
+  /** Funded role wallets on a deployed network; null runs on the local genesis wallet. */
+  roleSeeds: RoleSeeds | null;
   artifactDir: string;
   /** How many MPC nodes publish, each from its own funding wallet. */
   publishers: number;
@@ -170,6 +191,7 @@ type Request =
 
 interface Session {
   config: MidnightNodeConfig;
+  roleSeeds: RoleSeeds;
   artifactDir: string;
   facade: WalletFacade;
   providers: CallerProviders;
@@ -251,7 +273,9 @@ async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
 async function callerHasRequest(active: Session, requestId: RequestIdHex): Promise<boolean> {
   const state = await active.publicDataProvider.queryContractState(active.callerAddress);
   if (!state) throw new Error(`no caller state found at ${active.callerAddress}`);
-  return ledger(state.data).requests.member(requestIdBytes(requestId));
+  return ledger(state.contractState.deserialize({ v9: ContractState }).data).requests.member(
+    requestIdBytes(requestId),
+  );
 }
 
 function deployEnv(config: MidnightNodeConfig, seed: string): Record<string, string> {
@@ -296,10 +320,6 @@ async function transferNightToEach(
   const nightTokenType = Object.keys(state.unshielded.balances)[0];
   if (nightTokenType === undefined) throw new Error("root holds no unshielded NIGHT to transfer");
   const ttl = new Date(Date.now() + 30 * 60 * 1000);
-  const secretKeys = {
-    shieldedSecretKeys: keys.shieldedSecretKeys,
-    dustSecretKey: keys.dustSecretKey,
-  };
   const transfer = await facade.transferTransaction(
     [
       {
@@ -311,11 +331,10 @@ async function transferNightToEach(
         })),
       },
     ],
-    secretKeys,
     { ttl, payFees: false },
   );
   const recipe = await facade
-    .balanceUnprovenTransaction(transfer.transaction, secretKeys, {
+    .balanceUnprovenTransaction(transfer.transaction, {
       ttl,
       tokenKindsToBalance: ["dust"],
     })
@@ -330,14 +349,9 @@ async function transferNightToEach(
 // Mirrors the package's per-child flow but amortizes the expensive parts: a root
 // facade re-syncs from genesis once (that re-sync dominates wall time) and funds every
 // role wallet in one transfer, and the independent child verifications run concurrently.
-async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): Promise<void> {
+async function fundRoles(config: MidnightNodeConfig, roles: RoleWallet[]): Promise<void> {
   const networkId = config.networkId;
   const rootKeys = deriveAccountKeys(GENESIS_MINT_WALLET_SEED, networkId);
-  const roles = [
-    ["deployer", DEPLOYER_SEED],
-    ["invoker", INVOKER_SEED],
-    ...publisherSeeds.map((seed, node) => [`publisher ${node}`, seed] as const),
-  ] as const;
   const receivers = await step("syncing the role wallets' addresses", () =>
     Promise.all(
       roles.map(([, seed]) =>
@@ -390,41 +404,56 @@ async function fundRoles(config: MidnightNodeConfig, publisherSeeds: string[]): 
     diagnostics(`funded ${roles.length} role wallets in ${Date.now() - startedAt}ms`);
   });
 
-  await Promise.all(
-    roles.map(async ([name, seed]) => {
-      const startedAt = Date.now();
-      const keys = deriveAccountKeys(seed, networkId);
-      await withSyncedWalletFacade(keys, config, async (facade, initialState) => {
-        let state = initialState;
-        const deadline = Date.now() + 120_000;
-        while (totalNight(state) === 0n && Date.now() < deadline) {
-          await sleep(3_000);
-          state = await facade.waitForSyncedState();
-        }
-        if (totalNight(state) === 0n) {
-          throw new Error(`${name} wallet shows no NIGHT after funding from root`);
-        }
-        await step(`registering the ${name} wallet's NIGHT for DUST`, async () => {
-          await registerNightForDustGeneration(facade, keys, state);
-          if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade, 1n);
-        });
+  await verifyRoles(config, roles);
+}
+
+// Waits until each role wallet holds NIGHT, registered for DUST, and some spendable DUST.
+// A public network's endpoints refuse a burst of concurrent wallet syncs (HTTP 503), so
+// there the wallets go one at a time.
+async function verifyRoles(config: MidnightNodeConfig, roles: RoleWallet[]): Promise<void> {
+  const verify = async ([name, seed]: RoleWallet) => {
+    const startedAt = Date.now();
+    const keys = deriveAccountKeys(seed, config.networkId);
+    await withSyncedWalletFacade(keys, config, async (facade, initialState) => {
+      let state = initialState;
+      const deadline = Date.now() + 120_000;
+      while (totalNight(state) === 0n && Date.now() < deadline) {
+        await sleep(3_000);
+        state = await facade.waitForSyncedState();
+      }
+      if (totalNight(state) === 0n) throw new Error(`${name} wallet holds no NIGHT`);
+      await step(`registering the ${name} wallet's NIGHT for DUST`, async () => {
+        await registerNightForDustGeneration(facade, keys, state);
+        if (state.dust.balance(new Date()) === 0n) await waitForSpendableDust(facade, 1n);
       });
-      diagnostics(`verified ${name} wallet in ${Date.now() - startedAt}ms`);
-    }),
-  );
+    });
+    diagnostics(`verified ${name} wallet in ${Date.now() - startedAt}ms`);
+  };
+  if (isLocalStandaloneNetwork(config.networkId)) {
+    await Promise.all(roles.map(verify));
+  } else {
+    for (const role of roles) await verify(role);
+  }
 }
 
 async function bootstrap(request: BootstrapRequest) {
   if (session !== undefined) throw new Error("driver is already bootstrapped");
-  setNetworkId(request.config.networkId);
   if (!Number.isInteger(request.publishers) || request.publishers < 1) {
     throw new Error(`expected a positive publisher count, got ${String(request.publishers)}`);
   }
-  const publisherSeeds = Array.from({ length: request.publishers }, (_, node) =>
-    publisherSeed(node),
-  );
-  diagnostics("funding real-stack role wallets");
-  await fundRoles(request.config, publisherSeeds);
+  const roleSeeds = request.roleSeeds ?? localRoleSeeds(request.publishers);
+  if (roleSeeds.publishers.length !== request.publishers) {
+    throw new Error(
+      `got ${roleSeeds.publishers.length} publisher wallets for ${request.publishers} MPC nodes`,
+    );
+  }
+  if (request.roleSeeds) {
+    diagnostics("checking the funded role wallets");
+    await verifyRoles(request.config, roleWallets(roleSeeds));
+  } else {
+    diagnostics("funding real-stack role wallets");
+    await fundRoles(request.config, roleWallets(roleSeeds));
+  }
   // Each deploy pays from a freshly synced deployer facade, and a facade syncs from the
   // indexer, which indexes a block a moment after the node reports it final. A facade
   // synced in that gap still holds the DUST the previous deploy spent, and the node
@@ -458,12 +487,12 @@ async function bootstrap(request: BootstrapRequest) {
   };
   diagnostics("deploying central Signet contract");
   const central = await step("deploying the central Signet contract", () =>
-    deploySignetContract(deployEnv(request.config, DEPLOYER_SEED)),
+    deploySignetContract(deployEnv(request.config, roleSeeds.deployer)),
   );
   await indexed(central.contractAddress);
 
-  const deployerKeys = deriveAccountKeys(DEPLOYER_SEED, request.config.networkId);
-  const deployerSecret = bytes(DEPLOYER_SEED, 32);
+  const deployerKeys = deriveAccountKeys(roleSeeds.deployer, request.config.networkId);
+  const deployerSecret = bytes(roleSeeds.deployer, 32);
   const deployerCommitment = pureCircuits.deployerCommitment(deployerSecret);
   const deployCaller = () =>
     withSyncedWalletFacade(deployerKeys, request.config, async (facade) => {
@@ -486,10 +515,10 @@ async function bootstrap(request: BootstrapRequest) {
     deployCaller,
   );
   await indexed(impersonatorDeployment.contractAddress);
-  const invokerKeys = deriveAccountKeys(INVOKER_SEED, request.config.networkId);
+  const invokerKeys = deriveAccountKeys(roleSeeds.invoker, request.config.networkId);
   const facade = await step("syncing the invoker wallet", async () => {
     const started = await initialiseWalletFacade(invokerKeys, request.config);
-    await started.start(invokerKeys.shieldedSecretKeys, invokerKeys.dustSecretKey);
+    await started.start(invokerKeys.seeds);
     await started.waitForSyncedState();
     return started;
   });
@@ -513,6 +542,7 @@ async function bootstrap(request: BootstrapRequest) {
   const impersonator = await findCaller(impersonatorDeployment.contractAddress);
   session = {
     config: request.config,
+    roleSeeds,
     artifactDir: request.artifactDir,
     facade,
     providers,
@@ -532,7 +562,7 @@ async function bootstrap(request: BootstrapRequest) {
   return {
     centralAddress: central.contractAddress,
     callerAddress: callerDeployment.contractAddress,
-    publisherSeeds,
+    publisherSeeds: roleSeeds.publishers,
   };
 }
 
@@ -588,8 +618,8 @@ async function dispatch(request: Request): Promise<unknown> {
       mpcPublicKey: request.mpcPublicKey,
       evmRpcUrl: request.evmRpcUrl,
       evmFunderKey: request.evmFunderKey,
-      deployerSeed: DEPLOYER_SEED,
-      userSeed: INVOKER_SEED,
+      deployerSeed: active.roleSeeds.deployer,
+      userSeed: active.roleSeeds.invoker,
       userFacade: active.facade,
     });
   }
@@ -618,7 +648,9 @@ async function dispatch(request: Request): Promise<unknown> {
     const requestId = parseRequestIdHex(request.requestId);
     const state = await active.publicDataProvider.queryContractState(active.callerAddress);
     if (!state) throw new Error("caller state is missing");
-    const record = ledger(state.data).requests.lookup(requestIdBytes(requestId));
+    const record = ledger(
+      state.contractState.deserialize({ v9: ContractState }).data,
+    ).requests.lookup(requestIdBytes(requestId));
     const params = record.txParams;
     if (params.nonce > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("unsafe EVM nonce");
     const unsigned = Transaction.from({

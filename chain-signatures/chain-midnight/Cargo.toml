@@ -23,7 +23,7 @@ memchr.workspace = true
 midnight-base-crypto.workspace = true
 # `Transaction` and the call transcripts come from these two crates; nothing in
 # the pinned set re-exports them.
-midnight-ledger-v9 = { version = "1.0.0", default-features = false }
+midnight-ledger-v9 = { version = "1.0.1", default-features = false }
 midnight-onchain-runtime.workspace = true
 midnight-onchain-state.workspace = true
 midnight-serialize.workspace = true

@@ -7,10 +7,14 @@ import {
   type AccountKeys,
   type MidnightNodeConfig,
 } from "@sig-net/midnight-contract-deploy";
-import type { FinalizedTransaction } from "@midnightntwrk/ledger-v9";
-import { InMemoryTransactionHistoryStorage } from "@midnightntwrk/wallet-sdk-abstractions";
+import { Transaction } from "@midnightntwrk/ledger-v9";
+import {
+  type FinalizedTx,
+  InMemoryTransactionHistoryStorage,
+} from "@midnightntwrk/wallet-sdk-abstractions";
 import { DustWallet } from "@midnightntwrk/wallet-sdk-dust-wallet";
 import {
+  isAwaiting,
   mergeWalletEntries,
   WalletEntrySchema,
   WalletFacade,
@@ -38,8 +42,8 @@ export interface FundingWallet {
   requireReady(timeoutMs: number): Promise<void>;
   dustBalance(): Promise<bigint | undefined>;
   balanceTx(tx: UnboundTransaction): Promise<BalancingRecipe>;
-  finalizeTx(recipe: BalancingRecipe): Promise<FinalizedTransaction>;
-  submitTx(tx: FinalizedTransaction): Promise<Landed>;
+  finalizeTx(recipe: BalancingRecipe): Promise<FinalizedTx>;
+  submitTx(tx: FinalizedTx): Promise<Landed>;
   /** The encoded sub-wallet states; refused until synced with every submission settled. */
   snapshot(): Promise<string>;
   /** The coins and sync progress on one line, for a log; never throws. */
@@ -75,7 +79,7 @@ async function restoreWalletFacade(
   config: MidnightNodeConfig,
   snapshot: WalletSnapshot,
 ): Promise<WalletFacade> {
-  const configuration = {
+  const configuration = WalletFacade.resolveConfiguration({
     networkId: config.networkId,
     indexerClientConnection: {
       indexerHttpUrl: config.indexerUrl,
@@ -88,7 +92,7 @@ async function restoreWalletFacade(
       feeBlocksMargin: FEE_BLOCKS_MARGIN,
     },
     txHistoryStorage: new InMemoryTransactionHistoryStorage(WalletEntrySchema, mergeWalletEntries),
-  };
+  });
   // Restored before `init`, which opens the node connection first and has nothing to close
   // it with when a wallet factory throws, as `restore` does on state it cannot decode.
   const restored: { stop(): Promise<void> }[] = [];
@@ -121,7 +125,7 @@ async function startFacade(
       ? await initialiseWalletFacade(keys, config)
       : await restoreWalletFacade(config, snapshot);
   try {
-    await facade.start(keys.shieldedSecretKeys, keys.dustSecretKey);
+    await facade.start(keys.seeds);
   } catch (error) {
     await facade.stop().catch(() => undefined);
     throw error;
@@ -146,7 +150,7 @@ const seconds = (sinceMs: number): string => `${((Date.now() - sinceMs) / 1_000)
 function isSettled(state: FacadeState): boolean {
   return (
     state.isSynced &&
-    state.pending.all.length === 0 &&
+    !state.lifecycle.some(isAwaiting) &&
     [state.shielded, state.unshielded, state.dust].every(
       (wallet) => wallet.pendingCoins.length === 0,
     )
@@ -156,7 +160,7 @@ function isSettled(state: FacadeState): boolean {
 function describeState(state: FacadeState): string {
   const { dust, shielded, unshielded } = state;
   return [
-    `synced=${state.isSynced} pendingTxs=${state.pending.all.length}`,
+    `synced=${state.isSynced} pendingTxs=${state.lifecycle.filter(isAwaiting).length}`,
     `dust(spendable=${dust.availableCoins.length} inFlight=${dust.pendingCoins.length} ` +
       `specks=${dust.balance(new Date())} ` +
       `applied=${dust.progress.appliedIndex}/${dust.progress.highestIndex} ` +
@@ -257,19 +261,24 @@ async function openFacade(
     },
     dustBalance: () => readDustBalance(facade),
     async balanceTx(tx) {
-      const secretKeys = {
-        shieldedSecretKeys: keys.shieldedSecretKeys,
-        dustSecretKey: keys.dustSecretKey,
-      };
-      const recipe = await facade.balanceUnboundTransaction(tx, secretKeys, {
-        ttl: new Date(Date.now() + RECIPE_TTL_MS),
-        tokenKindsToBalance: ["dust"],
-      });
+      const recipe = await facade.balanceUnboundTransaction(
+        facade.adoptTransaction(tx.serialize(), "Unbound"),
+        {
+          ttl: new Date(Date.now() + RECIPE_TTL_MS),
+          tokenKindsToBalance: ["dust"],
+        },
+      );
       return facade.signRecipe(recipe, keys.unshieldedKeystore.signDataAsync);
     },
     finalizeTx: (recipe) => facade.finalizeRecipe(recipe),
     async submitTx(tx) {
-      if (tx.identifiers().at(-1) === undefined) {
+      const identifiers = Transaction.deserialize(
+        "signature",
+        "proof",
+        "binding",
+        tx.serialize(),
+      ).identifiers();
+      if (identifiers.at(-1) === undefined) {
         throw new Error("the finalized transaction carries no identifier");
       }
       const txId = await facade.submitTransaction(tx);

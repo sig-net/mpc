@@ -13,7 +13,7 @@ import {
 } from "@sig-net/midnight-contract-deploy";
 import { Contract, type Witnesses } from "./managed/erc20-vault/contract/index.js";
 import { recordingProofProvider, type CallPlacement } from "./placement.js";
-import { walletProvider } from "./providers.js";
+import { providerConfig, signetModuleProvider, walletProviders } from "./providers.js";
 
 export interface VaultPrivateState {
   readonly secretKey: Uint8Array;
@@ -56,13 +56,13 @@ export function buildVaultProviders(
 ): VaultProviders {
   const vaultZk = new NodeZkConfigProvider<VaultCircuitId>(vaultManagedPath);
   const signetZk = new NodeZkConfigProvider<string>(signetContractManagedPath);
-  const wallet = walletProvider(facade, keys);
+  const wallet = walletProviders(facade, keys);
   return {
     privateStateProvider: levelPrivateStateProvider({
       midnightDbName: databasePath,
       privateStateStoreName: "vault-private-state",
       signingKeyStoreName: "vault-signing-keys",
-      accountId: wallet.getCoinPublicKey(),
+      accountId: wallet.walletProvider.getCoinPublicKey(),
       privateStoragePasswordProvider: () => "MpcRealStack#2026!",
     }),
     publicDataProvider: indexerPublicDataProvider({
@@ -80,7 +80,8 @@ export function buildVaultProviders(
       }),
       onPlacement,
     ),
-    walletProvider: wallet,
-    midnightProvider: wallet,
+    ...wallet,
+    config: providerConfig(config),
+    contractModuleProvider: signetModuleProvider,
   };
 }

@@ -39,7 +39,7 @@ All three events have native call index 1, fallible phase, emission index 0, and
 
 `fallible-block-432-metadata.scale` and `fallible-block-432-events.scale` are the captured node's raw `state_getMetadata` and `System.Events` storage bytes for block 432. They allow the reader tests to decode the actual `TxApplied` association at extrinsic 4. Tests that substitute `TxPartialSuccess` or change the status event's transaction hash use synthetic status records; they do not demonstrate node acceptance of those combinations.
 
-The `Noop(0)` regression test appends a no-op to the captured singleton's fallible transcript and updates the synthetic `TxApplied` hash. It verifies that execution within the original gas limit produces the same events and effects, and that the contract proof's public inputs remain unchanged.
+The `Noop(0)` regression test appends a no-op to the captured singleton's fallible transcript and updates the synthetic `TxApplied` hash. It verifies that execution produces the same events and effects, and that the contract proof's public inputs remain unchanged. It runs the VM without the declared gas bound: ledger 9.1.0.1 prices the captured writes below the transcript's declared deletions and refuses `noop 0` as not normalized, so a node no longer accepts either transcript.
 
 The checkpoint regression test inserts `Ckpt` markers before, between and after the captured event instructions, then updates the synthetic `TxApplied` hash. It verifies that the reader recovers the same event and call location. It does not assert that the modified program preserves proof inputs or satisfies the original gas limit.
 

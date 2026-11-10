@@ -1,4 +1,4 @@
-import { ChargedState, type StateValue } from "@midnight-ntwrk/compact-runtime";
+import { ChargedState, ContractState, type StateValue } from "@midnight-ntwrk/compact-runtime";
 import {
   createUnprovenCallTx,
   type CallTxOptionsWithPrivateStateId,
@@ -6,9 +6,11 @@ import {
 import {
   FailFallible,
   SucceedEntirely,
-  type FinalizedTxData,
+  LedgerTransaction,
+  SerializedContractState,
+  type FinalizedTxRead,
 } from "@midnight-ntwrk/midnight-js/types";
-import type { UnprovenTransaction } from "@midnightntwrk/ledger-v9";
+import { Transaction, type UnprovenTransaction } from "@midnightntwrk/ledger-v9";
 import { bytesToHex, hexToBytes } from "@sig-net/midnight";
 import { ledger, type ProvableCircuits } from "./managed/caller/contract/index.js";
 import { applicationOrder, placementOf, type CallPlacement } from "./placement.js";
@@ -109,7 +111,8 @@ export async function buildCall<K extends CallerCircuitId>(
     args,
   } as unknown as CallTxOptionsWithPrivateStateId<CallerContract, K>;
   const built = await createUnprovenCallTx(context.providers, options);
-  const segments = [...(built.private.unprovenTx.intents?.keys() ?? [])];
+  const tx = built.private.unprovenTx.deserialize({ v9: Transaction });
+  const segments = [...(tx.intents?.keys() ?? [])];
   const [segment] = segments;
   if (segments.length !== 1 || segment === undefined) {
     throw new Error(`${circuitId} built ${segments.length} intents, expected one`);
@@ -117,7 +120,7 @@ export async function buildCall<K extends CallerCircuitId>(
   const result: unknown = built.private.result;
   const requests = Array.isArray(result) ? result : [result];
   return {
-    tx: built.private.unprovenTx,
+    tx,
     segment,
     requests: requests.map((requestId) => bytesToHex(requestId as Uint8Array)),
     nextState: built.public.nextContractState,
@@ -141,9 +144,12 @@ export function afterCall(context: PlacementContext, earlier: BuiltCall): Placem
   ) => {
     const states = await reads.queryZSwapAndContractState(address, config);
     if (states === null || normalizeAddress(address) !== caller) return states;
-    const [zswap, contract, parameters] = states;
+    const contract = states.contractState.deserialize({ v9: ContractState });
     contract.data = new ChargedState(earlier.nextState);
-    return [zswap, contract, parameters];
+    return {
+      ...states,
+      contractState: SerializedContractState.fromBytes("v9", contract.serialize()),
+    };
   };
   // The provider is a class instance: forward everything else to it, bound to it.
   const publicDataProvider = new Proxy(reads, {
@@ -191,7 +197,7 @@ async function committedRequests(context: PlacementContext, requests: string[]):
     context.callerAddress,
   );
   if (!state) throw new Error(`no caller state found at ${context.callerAddress}`);
-  const map = ledger(state.data).requests;
+  const map = ledger(state.contractState.deserialize({ v9: ContractState }).data).requests;
   return requests.filter((requestId) => map.member(hexToBytes(requestId)));
 }
 
@@ -200,11 +206,11 @@ export async function currentGate(context: PlacementContext): Promise<bigint> {
     context.callerAddress,
   );
   if (!state) throw new Error(`no caller state found at ${context.callerAddress}`);
-  return ledger(state.data).gate;
+  return ledger(state.contractState.deserialize({ v9: ContractState }).data).gate;
 }
 
 /** The indexer's per-segment results for a finalized transaction, segment id first. */
-export function segmentsOf(finalized: FinalizedTxData): [number, string][] {
+export function segmentsOf(finalized: FinalizedTxRead): [number, string][] {
   return [...(finalized.segmentStatusMap ?? new Map<number, unknown>())].map(
     ([segment, status]) => [segment, String(status)],
   );
@@ -214,8 +220,10 @@ export async function submitBuilt(
   context: PlacementContext,
   tx: UnprovenTransaction,
   beforeBalancing: () => Promise<unknown>,
-): Promise<FinalizedTxData> {
-  const proven = await context.providers.proofProvider.proveTx(tx);
+): Promise<FinalizedTxRead> {
+  const proven = await context.providers.proofProvider.proveTx(
+    LedgerTransaction.seal("v9", "Unproven", tx),
+  );
   await beforeBalancing();
   const balanced = await context.providers.walletProvider.balanceTx(proven);
   const txId = await context.providers.midnightProvider.submitTx(balanced);
