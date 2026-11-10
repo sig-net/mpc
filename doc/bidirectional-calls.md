@@ -67,17 +67,19 @@ Happy path:
   bytes (Tron, Zcash from version 5), signatures don't affect the
   transaction ID. Replay protection (Section 3.3) lets at most one of
   them execute, and all of them belong to the same request.
-* *Request*: what the contract asks for, the tuple (tx, target, key, schema):
-  the transaction, its target chain, the key parameters to sign it with
-  (a derivation path, key version and signing scheme), and the schema of its
-  output. The MPC decodes the output with that schema and encodes the
-  response from it, in the source chain's types. Written `req`, with fields
-  `req.tx`, `req.target`, `req.key` and `req.schema` (Section 7 maps them to
-  the fields on the wire, `req.target` is `executionDest`). A request is
-  *made* when the contract passes it to `sign_bidirectional` (Section 3.1)
-  and the library accepts it; a refused attempt makes nothing. The same
-  tuple can be made again, and then it is the same request.
-* *Request ID*: rid(contract, req.tx, req.target, req.key), a collision-
+* *Request*: what the contract asks for, the tuple (sender, tx, target, key,
+  schema): the contract that makes it, the transaction, its target chain,
+  the key parameters to sign it with (a derivation path, key version and
+  signing scheme), and the schema of its output. The MPC decodes the output
+  with that schema and encodes the response from it, in the source chain's
+  types. Written `req`, with fields `req.sender`, `req.tx`, `req.target`,
+  `req.key` and `req.schema` (Section 7 maps them to the fields on the wire,
+  `req.target` is `executionDest`). A request is *made* when the contract
+  passes it to `sign_bidirectional` (Section 3.1), the library sets
+  `req.sender` to the contract and accepts it; a refused attempt makes
+  nothing. The same tuple can be made again, and then it is the same
+  request.
+* *Request ID*: rid(req.sender, req.tx, req.target, req.key), a collision-
   resistant hash in a length-committing encoding, so within one source
   chain two requests have the same rid exactly when they agree on all four.
   One execution has one rid (Section 5).
@@ -180,7 +182,8 @@ sign_bidirectional(
     key:         (DerivationPath, KeyVersion, SigningScheme),
     schema:      OutputSchema,
 ) -> RequestId | Refused
-// the four arguments together are the request, written req below
+// the four arguments and the calling contract as sender are the request,
+// written req below
 
 // implemented by the application contract, called by the library
 on_response(rid: RequestId, outcome: (kind, data))
@@ -301,7 +304,8 @@ state (per application contract):
     // a rid is a hash and cannot yield target or key_version
 
 on sign_bidirectional(req) from the application logic:
-    rid = request_id(self, req)                            // SDK
+    req.sender = self
+    rid = request_id(req)                                  // SDK
     if rid in outstanding
       or req.key.key_version not in attestation_key:       // C1
         return Refused
@@ -355,14 +359,14 @@ Properties:
 ### 4.2 Signet contract (per source chain)
 
 It holds no per-application state, verifies nothing, and anyone may call
-it. It records the caller of `sign_bidirectional` as `contract` in the
+it. It records the caller of `sign_bidirectional` as `req.sender` in the
 event it emits, which is what `authentic` in Section 4.3 rests on. Where a
-chain's signet contract cannot see its caller, the event carries the caller
+chain's signet contract cannot see its caller, the event carries the sender
 the calling contract names, and `authentic` rests instead on the MPC
-checking, from the transaction itself, that the named contract made the
+checking, from the transaction itself, that the named sender made the
 call. It emits three events:
 
-* `SignRequest { contract, rid, req }`, when a contract asks for a
+* `SignRequest { rid, req }`, when a contract asks for a
   signature.
 * `Signature { rid, signature }`, when a signature is published, for the
   broadcaster and for nodes that were not in the signing round.
@@ -388,7 +392,7 @@ never meets a rid from another.
 
 state:
     backlog: RequestId -> Entry
-    Entry = { req, contract, signatures: Set<Signature> }
+    Entry = { req, signatures: Set<Signature> }
     // backlog is a function of the finalised source chain only,
     // the same on every correct node that processed the same height
 
@@ -399,25 +403,25 @@ state:
     // outcome and attestation are empty at first
     // local may differ between nodes that processed the same height
 
-on SignRequest { contract, rid, req } finalised on the source chain:
-    if not authentic(contract, rid, req):                 // M1
+on SignRequest { rid, req } finalised on the source chain:
+    if not authentic(rid, req):                           // M1
         drop
     if rid in backlog or not processable(req):            // M2
         drop
-    backlog[rid] = { req, contract, signatures: {} }
-    signature = threshold_sign(req.tx, derived_key(contract, req.key))   // M1
+    backlog[rid] = { req, signatures: {} }
+    signature = threshold_sign(req.tx, derived_key(req.sender, req.key))   // M1
     local[rid].issued.add(signature)       // stored before publishing
     publish_signature(rid, signature)
 
-authentic(contract, rid, req): bool
-    the request provably comes from `contract`, and rid recomputes from it
+authentic(rid, req): bool
+    the request provably comes from req.sender, and rid recomputes from it
 
 processable(req): bool
     req.target parses to a chain this MPC can watch
     key derivation is valid: parameters canonical, key derivable for the
       source chain, key version with a root key of its own (Section 5)
     req.key's path is not the attestation key's (M1)
-    if another signing API on the source chain maps the same contract,
+    if another signing API on the source chain maps the same sender,
       path and key version to the same key as sign_bidirectional:
         req.key's path lies in the bidirectional namespace (M1)
     req.tx is non-empty, parses as an unsigned transaction in target's
@@ -438,7 +442,7 @@ processable(req): bool
 on Signature { rid, signature } finalised on the source chain:
     e = backlog[rid] if rid in backlog
     if e and signature verifies over e.req.tx
-      under derived_key(e.contract, e.req.key):
+      under derived_key(e.req.sender, e.req.key):
         e.signatures.add(signature)
 
 on target chain block at height h finalised on chain target:
@@ -467,15 +471,15 @@ attest(rid, att):
     local[rid].outcome = Found(att)
     sig = threshold_sign(
         attestationDigest(rid, att),
-        attestation_key(e.contract, e.req.key.key_version)
+        attestation_key(e.req.sender, e.req.key.key_version)
     )                                                   // M5
     local[rid].attestation = (att, sig)    // stored before publishing
-    publish_response(e.contract, rid, att, sig)
+    publish_response(e.req.sender, rid, att, sig)
 
 on Response { rid, att, sig } finalised on the source chain:
     e = backlog[rid] if rid in backlog
     if e and sig verifies over attestationDigest(rid, att)
-      under attestation_key(e.contract, e.req.key.key_version):
+      under attestation_key(e.req.sender, e.req.key.key_version):
         if att.kind is Executed or Failed:        // e.req.tx was included
             for (rid', e') in backlog for e.req.target, other than rid,
               with e's account and e.req.tx's replay protection, unsigned
@@ -578,7 +582,7 @@ correct, with a signing threshold t, f+1 <= t <= n - f.
   scheme. The id names a chain family, so the same contract address on
   two networks of one family derives the same key; a deployment watches
   one network per family (Section 3.3), so within it the key still names
-  one contract. So the sender of an executed transaction tells the MPC
+  one contract. So an executed transaction's account tells the MPC
   which contract and key parameters asked for it. Assumed here: two
   signing schemes never share a key, and two key versions never share a
   root key; `processable` refuses a key version without a root key of its
@@ -626,7 +630,7 @@ a path from B48 through A15; the first at A12 has none.
   (height h) are accepted by entries e1 and e2. An accepted response is for a
   rid the MPC admitted (C3b), so its key parameters are canonical (M2) and its
   target names one chain (Section 3.3). Both then carry the same rid: the
-  execution fixes the transaction and the target, and its sender fixes
+  execution fixes the transaction and the target, and its account fixes
   the contract and key (distinct keys, above). By C1 they were not outstanding
   together, so e2 was created after e1 was removed, after the first
   acceptance. By C3d last_seen[target] was already at least h then, so by C2
@@ -802,7 +806,7 @@ The names of Section 2 map onto the fields below as follows.
 
 | Section 2 | field |
 |---|---|
-| contract | `sender` |
+| req.sender | `sender` |
 | req.tx | `txParamType` with `txParams` |
 | req.target | `executionDest` |
 | req.key | `keyVersion`, `path`, `algo` |
@@ -872,7 +876,7 @@ order.
 | field | type | meaning |
 |---|---|---|
 | `chainId` | `u64` | EIP-155 chain id |
-| `nonce` | `u64` | nonce of the derived sender |
+| `nonce` | `u64` | nonce of the derived account |
 | `maxPriorityFeePerGas` | `u128` | wei |
 | `maxFeePerGas` | `u128` | wei |
 | `gasLimit` | `u64` | |
