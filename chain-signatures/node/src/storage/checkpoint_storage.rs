@@ -1,8 +1,10 @@
 use crate::protocol::Chain;
 
 use crate::backlog::Checkpoint;
+use crate::sign_bidirectional::{BidirectionalProgress, SignStatus};
 use anyhow::Context;
 use deadpool_redis::Pool;
+use mpc_primitives::SignId;
 use near_account_id::AccountId;
 use redis::AsyncCommands;
 use tokio::sync::RwLock;
@@ -16,6 +18,7 @@ pub enum CheckpointStorage {
     InMemory {
         latest: Arc<RwLock<HashMap<Chain, Checkpoint>>>,
         pending: Arc<RwLock<HashMap<Chain, BTreeMap<u64, Checkpoint>>>>,
+        local: Arc<RwLock<HashMap<Chain, LocalRecords>>>,
         /// Number of upcoming `load_pending` calls to fail, for tests of transient errors.
         #[cfg(test)]
         load_pending_failures: Arc<std::sync::atomic::AtomicUsize>,
@@ -36,6 +39,7 @@ impl CheckpointStorage {
         Self::InMemory {
             latest: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(RwLock::new(HashMap::new())),
+            local: Arc::default(),
             #[cfg(test)]
             load_pending_failures: Arc::default(),
         }
@@ -98,6 +102,103 @@ impl CheckpointStorage {
 
     fn pending_digest_key(&self, chain: Chain) -> String {
         self.key("pending_digest", chain)
+    }
+
+    fn local_key(&self, chain: Chain) -> String {
+        self.key("local", chain)
+    }
+
+    /// Store what this node signed for one leg of a request, before it is published.
+    pub async fn put_local(
+        &self,
+        chain: Chain,
+        id: SignId,
+        status: &SignStatus,
+    ) -> anyhow::Result<()> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let bytes = encode_local(status)?;
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                conn.hset::<_, _, _, ()>(
+                    self.local_key(chain),
+                    local_field(id, leg(status)),
+                    bytes,
+                )
+                .await
+                .context("failed to store local record")?;
+            }
+            CheckpointStorage::InMemory { local, .. } => {
+                local
+                    .write()
+                    .await
+                    .entry(chain)
+                    .or_default()
+                    .insert((id, leg(status)), status.clone());
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
+    }
+
+    /// This node's records for `chain`, up to one per leg of a request. One that cannot be read
+    /// is skipped, which costs only signing that leg again.
+    pub async fn load_local(&self, chain: Chain) -> anyhow::Result<Vec<(SignId, SignStatus)>> {
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                let stored: HashMap<Vec<u8>, Vec<u8>> = conn
+                    .hgetall(self.local_key(chain))
+                    .await
+                    .context("failed to load local records")?;
+                let decode = |(field, bytes): (Vec<u8>, Vec<u8>)| {
+                    let id = SignId::new(field.get(..32)?.try_into().ok()?);
+                    decode_local(&bytes)
+                        .inspect_err(|err| {
+                            tracing::warn!(?chain, ?id, ?err, "skipping unreadable local record");
+                        })
+                        .ok()
+                        .map(|status| (id, status))
+                };
+                Ok(stored.into_iter().filter_map(decode).collect())
+            }
+            CheckpointStorage::InMemory { local, .. } => {
+                let local = local.read().await;
+                let records = local.get(&chain).into_iter().flatten();
+                Ok(records
+                    .map(|((id, _), status)| (*id, status.clone()))
+                    .collect())
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+    }
+
+    /// Delete this node's records of both legs of `ids`.
+    pub async fn remove_local(&self, chain: Chain, ids: &[SignId]) -> anyhow::Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        match self {
+            CheckpointStorage::Redis(pool, _) => {
+                let fields: Vec<Vec<u8>> = ids
+                    .iter()
+                    .flat_map(|id| LEGS.map(|leg| local_field(*id, leg)))
+                    .collect();
+                let mut conn = pool.get().await.context("failed to get redis connection")?;
+                conn.hdel::<_, _, ()>(self.local_key(chain), fields)
+                    .await
+                    .context("failed to remove local records")?;
+            }
+            CheckpointStorage::InMemory { local, .. } => {
+                if let Some(records) = local.write().await.get_mut(&chain) {
+                    records.retain(|(id, _), _| !ids.contains(id));
+                }
+            }
+            #[cfg(test)]
+            CheckpointStorage::Failing => anyhow::bail!("failing storage"),
+        }
+        Ok(())
     }
 
     /// Persist a checkpoint as the latest consensus checkpoint.
@@ -557,6 +658,35 @@ impl CheckpointStorage {
             CheckpointStorage::Failing => anyhow::bail!("failing storage"),
         }
     }
+}
+
+/// In-memory records, by request and leg.
+type LocalRecords = HashMap<(SignId, u8), SignStatus>;
+
+const FIRST_LEG: u8 = 0;
+const ATTESTATION: u8 = 1;
+const LEGS: [u8; 2] = [FIRST_LEG, ATTESTATION];
+
+/// The leg a record belongs to, so an attestation never replaces the first leg's signature.
+fn leg(status: &SignStatus) -> u8 {
+    match status {
+        SignStatus::Bidirectional(BidirectionalProgress::Final { .. }) => ATTESTATION,
+        _ => FIRST_LEG,
+    }
+}
+
+fn local_field(id: SignId, leg: u8) -> Vec<u8> {
+    [id.request_id.as_slice(), &[leg]].concat()
+}
+
+fn encode_local(status: &SignStatus) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(status, &mut bytes).context("failed to encode local record")?;
+    Ok(bytes)
+}
+
+fn decode_local(bytes: &[u8]) -> anyhow::Result<SignStatus> {
+    ciborium::from_reader(bytes).context("failed to decode local record")
 }
 
 fn encode_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Vec<u8>> {

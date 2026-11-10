@@ -515,6 +515,10 @@ A node has to be able to check a `Response` from the event alone, since a
 `Response` removes the request on every node. The event of Section 7
 carries a hash of the output for that.
 
+Storing before publishing is best effort. A node whose storing operation fails
+logs it and publishes anyway. After a restart a node may therefore sign that
+request a second time.
+
 Properties:
 
 * M1 The MPC signs a request only if it provably comes from the contract it
@@ -1116,6 +1120,8 @@ Source chains are Midnight, Solana, Hydration and Canton.
 
 Checked against `develop` at `1d823c4e`. Still to change:
 
+* `local` keeps the latest signature and the latest attestation per request.
+* Reading `local` back after a restart.
 * Unviable from another request's response.
 * Finding nonce siblings, and executions under every published signature.
 * Refusing non-canonical request fields, and the reserved paths on every

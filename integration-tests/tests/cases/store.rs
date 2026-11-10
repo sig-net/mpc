@@ -8,7 +8,9 @@ use mpc_node::protocol::MessageChannel;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
 
-use super::helpers::{dummy_backlog_entry, dummy_pair, dummy_presignature};
+use super::helpers::{
+    dummy_backlog_entry, dummy_indexed_sign_request, dummy_pair, dummy_presignature,
+};
 use mpc_primitives::SignId;
 
 #[test(tokio::test)]
@@ -538,5 +540,37 @@ async fn test_clear_clears_pending_reservations() -> anyhow::Result<()> {
     let peeked = triple_storage.peek_mine(&[]).await;
     assert!(peeked.is_some(), "artifact must be peekable after clear()");
 
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_local_records_persist() -> anyhow::Result<()> {
+    use mpc_node::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
+    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
+    use mpc_primitives::Chain;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-local-records")
+        .init_network()
+        .await?;
+    let redis_container = containers::Redis::run(&spawner).await;
+    let account_id = "party0.near".parse()?;
+    let storage = CheckpointStorage::Redis(redis_container.pool(), account_id);
+    let entry = dummy_backlog_entry(1, Chain::Solana);
+    let (id, status) = (entry.sign_id(), entry.status);
+    let attestation = SignStatus::Bidirectional(BidirectionalProgress::Final {
+        respond_request: dummy_indexed_sign_request(2, Chain::Solana),
+        progress: SignProgress::Generating,
+    });
+
+    storage.put_local(Chain::Solana, id, &status).await?;
+    storage.put_local(Chain::Solana, id, &attestation).await?;
+    let records = storage.load_local(Chain::Solana).await?;
+    assert_eq!(records.len(), 2);
+    assert!(records.contains(&(id, status)) && records.contains(&(id, attestation)));
+    assert!(storage.load_local(Chain::Canton).await?.is_empty());
+
+    storage.remove_local(Chain::Solana, &[id]).await?;
+    assert!(storage.load_local(Chain::Solana).await?.is_empty());
     Ok(())
 }
