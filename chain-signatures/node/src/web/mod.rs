@@ -98,11 +98,11 @@ pub async fn run(
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024));
 
     let mut router = Router::new()
-        // healthcheck endpoint
+        // Liveness: the process serves HTTP. Node state is on `/status`.
         .route(
             "/",
-            get(|| async move {
-                tracing::info!("node is ready to accept connections");
+            get(|| async {
+                tracing::debug!("liveness probe answered");
                 StatusCode::OK
             })
             .layer(timeout(DEFAULT_TIMEOUT)),

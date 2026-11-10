@@ -101,13 +101,13 @@ Every second Tuesday is a **release day**. On it, in this order:
 
 ### Step 4: Soak
 
-The release stays on testnet until the next release day, at least 7 days. It is ready for mainnet when no open issue labeled `regression` points at it. Anyone who sees a regression on testnet, from alerts, dashboards or reports, opens such an issue. A [hotfix](#hotfixes) closes it and restarts the 7 days.
+The release stays on testnet until the next release day, at least 7 days. It is ready for mainnet when no open issue labeled `regression` points at it. Anyone who sees a regression on testnet, from alerts, dashboards or reports, opens such an issue. A [hotfix](#hotfixes) closes it. A hotfix that changes what runs on testnet, the node binary or the contract, restarts the 7 days. A hotfix that changes only CI, tests, tooling or docs does not touch what is running, so the soak continues from the original promotion and the testnet image is not rebuilt. The promotion PR to mainnet still names the hotfix version, since `mainnet` gets the branch.
 
 Out-of-schedule releases to `testnet` are possible but discouraged. If a feature cannot wait, cut a release and promote it to `testnet`; it replaces the soaking release, which never reaches `mainnet`. This restarts the 7 days and can postpone the mainnet promotion by up to 7 days.
 
 ## Hotfixes
 
-Fixes land on `develop` first, then get cherry-picked downstream, so `develop` never loses a fix. The only exception is a bug that no longer exists on `develop` (see below). Each hotfix bumps the patch version of the release it fixes; `develop` never gets patch bumps, so the next promotion PR conflicts on the version line: take the version from the promote branch. For example, a hotfix for 1.21.0 on `testnet`:
+Fixes land on `develop` first, then get cherry-picked downstream, so `develop` never loses a fix. The only exception is a bug that no longer exists on `develop` (see below). Each hotfix bumps the patch version of the release it fixes, CI-only hotfixes included, so the branch and the tag always say what is on it; `develop` never gets patch bumps, so the next promotion PR conflicts on the version line: take the version from the promote branch. For example, a hotfix for 1.21.0 on `testnet`:
 
 ```mermaid
 %%{init: {'gitGraph': {'mainBranchName': 'develop'}}}%%
