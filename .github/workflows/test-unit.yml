@@ -89,6 +89,24 @@ jobs:
       - name: Unit tests
         run: just test-unit
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
+        with:
+          tool: nextest
+
+      # Each test migrates a live contract's state. A branch never upgrades the contracts
+      # before it (develop -> testnet -> mainnet), so those are skipped. Merge queue runs all.
+      - name: Migration test, dev contract
+        if: github.base_ref != 'testnet' && github.base_ref != 'mainnet'
+        run: cargo nextest run -p mpc-contract --run-ignored only -E 'test(=test_migrate_dev_state)'
+
+      - name: Migration test, testnet contract
+        if: github.base_ref != 'mainnet'
+        run: cargo nextest run -p mpc-contract --run-ignored only -E 'test(=test_migrate_testnet_state)'
+
+      - name: Migration test, mainnet contract
+        run: cargo nextest run -p mpc-contract --run-ignored only -E 'test(=test_migrate_mainnet_state)'
+
       - name: Midnight output storage tests
         run: cargo test -p mpc-chain-midnight --lib --features sandbox output_storage::tests
 
