@@ -9,4 +9,4 @@ about: Something does not work as expected
 ### Expected
 
 ### Version
-<!-- Release, e.g. 1.22.0, or commit. If it worked in the previous release, add the `regression` label: it blocks the mainnet promotion. -->
+<!-- Release, e.g. 1.22.0, or commit. Say if it worked in the previous release. A maintainer labels a regression in the release soaking on testnet `regression`, which blocks the mainnet promotion. -->
