@@ -24,6 +24,19 @@ fn routed_tx(id: u8, source: Chain, target: Chain) -> BidirectionalTx {
     tx
 }
 
+/// The sign ids watching under `tx`'s flat id.
+async fn watch_members(
+    backlog: &Backlog,
+    tx: &BidirectionalTx,
+) -> std::collections::HashSet<SignId> {
+    backlog
+        .get_execution_watchers(tx.target_chain)
+        .await
+        .get(&tx.id)
+        .map(|members| members.iter().map(|member| member.sign_id).collect())
+        .unwrap_or_default()
+}
+
 fn digest_hex(hex_str: &str) -> [u8; 32] {
     hex::decode(hex_str)
         .unwrap()
@@ -1254,54 +1267,62 @@ async fn executing_entry_for_falls_back_to_the_backlog_entry_without_a_watch() {
 #[tokio::test]
 async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_ids() {
     let backlog = Backlog::new();
-    let evicted = mock_bidirectional_tx(SignId::new([81; 32]), Chain::Solana);
-    let mut watch_owner = evicted.clone();
-    watch_owner.request_id = [0x7f; 32];
-    let evicted_entry = backlog.insert_mock_executing(&evicted).await;
-    let owner_entry = backlog.insert_mock_executing(&watch_owner).await;
-    backlog.watch_execution(&evicted_entry).await;
+    let first = mock_bidirectional_tx(SignId::new([81; 32]), Chain::Solana);
+    let mut second = first.clone();
+    second.request_id = [0x7f; 32];
+    let first_entry = backlog.insert_mock_executing(&first).await;
+    let second_entry = backlog.insert_mock_executing(&second).await;
+    backlog.watch_execution(&first_entry).await;
     // Same flat id: both entries keep their own watches.
-    backlog.watch_execution(&owner_entry).await;
-    // By the owner's keys the watch answers and is consumed.
+    backlog.watch_execution(&second_entry).await;
+
+    assert_eq!(
+        watch_members(&backlog, &first).await,
+        [first.sign_id(), second.sign_id()].into(),
+        "both entries hold their own watch"
+    );
+
+    // By second's keys its own watch answers and is consumed.
     let resolved = backlog
         .executing_entry_for(
-            watch_owner.target_chain,
-            &watch_owner.id,
-            watch_owner.source_chain,
-            &watch_owner.sign_id(),
+            second.target_chain,
+            &second.id,
+            second.source_chain,
+            &second.sign_id(),
         )
         .await
-        .expect("the owner resolves through its watch");
-    assert_eq!(resolved.sign_id(), watch_owner.sign_id());
+        .expect("second resolves through its watch");
+    assert_eq!(resolved.sign_id(), second.sign_id());
     assert!(
         resolved.awaiting_execution().is_some(),
         "the watch arm restores the wait measurement"
     );
+    assert_eq!(
+        watch_members(&backlog, &first).await,
+        [first.sign_id()].into(),
+        "second's resolution consumes only its own watch"
+    );
 
-    // Re-register the owner beside the evicted entry's watch.
-    backlog.watch_execution(&owner_entry).await;
-
-    // The evicted entry resolves through its own watch.
+    // Re-register second, then first resolves through its own watch.
+    backlog.watch_execution(&second_entry).await;
     let resolved = backlog
         .executing_entry_for(
-            evicted.target_chain,
-            &evicted.id,
-            evicted.source_chain,
-            &evicted.sign_id(),
+            first.target_chain,
+            &first.id,
+            first.source_chain,
+            &first.sign_id(),
         )
         .await
-        .expect("the evicted entry resolves through its own watch");
-    assert_eq!(resolved.sign_id(), evicted.sign_id());
+        .expect("first resolves through its own watch");
+    assert_eq!(resolved.sign_id(), first.sign_id());
     assert!(
         resolved.awaiting_execution().is_some(),
-        "the evicted entry's own watch restores the wait measurement"
+        "first's own watch restores the wait measurement"
     );
-    let watches = backlog.get_execution_watchers(evicted.target_chain).await;
-    assert_eq!(watches.len(), 1, "one flat id");
     assert_eq!(
-        watches[&evicted.id][0].sign_id,
-        watch_owner.sign_id(),
-        "the owner's watch survives the evicted entry's confirmation"
+        watch_members(&backlog, &first).await,
+        [second.sign_id()].into(),
+        "first's resolution consumes only its own watch"
     );
 }
 
