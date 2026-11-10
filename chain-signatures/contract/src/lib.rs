@@ -606,6 +606,7 @@ impl MpcContract {
                         threshold_votes: ThresholdVotes::new(),
                         reshare_votes: ReshareVotes::new(),
                     });
+                    self.drop_non_member_checkpoint_votes();
                     Ok(true)
                 } else {
                     Ok(false)
@@ -707,12 +708,17 @@ impl MpcContract {
         );
         let threshold = self.threshold()?;
         let voter = self.voter()?;
-        let Some(votes) = self.proposed_updates().vote(&id, voter) else {
+        let Some(votes) = self.proposed_updates.vote(&id, voter) else {
             return Err(InvalidParameters::UpdateNotFound.into());
         };
+        // Only current members' votes count.
+        let vote_count = votes
+            .iter()
+            .filter(|account| self.protocol_state.is_voter(account))
+            .count();
 
         // Not enough votes, wait for more.
-        if votes.len() < threshold {
+        if vote_count < threshold {
             return Ok(false);
         }
 
@@ -952,10 +958,13 @@ impl MpcContract {
         }
 
         let vote_count = {
-            let checkpoint_votes = self.checkpoint_votes_mut();
-            let voters = checkpoint_votes.entry(checkpoint);
+            let voters = self.checkpoint_votes.entry(checkpoint);
             voters.insert(voter);
-            voters.len()
+            // Only current members' votes count.
+            voters
+                .iter()
+                .filter(|account| self.protocol_state.is_voter(account))
+                .count()
         };
 
         if vote_count < threshold {
@@ -1162,33 +1171,23 @@ impl MpcContract {
         &mut self.proposed_updates
     }
 
+    fn drop_non_member_checkpoint_votes(&mut self) {
+        let state = &self.protocol_state;
+        self.checkpoint_votes.votes.retain(|_, voters| {
+            voters.retain(|account| state.is_voter(account));
+            !voters.is_empty()
+        });
+    }
+
     /// Get our own account id as a voter. Check to see if we are a participant in the protocol.
     /// If we are not a participant, return an error.
     fn voter(&self) -> Result<AccountId, Error> {
+        if let ProtocolContractState::NotInitialized = self.protocol_state {
+            return Err(InvalidState::UnexpectedProtocolState.message(self.protocol_state.name()));
+        }
         let voter = env::signer_account_id();
-        {
-            match &self.protocol_state {
-                ProtocolContractState::Initializing(state) => {
-                    if !state.candidates.contains_key(&voter) {
-                        return Err(VoteError::VoterNotParticipant.into());
-                    }
-                }
-                ProtocolContractState::Running(state) => {
-                    if !state.participants.contains_key(&voter) {
-                        return Err(VoteError::VoterNotParticipant.into());
-                    }
-                }
-                ProtocolContractState::Resharing(state) => {
-                    if !state.old_participants.contains_key(&voter) {
-                        return Err(VoteError::VoterNotParticipant.into());
-                    }
-                }
-                ProtocolContractState::NotInitialized => {
-                    return Err(
-                        InvalidState::UnexpectedProtocolState.message(self.protocol_state.name())
-                    );
-                }
-            }
+        if !self.protocol_state.is_voter(&voter) {
+            return Err(VoteError::VoterNotParticipant.into());
         }
         Ok(voter)
     }
@@ -1558,5 +1557,77 @@ mod tests {
         assert_eq!(event["chain"], serde_json::json!(Chain::Solana));
         assert_eq!(event["height"], resume_at_height);
         assert_eq!(event["resume_after"], resume_at_height - 1);
+    }
+
+    fn act_as(account: &AccountId) {
+        testing_env!(VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .signer_account_id(account.clone())
+            .build());
+    }
+
+    /// Alice to erin with threshold 3; dave and erin voted for `far` and update `id`.
+    fn dave_and_erin_voted() -> (MpcContract, [AccountId; 5], CheckpointDigest, UpdateId) {
+        let mut contract = running_contract(3);
+        let accounts: [AccountId; 5] = ["alice", "bob", "carol", "dave", "erin"]
+            .map(|name| format!("{name}.near").parse().unwrap());
+        let ProtocolContractState::Running(state) = contract.mutable_state() else {
+            unreachable!()
+        };
+        let info = state.participants.participants[&accounts[0]].clone();
+        for account in &accounts[1..] {
+            let info = primitives::ParticipantInfo {
+                account_id: account.clone(),
+                ..info.clone()
+            };
+            state.participants.insert(account.clone(), info);
+        }
+
+        let far = CheckpointDigest::new(Chain::Solana, 1_000_000, [9u8; 32]);
+        let id = contract
+            .proposed_updates
+            .propose(None, Some(ProtocolConfig::default()))
+            .unwrap();
+        for voter in &accounts[3..] {
+            act_as(voter);
+            assert!(!contract.vote_checkpoint(far).unwrap());
+            assert!(!contract.vote_update(id).unwrap());
+        }
+        (contract, accounts, far, id)
+    }
+
+    #[test]
+    fn tally_counts_only_current_participants() {
+        let (mut contract, [a, b, _, d, e], far, id) = dave_and_erin_voted();
+        let ProtocolContractState::Running(state) = contract.mutable_state() else {
+            unreachable!()
+        };
+        state.participants.remove(&d);
+        state.participants.remove(&e);
+        state.threshold = 2;
+
+        act_as(&a);
+        assert!(!contract.vote_checkpoint(far).unwrap());
+        assert!(!contract.vote_update(id).unwrap());
+
+        act_as(&b);
+        assert!(contract.vote_checkpoint(far).unwrap());
+        assert!(contract.vote_update(id).unwrap());
+    }
+
+    #[test]
+    fn reshare_drops_checkpoint_votes_of_removed_nodes() {
+        let (mut contract, [a, b, c, d, e], _, _) = dave_and_erin_voted();
+        for voter in [&a, &b, &c] {
+            act_as(voter);
+            contract
+                .vote_reshare(vec![], vec![d.clone(), e.clone()])
+                .unwrap();
+        }
+        for voter in [&a, &b, &c] {
+            act_as(voter);
+            contract.vote_reshared(1).unwrap();
+        }
+        assert!(contract.checkpoint_votes(Chain::Solana).is_empty());
     }
 }
