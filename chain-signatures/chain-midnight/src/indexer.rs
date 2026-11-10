@@ -787,12 +787,12 @@ mod tests {
 
     fn test_config() -> MidnightConfig {
         MidnightConfig {
-            node_url: "http://127.0.0.1:1".to_string(),
+            node_url: "http://127.0.0.1:1".parse().unwrap(),
             central_address: crate::MidnightAddress::from_bytes(SINGLETON),
             responder_address: crate::MidnightAddress::from_bytes(RESPONDER),
             publisher: crate::PublisherConfig {
                 funding_seed: "ab".repeat(32),
-                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                 ..Default::default()
             },
             rpc: Default::default(),

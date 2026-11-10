@@ -1211,12 +1211,12 @@ mod tests {
             canton: None,
             midnight: Some(MidnightConfig {
                 // Nothing listens on port 1, so the startup dial is refused.
-                node_url: "http://127.0.0.1:1".to_string(),
+                node_url: "http://127.0.0.1:1".parse().unwrap(),
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
                 responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
                     funding_seed: "ab".repeat(32),
-                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                     ..Default::default()
                 },
                 rpc: Default::default(),
