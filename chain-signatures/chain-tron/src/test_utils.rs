@@ -225,8 +225,7 @@ pub(crate) fn receipt_for(server: &mut mockito::ServerGuard, id: &BidirectionalT
         .create();
 }
 
-/// [`receipt_for`] asserting exactly one fetch — one receipt read per
-/// flat id per pass.
+/// [`receipt_for`] asserting exactly one fetch.
 pub(crate) fn receipt_for_once(
     server: &mut mockito::ServerGuard,
     id: &BidirectionalTxId,

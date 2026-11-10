@@ -11,7 +11,9 @@ use crate::backlog::mock::{
 };
 use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus};
 use mpc_chain_integration_core::StateManager;
-use mpc_primitives::{BidirectionalTx, Chain, ExecutionOutcome, SignId, SignKind};
+use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, SignId, SignKind,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1203,6 +1205,20 @@ async fn watch_execution_without_a_resident_watch_starts_unmeasured() {
 }
 
 #[tokio::test]
+async fn re_signed_replacement_keeps_both_flat_id_watches() {
+    let backlog = Backlog::new();
+    let tx = mock_bidirectional_tx(SignId::new([85; 32]), Chain::Solana);
+    backlog.insert_mock_executing(&tx).await;
+    let mut replacement = tx.clone();
+    replacement.id = BidirectionalTxId([0xee; 32]);
+    StateManager::watch_execution(&backlog, tx.target_chain, Arc::new(tx.clone())).await;
+    StateManager::watch_execution(&backlog, tx.target_chain, Arc::new(replacement)).await;
+
+    let watchers = backlog.get_execution_watchers(tx.target_chain).await;
+    assert_eq!(watchers.len(), 2, "one sign id, two flat ids: both watched");
+}
+
+#[tokio::test]
 async fn executing_entry_for_falls_back_to_the_backlog_entry_without_a_watch() {
     let backlog = Backlog::new();
     let tx = mock_bidirectional_tx(SignId::new([77; 32]), Chain::Solana);
@@ -1380,9 +1396,8 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
     assert_eq!(entry.respond_observed_at(), unrelated_observed_at);
 }
 
-/// Twins under one flat id keep distinct wait starts: recovery re-keys
-/// the observed carry by `(id, sign_id)`, and re-registration reads the
-/// entry's own element — never its sibling's.
+/// Twins under one flat id keep their own wait starts across recovery
+/// and re-registration.
 #[tokio::test]
 async fn twin_wait_starts_survive_recovery_and_re_registration() {
     let backlog = Backlog::new();
@@ -1431,8 +1446,7 @@ async fn twin_wait_starts_survive_recovery_and_re_registration() {
         .expect("twin must remain watched");
     assert_eq!(twin.respond_observed_at(), Some(twin_observed));
 
-    // Re-register one twin while both are resident: the carry reads its
-    // own element, and the sibling's is untouched.
+    // Re-register one twin while both are resident.
     backlog
         .watch_execution(&first.with_respond_observed_at(Some(first_observed)))
         .await;

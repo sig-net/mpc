@@ -132,11 +132,6 @@ impl ExecutionWatch {
             respond_observed_at,
         }
     }
-
-    /// Whether this watch belongs to the `(source_chain, sign_id)` entry.
-    pub(crate) fn belongs_to(&self, source_chain: Chain, sign_id: &SignId) -> bool {
-        self.tx.source_chain == source_chain && self.tx.sign_id() == *sign_id
-    }
 }
 
 /// Typestate marker: Phase 1.5 awaiting destination-chain execution.

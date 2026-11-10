@@ -7,6 +7,24 @@ use tokio::sync::RwLock;
 /// One watched execution: the entry's sign id and its transaction.
 pub type WatchedExecution = (SignId, Arc<BidirectionalTx>);
 
+/// Watch key for an execution: identifies the flat id, source chain, and sign id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WatchKey {
+    pub flat_id: BidirectionalTxId,
+    pub source: Chain,
+    pub sign_id: SignId,
+}
+
+impl WatchKey {
+    pub fn of(tx: &BidirectionalTx) -> Self {
+        Self {
+            flat_id: tx.id,
+            source: tx.source_chain,
+            sign_id: tx.sign_id(),
+        }
+    }
+}
+
 /// Interface for the Indexer to query and update state.
 /// Currently implemented by the Backlog
 #[async_trait::async_trait]
@@ -35,7 +53,7 @@ pub trait StateManager: Send + Sync + Clone + 'static {
 }
 
 /// Type alias to make clippy happy
-type Watchers = Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, Vec<WatchedExecution>>>>>;
+type Watchers = Arc<RwLock<HashMap<Chain, HashMap<WatchKey, Arc<BidirectionalTx>>>>>;
 
 /// In-memory mock implementation of [`StateManager`] intended for use in tests.
 ///
@@ -44,7 +62,9 @@ type Watchers = Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, Vec<Watched
 #[derive(Clone, Default)]
 pub struct MockStateManager {
     processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
-    // TODO: extract the watch map into a dedicated type to avoid divergence with the backlog.
+    // TODO: extract the watch map into a dedicated type to avoid
+    // divergence with the backlog — the identity is shared (`WatchKey`),
+    // the map shape is not.
     watchers: Watchers,
     pending: Arc<RwLock<Vec<Arc<BidirectionalTx>>>>,
 }
@@ -59,12 +79,21 @@ impl StateManager for MockStateManager {
         &self,
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
-        self.watchers
+        let watches = self
+            .watchers
             .read()
             .await
             .get(&chain)
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let mut grouped: HashMap<BidirectionalTxId, Vec<WatchedExecution>> = HashMap::new();
+        for (key, tx) in watches {
+            grouped
+                .entry(key.flat_id)
+                .or_default()
+                .push((key.sign_id, tx));
+        }
+        grouped
     }
 
     async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
@@ -82,8 +111,11 @@ impl StateManager for MockStateManager {
     }
 
     async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
-        let sign_id = tx.sign_id();
-        self.upsert_watch(chain, sign_id, tx).await;
+        let mut watchers = self.watchers.write().await;
+        watchers
+            .entry(chain)
+            .or_default()
+            .insert(WatchKey::of(&tx), tx);
     }
 }
 
@@ -100,16 +132,19 @@ impl MockStateManager {
         sign_id: SignId,
         tx: Arc<BidirectionalTx>,
     ) {
-        self.upsert_watch(chain, sign_id, tx).await;
-    }
-
-    async fn upsert_watch(&self, chain: Chain, sign_id: SignId, tx: Arc<BidirectionalTx>) {
-        let mut watchers = self.watchers.write().await;
-        let watches = watchers.entry(chain).or_default().entry(tx.id).or_default();
-        watches.retain(|(id, watched)| {
-            *id != sign_id || watched.source_chain != tx.source_chain
-        });
-        watches.push((sign_id, tx));
+        self.watchers
+            .write()
+            .await
+            .entry(chain)
+            .or_default()
+            .insert(
+                WatchKey {
+                    flat_id: tx.id,
+                    source: tx.source_chain,
+                    sign_id,
+                },
+                tx,
+            );
     }
 
     /// Register an `Executing` backlog entry targeting `tx.target_chain`.
@@ -135,15 +170,15 @@ impl MockStateManager {
         source_chain: Chain,
         sign_id: SignId,
     ) {
-        let mut watchers = self.watchers.write().await;
-        let Some(watches) = watchers.get_mut(&chain) else {
-            return;
-        };
-        if let Some(members) = watches.get_mut(tx_id) {
-            members.retain(|(id, tx)| *id != sign_id || tx.source_chain != source_chain);
-            if members.is_empty() {
-                watches.remove(tx_id);
-            }
-        }
+        self.watchers
+            .write()
+            .await
+            .entry(chain)
+            .or_default()
+            .remove(&WatchKey {
+                flat_id: *tx_id,
+                source: source_chain,
+                sign_id,
+            });
     }
 }
