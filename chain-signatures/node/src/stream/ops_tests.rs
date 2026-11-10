@@ -270,17 +270,14 @@ async fn process_execution_confirmed_failed_advance_keeps_the_entry_watched() {
 
     let entry = ctx
         .backlog
-        .executing_entry_for(
-            tx.target_chain,
-            &tx.id,
-            tx.source_chain,
-            &tx.sign_id(),
-        )
+        .executing_entry_for(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
         .await
         .expect("the watch returned with the entry");
     assert_eq!(entry.sign_id(), tx.sign_id());
     assert!(
-        entry.awaiting_execution().is_some_and(|wait| wait >= std::time::Duration::from_secs(90)),
+        entry
+            .awaiting_execution()
+            .is_some_and(|wait| wait >= std::time::Duration::from_secs(90)),
         "the restored watch keeps the wait start"
     );
 }
