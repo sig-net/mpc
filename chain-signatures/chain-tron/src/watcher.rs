@@ -11,9 +11,7 @@ use futures_util::stream::{iter, Stream, StreamExt};
 use mpc_chain_integration_core::{
     ChainIndexer, ChainTelemetry, ExtractionFailureKind, StateManager, WatchedExecution,
 };
-use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
-};
+use mpc_primitives::{BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -101,19 +99,15 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
 
         members
             .into_iter()
-            .filter_map(|(sign_id, tx)| self.member_event(tx_id, &receipt, sign_id, tx))
+            .filter_map(|member| self.member_event(member, &receipt))
             .collect()
     }
 
     /// `None` — unclassifiable under this member's schema; retries next
     /// tick.
-    fn member_event(
-        &self,
-        tx_id: BidirectionalTxId,
-        receipt: &TronReceipt,
-        sign_id: SignId,
-        tx: Arc<BidirectionalTx>,
-    ) -> Option<ChainEvent> {
+    fn member_event(&self, member: WatchedExecution, receipt: &TronReceipt) -> Option<ChainEvent> {
+        let WatchedExecution { sign_id, tx } = member;
+        let tx_id = tx.id;
         let result = receipt
             .execution_outcome(&tx.output_deserialization_schema)
             .inspect_err(|err| {

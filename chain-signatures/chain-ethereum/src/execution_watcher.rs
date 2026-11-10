@@ -153,11 +153,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         // Ethereum ids hash the signed tx: one member per flat id.
         let watchers: Vec<WatcherEntry> = watchers
             .into_iter()
-            .flat_map(|(tx_id, members)| {
-                members
-                    .into_iter()
-                    .map(move |(sign_id, tx)| (tx_id, (sign_id, tx)))
-            })
+            .flat_map(|(tx_id, members)| members.into_iter().map(move |member| (tx_id, member)))
             .collect();
 
         // Extract hashes from the block
@@ -465,16 +461,12 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         watchers: Vec<WatcherEntry>,
         block_number: u64,
     ) -> Vec<WatcherReceipt> {
-        stream::iter(
-            watchers
-                .into_iter()
-                .map(|(tx_id, (sign_id, pending_tx))| async move {
-                    let result = self
-                        .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
-                        .await;
-                    (tx_id, sign_id, pending_tx, result)
-                }),
-        )
+        stream::iter(watchers.into_iter().map(|(tx_id, member)| async move {
+            let result = self
+                .backfill_execution_confirmation(tx_id, member.sign_id, &member.tx, block_number)
+                .await;
+            (tx_id, member.sign_id, member.tx, result)
+        }))
         .buffer_unordered(self.config.max_concurrent_watcher_rpcs)
         .collect()
         .await
@@ -517,7 +509,12 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         // A watched hash in this final block proves its nonce is taken, receipt or not.
         let consumed_slots: HashMap<_, _> = mined
             .iter()
-            .map(|(_, (_, tx))| ((Address::from(tx.from_address), tx.nonce), Arc::clone(tx)))
+            .map(|(_, member)| {
+                (
+                    (Address::from(member.tx.from_address), member.tx.nonce),
+                    Arc::clone(&member.tx),
+                )
+            })
             .collect();
         let mut failed = HashSet::new();
 
@@ -554,7 +551,8 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     ) -> (Vec<ChainEvent>, Vec<WatcherEntry>) {
         let mut events = Vec::new();
         let mut remaining = Vec::new();
-        for (tx_id, (sign_id, tx)) in unmined {
+        for (tx_id, member) in unmined {
+            let tx = &member.tx;
             // A watched taker is another request, but with equal bytes it also executed this one
             // (M3); answering that needs matching by bytes, not tx id, so no verdict yet.
             let displaced = consumed_slots
@@ -563,12 +561,12 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                     consuming.serialized_transaction != tx.serialized_transaction
                 });
             if !displaced {
-                remaining.push((tx_id, (sign_id, tx)));
+                remaining.push((tx_id, member));
                 continue;
             }
             tracing::info!(
                 ?tx_id,
-                ?sign_id,
+                sign_id = ?member.sign_id,
                 nonce = tx.nonce,
                 replacement_block = block_number,
                 "transaction replaced by a watched sibling tx"
@@ -576,7 +574,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
             let result = unexecutable_outcome(tx.source_chain);
             events.push(ChainEvent::ExecutionConfirmed {
                 tx_id,
-                sign_id,
+                sign_id: member.sign_id,
                 source_chain: tx.source_chain,
                 block_height: block_number,
                 result,
@@ -637,7 +635,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     ) {
         let unique_senders: HashSet<_> = gated
             .iter()
-            .map(|(_, (_, tx))| Address::from(tx.from_address))
+            .map(|(_, member)| Address::from(member.tx.from_address))
             .collect();
 
         // Failed senders are skipped: their watchers stay pending and are
@@ -654,7 +652,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
                     failed.extend(
                         gated
                             .iter()
-                            .filter(|(_, (_, tx))| Address::from(tx.from_address) == sender)
+                            .filter(|(_, member)| Address::from(member.tx.from_address) == sender)
                             .map(|(tx_id, _)| *tx_id),
                     );
                 }
@@ -664,10 +662,10 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
         // Keep ONLY watchers whose nonces were consumed
         let consumed_txs: Vec<_> = gated
             .into_iter()
-            .filter(|(_, (_, tx))| {
+            .filter(|(_, member)| {
                 nonces
-                    .get(&Address::from(tx.from_address))
-                    .is_some_and(|&current_nonce| tx.nonce < current_nonce)
+                    .get(&Address::from(member.tx.from_address))
+                    .is_some_and(|&current_nonce| member.tx.nonce < current_nonce)
             })
             .collect();
 
@@ -720,7 +718,7 @@ mod tests {
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::{Block, BlockTransactions};
     use mockito::{Matcher, Server};
-    use mpc_chain_integration_core::StateManager;
+    use mpc_chain_integration_core::{StateManager, WatchedExecution};
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
@@ -1828,7 +1826,13 @@ mod tests {
                 mpc_chain_integration_core::MockStateManager,
                 test_utils::CountingChainTelemetry,
             >::resolve_replaced_siblings(
-                vec![(BidirectionalTxId(tx_hash.0), (SignId::new([0xdd; 32]), tx))],
+                vec![(
+                    BidirectionalTxId(tx_hash.0),
+                    WatchedExecution {
+                        sign_id: SignId::new([0xdd; 32]),
+                        tx,
+                    },
+                )],
                 &std::collections::HashMap::from([((from_address, 7), consuming_tx)]),
                 5,
             );
@@ -1887,7 +1891,10 @@ mod tests {
             >::resolve_replaced_siblings(
                 vec![(
                     BidirectionalTxId(tx_hash.0),
-                    (SignId::new([0xdd; 32]), tx.clone()),
+                    WatchedExecution {
+                        sign_id: SignId::new([0xdd; 32]),
+                        tx: tx.clone(),
+                    },
                 )],
                 &consumed,
                 5,

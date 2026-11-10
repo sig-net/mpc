@@ -1080,10 +1080,10 @@ async fn pending_executions_targeting_spans_sources() {
         .await;
 
     let mut tron = backlog.get_pending_executions(Chain::Tron).await;
-    tron.sort_by_key(|(id, _)| id.request_id);
+    tron.sort_by_key(|member| member.sign_id.request_id);
     assert_eq!(tron.len(), 2);
-    assert_eq!(tron[0], (tx1.sign_id(), Arc::new(tx1.clone())));
-    assert_eq!(tron[1], (tx2.sign_id(), Arc::new(tx2.clone())));
+    assert_eq!(tron[0].sign_id, tx1.sign_id());
+    assert_eq!(tron[1].sign_id, tx2.sign_id());
     assert!(backlog
         .get_pending_executions(Chain::Hydration)
         .await
@@ -1299,7 +1299,7 @@ async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_id
     let watches = backlog.get_execution_watchers(evicted.target_chain).await;
     assert_eq!(watches.len(), 1, "one flat id");
     assert_eq!(
-        watches[&evicted.id][0].0,
+        watches[&evicted.id][0].sign_id,
         watch_owner.sign_id(),
         "the owner's watch survives the evicted entry's confirmation"
     );

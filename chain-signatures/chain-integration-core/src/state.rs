@@ -4,8 +4,22 @@ use std::sync::Arc;
 use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, SignId};
 use tokio::sync::RwLock;
 
-/// One watched execution: the entry's sign id and its transaction.
-pub type WatchedExecution = (SignId, Arc<BidirectionalTx>);
+/// One watched execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchedExecution {
+    pub sign_id: SignId,
+    pub tx: Arc<BidirectionalTx>,
+}
+
+impl WatchedExecution {
+    /// Create a new `WatchedExecution` for the given transaction.
+    pub fn of(tx: Arc<BidirectionalTx>) -> Self {
+        Self {
+            sign_id: tx.sign_id(),
+            tx,
+        }
+    }
+}
 
 /// Watch key for an execution: identifies the flat id, source chain, and sign id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,7 +56,7 @@ pub trait StateManager: Send + Sync + Clone + 'static {
     /// All `Executing` backlog entries targeting `chain`, from every
     /// source chain — the authoritative set; the watch map is its
     /// derived index (the mock keeps the two independent).
-    async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)>;
+    async fn get_pending_executions(&self, chain: Chain) -> Vec<WatchedExecution>;
 
     /// Registers or refreshes the entry's own watch under `tx.id`;
     /// sibling watches under the same flat id survive.
@@ -91,18 +105,21 @@ impl StateManager for MockStateManager {
             grouped
                 .entry(key.flat_id)
                 .or_default()
-                .push((key.sign_id, tx));
+                .push(WatchedExecution {
+                    sign_id: key.sign_id,
+                    tx,
+                });
         }
         grouped
     }
 
-    async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+    async fn get_pending_executions(&self, chain: Chain) -> Vec<WatchedExecution> {
         self.pending
             .read()
             .await
             .iter()
             .filter(|tx| tx.target_chain == chain)
-            .map(|tx| (tx.sign_id(), Arc::clone(tx)))
+            .map(|tx| WatchedExecution::of(Arc::clone(tx)))
             .collect()
     }
 

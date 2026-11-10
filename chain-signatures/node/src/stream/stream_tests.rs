@@ -332,8 +332,8 @@ async fn test_respond_event_advances_to_pending_execution() {
 
     let watchers = backlog.get_execution_watchers(Chain::Ethereum).await;
     assert_eq!(watchers.len(), 1, "expected exactly one execution watcher");
-    let (watched_sign_id, _watched_tx) = &watchers.values().next().unwrap()[0];
-    assert_eq!(*watched_sign_id, sign_id);
+    let watched_sign_id = watchers.values().next().unwrap()[0].sign_id;
+    assert_eq!(watched_sign_id, sign_id);
 }
 
 /// `process_execution_confirmed` on a watched bidirectional tx should advance the

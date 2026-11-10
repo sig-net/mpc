@@ -93,14 +93,17 @@ impl PendingRequests {
             .collect()
     }
 
-    fn executing_targeting(&self, target: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+    fn executing_targeting(&self, target: Chain) -> Vec<WatchedExecution> {
         self.requests
             .values()
             .filter_map(|entry| {
                 entry
                     .execution_tx()
                     .filter(|tx| tx.target_chain == target)
-                    .map(|tx| (entry.sign_id(), Arc::clone(tx)))
+                    .map(|tx| WatchedExecution {
+                        sign_id: entry.sign_id(),
+                        tx: Arc::clone(tx),
+                    })
             })
             .collect()
     }
@@ -173,7 +176,7 @@ impl ExecutionWatchers {
             grouped
                 .entry(watch.tx.id)
                 .or_default()
-                .push((watch.tx.sign_id(), Arc::clone(&watch.tx)));
+                .push(WatchedExecution::of(Arc::clone(&watch.tx)));
         }
         grouped
     }
@@ -408,10 +411,7 @@ impl Backlog {
     }
 
     /// `Executing` entries targeting `target`, from every owning chain.
-    async fn pending_executions_targeting(
-        &self,
-        target: Chain,
-    ) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+    async fn pending_executions_targeting(&self, target: Chain) -> Vec<WatchedExecution> {
         let mut targeting = Vec::new();
         for pending in self.requests.values() {
             targeting.extend(pending.read().await.executing_targeting(target));
@@ -673,7 +673,7 @@ impl StateManager for Backlog {
         self.watchers(&chain).read().await.all()
     }
 
-    async fn get_pending_executions(&self, chain: Chain) -> Vec<(SignId, Arc<BidirectionalTx>)> {
+    async fn get_pending_executions(&self, chain: Chain) -> Vec<WatchedExecution> {
         self.pending_executions_targeting(chain).await
     }
 
