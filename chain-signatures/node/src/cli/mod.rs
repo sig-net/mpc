@@ -586,8 +586,7 @@ fn log_startup(
         hydration_rpc_host = %chains.hydration.as_ref().map_or("None", |c| host_of(&c.rpc_ws_url)),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_host = %chains.canton.as_ref().map_or("None", |c| host_of(&c.json_api_url)),
-        // Midnight still holds its node URL as a string.
-        midnight_node_host = %chains.midnight.as_ref().map_or("None".to_string(), |c| c.node_url.parse().map_or("invalid".to_string(), |url| host_of(&url).to_string())),
+        midnight_node_host = %chains.midnight.as_ref().map_or("None", |c| host_of(&c.node_url)),
         tron_host = %chains.tron.as_ref().map_or("None", |c| host_of(&c.endpoint)),
         "starting node",
     );
