@@ -70,8 +70,7 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
     /// fetch, and unclassifiable receipts yield nothing and retry next
     /// tick. Resolution order is load-bearing: immediate sends keep a
     /// pass that outlasts the stall timeout from losing confirmations.
-    /// One fetch per flat id: every member shares the receipt, but each
-    /// classifies under its own schema.
+    /// One fetch per flat id, one classification per member.
     async fn poll_watchers(&self) -> impl Stream<Item = ChainEvent> + Unpin + '_ {
         let watchers = self.state_manager.get_execution_watchers(Chain::Tron).await;
         tracing::debug!(watchers = watchers.len(), "polling tron execution watchers");
@@ -83,8 +82,7 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
             .flatten()
     }
 
-    /// Empty defers the id: pending, failed fetch, or a receipt no member
-    /// could classify retries next tick.
+    /// An empty vec defers the id to the next tick.
     async fn resolve_watched_id(
         &self,
         tx_id: BidirectionalTxId,
@@ -833,8 +831,12 @@ mod tests {
             "the closed window must not attest: {tick:?}"
         );
 
-        state.remove_pending_execution(sign_id).await;
-        state.remove_execution_watch(Chain::Tron, &id).await;
+        state
+            .remove_pending_execution(Chain::Midnight, sign_id)
+            .await;
+        state
+            .remove_execution_watch(Chain::Tron, &id, Chain::Midnight, sign_id)
+            .await;
         let next_tick = until_blocks(&mut run, 1).await;
         assert!(
             next_tick
@@ -876,13 +878,16 @@ mod tests {
                 if let ChainEvent::ExecutionConfirmed {
                     tx_id,
                     sign_id,
+                    source_chain,
                     block_height,
                     result,
                     ..
                 } = event
                 {
                     if tx_id == id {
-                        confirmed_state.remove_pending_execution(sign_id).await;
+                        confirmed_state
+                            .remove_pending_execution(source_chain, sign_id)
+                            .await;
                         if !seen.iter().any(|(sign, ..)| *sign == sign_id) {
                             seen.push((sign_id, block_height, result));
                             if seen.len() == 2 {

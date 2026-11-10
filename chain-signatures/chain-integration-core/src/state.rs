@@ -44,6 +44,7 @@ type Watchers = Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, Vec<Watched
 #[derive(Clone, Default)]
 pub struct MockStateManager {
     processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
+    // TODO: extract the watch map into a dedicated type to avoid divergence with the backlog.
     watchers: Watchers,
     pending: Arc<RwLock<Vec<Arc<BidirectionalTx>>>>,
 }
@@ -105,7 +106,9 @@ impl MockStateManager {
     async fn upsert_watch(&self, chain: Chain, sign_id: SignId, tx: Arc<BidirectionalTx>) {
         let mut watchers = self.watchers.write().await;
         let watches = watchers.entry(chain).or_default().entry(tx.id).or_default();
-        watches.retain(|(id, _)| *id != sign_id);
+        watches.retain(|(id, watched)| {
+            *id != sign_id || watched.source_chain != tx.source_chain
+        });
         watches.push((sign_id, tx));
     }
 
@@ -116,18 +119,31 @@ impl MockStateManager {
         self.pending.write().await.push(tx);
     }
 
-    /// Removes the entry — what the node's confirmation handling does.
-    pub async fn remove_pending_execution(&self, sign_id: SignId) {
+    /// Removes the entry by its `(source_chain, sign_id)` key.
+    pub async fn remove_pending_execution(&self, source_chain: Chain, sign_id: SignId) {
         self.pending
             .write()
             .await
-            .retain(|tx| tx.sign_id() != sign_id);
+            .retain(|tx| tx.source_chain != source_chain || tx.sign_id() != sign_id);
     }
 
-    /// Removes the watch under the flat id.
-    pub async fn remove_execution_watch(&self, chain: Chain, tx_id: &BidirectionalTxId) {
-        if let Some(watches) = self.watchers.write().await.get_mut(&chain) {
-            watches.remove(tx_id);
+    /// Removes one entry's watch; sibling watches stay.
+    pub async fn remove_execution_watch(
+        &self,
+        chain: Chain,
+        tx_id: &BidirectionalTxId,
+        source_chain: Chain,
+        sign_id: SignId,
+    ) {
+        let mut watchers = self.watchers.write().await;
+        let Some(watches) = watchers.get_mut(&chain) else {
+            return;
+        };
+        if let Some(members) = watches.get_mut(tx_id) {
+            members.retain(|(id, tx)| *id != sign_id || tx.source_chain != source_chain);
+            if members.is_empty() {
+                watches.remove(tx_id);
+            }
         }
     }
 }
