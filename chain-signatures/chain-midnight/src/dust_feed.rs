@@ -18,8 +18,12 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 /// A connection that answers no keepalive within this long is dead.
 const KEEPALIVE: Duration = Duration::from_secs(30);
-/// Events buffered between the socket and the replay.
-const BUFFER: usize = 4096;
+/// Events buffered between the socket and the replay; with `MAX_MESSAGE`, it bounds
+/// what an indexer can make the node hold.
+const BUFFER: usize = 512;
+/// The largest message or frame accepted from the indexer. One message carries one
+/// hex-encoded DUST event; the largest in the captured fixture is about 2.7 KB.
+const MAX_MESSAGE: usize = 1 << 20;
 
 const SUBSCRIPTION: &str =
     "subscription DustLedgerEvents($id: Int) { dustLedgerEvents(id: $id) { id maxId raw } }";
@@ -154,9 +158,12 @@ async fn open(url: &str) -> anyhow::Result<Socket> {
         "Sec-WebSocket-Protocol",
         HeaderValue::from_static("graphql-transport-ws"),
     );
+    let limits = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE))
+        .max_frame_size(Some(MAX_MESSAGE));
     let connect = tokio_tungstenite::connect_async_tls_with_config(
         request,
-        None,
+        Some(limits),
         false,
         Some(tokio_tungstenite::Connector::Rustls(tls()?)),
     );
@@ -281,6 +288,9 @@ mod tests {
 
     type ServerSocket = WebSocketStream<tokio::net::TcpStream>;
 
+    /// Bounds the tests that talk over a real socket, so a hang fails by name.
+    const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
     /// The events as the indexer serves them, `dustLedgerEvents` payloads verbatim.
     fn fixture_events() -> Vec<serde_json::Value> {
         serde_json::from_str(include_str!("../fixtures/dust-events-undeployed.json")).unwrap()
@@ -365,12 +375,16 @@ mod tests {
         })
         .await;
 
-        let updates: Vec<_> = IndexerDustEvents::new(url)
-            .subscribe(Some(1))
-            .await
-            .unwrap()
-            .collect()
-            .await;
+        let updates: Vec<_> = tokio::time::timeout(TEST_TIMEOUT, async {
+            IndexerDustEvents::new(url)
+                .subscribe(Some(1))
+                .await
+                .unwrap()
+                .collect()
+                .await
+        })
+        .await
+        .expect("the subscription ends when the indexer completes it");
         server.await.unwrap();
 
         assert_eq!(updates.len(), 4, "three events, then the end");
@@ -445,6 +459,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_oversized_message_ends_the_subscription_with_an_error() {
+        let (url, server) = indexer(|mut socket| async move {
+            accept(&mut socket).await;
+            receive(&mut socket).await;
+            // Twice the 1 MiB limit, fixed rather than derived from the constant.
+            let raw = "00".repeat(1 << 20);
+            let event = json!({ "id": 1, "maxId": 1, "raw": raw });
+            // The client drops the connection mid-message, so the send may fail.
+            let _ = socket
+                .send(Message::text(
+                    json!({ "id": "1", "type": "next", "payload": { "data": { "dustLedgerEvents": event } } })
+                        .to_string(),
+                ))
+                .await;
+            let _ = socket.next().await;
+        })
+        .await;
+
+        let mut stream = IndexerDustEvents::new(url).subscribe(None).await.unwrap();
+        let error = tokio::time::timeout(TEST_TIMEOUT, stream.next())
+            .await
+            .expect("an oversized message ends the subscription")
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("too long"), "{error:#}");
+        drop(stream);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn an_errors_payload_ends_the_subscription_with_an_error() {
         let (url, server) = indexer(|mut socket| async move {
             accept(&mut socket).await;
@@ -460,9 +504,16 @@ mod tests {
         .await;
 
         let mut stream = IndexerDustEvents::new(url).subscribe(None).await.unwrap();
-        let error = stream.next().await.unwrap().unwrap_err();
+        let error = tokio::time::timeout(TEST_TIMEOUT, stream.next())
+            .await
+            .expect("the errors payload ends the subscription")
+            .unwrap()
+            .unwrap_err();
         assert!(format!("{error:#}").contains("boom"), "{error:#}");
-        assert!(stream.next().await.is_none());
+        assert!(tokio::time::timeout(TEST_TIMEOUT, stream.next())
+            .await
+            .expect("the stream ends after the error")
+            .is_none());
         drop(stream);
         server.await.unwrap();
     }

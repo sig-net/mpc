@@ -327,6 +327,23 @@ mod tests {
     }
 
     #[test]
+    fn the_node_image_installs_the_artifacts_where_the_defaults_read_them() {
+        // No pull-request job builds the runtime image, so this ties the two together.
+        let dockerfile = include_str!("../../../Dockerfile");
+        let publisher = PublisherConfig::default();
+        for dir in [&publisher.contract_artifacts_dir, &publisher.zk_params_dir] {
+            let dir = dir.to_str().unwrap();
+            assert!(
+                dockerfile
+                    .lines()
+                    .any(|line| line.starts_with("COPY --from=midnight-artifacts ")
+                        && line.ends_with(&format!(" {dir}"))),
+                "the runtime image installs nothing at {dir}"
+            );
+        }
+    }
+
+    #[test]
     fn debug_redacts_the_funding_seed() {
         let seed = "0123456789abcdef0123456789abcdef";
         let mut config = valid_config();

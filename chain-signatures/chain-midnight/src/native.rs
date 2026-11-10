@@ -189,7 +189,13 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         Ok(bytes)
     }
 
-    async fn submit_intent(&self, intent: &[u8]) -> Result<Submitted, SubmitError> {
+    /// `wallet_used` is set once the wallet is asked to pay, as the intent builder's
+    /// `walletUsed` was: from there on, a failure can implicate the wallet's state.
+    async fn submit_intent(
+        &self,
+        intent: &[u8],
+        wallet_used: &mut bool,
+    ) -> Result<Submitted, SubmitError> {
         let deadline = Instant::now() + self.submit_timeout;
         let intent: PreimageIntent<DefaultDB> =
             midnight_serialize::tagged_deserialize(&mut &intent[..]).map_err(|error| {
@@ -234,7 +240,9 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
             ttl,
             &self.network_id,
             &mut StdRng::from_entropy(),
-        )?;
+        );
+        *wallet_used = plan_used_wallet(&plan);
+        let plan = plan?;
         let price_fee = stage.elapsed();
         let fee_tx = plan.tx;
         let stage = Instant::now();
@@ -313,10 +321,10 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
     }
 
     /// Posts a paid transaction and waits for it: the UTXOs it spends stay reserved
-    /// until it lands, the node refuses or never receives it, or a minute past its
-    /// TTL. An ambiguous outcome comes no earlier than that minute, so the retry may
-    /// plan the same UTXOs; if this transaction landed after all, the node refuses
-    /// that spend.
+    /// until it lands, the node refuses or never receives it, a finalized block past
+    /// its TTL does not hold it, or a minute past its TTL. An ambiguous outcome comes
+    /// no earlier than that minute, so the retry may plan the same UTXOs; if this
+    /// transaction landed after all, the node refuses that spend.
     async fn post(
         &self,
         bytes: &[u8],
@@ -446,10 +454,36 @@ where
             .map_err(SubmitError::into_publish_error)
     }
 
+    /// Tells the wallet how the submit ended, as the intent builder's parent did: a
+    /// landing clears the strikes, and any failure but an unsynced wallet starts the
+    /// replay over from the latest checkpoint.
     async fn submit(&self, intent: &[u8]) -> anyhow::Result<Submitted> {
-        self.submit_intent(intent)
-            .await
-            .map_err(SubmitError::into_publish_error)
+        let mut wallet_used = false;
+        let submitted = self.submit_intent(intent, &mut wallet_used).await;
+        report_submit(&self.wallet, &submitted, wallet_used);
+        submitted.map_err(SubmitError::into_publish_error)
+    }
+}
+
+/// Whether planning the fee used the wallet. A fee it could not plan for its held
+/// UTXOs, or before it caught up, used nothing, as the intent builder's busy gate and
+/// readiness wait did not.
+fn plan_used_wallet(plan: &Result<crate::funding::FeePlan, SubmitError>) -> bool {
+    !matches!(
+        plan,
+        Err(SubmitError::WalletBusy(_) | SubmitError::WalletUnsynced(_))
+    )
+}
+
+fn report_submit<W: FeePayer>(
+    wallet: &W,
+    submitted: &Result<Submitted, SubmitError>,
+    wallet_used: bool,
+) {
+    match submitted {
+        Ok(_) => wallet.landed(),
+        Err(SubmitError::WalletUnsynced(_)) => {}
+        Err(_) => wallet.failed(wallet_used),
     }
 }
 
@@ -559,6 +593,8 @@ mod tests {
         indexed_secs: u64,
         /// Where the replay stands once `ready_by` has waited for it, if it moves.
         caught_up_secs: Option<u64>,
+        failures: Mutex<Vec<bool>>,
+        landings: AtomicU64,
     }
 
     impl FeePayer for RecordingWallet {
@@ -597,6 +633,14 @@ mod tests {
 
         fn release(&self, spent: &[DustNullifier]) {
             self.released.lock().unwrap().push(spent.to_vec());
+        }
+
+        fn failed(&self, wallet_used: bool) {
+            self.failures.lock().unwrap().push(wallet_used);
+        }
+
+        fn landed(&self) {
+            self.landings.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -949,6 +993,68 @@ mod tests {
                 "a classified failure carries its verdict: {error:#}"
             );
         }
+        assert_eq!(
+            *client.wallet.failures.lock().unwrap(),
+            vec![false],
+            "the wallet hears of the failed submit, from before it paid anything"
+        );
+    }
+
+    #[test]
+    fn the_wallet_hears_how_each_submit_ended() {
+        let wallet = RecordingWallet::default();
+        let landed = Ok(Submitted {
+            tx_id: "00".into(),
+            dust_balance: 1,
+        });
+        report_submit(&wallet, &landed, true);
+        report_submit(
+            &wallet,
+            &Err(SubmitError::WalletUnsynced("syncing".into())),
+            false,
+        );
+        report_submit(
+            &wallet,
+            &Err(SubmitError::StateConflict("refused".into())),
+            true,
+        );
+        report_submit(&wallet, &Err(SubmitError::WalletBusy("held".into())), false);
+        assert_eq!(wallet.landings.load(Ordering::SeqCst), 1, "one landing");
+        assert_eq!(
+            *wallet.failures.lock().unwrap(),
+            vec![true, false],
+            "every failure but an unsynced wallet, with whether it used the wallet"
+        );
+    }
+
+    #[test]
+    fn only_a_fee_planned_or_refused_for_its_funds_used_the_wallet() {
+        let local = replayed();
+        let ctime = local.sync_time;
+        let ttl = Timestamp::from_secs(ctime.to_secs() + 180);
+        let mut rng = StdRng::seed_from_u64(7);
+        let planned = plan_fee(
+            &funded_key(),
+            &local,
+            &[],
+            &base(&mut rng, ttl),
+            &INITIAL_PARAMETERS,
+            ctime,
+            ttl,
+            "undeployed",
+            &mut rng,
+        );
+        assert!(planned.is_ok());
+        assert!(plan_used_wallet(&planned));
+        assert!(plan_used_wallet(&Err(SubmitError::WalletUnfunded(
+            "short".into()
+        ))));
+        assert!(!plan_used_wallet(&Err(SubmitError::WalletBusy(
+            "held".into()
+        ))));
+        assert!(!plan_used_wallet(&Err(SubmitError::WalletUnsynced(
+            "behind".into()
+        ))));
     }
 
     #[test]

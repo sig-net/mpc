@@ -575,10 +575,14 @@ fn responder_config(
     })
 }
 
-/// The ledger's own parameter cache, so runs share what earlier ones fetched.
+/// The ledger's own parameter cache, so runs share what earlier ones fetched; looked
+/// up as `MidnightDataProvider::new` does.
 fn zk_params_dir() -> anyhow::Result<PathBuf> {
     if let Some(dir) = std::env::var_os("MIDNIGHT_PP") {
         return Ok(PathBuf::from(dir));
+    }
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
+        return Ok(PathBuf::from(cache).join("midnight/zk-params"));
     }
     let home = std::env::var_os("HOME").context("HOME is unset, so there is no zk-params cache")?;
     Ok(PathBuf::from(home).join(".cache/midnight/zk-params"))

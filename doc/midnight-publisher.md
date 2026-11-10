@@ -20,17 +20,17 @@ The node posts every finished Midnight response itself: one transaction per sign
 
 ## The funding wallet
 
-The wallet's DUST key is account 0, index 0 of the funding seed, derived the way the Midnight wallet SDK derives it: BIP-32 `m/44'/2400'/0'/2/0`, then the ledger's `DustSecretKey::derive_secret_key`. Spendable DUST is derived by replaying every DUST ledger event into a `DustLocalState`, and only the indexer serves those events (`dustLedgerEvents` over `graphql-transport-ws`). The state is in memory, and the node keeps a checkpoint of it in Redis at most every five minutes once the replay has caught up. A starting publisher resumes from that checkpoint when it belongs to the same funding key and the indexer still serves the checkpoint's last event unchanged, and replays from the first event otherwise. The replay resubscribes from the newest applied event after a dropped connection, and starts over from the first event if an event does not apply, backing off up to ten minutes while that keeps happening. The wallet is ready once it has applied the newest event the indexer reports.
+The wallet's DUST key is account 0, index 0 of the funding seed, derived the way the Midnight wallet SDK derives it: BIP-32 `m/44'/2400'/0'/2/0`, then the ledger's `DustSecretKey::derive_secret_key`. Spendable DUST is derived by replaying every DUST ledger event into a `DustLocalState`, and only the indexer serves those events (`dustLedgerEvents` over `graphql-transport-ws`). The state is in memory, and the node keeps a checkpoint of it at most every five minutes once the replay has caught up, in memory and in Redis, as the TypeScript intent builder kept its wallet snapshots. A starting publisher resumes from the stored checkpoint when it belongs to the same funding key and the indexer serves the checkpoint's last event unchanged within a minute, and replays from the first event otherwise. The replay resubscribes from the newest applied event after a dropped connection, and starts over from the first event if an event does not apply, backing off up to ten minutes while that keeps happening before it catches up. The wallet is ready once it has applied the newest event the indexer reports.
 
 A DUST spend proves against the DUST commitment and generation roots, which the chain looks up by the spend's `ctime`, so the fee names a time the replay has fully seen: the earlier of the finalized head's and the indexer's newest block's time, or the newest replayed event's time when that is later.
 
-A submitted transaction reserves the UTXOs it spends. The reservation ends when the chain spends them, when the node refuses or never receives the transaction, or one minute after the fee intent's TTL (three minutes, less when the budget is short), when the transaction can no longer land. A publish whose fee needs reserved UTXOs fails as `wallet_busy` and the publish loop retries it.
+A submitted transaction reserves the UTXOs it spends. The reservation ends when the chain spends them, when the node refuses or never receives the transaction, when a finalized block past the fee intent's TTL does not hold it, or one minute after that TTL (three minutes, less when the budget is short), when the transaction can no longer land. A publish whose fee needs reserved UTXOs fails as `wallet_busy` and the publish loop retries it. A submit that fails for any reason but an unsynced wallet starts the replay over from the latest checkpoint, as the intent builder replaced its child with one restored from the latest snapshot. When a restored wallet fails three submits in a row once it was paying, with none landing in between, the checkpoint is dropped from memory and Redis and the replay starts from the first event.
 
 The indexer is trusted for liveness only. A replay that disagrees with the chain produces spends whose proofs or nullifiers the node rejects, so a lying indexer can stop the node from paying, not make it post something else.
 
 ## Budget and failures
 
-A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for the wallet may use all but the last 120 s, and everything after that, proving, pricing and the landing, shares what is left. The publish loop retries every failure. The class in the error message says what the retry may assume:
+A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for the wallet may use all but the last 120 s, and everything after that, proving, pricing and the landing, shares what is left. The publish loop retries every failure. A failed build or submit carries a class in its error message, which says what the retry may assume:
 
 | Class | Meaning |
 |---|---|
@@ -44,7 +44,7 @@ A submit has one budget, `PublisherConfig::submit_timeout` (420 s): waiting for 
 | `ambiguous_submit` | The transaction was not seen finalized within the budget and may still land. A retry may post the response again; duplicate responses are harmless. |
 | `internal` | Anything else. |
 
-The node counts each failure by its class in `multichain_publish_refusals`. A landed publish sets `multichain_funding_wallet_balance` to the spendable DUST its fee was planned from.
+The node counts each failed build or submit by its class in `multichain_publish_refusals`. A landed publish sets `multichain_funding_wallet_balance` to the spendable DUST its fee was planned from.
 
 ## Configuration and artifacts
 
@@ -53,7 +53,7 @@ The operator configures the node URL, the singleton address (`--midnight-central
 - `/usr/local/share/midnight/signet-responder`: the `respond` and `respondBidirectional` keys and IR from `@sig-net/midnight-responder`'s `dist/managed`, compiled with MinoCrab.
 - `/usr/local/share/midnight/zk-params`: the KZG parameters for k = 10 and k = 11 (the responder's circuits) and k = 13 (the DUST spend), and the DUST spend keys, laid out as the ledger's parameter cache. A missing file is fetched from `srs.midnight.network` and checked against the hash the ledger pins.
 
-Every download in the image is pinned by its SHA-256. Test builds take `--midnight-contract-artifacts-dir` and `--midnight-zk-params-dir` instead.
+Every Midnight artifact the image downloads is pinned by its SHA-256. Test builds take `--midnight-contract-artifacts-dir` and `--midnight-zk-params-dir` instead.
 
 ## Events the reader supports
 

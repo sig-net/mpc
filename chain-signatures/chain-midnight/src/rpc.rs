@@ -3388,5 +3388,10 @@ mod tests {
             rpc.landing(&block, applied).await.unwrap(),
             Some(Landing::PartialSuccess)
         );
+        assert_eq!(
+            rpc.landing(&block, other).await.unwrap(),
+            None,
+            "another transaction's partial success is not this one landing"
+        );
     }
 }

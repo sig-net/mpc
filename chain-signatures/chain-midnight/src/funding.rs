@@ -7,8 +7,9 @@
 //!
 //! The wallet never adopts the pending marks `DustLocalState::spend` sets on its
 //! scratch copy. It reserves the UTXOs a submitted transaction spends instead, and a
-//! reservation ends when the chain spends them, when the submit is refused, or a
-//! minute after the transaction's TTL, by when it has landed or never will.
+//! reservation ends when the chain spends them, when the transaction is refused, never
+//! sent, or seen expired, or a minute after the transaction's TTL, by when it has
+//! landed or never will.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -58,6 +59,13 @@ const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 /// How long loading or keeping a checkpoint may take.
 const CHECKPOINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const CHECKPOINT_MAGIC: &[u8; 16] = b"mpc-dust-ckpt-v1";
+/// How long a resumed subscription may stay silent before the checkpoint is dropped:
+/// the indexer serves the checkpoint's own event first, from what it has stored.
+const RESUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Failed submits of a restored wallet, after it was used and with none landing in
+/// between, before its checkpoint is dropped: the intent builder's snapshot strikes.
+/// Above one, because a healthy wallet is also refused at times.
+const RESTORE_STRIKES: u32 = 3;
 
 /// The DUST key of account 0 at index 0, derived the way the Midnight wallet SDK
 /// derives it from the same seed: BIP-32 `m/44'/2400'/0'/2/0`, then the ledger's
@@ -139,6 +147,12 @@ pub(crate) trait FeePayer: Send + Sync {
     fn reserve(&self, spent: &[DustNullifier], until: Timestamp);
     /// Ends the reservation of `spent`: the transaction spending them cannot land.
     fn release(&self, spent: &[DustNullifier]);
+    /// A submit failed for any reason but an unsynced wallet. The replay starts over
+    /// from the latest checkpoint, and `wallet_used` says whether the failure came
+    /// once the wallet was paying, so it can implicate the restored state.
+    fn failed(&self, wallet_used: bool);
+    /// A submit landed: the wallet in use can pay whatever it was restored from.
+    fn landed(&self);
 }
 
 /// One fee payment, not yet proven.
@@ -161,11 +175,13 @@ struct Reservation {
 pub trait DustCheckpointStore: Send + Sync {
     async fn load(&self) -> anyhow::Result<Option<Vec<u8>>>;
     async fn save(&self, checkpoint: &[u8]) -> anyhow::Result<()>;
+    async fn clear(&self) -> anyhow::Result<()>;
 }
 
 /// The replayed state after event `applied`, for the key whose public key hashes to
 /// `owner`. A restart resumes from it only when the indexer still serves the same
 /// event at `applied`, which `event_hash` checks.
+#[derive(Clone)]
 pub(crate) struct Checkpoint {
     pub(crate) owner: [u8; 32],
     pub(crate) applied: u64,
@@ -233,8 +249,10 @@ struct Synced {
     connected: bool,
     /// The event a restored checkpoint expects the next subscription to start with.
     resume: Option<(u64, [u8; 32])>,
-    /// When a checkpoint was last kept, and of which event.
-    checkpointed: Option<(Instant, u64)>,
+    /// Whether this state descends from a checkpoint rather than the first event.
+    restored: bool,
+    /// A failed submit asked for the replay to start over from the latest checkpoint.
+    reload: bool,
     reservations: Vec<Reservation>,
 }
 
@@ -247,7 +265,8 @@ impl Synced {
             max_id: 0,
             connected: false,
             resume: None,
-            checkpointed: None,
+            restored: false,
+            reload: false,
             reservations: Vec::new(),
         }
     }
@@ -259,8 +278,9 @@ impl Synced {
         self.reservations = reservations;
     }
 
+    /// Live, caught up, and not about to start over after a failed submit.
     fn is_ready(&self) -> bool {
-        self.connected && self.is_caught_up()
+        self.connected && self.is_caught_up() && !self.reload
     }
 
     /// Replayed up to the newest event the indexer reported, live or not.
@@ -274,9 +294,33 @@ struct Shared {
     owner: [u8; 32],
     state: Mutex<Synced>,
     progress: watch::Sender<()>,
+    snapshots: Mutex<Snapshots>,
+    /// Wakes the subscription to act on `Synced::reload`.
+    wake: tokio::sync::Notify,
+}
+
+/// The latest checkpoint and the strikes against it, which outlive any one replay, as
+/// the intent builder's wallet snapshots did.
+#[derive(Default)]
+struct Snapshots {
+    /// The newest checkpoint kept or restored, in memory even when the store refused it.
+    latest: Option<Checkpoint>,
+    /// When a checkpoint was last kept, and of which event: the intent builder's
+    /// `kept_at`, which no restart or reload moves.
+    kept: Option<(Instant, u64)>,
+    /// Failed submits of a restored wallet, once used, since one landed.
+    strikes: u32,
+    /// The stored checkpoint is to be cleared before the next replay.
+    forget: bool,
 }
 
 impl Shared {
+    fn snapshots(&self) -> std::sync::MutexGuard<'_, Snapshots> {
+        self.snapshots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Never panics on a poisoned lock: nothing inside it is left half-written.
     fn state(&self) -> std::sync::MutexGuard<'_, Synced> {
         self.state
@@ -306,6 +350,8 @@ impl FundingWallet {
             key,
             state: Mutex::new(Synced::fresh()),
             progress,
+            snapshots: Mutex::default(),
+            wake: tokio::sync::Notify::new(),
         });
         let sync = AbortOnDrop(tokio::spawn(follow(
             shared.clone(),
@@ -320,10 +366,21 @@ impl FundingWallet {
     }
 }
 
+/// How one subscription ended.
+#[derive(Clone, Copy)]
+enum Ended {
+    /// The connection or the stream ended; the replay goes on from where it is.
+    Dropped,
+    /// The replay restarted from the first event, after catching up or not.
+    Restarted { caught_up: bool },
+    /// A failed submit started the replay over from the latest checkpoint.
+    Reloaded,
+}
+
 /// Follows the event stream for the wallet's lifetime: resubscribes after any
 /// failure from the newest applied event, and starts over from the first event when
 /// the replayed state can no longer absorb what the indexer sends, backing off while
-/// that keeps happening.
+/// that keeps happening before the replay catches up.
 async fn follow(
     shared: Arc<Shared>,
     source: Arc<dyn DustEventSource>,
@@ -336,14 +393,16 @@ async fn follow(
     loop {
         // Its own task, so a panic below ends one subscription rather than the
         // wallet; held so that dropping the wallet aborts it too.
-        let restarted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ended = Arc::new(Mutex::new(Ended::Dropped));
         let mut attempt = AbortOnDrop(tokio::spawn({
             let (shared, source, checkpoints) =
                 (shared.clone(), source.clone(), checkpoints.clone());
-            let restarted = restarted.clone();
+            let ended = ended.clone();
             async move {
-                let ended = subscribe_once(shared, source, checkpoints).await;
-                restarted.store(ended, std::sync::atomic::Ordering::Relaxed);
+                let outcome = subscribe_once(shared, source, checkpoints).await;
+                *ended
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = outcome;
             }
         }));
         if let Err(error) = (&mut attempt.0).await {
@@ -352,13 +411,15 @@ async fn follow(
                 "midnight funding wallet: DUST event subscription panicked"
             );
         }
-        let restarted = restarted.load(std::sync::atomic::Ordering::Relaxed);
+        let ended = *ended
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         shared.state().connected = false;
         shared.progress.send_replace(());
-        delay = if restarted {
-            (delay * 2).min(MAX_RESTART_DELAY)
-        } else {
-            RESUBSCRIBE_DELAY
+        delay = match ended {
+            Ended::Restarted { caught_up: false } => (delay * 2).min(MAX_RESTART_DELAY),
+            Ended::Restarted { caught_up: true } => RESUBSCRIBE_DELAY * 2,
+            Ended::Dropped | Ended::Reloaded => RESUBSCRIBE_DELAY,
         };
         tokio::time::sleep(delay).await;
     }
@@ -408,42 +469,82 @@ async fn restore(shared: &Shared, store: &dyn DustCheckpointStore) {
         event = checkpoint.applied,
         "midnight funding wallet: resuming the DUST replay from its checkpoint"
     );
+    shared.snapshots().latest = Some(checkpoint.clone());
+    resume_from(shared, checkpoint);
+}
+
+/// Replaces the replayed state with `checkpoint`'s, keeping the reservations of
+/// submits in flight; the next subscription starts at its event and checks it.
+fn resume_from(shared: &Shared, checkpoint: Checkpoint) {
     let mut state = shared.state();
+    state.restart();
     state.local = checkpoint.local;
     state.applied = Some(checkpoint.applied);
     state.applied_hash = Some(checkpoint.event_hash);
     state.max_id = checkpoint.applied;
     state.resume = Some((checkpoint.applied, checkpoint.event_hash));
-    state.checkpointed = Some((Instant::now(), checkpoint.applied));
+    state.restored = true;
 }
 
-/// Applies one subscription until it ends; whether it ended by restarting the replay.
+/// Applies one subscription until it ends.
 async fn subscribe_once(
     shared: Arc<Shared>,
     source: Arc<dyn DustEventSource>,
     checkpoints: Option<Arc<dyn DustCheckpointStore>>,
-) -> bool {
+) -> Ended {
     let from = shared.state().applied;
+    let mut caught_up = false;
     match source.subscribe(from).await {
         Ok(stream) => {
             let mut batches = stream.ready_chunks(REPLAY_BATCH);
-            while let Some(batch) = batches.next().await {
+            let resume_deadline = Instant::now() + RESUME_TIMEOUT;
+            loop {
+                let resuming = shared.state().resume.is_some();
+                let batch = tokio::select! {
+                    batch = batches.next() => match batch {
+                        Some(batch) => batch,
+                        None => break,
+                    },
+                    () = shared.wake.notified() => {
+                        // A forget is acted on even when a restart since took the reload.
+                        let forget = std::mem::take(&mut shared.snapshots().forget);
+                        if let (true, Some(store)) = (forget, checkpoints.as_deref()) {
+                            clear(store).await;
+                        }
+                        if !std::mem::take(&mut shared.state().reload) {
+                            continue;
+                        }
+                        reload(&shared);
+                        return Ended::Reloaded;
+                    }
+                    () = tokio::time::sleep_until(resume_deadline), if resuming => {
+                        tracing::warn!(
+                            "midnight funding wallet: the indexer does not serve the DUST \
+                             checkpoint's event; replaying from the first event"
+                        );
+                        start_over(&shared);
+                        return Ended::Restarted { caught_up };
+                    }
+                };
                 // Replaying is CPU work; it stays off the async workers.
                 let applying = shared.clone();
                 match tokio::task::spawn_blocking(move || apply(&applying, batch)).await {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
                         tracing::warn!(?error, "midnight funding wallet: DUST replay failed");
-                        return error.is::<Restarted>();
+                        return if error.is::<Restarted>() {
+                            Ended::Restarted { caught_up }
+                        } else {
+                            Ended::Dropped
+                        };
                     }
                     Err(error) => {
                         tracing::error!(?error, "midnight funding wallet: DUST replay panicked");
-                        return false;
+                        return Ended::Dropped;
                     }
                 }
-                if let Some(store) = &checkpoints {
-                    keep_checkpoint(&shared, store.as_ref()).await;
-                }
+                caught_up |= shared.state().is_caught_up();
+                keep_checkpoint(&shared, checkpoints.as_deref()).await;
             }
         }
         Err(error) => {
@@ -453,32 +554,95 @@ async fn subscribe_once(
             );
         }
     }
-    false
+    Ended::Dropped
+}
+
+/// Drops the replayed state and the latest checkpoint it may have come from, so the
+/// next subscription replays from the first event.
+fn start_over(shared: &Shared) {
+    shared.state().restart();
+    let mut snapshots = shared.snapshots();
+    snapshots.latest = None;
+    snapshots.kept = None;
+    drop(snapshots);
+    shared.progress.send_replace(());
+}
+
+/// Clears the stored checkpoint a forget dropped from memory.
+async fn clear(store: &dyn DustCheckpointStore) {
+    match tokio::time::timeout(CHECKPOINT_TIMEOUT, store.clear()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(
+            ?error,
+            "midnight funding wallet: clearing the stored DUST checkpoint failed"
+        ),
+        Err(_) => {
+            tracing::warn!("midnight funding wallet: clearing the stored DUST checkpoint timed out")
+        }
+    }
+}
+
+/// Starts the replay over from the latest checkpoint, or from the first event once
+/// none is left, the way the intent builder retired its child after a failed submit
+/// and started the next from the latest wallet snapshot.
+fn reload(shared: &Shared) {
+    let latest = shared.snapshots().latest.clone();
+    match latest {
+        Some(checkpoint) => {
+            tracing::info!(
+                event = checkpoint.applied,
+                "midnight funding wallet: a submit failed; resuming the DUST replay from the \
+                 latest checkpoint"
+            );
+            resume_from(shared, checkpoint);
+        }
+        None => {
+            tracing::info!(
+                "midnight funding wallet: a submit failed; replaying DUST from the first event"
+            );
+            shared.state().restart();
+        }
+    }
+    shared.progress.send_replace(());
 }
 
 /// Keeps a checkpoint of a caught-up replay that moved since the last one, at most
-/// once per `CHECKPOINT_INTERVAL`. A failure only costs the next restart its resume.
-async fn keep_checkpoint(shared: &Shared, store: &dyn DustCheckpointStore) {
+/// once per `CHECKPOINT_INTERVAL`, in memory and in `store`. A store failure only
+/// costs the next node start its resume. As the intent builder kept no snapshot of a
+/// child it was retiring, nothing is kept while a failed submit's reload or forget is
+/// pending.
+async fn keep_checkpoint(shared: &Shared, store: Option<&dyn DustCheckpointStore>) {
     let checkpoint = {
+        // Held across the snapshots update, so a failure lands either before this
+        // check or after the checkpoint is in place for its forget to drop.
         let state = shared.state();
         let (Some(applied), Some(event_hash)) = (state.applied, state.applied_hash) else {
             return;
         };
-        let due = state
-            .checkpointed
-            .is_none_or(|(at, kept)| kept != applied && at.elapsed() >= CHECKPOINT_INTERVAL);
-        if !state.is_caught_up() || !due {
+        if !state.is_caught_up() || state.reload {
             return;
         }
-        Checkpoint {
+        let mut snapshots = shared.snapshots();
+        let due = snapshots
+            .kept
+            .is_none_or(|(at, kept)| kept != applied && at.elapsed() >= CHECKPOINT_INTERVAL);
+        if !due || snapshots.forget {
+            return;
+        }
+        let checkpoint = Checkpoint {
             owner: shared.owner,
             applied,
             event_hash,
             local: state.local.clone(),
-        }
+        };
+        snapshots.kept = Some((Instant::now(), applied));
+        snapshots.latest = Some(checkpoint.clone());
+        checkpoint
     };
     let applied = checkpoint.applied;
-    shared.state().checkpointed = Some((Instant::now(), applied));
+    let Some(store) = store else {
+        return;
+    };
     let encoded = match tokio::task::spawn_blocking(move || checkpoint.encode()).await {
         Ok(encoded) => encoded,
         Err(error) => {
@@ -523,9 +687,8 @@ fn apply(shared: &Shared, batch: Vec<anyhow::Result<DustEventUpdate>>) -> anyhow
     let mut state = shared.state();
     if let (Some((id, hash)), Some(first)) = (state.resume, updates.first()) {
         if first.id != id || event_hash(&first.raw) != hash {
-            state.restart();
             drop(state);
-            shared.progress.send_replace(());
+            start_over(shared);
             return Err(anyhow::Error::new(Restarted).context(format!(
                 "the DUST checkpoint at event {id} does not match the indexer, which served \
                  event {} first",
@@ -563,9 +726,8 @@ fn apply(shared: &Shared, batch: Vec<anyhow::Result<DustEventUpdate>>) -> anyhow
                 state.applied_hash = Some(event_hash(&newest.raw));
             }
             Err(error) => {
-                state.restart();
                 drop(state);
-                shared.progress.send_replace(());
+                start_over(shared);
                 return Err(anyhow::Error::new(Restarted).context(format!("{error:#}")));
             }
         }
@@ -627,9 +789,10 @@ impl FeePayer for FundingWallet {
     ) -> Result<FeePlan, SubmitError> {
         let (local, reserved) = {
             let mut state = self.shared.state();
-            // A replay restarted since `ready_by` holds a partial state, and the
-            // reservations' UTXOs are not in it yet, so the retain below would end them.
-            if !state.is_caught_up() {
+            // A replay restarted or reloaded since `ready_by` holds a partial or older
+            // state, and the reservations' UTXOs may not be in it, so the retain below
+            // would end them.
+            if !state.is_caught_up() || state.reload || state.resume.is_some() {
                 return Err(SubmitError::WalletUnsynced(format!(
                     "the DUST replay restarted and is at event {:?} of {}; nothing was posted",
                     state.applied, state.max_id
@@ -678,6 +841,33 @@ impl FeePayer for FundingWallet {
             .retain(|reservation| !reservation.spent.iter().any(|n| spent.contains(n)));
         drop(state);
         self.shared.progress.send_replace(());
+    }
+
+    fn failed(&self, wallet_used: bool) {
+        let restored = {
+            let mut state = self.shared.state();
+            state.reload = true;
+            state.restored
+        };
+        if restored && wallet_used {
+            let mut snapshots = self.shared.snapshots();
+            snapshots.strikes += 1;
+            if snapshots.strikes >= RESTORE_STRIKES {
+                tracing::warn!(
+                    "midnight funding wallet: discarding the DUST checkpoint after its \
+                     restored wallets failed to land a submit; replaying from the first event"
+                );
+                snapshots.latest = None;
+                snapshots.kept = None;
+                snapshots.strikes = 0;
+                snapshots.forget = true;
+            }
+        }
+        self.shared.wake.notify_one();
+    }
+
+    fn landed(&self) {
+        self.shared.snapshots().strikes = 0;
     }
 }
 
@@ -919,9 +1109,7 @@ pub(crate) mod tests {
             .sum();
         assert_eq!(plan.available, spendable, "nothing was reserved");
         let merged = base.merge(&plan.tx.mock_prove().unwrap()).unwrap();
-        let fee = merged
-            .fees_with_margin(&INITIAL_PARAMETERS, FEE_BLOCKS_MARGIN)
-            .unwrap();
+        let fee = merged.fees_with_margin(&INITIAL_PARAMETERS, 5).unwrap();
         assert_eq!(fee, plan.fee);
         assert_eq!(dust_deficit(&merged, fee).unwrap(), 0);
         let Transaction::Standard(stx) = &plan.tx else {
@@ -1027,6 +1215,8 @@ pub(crate) mod tests {
             owner: owner_of(&funded_key()),
             state: Mutex::new(Synced::fresh()),
             progress: watch::channel(()).0,
+            snapshots: Mutex::default(),
+            wake: tokio::sync::Notify::new(),
         }
     }
 
@@ -1411,6 +1601,11 @@ pub(crate) mod tests {
             *self.0.lock().unwrap() = Some(checkpoint.to_vec());
             Ok(())
         }
+
+        async fn clear(&self) -> anyhow::Result<()> {
+            *self.0.lock().unwrap() = None;
+            Ok(())
+        }
     }
 
     impl MemoryCheckpoints {
@@ -1588,16 +1783,946 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_replay_that_keeps_failing_backs_off() {
+    async fn a_checkpoint_past_the_indexers_newest_event_is_replayed_from_the_first_event() {
+        let key = funded_key();
+        let checkpoint = checkpoint_after(10, &key);
+        let resumed_at = checkpoint.applied;
+        // A reset chain that has not reached the checkpoint's event: the indexer
+        // serves what it has from the cursor, which is nothing, and then waits.
+        let mut shorter: Vec<_> = fixture_updates().into_iter().take(5).collect();
+        let newest = shorter.last().unwrap().id;
+        for update in &mut shorter {
+            update.max_id = newest;
+        }
+        let source = RecordingSource::new(shorter);
+        let wallet = FundingWallet::start(
+            key,
+            source.clone(),
+            Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+        );
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(600))
+            .await
+            .unwrap();
+        assert_eq!(source.froms(), vec![Some(resumed_at), None]);
+        assert_eq!(wallet.shared.state().applied, Some(newest));
+    }
+
+    /// A wallet resumed from a checkpoint after the fixture's tenth event, its store,
+    /// and the source recording where each subscription started.
+    async fn restored_wallet() -> (
+        FundingWallet,
+        Arc<MemoryCheckpoints>,
+        Arc<RecordingSource>,
+        u64,
+    ) {
+        let key = funded_key();
+        let checkpoint = checkpoint_after(10, &key);
+        let resumed_at = checkpoint.applied;
+        let store = Arc::new(MemoryCheckpoints::holding(checkpoint));
+        let source = RecordingSource::new(fixture_updates());
+        let wallet = FundingWallet::start(key, source.clone(), Some(store.clone()));
+        ready(&wallet).await;
+        (wallet, store, source, resumed_at)
+    }
+
+    /// Lets the subscription act on a failure, then waits for the wallet again.
+    async fn settle(wallet: &FundingWallet) {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        ready(wallet).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_submit_resumes_the_replay_from_the_latest_checkpoint() {
+        let (wallet, store, source, resumed_at) = restored_wallet().await;
+        wallet.failed(false);
+        settle(&wallet).await;
+        assert_eq!(source.froms(), vec![Some(resumed_at), Some(resumed_at)]);
+        assert_fully_replayed(&wallet);
+        assert!(
+            store.decoded().is_some(),
+            "a failure alone keeps the checkpoint"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restored_wallets_failing_three_times_once_used_forget_the_checkpoint() {
+        let (wallet, store, source, resumed_at) = restored_wallet().await;
+        // A landing between failures clears the strikes, and a failure before the
+        // wallet was used is no strike.
+        for (used, landed) in [(true, false), (true, true), (false, false), (true, false)] {
+            wallet.failed(used);
+            settle(&wallet).await;
+            if landed {
+                wallet.landed();
+            }
+        }
+        assert!(
+            store.decoded().is_some(),
+            "a landing and a failure before paying count no strike"
+        );
+        // The first reload resumes the restored checkpoint; its caught-up replay keeps
+        // the newest event's, which the later reloads resume.
+        let newest = Some(fixture_updates().last().unwrap().id);
+        assert_eq!(
+            source.froms(),
+            vec![Some(resumed_at), Some(resumed_at), newest, newest, newest]
+        );
+
+        // The last of those was the first strike since the landing; this is the second.
+        wallet.failed(true);
+        settle(&wallet).await;
+        assert!(
+            store.decoded().is_some(),
+            "two strikes in a row keep the checkpoint"
+        );
+
+        wallet.failed(true);
+        settle(&wallet).await;
+        assert_eq!(
+            source.froms().last(),
+            Some(&None),
+            "the third strike replays from the first event"
+        );
+        assert_fully_replayed(&wallet);
+        let kept = store
+            .decoded()
+            .expect("the fresh replay keeps a new checkpoint once caught up");
+        assert_eq!(kept.applied, fixture_updates().last().unwrap().id);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wallet_replayed_from_the_first_event_resumes_from_the_checkpoint_it_kept() {
+        let source = RecordingSource::new(fixture_updates());
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        // Lets the caught-up replay keep its checkpoint before the first failure.
+        settle(&wallet).await;
+        let newest = fixture_updates().last().unwrap().id;
+        for _ in 0..RESTORE_STRIKES {
+            wallet.failed(true);
+            settle(&wallet).await;
+        }
+        // Each failure resumes from the checkpoint the replay kept in memory.
+        let mut expected = vec![None];
+        expected.extend(vec![Some(newest); RESTORE_STRIKES as usize]);
+        assert_eq!(source.froms(), expected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wallet_whose_submit_just_failed_is_not_ready_until_it_reloads() {
+        let (wallet, _store, _source, _resumed_at) = restored_wallet().await;
+        wallet.failed(false);
+        // No await between the failure and the next publish's wait: the reload has not
+        // run yet, and the state it will replace is not ready.
+        let error = wallet
+            .ready_by(Instant::now() + std::time::Duration::from_millis(1))
+            .await
+            .expect_err("a wallet about to reload is not ready");
+        assert!(matches!(error, SubmitError::WalletUnsynced(_)), "{error}");
+        ready(&wallet).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replay_started_over_keeps_its_first_checkpoint_at_once() {
+        let store = Arc::new(CountingCheckpoints::default());
+        let _wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(CatchesUpThenBreaks(Default::default())),
+            Some(store.clone()),
+        );
+        // Kept once caught up; 60 s later the replay starts over and catches up again,
+        // well inside the interval, and keeps again since nothing it kept survives.
+        tokio::time::sleep(std::time::Duration::from_secs(70)).await;
+        let newest = fixture_updates().last().unwrap().id;
+        assert_eq!(*store.0.lock().unwrap(), vec![newest, newest]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wake_without_a_failure_changes_nothing() {
+        let (wallet, _store, source, resumed_at) = restored_wallet().await;
+        wallet.shared.wake.notify_one();
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        assert_eq!(source.froms(), vec![Some(resumed_at)]);
+    }
+
+    /// Delivers the fixture, then an event the replay cannot absorb; every
+    /// subscription, from wherever it starts.
+    struct CatchesUpThenBreaks(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl DustEventSource for CatchesUpThenBreaks {
+        async fn subscribe(
+            &self,
+            _from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let updates = fixture_updates();
+            let mut broken = updates.last().unwrap().clone();
+            broken.id += 1;
+            broken.max_id += 1;
+            broken.raw.truncate(10);
+            let caught_up: Vec<_> = updates.into_iter().map(Ok).collect();
+            let pause =
+                futures_util::stream::once(tokio::time::sleep(std::time::Duration::from_secs(60)))
+                    .filter_map(|()| async { None });
+            Ok(futures_util::stream::iter(caught_up)
+                .chain(pause)
+                .chain(futures_util::stream::iter([Ok(broken)]))
+                .chain(futures_util::stream::pending())
+                .boxed())
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_after_catching_up_does_not_inherit_the_backoff() {
+        let source = Arc::new(CatchesUpThenBreaks(Default::default()));
+        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        // Each round: 60 s caught up, a restart, then a short wait. A backoff kept
+        // across rounds would reach minutes and leave few subscriptions.
+        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+        let subscriptions = source.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            subscriptions >= 20,
+            "{subscriptions} subscriptions in 30 minutes"
+        );
+    }
+
+    /// Fails its first `failures` subscriptions with a stream error (a dropped
+    /// connection, not a replay the state could not absorb), then serves the fixture.
+    struct FailsFirst {
+        failures: usize,
+        subscriptions: std::sync::atomic::AtomicUsize,
+        updates: Vec<DustEventUpdate>,
+    }
+
+    #[async_trait]
+    impl DustEventSource for FailsFirst {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            let attempt = self
+                .subscriptions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if attempt < self.failures {
+                return Ok(futures_util::stream::iter([Err(anyhow::anyhow!(
+                    "the indexer dropped the connection"
+                ))])
+                .boxed());
+            }
+            OnceSource(self.updates.clone()).subscribe(from).await
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_subscription_is_resubscribed_without_backing_off() {
+        // Six dropped connections at the resubscribe delay take 12 s; backing off as
+        // for a failed replay would take 4 + 8 + ... + 128 = 252 s.
+        let source = Arc::new(FailsFirst {
+            failures: 6,
+            subscriptions: Default::default(),
+            updates: fixture_updates(),
+        });
+        let wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        wallet
+            .ready_by(Instant::now() + std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+    }
+
+    /// Serves `batches` in order as separate deliveries, each after `gap` of
+    /// silence, then stays open; records where each subscription started.
+    struct Batches {
+        batches: Vec<(std::time::Duration, Vec<DustEventUpdate>)>,
+        froms: Mutex<Vec<Option<u64>>>,
+    }
+
+    #[async_trait]
+    impl DustEventSource for Batches {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            self.froms.lock().unwrap().push(from);
+            let mut stream: BoxStream<'static, anyhow::Result<DustEventUpdate>> =
+                futures_util::stream::empty().boxed();
+            for (gap, batch) in self.batches.clone() {
+                let batch: Vec<_> = batch
+                    .into_iter()
+                    .filter(|update| from.is_none_or(|from| update.id >= from))
+                    .map(Ok)
+                    .collect();
+                // A pause, so the replay applies what came before as its own batch.
+                let pause = futures_util::stream::once(async move {
+                    tokio::time::sleep(gap).await;
+                    tokio::task::yield_now().await;
+                })
+                .filter_map(|()| async { None });
+                stream = stream
+                    .chain(pause)
+                    .chain(futures_util::stream::iter(batch))
+                    .boxed();
+            }
+            Ok(stream.chain(futures_util::stream::pending()).boxed())
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resumed_replay_checks_only_its_first_delivery_against_the_checkpoint() {
+        let key = funded_key();
+        let checkpoint = checkpoint_after(10, &key);
+        let resumed_at = checkpoint.applied;
+        let updates = fixture_updates();
+        let (first, rest) = updates.split_at(15);
+        let source = Arc::new(Batches {
+            batches: vec![
+                (std::time::Duration::ZERO, first.to_vec()),
+                (std::time::Duration::ZERO, rest.to_vec()),
+            ],
+            froms: Mutex::default(),
+        });
+        let wallet = FundingWallet::start(
+            key,
+            source.clone(),
+            Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+        );
+        ready(&wallet).await;
+        assert_eq!(
+            *source.froms.lock().unwrap(),
+            vec![Some(resumed_at)],
+            "a later delivery starting past the checkpoint is not a disagreement"
+        );
+        assert_fully_replayed(&wallet);
+    }
+
+    /// Records the event of every checkpoint kept.
+    #[derive(Default)]
+    struct CountingCheckpoints(Mutex<Vec<u64>>);
+
+    #[async_trait]
+    impl DustCheckpointStore for CountingCheckpoints {
+        async fn load(&self) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        async fn save(&self, checkpoint: &[u8]) -> anyhow::Result<()> {
+            let applied = Checkpoint::decode(checkpoint).unwrap().applied;
+            self.0.lock().unwrap().push(applied);
+            Ok(())
+        }
+
+        async fn clear(&self) -> anyhow::Result<()> {
+            unimplemented!("never cleared")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_checkpoint_is_kept_once_caught_up_then_at_most_once_per_interval_of_progress() {
+        let updates = fixture_updates();
+        // Report `newest` as the indexer's newest event, so the replay is caught up
+        // at the end of the slice.
+        let caught_up_at = |slice: &[DustEventUpdate]| -> Vec<DustEventUpdate> {
+            let newest = slice.last().unwrap().id;
+            slice
+                .iter()
+                .cloned()
+                .map(|update| DustEventUpdate {
+                    max_id: newest,
+                    ..update
+                })
+                .collect()
+        };
+        let past_interval = CHECKPOINT_INTERVAL + std::time::Duration::from_secs(1);
+        let source = Arc::new(Batches {
+            batches: vec![
+                // Behind the indexer: nothing is kept.
+                (std::time::Duration::ZERO, updates[..5].to_vec()),
+                // Caught up: the first checkpoint.
+                (std::time::Duration::ZERO, caught_up_at(&updates[5..10])),
+                // Progress inside the interval: not yet.
+                (std::time::Duration::ZERO, caught_up_at(&updates[10..15])),
+                // Progress past the interval: the second checkpoint.
+                (past_interval, updates[15..].to_vec()),
+                // No progress past another interval: nothing new to keep.
+                (past_interval, vec![updates.last().unwrap().clone()]),
+            ],
+            froms: Mutex::default(),
+        });
+        let store = Arc::new(CountingCheckpoints::default());
+        let _wallet = FundingWallet::start(funded_key(), source.clone(), Some(store.clone()));
+        tokio::time::sleep(past_interval * 4).await;
+        assert_eq!(
+            *store.0.lock().unwrap(),
+            vec![updates[9].id, updates.last().unwrap().id]
+        );
+        assert_eq!(*source.froms.lock().unwrap(), vec![None]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resumed_replay_that_matched_its_checkpoint_is_never_dropped_for_silence() {
+        let key = funded_key();
+        let checkpoint = checkpoint_after(10, &key);
+        let resumed_at = checkpoint.applied;
+        let source = RecordingSource::new(fixture_updates());
+        let wallet = FundingWallet::start(
+            key,
+            source.clone(),
+            Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+        );
+        ready(&wallet).await;
+        // A quiet chain long past the resume timeout, and past any backoff after it.
+        tokio::time::sleep(RESUME_TIMEOUT * 10).await;
+        assert_eq!(source.froms(), vec![Some(resumed_at)]);
+        assert_fully_replayed(&wallet);
+    }
+
+    /// The first `restarts` subscriptions serve the fixture with an event the replay
+    /// cannot absorb; the next serves it whole and drops the connection; later ones
+    /// serve it and stay open.
+    struct Scripted {
+        restarts: usize,
+        subscriptions: Mutex<Vec<tokio::time::Instant>>,
+    }
+
+    #[async_trait]
+    impl DustEventSource for Scripted {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            let attempt = {
+                let mut subscriptions = self.subscriptions.lock().unwrap();
+                subscriptions.push(tokio::time::Instant::now());
+                subscriptions.len() - 1
+            };
+            let mut updates = fixture_updates();
+            if attempt < self.restarts {
+                updates[5].raw.truncate(10);
+            }
+            let served: Vec<_> = updates
+                .into_iter()
+                .filter(|update| from.is_none_or(|from| update.id >= from))
+                .map(Ok)
+                .collect();
+            let stream = futures_util::stream::iter(served);
+            Ok(if attempt == self.restarts {
+                stream
+                    .chain(futures_util::stream::iter([Err(anyhow::anyhow!(
+                        "the indexer dropped the connection"
+                    ))]))
+                    .boxed()
+            } else {
+                stream.chain(futures_util::stream::pending()).boxed()
+            })
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_subscription_after_restarts_is_resubscribed_without_their_backoff() {
+        let source = Arc::new(Scripted {
+            restarts: 2,
+            subscriptions: Mutex::default(),
+        });
+        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        // Restarts at 0 s and 4 s grow the delay to 8 s; the third subscription, at 12 s,
+        // replays and drops; the fourth follows it by the 2 s resubscribe delay.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let at = source.subscriptions.lock().unwrap().clone();
+        assert!(at.len() >= 4, "{} subscriptions", at.len());
+        assert_eq!(at[3] - at[2], RESUBSCRIBE_DELAY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replay_that_keeps_failing_backs_off_to_at_most_ten_minutes() {
         let mut updates = fixture_updates();
         updates[5].raw.truncate(10);
         let source = RecordingSource::new(updates);
         let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
-        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
-        let subscriptions = source.froms().len();
+        // Delays 4, 8, ..., 512 s sum to 1020 s; then 600 s each when capped, 1024, 2048 s uncapped.
+        tokio::time::sleep(std::time::Duration::from_secs(1020 + 3 * 600 + 1)).await;
+        assert_eq!(source.froms().len(), 9 + 3, "{:?}", source.froms());
+    }
+
+    #[test]
+    fn a_checkpoint_keeps_its_stored_layout() {
+        let checkpoint = checkpoint_after(10, &funded_key());
+        let bytes = checkpoint.encode();
+        assert_eq!(&bytes[..16], b"mpc-dust-ckpt-v1");
+        assert_eq!(&bytes[16..48], &checkpoint.owner);
+        assert_eq!(&bytes[48..56], &checkpoint.applied.to_le_bytes());
+        assert_eq!(&bytes[56..88], &checkpoint.event_hash);
+    }
+
+    /// Holds a checkpoint and logs every save (by event) and clear, in order.
+    struct LoggingCheckpoints {
+        held: Mutex<Option<Vec<u8>>>,
+        log: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl DustCheckpointStore for LoggingCheckpoints {
+        async fn load(&self) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(self.held.lock().unwrap().clone())
+        }
+
+        async fn save(&self, checkpoint: &[u8]) -> anyhow::Result<()> {
+            let applied = Checkpoint::decode(checkpoint).unwrap().applied;
+            self.log.lock().unwrap().push(format!("save {applied}"));
+            *self.held.lock().unwrap() = Some(checkpoint.to_vec());
+            Ok(())
+        }
+
+        async fn clear(&self) -> anyhow::Result<()> {
+            self.log.lock().unwrap().push("clear".into());
+            *self.held.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_forgotten_checkpoint_is_cleared_from_the_store_once_and_its_strikes_start_over() {
+        let key = funded_key();
+        let store = Arc::new(LoggingCheckpoints {
+            held: Mutex::new(Some(checkpoint_after(10, &key).encode())),
+            log: Mutex::default(),
+        });
+        let source = RecordingSource::new(fixture_updates());
+        let wallet = FundingWallet::start(key, source.clone(), Some(store.clone()));
+        ready(&wallet).await;
+        for _ in 0..RESTORE_STRIKES {
+            wallet.failed(true);
+            settle(&wallet).await;
+        }
+        let newest = fixture_updates().last().unwrap().id;
+        assert_eq!(
+            *store.log.lock().unwrap(),
+            vec![
+                format!("save {newest}"),
+                "clear".to_string(),
+                format!("save {newest}")
+            ],
+            "the stored checkpoint is cleared before the fresh replay keeps its own"
+        );
+        // The fresh replay's first failure is no strike; the next is the first strike
+        // against the checkpoint it resumed from, so nothing is cleared again.
+        for _ in 0..2 {
+            wallet.failed(true);
+            settle(&wallet).await;
+        }
+        assert_eq!(
+            *store.log.lock().unwrap(),
+            vec![
+                format!("save {newest}"),
+                "clear".to_string(),
+                format!("save {newest}")
+            ],
+            "forgetting starts the strikes over and clears the store once"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_failed_submits_resume_without_backing_off() {
+        let (wallet, _store, source, resumed_at) = restored_wallet().await;
+        assert_eq!(source.froms(), vec![Some(resumed_at)]);
+        for round in 1..=4 {
+            wallet.failed(false);
+            // A reload resubscribes after the resubscribe delay, never a backoff.
+            tokio::time::sleep(RESUBSCRIBE_DELAY + std::time::Duration::from_secs(1)).await;
+            assert_eq!(source.froms().len(), round + 1, "failure {round}");
+            ready(&wallet).await;
+        }
+    }
+
+    /// Serves the fixture from `from` on the first subscription, then ends it; every
+    /// later subscription stays silent. Records where each one started.
+    struct EndsAfterFirst {
+        updates: Vec<DustEventUpdate>,
+        froms: Mutex<Vec<Option<u64>>>,
+    }
+
+    #[async_trait]
+    impl DustEventSource for EndsAfterFirst {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            let first = {
+                let mut froms = self.froms.lock().unwrap();
+                froms.push(from);
+                froms.len() == 1
+            };
+            if !first {
+                return Ok(futures_util::stream::pending().boxed());
+            }
+            let updates: Vec<_> = self
+                .updates
+                .iter()
+                .filter(|update| from.is_none_or(|from| update.id >= from))
+                .cloned()
+                .map(Ok)
+                .collect();
+            Ok(futures_util::stream::iter(updates).boxed())
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_submit_failing_while_the_subscription_is_down_still_reloads() {
+        let key = funded_key();
+        let checkpoint = checkpoint_after(10, &key);
+        let resumed_at = checkpoint.applied;
+        let newest = fixture_updates().last().unwrap().id;
+        let source = Arc::new(EndsAfterFirst {
+            updates: fixture_updates(),
+            froms: Mutex::default(),
+        });
+        let wallet = FundingWallet::start(
+            key,
+            source.clone(),
+            Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+        );
+        // The first subscription replays to the newest event and ends; the wallet waits
+        // out the resubscribe delay.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert_eq!(*source.froms.lock().unwrap(), vec![Some(resumed_at)]);
+        assert_eq!(wallet.shared.state().applied, Some(newest));
+        wallet.failed(false);
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        assert_eq!(
+            *source.froms.lock().unwrap(),
+            vec![Some(resumed_at), Some(newest), Some(newest)],
+            "the silent subscription acts on the failure and resumes the kept checkpoint"
+        );
+    }
+
+    /// Resumes from `resumed_at` on the first subscription with an event after it the
+    /// replay cannot absorb; later subscriptions stay silent.
+    struct BreaksAfterResume {
+        froms: Mutex<Vec<Option<u64>>>,
+    }
+
+    #[async_trait]
+    impl DustEventSource for BreaksAfterResume {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            let first = {
+                let mut froms = self.froms.lock().unwrap();
+                froms.push(from);
+                froms.len() == 1
+            };
+            if !first {
+                return Ok(futures_util::stream::pending().boxed());
+            }
+            let mut updates = fixture_updates();
+            updates[12].raw.truncate(10);
+            let served: Vec<_> = updates
+                .into_iter()
+                .filter(|update| from.is_none_or(|from| update.id >= from))
+                .map(Ok)
+                .collect();
+            Ok(futures_util::stream::iter(served)
+                .chain(futures_util::stream::pending())
+                .boxed())
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replay_started_over_no_longer_reloads_the_checkpoint_it_came_from() {
+        let key = funded_key();
+        let checkpoint = checkpoint_after(10, &key);
+        let resumed_at = checkpoint.applied;
+        let source = Arc::new(BreaksAfterResume {
+            froms: Mutex::default(),
+        });
+        let wallet = FundingWallet::start(
+            key,
+            source.clone(),
+            Some(Arc::new(MemoryCheckpoints::holding(checkpoint))),
+        );
+        // The resumed replay fails and starts over from the first event, which the
+        // indexer has not served yet.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        assert_eq!(*source.froms.lock().unwrap(), vec![Some(resumed_at), None]);
+        // A submit in flight from before fails.
+        wallet.failed(true);
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        assert_eq!(
+            *source.froms.lock().unwrap(),
+            vec![Some(resumed_at), None, None],
+            "the checkpoint the replay started over from is not resumed again"
+        );
+    }
+
+    /// Like `CatchesUpThenBreaks`, recording when each subscription started.
+    struct CatchesUpThenBreaksAt(Mutex<Vec<tokio::time::Instant>>);
+
+    #[async_trait]
+    impl DustEventSource for CatchesUpThenBreaksAt {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            self.0.lock().unwrap().push(tokio::time::Instant::now());
+            CatchesUpThenBreaks(Default::default())
+                .subscribe(from)
+                .await
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_after_catching_up_resubscribes_after_four_seconds() {
+        let source = Arc::new(CatchesUpThenBreaksAt(Mutex::default()));
+        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        tokio::time::sleep(std::time::Duration::from_secs(200)).await;
+        let at = source.0.lock().unwrap().clone();
+        assert!(at.len() >= 3, "{} subscriptions", at.len());
+        // 60 s caught up before the event that cannot be absorbed, then 4 s.
+        for pair in at.windows(2) {
+            assert_eq!(
+                pair[1] - pair[0],
+                std::time::Duration::from_secs(64),
+                "{at:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_checkpoint_kept_as_the_third_strike_lands_is_forgotten_too() {
+        let (wallet, store, source, resumed_at) = restored_wallet().await;
+        for _ in 0..RESTORE_STRIKES - 1 {
+            wallet.failed(true);
+            settle(&wallet).await;
+        }
+        assert_eq!(source.froms().len(), 3);
+        assert_eq!(source.froms()[0], Some(resumed_at));
+        // A checkpoint is due when the third strike lands.
+        tokio::time::sleep(CHECKPOINT_INTERVAL).await;
+        wallet.failed(true);
+        // What the subscription does when that strike lands while it applies a batch:
+        // it keeps the due checkpoint before it reaches the select that sees the wake.
+        let store_dyn: &dyn DustCheckpointStore = store.as_ref();
+        keep_checkpoint(&wallet.shared, Some(store_dyn)).await;
+        settle(&wallet).await;
+        assert_eq!(
+            source.froms().last(),
+            Some(&None),
+            "the third strike replays from the first event: {:?}",
+            source.froms()
+        );
+    }
+
+    /// Serves the first `visible` fixture events (inclusive from `from`), each with
+    /// `max_id` set to the newest visible one, and delivers newly visible events
+    /// on the open subscription.
+    struct GrowingSource {
+        updates: Vec<DustEventUpdate>,
+        visible: Arc<std::sync::atomic::AtomicUsize>,
+        froms: Arc<Mutex<Vec<Option<u64>>>>,
+    }
+
+    #[async_trait]
+    impl DustEventSource for GrowingSource {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            self.froms.lock().unwrap().push(from);
+            let updates = self.updates.clone();
+            let visible = self.visible.clone();
+            let start = updates
+                .iter()
+                .position(|update| from.is_none_or(|from| update.id >= from))
+                .unwrap_or(updates.len());
+            Ok(futures_util::stream::unfold(start, move |next| {
+                let updates = updates.clone();
+                let visible = visible.clone();
+                async move {
+                    loop {
+                        let shown = visible.load(std::sync::atomic::Ordering::SeqCst);
+                        if next < shown {
+                            let mut update = updates[next].clone();
+                            update.max_id = updates[shown - 1].id;
+                            return Some((Ok(update), next + 1));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
+            })
+            .boxed())
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    /// The interval runs from the last kept checkpoint, whatever reloads came in
+    /// between, as the intent builder's `kept_at` did: a failed submit 4 min after a
+    /// checkpoint, then new events 2 min later, keep a new one at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_reload_does_not_postpone_the_next_checkpoint() {
+        let store = Arc::new(MemoryCheckpoints::default());
+        let visible = Arc::new(std::sync::atomic::AtomicUsize::new(20));
+        let froms = Arc::new(Mutex::new(Vec::new()));
+        let updates = fixture_updates();
+        let wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(GrowingSource {
+                updates: updates.clone(),
+                visible: visible.clone(),
+                froms: froms.clone(),
+            }),
+            Some(store.clone()),
+        );
+        ready(&wallet).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let first = store
+            .decoded()
+            .expect("first checkpoint kept at once")
+            .applied;
+        assert_eq!(first, updates[19].id);
+
+        tokio::time::sleep(std::time::Duration::from_secs(4 * 60)).await;
+        wallet.failed(false);
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        ready(&wallet).await;
+
+        tokio::time::sleep(std::time::Duration::from_secs(2 * 60)).await;
+        visible.store(updates.len(), std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        ready(&wallet).await;
+        // 6.5 min since the last kept checkpoint.
+        let kept = store.decoded().unwrap().applied;
+        assert_eq!(
+            kept,
+            updates.last().unwrap().id,
+            "a checkpoint is kept 6.5 min after the last one, whatever the reload 2.5 min ago"
+        );
+    }
+
+    /// Failures every 2 min while events keep arriving still let the checkpoint
+    /// advance.
+    #[tokio::test(start_paused = true)]
+    async fn failures_more_often_than_the_interval_do_not_freeze_the_checkpoint() {
+        let store = Arc::new(MemoryCheckpoints::default());
+        let visible = Arc::new(std::sync::atomic::AtomicUsize::new(5));
+        let froms = Arc::new(Mutex::new(Vec::new()));
+        let updates = fixture_updates();
+        let wallet = FundingWallet::start(
+            funded_key(),
+            Arc::new(GrowingSource {
+                updates: updates.clone(),
+                visible: visible.clone(),
+                froms: froms.clone(),
+            }),
+            Some(store.clone()),
+        );
+        ready(&wallet).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let first = store.decoded().unwrap().applied;
+        for shown in 6..=updates.len() {
+            visible.store(shown, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_secs(110)).await;
+            wallet.failed(false);
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            ready(&wallet).await;
+        }
+        let kept = store.decoded().unwrap().applied;
+        let latest = wallet.shared.snapshots().latest.as_ref().unwrap().applied;
+        assert!(kept > first, "the stored checkpoint never advanced");
+        assert_eq!(
+            latest, kept,
+            "memory and the store hold the same checkpoint"
+        );
+    }
+
+    /// A reload since `ready_by` holds an older state, which `plan` must not price from.
+    #[tokio::test(start_paused = true)]
+    async fn a_wallet_reloaded_after_ready_plans_nothing() {
+        let (wallet, _store, _source, _resumed_at) = restored_wallet().await;
+        let local = replayed();
+        let ctime = local.sync_time;
+        let ttl = Timestamp::from_secs(ctime.to_secs() + 180);
+        let mut rng = StdRng::seed_from_u64(5);
+        let base = base(&mut rng, ttl);
+        // What `reload` does once a failed submit's wake is acted on.
+        resume_from(&wallet.shared, checkpoint_after(10, &funded_key()));
+        let planned = wallet.plan(
+            &base,
+            &INITIAL_PARAMETERS,
+            ctime,
+            ttl,
+            "undeployed",
+            &mut rng,
+        );
         assert!(
-            (2..=20).contains(&subscriptions),
-            "{subscriptions} full replays in 30 minutes"
+            matches!(planned, Err(SubmitError::WalletUnsynced(_))),
+            "a reloaded replay planned a fee from the checkpoint's older state"
+        );
+    }
+
+    /// A restart (`start_over`, as `apply` runs it on a mismatch or a bad event)
+    /// between the third strike and the subscription acting on its wake still clears
+    /// the store, and only then.
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_racing_the_third_strike_still_forgets() {
+        let (wallet, store, _source, _resumed_at) = restored_wallet().await;
+        for _ in 0..2 {
+            wallet.failed(true);
+            settle(&wallet).await;
+        }
+        wallet.failed(true);
+        // No await in between: the subscription task has not run yet.
+        start_over(&wallet.shared);
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let forget_pending = wallet.shared.snapshots().forget;
+        let stored_after_strikes = store.decoded().map(|checkpoint| checkpoint.applied);
+        // The fresh replay keeps a good checkpoint (simulated), then any later failure.
+        let good = checkpoint_after(29, &funded_key());
+        *store.0.lock().unwrap() = Some(good.encode());
+        wallet.shared.snapshots().latest = Some(good);
+        wallet.failed(false);
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        assert!(
+            !forget_pending,
+            "the third strike's forget was left pending"
+        );
+        assert_eq!(
+            stored_after_strikes, None,
+            "the third strike cleared the store"
+        );
+        assert!(
+            store.decoded().is_some(),
+            "a later failure leaves the replay's good checkpoint stored"
         );
     }
 
@@ -1680,6 +2805,10 @@ mod live {
 
         async fn save(&self, checkpoint: &[u8]) -> anyhow::Result<()> {
             Ok(std::fs::write(&self.0, checkpoint)?)
+        }
+
+        async fn clear(&self) -> anyhow::Result<()> {
+            Ok(std::fs::remove_file(&self.0)?)
         }
     }
 

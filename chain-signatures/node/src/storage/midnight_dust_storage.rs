@@ -45,6 +45,17 @@ impl DustCheckpointStore for MidnightDustStorage {
             .await
             .context("failed to save the midnight DUST checkpoint to redis")
     }
+
+    async fn clear(&self) -> anyhow::Result<()> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .context("failed to get redis connection")?;
+        conn.del::<_, ()>(&self.key)
+            .await
+            .context("failed to clear the midnight DUST checkpoint in redis")
+    }
 }
 
 #[cfg(test)]
@@ -62,5 +73,6 @@ mod tests {
 
         assert!(storage.load().await.is_err());
         assert!(storage.save(b"checkpoint").await.is_err());
+        assert!(storage.clear().await.is_err());
     }
 }
