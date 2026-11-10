@@ -547,7 +547,7 @@ impl ChainStack {
 
 /// Host of `url` for the startup log: RPC URLs may carry API keys.
 fn host_of(url: &Url) -> &str {
-    url.host_str().unwrap_or("none")
+    url.host_str().unwrap_or("invalid")
 }
 
 /// Emit the single structured "starting node" banner describing this node's identity
