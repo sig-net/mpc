@@ -265,7 +265,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let account_pk = signer.public_key();
 
             let RpcHandles {
-                near_client,
                 near_governance_client,
                 rpc_channel,
                 rpc_executor,
@@ -297,7 +296,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &my_address,
                 &cipher_pk_hex,
                 &network,
-                &near_client,
+                &near_rpc,
                 &stack.configs,
             );
 
@@ -579,6 +578,11 @@ impl ChainStack {
     }
 }
 
+/// Host of `url` for the startup log: RPC URLs may carry API keys.
+fn host_of(url: &Url) -> &str {
+    url.host_str().unwrap_or("invalid")
+}
+
 /// Emit the single structured "starting node" banner describing this node's identity
 /// and which chains it is configured to index.
 #[allow(clippy::too_many_arguments)]
@@ -589,7 +593,7 @@ fn log_startup(
     my_address: &Url,
     cipher_pk_hex: &str,
     network: &NetworkConfig,
-    near_client: &NearClient,
+    near_rpc: &Url,
     chains: &ChainConfigs,
 ) {
     let eth_signer_address = chains.eth.as_ref().map(|c| c.signer_address());
@@ -606,17 +610,18 @@ fn log_startup(
         git_commit_hash = build::GIT_COMMIT_HASH,
         build_timestamp = build::BUILD_TIMESTAMP,
         sign_pk = %network.sign_sk.public_key(),
-        near_rpc_url = %near_client.rpc_addr(),
+        near_rpc_host = %host_of(near_rpc),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
         eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
         sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.to_string()).unwrap_or_else(|| "None".to_string()),
-        sol_rpc_url = %chains.sol.as_ref().map(|c| c.rpc_http_url.as_str()).unwrap_or("None"),
+        sol_rpc_host = %chains.sol.as_ref().map_or("None", |c| host_of(&c.rpc_http_url)),
         sol_signer_address = %sol_signer_address.as_deref().unwrap_or("None"),
-        hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
+        hydration_rpc_host = %chains.hydration.as_ref().map_or("None", |c| host_of(&c.rpc_ws_url)),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
-        canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
-        midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
-        tron_endpoint = %chains.tron.as_ref().map(|c| c.endpoint.as_str()).unwrap_or("None"),
+        canton_json_api_host = %chains.canton.as_ref().map_or("None", |c| host_of(&c.json_api_url)),
+        // Midnight still holds its node URL as a string.
+        midnight_node_host = %chains.midnight.as_ref().map_or("None".to_string(), |c| c.node_url.parse().map_or("invalid".to_string(), |url| host_of(&url).to_string())),
+        tron_host = %chains.tron.as_ref().map_or("None", |c| host_of(&c.endpoint)),
         "starting node",
     );
 }
@@ -654,7 +659,6 @@ impl MeshHandles {
 }
 
 struct RpcHandles {
-    near_client: NearClient,
     near_governance_client: NearGovernanceClient,
     rpc_channel: RpcChannel,
     rpc_executor: RpcExecutor,
@@ -691,11 +695,10 @@ impl RpcHandles {
             signer,
             near_gates,
         );
-        let publishers = stack.publishers(near_client.clone(), backlog).await?;
+        let publishers = stack.publishers(near_client, backlog).await?;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
         Ok(Self {
-            near_client,
             near_governance_client,
             rpc_channel,
             rpc_executor,
