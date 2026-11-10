@@ -247,6 +247,7 @@ fn decode<T: AnchorDeserialize>(mut data: &[u8]) -> Option<T> {
 pub async fn emit_events(
     events_tx: &mpsc::Sender<ChainEvent>,
     program_id: &str,
+    block_time: Option<u64>,
     tx: &EncodedTransactionWithStatusMeta,
 ) -> anyhow::Result<()> {
     let events = parse_cpi_events(tx, program_id);
@@ -260,18 +261,29 @@ pub async fn emit_events(
                 let Some(request) = ev.build_sign_request(signature.as_ref()) else {
                     continue;
                 };
+                let bidirectional = matches!(request.kind, SignKind::SignBidirectional(_));
                 // `signature` is the Solana transaction signature, i.e. the tx hash
                 // shown in explorers and used as the getTransaction lookup key. Log it
                 // next to the sign_id so a given tx can be matched to its request.
                 tracing::info!(
                     tx_hash = %signature,
                     sign_id = ?request.id,
-                    bidirectional = matches!(request.kind, SignKind::SignBidirectional(_)),
+                    bidirectional,
                     "solana sign request parsed",
                 );
+                // A bidirectional request needs its block time as the §4.3
+                // anchor; Null on a finalized block is a
+                // serving fault, so the block holds.
+                let block_timestamp = match (bidirectional, block_time) {
+                    (_, Some(seconds)) => Some(seconds),
+                    (true, None) => {
+                        anyhow::bail!("block carries a bidirectional request but no block time")
+                    }
+                    (false, None) => None,
+                };
                 ChainEvent::SignRequest {
                     request: Arc::new(request),
-                    block_timestamp: None,
+                    block_timestamp,
                 }
             }
             CpiEvent::RespondBidirectional(ev) => {
@@ -359,6 +371,7 @@ pub fn to_mpc_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::sign_bidirectional_ix_data;
     use signet_program::SignatureRequestedEvent;
     use solana_sdk::pubkey::Pubkey;
 
@@ -409,26 +422,6 @@ mod tests {
             hex::encode(SolanaSignEvent::SignatureRequested(event).generate_request_id()),
             "7f7aee49c2a994cc17f85058f7e0b19a44603d619a7e738522f9aa329e457879"
         );
-    }
-
-    fn sign_bidirectional_ix_data(caip2_id: &str) -> String {
-        let event = SignBidirectionalEvent {
-            sender: Pubkey::new_from_array([0x11; 32]),
-            serialized_transaction: vec![1, 2, 3],
-            caip2_id: caip2_id.to_string(),
-            key_version: 0,
-            deposit: 0,
-            path: "path".to_string(),
-            algo: "secp256k1".to_string(),
-            dest: "dest".to_string(),
-            params: String::new(),
-            program_id: Pubkey::new_from_array([0x22; 32]),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
-        };
-        let mut data = anchor_lang::event::EVENT_IX_TAG_LE.to_vec();
-        data.extend(anchor_lang::Event::data(&event));
-        solana_sdk::bs58::encode(data).into_string()
     }
 
     #[test]

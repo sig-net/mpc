@@ -8,9 +8,9 @@
 //!
 //! # Configuration (env vars only)
 //!
-//! - `RPC_URL` (required) — Solana JSON-RPC endpoint, e.g. a Helius or
+//! - `MPC_SOL_RPC_HTTP_URL` (required) — Solana JSON-RPC endpoint, e.g. a Helius or
 //!   Alchemy devnet/mainnet URL.
-//! - `PROGRAM_ADDRESS` (required) — signet program id (base58).
+//! - `MPC_SOL_PROGRAM_ADDRESS` (required) — signet program id (base58).
 //! - `START` (required) — inclusive start of the catchup range.
 //! - `END` (required) — exclusive end of the catchup range (the anchor
 //!   slot). Must be finalized.
@@ -22,8 +22,8 @@
 //! # Usage
 //!
 //! ```sh
-//! RPC_URL=https://devnet.helius-rpc.com/?api-key=<KEY> \
-//! PROGRAM_ADDRESS=<base58> START=410000000 END=410010000 \
+//! MPC_SOL_RPC_HTTP_URL=https://devnet.helius-rpc.com/?api-key=<KEY> \
+//! MPC_SOL_PROGRAM_ADDRESS=<base58> START=410000000 END=410010000 \
 //! RUST_LOG=mpc_chain_solana::bench=info \
 //! cargo run -p mpc-chain-solana --example bench_catchup --features bench
 //! ```
