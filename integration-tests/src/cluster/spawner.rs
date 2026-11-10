@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use cait_sith::protocol::Participant;
 use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
 use mpc_chain_solana::SolConfig;
@@ -184,6 +185,8 @@ pub struct ClusterSpawner {
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
     pub use_midnight: bool,
+    /// Midnight funding seeds by node index; see [`Self::node_config`].
+    pub midnight_funding_seeds: Vec<String>,
     /// Tracks which binary source to use for each node index
     pub node_binary_sources: Vec<NodeBinarySource>,
 }
@@ -225,6 +228,7 @@ impl Default for ClusterSpawner {
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
             use_midnight: false,
+            midnight_funding_seeds: Vec::new(),
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
     }
@@ -338,6 +342,11 @@ impl ClusterSpawner {
     pub fn midnight(mut self) -> Self {
         self.use_midnight = true;
         self
+    }
+
+    /// Node `index`'s config; see [`node_config`].
+    pub fn node_config(&self, index: usize) -> anyhow::Result<NodeConfig> {
+        node_config(&self.cfg, &self.midnight_funding_seeds, index)
     }
 
     pub fn canton(mut self) -> Self {
@@ -478,6 +487,7 @@ impl IntoFuture for ClusterSpawner {
                 let midnight =
                     crate::midnight::MidnightContext::run(&self, root_public_key).await?;
                 self.cfg.midnight = Some(midnight.config.clone());
+                self.midnight_funding_seeds = midnight.publisher_seeds.clone();
                 Some(midnight)
             } else {
                 None
@@ -516,6 +526,29 @@ impl IntoFuture for ClusterSpawner {
     }
 }
 
+/// `cfg` for node `index`. A Midnight publisher assumes it alone spends its funding wallet's
+/// DUST, so every Midnight node needs its own seed; falling back to the shared one would race
+/// another node's publisher.
+fn node_config(
+    cfg: &NodeConfig,
+    midnight_funding_seeds: &[String],
+    index: usize,
+) -> anyhow::Result<NodeConfig> {
+    let mut cfg = cfg.clone();
+    if let Some(midnight) = cfg.midnight.as_mut() {
+        midnight.publisher.funding_seed = midnight_funding_seeds
+            .get(index)
+            .with_context(|| {
+                format!(
+                    "no Midnight funding seed for node {index} ({} funded)",
+                    midnight_funding_seeds.len()
+                )
+            })?
+            .clone();
+    }
+    Ok(cfg)
+}
+
 /// Spawn a near sandbox with retry logic to handle potential transient failures (i.e., due to CPU contention)
 async fn spawn_sandbox_with_retry() -> anyhow::Result<Worker<Sandbox>> {
     let mut last_err = None;
@@ -537,4 +570,50 @@ async fn spawn_sandbox_with_retry() -> anyhow::Result<Worker<Sandbox>> {
         "failed to spawn near sandbox after 5 attempts: {:?}",
         last_err
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use mpc_chain_midnight::{MidnightAddress, MidnightConfig, PublisherConfig};
+
+    use super::node_config;
+    use crate::NodeConfig;
+
+    fn midnight_cfg() -> NodeConfig {
+        NodeConfig {
+            midnight: Some(MidnightConfig {
+                node_url: "http://127.0.0.1:9944".to_string(),
+                central_address: MidnightAddress::from_bytes([0; 32]),
+                responder_address: MidnightAddress::from_bytes([1; 32]),
+                publisher: PublisherConfig {
+                    funding_seed: "04".repeat(32),
+                    ..Default::default()
+                },
+                rpc: Default::default(),
+                indexer: Default::default(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn each_midnight_node_gets_its_own_funding_seed() {
+        let seeds = ["04", "05", "06"].map(|byte| byte.repeat(32));
+        for (index, seed) in seeds.iter().enumerate() {
+            let cfg = node_config(&midnight_cfg(), &seeds, index).unwrap();
+            assert_eq!(&cfg.midnight.unwrap().publisher.funding_seed, seed);
+        }
+    }
+
+    #[test]
+    fn midnight_node_without_funding_seed_is_an_error() {
+        let seeds = ["04", "05"].map(|byte| byte.repeat(32));
+        assert!(node_config(&midnight_cfg(), &seeds, 2).is_err());
+    }
+
+    #[test]
+    fn node_without_midnight_needs_no_funding_seed() {
+        let cfg = node_config(&NodeConfig::default(), &[], 0).unwrap();
+        assert!(cfg.midnight.is_none());
+    }
 }

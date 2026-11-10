@@ -1,4 +1,3 @@
-use anyhow::Context as _;
 use mpc_chain_midnight::{MidnightAddress, MidnightConfig, OutputStorageConfig, PublisherConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 use std::time::Duration;
@@ -16,14 +15,14 @@ pub struct MidnightArgs {
         hide_env_values = true,
         requires_all = [
             "midnight_central_address",
+            "midnight_responder_address",
             "midnight_funding_seed",
-            "midnight_proof_server_url",
-            "midnight_indexer_url",
             "midnight_indexer_ws_url",
         ]
     )]
     pub midnight_node_url: Option<Url>,
-    /// Address of the central singleton contract: 64 hex characters, no `0x` prefix.
+    /// Address of the central singleton contract, where clients notify their
+    /// requests: 64 hex characters, no `0x` prefix.
     #[arg(
         long,
         env("MPC_MIDNIGHT_CENTRAL_ADDRESS"),
@@ -31,6 +30,15 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_central_address: Option<MidnightAddress>,
+    /// Address of the signet responder contract, where responses are posted:
+    /// 64 hex characters, no `0x` prefix.
+    #[arg(
+        long,
+        env("MPC_MIDNIGHT_RESPONDER_ADDRESS"),
+        value_parser = MidnightAddress::from_hex,
+        requires = "midnight_node_url"
+    )]
+    pub midnight_responder_address: Option<MidnightAddress>,
     /// Hex seed of the wallet that funds respond transactions.
     #[arg(
         long,
@@ -39,36 +47,9 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_funding_seed: Option<SecretString>,
-    /// argv of the intent builder child process, JSON-encoded:
-    /// `["node","dist/main.js"]`. One clap value rather than a multi-value
-    /// flag, whose forms stop at anything flag-shaped; JSON escapes instead
-    /// of terminating, so every argv survives the round trip.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_INTENT_GEN_COMMAND"),
-        requires = "midnight_node_url"
-    )]
-    pub midnight_intent_gen_command: Option<String>,
-    /// Proof server URL. Required to respond: these contracts are zkir-v3 and
-    /// cannot be proven in process.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_PROOF_SERVER_URL"),
-        hide_env_values = true,
-        requires = "midnight_node_url"
-    )]
-    pub midnight_proof_server_url: Option<Url>,
-    /// Indexer GraphQL URL. Required to respond: the funding wallet's spendable
-    /// DUST is only derivable from the ledger events the indexer serves.
-    #[arg(
-        long,
-        env("MPC_MIDNIGHT_INDEXER_URL"),
-        hide_env_values = true,
-        requires = "midnight_node_url"
-    )]
-    pub midnight_indexer_url: Option<Url>,
-    /// Indexer GraphQL subscription URL: the wallet catches up over the URL
-    /// above and follows over this one.
+    /// Indexer GraphQL subscription URL. Required to respond: the funding
+    /// wallet's spendable DUST is only derivable from the ledger events the
+    /// indexer serves.
     #[arg(
         long,
         env("MPC_MIDNIGHT_INDEXER_WS_URL"),
@@ -102,6 +83,16 @@ pub struct MidnightArgs {
     #[cfg(feature = "test-feature")]
     #[arg(long, requires = "midnight_node_url")]
     pub midnight_output_storage_emulator_endpoint: Option<String>,
+    /// The responder's proving artifacts, for test nodes running outside the image
+    /// that installs them.
+    #[cfg(feature = "test-feature")]
+    #[arg(long, requires = "midnight_node_url")]
+    pub midnight_contract_artifacts_dir: Option<std::path::PathBuf>,
+    /// The zero-knowledge parameter directory, for test nodes running outside the
+    /// image that installs it.
+    #[cfg(feature = "test-feature")]
+    #[arg(long, requires = "midnight_node_url")]
+    pub midnight_zk_params_dir: Option<std::path::PathBuf>,
 }
 
 impl MidnightArgs {
@@ -111,25 +102,23 @@ impl MidnightArgs {
         let (
             Some(node_url),
             Some(central_address),
+            Some(responder_address),
             Some(funding_seed),
-            Some(proof_server_url),
-            Some(indexer_url),
             Some(indexer_ws_url),
         ) = (
             self.midnight_node_url,
             self.midnight_central_address,
+            self.midnight_responder_address,
             self.midnight_funding_seed,
-            self.midnight_proof_server_url,
-            self.midnight_indexer_url,
             self.midnight_indexer_ws_url,
         )
         else {
             return Ok(None);
         };
+        // Only test builds override the image's artifact directories.
+        #[cfg_attr(not(feature = "test-feature"), allow(unused_mut))]
         let mut publisher = PublisherConfig {
             funding_seed: funding_seed.expose_secret().to_string(),
-            proof_server_url: proof_server_url.to_string(),
-            indexer_url: indexer_url.to_string(),
             indexer_ws_url: indexer_ws_url.to_string(),
             output_storage: self.midnight_output_storage_bucket.map(|bucket| {
                 OutputStorageConfig::new(
@@ -142,17 +131,21 @@ impl MidnightArgs {
             ..Default::default()
         };
         #[cfg(feature = "test-feature")]
-        if let Some(storage) = &mut publisher.output_storage {
-            storage.emulator_endpoint = self.midnight_output_storage_emulator_endpoint;
-        }
-        if let Some(command) = self.midnight_intent_gen_command {
-            publisher.intent_gen_command = serde_json::from_str(&command).with_context(|| {
-                format!("midnight config: --midnight-intent-gen-command must be a JSON array of strings, got {command}")
-            })?;
+        {
+            if let Some(storage) = &mut publisher.output_storage {
+                storage.emulator_endpoint = self.midnight_output_storage_emulator_endpoint;
+            }
+            if let Some(dir) = self.midnight_contract_artifacts_dir {
+                publisher.contract_artifacts_dir = dir;
+            }
+            if let Some(dir) = self.midnight_zk_params_dir {
+                publisher.zk_params_dir = dir;
+            }
         }
         let config = MidnightConfig {
             node_url: node_url.to_string(),
             central_address,
+            responder_address,
             publisher,
             rpc: Default::default(),
             indexer: Default::default(),
@@ -176,14 +169,10 @@ mod tests {
             "http://127.0.0.1:9944",
             "--midnight-central-address",
             &"ab".repeat(32),
+            "--midnight-responder-address",
+            &"cd".repeat(32),
             "--midnight-funding-seed",
             &"0f".repeat(32),
-            "--midnight-intent-gen-command",
-            r#"["node","/opt/midnight publisher/dist/main.js","--child-option"]"#,
-            "--midnight-proof-server-url",
-            "http://127.0.0.1:6300",
-            "--midnight-indexer-url",
-            "http://127.0.0.1:8088/api/v3/graphql",
             "--midnight-indexer-ws-url",
             "ws://127.0.0.1:8088/api/v3/graphql/ws",
             "--midnight-output-storage-bucket",
@@ -208,16 +197,9 @@ mod tests {
         MidnightConfig {
             node_url: "http://127.0.0.1:9944/".into(),
             central_address: MidnightAddress::from_bytes([0xab; 32]),
+            responder_address: MidnightAddress::from_bytes([0xcd; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
-                // A space and a leading dash, which only a structured encoding gets back out intact.
-                intent_gen_command: vec![
-                    "node".into(),
-                    "/opt/midnight publisher/dist/main.js".into(),
-                    "--child-option".into(),
-                ],
-                proof_server_url: "http://127.0.0.1:6300/".into(),
-                indexer_url: "http://127.0.0.1:8088/api/v3/graphql".into(),
                 indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".into(),
                 output_storage: Some(OutputStorageConfig::new(
                     "midnight-results".into(),
@@ -265,20 +247,16 @@ mod tests {
     }
 
     #[test]
-    fn the_cli_rejects_a_malformed_central_address() {
+    fn the_cli_rejects_malformed_contract_addresses() {
         crate::cli::tests::assert_midnight_env_unset();
         for invalid in ["ab".repeat(31), format!("0x{}", "ab".repeat(32))] {
-            let mut argv = configured_argv();
-            let flag = argv
-                .iter()
-                .position(|arg| arg == "--midnight-central-address")
-                .unwrap();
-            argv[flag + 1] = invalid;
-            let error = MidnightArgs::try_parse_from(argv).unwrap_err().to_string();
-            assert!(
-                error.contains("--midnight-central-address"),
-                "unexpected address error: {error}"
-            );
+            for flag in ["--midnight-central-address", "--midnight-responder-address"] {
+                let mut argv = configured_argv();
+                let index = argv.iter().position(|arg| arg == flag).unwrap();
+                argv[index + 1] = invalid.clone();
+                let error = MidnightArgs::try_parse_from(argv).unwrap_err().to_string();
+                assert!(error.contains(flag), "unexpected address error: {error}");
+            }
         }
     }
 
@@ -322,11 +300,10 @@ mod tests {
 
         // Well-formed values, so the rejection is the missing node url and
         // not the value itself.
+        let responder_address = "cd".repeat(32);
         for (flag, value) in [
+            ("--midnight-responder-address", responder_address.as_str()),
             ("--midnight-funding-seed", "1"),
-            ("--midnight-intent-gen-command", "1"),
-            ("--midnight-proof-server-url", "http://127.0.0.1:1"),
-            ("--midnight-indexer-url", "http://127.0.0.1:1"),
             ("--midnight-indexer-ws-url", "ws://127.0.0.1:1"),
             ("--midnight-output-storage-bucket", "1"),
             ("--midnight-output-storage-prefix", "1"),
@@ -350,9 +327,8 @@ mod tests {
         ])
         .expect_err("clap must demand the publisher group with the node url");
         for flag in [
+            "--midnight-responder-address",
             "--midnight-funding-seed",
-            "--midnight-proof-server-url",
-            "--midnight-indexer-url",
             "--midnight-indexer-ws-url",
         ] {
             assert!(
@@ -400,31 +376,43 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "test-feature"))]
     #[test]
     fn contract_assets_are_not_an_operator_input() {
+        // The image installs the artifacts the node proves with; a production
+        // node pointed elsewhere could prove against keys no deployment carries.
         crate::cli::tests::assert_midnight_env_unset();
 
-        let err = MidnightArgs::try_parse_from(["test", "--midnight-managed-dir", "/tmp/managed"])
-            .expect_err("the TypeScript package owns its matching contract assets");
-        assert!(
-            err.to_string().contains("unexpected argument"),
-            "got: {err}"
-        );
+        for flag in [
+            "--midnight-contract-artifacts-dir",
+            "--midnight-zk-params-dir",
+        ] {
+            let err = MidnightArgs::try_parse_from(["test", flag, "/tmp/managed"])
+                .expect_err("production nodes take the artifacts the image installs");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{flag}"
+            );
+        }
     }
 
+    #[cfg(feature = "test-feature")]
     #[test]
-    fn a_malformed_intent_gen_command_fails_at_the_config_boundary() {
-        // argv arrives as one opaque clap value; the shape check has nowhere
-        // else to happen.
+    fn test_nodes_carry_their_artifact_directories_across_the_cli() {
         crate::cli::tests::assert_midnight_env_unset();
 
-        let mut args = configured_args();
-        args.midnight_intent_gen_command = Some("node dist/main.js".into());
-        let err = args.into_config().unwrap_err().to_string();
-
-        assert!(
-            err.contains("--midnight-intent-gen-command"),
-            "unexpected error: {err}"
-        );
+        let mut cfg = configured();
+        cfg.publisher.contract_artifacts_dir = "/opt/signet/managed".into();
+        cfg.publisher.zk_params_dir = "/opt/signet/zk-params".into();
+        let mut argv = configured_argv();
+        argv.extend([
+            "--midnight-contract-artifacts-dir".into(),
+            "/opt/signet/managed".into(),
+            "--midnight-zk-params-dir".into(),
+            "/opt/signet/zk-params".into(),
+        ]);
+        let reparsed = MidnightArgs::try_parse_from(argv).unwrap();
+        assert_eq!(reparsed.into_config().unwrap(), Some(cfg));
     }
 }
