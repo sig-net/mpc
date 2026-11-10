@@ -934,6 +934,56 @@ mod tests {
         receipt.assert_async().await;
     }
 
+    /// Schemas are not in the rid, so twins may differ: one receipt
+    /// settles each member under its own schema.
+    #[tokio::test]
+    async fn divergent_twin_schemas_settle_independently_from_one_fetch() {
+        let (mut server, config, state) = expiry_stack().await;
+        let (id, plain, tx) =
+            watched_expiry_entry(&state, 5, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        let mut twin = (*tx).clone();
+        twin.request_id = [0x7f; 32];
+        let parked = twin.sign_id();
+        twin.output_deserialization_schema =
+            br#"[{\"name\":\"output\",\"type\":\"bool\"}]"#.to_vec();
+        state.watch_execution(Chain::Tron, twin.into()).await;
+        let receipt = receipt_for_once(&mut server, &id, success_receipt(&id));
+
+        let telemetry = CountingTelemetry::default();
+        let watcher = TronWatcher::new(config, state, telemetry.clone()).unwrap();
+        let outcomes: Vec<(SignId, ExecutionOutcome)> = watcher
+            .poll_watchers()
+            .await
+            .map(|event| match event {
+                ChainEvent::ExecutionConfirmed {
+                    sign_id, result, ..
+                } => (sign_id, result),
+                _ => unreachable!("the poll arm emits confirmations only"),
+            })
+            .collect()
+            .await;
+
+        assert_eq!(outcomes.len(), 2, "both members settle in one pass");
+        let outcome_of = |sign_id: &SignId| {
+            outcomes
+                .iter()
+                .find(|(id, _)| id == sign_id)
+                .map(|(_, result)| result)
+                .expect("each member settles exactly once")
+        };
+        assert!(matches!(
+            outcome_of(&plain),
+            ExecutionOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            outcome_of(&parked),
+            ExecutionOutcome::ExtractionFailed
+        ));
+        assert_eq!(telemetry.terminal_failures(), 1);
+        assert_eq!(telemetry.retryable_failures(), 0);
+        receipt.assert_async().await;
+    }
+
     /// Two nodes at different solidified heads attest the same height:
     /// the boundary — the digest binds the height, so a head a poll
     /// interval apart must not diverge the message.
