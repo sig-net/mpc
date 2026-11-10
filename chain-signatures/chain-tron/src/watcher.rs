@@ -86,11 +86,14 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
         tx_id: BidirectionalTxId,
         members: Vec<WatchedExecution>,
     ) -> Vec<ChainEvent> {
+        let member_count = members.len();
         let Some(receipt) = self
             .client
             .get_transaction_info_solidity(&B256::from(tx_id.0))
             .await
-            .inspect_err(|err| tracing::warn!(?tx_id, ?err, "receipt poll failed"))
+            .inspect_err(|err| {
+                tracing::warn!(?tx_id, members = member_count, ?err, "receipt poll failed")
+            })
             .ok()
             .flatten()
         else {
