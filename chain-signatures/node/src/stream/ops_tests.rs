@@ -242,6 +242,49 @@ async fn seed_executing_entry(
         .expect("advance to executing");
 }
 
+/// A failed transition returns the consumed watch with its wait start.
+#[tokio::test]
+async fn process_execution_confirmed_failed_advance_keeps_the_entry_watched() {
+    let backlog = Backlog::new();
+    // Solana does not encode Unviable, so the transition fails.
+    let tx = test_bidirectional_tx(10, Chain::Solana, Chain::Ethereum);
+    let observed_at = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(120))
+        .expect("clock must support backdating");
+    let entry = backlog
+        .insert_mock_executing(&tx)
+        .await
+        .with_respond_observed_at(Some(observed_at));
+    backlog.watch_execution(&entry).await;
+
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+
+    let err = confirm_execution(&tx, 41, ExecutionOutcome::Unviable, &ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("only supported for sources that encode them"),
+        "{err:#}"
+    );
+
+    let entry = ctx
+        .backlog
+        .executing_entry_for(
+            tx.target_chain,
+            &tx.id,
+            tx.source_chain,
+            &tx.sign_id(),
+        )
+        .await
+        .expect("the watch returned with the entry");
+    assert_eq!(entry.sign_id(), tx.sign_id());
+    assert!(
+        entry.awaiting_execution().is_some_and(|wait| wait >= std::time::Duration::from_secs(90)),
+        "the restored watch keeps the wait start"
+    );
+}
+
 #[tokio::test]
 async fn process_execution_confirmed_resolves_a_displaced_watch_by_sign_id() {
     let backlog = Backlog::new();

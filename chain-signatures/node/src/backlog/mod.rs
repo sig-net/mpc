@@ -455,6 +455,12 @@ impl Backlog {
             .map(|entry| entry.with_respond_observed_at(watch.respond_observed_at))
     }
 
+    /// Re-registers a watch — the confirmation error path, restoring
+    /// what [`Backlog::executing_entry_for`] consumed.
+    pub async fn rewatch_execution(&self, chain: Chain, watch: ExecutionWatch) {
+        self.watchers(&chain).write().await.insert(watch);
+    }
+
     /// The executing entry a confirmation attests: by the entry's own
     /// watch, or by source and sign id from the backlog.
     pub async fn executing_entry_for(
