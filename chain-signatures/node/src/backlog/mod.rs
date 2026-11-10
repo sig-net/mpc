@@ -128,14 +128,39 @@ impl PendingRequests {
     }
 }
 
+// TODO: move wait starts out of this polling index into their own
+// table — the map then holds only `WatchKey` → tx, and the carry and
+// rebuild arms go away. Do it together with the extraction (state.rs
+// TODO).
 #[derive(Debug, Clone, Default)]
 struct ExecutionWatchers {
     watches: HashMap<WatchKey, ExecutionWatch>,
 }
 
 impl ExecutionWatchers {
-    fn insert(&mut self, watch: ExecutionWatch) {
-        self.watches.insert(WatchKey::of(&watch.tx), watch);
+    /// Registers `watch`, keeping the resident's wait start.
+    fn insert(&mut self, mut watch: ExecutionWatch) {
+        let key = WatchKey::of(&watch.tx);
+        watch.respond_observed_at = watch.respond_observed_at.or_else(|| {
+            self.watches
+                .get(&key)
+                .and_then(|resident| resident.respond_observed_at)
+        });
+        self.watches.insert(key, watch);
+    }
+
+    /// Replaces `source`'s watches with `entries`, keeping a returning
+    /// member's wait start.
+    fn rebuild(&mut self, source: Chain, entries: impl IntoIterator<Item = ExecutionWatch>) {
+        let fresh: HashMap<WatchKey, ExecutionWatch> = entries
+            .into_iter()
+            .map(|watch| (WatchKey::of(&watch.tx), watch))
+            .collect();
+        self.watches
+            .retain(|key, _| key.source != source || fresh.contains_key(key));
+        for (_, watch) in fresh {
+            self.insert(watch);
+        }
     }
 
     fn remove(&mut self, key: &WatchKey) -> Option<ExecutionWatch> {
@@ -606,25 +631,23 @@ impl Backlog {
             pending.pending_executions(chain, self)
         };
 
-        // Replace this chain's watches, retaining wait start times for executions
-        // that are still being awaited.
+        // Replace this chain's watches, retaining wait start times for
+        // executions that are still being awaited.
+        let mut by_target: HashMap<Chain, Vec<ExecutionWatch>> = HashMap::new();
+        for entry in &execution_to_watch {
+            let watch = entry.execution_watch();
+            by_target
+                .entry(watch.tx.target_chain)
+                .or_default()
+                .push(watch);
+        }
         for destination_chain in Chain::iter() {
-            let mut watchers = self.watchers(&destination_chain).write().await;
-            let mut observed = HashMap::new();
-            watchers.watches.retain(|key, watch| {
-                if key.source != chain {
-                    return true;
-                }
-                observed.insert(*key, watch.respond_observed_at);
-                false
-            });
-            for entry in &execution_to_watch {
-                let mut watch = entry.execution_watch();
-                if watch.tx.target_chain == destination_chain {
-                    watch.respond_observed_at = observed.remove(&WatchKey::of(&watch.tx)).flatten();
-                    watchers.insert(watch);
-                }
-            }
+            let empty = Vec::new();
+            let entries = by_target.get(&destination_chain).unwrap_or(&empty);
+            self.watchers(&destination_chain)
+                .write()
+                .await
+                .rebuild(chain, entries.iter().cloned());
         }
     }
 }
@@ -655,12 +678,10 @@ impl StateManager for Backlog {
     }
 
     async fn watch_execution(&self, chain: Chain, tx: Arc<BidirectionalTx>) {
-        let mut watchers = self.watchers(&chain).write().await;
-        let observed = watchers
-            .watches
-            .get(&WatchKey::of(&tx))
-            .and_then(|watch| watch.respond_observed_at);
-        watchers.insert(ExecutionWatch::new(tx, observed));
+        self.watchers(&chain)
+            .write()
+            .await
+            .insert(ExecutionWatch::new(tx, None));
     }
 }
 
