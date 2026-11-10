@@ -3224,7 +3224,9 @@ mod live {
     #[ignore = "needs MIDNIGHT_LIVE_INDEXER_WS_URL; replays that indexer's whole DUST history"]
     async fn a_wallet_replays_a_live_indexer_to_its_newest_event() {
         let url = std::env::var("MIDNIGHT_LIVE_INDEXER_WS_URL")
-            .expect("MIDNIGHT_LIVE_INDEXER_WS_URL must be set");
+            .ok()
+            .and_then(|url| url.parse().ok())
+            .expect("MIDNIGHT_LIVE_INDEXER_WS_URL must be a URL");
         let file = std::env::var("MIDNIGHT_LIVE_DUST_CHECKPOINT")
             .ok()
             .map(std::path::PathBuf::from);
