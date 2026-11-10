@@ -3,8 +3,8 @@ pub mod spawner;
 use std::collections::{HashMap, HashSet};
 
 use mpc_contract::primitives::Participants;
-use mpc_node::storage::{PresignatureStorage, TripleStorage};
-use mpc_primitives::{Chain, Checkpoint};
+use mpc_node::backlog::Checkpoint;
+use mpc_primitives::Chain;
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Finality, NearToken};
 use near_workspaces::{Account, AccountId, Contract, Worker};
@@ -12,13 +12,14 @@ use spawner::{ClusterSpawner, Prestockpile};
 
 use crate::actions::sign::SignAction;
 use crate::actions::wait::WaitAction;
-use crate::containers::{self, DockerClient};
+use crate::containers;
 use crate::local::NodeEnvConfig;
-use crate::utils::{self, vote_join, vote_leave};
+use crate::utils::{self, vote_join, vote_reshare};
 use crate::{NodeConfig, Nodes};
 use mpc_contract::update::{ProposeUpdateArgs, UpdateId};
-use mpc_contract::{ProtocolContractState, RunningContractState};
-use mpc_node::web::{BenchMetrics, StateView};
+use mpc_contract::{ProtocolContractStateView, RunningContractStateView};
+use mpc_node::protocol::state::NodeStatus;
+use mpc_node::web::{BenchMetrics, StatusResponse};
 
 use anyhow::Context;
 use url::Url;
@@ -33,12 +34,13 @@ pub fn spawn() -> ClusterSpawner {
 
 pub struct Cluster {
     pub cfg: NodeConfig,
-    pub docker_client: DockerClient,
     pub rpc_client: near_fetch::Client,
     http_client: reqwest::Client,
     pub nodes: Nodes,
     pub account_idx: usize,
     pub solana: Option<containers::Solana>,
+    pub canton: Option<crate::canton::CantonSandbox>,
+    pub midnight: Option<crate::midnight::MidnightContext>,
 }
 
 impl Cluster {
@@ -62,15 +64,36 @@ impl Cluster {
         Url::parse(self.nodes.url(id)).unwrap()
     }
 
-    pub async fn fetch_state(&self, id: usize) -> anyhow::Result<StateView> {
-        let url = self.url(id).join("/state").unwrap();
-        let state_view: StateView = self.http_client.get(url).send().await?.json().await?;
-        Ok(state_view)
+    pub async fn fetch_status(&self, id: usize) -> anyhow::Result<NodeStatus> {
+        let url = self.url(id).join("/status").unwrap();
+        let resp: StatusResponse = self.http_client.get(url).send().await?.json().await?;
+        Ok(resp.status)
     }
 
-    pub async fn fetch_states(&self) -> anyhow::Result<Vec<StateView>> {
-        let tasks = (0..self.len()).map(|id| self.fetch_state(id));
+    pub async fn fetch_statuses(&self) -> anyhow::Result<Vec<NodeStatus>> {
+        let tasks = (0..self.len()).map(|id| self.fetch_status(id));
         futures::future::try_join_all(tasks).await
+    }
+
+    /// Reads a gauge from the node's `/metrics`, ignoring its labels.
+    pub async fn fetch_gauge(&self, id: usize, name: &str) -> anyhow::Result<i64> {
+        let url = self.url(id).join("/metrics").unwrap();
+        let body = self.http_client.get(url).send().await?.text().await?;
+        body.lines()
+            .find_map(|line| {
+                let rest = line.strip_prefix(name)?;
+                // `name value` or `name{labels} value`
+                let rest = match rest.strip_prefix('{') {
+                    Some(labels) => &labels[labels.find('}')? + 1..],
+                    None => rest,
+                };
+                rest.strip_prefix(' ')
+            })
+            .with_context(|| format!("metric {name} not found"))?
+            .trim()
+            .parse::<f64>()
+            .map(|v| v as i64)
+            .with_context(|| format!("metric {name} is not a number"))
     }
 
     pub async fn fetch_bench_metrics(&self, id: usize) -> anyhow::Result<BenchMetrics> {
@@ -95,19 +118,8 @@ impl Cluster {
         self.nodes.contract()
     }
 
-    pub fn triples(&self, idx: usize) -> TripleStorage {
-        self.nodes.ctx().redis.triple_storage(self.account_id(idx))
-    }
-
-    pub fn presignatures(&self, idx: usize) -> PresignatureStorage {
-        self.nodes
-            .ctx()
-            .redis
-            .presignature_storage(self.account_id(idx))
-    }
-
-    pub async fn contract_state(&self) -> anyhow::Result<ProtocolContractState> {
-        let state: ProtocolContractState = self
+    pub async fn contract_state(&self) -> anyhow::Result<ProtocolContractStateView> {
+        let state: ProtocolContractStateView = self
             .contract()
             .view("state")
             .finality(Finality::Final)
@@ -117,9 +129,9 @@ impl Cluster {
         Ok(state)
     }
 
-    pub async fn expect_running(&self) -> anyhow::Result<RunningContractState> {
+    pub async fn expect_running(&self) -> anyhow::Result<RunningContractStateView> {
         let state = self.contract_state().await?;
-        if let ProtocolContractState::Running(state) = state {
+        if let ProtocolContractStateView::Running(state) = state {
             Ok(state)
         } else {
             anyhow::bail!("expected running state, got {:?}", state)
@@ -144,7 +156,7 @@ impl Cluster {
     }
 
     pub async fn root_public_key(&self) -> anyhow::Result<near_sdk::PublicKey> {
-        let state: RunningContractState = self.expect_running().await?;
+        let state: RunningContractStateView = self.expect_running().await?;
         Ok(state.public_key)
     }
 
@@ -236,15 +248,8 @@ impl Cluster {
         let kick = kick
             .unwrap_or_else(|| participant_accounts.last().unwrap().id())
             .clone();
-        let voting_accounts = participant_accounts
-            .iter()
-            .filter(|account| account.id() != &kick)
-            .take(state.threshold)
-            .cloned()
-            .collect::<Vec<_>>();
 
-        tracing::info!(?voting_accounts, %kick, at_epoch = state.epoch, "kicking participant");
-        vote_leave(&voting_accounts, self.contract().id(), &kick).await?;
+        self.kick_participants(std::slice::from_ref(&kick)).await?;
 
         let new_state = self
             .wait()
@@ -273,6 +278,38 @@ impl Cluster {
         Ok(config)
     }
 
+    /// Reshares the network by voting to join new candidates and/or kick existing participants in a single batch.
+    pub async fn reshare_participants(
+        &self,
+        joins: &[&AccountId],
+        kicks: &[&AccountId],
+    ) -> anyhow::Result<()> {
+        let state = self.expect_running().await?;
+        let participant_accounts = self.participant_accounts().await?;
+        let kick_set: std::collections::HashSet<_> = kicks.iter().copied().collect();
+        let voting_accounts: Vec<&Account> = participant_accounts
+            .into_iter()
+            .filter(|account| !kick_set.contains(account.id()))
+            .take(state.threshold)
+            .collect();
+
+        tracing::info!(
+            ?voting_accounts,
+            ?joins,
+            ?kicks,
+            at_epoch = state.epoch,
+            "batch resharing participants"
+        );
+        vote_reshare(&voting_accounts, self.contract().id(), joins, kicks).await?;
+        Ok(())
+    }
+
+    /// Kicks multiple nodes out of the network in a single batch resharing vote.
+    pub async fn kick_participants(&self, kicks: &[AccountId]) -> anyhow::Result<()> {
+        let kick_refs: Vec<&AccountId> = kicks.iter().collect();
+        self.reshare_participants(&[], &kick_refs).await
+    }
+
     pub async fn propose_update(&self, args: ProposeUpdateArgs) -> mpc_contract::update::UpdateId {
         let accounts = self.nodes.near_accounts();
         accounts[0]
@@ -298,21 +335,51 @@ impl Cluster {
 
     pub async fn vote_update(&self, id: UpdateId) {
         let participants = self.participant_accounts().await.unwrap();
+        let voting_accounts = participants
+            .iter()
+            .take(self.cfg.threshold)
+            .cloned()
+            .collect::<Vec<_>>();
 
         let mut success = 0;
-        for account in participants.iter() {
-            let execution = account
-                .call(self.contract().id(), "vote_update")
-                .args_json((id,))
-                .max_gas()
-                .transact()
-                .await
-                .unwrap()
-                .into_result();
+        for account in voting_accounts {
+            let mut voted = false;
+            for attempt in 1..=3 {
+                let tx = account
+                    .call(self.contract().id(), "vote_update")
+                    .args_json((id,))
+                    .max_gas()
+                    .transact()
+                    .await;
 
-            match execution {
-                Ok(_) => success += 1,
-                Err(e) => tracing::warn!(?id, ?e, "Failed to vote for update"),
+                match tx {
+                    Ok(outcome) => match outcome.into_result() {
+                        Ok(_) => {
+                            success += 1;
+                            voted = true;
+                            break;
+                        }
+                        Err(e) => {
+                            // Once threshold is reached by another voter, remaining votes may race
+                            // and fail with `Update not found` even though update succeeded.
+                            if format!("{e:#}").contains("Update not found") {
+                                success += 1;
+                                voted = true;
+                                break;
+                            }
+                            tracing::warn!(?id, %attempt, ?e, "Failed to vote for update");
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(?id, %attempt, ?e, "RPC failure while voting for update");
+                    }
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+
+            if !voted {
+                tracing::warn!(?id, account = %account.id(), "exhausted vote_update retries");
             }
         }
 
@@ -324,14 +391,17 @@ impl Cluster {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    pub async fn prestockpile(&self, prestockpile: Prestockpile) {
+    pub async fn stockpile(&self, prestockpile: &Prestockpile) {
         let participants = self.participants().await.unwrap();
         self.nodes
             .ctx()
             .redis
             .stockpile_triples(&self.cfg, &participants, prestockpile.multiplier)
             .await;
+    }
 
+    /// Waits until every node owns `min_presignatures` presignatures.
+    pub async fn wait_stockpiled(&self) {
         self.wait()
             .min_mine_presignatures(self.cfg.protocol.presignature.min_presignatures as usize)
             .await

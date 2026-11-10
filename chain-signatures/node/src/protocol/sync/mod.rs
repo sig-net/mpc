@@ -2,31 +2,51 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
+use mpc_keys::hpke::{self, Ciphered};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinSet;
 
+use crate::config::NetworkConfig;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::ContractStateWatcher;
-use crate::storage::{PresignatureStorage, TripleStorage};
+use crate::storage::{PresignatureStorage, StorageError, TripleStorage};
 
-use super::contract::primitives::ParticipantInfo;
+use super::contract::primitives::{ParticipantInfo, ParticipantMap, Participants};
+use super::message::{MessageError, SignedMessage};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 
-/// The maximum number of update requests that can be queued. This is pretty much just
-/// based on the number of participants in the network. If we have 1024 participants then
-/// our issue will more than likely not be the channel size.
-const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
+/// Capacity of the sync report channel. This is pretty much just based on the
+/// number of participants in the network. If we have 1024 participants then our
+/// issue will more than likely not be the channel size.
+const MAX_SYNC_REPORTS: usize = 1024;
 
-/// The interval which we will try to sync with other nodes to see if they have lost track
-/// of anything.
-pub const RECURRING_SYNC_INTERVAL: Duration = Duration::from_secs(3600 * 24);
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error("not a participant yet")]
+    NotParticipant,
+    #[error("rejected sync update: {0}")]
+    Rejected(MessageError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    #[error("failed to encrypt sync response: {0}")]
+    Encrypt(MessageError),
+}
+
+/// Result of a sync RPC to a single peer.
+pub enum SyncPeerResponse {
+    /// Self-peer: no RPC was performed.
+    SelfPeer,
+    /// Peer responded successfully with its view of not_found artifacts.
+    Success(SyncUpdate),
+    /// RPC to peer failed.
+    Failed(String),
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
-    pub from: Participant,
     pub triples: Vec<TripleId>,
     pub presignatures: Vec<PresignatureId>,
 }
@@ -34,7 +54,6 @@ pub struct SyncUpdate {
 impl SyncUpdate {
     pub fn empty() -> Self {
         Self {
-            from: Participant::from(u32::MAX),
             triples: Vec::new(),
             presignatures: Vec::new(),
         }
@@ -45,8 +64,54 @@ impl SyncUpdate {
     }
 }
 
-pub struct SyncRequestReceiver {
-    updates: mpsc::Receiver<SyncUpdate>,
+/// Handle a peer's `/sync` request: drop the artifacts the signer no longer
+/// owns and reply, signed and encrypted to the signer, with the ids we do not
+/// hold.
+pub async fn process_sync_update(
+    update: &Ciphered,
+    triples: &TripleStorage,
+    presignatures: &PresignatureStorage,
+    me: Participant,
+    network: &NetworkConfig,
+    participants: &ParticipantMap,
+) -> Result<Ciphered, SyncError> {
+    let start = Instant::now();
+
+    // The signer is the owner whose shares we drop.
+    let (from, update) = SignedMessage::decrypt_with::<SyncUpdate, _>(
+        update,
+        &network.cipher_sk,
+        participants,
+        |_| Ok(()),
+    )
+    .map_err(SyncError::Rejected)?;
+
+    let outdated_triples = triples.remove_outdated(from, &update.triples).await?;
+    let outdated_presignatures = presignatures
+        .remove_outdated(from, &update.presignatures)
+        .await?;
+
+    tracing::info!(
+        removed_triples = outdated_triples.removed.len(),
+        removed_presignatures = outdated_presignatures.removed.len(),
+        not_found_triples = outdated_triples.not_found.len(),
+        not_found_presignatures = outdated_presignatures.not_found.len(),
+        elapsed = ?start.elapsed(),
+        "processed sync update",
+    );
+
+    let response = SyncUpdate {
+        triples: outdated_triples.not_found,
+        presignatures: outdated_presignatures.not_found,
+    };
+    // The signature check above found the sender in `participants`.
+    let info = participants
+        .get(&from)
+        .ok_or(SyncError::Rejected(MessageError::Verification(
+            "sync sender is not a participant",
+        )))?;
+    SignedMessage::encrypt(&response, me, &network.sign_sk, &info.cipher_pk)
+        .map_err(SyncError::Encrypt)
 }
 
 pub struct SyncTask {
@@ -55,11 +120,10 @@ pub struct SyncTask {
     presignatures: PresignatureStorage,
     mesh_state: watch::Receiver<MeshState>,
     contract: ContractStateWatcher,
-    requests: SyncRequestReceiver,
-    synced_peer_tx: mpsc::Sender<Participant>,
+    sync_report_tx: SyncReportSender,
+    network: NetworkConfig,
 }
 
-// TODO: add a watch channel for mesh active participants.
 impl SyncTask {
     pub fn new(
         client: &NodeClient,
@@ -67,275 +131,294 @@ impl SyncTask {
         presignatures: PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
         contract: ContractStateWatcher,
-        synced_peer_tx: mpsc::Sender<Participant>,
-    ) -> (SyncChannel, Self) {
-        let (requests, channel) = SyncChannel::new();
-        let task = Self {
+        sync_report_tx: SyncReportSender,
+        network: NetworkConfig,
+    ) -> Self {
+        Self {
             client: client.clone(),
             triples,
             presignatures,
             mesh_state,
             contract,
-            requests,
-            synced_peer_tx,
-        };
-        (channel, task)
+            sync_report_tx,
+            network,
+        }
     }
 
     pub async fn run(mut self) {
-        tracing::info!("task has been started");
-        let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
+        tracing::info!("sync task has been started");
+        // Trigger sync broadcasts to peers in need_sync state
         let mut sync_interval = tokio::time::interval(Duration::from_millis(200));
-        // Broadcast should generally not be necessary.
-        let mut broadcast_interval = tokio::time::interval(RECURRING_SYNC_INTERVAL);
-        let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(100));
 
-        // Do NOT start until we have our own participant info.
-        // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
-        let (_threshold, me) = loop {
-            watcher_interval.tick().await;
-            if let Some(info) = self.contract.info().await {
-                break info;
+        // Do NOT start until we have our own participant info
+        tracing::info!("sync waiting for participant info");
+        let start = Instant::now();
+        let (_, me) = self.contract.wait_info().await;
+        tracing::info!(?me, elapsed = ?start.elapsed(), "starting sync loop...");
+
+        self.triples.set_me(me);
+        self.presignatures.set_me(me);
+
+        loop {
+            sync_interval.tick().await;
+
+            let need_sync = self.mesh_state.borrow().need_sync().clone();
+            if need_sync.is_empty() {
+                continue;
+            }
+
+            let Some(update) = self.new_update().await else {
+                continue;
+            };
+            let start = Instant::now();
+            let receivers = need_sync
+                .iter()
+                .map(|(p, info)| (*p, info.clone()))
+                .collect::<Vec<_>>();
+            let responses = broadcast_sync(
+                self.client.clone(),
+                update,
+                receivers.into_iter(),
+                me,
+                self.network.clone(),
+            )
+            .await;
+
+            // Re-read every time: resharing can change the threshold.
+            let Some((threshold, _)) = self.contract.info().await else {
+                tracing::warn!("contract has no threshold yet, dropping sync responses");
+                continue;
+            };
+            // Process sync responses: update artifact participants based on not_found data
+            if let Err(err) = self.process_sync_responses(responses, threshold).await {
+                tracing::warn!(?err, "failed to process sync responses");
+            }
+            tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
+        }
+    }
+
+    async fn new_update(&self) -> Option<SyncUpdate> {
+        let triples = match self.triples.fetch_owned_with_reserved().await {
+            Ok(ids) => ids,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to fetch owned triples, skipping sync broadcast"
+                );
+                return None;
             }
         };
-        tracing::info!(?me, "mpc network ready, running...");
+        let presignatures = match self.presignatures.fetch_owned_with_reserved().await {
+            Ok(ids) => ids,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to fetch owned presignatures, skipping sync broadcast"
+                );
+                return None;
+            }
+        };
 
-        let mut broadcast = Option::<(Instant, JoinHandle<_>)>::None;
-        loop {
-            tokio::select! {
-                // find nodes that need syncing and initiate it
-                _ = sync_interval.tick() => {
-                    if broadcast.is_some() {
-                        // another broadcast task is still ongoing, skip.
-                        continue;
-                    }
+        Some(SyncUpdate {
+            triples,
+            presignatures,
+        })
+    }
 
-                    let need_sync = &self.mesh_state.borrow().need_sync.clone();
-                    if need_sync.is_empty() {
-                        continue;
-                    }
-
-                    let update = self.new_update(me).await;
-                    let start = Instant::now();
-                    let receivers = need_sync
-                        .iter()
-                        .map(|(p, info)|(*p, info.clone()))
-                        .collect::<Vec<_>>();
-                    let task = tokio::spawn(broadcast_sync(
-                        self.client.clone(),
-                        update,
-                        receivers.into_iter(),
-                        self.synced_peer_tx.clone(),
-                        me,
-                    ));
-                    broadcast = Some((start, task));
-                }
-                // do a new broadcast if there is no ongoing broadcast.
-                _ = broadcast_interval.tick() => {
-                    if broadcast.is_some() {
-                        // task is still ongoing, skip.
-                        continue;
-                    }
-
-                    let update = self.new_update(me).await;
-                    let active = self.mesh_state.borrow().active.clone();
-
-                    let start = Instant::now();
-                    let task = tokio::spawn(broadcast_sync(
-                        self.client.clone(),
-                        update,
-                        active.into_iter(),
-                        self.synced_peer_tx.clone(),
-                        me
-                    ));
-                    broadcast = Some((start, task));
-                }
-                // check that our broadcast has completed, and if so process the result.
-                _ = broadcast_check_interval.tick() => {
-                    let Some((start, handle)) = broadcast.take() else {
-                        continue;
-                    };
-                    if !handle.is_finished() {
-                        // task is not finished yet, put it back:
-                        broadcast = Some((start, handle));
-                        continue;
-                    }
-
-                    if let Err(err) = handle.await {
-                        tracing::warn!(?err, "broadcast task failed");
-                    } else {
-                        tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
+    /// Process sync responses:
+    /// 1. Remove peers from artifact participants if they're missing data
+    /// 2. Send synced peer notifications to mesh (for status transitions)
+    async fn process_sync_responses(
+        &self,
+        responses: Vec<(Participant, SyncPeerResponse)>,
+        threshold: usize,
+    ) -> Result<(), String> {
+        for (peer, result) in responses {
+            match result {
+                SyncPeerResponse::SelfPeer => {
+                    if self
+                        .sync_report_tx
+                        .send((peer, SyncKind::Synced))
+                        .await
+                        .is_err()
+                    {
+                        tracing::error!("sync reporter is down: state sync will no longer work");
+                        return Err("sync reporter is down".to_string());
                     }
                 }
-                Some(req) = self.requests.updates.recv() => {
-                    tokio::spawn(req.process(self.triples.clone(), self.presignatures.clone()));
+                SyncPeerResponse::Success(response) => {
+                    tracing::debug!(
+                        ?peer,
+                        not_found_triples = response.triples.len(),
+                        not_found_presignatures = response.presignatures.len(),
+                        "received sync response"
+                    );
+
+                    // Batch remove peer from all triples and prune
+                    let triple_res = self
+                        .triples
+                        .remove_holder_and_prune(peer, threshold, &response.triples)
+                        .await;
+
+                    // Batch remove peer from all presignatures and prune
+                    let presig_res = self
+                        .presignatures
+                        .remove_holder_and_prune(peer, threshold, &response.presignatures)
+                        .await;
+
+                    match (triple_res, presig_res) {
+                        (Ok((t_removed, t_updated)), Ok((p_removed, p_updated))) => {
+                            tracing::info!(
+                                ?peer,
+                                removed_triples = t_removed.len(),
+                                updated_triples = t_updated.len(),
+                                removed_presignatures = p_removed.len(),
+                                updated_presignatures = p_updated.len(),
+                                "batch removed peer from artifacts and pruned"
+                            );
+                            // Only notify mesh if both succeeded
+                            if self
+                                .sync_report_tx
+                                .send((peer, SyncKind::Synced))
+                                .await
+                                .is_err()
+                            {
+                                tracing::error!(
+                                    ?peer,
+                                    "sync reporter is down: state sync will no longer work"
+                                );
+                                return Err("sync reporter is down".to_string());
+                            }
+                        }
+                        (triple_res, presig_res) => {
+                            tracing::warn!(
+                                ?peer,
+                                ?triple_res,
+                                ?presig_res,
+                                "sync batch failed, not notifying mesh"
+                            );
+                        }
+                    }
+                }
+                SyncPeerResponse::Failed(err) => {
+                    tracing::warn!(?peer, ?err, "failed to sync peer");
                 }
             }
         }
+
+        Ok(())
     }
 
-    // TODO: use reserved values instead. Note that we cannot fetch our own triples via reserved
-    async fn new_update(&self, me: Participant) -> SyncUpdate {
-        let triples = self.triples.fetch_owned(me).await;
-        let presignatures = self.presignatures.fetch_owned(me).await;
-
-        SyncUpdate {
-            from: me,
-            triples,
-            presignatures,
-        }
-    }
-
-    /// Channel for communicating back from the sync task which nodes are now updated.
-    pub fn synced_nodes_channel() -> (mpsc::Sender<Participant>, mpsc::Receiver<Participant>) {
-        mpsc::channel(MAX_SYNC_UPDATE_REQUESTS)
+    /// Channel for reporting to the mesh which nodes changed sync status.
+    /// Sized well above the participant count: a full channel drops whatever
+    /// report is being sent, and the cost of losing a desync report is one
+    /// more failed round for that peer.
+    pub fn sync_report_channel() -> (SyncReportSender, SyncReportReceiver) {
+        mpsc::channel(MAX_SYNC_REPORTS)
     }
 }
 
+/// Which way a peer's sync status changed. `Synced` comes from the sync task
+/// once a peer's artifacts have been reconciled; `Desynced` comes from anyone
+/// who learns our record of what that peer stores is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncKind {
+    Synced,
+    Desynced,
+}
+
+pub type SyncReportSender = mpsc::Sender<(Participant, SyncKind)>;
+pub type SyncReportReceiver = mpsc::Receiver<(Participant, SyncKind)>;
+
 /// Broadcast an update to all participants specified by `receivers`.
+/// Returns results for all peers. Every call is bounded by the client's sync
+/// timeout, and peers that fail are retried on a later broadcast.
 async fn broadcast_sync(
     client: NodeClient,
     update: SyncUpdate,
     receivers: impl Iterator<Item = (Participant, ParticipantInfo)>,
-    synced_peer_tx: mpsc::Sender<Participant>,
     me: Participant,
-) {
-    if update.is_empty() {
-        for (participant, _) in receivers {
-            if synced_peer_tx.send(participant).await.is_err() {
-                tracing::error!(
-                    ?participant,
-                    "sync reporter is down: state sync will no longer work"
-                );
-            }
-        }
-        return;
-    }
-
-    let start = Instant::now();
+    network: NetworkConfig,
+) -> Vec<(Participant, SyncPeerResponse)> {
     let mut tasks = JoinSet::new();
     let update = Arc::new(update);
+
     for (p, info) in receivers {
         let client = client.clone();
         let update = update.clone();
-        let url = info.url;
-        let sync_tx = synced_peer_tx.clone();
+        let network = network.clone();
         tasks.spawn(async move {
-            // Only actually do the sync on other peers, not on self. (Hack) We
-            // still want to send the message to synced_peer_tx though, since
-            // the mesh does not currently understand which node is self, so it
-            // will trigger a sync to self.
-            let sync_view = if p != me {
-                let res = client.sync(&url, &update).await;
-                Some(res)
+            let sync_result = if p != me {
+                match sync_peer(&client, &update, me, &network, p, &info).await {
+                    Ok(response) => SyncPeerResponse::Success(response),
+                    Err(err) => SyncPeerResponse::Failed(err),
+                }
             } else {
-                None
+                SyncPeerResponse::SelfPeer
             };
-            if sync_tx.send(p).await.is_err() {
-                tracing::error!("sync reporter is down: state sync will no longer work")
-            }
-            (p, sync_view)
+            (p, sync_result)
         });
     }
 
-    let resps = tasks
-        .join_all()
+    let mut results = Vec::new();
+    while let Some(res) = tasks.join_next().await {
+        match res {
+            Ok((p, sync_result)) => results.push((p, sync_result)),
+            Err(err) => tracing::warn!(?err, "sync task failed"),
+        }
+    }
+
+    results
+}
+
+/// Send our signed update to `peer` and open its signed reply.
+async fn sync_peer(
+    client: &NodeClient,
+    update: &SyncUpdate,
+    me: Participant,
+    network: &NetworkConfig,
+    peer: Participant,
+    info: &ParticipantInfo,
+) -> Result<SyncUpdate, String> {
+    let encrypted = SignedMessage::encrypt(update, me, &network.sign_sk, &info.cipher_pk)
+        .map_err(|err| err.to_string())?;
+    let reply = client
+        .sync(&info.url, &encrypted)
         .await
-        .into_iter()
-        .filter_map(|(p, view)| {
-            if let Some(Ok(())) = view {
-                Some(p)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-
-    tracing::debug!(
-        elapsed = ?start.elapsed(),
-        responded = ?resps,
-        "broadcast completed",
-    );
+        .map_err(|err| err.to_string())?;
+    open_reply(&reply, &network.cipher_sk, peer, info).map_err(|err| err.to_string())
 }
 
-impl SyncUpdate {
-    async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
-        let start = Instant::now();
-
-        let outdated_triples = triples.remove_outdated(self.from, &self.triples).await;
-        let outdated_presignatures = presignatures
-            .remove_outdated(self.from, &self.presignatures)
-            .await;
-
-        if !outdated_triples.is_empty() || !outdated_presignatures.is_empty() {
-            tracing::info!(
-                outdated_triples = outdated_triples.len(),
-                outdated_presignatures = outdated_presignatures.len(),
-                elapsed = ?start.elapsed(),
-                "removed outdated",
-            );
-        }
+/// Decrypt a sync reply and check it was signed by `peer`, the node we asked.
+/// `info` must be `peer`'s entry from the contract.
+fn open_reply(
+    reply: &Ciphered,
+    cipher_sk: &hpke::SecretKey,
+    peer: Participant,
+    info: &ParticipantInfo,
+) -> Result<SyncUpdate, MessageError> {
+    let mut only_peer = Participants::default();
+    only_peer.insert(&peer, info.clone());
+    let (from, reply) = SignedMessage::decrypt_with::<SyncUpdate, _>(
+        reply,
+        cipher_sk,
+        &ParticipantMap::One(only_peer),
+        |_| Ok(()),
+    )?;
+    if from != peer {
+        return Err(MessageError::Verification(
+            "sync reply was not signed by the peer we asked",
+        ));
     }
+    Ok(reply)
 }
 
-#[derive(Clone)]
-pub struct SyncChannel {
-    request_update: mpsc::Sender<SyncUpdate>,
-}
-
-impl SyncChannel {
-    pub fn new() -> (SyncRequestReceiver, Self) {
-        let (request_update_tx, request_update_rx) = mpsc::channel(MAX_SYNC_UPDATE_REQUESTS);
-
-        let requests = SyncRequestReceiver {
-            updates: request_update_rx,
-        };
-        let channel = Self {
-            request_update: request_update_tx,
-        };
-
-        (requests, channel)
-    }
-
-    pub async fn request_update(&self, update: SyncUpdate) {
-        if let Err(err) = self.request_update.send(update).await {
-            tracing::warn!(?err, "failed to request update");
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::node_client::Options as NodeClientOptions;
-
-    #[tokio::test]
-    async fn test_broadcast_sync_on_empty_update() {
-        let client = NodeClient::new(&NodeClientOptions::default());
-        let update = SyncUpdate::empty();
-        let (tx, mut rx) = mpsc::channel(4);
-
-        let participants = vec![
-            (Participant::from(1u32), ParticipantInfo::new(1)),
-            (Participant::from(2u32), ParticipantInfo::new(2)),
-        ];
-
-        broadcast_sync(
-            client,
-            update,
-            participants.clone().into_iter(),
-            tx,
-            Participant::from(0u32),
-        )
-        .await;
-
-        let mut received = Vec::new();
-        for _ in 0..participants.len() {
-            received.push(rx.recv().await.expect("missing synced participant"));
-        }
-
-        let expected: Vec<_> = participants.iter().map(|(p, _)| *p).collect();
-        assert_eq!(received, expected);
-        assert!(rx.recv().await.is_none());
-    }
+#[cfg(any(test, feature = "test-feature"))]
+pub fn open_reply_for_test(
+    reply: &Ciphered,
+    cipher_sk: &hpke::SecretKey,
+    peer: Participant,
+    info: &ParticipantInfo,
+) -> Result<SyncUpdate, MessageError> {
+    open_reply(reply, cipher_sk, peer, info)
 }

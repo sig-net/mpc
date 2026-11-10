@@ -1,7 +1,6 @@
 use super::contract::{primitives::Participants, ResharingContractState};
 use super::triple::TripleSpawnerTask;
 use crate::protocol::presignature::PresignatureSpawnerTask;
-use crate::protocol::signature::SignatureSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 
 use cait_sith::protocol::Participant;
@@ -17,7 +16,7 @@ use std::time::{Duration, Instant};
 
 pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentNodeData {
     pub epoch: u64,
     pub private_share: SecretKeyShare,
@@ -77,7 +76,6 @@ pub struct RunningState {
     pub public_key: PublicKey,
     pub triple_task: TripleSpawnerTask,
     pub presign_task: PresignatureSpawnerTask,
-    pub sign_task: SignatureSpawnerTask,
 }
 
 pub struct ResharingState {
@@ -305,10 +303,6 @@ impl NodeStateWatcher {
 
     pub fn status(&self) -> NodeStatus {
         self.watcher.borrow().clone()
-    }
-
-    pub fn status_mut(&mut self) -> NodeStatus {
-        self.watcher.borrow_and_update().clone()
     }
 
     pub fn participants(&self) -> Vec<Participant> {

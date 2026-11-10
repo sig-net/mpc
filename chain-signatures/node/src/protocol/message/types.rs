@@ -1,31 +1,33 @@
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash as _};
 
 use cait_sith::protocol::{MessageData, Participant};
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::posit::PositAction;
+use crate::protocol::posit::{PositAction, PositRejectReason};
 use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
 use crate::types::Epoch;
 use mpc_keys::hpke;
-use mpc_primitives::SignId;
+use mpc_primitives::{RequestKind, SignId};
 
-#[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Protocols {
-    Generating,
-    Resharing,
-    Ready,
-    Triple,
-    Presignature,
-    Signature,
-}
+pub type Round = usize;
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum PositProtocolId {
     Triple(TripleId),
     Presignature(FullPresignatureId),
-    Signature(SignId, PresignatureId),
+    Signature(SignId, PresignatureId, Round, #[serde(default)] RequestKind),
+}
+
+impl PositProtocolId {
+    pub const fn signature(
+        sign_id: SignId,
+        kind: RequestKind,
+        presignature_id: PresignatureId,
+        round: Round,
+    ) -> Self {
+        Self::Signature(sign_id, presignature_id, round, kind)
+    }
 }
 
 /// The message associated with positing a new protocol.
@@ -44,7 +46,7 @@ impl PositMessage {
                 participants.len() * std::mem::size_of::<Participant>()
             }
             PositAction::Accept => 0,
-            PositAction::Reject => 0,
+            PositAction::RejectWithReason(_reason) => std::mem::size_of::<PositRejectReason>(),
         }
     }
 }
@@ -189,6 +191,21 @@ impl Message {
         }
     }
 
+    /// The participant this message claims to come from — unverified data;
+    /// the inbox checks it against the authenticated envelope sender.
+    pub fn claimed_sender(&self) -> Option<Participant> {
+        match self {
+            Message::Posit(msg) => Some(msg.from),
+            Message::Generating(msg) => Some(msg.from),
+            Message::Resharing(msg) => Some(msg.from),
+            Message::Ready(msg) => Some(msg.from),
+            Message::Triple(msg) => Some(msg.from),
+            Message::Presignature(msg) => Some(msg.from),
+            Message::Signature(msg) => Some(msg.from),
+            Message::Unknown(_) => None,
+        }
+    }
+
     /// The size of the message in bytes.
     pub fn size(&self) -> usize {
         match self {
@@ -220,70 +237,4 @@ pub enum MessageError {
     Verification(&'static str),
     #[error("idempotent check failed")]
     Idempotent,
-}
-
-pub trait ProtocolType {
-    const PROTOCOL: Protocols;
-}
-
-impl ProtocolType for GeneratingMessage {
-    const PROTOCOL: Protocols = Protocols::Generating;
-}
-
-impl ProtocolType for ResharingMessage {
-    const PROTOCOL: Protocols = Protocols::Resharing;
-}
-
-impl ProtocolType for ReadyMessage {
-    const PROTOCOL: Protocols = Protocols::Ready;
-}
-
-impl ProtocolType for TripleMessage {
-    const PROTOCOL: Protocols = Protocols::Triple;
-}
-
-impl ProtocolType for PresignatureMessage {
-    const PROTOCOL: Protocols = Protocols::Presignature;
-}
-
-impl ProtocolType for SignatureMessage {
-    const PROTOCOL: Protocols = Protocols::Signature;
-}
-
-impl ProtocolType for (SignId, PresignatureId) {
-    const PROTOCOL: Protocols = Protocols::Signature;
-}
-
-pub trait MessageFilterId: ProtocolType {
-    fn id(&self) -> u64;
-}
-
-impl MessageFilterId for TripleMessage {
-    fn id(&self) -> u64 {
-        self.id
-    }
-}
-
-impl MessageFilterId for PresignatureMessage {
-    fn id(&self) -> u64 {
-        self.id
-    }
-}
-
-impl MessageFilterId for SignatureMessage {
-    fn id(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.id.hash(&mut hasher);
-        self.presignature_id.hash(&mut hasher);
-        std::hash::Hasher::finish(&hasher)
-    }
-}
-
-impl MessageFilterId for (SignId, PresignatureId) {
-    fn id(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.0.hash(&mut hasher);
-        self.1.hash(&mut hasher);
-        std::hash::Hasher::finish(&hasher)
-    }
 }

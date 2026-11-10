@@ -1,7 +1,55 @@
 pub mod common;
-use common::init_env;
+use common::{init_env, init_env_with_participant_count};
 
 use serde_json::json;
+
+use mpc_contract::primitives::CandidateEntry;
+use near_workspaces::result::ExecutionFinalResult;
+use near_workspaces::types::NearToken;
+use near_workspaces::{Account, AccountId, Contract};
+
+async fn candidate_info(contract: &Contract, account_id: &AccountId) -> Option<CandidateEntry> {
+    contract
+        .view("candidate_info")
+        .args_json(json!({ "account_id": account_id }))
+        .await
+        .unwrap()
+        .json()
+        .unwrap()
+}
+
+const JOIN_URL: &str = "127.0.0.1";
+const JOIN_SIGN_PK: &str = "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae";
+
+/// Submit a `join` request from `account`. A `deposit` of `None` attaches none,
+/// which the contract rejects.
+async fn join_with(
+    account: &Account,
+    contract: &Contract,
+    url: String,
+    deposit: Option<NearToken>,
+) -> anyhow::Result<ExecutionFinalResult> {
+    let mut tx = account.call(contract.id(), "join").args_json(json!({
+        "url": url,
+        "cipher_pk": vec![1u8; 32],
+        "sign_pk": JOIN_SIGN_PK,
+    }));
+    if let Some(deposit) = deposit {
+        tx = tx.deposit(deposit);
+    }
+    Ok(tx.transact().await?)
+}
+
+/// `join` with the standard url and the required 1 NEAR deposit.
+async fn join(account: &Account, contract: &Contract) -> anyhow::Result<ExecutionFinalResult> {
+    join_with(
+        account,
+        contract,
+        JOIN_URL.to_owned(),
+        Some(NearToken::from_near(1)),
+    )
+    .await
+}
 
 #[tokio::test]
 async fn test_join() -> anyhow::Result<()> {
@@ -9,50 +57,82 @@ async fn test_join() -> anyhow::Result<()> {
 
     let alice = worker.dev_create_account().await?;
 
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
 
     assert!(execution.is_success());
 
-    let state: mpc_contract::ProtocolContractState =
-        contract.view("state").await.unwrap().json().unwrap();
-    match state {
-        mpc_contract::ProtocolContractState::Running(r) => {
-            assert!(r.candidates.contains_key(alice.id()));
-        }
-        _ => panic!("should be in running state"),
-    };
+    let candidate = candidate_info(&contract, alice.id())
+        .await
+        .expect("alice should be a candidate");
+    assert_eq!(candidate.info.account_id, *alice.id());
+    assert_eq!(candidate.info.url, "127.0.0.1");
+    assert!(candidate.join_votes.is_empty());
 
     // try join again, still ok, because not become participant yet
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
 
     // participant try join again, should fail
-    let execution = accounts[0]
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .transact()
-        .await?;
+    let execution = join(&accounts[0], &contract).await?;
     assert!(execution.is_failure());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_join_requires_deposit() -> anyhow::Result<()> {
+    let (worker, contract, _, _) = init_env().await;
+    let alice = worker.dev_create_account().await?;
+
+    let execution = join_with(&alice, &contract, JOIN_URL.to_owned(), None).await?;
+
+    assert!(execution.is_failure());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_join_rejects_oversized_url() -> anyhow::Result<()> {
+    let (worker, contract, _, _) = init_env().await;
+    let alice = worker.dev_create_account().await?;
+
+    // Deposit is attached so the call can only fail on the url length check.
+    let execution = join_with(
+        &alice,
+        &contract,
+        "a".repeat(mpc_contract::MAX_JOIN_URL_LEN + 1),
+        Some(NearToken::from_near(1)),
+    )
+    .await?;
+
+    assert!(execution.is_failure());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_join_refunds_excess_deposit() -> anyhow::Result<()> {
+    let (worker, contract, _, _) = init_env().await;
+
+    let alice = worker.dev_create_account().await?;
+    let balance = alice.view_account().await?.balance;
+    let execution = join_with(
+        &alice,
+        &contract,
+        JOIN_URL.to_owned(),
+        Some(NearToken::from_near(2)),
+    )
+    .await?;
+    assert!(execution.is_success());
+
+    let new_balance = alice.view_account().await?.balance;
+    let spent = balance.as_millinear() - new_balance.as_millinear();
+    assert!(
+        spent < 1100,
+        "excess deposit should be refunded; spent {spent} milliNEAR"
+    );
+    assert!(
+        spent >= 1000,
+        "required join deposit should remain with the contract; spent {spent} milliNEAR"
+    );
+
     Ok(())
 }
 
@@ -62,26 +142,14 @@ async fn test_remove_candidacy() -> anyhow::Result<()> {
 
     // Create a new account to join as candidate
     let alice = worker.dev_create_account().await?;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
 
     // Verify alice is in candidates
-    let state: mpc_contract::ProtocolContractState =
-        contract.view("state").await.unwrap().json().unwrap();
-    match state {
-        mpc_contract::ProtocolContractState::Running(r) => {
-            assert!(r.candidates.contains_key(alice.id()));
-        }
-        _ => panic!("should be in running state"),
-    };
+    assert!(
+        candidate_info(&contract, alice.id()).await.is_some(),
+        "alice should be a candidate"
+    );
 
     // Vote for alice to join
     let execution = accounts[0]
@@ -94,16 +162,15 @@ async fn test_remove_candidacy() -> anyhow::Result<()> {
     assert!(execution.is_success());
 
     // Verify votes exist for alice
-    let state: mpc_contract::ProtocolContractState =
-        contract.view("state").await.unwrap().json().unwrap();
-    match state {
-        mpc_contract::ProtocolContractState::Running(state) => {
-            assert!(state.candidates.contains_key(alice.id()));
-            assert!(state.join_votes.contains_key(alice.id()));
-            assert_eq!(state.join_votes.votes.get(alice.id()).unwrap().len(), 1);
-        }
-        _ => panic!("should be in running state"),
-    };
+    let candidate = candidate_info(&contract, alice.id())
+        .await
+        .expect("alice should be a candidate");
+    assert_eq!(
+        candidate.join_votes.len(),
+        1,
+        "alice should have exactly one join vote"
+    );
+    assert!(candidate.join_votes.contains(accounts[0].id()));
 
     // Alice revokes her join request
     let execution = alice
@@ -113,15 +180,10 @@ async fn test_remove_candidacy() -> anyhow::Result<()> {
     assert!(execution.is_success());
 
     // Verify alice is no longer in candidates and votes are cleaned up
-    let state: mpc_contract::ProtocolContractState =
-        contract.view("state").await.unwrap().json().unwrap();
-    match state {
-        mpc_contract::ProtocolContractState::Running(r) => {
-            assert!(!r.candidates.contains_key(alice.id()));
-            assert!(!r.join_votes.contains_key(alice.id()));
-        }
-        _ => panic!("should be in running state"),
-    };
+    assert!(
+        candidate_info(&contract, alice.id()).await.is_none(),
+        "alice should no longer be a candidate"
+    );
 
     // Try to revoke again, should fail (not a candidate anymore)
     let execution = alice
@@ -153,15 +215,7 @@ async fn test_vote_join() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
 
     let alice = worker.dev_create_account().await?;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
 
     // vote by first candidate should success, but vote not pass threshold yet
@@ -200,15 +254,7 @@ async fn test_vote_join() -> anyhow::Result<()> {
 
     // another try to join should fail, because it's in Resharing state now
     let bob = worker.dev_create_account().await?;
-    let execution = bob
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .transact()
-        .await?;
+    let execution = join(&bob, &contract).await?;
     assert!(execution.is_failure());
 
     Ok(())
@@ -220,15 +266,7 @@ async fn test_vote_leave() -> anyhow::Result<()> {
 
     let alice = worker.dev_create_account().await?;
     let bob = worker.dev_create_account().await?;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
     // now alice is candidate, bob is just a random account
 
@@ -275,16 +313,53 @@ async fn test_vote_leave() -> anyhow::Result<()> {
     let vote_pass: bool = execution.json().unwrap();
     assert!(vote_pass);
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Resharing(r) => {
+        mpc_contract::ProtocolContractStateView::Resharing(r) => {
             assert!(!r
                 .new_participants
                 .participants
                 .contains_key(accounts[0].id()));
+            assert!(!r
+                .new_participants
+                .account_to_participant_id
+                .contains_key(accounts[0].id()));
         }
         _ => panic!("should be in resharing state"),
+    };
+
+    // Complete resharing and verify the removed participant is fully gone
+    let execution = accounts[1]
+        .call(contract.id(), "vote_reshared")
+        .args_json(json!({ "epoch": 1 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let execution = accounts[2]
+        .call(contract.id(), "vote_reshared")
+        .args_json(json!({ "epoch": 1 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractStateView::Running(r) => {
+            assert!(
+                !r.participants.contains_key(accounts[0].id()),
+                "removed participant must not be in participants"
+            );
+            assert!(
+                !r.participants
+                    .account_to_participant_id
+                    .contains_key(accounts[0].id()),
+                "removed participant must not be in account_to_participant_id"
+            );
+        }
+        _ => panic!("should be in running state after resharing"),
     };
 
     Ok(())
@@ -344,15 +419,7 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
 
     // join a new candidate
     let alice = worker.dev_create_account().await?;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
 
     // vote to make it participant
@@ -376,10 +443,10 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
     assert!(execution.is_success());
     let vote_pass: bool = execution.json().unwrap();
     assert!(vote_pass);
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Resharing(r) => {
+        mpc_contract::ProtocolContractStateView::Resharing(r) => {
             assert!(r.new_participants.participants.contains_key(alice.id()));
         }
         _ => panic!("should be in resharing state"),
@@ -418,6 +485,8 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
         .await?;
     assert!(execution.is_failure());
 
+    // Completion is gated by the old threshold (2), so the second old-participant
+    // vote finishes resharing even though the new committee has 4 participants.
     let execution = accounts[1]
         .call(contract.id(), "vote_reshared")
         .args_json(json!({
@@ -429,12 +498,15 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
     let vote_pass: bool = execution.json().unwrap();
     assert!(vote_pass);
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Running(r) => {
+        mpc_contract::ProtocolContractStateView::Running(r) => {
             assert!(r.epoch == 1);
             assert!(r.participants.contains_key(alice.id()));
+            // The reshared key adopts the new threshold for 4 participants.
+            assert_eq!(r.threshold, mpc_contract::utils::compute_threshold(4));
+            assert_eq!(r.threshold, 3);
         }
         _ => panic!("should be in running state"),
     };
@@ -446,22 +518,14 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
 async fn test_cancel_resharing() -> anyhow::Result<()> {
     let (worker, contract, accounts, _) = init_env().await;
 
-    let initial_state: mpc_contract::ProtocolContractState =
+    let initial_state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
-    let mpc_contract::ProtocolContractState::Running(initial_state) = initial_state else {
+    let mpc_contract::ProtocolContractStateView::Running(initial_state) = initial_state else {
         panic!("expected running state");
     };
 
     let alice = worker.dev_create_account().await?;
-    let execution = alice
-        .call(contract.id(), "join")
-        .args_json(json!({
-            "url": "127.0.0.1",
-            "cipher_pk": vec![1u8; 32],
-            "sign_pk": "ed25519:J75xXmF7WUPS3xCm3hy2tgwLCKdYM1iJd4BWF8sWVnae",
-        }))
-        .transact()
-        .await?;
+    let execution = join(&alice, &contract).await?;
     assert!(execution.is_success());
 
     let execution = accounts[0]
@@ -486,10 +550,10 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
     let vote_pass: bool = execution.json().unwrap();
     assert!(vote_pass);
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     assert!(
-        matches!(state, mpc_contract::ProtocolContractState::Resharing(_)),
+        matches!(state, mpc_contract::ProtocolContractStateView::Resharing(_)),
         "should be in resharing state",
     );
 
@@ -502,6 +566,8 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
     let cancel_pass: bool = execution.json().unwrap();
     assert!(!cancel_pass);
 
+    // Cancellation is gated by the old threshold (2), so the second vote reverts
+    // the network to running.
     let execution = accounts[1]
         .call(contract.id(), "vote_cancel_resharing")
         .args_json(json!({}))
@@ -511,11 +577,13 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
     let cancel_pass: bool = execution.json().unwrap();
     assert!(cancel_pass);
 
-    let state: mpc_contract::ProtocolContractState =
+    let state: mpc_contract::ProtocolContractStateView =
         contract.view("state").await.unwrap().json().unwrap();
     match state {
-        mpc_contract::ProtocolContractState::Running(running_state) => {
+        mpc_contract::ProtocolContractStateView::Running(running_state) => {
             assert_eq!(running_state.epoch, initial_state.epoch);
+            // Cancelling leaves the key shares untouched, so the threshold is the
+            // exact original value.
             assert_eq!(running_state.threshold, initial_state.threshold);
             assert_eq!(running_state.public_key, initial_state.public_key);
             assert_eq!(
@@ -523,12 +591,864 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
                 initial_state.participants.participants
             );
             // the rest should be reset to empty
-            assert!(running_state.candidates.is_empty());
-            assert!(running_state.join_votes.is_empty());
             assert!(running_state.leave_votes.is_empty());
         }
         _ => panic!("should be back in running state"),
     }
+
+    Ok(())
+}
+
+/// The threshold is recomputed on every resharing, so adding and then removing a
+/// participant should move it in lockstep with the participant count.
+#[tokio::test]
+async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
+    let (worker, contract, accounts, _) = init_env().await;
+
+    async fn running(
+        contract: &near_workspaces::Contract,
+    ) -> mpc_contract::RunningContractStateView {
+        let state: mpc_contract::ProtocolContractStateView =
+            contract.view("state").await.unwrap().json().unwrap();
+        match state {
+            mpc_contract::ProtocolContractStateView::Running(r) => r,
+            other => panic!("expected running state, got {}", other.name()),
+        }
+    }
+
+    // Initially there are 3 participants: threshold = compute_threshold(3) = 2.
+    let state = running(&contract).await;
+    assert_eq!(state.participants.participants.len(), 3);
+    assert_eq!(
+        state.threshold,
+        mpc_contract::utils::compute_threshold(3),
+        "initial threshold should match the formula"
+    );
+    assert_eq!(state.threshold, 2);
+
+    // --- Add a 4th participant -------------------------------------------------
+    let alice = worker.dev_create_account().await?;
+    let execution = join(&alice, &contract).await?;
+    assert!(execution.is_success());
+
+    // Two votes (the current threshold) move the network into resharing.
+    for voter in &accounts[0..2] {
+        let execution = voter
+            .call(contract.id(), "vote_join")
+            .args_json(json!({ "candidate": alice.id() }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+    }
+
+    // Completion is gated by the old threshold (2), so the 2nd old-participant
+    // vote finishes resharing.
+    for (i, voter) in accounts.iter().enumerate().take(2) {
+        let execution = voter
+            .call(contract.id(), "vote_reshared")
+            .args_json(json!({ "epoch": 1 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+        let pass: bool = execution.json().unwrap();
+        assert_eq!(
+            pass,
+            i == 1,
+            "reshare should complete on the 2nd vote (old threshold 2)"
+        );
+    }
+
+    let state = running(&contract).await;
+    assert_eq!(state.participants.participants.len(), 4);
+    assert!(state.participants.participants.contains_key(alice.id()));
+    assert_eq!(
+        state.threshold,
+        mpc_contract::utils::compute_threshold(4),
+        "threshold should grow after adding a participant"
+    );
+    assert_eq!(state.threshold, 3);
+
+    // --- Remove a participant --------------------------------------------------
+    // Kick alice; three votes (the current threshold) trigger resharing.
+    for (i, voter) in accounts.iter().enumerate() {
+        let execution = voter
+            .call(contract.id(), "vote_leave")
+            .args_json(json!({ "kick": alice.id() }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+        let pass: bool = execution.json().unwrap();
+        assert_eq!(
+            pass,
+            i == 2,
+            "leave should trigger resharing only on the 3rd vote"
+        );
+    }
+
+    // The old committee had 4 participants (old threshold 3), so completion is
+    // gated by 3 votes even though the new committee shrinks to 3.
+    for (i, voter) in accounts.iter().enumerate() {
+        let execution = voter
+            .call(contract.id(), "vote_reshared")
+            .args_json(json!({ "epoch": 2 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+        let pass: bool = execution.json().unwrap();
+        assert_eq!(
+            pass,
+            i == 2,
+            "reshare should complete on the 3rd vote (old threshold 3)"
+        );
+    }
+
+    let state = running(&contract).await;
+    assert_eq!(state.participants.participants.len(), 3);
+    assert!(!state.participants.participants.contains_key(alice.id()));
+    assert_eq!(
+        state.threshold,
+        mpc_contract::utils::compute_threshold(3),
+        "threshold should shrink back after removing a participant"
+    );
+    assert_eq!(state.threshold, 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_threshold_votes_accumulate() -> anyhow::Result<()> {
+    // 7 participants, threshold 5 ─ valid changes are to 6 (compute(7)=5, max=6).
+    // We use `init_env_with_participant_count` here because the default
+    // 3-participant setup has no room for a threshold change (min=2, max=2,
+    // current=2).
+    let (worker, contract, accounts, _sk) = common::init_env_with_participant_count(7, 5).await;
+
+    // A single vote for new_threshold=6 is not enough to trigger resharing
+    // (threshold is 5).
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 6 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let pass: bool = execution.json().unwrap();
+    assert!(!pass, "a single vote must not start resharing");
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractStateView::Running(running) => {
+            assert_eq!(
+                running.threshold_votes.tally(6),
+                1,
+                "vote should be recorded under the proposed threshold"
+            );
+        }
+        other => panic!("expected running state, got {}", other.name()),
+    }
+
+    // A duplicate vote from the same voter does not double-count.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 6 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let pass: bool = execution.json().unwrap();
+    assert!(!pass, "duplicate vote must not start resharing");
+
+    // Four more distinct voters (total 5) trigger resharing.
+    for account in &accounts[1..5] {
+        let execution = account
+            .call(contract.id(), "vote_threshold")
+            .args_json(json!({ "new_threshold": 6 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+    }
+    // The 5th vote should have triggered resharing.
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    assert!(
+        matches!(state, mpc_contract::ProtocolContractStateView::Resharing(_)),
+        "5 votes must trigger resharing when threshold is 5"
+    );
+
+    // Non-participants are rejected.
+    let bob_account = worker.dev_create_account().await?;
+    let execution = bob_account
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 6 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_failure(),
+        "non-participants must not be able to vote"
+    );
+
+    Ok(())
+}
+
+/// A participant who switches their vote from one valid threshold to
+/// another must only back the new threshold — the old vote is removed.
+#[tokio::test]
+async fn test_vote_threshold_changes_vote() -> anyhow::Result<()> {
+    // 10 participants, threshold 7 — valid alternatives: 8, 9.
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(10, 7).await;
+
+    // Vote for threshold 8.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 8 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    match &state {
+        mpc_contract::ProtocolContractStateView::Running(running) => {
+            assert_eq!(
+                running.threshold_votes.tally(8),
+                1,
+                "vote should be recorded under threshold 8"
+            );
+            assert_eq!(
+                running.threshold_votes.tally(9),
+                0,
+                "no vote should exist for threshold 9 yet"
+            );
+        }
+        other => panic!("expected running state, got {}", other.name()),
+    }
+
+    // Switch to threshold 9; the vote for 8 must disappear.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 9 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    match &state {
+        mpc_contract::ProtocolContractStateView::Running(running) => {
+            assert_eq!(
+                running.threshold_votes.tally(8),
+                0,
+                "vote for threshold 8 must be removed after switching to 9"
+            );
+            assert_eq!(
+                running.threshold_votes.tally(9),
+                1,
+                "vote should now be recorded under threshold 9"
+            );
+        }
+        other => panic!("expected running state, got {}", other.name()),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_threshold_removes_vote() -> anyhow::Result<()> {
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(10, 6).await;
+
+    // Vote for threshold 8
+    accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 8 }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    if let mpc_contract::ProtocolContractStateView::Running(running) = &state {
+        assert_eq!(running.threshold_votes.tally(8), 1);
+    } else {
+        panic!("expected running state");
+    }
+
+    // Voting for current threshold (6) removes the vote for 8
+    accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 6 }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    if let mpc_contract::ProtocolContractStateView::Running(running) = &state {
+        assert_eq!(
+            running.threshold_votes.tally(8),
+            0,
+            "vote for threshold 8 must be removed after voting for current threshold"
+        );
+    } else {
+        panic!("expected running state");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_threshold_validation() -> anyhow::Result<()> {
+    // Use the configurable helper here — the default 3-participant setup has
+    // no room for a threshold change (min=2, max=2, current=2).
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(7, 5).await;
+
+    // new_threshold == current threshold (5) succeeds and removes existing vote.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 5 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_success(),
+        "voting current threshold should succeed"
+    );
+
+    // new_threshold > participants.len() (7) is rejected.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 8 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_failure(),
+        "threshold above participant count must be rejected"
+    );
+
+    // new_threshold == participants.len() (7) is rejected (no fault tolerance).
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 7 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_failure(),
+        "threshold equal to participant count must be rejected"
+    );
+
+    // new_threshold < compute_threshold(7) (5) is rejected.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 4 }))
+        .transact()
+        .await?;
+    assert!(
+        execution.is_failure(),
+        "threshold below compute_threshold must be rejected"
+    );
+
+    // new_threshold == 0 is rejected.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_threshold")
+        .args_json(json!({ "new_threshold": 0 }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure(), "zero threshold must be rejected");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_threshold_triggers_resharing() -> anyhow::Result<()> {
+    // 7 participants, threshold 5 ─ valid changes are to 6.
+    let (_, contract, accounts, _sk) = common::init_env_with_participant_count(7, 5).await;
+
+    // Raise the threshold from 5 → 6. Current threshold is 5, so 5 votes
+    // are required.
+    for account in &accounts[..5] {
+        let execution = account
+            .call(contract.id(), "vote_threshold")
+            .args_json(json!({ "new_threshold": 6 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+    }
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractStateView::Resharing(r) => {
+            // Same participant set, just a new threshold.
+            assert_eq!(
+                r.old_participants.participants,
+                r.new_participants.participants
+            );
+            assert_eq!(r.old_participants.participants.len(), 7);
+            assert_eq!(r.threshold, 5, "old threshold must stay put");
+            assert_eq!(
+                r.new_threshold, 6,
+                "new threshold must match the proposed value"
+            );
+        }
+        other => panic!("expected resharing state, got {}", other.name()),
+    }
+
+    // Completion is gated by the *old* threshold (5).
+    for account in &accounts[..5] {
+        let execution = account
+            .call(contract.id(), "vote_reshared")
+            .args_json(json!({ "epoch": 1 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+    }
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractStateView::Running(r) => {
+            assert_eq!(r.threshold, 6, "running state adopts the new threshold");
+            assert_eq!(r.epoch, 1, "epoch must bump after resharing");
+            assert_eq!(r.participants.participants.len(), 7);
+        }
+        other => panic!("expected running state, got {}", other.name()),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_reshare_batch_kick() -> anyhow::Result<()> {
+    // 5 participants, threshold 3
+    let (_worker, contract, accounts, _) = init_env_with_participant_count(5, 3).await;
+
+    let kick_1 = accounts[0].id();
+    let kick_2 = accounts[1].id();
+
+    // 2 votes should not meet threshold (3)
+    for voter in &accounts[2..4] {
+        let execution = voter
+            .call(contract.id(), "vote_reshare")
+            .args_json(json!({
+                "joins": [],
+                "kicks": [kick_1, kick_2],
+            }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+        let vote_pass: bool = execution.json().unwrap();
+        assert!(!vote_pass);
+    }
+
+    // 3rd vote reaches threshold 3 and triggers resharing
+    let execution = accounts[4]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [],
+            "kicks": [kick_1, kick_2],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let vote_pass: bool = execution.json().unwrap();
+    assert!(vote_pass);
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractStateView::Resharing(r) => {
+            assert_eq!(r.old_participants.participants.len(), 5);
+            assert_eq!(r.new_participants.participants.len(), 3);
+            assert!(!r.new_participants.participants.contains_key(kick_1));
+            assert!(!r.new_participants.participants.contains_key(kick_2));
+            assert_eq!(r.threshold, 3, "old threshold kept for completion");
+            assert_eq!(
+                r.new_threshold,
+                mpc_contract::utils::compute_threshold(3), // 2
+                "new threshold matches compute_threshold(3)"
+            );
+        }
+        other => panic!("expected resharing state, got {}", other.name()),
+    }
+
+    // Completion gated by old threshold (3)
+    for voter in &accounts[2..5] {
+        let execution = voter
+            .call(contract.id(), "vote_reshared")
+            .args_json(json!({ "epoch": 1 }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+    }
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractStateView::Running(r) => {
+            assert_eq!(r.epoch, 1);
+            assert_eq!(r.participants.participants.len(), 3);
+            assert_eq!(r.threshold, 2);
+            assert!(!r.participants.participants.contains_key(kick_1));
+            assert!(!r.participants.participants.contains_key(kick_2));
+        }
+        other => panic!("expected running state, got {}", other.name()),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_reshare_batch_join() -> anyhow::Result<()> {
+    // 3 participants, threshold 2
+    let (worker, contract, accounts, _) = init_env().await;
+
+    let alice = worker.dev_create_account().await?;
+    let bob = worker.dev_create_account().await?;
+    assert!(join(&alice, &contract).await?.is_success());
+    assert!(join(&bob, &contract).await?.is_success());
+
+    // 1st vote doesn't pass threshold 2
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [alice.id(), bob.id()],
+            "kicks": [],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let vote_pass: bool = execution.json().unwrap();
+    assert!(!vote_pass);
+
+    // 2nd vote reaches threshold 2
+    let execution = accounts[1]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            // Test unordered / set deduplication
+            "joins": [bob.id(), alice.id()],
+            "kicks": [],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let vote_pass: bool = execution.json().unwrap();
+    assert!(vote_pass);
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractStateView::Resharing(r) => {
+            assert_eq!(r.old_participants.participants.len(), 3);
+            assert_eq!(r.new_participants.participants.len(), 5);
+            assert!(r.new_participants.participants.contains_key(alice.id()));
+            assert!(r.new_participants.participants.contains_key(bob.id()));
+            assert_eq!(r.threshold, 2);
+            assert_eq!(
+                r.new_threshold,
+                mpc_contract::utils::compute_threshold(5), // 4
+            );
+        }
+        other => panic!("expected resharing state, got {}", other.name()),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_reshare_atomic_replacement() -> anyhow::Result<()> {
+    // 3 participants, threshold 2
+    let (worker, contract, accounts, _) = init_env().await;
+
+    let alice = worker.dev_create_account().await?;
+    assert!(join(&alice, &contract).await?.is_success());
+
+    let kick = accounts[0].id();
+
+    // 2 votes to replace accounts[0] with alice
+    for voter in &accounts[1..3] {
+        let execution = voter
+            .call(contract.id(), "vote_reshare")
+            .args_json(json!({
+                "joins": [alice.id()],
+                "kicks": [kick],
+            }))
+            .transact()
+            .await?;
+        assert!(execution.is_success());
+    }
+
+    let state: mpc_contract::ProtocolContractStateView =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractStateView::Resharing(r) => {
+            assert_eq!(r.new_participants.participants.len(), 3);
+            assert!(r.new_participants.participants.contains_key(alice.id()));
+            assert!(!r.new_participants.participants.contains_key(kick));
+            assert_eq!(r.new_threshold, 2);
+        }
+        other => panic!("expected resharing state, got {}", other.name()),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_reshare_retract_and_update() -> anyhow::Result<()> {
+    // 3 participants, threshold 2
+    let (_worker, contract, accounts, _) = init_env().await;
+
+    // Voter 0 votes to kick accounts[1]
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [],
+            "kicks": [accounts[1].id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Voter 0 retracts by voting empty
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [],
+            "kicks": [],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Voter 1 votes to kick accounts[1] (should not pass because voter 0 retracted)
+    let execution = accounts[1]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [],
+            "kicks": [accounts[1].id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let vote_pass: bool = execution.json().unwrap();
+    assert!(!vote_pass, "should not pass since voter 0 retracted");
+
+    // Voter 0 updates vote to kick accounts[2]
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [],
+            "kicks": [accounts[2].id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Voter 1 changes vote to kick accounts[2]
+    let execution = accounts[1]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [],
+            "kicks": [accounts[2].id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let vote_pass: bool = execution.json().unwrap();
+    assert!(vote_pass, "should pass on 2 votes for accounts[2]");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_reshare_validation_errors() -> anyhow::Result<()> {
+    let (worker, contract, accounts, _) = init_env().await;
+
+    let alice = worker.dev_create_account().await?;
+    assert!(join(&alice, &contract).await?.is_success());
+
+    // 1. Overlapping joins and kicks rejected
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [alice.id()],
+            "kicks": [alice.id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure());
+
+    // 2. Kicking non-participant rejected
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [],
+            "kicks": [alice.id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure());
+
+    // 3. Joining non-candidate rejected
+    let bob = worker.dev_create_account().await?;
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [bob.id()],
+            "kicks": [],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure());
+
+    // 4. Non-participant voter rejected
+    let execution = bob
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [alice.id()],
+            "kicks": [],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure());
+
+    // 5. Surviving old participants cannot go below current threshold
+    // 3 participants, threshold 2: kicking 2 participants leaves 3 - 2 = 1 < 2, rejected
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [alice.id()],
+            "kicks": [accounts[1].id(), accounts[2].id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure());
+    let failure = format!("{:?}", execution.failures());
+    assert!(failure.contains("Number of participants cannot go below threshold"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vote_reshare_rejects_surviving_cohort_below_threshold() -> anyhow::Result<()> {
+    // 5 participants, threshold 3
+    let (worker, contract, accounts, _) = init_env_with_participant_count(5, 3).await;
+
+    let alice = worker.dev_create_account().await?;
+    let bob = worker.dev_create_account().await?;
+    assert!(join(&alice, &contract).await?.is_success());
+    assert!(join(&bob, &contract).await?.is_success());
+
+    // Proposal: 3 kicks, 2 joins.
+    // Resulting cohort size = 5 - 3 + 2 = 4 >= 2.
+    // BUT surviving old participants = 5 - 3 = 2 < 3 (current threshold).
+    // This must be rejected because cait-sith cannot reconstruct the old key with < threshold old shares.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [alice.id(), bob.id()],
+            "kicks": [accounts[1].id(), accounts[2].id(), accounts[3].id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_failure());
+    let failure = format!("{:?}", execution.failures());
+    assert!(failure.contains("Number of participants cannot go below threshold"));
+
+    // Proposal: 2 kicks, 2 joins.
+    // Surviving old participants = 5 - 2 = 3 >= 3 (current threshold).
+    // This should be valid and accepted.
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [alice.id(), bob.id()],
+            "kicks": [accounts[1].id(), accounts[2].id()],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_remove_candidacy_clears_ballots_with_kicks() -> anyhow::Result<()> {
+    // 3 participants, threshold 2
+    let (worker, contract, accounts, _) = init_env().await;
+
+    let alice = worker.dev_create_account().await?;
+    assert!(join(&alice, &contract).await?.is_success());
+
+    let kick = accounts[1].id();
+
+    // Voter 0 votes for mixed ballot: join alice and kick accounts[1]
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [alice.id()],
+            "kicks": [kick],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Voter 2 votes for a pure kick ballot: kick accounts[1]
+    let execution = accounts[2]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [],
+            "kicks": [kick],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Verify both ballots are tracked in reshare_votes
+    let state: mpc_contract::ProtocolContractStateView = contract.view("state").await?.json()?;
+    let running = match state {
+        mpc_contract::ProtocolContractStateView::Running(r) => r,
+        other => panic!("expected running state, got {}", other.name()),
+    };
+    assert_eq!(running.reshare_votes.votes.len(), 2);
+    assert!(running.reshare_votes.votes.contains_key(accounts[0].id()));
+    assert!(running.reshare_votes.votes.contains_key(accounts[2].id()));
+
+    // Alice revokes her candidacy
+    let execution = alice
+        .call(contract.id(), "remove_candidacy")
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    // Verify:
+    // 1. Voter 0's ballot (which had alice in joins + a kick) is cleared
+    // 2. Voter 2's ballot (pure kick without alice) is preserved
+    let state: mpc_contract::ProtocolContractStateView = contract.view("state").await?.json()?;
+    let running = match state {
+        mpc_contract::ProtocolContractStateView::Running(r) => r,
+        other => panic!("expected running state, got {}", other.name()),
+    };
+    assert_eq!(running.reshare_votes.votes.len(), 1);
+    assert!(
+        !running.reshare_votes.votes.contains_key(accounts[0].id()),
+        "voter 0's ballot containing alice in joins must be cleared"
+    );
+    assert!(
+        running.reshare_votes.votes.contains_key(accounts[2].id()),
+        "voter 2's pure kick ballot must be preserved"
+    );
+
+    // Voter 0 can now submit a new pure kick ballot, reaching threshold
+    let execution = accounts[0]
+        .call(contract.id(), "vote_reshare")
+        .args_json(json!({
+            "joins": [],
+            "kicks": [kick],
+        }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+    let vote_pass: bool = execution.json()?;
+    assert!(
+        vote_pass,
+        "reshare should trigger once voter 0 and voter 2 agree on kicking accounts[1]"
+    );
 
     Ok(())
 }

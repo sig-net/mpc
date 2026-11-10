@@ -1,0 +1,14 @@
+# Code owners are auto-requested for review on PRs that touch these paths.
+# Teams must have write access to the repo to be valid owners.
+# Enforcement (review required from a code owner) is a ruleset rule, added separately.
+
+# Default: the MPC team owns the repository.
+*                                           @sig-net/mpc
+
+# CI, deploy workflows and repo automation: MPC plus Infra.
+/.github/                                   @sig-net/mpc @sig-net/infra
+
+# Cryptography: MPC plus the Cryptographers team.
+/signet-crypto/                             @sig-net/mpc @sig-net/cryptographers
+/chain-signatures/crypto/                   @sig-net/mpc @sig-net/cryptographers
+/chain-signatures/keys/                     @sig-net/mpc @sig-net/cryptographers

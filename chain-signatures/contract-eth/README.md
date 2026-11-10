@@ -72,7 +72,7 @@ In a few seconds,you should see the signature response from MPC printed by reque
 
 ## Run it on Ethereum Sepolia Testnet from end to end
 
-1. Get a Sepolia testnet ETH wallet with some ETH and a infura (MetaMask Developer) API key. You can also ping Bo for using his keys.
+1. Get a Sepolia testnet ETH wallet with some ETH and a infura (MetaMask Developer) API key.
 2. Config hardhat with the infura api key and ethereum account secret key, enter as is and it will ask you the key interactively:
 
 ```bash
@@ -96,7 +96,7 @@ npx hardhat ignition deploy ignition/modules/chainSignatures.js --parameters ign
 5. Make sure you have docker daemon running. Go to `integration-tests` and run the following command to start the MPC cluster connected to Ethereum Sepolia Testnet:
 
 ```bash
-cargo run -- setup-env --eth-rpc-ws-url wss://sepolia.infura.io/ws/v3/<api-key> --eth-rpc-http-url https://sepolia.infura.io/v3/<api-key> --eth-account-sk <eth-account-sk> --eth-contract-address <eth-contract-address-without-0x-prefix>
+cargo run -- setup-env --eth-execution-rpc-http-url https://sepolia.infura.io/v3/<api-key> --eth-network sepolia --eth-account-sk <eth-account-sk> --eth-contract-address <eth-contract-address-without-0x-prefix>
 ```
 
 6. Then run the following command to request a signature from MPC:
@@ -111,7 +111,7 @@ Note that everything is slower on Sepolia compared to local. Expect more than 10
 
 ## Deploy on Ethereum Mainnet
 
-1. Get a mainnet ETH wallet with some ETH and a infura (MetaMask Developer) API key. You can also ping Bo for using his keys.
+1. Get a mainnet ETH wallet with some ETH and a infura (MetaMask Developer) API key.
 2. Config hardhat with the infura api key and ethereum account secret key, enter as is and it will ask you the key interactively:
 
 ```bash

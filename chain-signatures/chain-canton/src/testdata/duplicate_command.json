@@ -1,0 +1,22 @@
+{
+  "code": "DUPLICATE_COMMAND",
+  "cause": "Command submission already exists.",
+  "correlationId": null,
+  "traceId": "test-trace",
+  "context": {
+    "participant": "participant",
+    "changeId": "test-changeId",
+    "completion_offset": "885730",
+    "accepted": "true",
+    "psid": "test-psid",
+    "category": "10",
+    "tid": "test-tid",
+    "definite_answer": "true",
+    "existingSubmissionId": "test-existingSubmissionId"
+  },
+  "resources": [],
+  "errorCategory": 10,
+  "grpcCodeValue": 6,
+  "retryInfo": null,
+  "definiteAnswer": null
+}

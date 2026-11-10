@@ -1,8 +1,32 @@
 use anyhow::Context;
 use async_process::Child;
-use mpc_primitives::Chain;
+use mpc_primitives::{Chain, ChainConfig as _};
+use std::path::PathBuf;
 
 pub(crate) const PACKAGE_MULTICHAIN: &str = "mpc-node";
+
+/// Returns the mpc-node binary of the latest release tag, built by
+/// `just build compat` under target/compat/latest/release/mpc-node.
+pub fn latest_release_binary() -> anyhow::Result<PathBuf> {
+    let target_dir = target_dir().ok_or_else(|| {
+        anyhow::anyhow!("could not locate target directory for compatibility binary")
+    })?;
+
+    let binary_path = target_dir
+        .join("compat")
+        .join("latest")
+        .join("release")
+        .join(PACKAGE_MULTICHAIN);
+
+    if !binary_path.exists() {
+        anyhow::bail!(
+            "latest release binary not found at {}. Run `just build compat` to build it.",
+            binary_path.display()
+        );
+    }
+
+    Ok(binary_path)
+}
 
 pub fn target_dir() -> Option<std::path::PathBuf> {
     // CARGO_TARGET_DIR can be set explicitly.
@@ -33,13 +57,17 @@ pub fn executable(release: bool, executable: &str) -> Option<std::path::PathBuf>
     Some(executable)
 }
 
-pub fn spawn_multichain(
+pub fn spawn_node_with_binary(
+    binary_path: Option<PathBuf>,
     release: bool,
     node: &str,
     cli: mpc_node::cli::Cli,
 ) -> anyhow::Result<Child> {
-    let executable = executable(release, PACKAGE_MULTICHAIN)
-        .with_context(|| format!("could not find target dir while starting {node} node"))?;
+    let executable = match binary_path {
+        Some(path) => path,
+        None => executable(release, PACKAGE_MULTICHAIN)
+            .with_context(|| format!("could not find target dir while starting {node} node"))?,
+    };
 
     async_process::Command::new(&executable)
         .args(cli.into_str_args())

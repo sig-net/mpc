@@ -1,0 +1,177 @@
+pub mod ops;
+pub(crate) mod recovery;
+pub mod supervisor;
+
+use crate::backlog::Backlog;
+use crate::mesh::MeshState;
+use crate::node_client::NodeClient;
+use crate::rpc::{ContractStateWatcher, RpcChannel};
+use crate::stream::ops::{
+    process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
+    process_respond_event, process_sign_request, publish_failover_due,
+    requeue_pending_sign_requests, resume_pending_publish_requests,
+};
+use crate::types::{CheckpointWatcher, SignCommand};
+
+use anyhow::Context;
+use mpc_chain_integration_core::ChainTelemetry;
+use mpc_primitives::{Chain, ChainEvent};
+use std::time::Duration;
+use tokio::sync::{mpsc, watch};
+
+/// Shared, per-chain dependencies
+pub struct StreamContext {
+    pub backlog: Backlog,
+    pub sign_tx: mpsc::Sender<SignCommand>,
+    pub rpc: RpcChannel,
+    pub contract_watcher: ContractStateWatcher,
+    pub mesh_state: watch::Receiver<MeshState>,
+    pub node_client: NodeClient,
+    pub checkpoints_rx: CheckpointWatcher,
+    pub caught_up: bool,
+    /// Overrides the failover schedule's observe lag; `None` is production. Fixtures
+    /// pin it.
+    pub observe_lag: Option<Duration>,
+    /// The chain id of the Ethereum network this node executes on; `None` when
+    /// Ethereum is not configured, which skips the admission check on it.
+    pub ethereum_chain_id: Option<u64>,
+}
+
+impl StreamContext {
+    pub fn new(
+        backlog: Backlog,
+        sign_tx: mpsc::Sender<SignCommand>,
+        rpc: RpcChannel,
+        contract_watcher: ContractStateWatcher,
+        mesh_state: watch::Receiver<MeshState>,
+        node_client: NodeClient,
+        checkpoints_rx: CheckpointWatcher,
+    ) -> Self {
+        Self {
+            backlog,
+            sign_tx,
+            rpc,
+            contract_watcher,
+            mesh_state,
+            node_client,
+            checkpoints_rx,
+            caught_up: false,
+            observe_lag: None,
+            ethereum_chain_id: None,
+        }
+    }
+
+    pub fn with_ethereum_chain_id(mut self, chain_id: Option<u64>) -> Self {
+        self.ethereum_chain_id = chain_id;
+        self
+    }
+
+    /// Pin the publish failover schedule's observe lag, for fixtures that assert
+    /// the failover itself rather than its production timing.
+    pub fn with_observe_lag(mut self, lag: Option<Duration>) -> Self {
+        self.observe_lag = lag;
+        self
+    }
+
+    /// Forward a sign command to the signing pipeline, but only when caught up.
+    /// Pre-catchup commands are dropped: the backlog retains the request and re-enqueues it on `CatchupCompleted`.
+    pub async fn try_enqueue(&self, cmd: SignCommand) -> anyhow::Result<()> {
+        if self.caught_up {
+            self.sign_tx
+                .send(cmd)
+                .await
+                .context("sign command channel closed")?;
+        } else {
+            tracing::warn!(
+                ?cmd,
+                "dropping sign command until catchup completes; the backlog requeues it on CatchupCompleted"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Dispatch a single chain event to the appropriate processor.
+pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
+    event: ChainEvent,
+    ctx: &mut StreamContext,
+    telemetry: &T,
+    root_pk: mpc_primitives::PublicKey,
+    chain: Chain,
+) -> anyhow::Result<()> {
+    match event {
+        ChainEvent::CatchupCompleted => {
+            if ctx.caught_up {
+                return Ok(());
+            }
+            ctx.caught_up = true;
+            // Set before the requeue scan, so an entry that misses the scan sees it.
+            ctx.backlog.set_caught_up(chain, true);
+
+            requeue_pending_sign_requests(ctx, chain)
+                .await
+                .context("failed to requeue pending sign requests")?;
+            resume_pending_publish_requests(ctx, chain).await;
+        }
+        ChainEvent::SignRequest {
+            request,
+            block_timestamp,
+        } => {
+            // Read the kind before the request is consumed: it labels the
+            // indexing observation so a bidirectional first leg is separable
+            // from a plain sign request.
+            let kind = request.request_kind();
+
+            // Record the request's indexed timestamp if it's a new request
+            let is_new = process_sign_request(request, ctx, root_pk)
+                .await
+                .context("failed to process sign request")?;
+
+            if is_new {
+                if let Some(ts) = block_timestamp {
+                    // Ethereum (~15 min finality) reports the block timestamp.
+                    telemetry.request_indexed_at(ts, kind);
+                } else {
+                    // Faster chains (Solana, Canton, Hydration) report no timestamp.
+                    telemetry.request_indexed(kind);
+                }
+            }
+        }
+        ChainEvent::Respond(ev) => {
+            process_respond_event(ev, ctx, root_pk)
+                .await
+                .context("failed to process respond event")?;
+        }
+        ChainEvent::RespondBidirectional(ev) => {
+            process_respond_bidirectional_event(ev, ctx, root_pk)
+                .await
+                .context("failed to process respond bidirectional event")?;
+        }
+        ChainEvent::Block(block) => {
+            publish_failover_due(ctx, chain).await;
+            process_block_event(chain, block, ctx, telemetry)
+                .await
+                .context("failed to process block event")?;
+        }
+        ChainEvent::ExecutionConfirmed {
+            tx_id,
+            block_height,
+            result,
+            ..
+        } => {
+            process_execution_confirmed(tx_id, block_height, result, ctx, chain)
+                .await
+                .context("failed to process execution confirmation")?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "test_utils.rs"]
+mod test_utils;
+
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod stream_tests;

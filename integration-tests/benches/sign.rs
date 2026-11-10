@@ -115,11 +115,6 @@ fn main() {
         at: Mutex::new(0),
     });
     bench_on_metrics(NodeTimeMeasurement {
-        name: "sig(metrics) respond latency",
-        data: metrics.sig_respond,
-        at: Mutex::new(0),
-    });
-    bench_on_metrics(NodeTimeMeasurement {
         name: "presig(metrics) generation latency",
         data: metrics.presig_gen,
         at: Mutex::new(0),

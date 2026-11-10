@@ -2,24 +2,35 @@ use integration_tests::actions;
 use integration_tests::cluster;
 use integration_tests::utils;
 
-use k256::elliptic_curve::point::AffineCoordinates;
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_contract::config::Config;
 use mpc_contract::update::ProposeUpdateArgs;
-use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt};
-use mpc_node::kdf::into_eth_sig;
+use mpc_crypto::{
+    self, derive_epsilon_near, derive_key, reconstruct_signature, x_coordinate, ScalarExt,
+};
 use mpc_node::protocol::cryptography::set_resharing_running_timeout;
-use mpc_node::protocol::state::ResharingStatus;
+use mpc_node::protocol::state::{NodeStatus, ResharingStatus};
+use mpc_node::sign_bidirectional::public_key_to_address;
 use mpc_node::util::NearPublicKeyExt as _;
-use mpc_node::web::StateView;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use std::time::{Duration, Instant};
 use test_log::test;
 
+pub mod canton;
+pub mod canton_stream;
 pub mod chains;
+pub mod checkpoint;
+pub mod compat;
 pub mod ethereum;
+pub mod ethereum_stream;
+pub mod helpers;
+pub mod midnight_stream;
 pub mod mpc;
-pub mod nightly;
+pub mod mpc_with_stream;
+pub mod posit;
 pub mod solana;
+pub mod solana_stream;
+pub mod state_sync;
 pub mod store;
 pub mod sync;
 
@@ -64,15 +75,6 @@ async fn test_signature_basic() -> anyhow::Result<()> {
     let nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     nodes.sign().await?;
-
-    Ok(())
-}
-
-#[test(tokio::test)]
-async fn test_signature_rogue() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().await?;
-    nodes.wait().signable().await?;
-    nodes.sign().rogue_responder().await?;
 
     Ok(())
 }
@@ -125,9 +127,9 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         let outcome = nodes.sign().path(hd_path).await?;
 
         let derivation_epsilon =
-            derive_epsilon_near(LATEST_MPC_KEY_VERSION, outcome.account.id(), hd_path);
+            derive_epsilon_near(LATEST_MPC_KEY_VERSION, outcome.account.id(), hd_path)?;
         let user_pk = derive_key(mpc_pk, derivation_epsilon);
-        let multichain_sig = into_eth_sig(
+        let multichain_sig = reconstruct_signature(
             &user_pk,
             &outcome.signature.big_r,
             &outcome.signature.s,
@@ -136,16 +138,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         .unwrap();
 
         // start recovering the address and compare them:
-        let user_pk_x = x_coordinate(&user_pk);
-        let user_pk_y_parity = match user_pk.y_is_odd().unwrap_u8() {
-            1 => secp256k1::Parity::Odd,
-            0 => secp256k1::Parity::Even,
-            _ => unreachable!(),
-        };
-        let user_pk_x = secp256k1::XOnlyPublicKey::from_slice(&user_pk_x.to_bytes()).unwrap();
-        let user_secp_pk =
-            secp256k1::PublicKey::from_x_only_public_key(user_pk_x, user_pk_y_parity);
-        let user_addr = actions::public_key_to_address(&user_secp_pk);
+        let user_addr = public_key_to_address(&user_pk.to_encoded_point(false));
         let r = x_coordinate(&multichain_sig.big_r);
         let s = multichain_sig.s;
         let signature_for_recovery: [u8; 64] = {
@@ -263,7 +256,7 @@ async fn test_resharing_offline_participant_recovers() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_secs(30)).await;
     assert!(matches!(
         nodes.contract_state().await?,
-        mpc_contract::ProtocolContractState::Resharing(_)
+        mpc_contract::ProtocolContractStateView::Resharing(_)
     ));
 
     // Restart the node that was offline during the resharing.
@@ -313,10 +306,10 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
     nodes.wait().nodes_resharing().await?;
 
     {
-        let states = nodes.fetch_states().await?;
+        let states = nodes.fetch_statuses().await?;
         for (account_id, state) in nodes.account_ids().into_iter().zip(states.iter()) {
             match state {
-                StateView::Resharing { phase, .. } => {
+                NodeStatus::Resharing { phase, .. } => {
                     tracing::info!(%account_id, ?phase, "account resharing phase before kill");
                 }
                 other => {
@@ -339,7 +332,7 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
 
     assert!(matches!(
         nodes.contract_state().await?,
-        mpc_contract::ProtocolContractState::Resharing(_)
+        mpc_contract::ProtocolContractStateView::Resharing(_)
     ));
 
     nodes.restart_node(target_config).await?;
@@ -354,10 +347,10 @@ async fn test_resharing_running_participant_restart() -> anyhow::Result<()> {
     .await?;
 
     {
-        let states = nodes.fetch_states().await?;
+        let states = nodes.fetch_statuses().await?;
         for (account_id, state) in nodes.account_ids().into_iter().zip(states.iter()) {
             match state {
-                StateView::Resharing { phase, .. } => {
+                NodeStatus::Resharing { phase, .. } => {
                     tracing::info!(%account_id, ?phase, "account resharing phase after restart");
                 }
                 other => {
@@ -425,6 +418,125 @@ async fn test_resharing_possible_with_kicked_node_offline() -> anyhow::Result<()
     Ok(())
 }
 
+#[test(tokio::test)]
+async fn test_resharing_possible_with_multiple_kicked_nodes_offline() -> anyhow::Result<()> {
+    set_resharing_running_timeout(Duration::from_secs(20));
+
+    // Spawn 5-node cluster with threshold 3.
+    // With threshold 3, the 3 online nodes meet threshold 3 to batch-kick both offline nodes.
+    let mut nodes = cluster::spawn()
+        .nodes(5)
+        .threshold(3)
+        .disable_prestockpile()
+        .await?;
+    nodes.wait().signable().await?;
+    let initial_state = nodes.expect_running().await?;
+    assert_eq!(initial_state.participants.len(), 5);
+    assert_eq!(initial_state.threshold, 3);
+
+    let kick_1 = nodes.account_id(1).clone();
+    let kick_2 = nodes.account_id(2).clone();
+
+    // Kill both nodes simultaneously while they are still participants.
+    let _ = nodes.kill_node(&kick_1).await;
+    let _ = nodes.kill_node(&kick_2).await;
+
+    // The remaining 3 online participants vote to kick both offline nodes in one batch.
+    // This transitions directly to Resharing with new_participants excluding both dead nodes,
+    // avoiding the deadlock where a remaining offline node prevents readiness completion.
+    nodes
+        .kick_participants(&[kick_1.clone(), kick_2.clone()])
+        .await?;
+
+    // Wait for cluster to reach Running state on next epoch
+    let final_state = nodes
+        .wait()
+        .running_on_epoch(initial_state.epoch + 1)
+        .await?;
+
+    assert_eq!(
+        final_state.participants.len(),
+        3,
+        "should have 3 participants remaining"
+    );
+    assert_eq!(
+        final_state.threshold,
+        mpc_contract::utils::compute_threshold(3),
+        "threshold should be recomputed for 3 participants"
+    );
+    assert!(!final_state.participants.contains_key(&kick_1));
+    assert!(!final_state.participants.contains_key(&kick_2));
+
+    // Sign to ensure the reshared 3-node network is fully functional
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+async fn test_resharing_batch_join_and_kick() -> anyhow::Result<()> {
+    set_resharing_running_timeout(Duration::from_secs(20));
+
+    // Spawn 3-node cluster with threshold 2.
+    let mut nodes = cluster::spawn()
+        .nodes(3)
+        .threshold(2)
+        .disable_prestockpile()
+        .await?;
+    nodes.wait().signable().await?;
+    let initial_state = nodes.expect_running().await?;
+    assert_eq!(initial_state.participants.len(), 3);
+    assert_eq!(initial_state.threshold, 2);
+
+    // Start a new node that registers as a candidate in the contract
+    let join_account = nodes.start(None).await?;
+    let kick_account = nodes.account_id(0).clone();
+
+    tracing::info!(
+        join = %join_account.id(),
+        kick = %kick_account,
+        "simultaneous join and kick batch reshare"
+    );
+
+    // Vote for batch reshare with 1 join and 1 kick
+    nodes
+        .reshare_participants(&[join_account.id()], &[&kick_account])
+        .await?;
+
+    // Wait for cluster to reach Running state on the next epoch
+    let final_state = nodes
+        .wait()
+        .running_on_epoch(initial_state.epoch + 1)
+        .candidate_missing(join_account.id())
+        .participant_present(join_account.id())
+        .participant_missing(&kick_account)
+        .await?;
+
+    assert_eq!(
+        final_state.participants.len(),
+        3,
+        "total participant count should remain 3 (1 joined, 1 kicked)"
+    );
+    assert_eq!(final_state.threshold, 2, "threshold should remain 2");
+    assert_eq!(
+        initial_state.public_key, final_state.public_key,
+        "public key must stay the same after resharing"
+    );
+    assert!(final_state.participants.contains_key(join_account.id()));
+    assert!(!final_state.participants.contains_key(&kick_account));
+
+    // Stop the kicked node and ensure remaining nodes are running
+    let _ = nodes.stop(&kick_account).await?;
+    nodes.wait().nodes_running().await?;
+
+    // Sign to ensure the new 3-node cohort is fully functional
+    nodes.wait().signable().await?;
+    nodes.sign().await?;
+
+    Ok(())
+}
+
 async fn wait_for_resharing_phase(
     nodes: &cluster::Cluster,
     account_id: &near_workspaces::AccountId,
@@ -440,16 +552,16 @@ async fn wait_for_resharing_phase(
             .iter()
             .position(|current| *current == account_id)
         {
-            match nodes.fetch_state(idx).await? {
-                StateView::Resharing { phase, .. } if expected.contains(&phase) => return Ok(()),
-                StateView::Running { .. } if allow_completion => {
+            match nodes.fetch_status(idx).await? {
+                NodeStatus::Resharing { phase, .. } if expected.contains(&phase) => return Ok(()),
+                NodeStatus::Running { .. } if allow_completion => {
                     tracing::info!(
                         %account_id,
                         "node already returned to running state; treating as successful resharing phase"
                     );
                     return Ok(());
                 }
-                StateView::Resharing { phase, .. } => {
+                NodeStatus::Resharing { phase, .. } => {
                     tracing::info!(
                         %account_id,
                         ?phase,

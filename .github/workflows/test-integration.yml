@@ -1,0 +1,306 @@
+name: Integration Tests
+
+on:
+  pull_request:
+  merge_group:
+
+env:
+  RUSTFLAGS: -D warnings
+permissions:
+  contents: read
+  packages: read
+  issues: write
+  pull-requests: write
+
+# Cancel superseded runs of the same PR. Merge-queue and develop runs keep going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Fixture tests: in-process MPC protocol tests, no Docker or external infra needed.
+  # Runs the `fixture` nextest profile (see .config/nextest.toml).
+  fixture-test:
+    name: Fixture Tests
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - name: Comment on PR if this is a re-run
+        if: github.run_attempt > 1 && github.event_name == 'pull_request'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `⚠️ Component tests (MPC fixture) were re-run (attempt ${process.env.RUN_ATTEMPT})`,
+            });
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Redis image
+        run: docker pull redis:7.4.2
+
+      - name: Install Rust (1.93.0)
+        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
+        with:
+          toolchain: 1.93.0
+          targets: wasm32-unknown-unknown
+
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
+
+      # Cache policy: doc/ci-caching.md
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: workspace-full
+          cache-targets: true
+          cache-on-failure: false
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
+        with:
+          tool: nextest
+
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
+
+      - name: Build Chain-Signatures Integration Tests
+        run: just build tests
+
+      # Artifacts (contract wasm + node binary) build inside the test recipe via its setup dependency,
+      # so setup.sh runs exactly once per job.
+      - name: Test
+        run: just test-fixture
+        env:
+          RUST_LOG: info,workspaces=warn
+          RUST_BACKTRACE: 1
+
+  # Integration tests that need Docker (near-sandbox, anvil, solana validator) and
+  # additional Solana/Anchor setup. Runs with num-cpus threads (see .config/nextest.toml).
+  cluster-test:
+    name: Cluster Integration Tests
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - name: Comment on PR if this is a re-run
+        if: github.run_attempt > 1 && github.event_name == 'pull_request'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `⚠️ Integration tests were re-run (attempt ${process.env.RUN_ATTEMPT})`,
+            });
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pull the images in parallel.
+      - name: Pull Redis and Foundry images
+        run: |
+          printf '%s\n' redis:7.4.2 ghcr.io/foundry-rs/foundry:nightly \
+            | xargs -P "$(nproc)" -n 1 docker pull
+
+      - name: Install Rust (1.93.0)
+        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
+        with:
+          toolchain: 1.93.0
+          targets: wasm32-unknown-unknown
+
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
+
+      - name: Setup Solana and Anchor
+        uses: metadaoproject/setup-anchor@b29b81b9a4568aafb3faaf42eccc73cefdbfbc9f # v3.1
+        with:
+          # The indexer/client stack (solana 3.x crates) only parses the
+          # 4.0+ RPC error shapes, so the validator must be agave >= 4.0.
+          solana-cli-version: '4.2.2'
+          anchor-version: '0.31.1'
+
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
+
+      # Cache policy: doc/ci-caching.md
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: workspace-full
+          cache-targets: true
+          cache-on-failure: false
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e88e69ecdb9658bd172693dcdc2c84e7f0ab6a11 # nextest
+        with:
+          tool: nextest
+
+      - name: Install cargo-near
+        run: |
+          if ! command -v cargo-near >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+          fi
+
+      - name: Build eth contract
+        run: just build eth
+
+      # Build the tests before actually running them to see how long the tests take to run by itself
+      # instead of including the build time in the test time report on Github.
+      # Artifacts build inside the test recipe via its setup dependency.
+      - name: Build Chain-Signatures Integration Tests
+        run: just build tests
+
+      - name: Test
+        run: just test-cluster
+        env:
+          RUST_LOG: info,workspaces=warn
+          RUST_BACKTRACE: 1
+          IT_ETH_ACCOUNT_SK: ${{ secrets.IT_ETH_ACCOUNT_SK }}
+          IT_ETH_CONTRACT_ADDR: ${{ secrets.IT_ETH_CONTRACT_ADDR }}
+          IT_ETH_EXECUTION_RPC_URL: ${{ secrets.IT_ETH_EXECUTION_RPC_URL }}
+
+  # Anvil-backed integration tests (no docker cluster): real EVM + real contract bytecode
+  anvil-integration-test:
+    name: Anvil Integration Tests
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install Rust (1.93.0)
+        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
+        with:
+          toolchain: 1.93.0
+          components: clippy
+
+      # Cache policy: doc/ci-caching.md
+      - name: Detect dependency changes vs develop
+        id: depchange
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet --depth=1 origin develop
+          git diff --name-only FETCH_HEAD...HEAD |
+            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
+            echo changed=true >> "$GITHUB_OUTPUT" || true
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: workspace-dev
+          cache-targets: true
+          # Only save the cache if there are dependency changes or it's not a merge group
+          save-if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || steps.depchange.outputs.changed == 'true') }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
+      - name: Install Foundry (anvil)
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
+
+      - name: Clippy (integration-gated code)
+        run: just lint-eth
+
+      - name: Test
+        run: just test-eth
+
+  # TRE-backed Tron gate: dockerized java-tron + gate-deployed GateToken
+  tre-integration-test:
+    name: TRE Integration Tests
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install just
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install Rust (1.93.0)
+        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
+
+      # Cache policy: doc/ci-caching.md — restore only; unit/anvil jobs
+      # maintain the shared workspace-dev key.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: workspace-dev
+          cache-targets: true
+          save-if: false
+
+      - name: Test
+        run: just test-tron-tre

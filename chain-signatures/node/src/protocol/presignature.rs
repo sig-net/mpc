@@ -1,16 +1,19 @@
-use super::message::{MessageChannel, PositMessage, PositProtocolId, PresignatureMessage};
+use super::message::{MessageChannel, PositProtocolId, PresignatureMessage};
 use super::posit::{PositAction, Positor, Posits};
 use super::triple::TripleId;
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::contract::primitives::intersect_vec;
-use crate::protocol::posit::PositInternalAction;
+use crate::protocol::posit::{PositInternalAction, PositRejectReason};
+use crate::protocol::should_generate;
 use crate::protocol::MpcSignProtocol;
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
-use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
+use crate::storage::protocol_storage::StockCounts;
+use crate::storage::triple_storage::{TriplesReserved, TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
-use crate::util::{AffinePointExt, JoinMap};
+use mpc_chain_near::AffinePointExt as _;
+use mpc_utils::task::JoinMap;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
@@ -28,8 +31,6 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time;
 
-use near_account_id::AccountId;
-
 /// Unique number used to identify a specific ongoing presignature generation protocol.
 /// Without `PresignatureId` it would be unclear where to route incoming cait-sith presignature
 /// generation messages.
@@ -39,8 +40,8 @@ pub type PresignatureId = u64;
 /// that was used to generate it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct FullPresignatureId {
-    id: PresignatureId,
-    pair_id: TripleId,
+    pub id: PresignatureId,
+    pub pair_id: TripleId,
 }
 
 impl FullPresignatureId {
@@ -58,7 +59,10 @@ impl FullPresignatureId {
 pub struct Presignature {
     pub id: PresignatureId,
     pub output: PresignOutput<Secp256k1>,
+    /// Original protocol participants
     pub participants: Vec<Participant>,
+    /// Nodes still holding their share of the artifact
+    pub holders: Option<Vec<Participant>>,
 }
 
 impl fmt::Debug for Presignature {
@@ -66,6 +70,7 @@ impl fmt::Debug for Presignature {
         f.debug_struct("Presignature")
             .field("id", &self.id)
             .field("participants", &self.participants)
+            .field("holders", &self.holders)
             .finish()
     }
 }
@@ -108,6 +113,7 @@ impl<'de> Deserialize<'de> for Presignature {
                 k: fields.output_k,
                 sigma: fields.output_sigma,
             },
+            holders: None,
             participants: fields.participants,
         })
     }
@@ -159,38 +165,23 @@ impl PresignatureGenerator {
         }
     }
 
-    pub async fn run(mut self, my_account_id: &AccountId, me: Participant, epoch: u64) {
-        let failure_counts = crate::metrics::PRESIGNATURE_GENERATOR_FAILURES
-            .with_label_values(&[my_account_id.as_str()]);
-        let before_first_poke_delay = crate::metrics::PRESIGNATURE_BEFORE_POKE_DELAY
-            .with_label_values(&[my_account_id.as_str()]);
-        let accrued_wait_delay = crate::metrics::PRESIGNATURE_ACCRUED_WAIT_DELAY
-            .with_label_values(&[my_account_id.as_str()]);
-        let poke_counts =
-            crate::metrics::PRESIGNATURE_POKES_CNT.with_label_values(&[my_account_id.as_str()]);
-        let runtime_latency =
-            crate::metrics::PRESIGNATURE_LATENCY.with_label_values(&[my_account_id.as_str()]);
-        let success_owned_counts: prometheus::core::GenericCounter<prometheus::core::AtomicF64> =
-            crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS
-                .with_label_values(&[my_account_id.as_str()]);
-        let success_total_counts =
-            crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS
-                .with_label_values(&[my_account_id.as_str()]);
-        let poke_latency =
-            crate::metrics::PRESIGNATURE_POKE_CPU_TIME.with_label_values(&[my_account_id.as_str()]);
-
+    pub async fn run(mut self, me: Participant, epoch: u64) {
         let start_time = Instant::now();
         let mut total_wait = Duration::from_millis(0);
         let mut total_pokes = 0;
         let mut poke_last_time = self.created;
-        before_first_poke_delay.observe(self.created.elapsed().as_millis() as f64);
+        crate::metrics::protocols::PRESIGNATURE_BEFORE_POKE_DELAY
+            .observe(self.created.elapsed().as_millis() as f64);
 
         loop {
             let poke_start_time = Instant::now();
             let action = match self.protocol.poke() {
                 Ok(action) => action,
                 Err(err) => {
-                    failure_counts.inc();
+                    crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();
+                    if self.owner == me {
+                        crate::metrics::protocols::PRESIGNATURE_GENERATOR_MINE_FAILURES.inc();
+                    }
                     tracing::warn!(
                         id = ?self.id,
                         owner = ?self.owner,
@@ -204,7 +195,8 @@ impl PresignatureGenerator {
             total_wait += poke_start_time - poke_last_time;
             total_pokes += 1;
             poke_last_time = Instant::now();
-            poke_latency.observe(poke_start_time.elapsed().as_millis() as f64);
+            crate::metrics::protocols::PRESIGNATURE_POKE_CPU_TIME
+                .observe(poke_start_time.elapsed().as_millis() as f64);
             #[cfg(feature = "debug-page")]
             self.render_debug(total_pokes);
 
@@ -212,7 +204,10 @@ impl PresignatureGenerator {
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
                     let Some(msg) = self.recv().await else {
-                        failure_counts.inc();
+                        crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();
+                        if self.owner == me {
+                            crate::metrics::protocols::PRESIGNATURE_GENERATOR_MINE_FAILURES.inc();
+                        }
                         break;
                     };
                     self.protocol.message(msg.from, msg.data);
@@ -228,7 +223,7 @@ impl PresignatureGenerator {
                                 *to,
                                 PresignatureMessage {
                                     id: self.id,
-                                    pair_id: self.dropper.pair_id,
+                                    pair_id: self.dropper.id,
                                     epoch,
                                     from: me,
                                     data: data.clone(),
@@ -245,7 +240,7 @@ impl PresignatureGenerator {
                             to,
                             PresignatureMessage {
                                 id: self.id,
-                                pair_id: self.dropper.pair_id,
+                                pair_id: self.dropper.id,
                                 epoch,
                                 from: me,
                                 data,
@@ -255,13 +250,16 @@ impl PresignatureGenerator {
                         .await;
                 }
                 Action::Return(output) => {
-                    runtime_latency.observe(start_time.elapsed().as_secs_f64());
-                    success_total_counts.inc();
-                    accrued_wait_delay.observe(total_wait.as_millis() as f64);
-                    poke_counts.observe(total_pokes as f64);
+                    crate::metrics::protocols::PRESIGNATURE_LATENCY
+                        .observe(start_time.elapsed().as_secs_f64());
+                    crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS
+                        .inc();
+                    crate::metrics::protocols::PRESIGNATURE_ACCRUED_WAIT_DELAY
+                        .observe(total_wait.as_millis() as f64);
+                    crate::metrics::protocols::PRESIGNATURE_POKES_CNT.observe(total_pokes as f64);
 
                     tracing::info!(
-                        id = self.id,
+                        id = ?self.id,
                         ?me,
                         owner = ?self.owner,
                         big_r = ?output.big_r.to_base58(),
@@ -272,10 +270,11 @@ impl PresignatureGenerator {
                         id: self.id,
                         output,
                         participants: self.participants.clone(),
+                        holders: Some(self.participants.clone()),
                     };
                     if self.owner == me {
                         tracing::info!(id = self.id, "assigning presignature to myself");
-                        success_owned_counts.inc();
+                        crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS.inc();
                     }
                     self.slot.insert(presignature, self.owner).await;
                     break;
@@ -299,7 +298,6 @@ impl Drop for PresignatureGenerator {
         let msg = self.msg.clone();
         tokio::spawn(async move {
             msg.unsubscribe_presignature(id).await;
-            msg.filter_presignature(id).await;
         });
     }
 }
@@ -312,16 +310,24 @@ pub struct PresignatureSpawner {
     /// Ongoing presignature generation protocols.
     ongoing: JoinMap<PresignatureId, ()>,
     ongoing_owned: HashSet<PresignatureId>,
-    /// The protocol posits that are currently in progress.
-    posits: Posits<FullPresignatureId, TriplesTaken>,
+    /// Stock counts refreshed on the expiration tick; see [`StockCounts`].
+    stock: StockCounts,
+    /// The protocol posits that are currently in progress. The proposer side
+    /// holds a reservation on the triple pair: the pair stays in storage until
+    /// the posit round succeeds and generation starts, so a failed round does
+    /// not waste it.
+    posits: Posits<FullPresignatureId, TriplesReserved>,
 
     me: Participant,
     threshold: usize,
     epoch: u64,
-    my_account_id: AccountId,
     private_share: SecretKeyShare,
     public_key: PublicKey,
     msg: MessageChannel,
+    node_account_id: String,
+
+    #[cfg(feature = "debug-page")]
+    posits_debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
 impl PresignatureSpawner {
@@ -332,24 +338,32 @@ impl PresignatureSpawner {
         epoch: u64,
         private_share: &SecretKeyShare,
         public_key: &PublicKey,
-        my_account_id: &AccountId,
         triples: &TripleStorage,
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
+        node_account_id: String,
     ) -> Self {
+        #[cfg(feature = "debug-page")]
+        let posits_debug_view = crate::web::debug::register_task(
+            node_account_id.clone(),
+            "Posits PresignatureSpawner".to_string(),
+        );
         Self {
             triples: triples.clone(),
             presignatures: presignatures.clone(),
             ongoing: JoinMap::new(),
             ongoing_owned: HashSet::new(),
+            stock: StockCounts::default(),
             posits: Posits::new(me),
             me,
             threshold,
             epoch,
             private_share: *private_share,
             public_key: *public_key,
-            my_account_id: my_account_id.clone(),
             msg,
+            node_account_id,
+            #[cfg(feature = "debug-page")]
+            posits_debug_view,
         }
     }
 
@@ -366,10 +380,6 @@ impl PresignatureSpawner {
     /// Returns true if the presignature with the given id is already ongoing
     pub fn contains_ongoing(&self, id: PresignatureId) -> bool {
         self.ongoing.contains_key(&id)
-    }
-
-    pub async fn contains_used(&self, id: PresignatureId) -> bool {
-        self.presignatures.contains_used(id).await
     }
 
     /// Returns the number of unspent presignatures available in the manager.
@@ -390,12 +400,63 @@ impl PresignatureSpawner {
         self.posits.len_proposed() + self.ongoing_owned.len()
     }
 
+    /// Read the stock counts from storage. Called once a second from the run
+    /// loop, so the 100 ms stockpile tick decides from memory.
+    async fn refresh_stock(&mut self) {
+        self.stock = self.presignatures.stock_counts(self.me).await;
+    }
+
     /// Returns the number of unspent presignatures we will have in the manager once
     /// all ongoing generation protocols complete.
     pub async fn len_potential(&self) -> usize {
         let complete_presignatures = self.len_generated().await;
         let ongoing_generators = self.ongoing.len();
         complete_presignatures + ongoing_generators
+    }
+
+    /// Returns why a PROPOSE fails id or storage checks or `None` if they pass.
+    async fn propose_rejection(
+        &self,
+        id: FullPresignatureId,
+        from: Participant,
+    ) -> Option<PositRejectReason> {
+        if !id.validate() {
+            tracing::error!(
+                ?id,
+                ?from,
+                "presignature id does not match the expected hash"
+            );
+            Some(PositRejectReason::InvalidRequest)
+        } else if self.contains_ongoing(id.id) {
+            tracing::warn!(?id, ?from, "presignature already generating");
+            Some(PositRejectReason::AlreadyGenerating)
+        } else if self.contains(id.id).await {
+            tracing::warn!(?id, ?from, "presignature already generated");
+            Some(PositRejectReason::AlreadyGenerating)
+        } else if !{
+            // TODO: we can potentially wait for the triples to exist first to then be able to accept.
+            // whereas we just blatantly reject here. The problem with waiting is that the other side
+            // might expire their posit first.
+            self.triples.contains_reserved(id.pair_id).await
+                || self.triples.contains(id.pair_id).await
+        } {
+            tracing::warn!(?id, ?from, "presignature required triples are not known");
+            Some(PositRejectReason::MissingArtifact)
+        } else {
+            None
+        }
+    }
+
+    /// Lets integration tests feed posit messages without the run loop.
+    #[cfg(any(test, feature = "test-feature"))]
+    pub async fn process_posit_for_test(
+        &mut self,
+        id: FullPresignatureId,
+        from: Participant,
+        action: PositAction,
+        timeout: Duration,
+    ) {
+        self.process_posit(id, from, action, timeout).await;
     }
 
     async fn process_posit(
@@ -405,36 +466,18 @@ impl PresignatureSpawner {
         action: PositAction,
         timeout: Duration,
     ) {
-        let internal_action = if !id.validate() {
-            tracing::error!(
-                ?id,
-                ?from,
-                ?action,
-                "presignature id does not match the expected hash"
-            );
-            PositInternalAction::Reply(PositAction::Reject)
-        } else if self.contains_ongoing(id.id) {
-            tracing::warn!(?id, ?from, ?action, "presignature already generating");
-            PositInternalAction::Reply(PositAction::Reject)
-        } else if self.contains(id.id).await {
-            tracing::warn!(?id, ?from, ?action, "presignature already generated");
-            PositInternalAction::Reply(PositAction::Reject)
-        } else if !{
-            // TODO: we can potentially wait for the triples to exist first to then be able to accept.
-            // whereas we just blatantly reject here. The problem with waiting is that the other side
-            // might expire their posit first.
-            self.triples.contains_reserved(id.pair_id).await
-                || self.triples.contains(id.pair_id).await
-        } {
-            tracing::warn!(
-                ?id,
-                ?from,
-                ?action,
-                "presignature required triples are not known"
-            );
-            PositInternalAction::Reply(PositAction::Reject)
+        let rejection = match action {
+            PositAction::Propose => self.propose_rejection(id, from).await,
+            _ => None,
+        };
+        let internal_action = if let Some(reason) = rejection {
+            PositInternalAction::Reply(PositAction::RejectWithReason(reason))
         } else {
-            self.posits.act(id, from, self.threshold, &action)
+            let internal_action = self.posits.act(id, from, self.threshold, &action);
+            #[cfg(feature = "debug-page")]
+            self.posits_debug_view
+                .send(self.posits.render_debug(self.threshold));
+            internal_action
         };
 
         match internal_action {
@@ -444,15 +487,7 @@ impl PresignatureSpawner {
             }
             PositInternalAction::Reply(action) => {
                 self.msg
-                    .send(
-                        self.me,
-                        from,
-                        PositMessage {
-                            id: PositProtocolId::Presignature(id),
-                            from: self.me,
-                            action,
-                        },
-                    )
+                    .send_posit(self.me, from, PositProtocolId::Presignature(id), action)
                     .await;
             }
             PositInternalAction::StartProtocol(participants, positor) => {
@@ -465,70 +500,67 @@ impl PresignatureSpawner {
     /// Starts a new presignature generation protocol.
     async fn propose_posit(&mut self, active: &[Participant]) {
         // To ensure there is no contention between different nodes we are only using triples
-        // that we proposed. This way in a non-BFT environment we are guaranteed to never try
+        // that we own. This way in a non-BFT environment we are guaranteed to never try
         // to use the same triple as any other node.
+        //
+        // The pair is only reserved here and stays in storage. It is taken out of
+        // storage once the posit round succeeds and generation starts. Dropping the
+        // reservation on a failed round returns the pair to the pool.
         // TODO: have all this part be a separate task such that finding a pair of triples is done in parallel instead
         // of waiting for storage to respond here.
-        let Some(triples) = self.triples.take_mine(self.me).await else {
-            return;
-        };
 
-        let pair_id = triples.pair.id;
-        // note: only one of the pair's participants is needed since they are the same.
-        let participants = intersect_vec(&[active, &triples.pair.triple0.public.participants]);
-        if participants.len() < self.threshold {
-            tracing::warn!(
-                pair_id,
-                ?active,
-                ?participants,
-                "intersection < threshold, trashing triple pair"
-            );
-            return;
-        }
+        // IDs that were found unsuitable this round (kept in storage, skipped on the next peek)
+        let mut local_skip: Vec<TripleId> = Vec::new();
+        let (reservation, participants) = loop {
+            let Some(reservation) = self.triples.peek_mine(&local_skip).await else {
+                return;
+            };
 
-        let id = FullPresignatureId::from_pair(pair_id);
-        tracing::info!(
-            ?id,
-            ?triples,
-            "proposing protocol to generate a new presignature"
-        );
-
-        self.posits.propose(id, triples, &participants);
-        for &p in participants.iter() {
-            if p == self.me {
+            let pair_id = reservation.id;
+            // use holders (not original participants) since some nodes may have lost the artifact.
+            let participants = intersect_vec(&[active, reservation.holders()]);
+            if participants.len() < self.threshold {
+                tracing::warn!(
+                    ?pair_id,
+                    ?active,
+                    ?participants,
+                    "intersection < threshold, skipping triple pair"
+                );
+                local_skip.push(pair_id);
+                // drop: in-memory reservation released, pair stays in storage
                 continue;
             }
 
-            self.msg
-                .send(
-                    self.me,
-                    p,
-                    PositMessage {
-                        id: PositProtocolId::Presignature(id),
-                        from: self.me,
-                        action: PositAction::Propose,
-                    },
-                )
-                .await;
-        }
-    }
-
-    async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
-        let not_enough_presignatures = {
-            // Stopgap to prevent too many presignatures in the system. This should be around min_presig*nodes*2
-            // for good measure so that we have enough presignatures to do sig generation while also maintain
-            // the minimum number of presignature where a single node can't flood the system.
-            if self.len_potential().await >= cfg.presignature.max_presignatures as usize {
-                false
-            } else {
-                // We will always try to generate a new triple if we have less than the minimum
-                self.len_mine().await < cfg.presignature.min_presignatures as usize
-                    && self.len_introduced() < cfg.max_concurrent_introduction as usize
-                    && self.ongoing.len() < cfg.max_concurrent_generation as usize
-            }
+            break (reservation, participants);
         };
 
-        if not_enough_presignatures {
+        let id = FullPresignatureId::from_pair(reservation.id);
+        tracing::info!(?id, "proposing protocol to generate a new presignature");
+
+        self.posits.propose(id, reservation, &participants);
+        self.msg
+            .broadcast_posit(
+                self.me,
+                &participants,
+                PositProtocolId::Presignature(id),
+                PositAction::Propose,
+            )
+            .await;
+    }
+
+    /// Generate new presignatures if this node owns fewer than the per-node minimum
+    /// (`min_presignatures`) and the network-wide total hasn't reached the cap
+    /// (`max_presignatures`).
+    async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
+        if should_generate(
+            self.stock,
+            self.ongoing.len(),
+            self.len_introduced(),
+            cfg.presignature.min_presignatures as usize,
+            cfg.presignature.max_presignatures as usize,
+            cfg.max_concurrent_introduction as usize,
+            cfg.max_concurrent_generation as usize,
+        ) {
             tracing::debug!("not enough presignatures, generating");
             self.propose_posit(active).await;
         }
@@ -537,27 +569,39 @@ impl PresignatureSpawner {
     async fn generate(
         &mut self,
         id: FullPresignatureId,
-        positor: Positor<TriplesTaken>,
+        positor: Positor<TriplesReserved>,
         participants: &[Participant],
         timeout: Duration,
     ) -> Result<(), InitializationError> {
-        let (owner, triples) = match positor {
-            Positor::Proposer(proposer, triples) => (proposer, PendingTriples::Available(triples)),
-            Positor::Deliberator(proposer) => (
-                proposer,
-                PendingTriples::InStorage(id.pair_id, self.triples.clone()),
-            ),
-        };
+        let owner = positor.id();
         tracing::info!(
             ?id,
             ?owner,
             "starting protocol to generate a new presignature",
         );
 
-        let Some(slot) = self.presignatures.reserve(id.id).await else {
+        let Some(slot) = self.presignatures.create_slot(id.id, owner).await else {
+            // Dropping the positor here releases the reservation (proposer only),
+            // returning the pair to the pool.
             return Err(InitializationError::BadParameters(format!(
-                "id collision: presignature_id={id:?}"
+                "presignature {} is already generating, in use, or stored",
+                id.id
             )));
+        };
+
+        let triples = match positor {
+            Positor::Proposer(_, reservation) => {
+                // Commit: only now that the posit round succeeded and generation is
+                // starting is the pair actually removed from storage.
+                let Some(taken) = reservation.commit().await else {
+                    return Err(InitializationError::BadParameters(format!(
+                        "failed to commit triple pair reservation {}",
+                        id.pair_id
+                    )));
+                };
+                PendingTriples::Available(taken)
+            }
+            Positor::Deliberator(_) => PendingTriples::InStorage(id.pair_id, self.triples.clone()),
         };
 
         let mut participants = participants.to_vec();
@@ -567,14 +611,17 @@ impl PresignatureSpawner {
         let threshold = self.threshold;
         let epoch = self.epoch;
         let msg = self.msg.clone();
-        let my_account_id = self.my_account_id.clone();
+        #[cfg(feature = "debug-page")]
+        let node_account_id = self.node_account_id.clone();
+        #[cfg(not(feature = "debug-page"))]
+        let _ = self.node_account_id.clone();
         let keygen_out = KeygenOutput {
             private_share: self.private_share,
             public_key: self.public_key,
         };
 
         let task = async move {
-            let Some(triples) = triples.fetch(me, owner, timeout).await else {
+            let Some(triples) = triples.fetch(owner, timeout).await else {
                 return;
             };
 
@@ -600,13 +647,9 @@ impl PresignatureSpawner {
                 }
             };
 
-            crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS
-                .with_label_values(&[my_account_id.as_str()])
-                .inc();
+            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS.inc();
             if owner == me {
-                crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE
-                    .with_label_values(&[my_account_id.as_str()])
-                    .inc();
+                crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE.inc();
             }
 
             let inbox = msg.subscribe_presignature(id.id).await;
@@ -623,11 +666,11 @@ impl PresignatureSpawner {
                 msg,
                 #[cfg(feature = "debug-page")]
                 debug_view: crate::web::debug::register_task(
-                    my_account_id.to_string(),
+                    node_account_id,
                     format!("PresignatureGenerator {id:#?}"),
                 ),
             };
-            generator.run(&my_account_id, me, epoch).await;
+            generator.run(me, epoch).await;
         };
 
         self.ongoing.spawn(id.id, task);
@@ -641,56 +684,60 @@ impl PresignatureSpawner {
     async fn start_generation(
         &mut self,
         id: FullPresignatureId,
-        positor: Positor<TriplesTaken>,
+        positor: Positor<TriplesReserved>,
         participants: Vec<Participant>,
         timeout: Duration,
     ) {
-        if positor.is_proposer() {
-            for &p in &participants {
-                if p == self.me {
-                    continue;
-                }
-                self.msg
-                    .send(
-                        self.me,
-                        p,
-                        PositMessage {
-                            id: PositProtocolId::Presignature(id),
-                            from: self.me,
-                            action: PositAction::Start(participants.clone()),
-                        },
-                    )
-                    .await;
-            }
-        }
-
         let is_proposer = positor.is_proposer();
+
+        // Peers spend the pair as soon as START arrives. Announce only once our
+        // own slot and commit have succeeded, so we cannot back out after they did.
         if let Err(err) = self.generate(id, positor, &participants, timeout).await {
-            self.ongoing_owned.remove(&id.id);
             tracing::warn!(
                 ?id,
                 ?participants,
                 is_proposer,
                 ?err,
-                "unable to start presignature generation on START"
+                "unable to start presignature generation"
             );
+            return;
         }
+
+        if !is_proposer {
+            return;
+        }
+
+        self.msg
+            .broadcast_posit(
+                self.me,
+                &participants,
+                PositProtocolId::Presignature(id),
+                PositAction::Start(participants.clone()),
+            )
+            .await;
     }
 
     async fn run(
         mut self,
-        mesh_state: watch::Receiver<MeshState>,
-        config: watch::Receiver<Config>,
+        mut mesh_state: watch::Receiver<MeshState>,
+        mut cfg: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
+        let mut last_active_warn: Option<Instant> = None;
         let mut stockpile_interval = time::interval(Duration::from_millis(100));
-        let mut expiration_interval = tokio::time::interval(Duration::from_secs(20));
+        stockpile_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
+        expiration_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut posits = self.msg.subscribe_presignature_posit().await;
 
+        let mut protocol = cfg.borrow().protocol.clone();
+        let mut active = mesh_state.borrow().active().keys_vec();
+
+        self.refresh_stock().await;
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
-                    for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(60)) {
+                    for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(10), Duration::from_secs(2)) {
                         let PositInternalAction::StartProtocol(participants, positor) = action else {
                             tracing::warn!(
                                 ?id,
@@ -698,13 +745,18 @@ impl PresignatureSpawner {
                             );
                             continue;
                         };
-                        let timeout = config.borrow().protocol.presignature.generation_timeout;
-                        self.start_generation(id, positor, participants, Duration::from_millis(timeout)).await;
+                        let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
+                        self.start_generation(id, positor, participants, timeout).await;
                     }
+                    self.refresh_stock().await;
+                    crate::metrics::storage::NUM_PRESIGNATURES_MINE.set(self.stock.mine as i64);
+                    crate::metrics::storage::NUM_PRESIGNATURES_TOTAL.set(self.stock.generated as i64);
+                    crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL
+                        .set(self.ongoing.len() as i64);
                 }
                 Some((id, from, action)) = posits.recv() => {
-                    let timeout = config.borrow().protocol.presignature.generation_timeout;
-                    self.process_posit(id, from, action, Duration::from_millis(timeout)).await;
+                    let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
+                    self.process_posit(id, from, action, timeout).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
@@ -719,20 +771,25 @@ impl PresignatureSpawner {
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
                 _ = stockpile_interval.tick() => {
-                    let active = mesh_state.borrow().active.keys_vec();
-                    let protocol_cfg = config.borrow().protocol.clone();
-                    self.stockpile(&active, &protocol_cfg).await;
-                    let _ = ongoing_gen_tx.send(self.ongoing.len());
+                    if active.len() >= self.threshold {
+                        last_active_warn = None;
+                        self.stockpile(&active, &protocol).await;
+                        let _ = ongoing_gen_tx.send(self.ongoing.len());
 
-                    crate::metrics::NUM_PRESIGNATURES_MINE
-                        .with_label_values(&[self.my_account_id.as_str()])
-                        .set(self.len_mine().await as i64);
-                    crate::metrics::NUM_PRESIGNATURES_TOTAL
-                        .with_label_values(&[self.my_account_id.as_str()])
-                        .set(self.len_generated().await as i64);
-                    crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
-                        .with_label_values(&[self.my_account_id.as_str()])
-                        .set(self.len_potential().await as i64 - self.len_generated().await as i64);
+                    } else if last_active_warn.is_none_or(|i: Instant| i.elapsed() > Duration::from_secs(60)) {
+                        tracing::warn!(
+                            ?active,
+                            threshold = self.threshold,
+                            "not enough active participants to generate presignatures"
+                        );
+                        last_active_warn = Some(Instant::now());
+                    }
+                }
+                Ok(()) = cfg.changed() => {
+                    protocol = cfg.borrow().protocol.clone();
+                }
+                Ok(()) = mesh_state.changed() => {
+                    active = mesh_state.borrow().active().keys_vec();
                 }
             }
         }
@@ -776,10 +833,10 @@ impl PresignatureSpawnerTask {
             epoch,
             private_share,
             public_key,
-            &ctx.my_account_id,
             &ctx.triple_storage,
             &ctx.presignature_storage,
             ctx.msg_channel.clone(),
+            ctx.my_account_id.to_string(),
         );
 
         Self {
@@ -823,12 +880,7 @@ enum PendingTriples {
 }
 
 impl PendingTriples {
-    async fn fetch(
-        self,
-        me: Participant,
-        owner: Participant,
-        timeout: Duration,
-    ) -> Option<TriplesTaken> {
+    async fn fetch(self, owner: Participant, timeout: Duration) -> Option<TriplesTaken> {
         let (pair_id, storage) = match self {
             Self::InStorage(pair_id, storage) => (pair_id, storage),
             Self::Available(triples) => return Some(triples),
@@ -838,7 +890,7 @@ impl PendingTriples {
             let mut interval = tokio::time::interval(Duration::from_millis(200));
             loop {
                 interval.tick().await;
-                if let Some(triples) = storage.take(pair_id, owner, me).await {
+                if let Some(triples) = storage.take(pair_id, owner).await {
                     break triples;
                 };
             }
@@ -848,7 +900,7 @@ impl PendingTriples {
         match triples {
             Ok(triples) => Some(triples),
             Err(_) => {
-                tracing::warn!(pair_id, "timeout waiting for triple pair to be available");
+                tracing::warn!(?pair_id, "timeout waiting for triple pair to be available");
                 None
             }
         }
@@ -872,6 +924,7 @@ mod tests {
                 sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
             },
             participants: vec![Participant::from(1), Participant::from(2)],
+            holders: None,
         };
 
         // Serialize Presignature to JSON

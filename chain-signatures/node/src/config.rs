@@ -1,9 +1,7 @@
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
 
@@ -12,80 +10,60 @@ pub type ContractConfig = HashMap<String, Value>;
 
 #[derive(Clone, Debug, Default)]
 pub struct Config {
+    /// Protocol parameters mirrored from the contract.
     pub protocol: ProtocolConfig,
-    pub local: LocalConfig,
+    /// This node's own keys, never shared with anyone else.
+    pub network: NetworkConfig,
 }
 
 impl Config {
-    pub fn channel(local: LocalConfig) -> (watch::Sender<Self>, watch::Receiver<Self>) {
-        let config = Self::new(local);
+    pub fn channel(network: NetworkConfig) -> (watch::Sender<Self>, watch::Receiver<Self>) {
+        let config = Self::new(network);
         watch::channel(config)
     }
 
-    pub fn channel_default() -> (watch::Sender<Self>, watch::Receiver<Self>) {
-        Self::channel(LocalConfig::default())
-    }
-
-    pub fn new(local: LocalConfig) -> Self {
-        let mut protocol = ProtocolConfig::default();
-
-        // We should also override are default initalized config if our overrides are present:
-        if let Some(map) = local.over.entries.as_object() {
-            if !map.is_empty() {
-                let mut base = serde_json::to_value(protocol).unwrap();
-                merge(&mut base, &local.over.entries);
-                protocol = serde_json::from_value(base).unwrap();
-            }
+    pub fn new(network: NetworkConfig) -> Self {
+        Self {
+            protocol: ProtocolConfig::default(),
+            network,
         }
-
-        Self { protocol, local }
     }
 
-    pub fn try_from_contract(mut contract: ContractConfig, original: &Config) -> Option<Self> {
-        let Some(mut protocol) = contract.remove("protocol") else {
-            tracing::warn!("unable to find protocol in contract config");
-            return None;
-        };
-        merge(&mut protocol, &original.local.over.entries);
-        let Ok(protocol) = serde_json::from_value(protocol) else {
-            tracing::warn!("unable to parse protocol in contract config");
-            return None;
-        };
-
-        Some(Self {
-            protocol,
-            local: original.local.clone(),
-        })
-    }
-
+    /// Returns whether the protocol config actually changed, so that the
+    /// surrounding `watch::Sender::send_if_modified` only notifies receivers on
+    /// real changes instead of every contract poll.
     pub fn update(&mut self, mut contract: ContractConfig) -> bool {
-        let Some(mut protocol) = contract.remove("protocol") else {
+        let Some(protocol) = contract.remove("protocol") else {
             tracing::warn!("unable to find protocol in contract config");
             return false;
         };
-        merge(&mut protocol, &self.local.over.entries);
         let Ok(protocol) = serde_json::from_value(protocol) else {
             tracing::warn!("unable to parse protocol in contract config");
             return false;
         };
-
+        if self.protocol == protocol {
+            return false;
+        }
         self.protocol = protocol;
         true
     }
 }
 
-/// All the local configurations on a node that are not accessible by anyone else
-/// but the current node.
-#[derive(Clone, Debug, Default)]
-pub struct LocalConfig {
-    pub network: NetworkConfig,
-    pub over: OverrideConfig,
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NetworkConfig {
     pub sign_sk: near_crypto::SecretKey,
     pub cipher_sk: hpke::SecretKey,
+}
+
+/// Custom Debug implementation to avoid printing the secret keys in logs.
+/// Underlying crates probably redact already, but it's better to be 100% sure
+impl std::fmt::Debug for NetworkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetworkConfig")
+            .field("sign_sk", &"<hidden>")
+            .field("cipher_sk", &"<hidden>")
+            .finish()
+    }
 }
 
 impl Default for NetworkConfig {
@@ -100,94 +78,35 @@ impl Default for NetworkConfig {
     }
 }
 
-/// The override config is the set of configurations we want to override from the
-/// default configuration. This is a partial set of configurations, purely only
-/// the values that the node wants to override.
-///
-/// The set of configs that can be overridden are only the non-[`LocalConfig`]
-/// ones since we already control those.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OverrideConfig {
-    pub(crate) entries: Value,
-}
-
-impl Default for OverrideConfig {
-    fn default() -> Self {
-        // NOTE: serde_json::Value::default() use Value::Null which is not what we want
-        // so we create a new empty map instead.
-        Self {
-            entries: Value::Object(serde_json::Map::new()),
-        }
-    }
-}
-
-impl OverrideConfig {
-    pub fn new(entries: Value) -> Self {
-        Self { entries }
-    }
-}
-
-impl FromStr for OverrideConfig {
-    type Err = serde_json::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_str(s)
-    }
-}
-
-pub fn merge(base: &mut Value, new: &Value) {
-    match (base, new) {
-        (base @ &mut Value::Object(_), Value::Object(new)) => {
-            let base = base.as_object_mut().unwrap();
-            for (key, new_value) in new {
-                let base = base.entry(key).or_insert(Value::Null);
-                merge(base, new_value);
-            }
-        }
-        (base, new) => *base = new.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use serde::Deserialize;
+    use super::{Config, ContractConfig, NetworkConfig};
+    use mpc_contract::config::ProtocolConfig;
 
-    use super::merge;
+    fn contract_config(protocol: &ProtocolConfig) -> ContractConfig {
+        ContractConfig::from([(
+            "protocol".to_string(),
+            serde_json::to_value(protocol).unwrap(),
+        )])
+    }
 
     #[test]
-    fn test_merge() {
-        #[allow(dead_code)]
-        #[derive(Debug, Deserialize)]
-        struct B {
-            c: i32,
-            d: i32,
-        }
+    fn test_update_returns_whether_protocol_changed() {
+        let mut config = Config::new(NetworkConfig::default());
 
-        #[allow(dead_code)]
-        #[derive(Debug, Deserialize)]
-        struct Base {
-            a: i32,
-            b: B,
-        }
+        // Same config as current => no change, no notification.
+        assert!(!config.update(contract_config(&ProtocolConfig::default())));
 
-        let mut base = serde_json::json!( {
-            "a": 1,
-            "b": {
-                "c": 2,
-                "d": 3,
-            },
-        });
+        // An actual change => updated and notified.
+        let mut changed = ProtocolConfig::default();
+        changed.message_timeout += 1;
+        assert!(config.update(contract_config(&changed)));
+        assert_eq!(config.protocol.message_timeout, changed.message_timeout);
 
-        let new = serde_json::json!({
-            "b": {
-                "c": 4,
-                "e": 5,
-            },
-            "f": 6,
-        });
+        // The same value again => no change.
+        assert!(!config.update(contract_config(&changed)));
 
-        merge(&mut base, &new);
-        let base: Base = serde_json::from_value(base).unwrap();
-        dbg!(base);
+        // Missing protocol section => rejected, no change.
+        assert!(!config.update(ContractConfig::new()));
     }
 }

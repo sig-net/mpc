@@ -1,10 +1,11 @@
 pub mod consensus;
 pub mod contract;
 pub mod cryptography;
-pub mod error;
 pub mod message;
 pub mod posit;
 pub mod presignature;
+pub mod publish_failover;
+pub mod request;
 pub mod signature;
 pub mod state;
 pub mod sync;
@@ -15,55 +16,81 @@ pub mod test_setup;
 
 pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
-pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
-pub use mpc_primitives::Chain;
-pub use signature::{IndexedSignRequest, SignQueue};
-use signet_program::SignBidirectionalEvent;
+pub use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, RespondBidirectionalTx};
 pub use state::{Node, NodeState};
 
-use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
-use crate::respond_bidirectional::RespondBidirectionalTx;
-use crate::rpc::{ContractStateWatcher, RpcChannel};
+use crate::protocol::request::SignatureSpawnerTask;
+use crate::rpc::ContractStateWatcher;
 use crate::storage::presignature_storage::PresignatureStorage;
-use crate::storage::secret_storage::SecretNodeStorageBox;
+use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
 use semver::Version;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
-use tokio::sync::RwLock;
 use tokio::sync::{mpsc, watch};
+
+use crate::storage::protocol_storage::StockCounts;
+
+/// Whether a spawner should propose another generation: below its own floor,
+/// the network cap not reached counting generations in flight, and both
+/// concurrency caps free. `stock` may be up to a second old, so the floor can
+/// be overshot by at most one second of proposals, bounded by `max_introduced`.
+pub(crate) fn should_generate(
+    stock: StockCounts,
+    ongoing: usize,
+    introduced: usize,
+    min: usize,
+    max: usize,
+    max_introduced: usize,
+    max_ongoing: usize,
+) -> bool {
+    stock.generated + ongoing < max
+        && stock.mine < min
+        && introduced < max_introduced
+        && ongoing < max_ongoing
+}
 
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
-    pub(crate) secret_storage: SecretNodeStorageBox,
+    pub(crate) secret_storage: SecretNodeStorageVariant,
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
-    pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    pub(crate) sign_task: SignatureSpawnerTask,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
     pub(crate) ready: mpsc::Receiver<ReadyMessage>,
     pub(crate) msg_channel: MessageChannel,
-    pub(crate) rpc_channel: RpcChannel,
-    pub(crate) contract: ContractStateWatcher,
     pub(crate) config: watch::Receiver<Config>,
     pub(crate) mesh_state: watch::Receiver<MeshState>,
-    pub(crate) backlog: Backlog,
+}
+
+impl Drop for MpcSignProtocol {
+    fn drop(&mut self) {
+        self.sign_task.abort();
+    }
 }
 
 /// Interface required by the [`MpcSignProtocol`] to participate in the
 /// self-governing methods of the MPC network.
 pub trait Governance {
     fn propose_join(&self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+
+    /// Returns candidate information and admission votes for `account_id`.
+    fn candidate_info(
+        &self,
+        account_id: &AccountId,
+    ) -> impl std::future::Future<
+        Output = anyhow::Result<Option<mpc_contract::primitives::CandidateEntry>>,
+    > + Send;
 
     fn vote_reshared(
         &self,
@@ -73,6 +100,11 @@ pub trait Governance {
     fn vote_public_key(
         &self,
         public_key: &near_crypto::PublicKey,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+
+    fn vote_threshold(
+        &self,
+        new_threshold: usize,
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
 }
 
@@ -84,29 +116,26 @@ impl MpcSignProtocol {
         contract_state: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
     ) {
-        let my_account_id = self.my_account_id.as_str();
-        let _span = tracing::info_span!("running", my_account_id);
-        let my_account_id = self.my_account_id.clone();
+        let _span = tracing::info_span!("running", "{}", self.my_account_id.as_str());
 
-        crate::metrics::NODE_RUNNING
-            .with_label_values(&[my_account_id.as_str()])
-            .set(1);
-        crate::metrics::NODE_VERSION
-            .with_label_values(&[my_account_id.as_str()])
-            .set(node_version());
+        crate::metrics::nodes::NODE_RUNNING.set(1);
+        crate::metrics::nodes::NODE_VERSION.set(node_version());
+        crate::metrics::nodes::PROCESS_START_TIME.set(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        );
 
         loop {
             let protocol_time = Instant::now();
-            crate::metrics::PROTOCOL_ITER_CNT
-                .with_label_values(&[my_account_id.as_str()])
-                .inc();
+            crate::metrics::protocols::PROTOCOL_ITER_CNT.inc();
 
             let mesh_state = mesh_state.borrow().clone();
             let crypto_time = Instant::now();
             node.state = node.state.progress(&mut self, mesh_state).await;
             node.update_watchers().await;
-            crate::metrics::PROTOCOL_LATENCY_ITER_CRYPTO
-                .with_label_values(&[my_account_id.as_str()])
+            crate::metrics::protocols::PROTOCOL_LATENCY_ITER_CRYPTO
                 .observe(crypto_time.elapsed().as_secs_f64());
 
             if let Some(contract_state) = contract_state.state() {
@@ -115,8 +144,7 @@ impl MpcSignProtocol {
                     .state
                     .advance(&mut self, &mut gov_client, contract_state)
                     .await;
-                crate::metrics::PROTOCOL_LATENCY_ITER_CONSENSUS
-                    .with_label_values(&[my_account_id.as_str()])
+                crate::metrics::protocols::PROTOCOL_LATENCY_ITER_CONSENSUS
                     .observe(consensus_time.elapsed().as_secs_f64());
                 node.update_watchers().await;
             }
@@ -132,8 +160,7 @@ impl MpcSignProtocol {
                 NodeState::Joining(_) => 1000,
             };
 
-            crate::metrics::PROTOCOL_LATENCY_ITER_TOTAL
-                .with_label_values(&[my_account_id.as_str()])
+            crate::metrics::protocols::PROTOCOL_LATENCY_ITER_TOTAL
                 .observe(protocol_time.elapsed().as_secs_f64());
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         }
@@ -165,8 +192,7 @@ fn parse_node_version(version: &str) -> i64 {
     (rc_num + version.patch * 1000 + version.minor * 1000000 + version.major * 1000000000) as i64
 }
 
-pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHandle<()> {
-    let node_account_id = node_account_id.to_string();
+pub async fn spawn_system_metrics() -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         loop {
             let mut system = System::new_all();
@@ -184,20 +210,20 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
 
             // Update CPU usage metric
             let cpu_usage = s.global_cpu_usage() as i64;
-            crate::metrics::CPU_USAGE_PERCENTAGE
-                .with_label_values(&["global", &node_account_id])
+            crate::metrics::hardware::CPU_USAGE_PERCENTAGE
+                .with_label_values(&["global"])
                 .set(cpu_usage);
 
             // Update available memory metric
             let available_memory = system.available_memory() as i64;
-            crate::metrics::AVAILABLE_MEMORY_BYTES
-                .with_label_values(&["available_mem", &node_account_id])
+            crate::metrics::hardware::AVAILABLE_MEMORY_BYTES
+                .with_label_values(&["available_mem"])
                 .set(available_memory);
 
             // Update used memory metric
             let used_memory = system.used_memory() as i64;
-            crate::metrics::USED_MEMORY_BYTES
-                .with_label_values(&["used", &node_account_id])
+            crate::metrics::hardware::USED_MEMORY_BYTES
+                .with_label_values(&["used"])
                 .set(used_memory);
 
             let root_mount_point = Path::new("/");
@@ -207,8 +233,8 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
                 .find(|d| d.mount_point() == root_mount_point)
                 .expect("No disk found mounted at '/'")
                 .available_space() as i64;
-            crate::metrics::AVAILABLE_DISK_SPACE_BYTES
-                .with_label_values(&["available_disk", &node_account_id])
+            crate::metrics::hardware::AVAILABLE_DISK_SPACE_BYTES
+                .with_label_values(&["available_disk"])
                 .set(available_disk_space);
 
             // Update total disk space metric
@@ -217,21 +243,13 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
                 .find(|d| d.mount_point() == root_mount_point)
                 .expect("No disk found mounted at '/'")
                 .total_space() as i64;
-            crate::metrics::TOTAL_DISK_SPACE_BYTES
-                .with_label_values(&["total_disk", &node_account_id])
+            crate::metrics::hardware::TOTAL_DISK_SPACE_BYTES
+                .with_label_values(&["total_disk"])
                 .set(total_disk_space);
 
             std::thread::sleep(Duration::from_secs(5));
         }
     })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(clippy::large_enum_variant)]
-pub enum SignRequestType {
-    Sign,
-    SignBidirectional(SignBidirectionalEvent),
-    RespondBidirectional(RespondBidirectionalTx),
 }
 
 #[cfg(test)]
@@ -258,5 +276,30 @@ mod tests {
     fn test_parse_node_version_invalid() {
         assert_eq!(parse_node_version("bad_version"), 999999999000);
         assert_eq!(parse_node_version(""), 999999999000);
+    }
+
+    #[test]
+    fn should_generate_branches() {
+        let stock = StockCounts {
+            mine: 3,
+            generated: 10,
+        };
+        assert!(should_generate(stock, 2, 1, 5, 100, 10, 128));
+        assert!(
+            !should_generate(stock, 2, 1, 3, 100, 10, 128),
+            "floor reached"
+        );
+        assert!(
+            !should_generate(stock, 2, 1, 5, 12, 10, 128),
+            "network cap counts in flight"
+        );
+        assert!(
+            !should_generate(stock, 2, 10, 5, 100, 10, 128),
+            "introduction cap"
+        );
+        assert!(
+            !should_generate(stock, 128, 1, 5, 1000, 10, 128),
+            "generation cap"
+        );
     }
 }

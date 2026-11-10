@@ -1,8 +1,44 @@
 # Integration tests
 
+## Prerequisites
+
+Run `just setup-check` to verify your system (Linux/macOS) without installing
+anything, or `just setup` to install missing dependencies automatically
+(`just setup-check all` / `just setup "" all` cover extended chain tooling:
+Solana/Anchor, Java/dpm, Compact). Manual install notes follow.
+
+1. Install [cargo-nextest](https://nexte.st) for race-free parallelization:
+
+```bash
+# Linux
+curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
+# macOS:
+curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C ~/.cargo/bin
+```
+
+2. Install the WebAssembly `wasm32-unknown-unknown` target:
+
+```bash
+rustup target add wasm32-unknown-unknown
+# The contract build runs under the pinned toolchain, so add the target there too:
+rustup target add wasm32-unknown-unknown --toolchain 1.93.0
+```
+
+3. Install [just](https://just.systems/man/en/packages.html):
+
+```bash
+# Linux/macOS
+curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.cargo/bin
+
+# Cargo
+cargo install just
+```
+
 ## Basic guide
 
-Running integration tests requires you to have redis and sandbox docker images present on your machine:
+Running integration tests requires a running Docker daemon (`just setup` installs
+Docker Desktop on macOS, docker.io on Linux). The `redis:7.4.2` image is pulled
+automatically by testcontainers on first run; prefetch it to avoid waiting:
 
 ```BASH
 docker pull redis:7.4.2
@@ -10,42 +46,54 @@ docker pull redis:7.4.2
 
 In case of authorization issues make sure you have logged into docker using your [access token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
 
-Then run the integration tests:
+### Running tests
 
-```BASH
-cargo test -p integration-tests --jobs 1 -- --test-threads 1
-# or if you want to run tests in docker
-cargo test -p integration-tests --features docker-test
+Each `just` test recipe automatically runs setup (WASM contract + node binary compilation) before executing tests. Pass an optional `filter` to run matching tests only. Run `just` with no arguments to list all available recipes.
+
+| Command | Full recipe | Description |
+|---|---|---|
+| `just s` | `just setup` | Build artifacts |
+| `just t [filter]` | `just test` | All integration tests |
+| `just tf [filter]` | `just test-fixture` | Fixture tests only (no full cluster) |
+| `just tc [filter]` | `just test-cluster` | Full cluster tests only |
+| `just ts [filter]` | `just test-seq` | All tests, sequential single-threaded |
+| `just to <name>` | `just test-one <name>` | Single test, keeps containers alive |
+| `just tk [filter]` | `just test-keep` | All tests, keeps containers alive |
+
+```bash
+just t                               # run all tests
+just t my_module                     # run matching tests only
+just to test_basic_action.           # run specific test
 ```
 
+The available profiles and their concurrency settings are defined in [`.config/nextest.toml`](../.config/nextest.toml).
+
+### Midnight real-stack test
+
+The Midnight real-stack test exercises the complete Midnight → Ethereum → Midnight response lifecycle. It starts a real Midnight node, indexer, proof server, Anvil, and MPC cluster, so it is ignored by default and must be selected explicitly.
+
+In addition to the prerequisites above, it requires:
+
+- Docker
+- [Node.js](https://nodejs.org/) 22.13 or newer
+- [cargo-near](https://github.com/near/cargo-near)
+- Compact launcher 0.5.1 with `compactc` 0.33.0-rc.2 available as `compact`; see the [Midnight CI workflow](../.github/workflows/test-chain-midnight.yml) for the pinned Linux installation
+
+From the repository root, prepare the TypeScript publisher and test caller,
+then build the MPC contract and host node and run the ignored test:
+
+```bash
+just build midnight
+just setup
+just test-midnight
+```
+
+The test requires the host `mpc-node` binary. Midnight node, indexer, proof-server, and fixture-driver logs are written under `target/tmp_*/midnight`.
+
 ## Logging and Tracing
-We have three types of logging available:
 
-### FMT
-This is the default logging format used for local development. It outputs logs to the console in a human-readable format.
-
-### OTLP
-OpenTelemetry Protocol is used for exporting logs to an OpenTelemetry collector. This is useful for integrating with various observability backends.
-
-#### Configuring Local OTLP Logging
-1. **Setup OTLP Backend**
-Start OTLP backend of your choice. For example [Jaeger](https://www.jaegertracing.io/docs/getting-started/).
-
-2. **Set the OTLP Endpoint**:
-    - By default, the endpoint is set to `http://localhost:4318`.
-    - To change it, set the environment variable `MPC_OTLP_ENDPOINT` or pass it as a parameter when starting the node with `--otlp-endpoint` flag.
-
-3. **Set the OpenTelemetry Logging Level**:
-    - By default, the logging level is set to `off` when parameters are skipped and to `debug` when running the integration tests cluster.
-    - To change it, pass `-opentelemetry-level` value when starting the node, or set the environment variable `MPC_OPENTELEMETRY_LEVEL` to the desired level (`debug`, `info`, etc.).
-
-4. **Explore traces**:
-- Start the cluster or run tests
-- Open the page of your backend in browser
-- Explore traces
-
-### Stackdriver
-This logging format is used exclusively in Google Cloud Platform (GCP). It integrates with Google Cloud's operations suite (formerly Stackdriver) to provide structured logging.
+Log level policy, output layers (FMT, OTLP, Stackdriver) and local OTLP setup are documented in
+[doc/logging.md](../doc/logging.md).
 
 ## Benchmarking
 
@@ -56,14 +104,37 @@ To run benchmarks, simply run the `bench.sh` script in the root:
 ./bench.sh
 ```
 
+## Release compatibility test
+
+The release compatibility test boots one node from the current code and one
+node from the latest release tag, with threshold 2, and signs. It is
+informational: a failure means investigate before a rolling deploy.
+To run it locally:
+
+1. Build the latest release binary (only needed once per tag):
+    ```bash
+    just build compat
+    ```
+    Set `COMPAT_TAG=<tag>` to build another tag and `FORCE_REBUILD=1` to
+    rebuild an existing binary.
+2. Execute the test (builds the contract and the current node first):
+    ```bash
+    just test-compat
+    ```
+
+The build script generates the binary under `target/compat/<tag>` and points
+`target/compat/latest` at it, so the integration test cluster can spawn a
+previous-release node without checking artifacts into git.
+
 ## FAQ
 
 ### I want to run a test, but keep the docker containers from being destroyed
 
-You can pass environment variable `TESTCONTAINERS=keep` to keep all of the docker containers. For example:
+Use `just tk` to keep all containers after a full test run, or `just to <name>` for a single test:
 
 ```bash
-$ TESTCONTAINERS=keep cargo test -p integration-tests --jobs 1 -- --test-threads 1
+just tk
+just to test_basic_action
 ```
 
 ### There are no logs anymore, how do I debug?
@@ -71,28 +142,16 @@ $ TESTCONTAINERS=keep cargo test -p integration-tests --jobs 1 -- --test-threads
 The easiest way is to run one isolated test of your choosing while keeping the containers (see above):
 
 ```bash
-$ TESTCONTAINERS=keep cargo test -p integration-tests test_basic_action
+just to test_basic_action
 ```
 
-Now, you can do `docker ps` and it should list all of containers related to your test (the most recent ones are always at the top, so lookout for those). For example:
-
-```bash
-CONTAINER ID   IMAGE                                            COMMAND                  CREATED         STATUS         PORTS                                           NAMES
-b2724d0c9530   near/mpc-recovery:latest                         "mpc-recovery start-…"   5 minutes ago   Up 5 minutes   0.0.0.0:32792->19985/tcp, :::32792->19985/tcp   fervent_moore
-67308ab06c5d   near/mpc-recovery:latest                         "mpc-recovery start-…"   5 minutes ago   Up 5 minutes   0.0.0.0:32791->3000/tcp, :::32791->3000/tcp     upbeat_volhard
-65ec65384af4   near/mpc-recovery:latest                         "mpc-recovery start-…"   5 minutes ago   Up 5 minutes   0.0.0.0:32790->3000/tcp, :::32790->3000/tcp     friendly_easley
-b4f90b1546ec   near/mpc-recovery:latest                         "mpc-recovery start-…"   5 minutes ago   Up 5 minutes   0.0.0.0:32789->3000/tcp, :::32789->3000/tcp     vibrant_allen
-934ec13d9146   ghcr.io/near/os-relayer:latest                   "/usr/local/bin/entr…"   5 minutes ago   Up 5 minutes   0.0.0.0:32788->16581/tcp, :::32788->16581/tcp   sleepy_grothendieck
-c505ead6eb18   redis:latest                                     "docker-entrypoint.s…"   5 minutes ago   Up 5 minutes   0.0.0.0:32787->6379/tcp, :::32787->6379/tcp     trusting_lederberg
-2843226b16a9   google/cloud-sdk:latest                          "gcloud beta emulato…"   5 minutes ago   Up 5 minutes   0.0.0.0:32786->15805/tcp, :::32786->15805/tcp   hungry_pasteur
-3f4c70020a4c   ghcr.io/near/sandbox:latest                      "near-sandbox --home…"   5 minutes ago   Up 5 minutes                                                   practical_elbakyan
-```
+Now, you can do `docker ps` and it should list all of containers related to your test (the most recent ones are always at the top, so lookout for those).
 
 Now, you can inspect each container's logs according to your needs using `docker logs <container-id>`. You might also want to reproduce some components of the test manually by making `curl` requests to the leader node (its web port is exposed on your host machine, use `docker ps` output above as the reference).
 
 ### How to see all the logs in terminal
 ```bash
-RUST_BACKTRACE=full RUST_LOG=debug cargo test test_name -- --nocapture
+RUST_BACKTRACE=full RUST_LOG=debug cargo nextest run -p integration-tests -E 'test(test_name)' --no-capture
 ```
 
 ### Re-building Docker image is way too slow, is there a way I can do a faster development feedback loop?

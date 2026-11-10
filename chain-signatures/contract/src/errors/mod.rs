@@ -21,12 +21,22 @@ pub enum RespondError {
     InvalidSignature,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CheckpointError {
+    #[error("The checkpoint is behind the latest checkpoint for this chain.")]
+    CheckpointBehind,
+    #[error("A conflicting checkpoint already exists for this chain and height.")]
+    ConflictingCheckpoint,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
 pub enum JoinError {
     #[error("Account to join is already in the participant set.")]
     JoinAlreadyParticipant,
     #[error("Account to revoke is not in the candidate set.")]
     RevokeNotCandidate,
+    #[error("Candidate URL is too long.")]
+    UrlTooLong,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
@@ -51,6 +61,14 @@ pub enum VoteError {
     JoinNotCandidate,
     #[error("Number of participants cannot go below threshold.")]
     ParticipantsBelowThreshold,
+    #[error("Number of participants cannot go below minimum of two.")]
+    ParticipantsBelowMinimum,
+    #[error(
+        "Proposed new threshold must be between compute_threshold and the number of participants."
+    )]
+    ThresholdOutOfRange,
+    #[error("Joins and kicks must be disjoint.")]
+    BatchOverlapping,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
@@ -97,6 +115,9 @@ pub enum ErrorKind {
     /// An error occurred while node is performing respond call.
     #[error("{0}")]
     Respond(#[from] RespondError),
+    /// An error occurred while nodes are voting on a checkpoint.
+    #[error("{0}")]
+    Checkpoint(#[from] CheckpointError),
     /// An error occurred while node is performing join call.
     #[error("{0}")]
     Join(#[from] JoinError),

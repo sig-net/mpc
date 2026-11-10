@@ -1,23 +1,22 @@
-use std::sync::Arc;
-
-use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::{IndexedSignRequest, MessageChannel, MpcSignProtocol};
+use crate::protocol::request::{SignatureSpawner, SignatureSpawnerTask};
+use crate::protocol::{MessageChannel, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::storage::secret_storage::SecretNodeStorageBox;
+use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::{PresignatureStorage, TripleStorage};
+use crate::types::SignCommand;
 use near_sdk::AccountId;
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch};
 
 pub struct TestProtocolStorage {
-    pub secret_storage: SecretNodeStorageBox,
+    pub secret_storage: SecretNodeStorageVariant,
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
 }
 
 pub struct TestProtocolChannels {
-    pub sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    pub sign_rx: mpsc::Receiver<SignCommand>,
     pub msg_channel: MessageChannel,
     pub rpc_channel: RpcChannel,
     pub config: watch::Receiver<Config>,
@@ -34,21 +33,32 @@ impl MpcSignProtocol {
         let generating = channels.msg_channel.subscribe_generation().await;
         let resharing = channels.msg_channel.subscribe_resharing().await;
         let ready = channels.msg_channel.subscribe_ready().await;
+        // Nothing in tests observes sync-status reports, so the receiving end is
+        // dropped immediately.
+        let (sync_report_tx, _sync_report_rx) = mpsc::channel(1);
+        let spawner = SignatureSpawner::new(
+            my_account_id.clone(),
+            contract.clone(),
+            storage.presignature_storage.clone(),
+            channels.mesh_state.clone(),
+            channels.msg_channel.clone(),
+            channels.rpc_channel.clone(),
+            sync_report_tx,
+        );
+        let sign_task =
+            SignatureSpawnerTask::run(spawner, channels.sign_rx, channels.config.clone());
         Self {
             my_account_id,
             secret_storage: storage.secret_storage,
             triple_storage: storage.triple_storage,
             presignature_storage: storage.presignature_storage,
-            sign_rx: channels.sign_rx,
+            sign_task,
             msg_channel: channels.msg_channel,
             generating,
             resharing,
             ready,
-            rpc_channel: channels.rpc_channel,
-            contract,
             config: channels.config,
             mesh_state: channels.mesh_state,
-            backlog: Backlog::new(),
         }
     }
 }

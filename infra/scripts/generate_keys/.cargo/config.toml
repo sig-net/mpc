@@ -1,2 +1,0 @@
-[target.'cfg(not(target = "wasm32-unknown-unknown"))']
-runner = "target/debug/generate_keys"

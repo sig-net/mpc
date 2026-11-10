@@ -5,9 +5,9 @@ use near_sdk::AccountId;
 use crate::{
     node_client::NodeClient,
     protocol::{contract::primitives::Participants, state::NodeStatus, ParticipantInfo},
+    web::StatusResponse,
+    PROTOCOL_VERSION,
 };
-
-use super::StateView;
 
 pub struct MockServer {
     id: u32,
@@ -18,14 +18,6 @@ pub struct MockServer {
 impl MockServer {
     async fn run(id: u32) -> Self {
         let mut server = mockito::Server::new_async().await;
-        server
-            .mock("GET", "/state")
-            .with_status(201)
-            .with_header("content-type", "application/json")
-            .with_body(default_state_body())
-            .create_async()
-            .await;
-
         server
             .mock("GET", "/status")
             .with_status(201)
@@ -77,11 +69,15 @@ impl MockServer {
     }
 
     pub async fn make_online(&mut self) {
+        self.set_protocol_version(Some(PROTOCOL_VERSION)).await;
+    }
+
+    pub async fn set_protocol_version(&mut self, protocol_version: Option<u64>) {
         self.server
             .mock("GET", "/status")
             .with_status(201)
             .with_header("content-type", "application/json")
-            .with_body(default_status_body(self.id))
+            .with_body(status_body(self.id, protocol_version))
             .create_async()
             .await;
     }
@@ -111,7 +107,7 @@ impl MockServers {
     }
 
     pub fn client(&self) -> NodeClient {
-        NodeClient::new(&crate::node_client::Options::default())
+        NodeClient::new()
     }
 
     pub async fn push(&mut self, id: u32) {
@@ -131,10 +127,6 @@ impl MockServers {
     pub fn remove_back(&mut self) {
         self.servers.pop();
     }
-
-    pub fn swap_remove_front(&mut self) {
-        self.servers.swap_remove(0);
-    }
 }
 
 impl std::ops::Index<usize> for MockServers {
@@ -151,26 +143,24 @@ impl std::ops::IndexMut<usize> for MockServers {
     }
 }
 
-fn default_state_body() -> Vec<u8> {
-    serde_json::to_vec(&StateView::Running {
-        participants: vec![Participant::from(0)],
-        triple_count: 0,
-        triple_mine_count: 0,
-        triple_potential_count: 0,
-        presignature_count: 0,
-        presignature_mine_count: 0,
-        presignature_potential_count: 0,
-        latest_block_height: 0,
-    })
-    .unwrap()
+fn default_status_body(id: u32) -> Vec<u8> {
+    status_body(id, Some(PROTOCOL_VERSION))
 }
 
-fn default_status_body(id: u32) -> Vec<u8> {
-    serde_json::to_vec(&NodeStatus::Running {
+fn status_body(id: u32, version: Option<u64>) -> Vec<u8> {
+    let status = NodeStatus::Running {
         me: Participant::from(id),
         participants: vec![Participant::from(0)],
         ongoing_triple_gen: 0,
         ongoing_presignature_gen: 0,
-    })
-    .unwrap()
+    };
+
+    match version {
+        Some(protocol_version) => serde_json::to_vec(&StatusResponse {
+            protocol_version,
+            status: status.clone(),
+        })
+        .unwrap(),
+        None => serde_json::to_vec(&status).unwrap(),
+    }
 }

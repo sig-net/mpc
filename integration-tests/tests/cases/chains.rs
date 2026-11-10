@@ -9,11 +9,11 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
 use mpc_crypto::kdf::check_ec_signature;
 use mpc_crypto::{derive_epsilon_sol, derive_key, near_public_key_to_affine_point};
+use mpc_node::sign_bidirectional::public_key_to_address;
+use mpc_primitives::Chain;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use reqwest::Client;
 use rlp::RlpStream;
-use secp256k1::PublicKey as SecpPublicKey;
-use secp256k1::{Secp256k1 as LibSecp256k1, SecretKey as SecpSecretKey};
 use serde_json::json;
 use sha3::{Digest, Keccak256};
 use solana_sdk::signer::Signer as _;
@@ -44,7 +44,6 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let execution_rpc_http_url = eth_ctx.sandbox.external_http_endpoint.clone();
     let account_sk = eth_ctx.sandbox.secret_key.clone();
     let chain_id = eth_ctx.sandbox.chain_id;
-    let parameters = serde_json::to_string(&json!({ "network": "sandbox" }))?;
 
     let solana = nodes
         .solana
@@ -57,16 +56,19 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
 
     let root_pk_near = nodes.root_public_key().await?;
     let root_pk = near_public_key_to_affine_point(root_pk_near);
-    let epsilon = derive_epsilon_sol(key_version, &signer_account, path);
+    let epsilon = derive_epsilon_sol(key_version, &signer_account, path)?;
     let user_pk = derive_key(root_pk, epsilon);
     let user_pk_bytes = user_pk.to_encoded_point(false);
-    let user_secp_pk = SecpPublicKey::from_slice(user_pk_bytes.as_bytes())
-        .context("failed to convert user public key")?;
-    let user_address = actions::public_key_to_address(&user_secp_pk);
-    let user_alloy_address = AlloyAddress::from_slice(user_address.as_bytes());
+    let user_address = public_key_to_address(&user_pk_bytes);
+    let user_alloy_address = AlloyAddress::from_slice(user_address.as_slice());
+
+    let client = Client::new();
+    // Use the live account nonce to avoid "nonce too low" errors if the address has prior sends
+    let user_hex = format_alloy_address(&user_alloy_address);
+    let sender_nonce = get_transaction_count(&client, &execution_rpc_http_url, &user_hex).await?;
 
     let legacy_tx = EthereumTransaction {
-        nonce: U256::from(0u8),
+        nonce: sender_nonce,
         gas_price: U256::from(1_500_000_000u64),
         gas_limit: U256::from(FUNDING_GAS_LIMIT),
         to: user_alloy_address,
@@ -74,7 +76,6 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         data: Vec::new(),
     };
 
-    let client = Client::new();
     ensure_eth_signer_funded(
         &client,
         &execution_rpc_http_url,
@@ -95,16 +96,16 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .solana()
         .bidirectional()
         .transaction_data(unsigned_rlp.clone())
-        .caip2_id("eip155:60")
+        .caip2_id(Chain::Ethereum.caip2_chain_id())
         .output_deserialization_schema(Vec::new())
-        .respond_serialization_schema(Vec::new())
+        .respond_serialization_schema(br#"[{"name":"output","type":"bool"}]"#.to_vec())
         .payload(msg_hash_bytes)
         .payload_hash(msg_hash_bytes)
         .path(path)
         .key_version(key_version)
         .algorithm("ECDSA")
-        .destination("ethereum")
-        .parameters(&parameters)
+        .destination("")
+        .parameters("")
         .await?;
 
     assert_eq!(
@@ -156,14 +157,21 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .context("eth_sendRawTransaction missing result")?
         .to_string();
 
-    let receipt = wait_for_transaction_receipt(
+    let respond_future = actions::sign::wait_for_respond_bidirectional(
+        solana,
+        sol_outcome.request_id,
+        Duration::from_secs(120),
+    );
+
+    let receipt_future = wait_for_transaction_receipt(
         &client,
         &execution_rpc_http_url,
         &tx_hash,
         TX_RECEIPT_MAX_ATTEMPTS,
         Duration::from_secs(TX_RECEIPT_POLL_INTERVAL_SECS),
-    )
-    .await?;
+    );
+
+    let (read_outcome, receipt) = tokio::try_join!(respond_future, receipt_future)?;
 
     let status = receipt
         .get("status")
@@ -177,13 +185,6 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
             status
         );
     }
-
-    let read_outcome = actions::sign::wait_for_respond_bidirectional(
-        solana,
-        sol_outcome.request_id,
-        Duration::from_secs(120),
-    )
-    .await?;
 
     assert_eq!(
         read_outcome.request_id, sol_outcome.request_id,
@@ -248,7 +249,7 @@ fn append_u256(stream: &mut RlpStream, value: &U256) {
 }
 
 fn signature_components(signature: &FullSignature<Secp256k1>) -> (U256, U256) {
-    let r_scalar = actions::x_coordinate::<Secp256k1>(&signature.big_r);
+    let r_scalar = mpc_crypto::x_coordinate(&signature.big_r);
     let r_bytes = r_scalar.to_bytes();
     let r = U256::from_be_slice(r_bytes.as_slice());
     let s_bytes = signature.s.to_bytes();
@@ -270,12 +271,9 @@ async fn ensure_eth_signer_funded(
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("expected 32-byte ethereum secret key"))?;
-    let payer_sk = SecpSecretKey::from_slice(&payer_sk_array)?;
-    let secp = LibSecp256k1::signing_only();
-    let payer_pk = SecpPublicKey::from_secret_key(&secp, &payer_sk);
-    let payer_address = actions::public_key_to_address(&payer_pk);
-    let payer_alloy = AlloyAddress::from_slice(payer_address.as_bytes());
     let signing_key = SigningKey::from_bytes(&payer_sk_array.into())?;
+    let payer_address = public_key_to_address(&signing_key.verifying_key().to_encoded_point(false));
+    let payer_alloy = AlloyAddress::from_slice(payer_address.as_slice());
 
     let mut gas_price = fetch_gas_price(client, rpc_url).await?;
     if gas_price < default_gas_price {

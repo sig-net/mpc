@@ -1,24 +1,66 @@
 use cait_sith::protocol::Participant;
+use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
+use mpc_chain_solana::SolConfig;
 use mpc_contract::config::ProtocolConfig;
 use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
-use crate::{execute, NodeConfig, Nodes};
+use crate::{execute, NodeBinarySource, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
+use mpc_primitives::SANDBOX_VERSION;
 
-const DOCKER_NETWORK: &str = "mpc_it_network";
+thread_local! {
+    static THREAD_NETWORK_NAME: RefCell<Option<String>> = const { RefCell::new(None) };
+    static THREAD_NETWORK_CLEANUP: RefCell<Option<ThreadNetworkCleanup>> = const { RefCell::new(None) };
+}
+
+static NEXT_NETWORK_SLOT: AtomicUsize = AtomicUsize::new(0);
+
+struct ThreadNetworkCleanup {
+    docker: DockerClient,
+    network: String,
+}
+
+impl Drop for ThreadNetworkCleanup {
+    fn drop(&mut self) {
+        self.docker.best_effort_remove_network(self.network.clone());
+    }
+}
+
+fn thread_network_name(docker: &DockerClient) -> String {
+    THREAD_NETWORK_NAME.with(|name_cell| {
+        let mut name = name_cell.borrow_mut();
+        if let Some(name) = name.as_ref() {
+            return name.clone();
+        }
+
+        let slot = NEXT_NETWORK_SLOT.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let network = format!("mpc_it_{}_{}", pid, slot);
+        THREAD_NETWORK_CLEANUP.with(|cleanup_cell| {
+            *cleanup_cell.borrow_mut() = Some(ThreadNetworkCleanup {
+                docker: docker.clone(),
+                network: network.clone(),
+            });
+        });
+        *name = Some(network.clone());
+        network
+    })
+}
+
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
-
 /// Configuration for pregenerated keys to skip the 20+ second key generation phase.
 ///
 /// When enabled, uses hardcoded key shares from fixture data to start nodes in
@@ -37,13 +79,13 @@ pub enum PregeneratedKeys {
 }
 
 impl PregeneratedKeys {
-    /// Load pregenerated keys for the given number of nodes from fixture data
-    pub fn load(num_nodes: usize) -> Option<Self> {
-        let data = match num_nodes {
-            3 => include_str!("../mpc_fixture/3_nodes.json"),
-            5 => include_str!("../mpc_fixture/5_nodes.json"),
-            other => {
-                tracing::warn!("No pregenerated keys for {other} nodes available");
+    /// Load pregenerated keys for the given number of nodes and threshold from fixture data.
+    pub fn load(num_nodes: usize, threshold: usize) -> Option<Self> {
+        let data = match (num_nodes, threshold) {
+            (3, 2) => include_str!("../mpc_fixture/3_nodes_2_threshold.json"),
+            (5, 4) => include_str!("../mpc_fixture/5_nodes_4_threshold.json"),
+            _ => {
+                tracing::warn!("No pregenerated keys for {num_nodes} nodes, threshold {threshold}");
                 return None;
             }
         };
@@ -107,7 +149,6 @@ pub struct Prestockpile {
     /// the number of triples to be lower than the stockpile limit.
     pub multiplier: u32,
 }
-
 pub struct ClusterSpawner {
     pub docker: DockerClient,
     pub release: bool,
@@ -123,29 +164,39 @@ pub struct ClusterSpawner {
     pub redis: Option<containers::Redis>,
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
+    pub canton: Option<crate::canton::CantonSandbox>,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
+    pub use_midnight: bool,
+    /// Tracks which binary source to use for each node index
+    pub node_binary_sources: Vec<NodeBinarySource>,
 }
 
 impl Default for ClusterSpawner {
     fn default() -> Self {
+        let docker = DockerClient::default();
+        let network = thread_network_name(&docker);
+
         let mut tmp_dir = execute::target_dir().expect("unable to locate target dir");
-        tmp_dir.push("tmp");
+        // Create a unique temporary directory for this test run to avoid conflicts
+        tmp_dir.push(format!("tmp_{}", network));
 
         let nodes = 3;
+        let threshold = 2;
         let cfg = NodeConfig {
             nodes,
-            threshold: 2,
+            threshold,
             ..Default::default()
         };
+
         Self {
-            docker: DockerClient::default(),
+            docker,
             release: true,
             env: ENV.to_string(),
             gcp_project_id: GCP_PROJECT_ID.to_string(),
-            network: DOCKER_NETWORK.to_string(),
+            network,
             accounts: Vec::with_capacity(cfg.nodes),
             participants: Vec::with_capacity(cfg.nodes),
             tmp_dir,
@@ -155,10 +206,13 @@ impl Default for ClusterSpawner {
             redis: None,
             worker: None,
             solana: None,
+            canton: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
-            pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
+            pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
+            use_midnight: false,
+            node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
     }
 }
@@ -171,6 +225,18 @@ impl ClusterSpawner {
 
     pub fn nodes(mut self, nodes: usize) -> Self {
         self.cfg.nodes = nodes;
+        // Resize the binary sources vector to match
+        self.node_binary_sources
+            .resize(nodes, NodeBinarySource::CurrentCode);
+        self
+    }
+
+    /// Add nodes running the latest release binary under target/compat/latest.
+    pub fn latest_release_nodes(mut self, count: usize) -> Self {
+        let current_len = self.node_binary_sources.len();
+        self.node_binary_sources
+            .extend((0..count).map(|_| NodeBinarySource::LatestRelease));
+        self.cfg.nodes = current_len + count;
         self
     }
 
@@ -194,12 +260,6 @@ impl ClusterSpawner {
         self
     }
 
-    /// Do not wait for the nodes to be running.
-    pub fn disable_wait_running(mut self) -> Self {
-        self.wait_for_running = false;
-        self
-    }
-
     pub fn disable_prestockpile(mut self) -> Self {
         self.prestockpile = None;
         self
@@ -210,17 +270,18 @@ impl ClusterSpawner {
         self
     }
 
-    /// Disable pregenerated keys and generate keys fresh.
-    /// This is slower but tests the full key generation protocol.
-    pub fn without_pregenerated_keys(mut self) -> Self {
-        self.pregenerated_keys = PregeneratedKeys::Disabled;
-        self
+    /// The stockpile `host` applies before the contract starts, which it can only
+    /// do with pregenerated keys.
+    pub(crate) fn host_prestockpile(&self) -> Option<&Prestockpile> {
+        self.prestockpile
+            .as_ref()
+            .filter(|_| self.pregenerated_keys.is_enabled())
     }
 
     fn load_pregenerated_keys(mut self) -> Self {
         if self.pregenerated_keys.is_enabled() && self.pregenerated_keys.len() != self.cfg.nodes {
-            self.pregenerated_keys =
-                PregeneratedKeys::load(self.cfg.nodes).unwrap_or(PregeneratedKeys::Disabled);
+            self.pregenerated_keys = PregeneratedKeys::load(self.cfg.nodes, self.cfg.threshold)
+                .unwrap_or(PregeneratedKeys::Disabled);
         }
         self
     }
@@ -230,12 +291,11 @@ impl ClusterSpawner {
     pub fn solana(mut self) -> Self {
         // Enable Solana by setting a placeholder if not already configured
         if self.cfg.sol.is_none() {
-            self.cfg.sol = Some(mpc_node::indexer_sol::SolConfig {
+            self.cfg.sol = Some(SolConfig {
                 account_sk: String::new(),      // Will be filled in later
                 rpc_http_url: String::new(),    // Will be filled in later
-                rpc_ws_url: String::new(),      // Will be filled in later
                 program_address: String::new(), // Will be filled in later
-                total_timeout: 60,
+                indexer: Default::default(),
             });
         }
         self
@@ -267,8 +327,29 @@ impl ClusterSpawner {
         self
     }
 
-    pub fn debug_node(&mut self) -> &mut Self {
-        self.release = false;
+    pub fn midnight(mut self) -> Self {
+        self.use_midnight = true;
+        self
+    }
+
+    pub fn canton(mut self) -> Self {
+        if self.cfg.canton.is_none() {
+            self.cfg.canton = Some(CantonConfig {
+                json_api_url: String::new(),
+                json_api_ws_url: String::new(),
+                auth: CantonAuthConfig {
+                    token_url: String::new(),
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                    audience: String::new(),
+                    scope: None,
+                },
+                ledger_api_user: String::new(),
+                party_id: String::new(),
+                signer_contract_id: String::new(),
+                signer_template_id: String::new(),
+            });
+        }
         self
     }
 
@@ -310,12 +391,6 @@ impl ClusterSpawner {
         self.redis.as_ref().unwrap()
     }
 
-    /// Prespawns a Solana test validator instance for integration testing.
-    pub async fn prespawn_solana(&mut self) -> &containers::Solana {
-        self.solana = Some(self.spawn_solana().await);
-        self.solana.as_ref().unwrap()
-    }
-
     /// Grabs the underlying redis instance that was prespawned, or if not prespawned, create a
     /// new one from start up.
     pub async fn take_redis(&mut self) -> containers::Redis {
@@ -325,15 +400,9 @@ impl ClusterSpawner {
         }
     }
 
-    /// Grabs the underlying Solana instance that was prespawned, or if not prespawned, create a
-    /// new one from start up.
-    pub async fn take_solana(&mut self) -> Option<containers::Solana> {
-        self.solana.take()
-    }
-
     pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
         if self.worker.is_none() {
-            self.worker = Some(near_workspaces::sandbox().await?);
+            self.worker = Some(spawn_sandbox_with_retry().await?);
         }
         Ok(self.worker.as_ref().unwrap())
     }
@@ -341,14 +410,10 @@ impl ClusterSpawner {
     pub async fn take_worker(&mut self) -> Worker<Sandbox> {
         match self.worker.take() {
             Some(worker) => worker,
-            None => near_workspaces::sandbox().await.unwrap(),
+            None => spawn_sandbox_with_retry()
+                .await
+                .expect("failed to spawn sandbox"),
         }
-    }
-
-    pub async fn presetup(&mut self) -> anyhow::Result<&containers::Redis> {
-        let worker = self.prespawn_sandbox().await?.clone();
-        self.create_accounts(&worker).await;
-        Ok(self.prespawn_redis().await)
     }
 
     pub async fn run(&mut self) -> anyhow::Result<Nodes> {
@@ -389,7 +454,29 @@ impl IntoFuture for ClusterSpawner {
                 self.solana = Some(solana);
             }
 
+            if self.cfg.canton.is_some() && self.canton.is_none() {
+                let sandbox = crate::canton::CantonSandbox::run().await?;
+                self.cfg.canton = Some(sandbox.get_config());
+                self.canton = Some(sandbox);
+            }
+
+            let midnight = if self.use_midnight {
+                let root_public_key = self
+                    .pregenerated_keys
+                    .public_key()
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "Midnight real-stack tests require pregenerated MPC keys so the caller response key exists before node startup"
+                    ))?;
+                let midnight =
+                    crate::midnight::MidnightContext::run(&self, root_public_key).await?;
+                self.cfg.midnight = Some(midnight.config.clone());
+                Some(midnight)
+            } else {
+                None
+            };
+
             let nodes = self.run().await?;
+            let stockpiled_in_host = self.host_prestockpile().is_some();
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
@@ -398,21 +485,48 @@ impl IntoFuture for ClusterSpawner {
                 cfg: self.cfg,
                 rpc_client,
                 http_client: reqwest::Client::default(),
-                docker_client: self.docker,
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
+                canton: self.canton.take(),
+                midnight,
                 nodes,
             };
 
             if self.wait_for_running {
                 cluster.wait().running().nodes_running().await?;
 
-                if let Some(prestockpile) = self.prestockpile {
-                    cluster.prestockpile(prestockpile).await;
+                if let Some(prestockpile) = &self.prestockpile {
+                    if !stockpiled_in_host {
+                        cluster.stockpile(prestockpile).await;
+                    }
+                    cluster.wait_stockpiled().await;
                 }
             }
 
             Ok(cluster)
         })
     }
+}
+
+/// Spawn a near sandbox with retry logic to handle potential transient failures (i.e., due to CPU contention)
+async fn spawn_sandbox_with_retry() -> anyhow::Result<Worker<Sandbox>> {
+    let mut last_err = None;
+    for attempt in 1..=5 {
+        match near_workspaces::sandbox_with_version(SANDBOX_VERSION).await {
+            Ok(worker) => return Ok(worker),
+            Err(e) => {
+                tracing::warn!(
+                    attempt,
+                    "failed to spawn near sandbox within timeout, retrying: {e}"
+                );
+                last_err = Some(e);
+                // Give the OS a moment to breathe before trying again
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+    anyhow::bail!(
+        "failed to spawn near sandbox after 5 attempts: {:?}",
+        last_err
+    )
 }

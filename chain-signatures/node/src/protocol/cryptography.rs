@@ -13,7 +13,7 @@ use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::types::{ReshareProtocol, SecretKeyShare};
 
-use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
+use cait_sith::protocol::{Action, Participant};
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::sha2::{Digest, Sha256};
 use mpc_crypto::PublicKey;
@@ -27,14 +27,6 @@ pub fn resharing_running_timeout() -> Duration {
 
 pub fn set_resharing_running_timeout(duration: Duration) {
     RESHARING_RUNNING_TIMEOUT_SECS.swap(duration.as_secs(), Ordering::SeqCst);
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum CryptographicError {
-    #[error("cait-sith initialization error: {0}")]
-    CaitSithInitializationError(#[from] InitializationError),
-    #[error("cait-sith protocol error: {0}")]
-    CaitSithProtocolError(#[from] ProtocolError),
 }
 
 pub(crate) trait CryptographicProtocol {
@@ -51,7 +43,7 @@ impl CryptographicProtocol for GeneratingState {
         let participants = self.participants.keys_vec();
         tracing::info!(
             ?participants,
-            active = ?mesh_state.active,
+            active = ?mesh_state.active(),
             "generating: progressing key generation",
         );
         loop {
@@ -174,7 +166,7 @@ impl CryptographicProtocol for WaitingForConsensusState {
 
 impl CryptographicProtocol for ResharingState {
     async fn progress(mut self, ctx: &mut MpcSignProtocol, mesh_state: MeshState) -> NodeState {
-        tracing::info!(active = ?mesh_state.active.keys_vec(), "progressing key reshare");
+        tracing::info!(active = ?mesh_state.active().keys_vec(), "progressing key reshare");
 
         let mut resharing = match self.phase {
             ResharingPhase::Resharing(resharing) => resharing,
@@ -191,6 +183,13 @@ impl CryptographicProtocol for ResharingState {
                     self.phase = ResharingPhase::Awaiting(state);
                     return NodeState::Resharing(self);
                 }
+
+                // A peer that saw the resharing after us dropped our earlier
+                // Ready. It knows us now, so send ours once more before we stop.
+                state.broadcast_interval = Instant::now() - RESHARING_READY_BROADCAST_INTERVAL;
+                self.ready_nonce = state
+                    .broadcast_ready(self.me, ctx, &self.contract, self.ready_nonce)
+                    .await;
 
                 let protocol =
                     match ReshareProtocol::new(self.local_private_share, self.me, &self.contract) {
@@ -229,7 +228,7 @@ impl CryptographicProtocol for ResharingState {
 
         // If we have received new tokens while running (i.e. node restart while in the midst),
         // short-circuit and restart the whole resharing protocol.
-        if let Some(new_tokens) = resharing.restartable(self.me, ctx, &self.contract) {
+        if let Some(new_tokens) = resharing.restartable(ctx, &self.contract) {
             self.phase = ResharingPhase::awaiting(self.me);
             if let ResharingPhase::Awaiting(state) = &mut self.phase {
                 for (participant, token) in new_tokens {
@@ -394,7 +393,8 @@ impl ResharingState {
         Ok(NodeState::WaitingForConsensus(WaitingForConsensusState {
             epoch: contract.old_epoch + 1,
             participants: contract.new_participants.clone(),
-            threshold: contract.threshold,
+            // The reshared key uses the new threshold going forward.
+            threshold: contract.new_threshold,
             private_share,
             public_key: contract.public_key,
         }))
@@ -405,7 +405,7 @@ impl ReshareAwaiting {
     fn startable(&self, contract: &ResharingContractState) -> bool {
         let ready = self.ready_count(contract);
         let total = contract.new_participants.len();
-        let threshold = contract.threshold;
+        let threshold = contract.new_threshold;
 
         total >= threshold && ready == total
     }
@@ -507,7 +507,6 @@ impl ReshareRunning {
     /// Checks if while running we have received readiness messages for a new attempt,
     fn restartable(
         &self,
-        me: Participant,
         ctx: &mut MpcSignProtocol,
         contract: &ResharingContractState,
     ) -> Option<Vec<(Participant, u64)>> {
@@ -526,9 +525,6 @@ impl ReshareRunning {
                             contract_epoch = contract.old_epoch,
                             "resharing: ignoring readiness message for other epoch while running",
                         );
-                        continue;
-                    }
-                    if from == me {
                         continue;
                     }
                     match self.ready_tokens.get(&from) {

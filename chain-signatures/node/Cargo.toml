@@ -1,6 +1,7 @@
 [package]
 name = "mpc-node"
 version.workspace = true
+publish.workspace = true
 edition = "2021"
 
 [[bin]]
@@ -8,22 +9,21 @@ name = "mpc-node"
 path = "src/main.rs"
 
 [dependencies]
-async-trait = "0.1"
+async-trait.workspace = true
 axum = "0.7.9"
 axum-extra = "0.9.6"
+tower-http = { version = "0.6", features = ["timeout"] }
+backon.workspace = true
 chrono = "0.4.24"
-google-datastore1 = "=5.0.4"
-google-secretmanager1 = "5"
-hkdf = "0.12.4"
-highway = "1.1.0"
-http = "1.1.0"
-hyper-rustls = { version = "=0.24", features = ["http2"] }
+base64 = "0.22"
+dashmap = "6.1"
+google-cloud-auth = { version = "1.16", default-features = false, features = ["default-rustls-provider"] }
+http.workspace = true
 local-ip-address = "0.5.4"
-lru = "0.13.0"
+lru = "0.18"
 mime = "0.3.17"
 prometheus = "0.14.0"
 redis = "0.27.2"
-semver = "1.0.23"
 sysinfo = "0.32.0"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 tracing-stackdriver = "0.10.0"
@@ -37,72 +37,73 @@ opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
     "rt-tokio",
 ] }
 opentelemetry-appender-tracing = "0.29.1"
-alloy-signer-local = "1.0.38"
-alloy-sol-types = "1.4.1"
-helios = { git = "https://github.com/a16z/helios", rev = "0a96f31125b7948bbe5c7ab73aa5699efae24902", optional = true }
-
-
 # workspace dependencies
 alloy.workspace = true
 anyhow.workspace = true
+enum-map.workspace = true
 borsh.workspace = true
-borsh_sol = { package = "borsh", version = "0.10.4" } # solana anchor requires borsh 0.10
 cait-sith.workspace = true
 ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
 hex.workspace = true
-hyper.workspace = true
 k256.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 serde_json.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util = { workspace = true, features = ["time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
-ethabi.workspace = true
-anchor-client.workspace = true
-anchor-lang.workspace = true
-solana-sdk.workspace = true
-solana-transaction-status.workspace = true
-solana-client.workspace = true
 futures-util.workspace = true
 
 near-account-id.workspace = true
-near-crypto = "0.26.0"
-near-fetch = "0.6.0"
+near-crypto.workspace = true
+near-fetch.workspace = true
 near-primitives.workspace = true
 near-sdk.workspace = true
 
 mpc-contract.workspace = true
 mpc-crypto.workspace = true
+mpc-chain-integration-core.workspace = true
+mpc-chain-canton.workspace = true
+mpc-chain-ethereum.workspace = true
+mpc-chain-solana.workspace = true
+mpc-chain-near.workspace = true
+mpc-chain-hydration.workspace = true
+mpc-chain-midnight.workspace = true
+mpc-chain-tron.workspace = true
+mpc-tron-wire.workspace = true
+mpc-compact-hashing.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
-signet-program.workspace = true
+mpc-utils.workspace = true
 
-alloy-primitives.workspace = true
-alloy-dyn-abi.workspace = true
-secp256k1.workspace = true
 rlp.workspace = true
 
 maud = { version = "0.27.0", optional = true }
+secrecy = "0.10.3"
 
 [dev-dependencies]
-mockito = "1.7.0"
+mockito.workspace = true
+tempfile = "3.27.0"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
+tokio = { workspace = true, features = ["test-util"] }
+
+[package.metadata.cargo-machete]
+ignored = ["serde_bytes"]
 
 [features]
 default = []
-# utilize ethereum light client via helios
-light_client = ["helios"]
 # utilized for benchmarking the node:
 bench = []
 # utilized by "integration-tests" package:
-test-feature = []
+test-feature = ["mpc-chain-midnight/sandbox"]
 # Show a debug page
 debug-page = ["maud"]

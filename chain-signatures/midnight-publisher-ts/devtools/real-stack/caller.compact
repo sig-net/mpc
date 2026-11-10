@@ -1,0 +1,145 @@
+// Test-only real caller for the Rust-owned integration stack.
+pragma language_version >= 0.25;
+
+import CompactStandardLibrary;
+import "@sig-net/midnight/src/Signet";
+
+struct BoolResponse {
+  success: Boolean;
+}
+
+// The declaration order is protocol-visible. The request map is field 2 and the
+// notification below names that exact path.
+export ledger mpcResponseKey: Secp256k1Point;
+sealed ledger signetSigner: SignetSigner;
+export ledger requests: Map<RequestId, SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 64, 0>>;
+sealed ledger deployer: Bytes<32>;
+export ledger initialised: Counter;
+
+witness deployerSecretKey(): Bytes<32>;
+
+export pure circuit deployerCommitment(sk: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "signet-caller:deployer:"), sk]);
+}
+
+constructor(initialDeployerCommitment: Bytes<32>, signetContract: SignetSigner) {
+  deployer = disclose(initialDeployerCommitment);
+  signetSigner = disclose(signetContract);
+}
+
+export circuit initialise(responseKey: Secp256k1Point): [] {
+  assert(initialised == 0, "Already initialised");
+  assert(deployerCommitment(deployerSecretKey()) == deployer, "Not the deployer");
+  initialised.increment(1);
+  mpcResponseKey = disclose(responseKey);
+}
+
+export circuit submitIsEvenRequest(
+  evmNonce: Uint<64>,
+  keyVersion: Uint<8>,
+  to: Bytes<20>,
+  argWord: Bytes<32>,
+  outputSchema: Bytes<64>
+): [] {
+  const calldata = EvmCalldata<1> {
+    selector: Bytes [0x2a, 0x2e, 0x13, 0x20],
+    noWords: 1 as Uint<16>,
+    words: [argWord]
+  };
+  const txParams = EvmType2TxParams<1, 0, 0> {
+    chainId: 31337 as Uint<64>,
+    nonce: evmNonce,
+    maxPriorityFeePerGas: 1000000000 as Uint<128>,
+    maxFeePerGas: 30000000000 as Uint<128>,
+    gasLimit: 100000 as Uint<64>,
+    to: to,
+    value: 0 as Uint<128>,
+    calldata: some<EvmCalldata<1>>(calldata),
+    accessListEntryCount: 0,
+    accessList: []
+  };
+  const request = SignBidirectionalEventV1<EvmType2TxParams<1, 0, 0>, 64, 0> {
+    keyVersion: keyVersion,
+    sender: kernel.self(),
+    path: pad(32, "caller-path"),
+    algo: MPCSignatureAlgorithm.ecdsa,
+    txParamType: TxParamType.evmType2,
+    txParams: txParams,
+    executionDest: ethereumCaip2Id(),
+    signatureDest: MPCDestination.unused,
+    params: pad(64, ""),
+    outputDeserializationSchema: outputSchema,
+    respondSerializationSchema: default<Bytes<0>>
+  };
+  const requestId = disclose(calculateEvmType2RequestIdV1<1, 0, 0, 64>(request));
+
+  assert(!requests.member(requestId), "Request already exists");
+  requests.insert(requestId, disclose(request));
+
+  signetSigner.signBidirectional(
+    requestId,
+    constructSignBidirectionalEventNotificationV1(
+      kernel.self(),
+      1 as Uint<8>,
+      [2, 0, 0, 0] as Vector<4, Uint<8>>,
+    ),
+  );
+}
+
+// Test-only impersonation: notify the central Signet contract naming another contract's request.
+// The MPC must drop it because this contract, not `victim`, is the direct caller.
+export circuit notifyAs(victim: ContractAddress, requestId: RequestId): [] {
+  signetSigner.signBidirectional(
+    disclose(requestId),
+    constructSignBidirectionalEventNotificationV1(
+      disclose(victim),
+      1 as Uint<8>,
+      [2, 0, 0, 0] as Vector<4, Uint<8>>,
+    ),
+  );
+}
+
+circuit consumeResponse<#N>(response: RespondBidirectionalEventV1, serializedOutput: Bytes<N>): [] {
+  const requestId = disclose(response.requestId);
+  assert(initialised != 0, "Not initialised");
+  assert(verifyRespondBidirectionalEventV1<N>(serializedOutput, disclose(response), mpcResponseKey), "Invalid attestation signature");
+  assert(requests.member(requestId), "Request not found");
+  requests.remove(requestId);
+}
+
+export circuit verifyResponse0(response: RespondBidirectionalEventV1, serializedOutput: Bytes<0>): [] {
+  consumeResponse<0>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.failed || response.outputKind == OutputKind.unviable, "Expected failed or unviable outcome");
+}
+
+export pure circuit checkResponse0(response: RespondBidirectionalEventV1, serializedOutput: Bytes<0>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<0>(serializedOutput, response, responseKey);
+}
+
+export circuit verifyResponse(response: RespondBidirectionalEventV1, serializedOutput: Bytes<1>): [] {
+  consumeResponse<1>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
+  assert(deserialize<BoolResponse, 1>(serializedOutput).success, "Foreign call reported failure");
+}
+
+export pure circuit checkResponse1(response: RespondBidirectionalEventV1, serializedOutput: Bytes<1>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<1>(serializedOutput, response, responseKey);
+}
+
+export circuit verifyResponse8(response: RespondBidirectionalEventV1, serializedOutput: Bytes<8>): [] {
+  consumeResponse<8>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
+}
+
+export pure circuit checkResponse8(response: RespondBidirectionalEventV1, serializedOutput: Bytes<8>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<8>(serializedOutput, response, responseKey);
+}
+
+export circuit verifyResponse32(response: RespondBidirectionalEventV1, serializedOutput: Bytes<32>): [] {
+  consumeResponse<32>(response, serializedOutput);
+  assert(response.outputKind == OutputKind.executed, "Expected executed outcome");
+}
+
+export pure circuit checkResponse32(response: RespondBidirectionalEventV1, serializedOutput: Bytes<32>, responseKey: Secp256k1Point): Boolean {
+  return verifyRespondBidirectionalEventV1<32>(serializedOutput, response, responseKey);
+}
