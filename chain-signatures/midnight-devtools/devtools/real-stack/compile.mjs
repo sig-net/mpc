@@ -22,15 +22,11 @@ const restored =
 if (restored) {
   console.log(`using the restored managed/${contract}`);
 } else {
-  const compile = spawnSync(
-    "compact",
-    ["compile", "--feature-zkir-v3", `${contract}.compact`, `managed/${contract}`],
-    {
-      cwd: fixtureDir,
-      env: { ...process.env, COMPACT_PATH: compactPath },
-      stdio: "inherit",
-    },
-  );
+  const compile = spawnSync("compact", ["compile", `${contract}.compact`, `managed/${contract}`], {
+    cwd: fixtureDir,
+    env: { ...process.env, COMPACT_PATH: compactPath },
+    stdio: "inherit",
+  });
   if (compile.error !== undefined) throw compile.error;
   if (compile.status !== 0) process.exit(compile.status ?? 1);
 }

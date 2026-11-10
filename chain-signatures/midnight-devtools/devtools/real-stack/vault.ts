@@ -1,6 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { rawTokenType } from "@midnight-ntwrk/compact-runtime";
+import {
+  ContractState as RuntimeContractState,
+  rawTokenType,
+} from "@midnight-ntwrk/compact-runtime";
 import {
   createCallTxOptions,
   createUnprovenCallTx,
@@ -11,7 +14,9 @@ import {
 import {
   encodeContractKeyLocation,
   hashVerifierKey,
+  LedgerTransaction,
   SucceedEntirely,
+  type UnprovenTx,
 } from "@midnight-ntwrk/midnight-js/types";
 import {
   communicationCommitmentRandomness,
@@ -237,7 +242,7 @@ class VaultRun {
   private async readLedger(): Promise<VaultLedger> {
     const state = await this.providers.publicDataProvider.queryContractState(this.vaultAddress);
     if (!state) throw new Error(`no vault state at ${this.vaultAddress}`);
-    return ledger(state.data);
+    return ledger(state.contractState.deserialize({ v9: RuntimeContractState }).data);
   }
 
   private tokenType(token: string): string {
@@ -356,7 +361,10 @@ class VaultRun {
   // can exceed the node's time-to-dismiss cap. Mirrors submitFlush in the vault package.
   private async flush(inIndexes: readonly bigint[], requestIds: readonly Uint8Array[]) {
     const unprovenTx = await this.buildFlush(inIndexes, requestIds, FLUSH_TTL_MS);
-    const finalized = await submitTx(this.providers, { unprovenTx, circuitId: "flushQueue" });
+    const finalized = await submitTx(this.providers, {
+      unprovenTx: LedgerTransaction.seal("v9", "Unproven", unprovenTx),
+      circuitId: "flushQueue",
+    });
     if (finalized.status !== SucceedEntirely) {
       throw new Error(`the flush finalized as ${finalized.status}`);
     }
@@ -381,7 +389,7 @@ class VaultRun {
     const [guaranteed, fallible] = call.public.partitionedTranscript;
     const raw = await this.providers.publicDataProvider.queryContractState(this.vaultAddress);
     // The ledger's ContractCallPrototype takes only its own ContractOperation.
-    const operation = raw && ContractState.deserialize(raw.serialize()).operation("flushQueue");
+    const operation = raw?.contractState.deserialize({ v9: ContractState }).operation("flushQueue");
     if (!operation?.verifierKey) throw new Error("flushQueue has no verifier key on chain");
     const prototype = new ContractCallPrototype(
       this.vaultAddress,
@@ -776,7 +784,9 @@ class VaultRun {
         privateStateId: VAULT_PRIVATE_STATE_ID,
         args: [outIndex],
       } as never);
-      const tx = (built as { private: { unprovenTx: UnprovenTransaction } }).private.unprovenTx;
+      const tx = (built as { private: { unprovenTx: UnprovenTx } }).private.unprovenTx.deserialize({
+        v9: Transaction,
+      });
       if ([...(tx.intents?.keys() ?? [])].every((segment) => !staleSegments.includes(segment))) {
         send = tx;
       }
@@ -784,7 +794,9 @@ class VaultRun {
     if (send === undefined) throw new Error("could not keep the send and stale flush apart");
     const tx = send.merge(stale);
     const placement = placementOf(tx);
-    const proven = await this.providers.proofProvider.proveTx(tx);
+    const proven = await this.providers.proofProvider.proveTx(
+      LedgerTransaction.seal("v9", "Unproven", tx),
+    );
     const balanced = await this.providers.walletProvider.balanceTx(proven);
     const txId = await this.providers.midnightProvider.submitTx(balanced);
     const finalized = await this.providers.publicDataProvider.watchForTxData(txId);
