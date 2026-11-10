@@ -847,15 +847,15 @@ mod tests {
     }
 
     /// Two requests share the flat txID; both must resolve through the
-    /// one receipt.
+    /// one receipt — fetched once per id, not once per entry.
     #[tokio::test]
     async fn duplicate_flat_id_entries_both_resolve_through_the_receipt_arm() {
         let (mut server, config, state) = expiry_stack().await;
         solidity_nowblock_mock(&mut server);
         let (id, displacing, tx) =
             pending_expiry_entry(&state, 5, Chain::Midnight, SOLIDITY_TS - 40_000).await;
-        // The twins' bytes live in a walked block: whichever twin the
-        // receipt arm retires first, the scan re-registers the other.
+        // Both entries hold their own watch under the flat id; the walk
+        // ladder stays for members the poll arm has not reached yet.
         solid_block_ladder(&mut server, &[(20, id.0)]);
         let mut displaced_tx = (*tx).clone();
         displaced_tx.request_id = [0x7f; 32];
@@ -903,6 +903,35 @@ mod tests {
         }
 
         run.stop().await;
+    }
+
+    /// One receipt fetch per flat id: a single request confirms every
+    /// entry registered under the id in the same pass.
+    #[tokio::test]
+    async fn one_receipt_fetch_confirms_every_flat_id_entry() {
+        let (mut server, config, state) = expiry_stack().await;
+        let (id, first, tx) =
+            watched_expiry_entry(&state, 5, Chain::Midnight, SOLIDITY_TS - 40_000).await;
+        let mut twin = (*tx).clone();
+        twin.request_id = [0x7f; 32];
+        let second = twin.sign_id();
+        state.watch_execution(Chain::Tron, Arc::new(twin)).await;
+        let receipt = receipt_for_once(&mut server, &id, success_receipt(&id));
+
+        let watcher = TronWatcher::new(config, state, NoopChainTelemetry).unwrap();
+        let confirmed: Vec<SignId> = watcher
+            .poll_watchers()
+            .await
+            .map(|event| match event {
+                ChainEvent::ExecutionConfirmed { sign_id, .. } => sign_id,
+                _ => unreachable!("the poll arm emits confirmations only"),
+            })
+            .collect()
+            .await;
+
+        assert_eq!(confirmed.len(), 2, "both members confirm in one pass");
+        assert!(confirmed.contains(&first) && confirmed.contains(&second));
+        receipt.assert_async().await;
     }
 
     /// Two nodes at different solidified heads attest the same height:

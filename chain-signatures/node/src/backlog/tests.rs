@@ -1180,8 +1180,8 @@ async fn watch_execution_re_register_keeps_the_wait_start() {
     );
 }
 
-/// Re-registering with no resident watch (displaced or lost) stays
-/// unmeasured, honest `EXECUTION_WAIT_UNMEASURED` case.
+/// Re-registering with no resident watch (lost) stays unmeasured,
+/// honest `EXECUTION_WAIT_UNMEASURED` case.
 #[tokio::test]
 async fn watch_execution_without_a_resident_watch_starts_unmeasured() {
     let backlog = Backlog::new();
@@ -1202,7 +1202,7 @@ async fn watch_execution_without_a_resident_watch_starts_unmeasured() {
 }
 
 #[tokio::test]
-async fn executing_entry_for_resolves_the_displaced_watch_by_backlog_key() {
+async fn executing_entry_for_falls_back_to_the_backlog_entry_without_a_watch() {
     let backlog = Backlog::new();
     let tx = mock_bidirectional_tx(SignId::new([77; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
@@ -1213,7 +1213,7 @@ async fn executing_entry_for_resolves_the_displaced_watch_by_backlog_key() {
     let entry = backlog
         .executing_entry_for(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
         .await
-        .expect("displaced watch must fall back to the backlog entry");
+        .expect("a watch-less entry must fall back to the backlog");
     assert_eq!(
         entry.awaiting_execution(),
         None,

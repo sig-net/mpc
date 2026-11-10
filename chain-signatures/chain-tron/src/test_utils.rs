@@ -225,6 +225,24 @@ pub(crate) fn receipt_for(server: &mut mockito::ServerGuard, id: &BidirectionalT
         .create();
 }
 
+/// [`receipt_for`] asserting exactly one fetch — one receipt read per
+/// flat id per pass.
+pub(crate) fn receipt_for_once(
+    server: &mut mockito::ServerGuard,
+    id: &BidirectionalTxId,
+    body: String,
+) -> mockito::Mock {
+    server
+        .mock("POST", "/walletsolidity/gettransactioninfobyid")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "value": hex::encode(id.0)
+        })))
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .expect(1)
+        .create()
+}
+
 /// An entry whose serialized bytes carry `expiration`; the id is
 /// those bytes' txID, as admission derives it.
 pub(crate) fn expiry_tx(
