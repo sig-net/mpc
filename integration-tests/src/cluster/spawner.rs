@@ -584,6 +584,7 @@ mod tests {
             midnight: Some(MidnightConfig {
                 node_url: "http://127.0.0.1:9944".to_string(),
                 central_address: MidnightAddress::from_bytes([0; 32]),
+                responder_address: MidnightAddress::from_bytes([1; 32]),
                 publisher: PublisherConfig {
                     funding_seed: "04".repeat(32),
                     ..Default::default()
