@@ -540,3 +540,35 @@ async fn test_clear_clears_pending_reservations() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test(tokio::test)]
+async fn test_clear_removes_more_artifacts_than_one_unpack_allows() -> anyhow::Result<()> {
+    use deadpool_redis::redis;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-clear-many")
+        .init_network()
+        .await?;
+
+    let node0 = Participant::from(0);
+    let node0_id = "party0.near".parse().unwrap();
+    let redis_container = containers::Redis::run(&spawner).await;
+    let triple_storage = redis_container.triple_storage(&node0_id, node0);
+
+    // Lua's unpack in Redis 7.4 fails somewhere above 8000 entries.
+    let artifact_key = triple_storage.artifact_key();
+    let mut pipe = redis::pipe();
+    for id in 1..=10_000u64 {
+        pipe.hset(artifact_key, id, "x")
+            .sadd(format!("{artifact_key}:holders:{id}"), 1)
+            .ignore();
+    }
+    let mut conn = redis_container.pool().get().await?;
+    let _: () = pipe.query_async(&mut conn).await?;
+
+    assert!(triple_storage.clear().await);
+    let remaining: u64 = redis::cmd("DBSIZE").query_async(&mut conn).await?;
+    assert_eq!(remaining, 0);
+
+    Ok(())
+}
