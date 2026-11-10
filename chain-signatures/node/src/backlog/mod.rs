@@ -15,7 +15,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 pub use checkpoints::{Checkpoint, CheckpointError, Checkpoints};
 
 use enum_map::EnumMap;
-use mpc_chain_integration_core::StateManager;
+use mpc_chain_integration_core::{StateManager, WatchedExecution};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, SignId, SignKind,
 };
@@ -130,37 +130,54 @@ impl PendingRequests {
 
 #[derive(Debug, Clone, Default)]
 struct ExecutionWatchers {
-    watchers: HashMap<BidirectionalTxId, ExecutionWatch>,
+    watchers: HashMap<BidirectionalTxId, Vec<ExecutionWatch>>,
 }
 
 impl ExecutionWatchers {
-    // TODO(non-lossy watch map): store a Vec<ExecutionWatch> per flat
-    // id instead of one, so duplicate ids keep their own watches. This
-    // removes the workarounds: the tron scan's flat-id grouping and
-    // inclusion veto, the identity check in `remove_owned`, and
-    // displaced entries losing their wait measurement.
-    fn insert(&mut self, watch: ExecutionWatch) -> Option<ExecutionWatch> {
-        self.watchers.insert(watch.tx.id, watch)
+    /// Upserts the entry's own watch; other entries' watches under the
+    /// same flat id survive.
+    fn insert(&mut self, watch: ExecutionWatch) {
+        let (source, sign_id) = (watch.tx.source_chain, watch.tx.sign_id());
+        let watches = self.watchers.entry(watch.tx.id).or_default();
+        match watches
+            .iter()
+            .position(|resident| resident.belongs_to(source, &sign_id))
+        {
+            Some(index) => watches[index] = watch,
+            None => watches.push(watch),
+        }
     }
 
-    /// Removes the watch only if it belongs to `(source_chain, sign_id)`;
-    /// a foreign watch under the same flat id survives.
+    /// Removes `(source_chain, sign_id)`'s watch, leaving sibling watches.
     fn remove_owned(
         &mut self,
         tx_id: &BidirectionalTxId,
         source_chain: Chain,
         sign_id: &SignId,
     ) -> Option<ExecutionWatch> {
-        let own = self.watchers.get(tx_id).is_some_and(|watch| {
-            watch.tx.source_chain == source_chain && watch.tx.sign_id() == *sign_id
-        });
-        own.then(|| self.watchers.remove(tx_id)).flatten()
+        let watches = self.watchers.get_mut(tx_id)?;
+        let index = watches
+            .iter()
+            .position(|watch| watch.belongs_to(source_chain, sign_id))?;
+        let watch = watches.remove(index);
+        if watches.is_empty() {
+            self.watchers.remove(tx_id);
+        }
+        Some(watch)
     }
 
-    fn all(&self) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
+    fn all(&self) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
         self.watchers
             .iter()
-            .map(|(id, watch)| (*id, (watch.tx.sign_id(), Arc::clone(&watch.tx))))
+            .map(|(id, watches)| {
+                (
+                    *id,
+                    watches
+                        .iter()
+                        .map(|watch| (watch.tx.sign_id(), Arc::clone(&watch.tx)))
+                        .collect(),
+                )
+            })
             .collect()
     }
 }
@@ -621,17 +638,22 @@ impl Backlog {
         for destination_chain in Chain::iter() {
             let mut watchers = self.watchers(&destination_chain).write().await;
             let mut observed = HashMap::new();
-            watchers.watchers.retain(|id, watch| {
-                if watch.tx.source_chain != chain {
-                    return true;
-                }
-                observed.insert(*id, watch.respond_observed_at);
-                false
+            watchers.watchers.retain(|id, watches| {
+                watches.retain_mut(|watch| {
+                    if watch.tx.source_chain != chain {
+                        return true;
+                    }
+                    observed.insert((*id, watch.tx.sign_id()), watch.respond_observed_at);
+                    false
+                });
+                !watches.is_empty()
             });
             for entry in &execution_to_watch {
                 let mut watch = entry.execution_watch();
                 if watch.tx.target_chain == destination_chain {
-                    watch.respond_observed_at = observed.remove(&watch.tx.id).flatten();
+                    watch.respond_observed_at = observed
+                        .remove(&(watch.tx.id, watch.tx.sign_id()))
+                        .flatten();
                     watchers.insert(watch);
                 }
             }
@@ -656,7 +678,7 @@ impl StateManager for Backlog {
     async fn get_execution_watchers(
         &self,
         chain: Chain,
-    ) -> HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)> {
+    ) -> HashMap<BidirectionalTxId, Vec<WatchedExecution>> {
         self.watchers(&chain).read().await.all()
     }
 
@@ -669,6 +691,11 @@ impl StateManager for Backlog {
         let observed = watchers
             .watchers
             .get(&tx.id)
+            .and_then(|watches| {
+                watches
+                    .iter()
+                    .find(|watch| watch.belongs_to(tx.source_chain, &tx.sign_id()))
+            })
             .and_then(|watch| watch.respond_observed_at);
         watchers.insert(ExecutionWatch::new(tx, observed));
     }

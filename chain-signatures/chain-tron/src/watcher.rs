@@ -75,7 +75,10 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
         tracing::debug!(watchers = watchers.len(), "polling tron execution watchers");
 
         iter(watchers)
-            .map(|(tx_id, (sign_id, tx))| self.resolve_watcher_from_receipt(tx_id, sign_id, tx))
+            .flat_map(|(tx_id, members)| {
+                iter(members).map(move |(sign_id, tx)| (tx_id, sign_id, tx))
+            })
+            .map(|(tx_id, sign_id, tx)| self.resolve_watcher_from_receipt(tx_id, sign_id, tx))
             .buffer_unordered(MAX_CONCURRENT_PROVIDER_REQUESTS)
             .filter_map(std::future::ready)
     }

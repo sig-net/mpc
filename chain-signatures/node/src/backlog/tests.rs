@@ -1243,9 +1243,8 @@ async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_id
     let evicted_entry = backlog.insert_mock_executing(&evicted).await;
     let owner_entry = backlog.insert_mock_executing(&watch_owner).await;
     backlog.watch_execution(&evicted_entry).await;
-    // Same flat id: the second watch takes the slot.
+    // Same flat id: both entries keep their own watches.
     backlog.watch_execution(&owner_entry).await;
-
     // By the owner's keys the watch answers and is consumed.
     let resolved = backlog
         .executing_entry_for(
@@ -1262,9 +1261,10 @@ async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_id
         "the watch arm restores the wait measurement"
     );
 
-    // By the evicted entry's keys the displaced watch stays and the
-    // backlog arm answers the evicted entry itself.
+    // Re-register the owner beside the evicted entry's watch.
     backlog.watch_execution(&owner_entry).await;
+
+    // The evicted entry resolves through its own watch.
     let resolved = backlog
         .executing_entry_for(
             evicted.target_chain,
@@ -1273,17 +1273,16 @@ async fn executing_entry_for_resolves_only_the_entrys_own_watch_for_duplicate_id
             &evicted.sign_id(),
         )
         .await
-        .expect("the evicted entry resolves through the backlog");
+        .expect("the evicted entry resolves through its own watch");
     assert_eq!(resolved.sign_id(), evicted.sign_id());
-    assert_eq!(
-        resolved.awaiting_execution(),
-        None,
-        "the backlog arm has no watch to measure from"
+    assert!(
+        resolved.awaiting_execution().is_some(),
+        "the evicted entry's own watch restores the wait measurement"
     );
     let watches = backlog.get_execution_watchers(evicted.target_chain).await;
-    assert_eq!(watches.len(), 1, "one flat id, one watch slot");
+    assert_eq!(watches.len(), 1, "one flat id");
     assert_eq!(
-        watches[&evicted.id].0,
+        watches[&evicted.id][0].0,
         watch_owner.sign_id(),
         "the owner's watch survives the evicted entry's confirmation"
     );

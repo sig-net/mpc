@@ -18,7 +18,7 @@ use alloy::primitives::{Address, B256};
 use alloy::rpc::types::{Block, BlockId, BlockTransactions, TransactionReceipt};
 use futures_util::{stream, StreamExt};
 use mpc_chain_integration_core::{
-    unexecutable_outcome, ChainTelemetry, ExtractionFailureKind, StateManager,
+    unexecutable_outcome, ChainTelemetry, ExtractionFailureKind, StateManager, WatchedExecution,
 };
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainConfig as _, ChainEvent, ExecutionOutcome,
@@ -39,7 +39,7 @@ pub(crate) struct WatcherGateState {
 }
 
 /// A pending execution watcher entry from the state manager.
-type WatcherEntry = (BidirectionalTxId, (SignId, Arc<BidirectionalTx>));
+type WatcherEntry = (BidirectionalTxId, WatchedExecution);
 
 /// Per-watcher receipt resolution result.
 type WatcherReceipt = (
@@ -150,6 +150,16 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
         let (new_watchers, retry) = self.schedule_watcher_gates(&watchers);
 
+        // Ethereum ids hash the signed tx: one member per flat id.
+        let watchers: Vec<WatcherEntry> = watchers
+            .into_iter()
+            .flat_map(|(tx_id, members)| {
+                members
+                    .into_iter()
+                    .map(move |(sign_id, tx)| (tx_id, (sign_id, tx)))
+            })
+            .collect();
+
         // Extract hashes from the block
         let block_tx_hashes: HashSet<_> = match &block.transactions {
             BlockTransactions::Hashes(hashes) => hashes.iter().copied().collect(),
@@ -219,7 +229,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
     /// (retried every block).
     fn schedule_watcher_gates(
         &self,
-        watchers: &HashMap<BidirectionalTxId, (SignId, Arc<BidirectionalTx>)>,
+        watchers: &HashMap<BidirectionalTxId, Vec<WatchedExecution>>,
     ) -> (HashSet<BidirectionalTxId>, HashSet<BidirectionalTxId>) {
         let mut gate = self.lock_watcher_gate();
         gate.retry.retain(|id| watchers.contains_key(id));
