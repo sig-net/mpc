@@ -71,7 +71,7 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
     /// One fetch per flat id, one classification per member.
     async fn poll_watchers(&self) -> impl Stream<Item = ChainEvent> + Unpin + '_ {
         let watchers = self.state_manager.get_execution_watchers(Chain::Tron).await;
-        tracing::debug!(watchers = watchers.len(), "polling tron execution watchers");
+        tracing::debug!(flat_ids = watchers.len(), "polling tron execution watchers");
 
         iter(watchers)
             .map(|(tx_id, members)| self.resolve_watched_id(tx_id, members))

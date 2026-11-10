@@ -143,7 +143,7 @@ impl<'a, S: StateManager, T: ChainTelemetry> ExecutionWatcher<'a, S, T> {
 
         let block_number = block.header.number;
         tracing::info!(
-            watchers_count = watchers.len(),
+            flat_ids = watchers.len(),
             block_number,
             "collect_execution_confirmations checking watchers"
         );
