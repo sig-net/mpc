@@ -1073,14 +1073,32 @@ The output itself travels off chain. Clients are responsible for recovering
 it from the target chain so they can deliver the exact serialised
 output the MPC attested to the application contract. Each target chain
 integration must document how the MPC obtains the output so clients can
-follow the same procedure.
+follow the same procedure. The recovery method is chain-specific.
 
-The recovery method is chain-specific. For example, on EVM chains the MPC
-reads a mined call's return data with the `debug_traceTransaction` RPC method,
-using `callTracer`'s top call frame. A client retrieves that data, decodes it
-with the request's `outputDeserializationSchema` and re-serialises it in
-the source chain's encoding, which that schema determines, reproducing
-the MPC's conversions.
+###### EVM
+
+The MPC reads a mined call's return data with the `debug_traceTransaction`
+RPC method, using `callTracer`'s top call frame. A client retrieves that
+data, decodes it with the request's `outputDeserializationSchema` and
+re-serialises it in the source chain's encoding, which that schema
+determines, reproducing the MPC's conversions.
+
+###### Tron
+
+The MPC reads the executed transaction's receipt with
+`gettransactioninfobyid`. Tron receipts carry no return data, so the
+output comes from a receipt log instead:
+
+- the schema names an event and, optionally, the emitting contract —
+  the request's own `contractAddress` if absent;
+- the output is the `data` of the unique log from that contract whose
+  first topic is the event's selector;
+- the `data` holds the event's non-indexed parameters and decodes per
+  the schema exactly like an EVM return value;
+- a client retrieves the receipt and applies the same rule.
+
+A receipt with no such log, or more than one, yields no output: the
+receipt is final, so nothing later can supply or disambiguate the match.
 
 As a convenience, MPC nodes may serve the serialised output they attest in
 a public cache. This helps dApp developers who lack access to a node that
