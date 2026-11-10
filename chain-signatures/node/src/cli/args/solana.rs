@@ -1,4 +1,4 @@
-use mpc_chain_solana::{SolConfig, SolIndexerConfig};
+use mpc_chain_solana::{Pubkey, SolConfig, SolIndexerConfig};
 use url::Url;
 
 /// Configures Solana indexer.
@@ -23,7 +23,7 @@ pub struct SolArgs {
     pub sol_rpc_http_url: Option<Url>,
     /// The program address to watch
     #[arg(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]
-    pub sol_program_address: Option<String>,
+    pub sol_program_address: Option<Pubkey>,
 }
 
 impl SolArgs {
@@ -34,5 +34,30 @@ impl SolArgs {
             program_address: self.sol_program_address?,
             indexer: SolIndexerConfig::default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser as _;
+
+    #[test]
+    fn the_cli_rejects_a_malformed_program_address() {
+        let error = SolArgs::try_parse_from([
+            "test",
+            "--sol-account-sk",
+            "sk",
+            "--sol-rpc-http-url",
+            "http://127.0.0.1:8899",
+            "--sol-program-address",
+            "not-a-pubkey",
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("--sol-program-address"),
+            "unexpected address error: {error}"
+        );
     }
 }

@@ -6,7 +6,16 @@ on:
   # Cache policy: doc/ci-caching.md
   push:
     branches: [develop]
-    paths: [Cargo.lock, "**/Cargo.toml", ".cargo/**", "rust-toolchain*", .github/workflows/test-chain-midnight.yml]
+    paths:
+      - Cargo.lock
+      - "**/Cargo.toml"
+      - ".cargo/**"
+      - "rust-toolchain*"
+      - .github/workflows/test-chain-midnight.yml
+      # Inputs of the compiled real-stack contracts cache.
+      - "chain-signatures/midnight-devtools/devtools/real-stack/*.compact"
+      - chain-signatures/midnight-devtools/devtools/real-stack/compile.mjs
+      - chain-signatures/midnight-devtools/package-lock.json
   workflow_dispatch:
 
 env:
@@ -42,7 +51,7 @@ jobs:
       - name: Install just
         run: |
           mkdir -p "$HOME/.cargo/bin"
-          curl --proto '=https' --tlsv1.2 -sSfL "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL --retry 8 --retry-delay 15 "https://github.com/casey/just/releases/download/1.54.0/just-1.54.0-x86_64-unknown-linux-musl.tar.gz" | tar zxf - -C "$HOME/.cargo/bin"
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Login to GitHub Container Registry
@@ -68,7 +77,7 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: chain-signatures/midnight-publisher-ts/package-lock.json
+          cache-dependency-path: chain-signatures/midnight-devtools/package-lock.json
 
       - name: Restore Compact toolchain
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -76,7 +85,7 @@ jobs:
           path: |
             ~/.compact
             ~/.local/bin/compact
-          key: compact-${{ runner.os }}-launcher0.5.1-compactc0.33.0-rc.2
+          key: compact-${{ runner.os }}-launcher0.5.3-compactc0.36.0
 
       # The recipe sig-net/midnight-integration's ci.yml uses for the same pins.
       - name: Install pinned Compact toolchain
@@ -84,36 +93,58 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "$HOME/.compact/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.local/bin:$HOME/.compact/bin:$PATH"
-          # Launcher pinned to compact-v0.5.1 (never releases/latest).
+          # Launcher pinned to compact-v0.5.3 (never releases/latest).
           if ! command -v compact >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -LsSf --retry 4 -o /tmp/compact-installer.sh \
-              https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.1/compact-installer.sh
-            echo "85e74a53ae4a67b31fa4d854f3b6ffb4c29f7c53e3372c5008b6a4729a8b4a73  /tmp/compact-installer.sh" | sha256sum -c
+              https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.3/compact-installer.sh
+            echo "5ad9c8f53dd09c39ebd4290dc47d1742d36b01ad65859eed41e7658ac65bdff8  /tmp/compact-installer.sh" | sha256sum -c
             sh /tmp/compact-installer.sh
           fi
-          # compactc 0.33.0-rc.2 is a ledger-9 prerelease the launcher's channel does
-          # not serve (`compact update 0.33.0-rc.2` alone fails), so fetch it by exact
-          # URL and let the launcher adopt the on-disk copy.
-          RC_DIR="$HOME/.compact/versions/0.33.0-rc.2/x86_64-unknown-linux-musl"
-          if [ ! -x "$RC_DIR/compactc" ]; then
-            mkdir -p "$RC_DIR"
-            curl -fsSL --retry 4 -o /tmp/compactc-rc.zip \
-              https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v0.33.0-rc.2/compactc_v0.33.0-rc.2_x86_64-unknown-linux-musl.zip
-            echo "3055ab92bbc8d5bb0d6282b661b83761d2a0de2ee37e21cf7107e25aaf2a9aad  /tmp/compactc-rc.zip" | sha256sum -c
-            unzip -qo /tmp/compactc-rc.zip -d "$RC_DIR"
-            chmod +x "$RC_DIR"/*
+          # compactc 0.36.0, fetched by exact URL and checksum, then adopted by the launcher.
+          COMPACTC_DIR="$HOME/.compact/versions/0.36.0/x86_64-unknown-linux-musl"
+          if [ ! -x "$COMPACTC_DIR/compactc" ]; then
+            mkdir -p "$COMPACTC_DIR"
+            curl -fsSL --retry 4 -o /tmp/compactc.zip \
+              https://github.com/LFDT-Minokawa/compact/releases/download/compactc-v0.36.0/compactc_v0.36.0_x86_64-unknown-linux-musl.zip
+            echo "7017b6121ebb9d53a562984bca616d143ef84fc7ee18b4da6c3a0a6615cb5e97  /tmp/compactc.zip" | sha256sum -c
+            unzip -qo /tmp/compactc.zip -d "$COMPACTC_DIR"
+            chmod +x "$COMPACTC_DIR"/*
           fi
           # Adopt the on-disk version. If the launcher refuses, wire its symlinks.
-          compact update 0.33.0-rc.2 || ln -sfn "$RC_DIR"/* "$HOME/.compact/bin/"
+          compact update 0.36.0 || ln -sfn "$COMPACTC_DIR"/* "$HOME/.compact/bin/"
           compact compile --version
+
+      # Key generation is nearly all of the fixture build. Its output is a pure function of the
+      # contract sources, the @sig-net/midnight sources (pinned by the lockfile), compile.mjs's
+      # flags and compactc; keep the compactc pin in the key in step with the toolchain above.
+      - name: Restore compiled real-stack contracts
+        id: real-stack-contracts
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            chain-signatures/midnight-devtools/devtools/real-stack/managed/caller
+            chain-signatures/midnight-devtools/devtools/real-stack/managed/erc20-vault
+          key: real-stack-contracts-compactc0.36.0-${{ hashFiles('chain-signatures/midnight-devtools/devtools/real-stack/*.compact', 'chain-signatures/midnight-devtools/devtools/real-stack/compile.mjs', 'chain-signatures/midnight-devtools/package-lock.json') }}
 
       - name: Build real-stack TypeScript fixtures
         run: just build midnight
+        env:
+          REAL_STACK_CONTRACTS_RESTORED: ${{ steps.real-stack-contracts.outputs.cache-hit }}
 
-      - name: Install Rust (1.93.0)
-        uses: dtolnay/rust-toolchain@283fb51ee3c8a49cd7c8ff30102f3fcf3cfbe0e1 # 1.93.0
+      # ~210 MB compressed. Merge-queue refs are unique per attempt, so saving there is waste.
+      - name: Save compiled real-stack contracts
+        if: steps.real-stack-contracts.outputs.cache-hit != 'true' && github.event_name != 'merge_group'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          toolchain: 1.93.0
+          path: |
+            chain-signatures/midnight-devtools/devtools/real-stack/managed/caller
+            chain-signatures/midnight-devtools/devtools/real-stack/managed/erc20-vault
+          key: ${{ steps.real-stack-contracts.outputs.cache-primary-key }}
+
+      - name: Install Rust (1.95.0)
+        uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          toolchain: 1.95.0
           targets: wasm32-unknown-unknown
 
       - name: Install system OpenSSL
@@ -129,9 +160,11 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git fetch --quiet --depth=1 origin develop
-          git diff --name-only FETCH_HEAD...HEAD |
-            grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' &&
-            echo changed=true >> "$GITHUB_OUTPUT" || true
+          # Two trees, no merge base: the shallow checkout has no common history.
+          files=$(git diff --name-only FETCH_HEAD HEAD)
+          if grep -qE '(^|/)(Cargo\.toml|Cargo\.lock|rust-toolchain(\.toml)?)$|^\.cargo/|^\.github/workflows/' <<< "$files"; then
+            echo changed=true >> "$GITHUB_OUTPUT"
+          fi
 
       # Cache policy: doc/ci-caching.md
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -175,8 +208,12 @@ jobs:
           path: ~/.cargo/bin/cargo-near
           key: cargo-near-v0.22.0-x86_64-unknown-linux-gnu
 
+      # The tests embed contract-eth's hardhat artifact (include_bytes!), and `just test-midnight`
+      # recompiles it first; compiling it before the test build keeps that later compile a no-op.
       - name: Build integration tests
-        run: just build tests
+        run: |
+          just build eth
+          just build tests
 
       # nextest fails on an empty selection, so a renamed test cannot turn this
       # step into a silent no-op.
@@ -190,6 +227,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: midnight-real-stack-logs-${{ matrix.test }}
+          # A re-run replaces an artifact of the same name, so keep each attempt's logs apart.
+          name: midnight-real-stack-logs-${{ matrix.test }}-attempt-${{ github.run_attempt }}
           path: target/tmp_*/midnight
           if-no-files-found: warn
