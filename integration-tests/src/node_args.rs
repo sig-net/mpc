@@ -69,7 +69,7 @@ impl Args {
     fn sol(&mut self, sol: &SolConfig) {
         self.flag("--sol-account-sk", &sol.account_sk);
         self.flag("--sol-rpc-http-url", &sol.rpc_http_url);
-        self.flag("--sol-program-address", &sol.program_address);
+        self.flag("--sol-program-address", sol.program_address);
     }
 
     fn hydration(&mut self, hydration: &HydrationConfig) {
@@ -100,15 +100,20 @@ impl Args {
             "--midnight-central-address",
             midnight.central_address.to_hex(),
         );
-        self.flag("--midnight-funding-seed", &publisher.funding_seed);
         self.flag(
-            "--midnight-intent-gen-command",
-            serde_json::to_string(&publisher.intent_gen_command)
-                .expect("a Vec<String> always serializes"),
+            "--midnight-responder-address",
+            midnight.responder_address.to_hex(),
         );
-        self.flag("--midnight-proof-server-url", &publisher.proof_server_url);
-        self.flag("--midnight-indexer-url", &publisher.indexer_url);
+        self.flag("--midnight-funding-seed", &publisher.funding_seed);
         self.flag("--midnight-indexer-ws-url", &publisher.indexer_ws_url);
+        self.flag(
+            "--midnight-contract-artifacts-dir",
+            publisher.contract_artifacts_dir.display(),
+        );
+        self.flag(
+            "--midnight-zk-params-dir",
+            publisher.zk_params_dir.display(),
+        );
         if let Some(storage) = &publisher.output_storage {
             self.flag("--midnight-output-storage-bucket", &storage.bucket);
             self.flag("--midnight-output-storage-prefix", &storage.prefix);
