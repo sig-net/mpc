@@ -901,7 +901,11 @@ export circuit completeDeposit(
       verifyAttestedOutputV1<1>(output, record.serializedOutputLength, record.outputHash),
       "Output does not match the attestation"
     );
-    if (deserialize<VaultResponse, 1>(output).success) {
+    // compactc 0.36.0 fails with an internal error on deserialize<VaultResponse, 1> under a
+    // branch, so this applies its Borsh rule for the one Boolean byte directly.
+    const success = output[0];
+    assert(success == 0 || success == 1, "VaultResponse.success is not a Borsh Boolean");
+    if (success == 1) {
       const claimRecipient = disclose(recipient).is_some
         ? disclose(recipient).value
         : left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
@@ -1071,7 +1075,14 @@ export circuit completeWithdraw(
       "Output does not match the attestation"
     );
   }
-  if (outcomeRefunds(record.outputKind) || !deserialize<VaultResponse, 1>(output).success) {
+  // compactc 0.36.0 fails with an internal error on deserialize<VaultResponse, 1> under a
+  // branch, so this applies its Borsh rule for the one Boolean byte directly.
+  const refunds = outcomeRefunds(record.outputKind);
+  const success = output[0];
+  if (!refunds) {
+    assert(success == 0 || success == 1, "VaultResponse.success is not a Borsh Boolean");
+  }
+  if (refunds || success == 0) {
     mintShieldedToken(
       vaultTokenDomainSeparator(args.request.erc20Address),
       args.request.amount as Uint<64>,

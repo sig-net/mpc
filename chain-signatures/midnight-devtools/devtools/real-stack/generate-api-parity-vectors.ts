@@ -342,13 +342,13 @@ const wireResponse = {
   },
 };
 const emitted = await responder.circuits.respondBidirectional(
-  createCircuitContext(
-    "respondBidirectional",
-    "ab".repeat(32),
-    "44".repeat(32),
-    responderInitial.currentContractState,
-    {},
-  ),
+  createCircuitContext({
+    circuitId: "respondBidirectional",
+    contractAddress: "ab".repeat(32),
+    coinPublicKeyOrZswapState: "44".repeat(32),
+    contractState: responderInitial.currentContractState,
+    privateState: {},
+  }),
   wireResponse,
 );
 const [event] = decodeSignetLogEvents(emitted.context.events);
@@ -371,10 +371,10 @@ const responseEvent = {
 
 const fixture = {
   responseEvent,
-  compiler: "0.33.0-rc.2",
-  runtime: "0.18.0-rc.1",
-  reference: "@sig-net/midnight@0.26.0-rc.3/src/Signet.compact",
-  referenceCommit: "82e09b230f17817a6e3a078a0bd7c67abe2c0421",
+  compiler: "0.36.0",
+  runtime: "0.21.0",
+  reference: "@sig-net/midnight@0.26.0-rc.7/src/Signet.compact",
+  referenceCommit: "242965d9535c602374a7b772ceb94a97012f5ebd",
   request: requestVectors[0],
   requestVectors,
   attestations: vectors.map((vector) => ({

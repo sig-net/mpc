@@ -57,7 +57,7 @@ async function waitForCounter(
   while (Date.now() < deadline) {
     const state = await publicDataProvider.queryContractState(address);
     if (state) {
-      const current = ledger.ContractState.deserialize(state.serialize());
+      const current = state.contractState.deserialize({ v9: ledger.ContractState });
       if (current.maintenanceAuthority.counter >= counter) return current;
     }
     await new Promise((resolve) => setTimeout(resolve, 2_000));

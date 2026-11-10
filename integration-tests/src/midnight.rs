@@ -23,12 +23,19 @@ use tokio::sync::Mutex;
 use crate::cluster::spawner::ClusterSpawner;
 use crate::containers::{start_container_with_network_retry, Container};
 
-const NODE_IMAGE: (&str, &str) = ("midnightntwrk/midnight-node", "2.0.0-rc.4");
-const INDEXER_IMAGE: (&str, &str) = (
-    "midnightntwrk/indexer-standalone",
-    "4.4.0-pre-alpha.16-l91r3-n2r3-bridge-and-events-epics-contract-zswap-16c656df",
-);
-const PROOF_IMAGE: (&str, &str) = ("midnightntwrk/proof-server", "9.0.0-rc.5_experimental");
+const NODE_IMAGE: (&str, &str) = ("midnightntwrk/midnight-node", "2.1.101");
+const INDEXER_IMAGE: (&str, &str) = ("midnightntwrk/indexer-standalone", "4.4.101");
+const PROOF_IMAGE: (&str, &str) = ("midnightntwrk/proof-server", "9.0.1");
+
+/// Set to a deployed network's node RPC URL to run the cases there instead of on a local node
+/// and indexer; the other `MPC_MIDNIGHT_E2E_*` variables then become required.
+const DEPLOYED_NODE_URL_ENV: &str = "MPC_MIDNIGHT_E2E_NODE_URL";
+const DEPLOYED_INDEXER_URL_ENV: &str = "MPC_MIDNIGHT_E2E_INDEXER_URL";
+const DEPLOYED_INDEXER_WS_URL_ENV: &str = "MPC_MIDNIGHT_E2E_INDEXER_WS_URL";
+const DEPLOYED_DEPLOYER_SEED_ENV: &str = "MPC_MIDNIGHT_E2E_DEPLOYER_SEED";
+const DEPLOYED_INVOKER_SEED_ENV: &str = "MPC_MIDNIGHT_E2E_INVOKER_SEED";
+/// Comma-separated, one per MPC node.
+const DEPLOYED_PUBLISHER_SEEDS_ENV: &str = "MPC_MIDNIGHT_E2E_PUBLISHER_SEEDS";
 
 const NODE_PORT: u16 = 9944;
 const INDEXER_PORT: u16 = 8088;
@@ -45,12 +52,57 @@ struct MidnightEndpoints {
 }
 
 struct MidnightStack {
-    _node: Container,
-    _indexer: Container,
+    /// The local node and indexer; none on a deployed network.
+    _chain: Option<(Container, Container)>,
     _proof_server: Container,
     endpoints: MidnightEndpoints,
     network_id: String,
+    /// The role wallets on a deployed network; locally the driver funds its own.
+    role_seeds: Option<RoleSeeds>,
     artifact_dir: PathBuf,
+}
+
+/// A deployed network the cases run against in place of a local node and indexer.
+struct DeployedNetwork {
+    node_http_url: String,
+    indexer_url: String,
+    indexer_ws_url: String,
+    role_seeds: RoleSeeds,
+}
+
+/// Role wallets that already hold NIGHT registered for DUST: NIGHT sent just before a run
+/// has not generated enough DUST to pay for it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoleSeeds {
+    deployer: String,
+    invoker: String,
+    publishers: Vec<String>,
+}
+
+impl DeployedNetwork {
+    fn from_env() -> anyhow::Result<Option<Self>> {
+        let Ok(node_http_url) = std::env::var(DEPLOYED_NODE_URL_ENV) else {
+            return Ok(None);
+        };
+        let required = |name: &str| {
+            std::env::var(name)
+                .with_context(|| format!("{name} is required with {DEPLOYED_NODE_URL_ENV}"))
+        };
+        Ok(Some(Self {
+            node_http_url,
+            indexer_url: required(DEPLOYED_INDEXER_URL_ENV)?,
+            indexer_ws_url: required(DEPLOYED_INDEXER_WS_URL_ENV)?,
+            role_seeds: RoleSeeds {
+                deployer: required(DEPLOYED_DEPLOYER_SEED_ENV)?,
+                invoker: required(DEPLOYED_INVOKER_SEED_ENV)?,
+                publishers: required(DEPLOYED_PUBLISHER_SEEDS_ENV)?
+                    .split(',')
+                    .map(|seed| seed.trim().to_owned())
+                    .collect(),
+            },
+        }))
+    }
 }
 
 #[derive(Deserialize)]
@@ -221,6 +273,7 @@ impl MidnightContext {
                 "config": DriverConfig::new(&stack),
                 "artifactDir": stack.artifact_dir,
                 "publishers": spawner.cfg.nodes,
+                "roleSeeds": stack.role_seeds,
             }))
             .await
             .context("bootstrapping fresh Midnight wallets and contracts")?;
@@ -677,6 +730,77 @@ impl MidnightStack {
             )
         })?;
 
+        let (chain, node_http_url, indexer_url, indexer_ws_url, network_id, role_seeds) =
+            match DeployedNetwork::from_env()? {
+                Some(network) => {
+                    let network_id = wait_for_node(&network.node_http_url).await?;
+                    tracing::info!(%network_id, "running the Midnight cases on a deployed network");
+                    (
+                        None,
+                        network.node_http_url,
+                        network.indexer_url,
+                        network.indexer_ws_url,
+                        network_id,
+                        Some(network.role_seeds),
+                    )
+                }
+                None => {
+                    let (chain, node_http_url, indexer_host_port, network_id) =
+                        Self::start_local_chain(spawner, &artifact_dir).await?;
+                    (
+                        Some(chain),
+                        node_http_url,
+                        format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
+                        format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
+                        network_id,
+                        None,
+                    )
+                }
+            };
+
+        let proof_log = log_consumer(&artifact_dir.join("proof-server.log"));
+        let proof_server = start_container_with_network_retry(
+            || {
+                GenericImage::new(PROOF_IMAGE.0, PROOF_IMAGE.1)
+                    .with_exposed_port(PROOF_PORT.tcp())
+                    .with_wait_for(WaitFor::Nothing)
+                    .with_network(&spawner.network)
+                    .with_log_consumer(proof_log.clone())
+            },
+            &spawner.network,
+        )
+        .await
+        .context("starting Midnight proof-server container")?;
+        let proof_host_port = proof_server
+            .get_host_port_ipv4(PROOF_PORT)
+            .await
+            .context("resolving Midnight proof-server host port")?;
+
+        let endpoints = MidnightEndpoints {
+            node_http_url,
+            indexer_url,
+            indexer_ws_url,
+            proof_server_url: format!("http://127.0.0.1:{proof_host_port}"),
+        };
+        wait_for_indexer(&endpoints.indexer_url).await?;
+        wait_for_http("proof server", &endpoints.proof_server_url).await?;
+
+        Ok(Self {
+            _chain: chain,
+            _proof_server: proof_server,
+            endpoints,
+            network_id,
+            role_seeds,
+            artifact_dir,
+        })
+    }
+
+    /// Starts a local dev node and an indexer following it, returning them with the node's
+    /// HTTP URL, the indexer's host port and the node's network id.
+    async fn start_local_chain(
+        spawner: &ClusterSpawner,
+        artifact_dir: &Path,
+    ) -> anyhow::Result<((Container, Container), String, u16, String)> {
         let node_log = log_consumer(&artifact_dir.join("node.log"));
         let node = start_container_with_network_retry(
             || {
@@ -737,41 +861,12 @@ impl MidnightStack {
             .await
             .context("resolving Midnight indexer host port")?;
 
-        let proof_log = log_consumer(&artifact_dir.join("proof-server.log"));
-        let proof_server = start_container_with_network_retry(
-            || {
-                GenericImage::new(PROOF_IMAGE.0, PROOF_IMAGE.1)
-                    .with_exposed_port(PROOF_PORT.tcp())
-                    .with_wait_for(WaitFor::Nothing)
-                    .with_network(&spawner.network)
-                    .with_log_consumer(proof_log.clone())
-            },
-            &spawner.network,
-        )
-        .await
-        .context("starting Midnight proof-server container")?;
-        let proof_host_port = proof_server
-            .get_host_port_ipv4(PROOF_PORT)
-            .await
-            .context("resolving Midnight proof-server host port")?;
-
-        let endpoints = MidnightEndpoints {
+        Ok((
+            (node, indexer),
             node_http_url,
-            indexer_url: format!("http://127.0.0.1:{indexer_host_port}/api/v3/graphql"),
-            indexer_ws_url: format!("ws://127.0.0.1:{indexer_host_port}/api/v3/graphql/ws"),
-            proof_server_url: format!("http://127.0.0.1:{proof_host_port}"),
-        };
-        wait_for_indexer(&endpoints.indexer_url).await?;
-        wait_for_http("proof server", &endpoints.proof_server_url).await?;
-
-        Ok(Self {
-            _node: node,
-            _indexer: indexer,
-            _proof_server: proof_server,
-            endpoints,
+            indexer_host_port,
             network_id,
-            artifact_dir,
-        })
+        ))
     }
 }
 

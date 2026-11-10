@@ -1,5 +1,11 @@
 import type { ProofProvider } from "@midnight-ntwrk/midnight-js/types";
-import type { AlignedValue, Op, Transcript, UnprovenTransaction } from "@midnightntwrk/ledger-v9";
+import {
+  Transaction,
+  type AlignedValue,
+  type Op,
+  type Transcript,
+  type UnprovenTransaction,
+} from "@midnightntwrk/ledger-v9";
 import {
   bytesToHex,
   decodeSignBidirectionalEventNotificationPayload,
@@ -96,8 +102,9 @@ export function recordingProofProvider(
   record: (placement: CallPlacement[]) => void,
 ): ProofProvider {
   return {
+    supportedEras: inner.supportedEras,
     proveTx(unprovenTx, config) {
-      record(placementOf(unprovenTx));
+      record(placementOf(unprovenTx.deserialize({ v9: Transaction })));
       return inner.proveTx(unprovenTx, config);
     },
   };

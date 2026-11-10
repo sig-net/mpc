@@ -1,12 +1,14 @@
 import { fileURLToPath } from "node:url";
+import type { ContractModuleProvider } from "@midnight-ntwrk/compact-runtime";
 import { indexerPublicDataProvider } from "@midnight-ntwrk/midnight-js-indexer-public-data-provider";
 import { levelPrivateStateProvider } from "@midnight-ntwrk/midnight-js-level-private-state-provider";
 import { NodeZkConfigProvider } from "@midnight-ntwrk/midnight-js-node-zk-config-provider";
 import {
+  createLedger9MidnightProvider,
+  createLedger9WalletProvider,
   ZKConfigRegistry,
   type MidnightProvider,
   type MidnightProviders,
-  type UnboundTransaction,
   type WalletProvider,
 } from "@midnight-ntwrk/midnight-js/types";
 import { httpClientProofProvider } from "@midnight-ntwrk/midnight-js-http-client-proof-provider";
@@ -40,24 +42,41 @@ export const callerCompiledContract = makeCompiledContract<CallerContract, Calle
   callerManagedPath,
 );
 
-export function walletProvider(
+// Transactions this provider set builds, and the recipes balancing them, expire 30 min out.
+const TTL_SECONDS = 30 * 60;
+
+export const providerConfig = (config: MidnightNodeConfig) => ({
+  networkId: config.networkId,
+  ttlSeconds: TTL_SECONDS,
+});
+
+// Both contracts cross-contract call only the Signet singleton, so every callee resolves to
+// the module compile.mjs links beside them; the runtime still checks its verifier keys.
+export const signetModuleProvider: ContractModuleProvider = {
+  resolve: () => () => import("./managed/SignetSigner/contract/index.js"),
+};
+
+// Transactions cross between midnight-js and the facade as bytes, each sealing its own handle.
+export function walletProviders(
   facade: WalletFacade,
   keys: AccountKeys,
-): WalletProvider & MidnightProvider {
-  return {
+): { walletProvider: WalletProvider; midnightProvider: MidnightProvider } {
+  const walletProvider = createLedger9WalletProvider({
     getCoinPublicKey: () => keys.shieldedSecretKeys.coinPublicKey,
     getEncryptionPublicKey: () => keys.shieldedSecretKeys.encryptionPublicKey,
-    async balanceTx(tx: UnboundTransaction, ttl?: Date) {
+    async balanceTx(tx, ttl) {
       const recipe = await facade.balanceUnboundTransaction(
-        tx as never,
-        { shieldedSecretKeys: keys.shieldedSecretKeys, dustSecretKey: keys.dustSecretKey },
-        { ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000) },
+        facade.adoptTransaction(tx.serialize(), "Unbound"),
+        { ttl: ttl ?? new Date(Date.now() + TTL_SECONDS * 1000) },
       );
       const signed = await facade.signRecipe(recipe, keys.unshieldedKeystore.signDataAsync);
-      return (await facade.finalizeRecipe(signed)) as never;
+      return facade.finalizeRecipe(signed);
     },
-    submitTx: (tx) => facade.submitTransaction(tx as never) as never,
-  };
+  });
+  const midnightProvider = createLedger9MidnightProvider((tx) =>
+    facade.submitTransaction(facade.adoptTransaction(tx.serialize(), "Finalized")),
+  );
+  return { walletProvider, midnightProvider };
 }
 
 export function buildCallerProviders(
@@ -69,13 +88,13 @@ export function buildCallerProviders(
 ): CallerProviders {
   const callerZk = new NodeZkConfigProvider<CallerCircuitId>(callerManagedPath);
   const signetZk = new NodeZkConfigProvider<string>(signetContractManagedPath);
-  const wallet = walletProvider(facade, keys);
+  const wallet = walletProviders(facade, keys);
   return {
     privateStateProvider: levelPrivateStateProvider({
       midnightDbName: databasePath,
       privateStateStoreName: "caller-private-state",
       signingKeyStoreName: "caller-signing-keys",
-      accountId: wallet.getCoinPublicKey(),
+      accountId: wallet.walletProvider.getCoinPublicKey(),
       privateStoragePasswordProvider: () => "MpcRealStack#2026!",
     }),
     publicDataProvider: indexerPublicDataProvider({
@@ -86,10 +105,14 @@ export function buildCallerProviders(
     // `submitIsEvenRequest` calls into the Signet singleton, so one transaction carries a
     // proof per contract; the registry binds each call to its bundle by deployed verifier key.
     proofProvider: recordingProofProvider(
-      httpClientProofProvider(config.proofServerUrl, new ZKConfigRegistry([callerZk, signetZk])),
+      httpClientProofProvider({
+        url: config.proofServerUrl,
+        zkConfigProvider: new ZKConfigRegistry([callerZk, signetZk]),
+      }),
       onPlacement,
     ),
-    walletProvider: wallet,
-    midnightProvider: wallet,
+    ...wallet,
+    config: providerConfig(config),
+    contractModuleProvider: signetModuleProvider,
   };
 }

@@ -298,6 +298,8 @@ mod tests {
 
     /// One `graphql-transport-ws` server connection running `script`, at the URL
     /// returned.
+    // tungstenite fixes the handshake callback's error type.
+    #[allow(clippy::result_large_err)]
     async fn indexer<F, Fut>(script: F) -> (String, tokio::task::JoinHandle<()>)
     where
         F: FnOnce(ServerSocket) -> Fut + Send + 'static,

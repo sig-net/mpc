@@ -1735,6 +1735,7 @@ mod tests {
             context::QueryContext,
             cost_model::INITIAL_COST_MODEL,
             ops::Op,
+            result_mode::ResultModeVerify,
             state::{ChargedState, StateValue},
         };
         use midnight_storage::{arena::Sp, storage::Array};
@@ -1748,15 +1749,18 @@ mod tests {
             original.address,
         );
         let mut transcript = original.fallible_transcript.as_deref().unwrap().clone();
+        // Unbounded: the capture's declared deletions exceed what ledger 9.1.0.1 prices for
+        // its writes, and 9.1.0.1 refuses `noop 0` as not normalized, so neither declared gas
+        // bound applies to this fixture any longer.
         let before = context
-            .run_transcript(&transcript, &INITIAL_COST_MODEL)
+            .query::<ResultModeVerify>(&Vec::from(&transcript.program), None, &INITIAL_COST_MODEL)
             .unwrap();
         let mut program = Vec::from(&transcript.program);
         program.push(Op::Noop { n: 0 });
         transcript.program = program.into();
         let after = context
-            .run_transcript(&transcript, &INITIAL_COST_MODEL)
-            .expect("zero noop executes within the original declared gas");
+            .query::<ResultModeVerify>(&Vec::from(&transcript.program), None, &INITIAL_COST_MODEL)
+            .expect("zero noop executes");
         assert_eq!(before.events, after.events);
         assert_eq!(before.context.effects, after.context.effects);
 
@@ -1768,8 +1772,8 @@ mod tests {
         modified.fallible_transcript = Some(Sp::new(transcript));
         let binding = intent.binding_commitment.clone().into();
         assert_eq!(
-            original.public_inputs(binding),
-            modified.public_inputs(binding),
+            original.public_inputs(binding).unwrap(),
+            modified.public_inputs(binding).unwrap(),
             "fallible Noop(0) leaves the existing contract proof inputs unchanged"
         );
         let mut actions = Vec::from(&intent.actions);
