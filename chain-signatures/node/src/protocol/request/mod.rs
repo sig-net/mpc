@@ -14,7 +14,7 @@ use crate::protocol::Chain;
 use crate::respond_bidirectional::claims_attestation_key;
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureReservation, PresignatureTaken};
-use crate::storage::PresignatureStorage;
+use crate::storage::{Initializing, PresignatureStorage};
 use crate::types::SignCommand;
 
 use mpc_utils::{
@@ -179,7 +179,7 @@ struct SignEntry {
 pub struct SignatureSpawner {
     contract: ContractStateWatcher,
     /// Presignature storage that maintains all presignatures.
-    presignatures: PresignatureStorage,
+    presignatures: PresignatureStorage<Initializing>,
     /// Consolidated signature tasks - one per (sign_id, kind), each task is an async task handling complete lifecycle
     tasks: JoinMap<SignTaskKey, Result<(), SignError>>,
     /// Per-(sign, kind) posit mailboxes; also buffer messages that arrive before their
@@ -208,7 +208,7 @@ impl SignatureSpawner {
     pub fn new(
         node_account_id: near_account_id::AccountId,
         contract: ContractStateWatcher,
-        presignatures: PresignatureStorage,
+        presignatures: PresignatureStorage<Initializing>,
         mesh_state: watch::Receiver<MeshState>,
         msg: MessageChannel,
         rpc: RpcChannel,
@@ -318,7 +318,7 @@ impl SignatureSpawner {
             governance: governance.clone(),
             sign_id,
             kind,
-            presignatures: self.presignatures.clone(),
+            presignatures: self.presignatures.to_ready(governance.me),
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
             signature_timeout,
@@ -582,7 +582,11 @@ impl SignatureSpawner {
 
     /// Main loop: multiplex incoming requests, posit messages, task exits, config
     /// changes, and governance updates until the request channel closes.
-    async fn run(mut self, mut sign_rx: mpsc::Receiver<SignCommand>, cfg: watch::Receiver<Config>) {
+    async fn run(
+        mut self,
+        mut sign_rx: mpsc::Receiver<SignCommand>,
+        cfg: watch::Receiver<Config>,
+    ) -> anyhow::Result<()> {
         let mut posits = self.msg.subscribe_signature_posit().await;
         let signature_timeout = cfg.borrow().timeouts.signature_generation;
 
@@ -590,7 +594,7 @@ impl SignatureSpawner {
 
         // GUARANTEE: contract is in a running state with valid governance info
         // before we start processing any messages
-        let mut governance = contract_watcher.wait_governance().await;
+        let mut governance = contract_watcher.wait_governance().await?;
 
         loop {
             tokio::select! {
@@ -607,8 +611,8 @@ impl SignatureSpawner {
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     self.handle_task_exit(result);
                 }
-                Some(new_governance) = contract_watcher.next_governance(governance.clone()) => {
-                    governance = new_governance;
+                new_governance = contract_watcher.next_governance(governance.clone()) => {
+                    governance = new_governance?;
                     // A governance change invalidates every incarnation — even
                     // running -> running: the watch coalesces fast transitions.
                     self.tasks.abort_all();
@@ -624,6 +628,7 @@ impl SignatureSpawner {
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -660,7 +665,7 @@ impl Drop for SignatureSpawner {
 }
 
 pub struct SignatureSpawnerTask {
-    handle: JoinHandle<()>,
+    handle: JoinHandle<anyhow::Result<()>>,
 }
 
 impl SignatureSpawnerTask {

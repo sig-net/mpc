@@ -11,7 +11,7 @@ use crate::config::NetworkConfig;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::ContractStateWatcher;
-use crate::storage::{PresignatureStorage, StorageError, TripleStorage};
+use crate::storage::{Initializing, PresignatureStorage, StorageError, TripleStorage};
 
 use super::contract::primitives::{ParticipantInfo, ParticipantMap, Participants};
 use super::message::{MessageError, SignedMessage};
@@ -67,10 +67,10 @@ impl SyncUpdate {
 /// Handle a peer's `/sync` request: drop the artifacts the signer no longer
 /// owns and reply, signed and encrypted to the signer, with the ids we do not
 /// hold.
-pub async fn process_sync_update(
+pub async fn process_sync_update<P1, P2>(
     update: &Ciphered,
-    triples: &TripleStorage,
-    presignatures: &PresignatureStorage,
+    triples: &TripleStorage<P1>,
+    presignatures: &PresignatureStorage<P2>,
     me: Participant,
     network: &NetworkConfig,
     participants: &ParticipantMap,
@@ -116,8 +116,8 @@ pub async fn process_sync_update(
 
 pub struct SyncTask {
     client: NodeClient,
-    triples: TripleStorage,
-    presignatures: PresignatureStorage,
+    triples: TripleStorage<Initializing>,
+    presignatures: PresignatureStorage<Initializing>,
     mesh_state: watch::Receiver<MeshState>,
     contract: ContractStateWatcher,
     sync_report_tx: SyncReportSender,
@@ -127,8 +127,8 @@ pub struct SyncTask {
 impl SyncTask {
     pub fn new(
         client: &NodeClient,
-        triples: TripleStorage,
-        presignatures: PresignatureStorage,
+        triples: TripleStorage<Initializing>,
+        presignatures: PresignatureStorage<Initializing>,
         mesh_state: watch::Receiver<MeshState>,
         contract: ContractStateWatcher,
         sync_report_tx: SyncReportSender,
@@ -145,7 +145,7 @@ impl SyncTask {
         }
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(mut self) -> anyhow::Result<()> {
         tracing::info!("sync task has been started");
         // Trigger sync broadcasts to peers in need_sync state
         let mut sync_interval = tokio::time::interval(Duration::from_millis(200));
@@ -153,11 +153,11 @@ impl SyncTask {
         // Do NOT start until we have our own participant info
         tracing::info!("sync waiting for participant info");
         let start = Instant::now();
-        let (_, me) = self.contract.wait_info().await;
+        let (_, me) = self.contract.wait_info().await?;
         tracing::info!(?me, elapsed = ?start.elapsed(), "starting sync loop...");
 
-        self.triples.set_me(me);
-        self.presignatures.set_me(me);
+        let triples = self.triples.to_ready(me);
+        let presignatures = self.presignatures.to_ready(me);
 
         loop {
             sync_interval.tick().await;
@@ -167,7 +167,7 @@ impl SyncTask {
                 continue;
             }
 
-            let Some(update) = self.new_update().await else {
+            let Some(update) = Self::new_update(&triples, &presignatures).await else {
                 continue;
             };
             let start = Instant::now();
@@ -190,15 +190,21 @@ impl SyncTask {
                 continue;
             };
             // Process sync responses: update artifact participants based on not_found data
-            if let Err(err) = self.process_sync_responses(responses, threshold).await {
+            if let Err(err) = self
+                .process_sync_responses(&triples, &presignatures, responses, threshold)
+                .await
+            {
                 tracing::warn!(?err, "failed to process sync responses");
             }
             tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
         }
     }
 
-    async fn new_update(&self) -> Option<SyncUpdate> {
-        let triples = match self.triples.fetch_owned_with_reserved().await {
+    async fn new_update(
+        triples: &TripleStorage,
+        presignatures: &PresignatureStorage,
+    ) -> Option<SyncUpdate> {
+        let triples = match triples.fetch_owned_with_reserved().await {
             Ok(ids) => ids,
             Err(err) => {
                 tracing::warn!(
@@ -208,7 +214,7 @@ impl SyncTask {
                 return None;
             }
         };
-        let presignatures = match self.presignatures.fetch_owned_with_reserved().await {
+        let presignatures = match presignatures.fetch_owned_with_reserved().await {
             Ok(ids) => ids,
             Err(err) => {
                 tracing::warn!(
@@ -230,6 +236,8 @@ impl SyncTask {
     /// 2. Send synced peer notifications to mesh (for status transitions)
     async fn process_sync_responses(
         &self,
+        triples: &TripleStorage,
+        presignatures: &PresignatureStorage,
         responses: Vec<(Participant, SyncPeerResponse)>,
         threshold: usize,
     ) -> Result<(), String> {
@@ -255,14 +263,12 @@ impl SyncTask {
                     );
 
                     // Batch remove peer from all triples and prune
-                    let triple_res = self
-                        .triples
+                    let triple_res = triples
                         .remove_holder_and_prune(peer, threshold, &response.triples)
                         .await;
 
                     // Batch remove peer from all presignatures and prune
-                    let presig_res = self
-                        .presignatures
+                    let presig_res = presignatures
                         .remove_holder_and_prune(peer, threshold, &response.presignatures)
                         .await;
 

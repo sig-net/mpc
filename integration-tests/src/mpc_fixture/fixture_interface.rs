@@ -56,7 +56,7 @@ pub struct MpcFixtureNode {
     pub backlog: Backlog,
 
     pub contract: ContractStateWatcher,
-    pub web_handle: Option<tokio::task::JoinHandle<()>>,
+    pub web_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
 /// Logs for reading outputs after a test run for assertions and debugging.
@@ -518,8 +518,8 @@ impl MpcFixtureNode {
             web_port,
             self.msg_channel.clone(),
             self.state.clone(),
-            self.triple_storage.clone(),
-            self.presignature_storage.clone(),
+            self.triple_storage.to_initializing(),
+            self.presignature_storage.to_initializing(),
             self.contract.clone(),
             self.network.clone(),
             account_id,

@@ -23,6 +23,7 @@ pub fn start(ctx: &Context, node: &NodeEnvConfig) -> Vec<String> {
     args.flag("--cipher-sk", hex::encode(node.cipher_sk.to_bytes()));
     args.flag("--sign-sk", &node.sign_sk);
     args.flag("--web-port", node.web_port);
+    args.flag("--my-address", node.address());
     args.chains(&node.cfg);
     args.storage(&ctx.storage_options);
     args.logs(&ctx.log_options);
@@ -35,12 +36,6 @@ impl Args {
     fn flag(&mut self, name: &str, value: impl ToString) {
         self.0.push(name.to_string());
         self.0.push(value.to_string());
-    }
-
-    fn switch(&mut self, name: &str, on: bool) {
-        if on {
-            self.0.push(name.to_string());
-        }
     }
 
     fn chains(&mut self, cfg: &NodeConfig) {
@@ -69,21 +64,12 @@ impl Args {
         self.flag("--eth-execution-rpc-http-url", &eth.execution_rpc_http_url);
         self.flag("--eth-contract-address", eth.contract_address);
         self.flag("--eth-network", &eth.network);
-        self.flag(
-            "--eth-refresh-finalized-interval",
-            eth.refresh_finalized_interval,
-        );
-        self.switch("--eth-optimistic-requests", eth.optimistic_requests);
     }
 
     fn sol(&mut self, sol: &SolConfig) {
         self.flag("--sol-account-sk", &sol.account_sk);
         self.flag("--sol-rpc-http-url", &sol.rpc_http_url);
-        self.flag("--sol-program-address", &sol.program_address);
-        self.flag(
-            "--sol-poll-interval-ms",
-            sol.indexer.poll_interval.as_millis(),
-        );
+        self.flag("--sol-program-address", sol.program_address);
     }
 
     fn hydration(&mut self, hydration: &HydrationConfig) {
@@ -114,15 +100,20 @@ impl Args {
             "--midnight-central-address",
             midnight.central_address.to_hex(),
         );
-        self.flag("--midnight-funding-seed", &publisher.funding_seed);
         self.flag(
-            "--midnight-intent-gen-command",
-            serde_json::to_string(&publisher.intent_gen_command)
-                .expect("a Vec<String> always serializes"),
+            "--midnight-responder-address",
+            midnight.responder_address.to_hex(),
         );
-        self.flag("--midnight-proof-server-url", &publisher.proof_server_url);
-        self.flag("--midnight-indexer-url", &publisher.indexer_url);
+        self.flag("--midnight-funding-seed", &publisher.funding_seed);
         self.flag("--midnight-indexer-ws-url", &publisher.indexer_ws_url);
+        self.flag(
+            "--midnight-contract-artifacts-dir",
+            publisher.contract_artifacts_dir.display(),
+        );
+        self.flag(
+            "--midnight-zk-params-dir",
+            publisher.zk_params_dir.display(),
+        );
         if let Some(storage) = &publisher.output_storage {
             self.flag("--midnight-output-storage-bucket", &storage.bucket);
             self.flag("--midnight-output-storage-prefix", &storage.prefix);
@@ -137,12 +128,14 @@ impl Args {
     }
 
     fn storage(&mut self, storage: &storage::Options) {
-        self.flag("--gcp-project-id", &storage.gcp_project_id);
+        if let Some(id) = &storage.gcp_project_id {
+            self.flag("--gcp-project-id", id);
+        }
         if let Some(id) = &storage.sk_share_secret_id {
             self.flag("--sk-share-secret-id", id);
         }
         if let Some(path) = &storage.sk_share_local_path {
-            self.flag("--sk-share-local-path", path);
+            self.flag("--sk-share-local-path", path.display());
         }
         self.flag("--redis-url", &storage.redis_url);
     }
@@ -150,6 +143,6 @@ impl Args {
     fn logs(&mut self, logs: &logs::Options) {
         self.flag("--opentelemetry-level", logs.opentelemetry_level);
         self.flag("--otlp-endpoint", &logs.otlp_endpoint);
-        self.switch("--disable-gcp-logs", logs.disable_gcp_logs);
+        self.flag("--log-format", logs.log_format);
     }
 }

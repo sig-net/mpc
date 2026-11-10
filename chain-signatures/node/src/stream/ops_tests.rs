@@ -6,6 +6,7 @@ use crate::backlog::mock::{
 use crate::backlog::{Backlog, Bidirectional, Final, Generating};
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
+use crate::metrics::requests::EXECUTION_WAIT_UNMEASURED;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction};
 use crate::sign_bidirectional::derive_user_address;
@@ -25,12 +26,12 @@ use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ChainConfig as _, IndexedSignRequest, SignArgs,
-    SignBidirectionalEvent, SignKind, Signature,
+    BidirectionalTx, BidirectionalTxId, IndexedSignRequest, SignArgs, SignBidirectionalEvent,
+    SignKind, Signature,
 };
 use mpc_tron_wire::{
     pb::{Message as _, RawTransaction, TriggerSmartContract},
-    TronAddress,
+    TronAddress, MAX_EXPIRATION_SPAN_MS,
 };
 use mpc_utils::time::current_unix_timestamp;
 use near_primitives::types::AccountId;
@@ -58,6 +59,17 @@ fn owned_tron_bytes(root_pk: mpc_primitives::PublicKey, event: &SignBidirectiona
     let mut trigger = TriggerSmartContract::decode(any.value.as_slice()).unwrap();
     trigger.owner_address = owner.as_bytes().to_vec();
     any.value = trigger.encode_to_vec();
+    raw.encode_to_vec()
+}
+
+/// [`owned_tron_bytes`] with the raw message's `expiration` set.
+fn owned_tron_bytes_with_expiry(
+    root_pk: mpc_primitives::PublicKey,
+    event: &SignBidirectionalEvent,
+    expiration_ms: i64,
+) -> Vec<u8> {
+    let mut raw = RawTransaction::parse(&owned_tron_bytes(root_pk, event)).unwrap();
+    raw.expiration = expiration_ms;
     raw.encode_to_vec()
 }
 
@@ -97,7 +109,9 @@ async fn recover_backlog_requeues_pending_signs() {
     let participant = Participant::from(0u32);
     mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
     let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
-    wait_threshold_active(&mut mesh_rx, threshold).await;
+    wait_threshold_active(&mut mesh_rx, threshold)
+        .await
+        .unwrap();
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     backlog.recover_by_checkpoint(&checkpoint).await;
 
@@ -229,6 +243,95 @@ async fn seed_executing_entry(
 }
 
 #[tokio::test]
+async fn process_execution_confirmed_resolves_a_displaced_watch_by_sign_id() {
+    let backlog = Backlog::new();
+    let tx = test_bidirectional_tx(9, Chain::Midnight, Chain::Tron);
+    backlog.insert_mock_executing(&tx).await;
+    // A flat Tron id: an earlier confirmation consumed this entry's watch
+    // while the entry itself is still Executing.
+    backlog
+        .unwatch_execution(tx.target_chain, &tx.id, tx.source_chain, &tx.sign_id())
+        .await;
+
+    // No watch, no wait start: the resolution must count as unmeasured.
+    let unmeasured = EXECUTION_WAIT_UNMEASURED
+        .with_label_values(&[tx.source_chain.as_str()])
+        .get();
+
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+
+    confirm_execution(&tx, 41u64, ExecutionOutcome::Unviable, &ctx)
+        .await
+        .unwrap();
+
+    assert!(
+        EXECUTION_WAIT_UNMEASURED
+            .with_label_values(&[tx.source_chain.as_str()])
+            .get()
+            > unmeasured,
+        "the displaced entry's resolution counts as unmeasured"
+    );
+
+    let entry = ctx
+        .backlog
+        .get(tx.source_chain, &tx.sign_id())
+        .await
+        .expect("entry survives resolution");
+    assert_matches!(
+        entry.status(),
+        SignStatus::Bidirectional(BidirectionalProgress::Final {
+            progress: SignProgress::Generating,
+            ..
+        })
+    );
+    assert_matches!(entry.request().kind, SignKind::RespondBidirectional(_));
+
+    let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_matches!(
+        msg,
+        SignCommand::Request(req) if matches!(req.request().kind, SignKind::RespondBidirectional(_))
+    );
+}
+
+#[tokio::test]
+async fn process_execution_confirmed_without_an_entry_warns_and_succeeds() {
+    let backlog = Backlog::new();
+    let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+    let tx = test_bidirectional_tx(3, Chain::Solana, Chain::Ethereum);
+
+    confirm_execution(&tx, 1u64, ExecutionOutcome::Unviable, &ctx)
+        .await
+        .unwrap();
+
+    assert!(sign_rx.try_recv().is_err());
+}
+
+/// Drives one execution confirmation for `tx` through the stream handler,
+/// deriving every keyed argument the way a watcher's event does.
+async fn confirm_execution(
+    tx: &BidirectionalTx,
+    height: u64,
+    outcome: ExecutionOutcome,
+    ctx: &StreamContext,
+) -> anyhow::Result<()> {
+    process_execution_confirmed(
+        tx.id,
+        tx.sign_id(),
+        tx.source_chain,
+        height,
+        outcome,
+        ctx,
+        tx.target_chain,
+    )
+    .await
+}
+
+#[tokio::test]
 async fn process_execution_confirmed_success_creates_respond_request() {
     let backlog = Backlog::new();
     let tx = test_bidirectional_tx(1, Chain::Solana, Chain::Ethereum);
@@ -237,18 +340,15 @@ async fn process_execution_confirmed_success_creates_respond_request() {
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
-    // Call the handler with a Success and empty output
-    let tx_id = tx.id;
     // ensure watcher exists before processing
     let before_watchers = backlog.get_execution_watchers(tx.target_chain).await;
     assert!(before_watchers.contains_key(&tx.id));
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-    process_execution_confirmed(
-        tx_id,
+    confirm_execution(
+        &tx,
         123u64,
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
-        tx.target_chain,
     )
     .await
     .unwrap();
@@ -299,22 +399,20 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
-    process_execution_confirmed(
-        tx.id,
+    confirm_execution(
+        &tx,
         123u64,
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
-        tx.target_chain,
     )
     .await
     .unwrap();
 
-    process_execution_confirmed(
-        tx.id,
+    confirm_execution(
+        &tx,
         124u64,
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
-        tx.target_chain,
     )
     .await
     .unwrap();
@@ -352,12 +450,11 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     drop(sign_rx);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
-    process_execution_confirmed(
-        tx.id,
+    confirm_execution(
+        &tx,
         444u64,
         ExecutionOutcome::Success { output: vec![] },
         &ctx,
-        tx.target_chain,
     )
     .await
     .expect_err("send failure should surface as an error");
@@ -379,7 +476,9 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     let participant = Participant::from(0u32);
     mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
     let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
-    wait_threshold_active(&mut mesh_rx, threshold).await;
+    wait_threshold_active(&mut mesh_rx, threshold)
+        .await
+        .unwrap();
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let recovered = Backlog::persisted(storage.clone());
 
@@ -494,7 +593,7 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-    let err = process_sign_request(request, &ctx, test_root_pk())
+    let err = process_sign_request(request, &ctx, test_root_pk(), None)
         .await
         .expect_err("RespondBidirectional should be rejected from the sign queue path");
     assert!(err.to_string().contains("Unexpected sign request kind"));
@@ -580,7 +679,7 @@ async fn process_sign_request_admits_off_spec_fields_for_now() {
         event,
     ));
 
-    process_sign_request(request, &ctx, root_pk)
+    process_sign_request(request, &ctx, root_pk, None)
         .await
         .expect("off-spec fields only warn for now");
     assert!(backlog.get(Chain::Solana, &sign_id).await.is_some());
@@ -661,7 +760,7 @@ async fn process_sign_request_rejects_a_duplicate_tron_destination_id() {
     };
 
     // Process the first request to ensure it is admitted and pending.
-    process_sign_request(request(19), &ctx, root_pk)
+    process_sign_request(request(19), &ctx, root_pk, None)
         .await
         .expect("the first Tron request is admitted");
 
@@ -671,7 +770,7 @@ async fn process_sign_request_rejects_a_duplicate_tron_destination_id() {
         .is_some());
 
     // Process the second request, which should be rejected due to a duplicate Tron destination ID.
-    let err = process_sign_request(request(20), &ctx, root_pk)
+    let err = process_sign_request(request(20), &ctx, root_pk, None)
         .await
         .expect_err("identical bytes must be rejected while the first is pending");
 
@@ -686,6 +785,171 @@ async fn process_sign_request_rejects_a_duplicate_tron_destination_id() {
         .get(Chain::Solana, &SignId::new([20; 32]))
         .await
         .is_none());
+}
+
+/// A source block time for the expiry-bound tests, in unix seconds.
+const SOURCE_BLOCK_S: u64 = 1_700_000_000;
+
+async fn admit_tron_request_with_expiry(
+    expiration_ms: i64,
+    block_timestamp: Option<u64>,
+    backlog: Backlog,
+) -> anyhow::Result<bool> {
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+    let root_pk = test_root_pk();
+    let event = tron_bidirectional_event(Vec::new());
+    let request = Arc::new(IndexedSignRequest::sign_bidirectional(
+        EXPIRY_SIGN_ID,
+        test_sign_args(0x7e),
+        Chain::Solana,
+        current_unix_timestamp(),
+        SignBidirectionalEvent {
+            serialized_transaction: owned_tron_bytes_with_expiry(root_pk, &event, expiration_ms),
+            ..event
+        },
+    ));
+    process_sign_request(request, &ctx, root_pk, block_timestamp).await
+}
+
+/// The sign id used for the expiry-bound tests.
+const EXPIRY_SIGN_ID: SignId = SignId::new([0x7e; 32]);
+
+/// Both boundaries: open strictly after the source block, closed within
+/// the cap.
+#[tokio::test]
+async fn process_sign_request_admits_a_window_within_the_cap() {
+    for expiration_ms in [
+        SOURCE_BLOCK_S * 1000 + 1,
+        SOURCE_BLOCK_S * 1000 + MAX_EXPIRATION_SPAN_MS,
+    ] {
+        let backlog = Backlog::new();
+        admit_tron_request_with_expiry(expiration_ms as i64, Some(SOURCE_BLOCK_S), backlog.clone())
+            .await
+            .expect("open window, within the cap");
+        assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_some());
+    }
+}
+
+#[tokio::test]
+async fn process_sign_request_rejects_a_window_closed_at_the_source_block() {
+    let backlog = Backlog::new();
+    let err = admit_tron_request_with_expiry(
+        (SOURCE_BLOCK_S * 1000) as i64,
+        Some(SOURCE_BLOCK_S),
+        backlog.clone(),
+    )
+    .await
+    .expect_err("the window must open strictly after the source block");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("rejecting bidirectional sign request"),
+        "unexpected error: {rendered}"
+    );
+    assert!(
+        rendered.contains("validity window closed at the source block"),
+        "unexpected error: {rendered}"
+    );
+    assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_none());
+}
+
+#[tokio::test]
+async fn process_sign_request_rejects_a_window_beyond_the_cap() {
+    let backlog = Backlog::new();
+    let err = admit_tron_request_with_expiry(
+        (SOURCE_BLOCK_S * 1000 + MAX_EXPIRATION_SPAN_MS + 1) as i64,
+        Some(SOURCE_BLOCK_S),
+        backlog.clone(),
+    )
+    .await
+    .expect_err("the window must close within the cap");
+    assert!(
+        format!("{err:#}").contains("exceeds the cap over source block"),
+        "unexpected error: {err:#}"
+    );
+    assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_none());
+}
+
+/// No block time (Canton, Hydration, or a Solana block whose estimate is
+/// absent): the bound skips; M6 answers at expiry where the walk spans
+/// the window.
+#[tokio::test]
+async fn process_sign_request_skips_the_expiry_bound_without_a_source_block_time() {
+    let backlog = Backlog::new();
+    admit_tron_request_with_expiry(
+        (SOURCE_BLOCK_S * 1000 + MAX_EXPIRATION_SPAN_MS * 10) as i64,
+        None,
+        backlog.clone(),
+    )
+    .await
+    .expect("no anchor: the bound skips");
+    assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_some());
+}
+
+/// The block time from the event is forwarded to the bound, ensuring that the expiration window is correctly enforced.
+#[tokio::test]
+async fn handle_chain_event_forwards_the_block_time_to_the_bound() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let mut ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+    let root_pk = test_root_pk();
+    let event = tron_bidirectional_event(Vec::new());
+    let request = Arc::new(IndexedSignRequest::sign_bidirectional(
+        EXPIRY_SIGN_ID,
+        test_sign_args(0x7e),
+        Chain::Solana,
+        current_unix_timestamp(),
+        SignBidirectionalEvent {
+            serialized_transaction: owned_tron_bytes_with_expiry(
+                root_pk,
+                &event,
+                (SOURCE_BLOCK_S * 1000 + MAX_EXPIRATION_SPAN_MS + 1) as i64,
+            ),
+            ..event
+        },
+    ));
+
+    let err = crate::stream::handle_chain_event(
+        mpc_primitives::ChainEvent::SignRequest {
+            request,
+            block_timestamp: Some(SOURCE_BLOCK_S),
+        },
+        &mut ctx,
+        &NoopChainTelemetry,
+        root_pk,
+        Chain::Solana,
+    )
+    .await
+    .expect_err("the out-of-cap window is rejected at the event boundary");
+
+    assert!(
+        format!("{err:#}").contains("exceeds the cap"),
+        "unexpected error: {err:#}"
+    );
+    assert!(backlog.get(Chain::Solana, &EXPIRY_SIGN_ID).await.is_none());
+}
+
+/// An Ethereum target carries no expiry; block time is ignored.
+#[tokio::test]
+async fn process_sign_request_ignores_block_time_for_targets_without_an_expiry() {
+    let backlog = Backlog::new();
+    let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
+    let request = Arc::new(IndexedSignRequest::sign_bidirectional(
+        SignId::new([0x7f; 32]),
+        test_sign_args(0x7f),
+        Chain::Solana,
+        current_unix_timestamp(),
+        bidirectional_event(legacy_contract_call(1)),
+    ));
+
+    process_sign_request(request, &ctx, test_root_pk(), Some(SOURCE_BLOCK_S))
+        .await
+        .expect("Ethereum's transactions carry no expiry to bound");
+    assert!(backlog
+        .get(Chain::Solana, &SignId::new([0x7f; 32]))
+        .await
+        .is_some());
 }
 
 /// A Tron request must name its own derived key as owner - copied or misbuilt
@@ -708,7 +972,7 @@ async fn process_sign_request_rejects_unowned_tron_bytes() {
     };
 
     let unowned = tron_bidirectional_event(hex::decode(TRON_RAW_HEX).unwrap());
-    let err = process_sign_request(request(21, unowned.clone()), &ctx, root_pk)
+    let err = process_sign_request(request(21, unowned.clone()), &ctx, root_pk, None)
         .await
         .expect_err("bytes naming a foreign owner must be rejected");
     assert!(format!("{err:#}").contains("owner_address"));
@@ -718,7 +982,7 @@ async fn process_sign_request_rejects_unowned_tron_bytes() {
         .is_none());
 
     let owned = tron_bidirectional_event(owned_tron_bytes(root_pk, &unowned));
-    process_sign_request(request(22, owned), &ctx, root_pk)
+    process_sign_request(request(22, owned), &ctx, root_pk, None)
         .await
         .expect("bytes naming the request's own derived key are admitted");
     assert!(backlog
@@ -787,14 +1051,14 @@ async fn process_sign_request_rejects_an_unprocessable_output_schema() {
     };
 
     let refused = SignId::new([15u8; 32]);
-    let err = process_sign_request(request(15, b"{"), &ctx, test_root_pk())
+    let err = process_sign_request(request(15, b"{"), &ctx, test_root_pk(), None)
         .await
         .expect_err("a malformed output schema should be rejected at ingestion");
     assert!(format!("{err:#}").contains("unprocessable output schemas"));
     assert!(backlog.get(Chain::Solana, &refused).await.is_none());
 
     let admitted = SignId::new([16u8; 32]);
-    process_sign_request(request(16, b"[]"), &ctx, test_root_pk())
+    process_sign_request(request(16, b"[]"), &ctx, test_root_pk(), None)
         .await
         .expect("an empty output schema should be admitted");
     assert!(backlog.get(Chain::Solana, &admitted).await.is_some());
@@ -821,12 +1085,12 @@ async fn process_sign_request_rejects_another_networks_chain_id() {
     };
 
     ctx.ethereum_chain_id = None;
-    process_sign_request(request(17, 11_155_111), &ctx, test_root_pk())
+    process_sign_request(request(17, 11_155_111), &ctx, test_root_pk(), None)
         .await
         .expect("without Ethereum configured the check is skipped");
 
     ctx.ethereum_chain_id = Some(1);
-    let err = process_sign_request(request(18, 11_155_111), &ctx, test_root_pk())
+    let err = process_sign_request(request(18, 11_155_111), &ctx, test_root_pk(), None)
         .await
         .expect_err("another network's chain id should be rejected at ingestion");
     assert!(format!("{err:#}").contains("this node executes on 1"));
@@ -843,7 +1107,7 @@ async fn process_sign_request_rejects_another_networks_chain_id() {
         current_unix_timestamp(),
         bidirectional_event(legacy_contract_call_on(&WIDE_CHAIN_ID.to_vec())),
     ));
-    let err = process_sign_request(wide, &ctx, test_root_pk())
+    let err = process_sign_request(wide, &ctx, test_root_pk(), None)
         .await
         .expect_err("a chain id wider than u64 should be rejected at ingestion");
     assert!(format!("{err:#}").contains("chain id None"), "{err:#}");
@@ -852,7 +1116,7 @@ async fn process_sign_request_rejects_another_networks_chain_id() {
         .await
         .is_none());
 
-    process_sign_request(request(19, 1), &ctx, test_root_pk())
+    process_sign_request(request(19, 1), &ctx, test_root_pk(), None)
         .await
         .expect("the configured network's chain id should be admitted");
     assert!(backlog
@@ -874,7 +1138,7 @@ async fn process_sign_request_rejects_undecodable_bidirectional_transaction() {
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
-    let err = process_sign_request(request, &ctx, test_root_pk())
+    let err = process_sign_request(request, &ctx, test_root_pk(), None)
         .await
         .expect_err("undecodable serialized_transaction should be rejected at ingestion");
     assert!(format!("{err:#}").contains("undecodable serialized_transaction"));
@@ -903,7 +1167,7 @@ async fn process_sign_request_rejects_empty_bidirectional_serialized_transaction
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
-    let err = process_sign_request(request, &ctx, test_root_pk())
+    let err = process_sign_request(request, &ctx, test_root_pk(), None)
         .await
         .expect_err("empty serialized_transaction should be rejected at ingestion");
     assert!(format!("{err:#}").contains("empty serialized_transaction"));
@@ -926,7 +1190,7 @@ async fn process_sign_request_rejects_the_reserved_attestation_path() {
 
     let mut reserved = mock_sign_request(SignId::new([31u8; 32]), Chain::Solana);
     Arc::make_mut(&mut reserved).args.path = "solana response key".to_string();
-    let err = process_sign_request(reserved, &ctx, test_root_pk())
+    let err = process_sign_request(reserved, &ctx, test_root_pk(), None)
         .await
         .expect_err("a sign request on the attestation path must be rejected");
     assert!(err.to_string().contains("reserved attestation path"));
@@ -942,7 +1206,7 @@ async fn process_sign_request_rejects_the_reserved_attestation_path() {
     let foreign_id = SignId::new([32u8; 32]);
     let mut foreign = mock_sign_request(foreign_id, Chain::Solana);
     Arc::make_mut(&mut foreign).args.path = "canton response key".to_string();
-    process_sign_request(foreign, &ctx, test_root_pk())
+    process_sign_request(foreign, &ctx, test_root_pk(), None)
         .await
         .expect("another chain's attestation path must still be admitted");
     assert!(backlog.get(Chain::Solana, &foreign_id).await.is_some());
@@ -958,7 +1222,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, false);
 
     // First emission inserts a new entry.
-    let was_new = process_sign_request(Arc::clone(&request), &ctx, test_root_pk())
+    let was_new = process_sign_request(Arc::clone(&request), &ctx, test_root_pk(), None)
         .await
         .expect("first sign request should be accepted");
     assert!(was_new, "first insert must report a new entry");
@@ -966,7 +1230,7 @@ async fn process_sign_request_duplicate_is_idempotent() {
 
     // Replay: the indexer re-emitted the same SignId
     // backlog.insert is keyed on SignId, so the replay is absorbed, not duplicated.
-    let is_new = process_sign_request(request, &ctx, test_root_pk())
+    let is_new = process_sign_request(request, &ctx, test_root_pk(), None)
         .await
         .expect("replayed sign request should be accepted");
     assert!(!is_new, "replayed insert must report an existing entry");
@@ -990,11 +1254,13 @@ async fn process_sign_request_duplicate_is_idempotent() {
             tron_bidirectional_event(bytes.clone()),
         ))
     };
-    assert!(process_sign_request(Arc::clone(&tron(41)), &ctx, root_pk)
-        .await
-        .expect("first Tron request is admitted"));
     assert!(
-        !process_sign_request(tron(41), &ctx, root_pk)
+        process_sign_request(Arc::clone(&tron(41)), &ctx, root_pk, None)
+            .await
+            .expect("first Tron request is admitted")
+    );
+    assert!(
+        !process_sign_request(tron(41), &ctx, root_pk, None)
             .await
             .expect("replaying a pending Tron request is absorbed, not rejected"),
         "the replay must not report a new entry"
@@ -1049,7 +1315,7 @@ async fn process_sign_request_replay_keeps_an_advanced_entry() {
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
 
     // The same request id is emitted again while the first is in flight.
-    let is_new = process_sign_request(request, &ctx, test_root_pk())
+    let is_new = process_sign_request(request, &ctx, test_root_pk(), None)
         .await
         .expect("a replayed sign request is accepted");
 
@@ -1332,15 +1598,9 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
-    process_execution_confirmed(
-        tx.id,
-        456u64,
-        ExecutionOutcome::Failed,
-        &ctx,
-        tx.target_chain,
-    )
-    .await
-    .unwrap();
+    confirm_execution(&tx, 456u64, ExecutionOutcome::Failed, &ctx)
+        .await
+        .unwrap();
 
     // Watcher removed
     let watchers = ctx.backlog.get_execution_watchers(tx.target_chain).await;
@@ -1386,15 +1646,9 @@ async fn process_execution_confirmed_waits_for_source_catchup() {
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let mut ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
     ctx.backlog.set_caught_up(Chain::Ethereum, true);
-    process_execution_confirmed(
-        tx.id,
-        789u64,
-        ExecutionOutcome::Failed,
-        &ctx,
-        tx.target_chain,
-    )
-    .await
-    .unwrap();
+    confirm_execution(&tx, 789u64, ExecutionOutcome::Failed, &ctx)
+        .await
+        .unwrap();
     assert!(
         sign_rx.try_recv().is_err(),
         "second leg signed before source catchup"
@@ -1440,12 +1694,11 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
-    process_execution_confirmed(
-        tx.id,
+    confirm_execution(
+        &tx,
         456u64,
         ExecutionOutcome::Success { output: vec![1] },
         &ctx,
-        tx.target_chain,
     )
     .await
     .unwrap();
@@ -1547,7 +1800,7 @@ async fn catchup_blocks_do_not_consume_checkpoint_slots() {
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
 
     // Process 33 checkpoint intervals at caught_up=false
-    let interval = chain.checkpoint_interval().unwrap(); // 100 for Ethereum
+    let interval = crate::backlog::checkpoint_interval(chain).unwrap();
     for i in 1..=33 {
         process_block_event(chain, i * interval, &ctx, &telemetry)
             .await
@@ -1574,7 +1827,7 @@ async fn live_block_votes_for_checkpoint() {
         true,
         ProjectivePoint::GENERATOR.to_affine(),
     );
-    let interval = chain.checkpoint_interval().unwrap();
+    let interval = crate::backlog::checkpoint_interval(chain).unwrap();
 
     process_block_event(chain, interval, &ctx, &telemetry)
         .await
@@ -1795,9 +2048,7 @@ async fn midnight_execution_response_binds_receipt_height_and_outcome() {
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-        process_execution_confirmed(tx.id, 7123, result, &ctx, Chain::Ethereum)
-            .await
-            .unwrap();
+        confirm_execution(&tx, 7123, result, &ctx).await.unwrap();
         let SignCommand::Request(entry) = sign_rx.try_recv().unwrap() else {
             panic!("expected signing request")
         };
@@ -1970,15 +2221,9 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
             observer.recover_by_checkpoint(&before).await;
             let (sign_tx, mut sign_rx) = mpsc::channel(4);
             let ctx = make_test_stream_context_with_generator_pk(observer, sign_tx, caught_up);
-            process_execution_confirmed(
-                tx.id,
-                7123,
-                ExecutionOutcome::ExtractionFailed,
-                &ctx,
-                Chain::Ethereum,
-            )
-            .await
-            .unwrap();
+            confirm_execution(&tx, 7123, ExecutionOutcome::ExtractionFailed, &ctx)
+                .await
+                .unwrap();
             let after = ctx.backlog.checkpoint(source_chain).await.unwrap();
             assert_eq!(before.block_height, after.block_height);
             assert_eq!(
@@ -2007,15 +2252,9 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
                 0,
                 "terminal decode failure must stop watching before checkpoint recovery"
             );
-            process_execution_confirmed(
-                tx.id,
-                7123,
-                ExecutionOutcome::ExtractionFailed,
-                &ctx,
-                Chain::Ethereum,
-            )
-            .await
-            .unwrap();
+            confirm_execution(&tx, 7123, ExecutionOutcome::ExtractionFailed, &ctx)
+                .await
+                .unwrap();
             assert!(
                 sign_rx.try_recv().is_err(),
                 "duplicate event must not complete again"
@@ -2043,15 +2282,9 @@ async fn decode_failure_parks_request_and_preserves_source_checkpoint() {
             let (sign_tx, mut sign_rx) = mpsc::channel(4);
             let restored_ctx =
                 make_test_stream_context_with_generator_pk(restored, sign_tx, caught_up);
-            process_execution_confirmed(
-                tx.id,
-                7123,
-                ExecutionOutcome::ExtractionFailed,
-                &restored_ctx,
-                Chain::Ethereum,
-            )
-            .await
-            .unwrap();
+            confirm_execution(&tx, 7123, ExecutionOutcome::ExtractionFailed, &restored_ctx)
+                .await
+                .unwrap();
             let parked = restored_ctx
                 .backlog
                 .get(source_chain, &tx.sign_id())
@@ -2105,9 +2338,7 @@ async fn published_midnight_response(
         .await;
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog.clone(), sign_tx, true);
-    process_execution_confirmed(tx.id, height, outcome, &ctx, Chain::Ethereum)
-        .await
-        .unwrap();
+    confirm_execution(tx, height, outcome, &ctx).await.unwrap();
     let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
         panic!("the observed outcome must be signed");
     };
@@ -2155,7 +2386,7 @@ async fn midnight_response_settles_entries_that_missed_the_outcome() {
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
-                .unwatch_execution(Chain::Ethereum, &tx.id)
+                .unwatch_execution(Chain::Ethereum, &tx.id, tx.source_chain, &tx.sign_id())
                 .await
                 .unwrap()
                 .park()
@@ -2407,9 +2638,7 @@ async fn unobserved_response_settles_when_it_verifies() {
         attested.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(attested, sign_tx, true);
-        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
-            .await
-            .unwrap();
+        confirm_execution(&tx, 7123, outcome, &ctx).await.unwrap();
         let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
             panic!("{case}: the observed outcome must be signed");
         };
@@ -2434,7 +2663,7 @@ async fn unobserved_response_settles_when_it_verifies() {
         lagging.insert_mock_executing(&tx).await;
         if parked {
             lagging
-                .unwatch_execution(Chain::Ethereum, &tx.id)
+                .unwatch_execution(Chain::Ethereum, &tx.id, tx.source_chain, &tx.sign_id())
                 .await
                 .unwrap()
                 .park()
@@ -2498,9 +2727,7 @@ async fn final_response_latency_follows_the_recorded_outcome() {
         backlog.insert_mock_executing(&tx).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
-        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
-            .await
-            .unwrap();
+        confirm_execution(&tx, 7123, outcome, &ctx).await.unwrap();
         let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
             panic!("{status}: the observed outcome must be signed");
         };
@@ -2538,9 +2765,7 @@ async fn final_response_settles_on_the_published_output() {
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
         let outcome = ExecutionOutcome::Success { output: vec![] };
-        process_execution_confirmed(tx.id, 7123, outcome, &ctx, Chain::Ethereum)
-            .await
-            .unwrap();
+        confirm_execution(&tx, 7123, outcome, &ctx).await.unwrap();
         let Ok(SignCommand::Request(entry)) = sign_rx.try_recv() else {
             panic!("{published}: the observed outcome must be signed");
         };

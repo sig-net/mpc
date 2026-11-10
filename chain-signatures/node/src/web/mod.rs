@@ -14,7 +14,7 @@ use crate::protocol::state::{NodeStateWatcher, NodeStatus};
 use crate::protocol::sync::{self, SyncError};
 use crate::protocol::{Chain, MessageChannel};
 use crate::rpc::ContractStateWatcher;
-use crate::storage::{PresignatureStorage, TripleStorage};
+use crate::storage::{Initializing, PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;
 
@@ -56,9 +56,9 @@ struct AxumState {
     node: NodeStateWatcher,
     /// Only used by the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
-    triple_storage: TripleStorage,
+    triple_storage: TripleStorage<Initializing>,
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
-    presignature_storage: PresignatureStorage,
+    presignature_storage: PresignatureStorage<Initializing>,
     contract: ContractStateWatcher,
     network: NetworkConfig,
     msg_channel: MessageChannel,
@@ -73,13 +73,13 @@ pub async fn run(
     port: u16,
     msg_channel: MessageChannel,
     node: NodeStateWatcher,
-    triple_storage: TripleStorage,
-    presignature_storage: PresignatureStorage,
+    triple_storage: TripleStorage<Initializing>,
+    presignature_storage: PresignatureStorage<Initializing>,
     contract: ContractStateWatcher,
     network: NetworkConfig,
     my_account_id: AccountId,
     backlog: Backlog,
-) {
+) -> anyhow::Result<()> {
     tracing::info!("starting web server");
     let axum_state = AxumState {
         msg_channel,
@@ -98,11 +98,11 @@ pub async fn run(
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024));
 
     let mut router = Router::new()
-        // healthcheck endpoint
+        // Liveness: the process serves HTTP. Node state is on `/status`.
         .route(
             "/",
-            get(|| async move {
-                tracing::info!("node is ready to accept connections");
+            get(|| async {
+                tracing::debug!("liveness probe answered");
                 StatusCode::OK
             })
             .layer(timeout(DEFAULT_TIMEOUT)),
@@ -129,18 +129,15 @@ pub async fn run(
         .layer(Extension(Arc::new(axum_state)));
 
     let addr = format!("0.0.0.0:{port}");
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            tracing::error!(?addr, ?err, "failed to bind web server");
-            return;
-        }
-    };
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("failed to bind web server on {addr}"))?;
 
     tracing::info!(?addr, "starting http server");
-    if let Err(err) = axum::serve(listener, app).await {
-        tracing::error!(?addr, ?err, "web server exited with an error");
-    }
+    axum::serve(listener, app)
+        .await
+        .with_context(|| format!("web server on {addr} exited with an error"))?;
+    anyhow::bail!("web server on {addr} exited")
 }
 
 async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response {

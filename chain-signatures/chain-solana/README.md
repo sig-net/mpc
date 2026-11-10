@@ -24,7 +24,6 @@ variables:
 | `account_sk`     | `MPC_SOL_ACCOUNT_SK`     | yes       | payer keypair (base58) for respond transactions |
 | `rpc_http_url`   | `MPC_SOL_RPC_HTTP_URL`   | yes       | JSON-RPC endpoint (Helius, Alchemy, …) |
 | `program_address`| `MPC_SOL_PROGRAM_ADDRESS`| yes       | signet program id (base58) |
-| `indexer.poll_interval` | `MPC_SOL_POLL_INTERVAL_MS` | no | default `1000`; finalized slots advance ~every 400ms |
 
 ### Stall budgets
 
@@ -45,8 +44,8 @@ timing. The report is emitted under the `mpc_chain_solana::bench` tracing
 target via `bench::report_metrics`.
 
 ```sh
-RPC_URL=https://solana-devnet.g.alchemy.com/v2/<KEY> \
-PROGRAM_ADDRESS=CMGYAEsqXw5z52R8fmMZwPYQARHPEkGbefJA2FmeHLMh \
+MPC_SOL_RPC_HTTP_URL=https://solana-devnet.g.alchemy.com/v2/<KEY> \
+MPC_SOL_PROGRAM_ADDRESS=CMGYAEsqXw5z52R8fmMZwPYQARHPEkGbefJA2FmeHLMh \
 START=375977077 END=377504390 \
 RUST_LOG=mpc_chain_solana::bench=info \
 cargo run -p mpc-chain-solana --example bench_catchup --features bench
@@ -101,8 +100,8 @@ Notes:
 
 | var | required? | description |
 |---|---|---|
-| `RPC_URL` | yes | Solana JSON-RPC endpoint |
-| `PROGRAM_ADDRESS` | yes | signet program id (base58) |
+| `MPC_SOL_RPC_HTTP_URL` | yes | Solana JSON-RPC endpoint |
+| `MPC_SOL_PROGRAM_ADDRESS` | yes | signet program id (base58) |
 | `END` | yes | exclusive end of the range (the anchor slot); must be finalized |
 | `START` | yes | inclusive start of the range |
 | `RUST_LOG` | no | tracing filter — `mpc_chain_solana::bench=info` for just the report |
