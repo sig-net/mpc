@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use alloy::primitives::B256;
 use anyhow::Context;
-use futures_util::stream::{iter, StreamExt};
+use futures_util::stream::{iter, Stream, StreamExt};
 use mpc_chain_integration_core::{
-    ChainIndexer, ChainTelemetry, ExtractionFailureKind, StateManager,
+    ChainIndexer, ChainTelemetry, ExtractionFailureKind, StateManager, WatchedExecution,
 };
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
@@ -23,7 +23,7 @@ use crate::expiry::{
     closed_groups, expired_event, ExpiryVerdict, Group, SolidityCache, SolidityView,
     MAX_CONCURRENT_PROVIDER_REQUESTS,
 };
-use crate::types::SolidifiedBlock;
+use crate::types::{SolidifiedBlock, TronReceipt};
 
 pub struct TronWatcher<S: StateManager, T: ChainTelemetry> {
     client: TronHttp,
@@ -70,34 +70,52 @@ impl<S: StateManager, T: ChainTelemetry> TronWatcher<S, T> {
     /// fetch, and unclassifiable receipts yield nothing and retry next
     /// tick. Resolution order is load-bearing: immediate sends keep a
     /// pass that outlasts the stall timeout from losing confirmations.
-    async fn poll_watchers(&self) -> impl futures_util::Stream<Item = ChainEvent> + Unpin + '_ {
+    /// One fetch per flat id: every member shares the receipt, but each
+    /// classifies under its own schema.
+    async fn poll_watchers(&self) -> impl Stream<Item = ChainEvent> + Unpin + '_ {
         let watchers = self.state_manager.get_execution_watchers(Chain::Tron).await;
         tracing::debug!(watchers = watchers.len(), "polling tron execution watchers");
 
         iter(watchers)
-            .flat_map(|(tx_id, members)| {
-                iter(members).map(move |(sign_id, tx)| (tx_id, sign_id, tx))
-            })
-            .map(|(tx_id, sign_id, tx)| self.resolve_watcher_from_receipt(tx_id, sign_id, tx))
+            .map(|(tx_id, members)| self.resolve_watched_id(tx_id, members))
             .buffer_unordered(MAX_CONCURRENT_PROVIDER_REQUESTS)
-            .filter_map(std::future::ready)
+            .map(iter)
+            .flatten()
     }
 
-    /// `None` — pending;
-    /// Failed fetch or unclassifiable — retries next tick.
-    async fn resolve_watcher_from_receipt(
+    /// Empty defers the id: pending, failed fetch, or a receipt no member
+    /// could classify retries next tick.
+    async fn resolve_watched_id(
         &self,
         tx_id: BidirectionalTxId,
-        sign_id: SignId,
-        tx: Arc<BidirectionalTx>,
-    ) -> Option<ChainEvent> {
-        let receipt = self
+        members: Vec<WatchedExecution>,
+    ) -> Vec<ChainEvent> {
+        let Some(receipt) = self
             .client
             .get_transaction_info_solidity(&B256::from(tx_id.0))
             .await
-            .inspect_err(|err| tracing::warn!(?tx_id, ?sign_id, ?err, "receipt poll failed"))
-            .ok()??;
+            .inspect_err(|err| tracing::warn!(?tx_id, ?err, "receipt poll failed"))
+            .ok()
+            .flatten()
+        else {
+            return Vec::new();
+        };
 
+        members
+            .into_iter()
+            .filter_map(|(sign_id, tx)| self.member_event(tx_id, &receipt, sign_id, tx))
+            .collect()
+    }
+
+    /// `None` — unclassifiable under this member's schema; retries next
+    /// tick.
+    fn member_event(
+        &self,
+        tx_id: BidirectionalTxId,
+        receipt: &TronReceipt,
+        sign_id: SignId,
+        tx: Arc<BidirectionalTx>,
+    ) -> Option<ChainEvent> {
         let result = receipt
             .execution_outcome(&tx.output_deserialization_schema)
             .inspect_err(|err| {

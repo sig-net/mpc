@@ -104,11 +104,7 @@ impl MockStateManager {
 
     async fn upsert_watch(&self, chain: Chain, sign_id: SignId, tx: Arc<BidirectionalTx>) {
         let mut watchers = self.watchers.write().await;
-        let watches = watchers
-            .entry(chain)
-            .or_default()
-            .entry(tx.id)
-            .or_default();
+        let watches = watchers.entry(chain).or_default().entry(tx.id).or_default();
         watches.retain(|(id, _)| *id != sign_id);
         watches.push((sign_id, tx));
     }
