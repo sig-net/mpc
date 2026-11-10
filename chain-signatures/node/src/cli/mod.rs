@@ -3,6 +3,7 @@ mod args;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::backlog::Backlog;
+use crate::build;
 use crate::config::{Config, NetworkConfig};
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
@@ -59,6 +60,7 @@ use url::Url;
 const MAX_SIGN_COMMANDS: usize = 16384;
 
 #[derive(Parser, Debug)]
+#[command(version = build::version_with_commit())]
 pub enum Cli {
     Start {
         /// NEAR RPC address
@@ -210,12 +212,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // Installed before the slow startup steps, so a stop during them
             // is an orderly exit rather than the OS default.
             let shutdown = shutdown_signal();
-            crate::metrics::init_metrics(
-                &account_id,
-                env!("CARGO_PKG_VERSION"),
-                option_env!("GIT_COMMIT_HASH"),
-                option_env!("BUILD_TIMESTAMP"),
-            );
+            crate::metrics::init_metrics(&account_id);
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
 
@@ -609,9 +606,9 @@ fn log_startup(
         %account_pk,
         %my_address,
         cipher_pk_hex = %cipher_pk_hex,
-        version = %crate::metrics::version(),
-        git_commit_hash = %crate::metrics::git_commit_hash(),
-        build_timestamp = %crate::metrics::build_timestamp(),
+        version = build::VERSION,
+        git_commit_hash = build::GIT_COMMIT_HASH,
+        build_timestamp = build::BUILD_TIMESTAMP,
         sign_pk = %network.sign_sk.public_key(),
         near_rpc_host = %host_of(near_rpc),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
