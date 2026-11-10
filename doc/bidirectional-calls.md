@@ -374,6 +374,9 @@ call. It emits three events:
   directly, which is how a response is delivered where the signet contract
   cannot call it, and again after a failed handler.
 
+On Midnight, a second contract, the signet responder, emits `Signature` and
+`Response`; see [midnight-publisher.md](midnight-publisher.md).
+
 ### 4.3 MPC network
 
 Written as if the network were one process; the real one is a threshold
@@ -689,8 +692,8 @@ a path from B48 through A15; the first at A12 has none.
   not follow each node's RPC response cap. A read the RPC node refuses for
   size is a drop only if the refusing cap fits every state within the
   limit; a smaller cap is that node's misconfiguration and holds the block.
-  The limit binds admission only; the publisher's read of the central
-  contract is exempt.
+  The limit binds admission only; the publisher's read of the signet
+  responder is exempt.
 * Solana with a recent blockhash has no replay protection in the sense of
   Section 3.3. It can be made to work if the MPC remembers completed rids
   for as long as a differently signed copy could still execute, about a

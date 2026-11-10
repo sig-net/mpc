@@ -7,7 +7,7 @@ use super::try_create_int_gauge_vec_with_node_account_id;
 pub(crate) static NODE_RUNNING: LazyLock<IntGauge> = LazyLock::new(|| {
     try_create_int_gauge_vec_with_node_account_id(
         "multichain_node_is_up",
-        "whether the multichain signer node is up and running",
+        "whether the node is up and running",
         &[],
     )
     .unwrap()
