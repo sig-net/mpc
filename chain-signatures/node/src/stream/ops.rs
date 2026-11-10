@@ -624,8 +624,6 @@ pub(crate) async fn answer_unviable(
     }
 }
 
-/// What a request that can no longer execute is answered with: Unviable where the source
-/// chain encodes it, Failed elsewhere, as those applications refund on Failed.
 /// A verified Midnight Response saying Executed or Failed reports its request's transaction
 /// included: mark what that leaves unexecutable (#1430). The event carries the height only on
 /// Midnight so far (#1429).
