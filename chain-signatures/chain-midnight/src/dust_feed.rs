@@ -385,7 +385,10 @@ mod tests {
         })
         .await
         .expect("the subscription ends when the indexer completes it");
-        server.await.unwrap();
+        tokio::time::timeout(TEST_TIMEOUT, server)
+            .await
+            .expect("the indexer script ends")
+            .unwrap();
 
         assert_eq!(updates.len(), 4, "three events, then the end");
         for (update, event) in updates.iter().zip(&events) {
@@ -515,7 +518,10 @@ mod tests {
             .expect("the stream ends after the error")
             .is_none());
         drop(stream);
-        server.await.unwrap();
+        tokio::time::timeout(TEST_TIMEOUT, server)
+            .await
+            .expect("the indexer script ends")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -533,7 +539,10 @@ mod tests {
         .await;
 
         let time = IndexerDustEvents::new(url).indexed_time().await.unwrap();
-        server.await.unwrap();
+        tokio::time::timeout(TEST_TIMEOUT, server)
+            .await
+            .expect("the indexer script ends")
+            .unwrap();
         assert_eq!(time, Timestamp::from_secs(1_761_400_000));
     }
 }

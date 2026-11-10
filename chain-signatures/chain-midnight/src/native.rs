@@ -60,6 +60,13 @@ pub(crate) trait SubmitChain: PinnedReads {
         -> anyhow::Result<Option<Landing>>;
 }
 
+/// What a submit spent before it asked the wallet to pay, for its log line.
+struct SubmitTimings {
+    started: Instant,
+    wallet_wait: Duration,
+    prove_respond: Duration,
+}
+
 /// The packaged contract keys and the parameters every proof needs.
 pub(crate) struct Provers {
     managed: ManagedDir,
@@ -214,7 +221,23 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         let stage = Instant::now();
         let base = self.prove_respond(intent, deadline).await?;
         let prove_respond = stage.elapsed();
+        let before = SubmitTimings {
+            started,
+            wallet_wait,
+            prove_respond,
+        };
+        self.pay_for(&base, deadline, before, wallet_used).await
+    }
 
+    /// Pays for the proven respond `base` and posts it: the half of a submit that asks
+    /// the wallet to pay, and so the half that sets `wallet_used`.
+    async fn pay_for(
+        &self,
+        base: &SealedTx,
+        deadline: Instant,
+        before: SubmitTimings,
+        wallet_used: &mut bool,
+    ) -> Result<Submitted, SubmitError> {
         let head = self.chain.finalized_head().await.map_err(node)?;
         let parameters: LedgerParameters = midnight_serialize::tagged_deserialize(
             &mut &self.chain.ledger_parameters(&head).await.map_err(node)?[..],
@@ -237,7 +260,7 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
 
         let stage = Instant::now();
         let plan = self.wallet.plan(
-            &base,
+            base,
             &parameters,
             ctime,
             ttl,
@@ -251,16 +274,16 @@ impl<W: FeePayer, C: SubmitChain> NativeIntentClient<W, C> {
         let stage = Instant::now();
         let fee_sealed = self.prove_fee(fee_tx, deadline).await?;
         let prove_fee = stage.elapsed();
-        let (bytes, tx_hash) = paid_transaction(&base, &fee_sealed, &parameters)?;
+        let (bytes, tx_hash) = paid_transaction(base, &fee_sealed, &parameters)?;
 
         tracing::info!(
             fee = plan.fee,
             tx_hash = %hex::encode(tx_hash),
-            ?wallet_wait,
-            ?prove_respond,
+            wallet_wait = ?before.wallet_wait,
+            prove_respond = ?before.prove_respond,
             ?price_fee,
             ?prove_fee,
-            before_post = ?started.elapsed(),
+            before_post = ?before.started.elapsed(),
             "midnight: posting respond"
         );
         let tx_id = self
@@ -598,6 +621,8 @@ mod tests {
         caught_up_secs: Option<u64>,
         failures: Mutex<Vec<bool>>,
         landings: AtomicU64,
+        /// What the next `plan` refuses with.
+        plan_refusal: Mutex<Option<SubmitError>>,
     }
 
     impl FeePayer for RecordingWallet {
@@ -626,7 +651,12 @@ mod tests {
             _network_id: &str,
             _rng: &mut StdRng,
         ) -> Result<FeePlan, SubmitError> {
-            unimplemented!("these tests never price a fee")
+            Err(self
+                .plan_refusal
+                .lock()
+                .unwrap()
+                .take()
+                .expect("these tests price no fee they do not refuse"))
         }
 
         fn reserve(&self, spent: &[DustNullifier], until: Timestamp) {
@@ -703,7 +733,7 @@ mod tests {
         }
 
         async fn ledger_parameters(&self, _: &str) -> anyhow::Result<Vec<u8>> {
-            unimplemented!("the post path reads no ledger parameters")
+            Ok(ledger_parameters())
         }
     }
 
@@ -755,7 +785,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("keys")).unwrap();
         std::fs::create_dir_all(dir.join("zkir")).unwrap();
         for circuit in ["respond", "respondBidirectional"] {
-            // Present, never read: these tests prove nothing.
+            // Empty: a test that proves with them fails at the first one.
             std::fs::write(dir.join("keys").join(format!("{circuit}.prover")), b"").unwrap();
             std::fs::write(dir.join("zkir").join(format!("{circuit}.bzkir")), b"").unwrap();
         }
@@ -1022,10 +1052,17 @@ mod tests {
             true,
         );
         report_submit(&wallet, &Err(SubmitError::WalletBusy("held".into())), false);
+        // An empty wallet is a failure like any other, as the intent builder's
+        // `wallet_unfunded` was.
+        report_submit(
+            &wallet,
+            &Err(SubmitError::WalletUnfunded("empty".into())),
+            true,
+        );
         assert_eq!(wallet.landings.load(Ordering::SeqCst), 1, "one landing");
         assert_eq!(
             *wallet.failures.lock().unwrap(),
-            vec![true, false],
+            vec![true, false, true],
             "every failure but an unsynced wallet, with whether it used the wallet"
         );
     }
@@ -1058,6 +1095,45 @@ mod tests {
         assert!(!plan_used_wallet(&Err(SubmitError::WalletUnsynced(
             "behind".into()
         ))));
+    }
+
+    #[tokio::test]
+    async fn a_fee_planned_against_the_wallets_funds_used_it_and_one_it_held_did_not() {
+        for (refusal, used) in [
+            (SubmitError::WalletUnfunded("short".into()), true),
+            (SubmitError::WalletBusy("held".into()), false),
+        ] {
+            let client = client_over(
+                managed_dir(|_, bytes| bytes),
+                ScriptedChain::new(10, 20, None),
+            );
+            *client.wallet.plan_refusal.lock().unwrap() = Some(refusal);
+            let mut rng = StdRng::seed_from_u64(3);
+            let base = base(&mut rng, Timestamp::from_secs(2_000));
+            let before = SubmitTimings {
+                started: Instant::now(),
+                wallet_wait: Duration::ZERO,
+                prove_respond: Duration::ZERO,
+            };
+            let mut wallet_used = !used;
+            client
+                .pay_for(&base, deadline(), before, &mut wallet_used)
+                .await
+                .expect_err("the plan was refused");
+            assert_eq!(wallet_used, used);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_submit_failing_before_the_wallet_pays_reports_it_unused() {
+        let client = client();
+        let intent = client.build(&respond_request()).await.unwrap();
+        // The packaged keys are empty here, so proving the respond fails.
+        client
+            .submit(&intent)
+            .await
+            .expect_err("nothing can be proven");
+        assert_eq!(*client.wallet.failures.lock().unwrap(), vec![false]);
     }
 
     #[test]
