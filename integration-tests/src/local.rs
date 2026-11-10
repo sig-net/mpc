@@ -77,7 +77,7 @@ impl Node {
             binary_path: None,
         };
 
-        let cmd = executable(ctx.release, crate::execute::PACKAGE_MULTICHAIN)
+        let cmd = executable(ctx.release, crate::execute::MPC_NODE_PACKAGE)
             .with_context(|| "could not find target dir for mpc-node")?;
         let args = node_args::start(ctx, &node_config);
         let escaped_args: Vec<_> = args
@@ -135,7 +135,7 @@ impl Node {
         let address = config.address();
         let args = node_args::start(ctx, &config);
 
-        let mpc_node_id = format!("multichain/{}", config.account.id());
+        let mpc_node_id = config.account.id().to_string();
         let mut process = execute::spawn_node_with_binary(
             config.binary_path.clone(),
             ctx.release,

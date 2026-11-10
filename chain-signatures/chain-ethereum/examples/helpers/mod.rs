@@ -30,7 +30,9 @@ pub fn env_u64(name: &str, default: Option<u64>) -> anyhow::Result<u64> {
 /// the network is `anvil`.
 pub fn make_config() -> anyhow::Result<EthConfig> {
     let network = match std::env::var("MPC_ETH_NETWORK") {
-        Ok(network) => network.parse()?,
+        Ok(network) => network
+            .parse()
+            .map_err(|e| anyhow!("invalid MPC_ETH_NETWORK: {e}"))?,
         Err(_) => mpc_chain_ethereum::EthNetwork::Sepolia,
     };
     Ok(EthConfig {
