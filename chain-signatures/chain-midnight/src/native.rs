@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode, BASE_URL};
 use midnight_base_crypto::hash::HashOutput;
 use midnight_base_crypto::time::Timestamp;
 use midnight_coin_structure::contract::ContractAddress;
@@ -77,12 +77,15 @@ impl Provers {
         zk_params: impl Into<std::path::PathBuf>,
     ) -> anyhow::Result<Self> {
         let zk_params = zk_params.into();
-        let provider = |expected: Vec<_>| -> anyhow::Result<MidnightDataProvider> {
-            let mut provider =
-                MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, expected)
-                    .context("opening the zero-knowledge parameter store")?;
-            provider.dir = zk_params.clone();
-            Ok(provider)
+        // Built directly: `MidnightDataProvider::new` resolves a cache directory from
+        // HOME, XDG_CACHE_HOME or MIDNIGHT_PP and fails when none is set, and the node
+        // replaces that directory with `zk_params` anyway.
+        let provider = |expected: Vec<_>| MidnightDataProvider {
+            fetch_mode: FetchMode::OnDemand,
+            base_url: BASE_URL.clone(),
+            output_mode: OutputMode::Log,
+            expected_data: expected,
+            dir: zk_params.clone(),
         };
         let managed = ManagedDir::new(artifacts);
         for circuit in ["respond", "respondBidirectional"] {
@@ -101,8 +104,8 @@ impl Provers {
         Ok(Self {
             contract: SignerResolver::new(managed.clone()),
             managed,
-            params: provider(vec![])?,
-            dust: DustResolver(provider(DUST_EXPECTED_FILES.to_vec())?),
+            params: provider(vec![]),
+            dust: DustResolver(provider(DUST_EXPECTED_FILES.to_vec())),
         })
     }
 }
