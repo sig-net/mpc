@@ -13,6 +13,7 @@ use crate::sign_bidirectional::{BidirectionalProgress, SignProgress, SignStatus}
 use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{BidirectionalTx, Chain, ExecutionOutcome, SignId, SignKind};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 fn routed_tx(id: u8, source: Chain, target: Chain) -> BidirectionalTx {
     let mut tx = mock_tx(id);
@@ -1151,7 +1152,7 @@ async fn respond_observed_at_survives_the_unwatch_lookup() {
         .awaiting_execution()
         .expect("wait start must survive the lookup the handler goes through");
     assert!(
-        measured < std::time::Duration::from_secs(60),
+        measured < Duration::from_secs(60),
         "a freshly published entry has barely been waiting, got {measured:?}"
     );
 }
@@ -1163,7 +1164,7 @@ async fn watch_execution_re_register_keeps_the_wait_start() {
     let backlog = Backlog::new();
     let tx = mock_bidirectional_tx(SignId::new([73; 32]), Chain::Solana);
     backlog.insert_mock_executing(&tx).await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     StateManager::watch_execution(&backlog, tx.target_chain, Arc::new(tx.clone())).await;
 
@@ -1175,7 +1176,7 @@ async fn watch_execution_re_register_keeps_the_wait_start() {
         .awaiting_execution()
         .expect("the wait start must survive the re-register");
     assert!(
-        measured >= std::time::Duration::from_millis(90),
+        measured >= Duration::from_millis(90),
         "a restarted measurement would read near zero, got {measured:?}"
     );
 }
@@ -1310,8 +1311,8 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
     let unrelated = mock_bidirectional_tx(SignId::from_u8(83), Chain::Canton);
 
     // Backdate the wait so it is distinguishable from one restarted at recovery.
-    let observed_at = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(120))
+    let observed_at = Instant::now()
+        .checked_sub(Duration::from_secs(120))
         .expect("clock must support backdating");
     let entry = backlog
         .insert_mock_executing(&retained)
@@ -1347,7 +1348,7 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
         .await
         .expect("matching execution must remain watched");
     assert_eq!(entry.respond_observed_at(), Some(observed_at));
-    assert!(entry.awaiting_execution().unwrap() >= std::time::Duration::from_secs(120));
+    assert!(entry.awaiting_execution().unwrap() >= Duration::from_secs(120));
     let entry = backlog
         .unwatch_execution(
             restored.target_chain,
@@ -1377,6 +1378,88 @@ async fn live_regress_preserves_only_matching_execution_wait_starts() {
         .await
         .expect("other source chain must remain watched");
     assert_eq!(entry.respond_observed_at(), unrelated_observed_at);
+}
+
+/// Twins under one flat id keep distinct wait starts: recovery re-keys
+/// the observed carry by `(id, sign_id)`, and re-registration reads the
+/// entry's own element — never its sibling's.
+#[tokio::test]
+async fn twin_wait_starts_survive_recovery_and_re_registration() {
+    let backlog = Backlog::new();
+    let first_tx = mock_bidirectional_tx(SignId::from_u8(90), Chain::Solana);
+    let mut twin_tx = first_tx.clone();
+    twin_tx.request_id = [0x7f; 32];
+    let now = Instant::now();
+    let first_observed = now
+        .checked_sub(Duration::from_secs(120))
+        .expect("clock must support backdating");
+    let twin_observed = now
+        .checked_sub(Duration::from_secs(60))
+        .expect("clock must support backdating");
+    let first_entry = backlog
+        .insert_mock_executing(&first_tx)
+        .await
+        .with_respond_observed_at(Some(first_observed));
+    backlog.watch_execution(&first_entry).await;
+    let twin_entry = backlog
+        .insert_mock_executing(&twin_tx)
+        .await
+        .with_respond_observed_at(Some(twin_observed));
+    backlog.watch_execution(&twin_entry).await;
+
+    let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
+    backlog.regress(&checkpoint).await.unwrap();
+
+    let first = backlog
+        .unwatch_execution(
+            first_tx.target_chain,
+            &first_tx.id,
+            first_tx.source_chain,
+            &first_tx.sign_id(),
+        )
+        .await
+        .expect("first twin must remain watched");
+    assert_eq!(first.respond_observed_at(), Some(first_observed));
+    let twin = backlog
+        .unwatch_execution(
+            twin_tx.target_chain,
+            &twin_tx.id,
+            twin_tx.source_chain,
+            &twin_tx.sign_id(),
+        )
+        .await
+        .expect("twin must remain watched");
+    assert_eq!(twin.respond_observed_at(), Some(twin_observed));
+
+    // Re-register one twin while both are resident: the carry reads its
+    // own element, and the sibling's is untouched.
+    backlog
+        .watch_execution(&first.with_respond_observed_at(Some(first_observed)))
+        .await;
+    backlog
+        .watch_execution(&twin.with_respond_observed_at(Some(twin_observed)))
+        .await;
+    StateManager::watch_execution(&backlog, twin_tx.target_chain, Arc::new(twin_tx.clone())).await;
+    let re_registered = backlog
+        .unwatch_execution(
+            twin_tx.target_chain,
+            &twin_tx.id,
+            twin_tx.source_chain,
+            &twin_tx.sign_id(),
+        )
+        .await
+        .expect("re-registered twin must resolve");
+    assert_eq!(re_registered.respond_observed_at(), Some(twin_observed));
+    let sibling = backlog
+        .unwatch_execution(
+            first_tx.target_chain,
+            &first_tx.id,
+            first_tx.source_chain,
+            &first_tx.sign_id(),
+        )
+        .await
+        .expect("sibling watch must survive the re-register");
+    assert_eq!(sibling.respond_observed_at(), Some(first_observed));
 }
 
 #[tokio::test]
