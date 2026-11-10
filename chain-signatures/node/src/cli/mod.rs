@@ -17,7 +17,7 @@ use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::keystore::Keystore;
-use crate::storage::midnight_wallet_storage::MidnightWalletStorage;
+use crate::storage::midnight_dust_storage::MidnightDustStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::storage::Initializing;
@@ -39,7 +39,7 @@ use mpc_chain_ethereum::{publisher, EthConfig, EthereumIndexer};
 use mpc_chain_hydration::{HydrationConfig, HydrationIndexer};
 use mpc_chain_integration_core::{utils::retry::SharedBackoff, ChainPublisher, GatedPublisher};
 use mpc_chain_midnight::{
-    MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher, WalletSnapshotStore,
+    DustCheckpointStore, MidnightConfig, MidnightIndexer, RecoveringMidnightPublisher,
 };
 use mpc_chain_near::{NearClient, NearRpcGates};
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaIndexer};
@@ -225,7 +225,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage,
                 presignature_storage,
                 backlog,
-                midnight_wallet,
+                midnight_dust,
             } = StorageHandles::new(&account_id, &storage_options).await?;
 
             // NEAR as a source chain exists for the integration tests only, and the
@@ -254,7 +254,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let stack = ChainStack::new(ChainConfigs::from_args(
                 eth, sol, hydration, canton, midnight, tron,
             )?)
-            .with_midnight_wallet(midnight_wallet);
+            .with_midnight_dust(midnight_dust);
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
                 near_crypto::Signer::InMemory(s) => s,
@@ -436,8 +436,8 @@ struct ChainStack {
     /// One 429 cooldown gate per chain, shared by that chain's indexer and
     /// publisher (they hit the same RPC endpoint).
     gates: EnumMap<Chain, SharedBackoff>,
-    /// Where the Midnight publisher's funding wallet resumes from across restarts.
-    midnight_wallet: Option<Arc<dyn WalletSnapshotStore>>,
+    /// Where the Midnight funding wallet keeps its DUST replay across restarts.
+    midnight_dust: Option<Arc<dyn DustCheckpointStore>>,
 }
 
 impl ChainStack {
@@ -445,12 +445,12 @@ impl ChainStack {
         Self {
             configs,
             gates: EnumMap::from_fn(|_| SharedBackoff::new()),
-            midnight_wallet: None,
+            midnight_dust: None,
         }
     }
 
-    fn with_midnight_wallet(mut self, store: Arc<dyn WalletSnapshotStore>) -> Self {
-        self.midnight_wallet = Some(store);
+    fn with_midnight_dust(mut self, store: Arc<dyn DustCheckpointStore>) -> Self {
+        self.midnight_dust = Some(store);
         self
     }
 
@@ -530,7 +530,7 @@ impl ChainStack {
                 midnight,
                 telemetry,
                 awaiter,
-                self.midnight_wallet.clone(),
+                self.midnight_dust.clone(),
             ) {
                 Ok(client) => {
                     publishers.insert(
@@ -576,7 +576,7 @@ fn log_startup(
         near_rpc_url = %near_client.rpc_addr(),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
         eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
-        sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.as_str()).unwrap_or("None"),
+        sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.to_string()).unwrap_or_else(|| "None".to_string()),
         sol_rpc_url = %chains.sol.as_ref().map(|c| c.rpc_http_url.as_str()).unwrap_or("None"),
         sol_signer_address = %sol_signer_address.as_deref().unwrap_or("None"),
         hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
@@ -675,7 +675,7 @@ struct StorageHandles {
     triple_storage: TripleStorage<Initializing>,
     presignature_storage: PresignatureStorage<Initializing>,
     backlog: Backlog,
-    midnight_wallet: Arc<dyn WalletSnapshotStore>,
+    midnight_dust: Arc<dyn DustCheckpointStore>,
 }
 
 const REDIS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -708,13 +708,13 @@ impl StorageHandles {
             redis_pool.clone(),
             account_id.clone(),
         ));
-        let midnight_wallet = Arc::new(MidnightWalletStorage::new(redis_pool, account_id));
+        let midnight_dust = Arc::new(MidnightDustStorage::new(redis_pool, account_id));
         Ok(Self {
             keystore,
             triple_storage,
             presignature_storage,
             backlog,
-            midnight_wallet,
+            midnight_dust,
         })
     }
 }
@@ -1124,10 +1124,8 @@ mod tests {
         for var in [
             "MPC_MIDNIGHT_NODE_URL",
             "MPC_MIDNIGHT_CENTRAL_ADDRESS",
+            "MPC_MIDNIGHT_RESPONDER_ADDRESS",
             "MPC_MIDNIGHT_FUNDING_SEED",
-            "MPC_MIDNIGHT_INTENT_GEN_COMMAND",
-            "MPC_MIDNIGHT_PROOF_SERVER_URL",
-            "MPC_MIDNIGHT_INDEXER_URL",
             "MPC_MIDNIGHT_INDEXER_WS_URL",
             "MPC_MIDNIGHT_OUTPUT_STORAGE_BUCKET",
             "MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX",
@@ -1215,10 +1213,9 @@ mod tests {
                 // Nothing listens on port 1, so the startup dial is refused.
                 node_url: "http://127.0.0.1:1".to_string(),
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
+                responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
                     funding_seed: "ab".repeat(32),
-                    proof_server_url: "http://127.0.0.1:1".to_string(),
-                    indexer_url: "http://127.0.0.1:1/api/v3/graphql".to_string(),
                     indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
                     ..Default::default()
                 },
@@ -1259,7 +1256,7 @@ mod tests {
         SolConfig {
             account_sk: mpc_chain_solana::Keypair::new().to_base58_string(),
             rpc_http_url: "http://127.0.0.1:1".parse().unwrap(),
-            program_address: mpc_chain_solana::Pubkey::new_unique().to_string(),
+            program_address: mpc_chain_solana::Pubkey::new_unique(),
             indexer: Default::default(),
         }
     }
@@ -1334,8 +1331,6 @@ mod tests {
             "canton_json_api_ws_url",
             "canton_oidc_token_url",
             "midnight_node_url",
-            "midnight_proof_server_url",
-            "midnight_indexer_url",
             "midnight_indexer_ws_url",
             "tron_endpoint",
             "tron_api_key",
