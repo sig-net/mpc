@@ -818,6 +818,12 @@ mod tests {
         format!("0x{number:064x}")
     }
 
+    fn hash_bytes(number: u64) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        bytes[24..].copy_from_slice(&number.to_be_bytes());
+        bytes
+    }
+
     fn block_ref(number: u64) -> BlockRef {
         BlockRef {
             number,
@@ -827,12 +833,10 @@ mod tests {
     }
 
     fn proof_seed(height: u64) -> BlockProofSeed {
-        let mut reported_block_hash = [0; 32];
-        reported_block_hash[24..].copy_from_slice(&height.to_be_bytes());
         BlockProofSeed {
             reported_genesis_hash: [0x11; 32],
             reported_block_number: height,
-            reported_block_hash,
+            reported_block_hash: hash_bytes(height),
             singleton_address: SINGLETON,
             responder_address: RESPONDER,
             scale_header: vec![0x21, height as u8],
@@ -1313,7 +1317,11 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         for event in events {
-            assert_request(event, rid, 9);
+            let ChainEvent::SignRequest { request, .. } = event else {
+                panic!("expected SignRequest");
+            };
+            assert_eq!(request.id, SignId::new(rid));
+            assert_eq!(request.args.entropy, hash_bytes(9));
         }
     }
 

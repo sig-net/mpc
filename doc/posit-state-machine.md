@@ -310,6 +310,12 @@ which is why agreeing on `r` is all the nodes need:
 - proposer of the round: `participants[(entropy[0] + r) % n]` (`organize.rs`)
 - round length: `round_timeout(r)` (§6)
 
+Entropy granularity can correlate proposer schedules across requests. On
+Midnight, entropy is the containing finalized block hash, so requests in the
+same block elect the same proposer in each corresponding round. This can
+concentrate work for a batch, but does not merge their signing derivations:
+`derive_delta` also binds each request ID.
+
 ## 6. The round timeout
 
 `round_timeout(r)` starts when the round begins: at the round bump
