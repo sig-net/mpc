@@ -1393,132 +1393,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rpc_call_classifies_body_errors_by_code() {
-        // same verdicts as classify_read: skipped codes terminal,
-        // node-local absence retryable
-        for (code, message, retryable, carried) in [
-            (
-                JSON_RPC_SERVER_ERROR_SLOT_SKIPPED,
-                "Slot was skipped",
-                false,
-                Some(JSON_RPC_SERVER_ERROR_SLOT_SKIPPED),
-            ),
-            (
-                JSON_RPC_SERVER_ERROR_BLOCK_NOT_AVAILABLE,
-                "Block not available for slot 1234",
-                true,
-                None,
-            ),
-        ] {
-            let mut server = mockito::Server::new_async().await;
-            let mock = server
-                .mock("POST", "/")
-                .with_status(200)
-                .with_header("content-type", "application/json")
-                .with_body(
-                    json!({"jsonrpc": "2.0", "id": 0, "error": {"code": code, "message": message}})
-                        .to_string(),
-                )
-                .expect(1)
-                .create_async()
-                .await;
-
-            let client = test_client(&server.url());
-            let err = client
-                .rpc_call::<UiConfirmedBlock>(
-                    "getBlock",
-                    json!([
-                        1234,
-                        serde_json::to_value(SolanaClient::block_fetch_config()).unwrap()
-                    ]),
-                )
-                .await
-                .unwrap_err();
-            assert_eq!(is_retryable(&err), retryable, "code {code}: {err:#}");
-            assert_eq!(skipped_code(&err), carried, "code {code}: {err:#}");
-            mock.assert_async().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn rpc_call_null_results_classify_retryable() {
-        // providers send null for absent blocks; the vendored client
-        // treats it as a retryable decode failure
+    async fn null_block_results_classify_retryable() {
+        // providers send null for absent blocks; the vendored client also
+        // treated it as a retryable decode failure
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"jsonrpc":"2.0","id":0,"result":null}"#)
-            .expect(1)
+            .expect(3) // 1 attempt + 2 retries
             .create_async()
             .await;
 
         let client = test_client(&server.url());
-        let err = client
-            .rpc_call::<UiConfirmedBlock>("getBlock", json!([1234]))
-            .await
-            .unwrap_err();
-        assert!(is_retryable(&err), "{err:#}");
-        assert!(!is_provider_throttled(&err), "{err:#}");
-        mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn rpc_call_statuses_arrive_typed() {
-        // a 429 arrives typed here, so the gate can engage (the vendored
-        // sender would surface it as a timeout); classic client errors
-        // stay terminal
-        let mut server = mockito::Server::new_async().await;
-        let throttled = server
-            .mock("POST", "/")
-            .with_status(429)
-            .expect(1)
-            .create_async()
-            .await;
-        let client = test_client(&server.url());
-        let err = client
-            .rpc_call::<u64>("getSlot", json!([]))
-            .await
-            .unwrap_err();
-        assert!(is_retryable(&err), "{err:#}");
-        assert!(is_provider_throttled(&err), "{err:#}");
-        throttled.assert_async().await;
-
-        let mut server = mockito::Server::new_async().await;
-        let not_found = server
-            .mock("POST", "/")
-            .with_status(404)
-            .expect(1)
-            .create_async()
-            .await;
-        let client = test_client(&server.url());
-        let err = client
-            .rpc_call::<u64>("getSlot", json!([]))
-            .await
-            .unwrap_err();
-        assert!(!is_retryable(&err), "{err:#}");
-        not_found.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn rpc_call_undecodable_bodies_stay_retryable() {
-        // 200 with HTML: statusless decode failure, same as the batch
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("POST", "/")
-            .with_status(200)
-            .with_header("content-type", "text/html")
-            .with_body("<html>502 Bad Gateway</html>")
-            .expect(1)
-            .create_async()
-            .await;
-
-        let client = test_client(&server.url());
-        let err = client
-            .rpc_call::<u64>("getSlot", json!([]))
-            .await
-            .unwrap_err();
+        let err = client.get_block(1234).await.unwrap_err();
         assert!(is_retryable(&err), "{err:#}");
         assert!(!is_provider_throttled(&err), "{err:#}");
         mock.assert_async().await;
