@@ -573,7 +573,6 @@ mod tests {
             execution_rpc_http_url: url.parse().unwrap(),
             contract_address: "1234567890123456789012345678901234567890".parse().unwrap(),
             network: crate::config::EthNetwork::Sepolia,
-            optimistic_requests: false,
             rpc: Default::default(),
             gas: Default::default(),
             publisher: Default::default(),

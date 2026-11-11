@@ -250,10 +250,6 @@ pub struct EthConfig {
     /// The contract address to watch
     pub contract_address: Address,
     pub network: EthNetwork,
-    /// Emit requests without waiting for block finality. Only for demos and
-    /// integration tests on dev chains (anvil never reports finalized blocks
-    /// and never reorgs); must stay `false` on live networks.
-    pub optimistic_requests: bool,
     pub rpc: RpcConfig,
     pub gas: GasConfig,
     pub publisher: PublisherConfig,
@@ -279,7 +275,6 @@ impl fmt::Debug for EthConfig {
             .field("execution_rpc_http_url", &self.execution_rpc_http_url)
             .field("contract_address", &self.contract_address)
             .field("network", &self.network)
-            .field("optimistic_requests", &self.optimistic_requests)
             .field("rpc", &self.rpc)
             .field("gas", &self.gas)
             .field("publisher", &self.publisher)

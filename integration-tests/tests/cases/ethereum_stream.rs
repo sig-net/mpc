@@ -181,13 +181,12 @@ impl EthereumTestEnvironment {
         })
     }
 
-    fn config(&self, optimistic_requests: bool) -> EthConfig {
+    fn config(&self) -> EthConfig {
         EthConfig {
             account_sk: self.sandbox.secret_key.parse().unwrap(),
             execution_rpc_http_url: self.sandbox.external_http_endpoint.parse().unwrap(),
             contract_address: self.contract_address,
             network: mpc_chain_ethereum::EthNetwork::Anvil,
-            optimistic_requests,
             gas: Default::default(),
             // The indexer runs in-process here, so poll as fast as a test node.
             indexer: mpc_node::cli::mock_indexer_config(),
@@ -348,7 +347,7 @@ async fn stream_ethereum(
     backlog: Backlog,
 ) -> Result<ChainIndexerStream> {
     let indexer = EthereumIndexer::new(
-        ctx.config(true),
+        ctx.config(),
         backlog.clone(),
         NoopChainTelemetry,
         SharedBackoff::new(),
@@ -392,7 +391,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
 
     let backlog = Backlog::persisted(storage);
     let indexer = EthereumIndexer::new(
-        ctx.config(true),
+        ctx.config(),
         backlog.clone(),
         NoopChainTelemetry,
         SharedBackoff::new(),
@@ -544,7 +543,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
 
     let indexer = EthereumIndexer::new(
-        ctx.config(true),
+        ctx.config(),
         backlog.clone(),
         NoopChainTelemetry,
         SharedBackoff::new(),
@@ -699,7 +698,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         .await;
 
     let indexer = EthereumIndexer::new(
-        ctx.config(true),
+        ctx.config(),
         backlog.clone(),
         NoopChainTelemetry,
         SharedBackoff::new(),

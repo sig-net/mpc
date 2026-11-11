@@ -314,7 +314,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// The catchup-live anchor: the first processable head + 1.
     /// Returns `None` on cancellation.
     async fn sample_anchor(&self, cancel: &CancellationToken) -> Option<u64> {
-        let tag = if self.config.optimistic_requests {
+        let tag = if self.config.network.is_optimistic() {
             BlockNumberOrTag::Latest
         } else {
             BlockNumberOrTag::Finalized
@@ -598,7 +598,7 @@ mod tests {
             .create_async()
             .await;
         let mut builder = test_utils::TestIndexerBuilder::new(server.url());
-        builder.eth.optimistic_requests = true;
+        builder.eth.network = crate::config::EthNetwork::Anvil;
         let indexer = builder.build().await;
 
         assert_eq!(

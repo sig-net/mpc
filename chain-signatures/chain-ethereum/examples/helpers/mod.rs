@@ -46,7 +46,6 @@ pub fn make_config() -> anyhow::Result<EthConfig> {
         contract_address: opt_env("MPC_ETH_CONTRACT_ADDRESS")?
             .parse()
             .map_err(|e| anyhow!("invalid MPC_ETH_CONTRACT_ADDRESS: {e}"))?,
-        optimistic_requests: network.is_optimistic(),
         network,
         rpc: Default::default(),
         gas: Default::default(),

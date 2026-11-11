@@ -70,7 +70,6 @@ impl EthTestEnv {
             execution_rpc_http_url: endpoint.parse()?,
             contract_address,
             network: mpc_chain_ethereum::EthNetwork::Anvil,
-            optimistic_requests: false,
             rpc: Default::default(),
             gas: Default::default(),
             publisher: PublisherConfig {
