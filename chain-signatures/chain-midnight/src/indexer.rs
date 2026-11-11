@@ -796,7 +796,10 @@ mod tests {
                 ..Default::default()
             },
             rpc: Default::default(),
-            indexer: Default::default(),
+            // Under `RunFixture::next_event`'s 5 s wait.
+            indexer: crate::IndexerConfig {
+                poll_interval: Duration::from_secs(2),
+            },
         }
     }
 

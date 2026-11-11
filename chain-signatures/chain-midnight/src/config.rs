@@ -43,7 +43,7 @@ pub struct IndexerConfig {
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
-            poll_interval: Duration::from_secs(2),
+            poll_interval: Duration::from_secs(6),
         }
     }
 }
