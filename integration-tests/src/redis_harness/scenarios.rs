@@ -10,7 +10,7 @@ use mpc_primitives::{Chain, SignId};
 
 use super::diagnostics::LatencySummary;
 use super::gate::StartingGate;
-use super::participant::{next_id_block, ArtifactKind, MeasuredOp};
+use super::participant::{next_id_block, ArtifactKind, ChurnState, MeasuredOp};
 use super::RedisHarness;
 
 fn summarize(name: &str, mut metric: MeasuredOp, wall: Duration) -> LatencySummary {
@@ -1309,7 +1309,6 @@ impl RedisHarness {
             return Ok(vec![
                 LatencySummary::empty("churn_peek_mine"),
                 LatencySummary::empty("churn_commit"),
-                LatencySummary::empty("churn_simulated_deliberation"),
             ]);
         }
 
@@ -1324,31 +1323,33 @@ impl RedisHarness {
             "   -> Simulating {num_proposers} proposers with {abort_percent}% deliberation timeout/abort rate across {rounds_per_proposer} rounds (deliberation hold: {deliberation_delay_ms}ms)..."
         );
         let gate = StartingGate::new(num_proposers);
+        let state = Arc::new(ChurnState::default());
 
         let tasks: Vec<_> = (0..num_proposers)
             .map(|proposer_id| {
                 let proposer = p.clone();
-                tokio::spawn(proposer.run_proposer_churn(
+                tokio_util::task::AbortOnDropHandle::new(tokio::spawn(proposer.run_proposer_churn(
                     gate.barrier(),
                     proposer_id,
                     rounds_per_proposer,
                     abort_percent,
                     deliberation_delay_ms,
-                ))
+                    state.clone(),
+                )))
             })
             .collect();
 
         let overall_start = gate.start().await;
 
         let mut metrics: [MeasuredOp; 2] = Default::default();
-        let mut all_deliberation = Vec::new();
+        let mut total_deliberations = 0;
         let mut total_aborts = 0;
         for task in tasks {
             let (results, deliberation, aborted) = task.await?;
             for (total, result) in metrics.iter_mut().zip(results) {
                 total.merge(result);
             }
-            all_deliberation.extend(deliberation);
+            total_deliberations += deliberation;
             total_aborts += aborted;
         }
         let wall = overall_start.elapsed();
@@ -1357,13 +1358,13 @@ impl RedisHarness {
             metrics[1].latencies.len(), metrics[1].indeterminate,
         );
         println!(
-            "   -> Deliberation hold time: {deliberation_delay_ms}ms per round (simulated sleep)"
+            "   -> Peak pending reservations: {}; simulated deliberations: {} (target {deliberation_delay_ms}ms)",
+            state.peak_pending.load(Ordering::Relaxed), total_deliberations,
         );
         let [peek, commit] = metrics;
         Ok(vec![
             summarize("churn_peek_mine", peek, wall),
             summarize("churn_commit", commit, wall),
-            LatencySummary::calculate("churn_simulated_deliberation", &mut all_deliberation, wall),
         ])
     }
 

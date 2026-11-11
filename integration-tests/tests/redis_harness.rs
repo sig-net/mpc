@@ -1,6 +1,8 @@
+use integration_tests::redis_harness::participant::ChurnState;
 use integration_tests::redis_harness::RedisDiagnosticsClient;
-use integration_tests::redis_harness::{RedisHarness, RedisHarnessConfig};
+use integration_tests::redis_harness::{ArtifactKind, RedisHarness, RedisHarnessConfig};
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -68,6 +70,39 @@ async fn mixed_pipeline_uses_independent_node_pools() -> anyhow::Result<()> {
     assert_eq!(results[0].count + results[0].indeterminate, 6);
     assert!(results[1].count > 0);
     assert_eq!(results[1].failures, 0);
+
+    harness
+        .populate(ArtifactKind::Presignatures, 0, 900_000_000, 32)
+        .await?;
+    let state = Arc::new(ChurnState::default());
+    let barrier = Arc::new(tokio::sync::Barrier::new(9));
+    let mut tasks = Vec::new();
+    for i in 0..8 {
+        tasks.push(tokio::spawn(
+            harness.participants[0].clone().run_proposer_churn(
+                barrier.clone(),
+                i,
+                1,
+                0,
+                500,
+                state.clone(),
+            ),
+        ));
+    }
+    barrier.wait().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.pending.load(Ordering::Relaxed) < 4 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    for task in tasks {
+        let (metrics, _, _) = task.await?;
+        assert_eq!(metrics[0].latencies.len(), 1);
+        assert_eq!(metrics[1].latencies.len(), 1);
+    }
+    assert!(state.peak_pending.load(Ordering::Relaxed) >= 4);
+    assert_eq!(state.pending.load(Ordering::Relaxed), 0);
 
     // All five items are excluded by the proposer scenario: empty peeks are
     // indeterminate, not successful latency samples or known Redis errors.

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -59,6 +59,14 @@ impl MeasuredOp {
         self.failures += other.failures;
         self.indeterminate += other.indeterminate;
     }
+}
+
+/// Shared state for staggered proposals and their pending reservations.
+#[derive(Default)]
+pub struct ChurnState {
+    peek_lock: tokio::sync::Mutex<()>,
+    pub pending: AtomicUsize,
+    pub peak_pending: AtomicUsize,
 }
 
 /// Simulated participant storage handles in the isolated Redis harness.
@@ -552,25 +560,31 @@ impl SimulatedParticipant {
         rounds: usize,
         abort_percent: u8,
         deliberation_delay_ms: u64,
-    ) -> ([MeasuredOp; 2], Vec<Duration>, usize) {
+        state: Arc<ChurnState>,
+    ) -> ([MeasuredOp; 2], usize, usize) {
         barrier.wait().await;
         let mut metrics: [MeasuredOp; 2] = Default::default();
-        let mut deliberation_latencies = Vec::with_capacity(rounds);
+        let mut deliberations = 0;
         let mut aborted_count = 0;
         let mut local_excluded: Vec<u64> = Vec::new();
         for round_idx in 0..rounds {
+            // Stagger proposal selection so pending reservations accumulate.
+            let peek_guard = state.peek_lock.lock().await;
             let start = Instant::now();
             let reservation = self.presignatures.peek_mine(&local_excluded).await;
             metrics[0].record_optional(start, reservation.is_some());
+            drop(peek_guard);
             let Some(reservation) = reservation else {
                 continue;
             };
+            let pending = state.pending.fetch_add(1, Ordering::Relaxed) + 1;
+            state.peak_pending.fetch_max(pending, Ordering::Relaxed);
             if deliberation_delay_ms > 0 {
-                let start = Instant::now();
                 tokio::time::sleep(Duration::from_millis(deliberation_delay_ms)).await;
-                deliberation_latencies.push(start.elapsed());
+                deliberations += 1;
             }
             let should_abort = ((proposer_id * 17 + round_idx * 31) % 100) < abort_percent as usize;
+            state.pending.fetch_sub(1, Ordering::Relaxed);
             if should_abort {
                 let id = reservation.id;
                 drop(reservation);
@@ -581,7 +595,7 @@ impl SimulatedParticipant {
                 metrics[1].record_optional(start, reservation.commit().await.is_some());
             }
         }
-        (metrics, deliberation_latencies, aborted_count)
+        (metrics, deliberations, aborted_count)
     }
 
     /// Helper task for racing contenders to take artifacts concurrently over Redis.

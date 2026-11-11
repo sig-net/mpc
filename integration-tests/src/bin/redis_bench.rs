@@ -61,9 +61,17 @@ struct Args {
     #[arg(long, default_value_t = 250)]
     spike_ms: u64,
 
-    /// Simulated proposer deliberation hold time in milliseconds for Scenario 11 (default: 15ms)
-    #[arg(long, default_value_t = 15)]
+    /// Simulated timeout-case deliberation hold in milliseconds.
+    #[arg(long, default_value_t = 10_000)]
     deliberation_ms: u64,
+
+    /// Concurrent simulated signing proposals across chains on one node.
+    #[arg(long, default_value_t = 16)]
+    churn_proposers: usize,
+
+    /// Reservation attempts per simulated proposer.
+    #[arg(long, default_value_t = 2)]
+    churn_rounds: usize,
 
     /// Total stockpile size for Scenario 10 Deep Stockpile Seek (default: max(items * 10, 2000))
     #[arg(long)]
@@ -385,9 +393,9 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if should_run(BenchScenario::ReservationChurn) {
-            let stockpile = (args.items * 2).max(50);
-            let num_proposers = args.participants.clamp(2, 4);
-            let rounds = 25;
+            let stockpile = (args.items * 2).max(args.churn_proposers.saturating_mul(2));
+            let num_proposers = args.churn_proposers;
+            let rounds = args.churn_rounds;
             let abort_percent = 40;
             let deliberation_ms = args.deliberation_ms;
             println!(
