@@ -21,11 +21,11 @@ pub fn is_contract_call(input: &Bytes) -> bool {
     !input.is_empty()
 }
 
-pub fn parse_filtered_logs(logs: Vec<Log>) -> Vec<IndexedSignRequest> {
+pub fn parse_filtered_logs(logs: Vec<Log>, entropy: [u8; 32]) -> Vec<IndexedSignRequest> {
     let mut indexed_requests = Vec::new();
     for log in logs {
         tracing::debug!("Parsing Ethereum log: {:?}", log);
-        match sign_request_from_filtered_log(log.clone()) {
+        match sign_request_from_filtered_log(log.clone(), entropy) {
             Some(request) => indexed_requests.push(request),
             None => tracing::warn!("Failed to parse Ethereum log: {:?}", log),
         }
@@ -96,7 +96,7 @@ fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
     Some(SignId { request_id })
 }
 
-fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
+fn sign_request_from_filtered_log(log: Log, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
     let event = parse_event(&log)?;
     tracing::debug!("found eth event: {:?}", event);
     // Create sign request from event
@@ -126,9 +126,7 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     })
     .ok()?;
 
-    // Use transaction hash as entropy
-    let tx_hash = log.transaction_hash.unwrap_or_default();
-    let entropy = tx_hash;
+    let tx_hash = log.transaction_hash;
 
     let sign_id = SignId::new(generate_request_id(
         event.requester,
@@ -140,12 +138,12 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
         &event.dest,
         &event.params,
     ));
-    tracing::info!(%tx_hash, ?sign_id, "eth signature requested");
+    tracing::info!(?tx_hash, ?sign_id, "eth signature requested");
 
     Some(IndexedSignRequest::sign(
         sign_id,
         SignArgs {
-            entropy: entropy.into(),
+            entropy,
             epsilon,
             payload,
             path: event.path,
@@ -259,6 +257,17 @@ mod tests {
             ),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn parse_filtered_logs_uses_the_containing_block_entropy() {
+        let event = sample_requested_event();
+        let entropy = [0xab; 32];
+
+        let requests = parse_filtered_logs(vec![requested_log(event.encode_data())], entropy);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].args.entropy, entropy);
     }
 
     #[test]

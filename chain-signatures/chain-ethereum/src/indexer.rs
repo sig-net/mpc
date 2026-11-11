@@ -185,7 +185,11 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             .filter(|l| l.topic0() == Some(&ChainSignatures::SignatureResponded::SIGNATURE_HASH))
             .cloned()
             .collect();
-        let sign_requests = parse_filtered_logs(request_logs);
+        // EIP-4399 assigns the post-Merge PREVRANDAO value to the header's
+        // `mixHash` field. Read it from this finalized block, not from the
+        // requester-known transaction hash.
+        let entropy: [u8; 32] = block.header.mix_hash.into();
+        let sign_requests = parse_filtered_logs(request_logs, entropy);
 
         // Collect execution confirmations (if any) and emit ExecutionConfirmed events
         let watcher = ExecutionWatcher::new(
@@ -501,10 +505,13 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 
 #[cfg(test)]
 mod tests {
+    use crate::abi::ChainSignatures;
     use crate::client::CatchupItem;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
+    use alloy::primitives::{Address, FixedBytes, Log as PrimitiveLog, U256};
     use alloy::rpc::types::BlockId;
+    use alloy::sol_types::SolEvent;
     use futures_util::StreamExt;
     use mockito::{Matcher, Server};
     use mpc_chain_integration_core::utils::stream::chain_event_channel;
@@ -516,6 +523,52 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    fn requested_log() -> alloy::rpc::types::Log {
+        let event = ChainSignatures::SignatureRequested {
+            sender: Address::from([0x11; 20]),
+            payload: FixedBytes::from([0x22; 32]),
+            keyVersion: 1,
+            deposit: U256::from(1000u64),
+            chainId: U256::from(31337u64),
+            path: "m/44'/60'/0'/0/0".to_string(),
+            algo: "ecdsa".to_string(),
+            dest: String::new(),
+            params: "{}".to_string(),
+        };
+        alloy::rpc::types::Log {
+            inner: PrimitiveLog::new_unchecked(
+                Address::ZERO,
+                vec![ChainSignatures::SignatureRequested::SIGNATURE_HASH],
+                event.encode_data().into(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn indexed_request_uses_its_block_prevrandao_as_entropy() {
+        let server = Server::new_async().await;
+        let item = test_utils::batch_block(1, vec![requested_log()]);
+        let CatchupItem::BatchBlock { block, .. } = &item else {
+            unreachable!("batch_block returns a BatchBlock")
+        };
+        let expected_entropy: [u8; 32] = block.header.mix_hash.into();
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .build()
+            .await;
+        let (events_tx, mut events_rx) = chain_event_channel();
+
+        indexer
+            .process_catchup_item(&events_tx, &item)
+            .await
+            .expect("request block processes");
+
+        let Some(ChainEvent::SignRequest { request, .. }) = events_rx.recv().await else {
+            panic!("expected SignRequest");
+        };
+        assert_eq!(request.args.entropy, expected_entropy);
+    }
 
     #[tokio::test]
     async fn sample_anchor_fetches_finalized_head_directly() {
