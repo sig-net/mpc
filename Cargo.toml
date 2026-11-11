@@ -22,6 +22,33 @@ members = [
     "chain-signatures/midnight-respond-codec",
     "chain-signatures/utils",
 ]
+# What a bare `cargo build` or `cargo test` covers: every member but
+# `integration-tests`. That crate asks for the node's `test-feature`, and cargo
+# turns a feature on for every package built in the same run, so building it
+# next to the node would produce a node binary with test code and test cadences.
+# A new member goes in both lists.
+default-members = [
+    "chain-signatures/crypto",
+    "chain-signatures/contract",
+    "chain-signatures/contract-sol",
+    "chain-signatures/keys",
+    "chain-signatures/node",
+    "chain-signatures/primitives",
+    "signet-crypto",
+    "signet-primitives",
+    "chain-signatures/chain-integration-core",
+    "chain-signatures/chain-canton",
+    "chain-signatures/chain-solana",
+    "chain-signatures/chain-ethereum",
+    "chain-signatures/chain-near",
+    "chain-signatures/chain-hydration",
+    "chain-signatures/chain-midnight",
+    "chain-signatures/chain-tron",
+    "chain-signatures/tron-wire",
+    "chain-signatures/compact-hashing",
+    "chain-signatures/midnight-respond-codec",
+    "chain-signatures/utils",
+]
 resolver = "2"
 
 [workspace.package]
