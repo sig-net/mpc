@@ -1563,7 +1563,7 @@ async fn a_first_leg_record_does_not_undo_later_progress() {
     let status = executing.status.clone();
     let publish = SignProgress::Publishing(mock_publishing());
 
-    executing.claim_local(SignStatus::Bidirectional(BidirectionalProgress::Initial(
+    executing.apply_record(SignStatus::Bidirectional(BidirectionalProgress::Initial(
         publish,
     )));
     assert_eq!(executing.status, status);
@@ -1619,5 +1619,49 @@ async fn both_records_claim_the_attestation_in_any_order() {
 
         let entry = backlog.get(chain, &request.id).await.unwrap();
         assert_eq!(entry.status(), &attestation);
+    }
+}
+
+/// Each stored record against each entry status: the record applies only where marked.
+#[test]
+fn a_record_applies_only_to_an_entry_behind_it() {
+    use BidirectionalProgress::{Executing, Final, Initial, Parked};
+    let tx = mock_tx(42);
+    let execution = Arc::new(tx.clone());
+    let record = || SignProgress::Publishing(mock_publishing());
+    let held = || SignProgress::Publishing(mock_publishing_with_proposer(false));
+    let gen = || SignProgress::Generating;
+    let fin = |progress| Final {
+        respond_request: mock_bidi_response(&tx),
+        progress,
+    };
+    let statuses = [
+        SignStatus::Sign(gen()),
+        SignStatus::Sign(held()),
+        SignStatus::Bidirectional(Initial(gen())),
+        SignStatus::Bidirectional(Initial(held())),
+        SignStatus::Bidirectional(Executing(Arc::clone(&execution))),
+        SignStatus::Bidirectional(fin(gen())),
+        SignStatus::Bidirectional(fin(held())),
+        SignStatus::Bidirectional(Parked(execution)),
+    ];
+    let records = [
+        (SignStatus::Sign(record()), [1, 0, 0, 0, 0, 0, 0, 0]),
+        (
+            SignStatus::Bidirectional(Initial(record())),
+            [0, 0, 1, 0, 0, 0, 0, 0],
+        ),
+        (
+            SignStatus::Bidirectional(fin(record())),
+            [0, 0, 1, 1, 1, 1, 0, 0],
+        ),
+    ];
+    for (record, applies) in records {
+        for (status, applies) in statuses.iter().zip(applies) {
+            let mut entry = mock_execution_entry(&tx, Chain::Solana, status.clone());
+            entry.apply_record(record.clone());
+            let expected = if applies == 1 { &record } else { status };
+            assert_eq!(&entry.status, expected, "{record:?} on {status:?}");
+        }
     }
 }

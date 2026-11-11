@@ -129,7 +129,8 @@ async fn a_supervised_restart_publishes_a_stored_signature() {
     assert!(sign_rx.try_recv().is_err(), "nothing is signed again");
     let published = timeout(Duration::from_secs(1), rpc_rx.recv()).await;
     assert!(
-        matches!(published, Ok(Some(_))),
+        matches!(published, Ok(Some(RpcAction::Publish(action)))
+            if action.request.id == request.id),
         "the proposer publishes it"
     );
     assert_eq!(restarted.publishable_requests(chain).await.len(), 1);

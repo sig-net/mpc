@@ -583,7 +583,7 @@ impl Backlog {
         let mut pending = self.pending(&chain).write().await;
         for (id, record) in records {
             if let Some(entry) = pending.requests.get_mut(&id) {
-                entry.claim_local(record);
+                entry.apply_record(record);
             }
         }
     }
@@ -753,7 +753,7 @@ impl BacklogEntry {
 
     /// Take a stored status unless the entry has moved past it. A record is written only on
     /// publishing, so a first leg's stays behind once the request executes.
-    fn claim_local(&mut self, record: SignStatus) {
+    fn apply_record(&mut self, record: SignStatus) {
         use BidirectionalProgress::{Executing, Final, Initial};
         use SignStatus::{Bidirectional, Sign};
         let applies = match (&record, &self.status) {
