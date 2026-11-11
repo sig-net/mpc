@@ -11,6 +11,8 @@ const RATE_LIMIT_BASE_COOLDOWN: Duration = Duration::from_secs(1);
 const RATE_LIMIT_MAX_COOLDOWN: Duration = Duration::from_secs(60);
 const RATE_LIMIT_MAX_JITTER: Duration = Duration::from_millis(500);
 const MAX_PENALTY_LEVEL: u32 = 10;
+/// Duration after which a warning is logged if the caller is still waiting.
+const GATE_WAIT_WARN_AFTER: Duration = Duration::from_secs(5);
 
 /// Shared cooldown gate: callers wait out a window that failures extend.
 #[derive(Clone)]
@@ -122,6 +124,14 @@ pub async fn run_gated<T, F>(
 where
     F: Future<Output = anyhow::Result<T>>,
 {
+    let remaining = gate.remaining();
+    if remaining > GATE_WAIT_WARN_AFTER {
+        tracing::warn!(
+            operation,
+            ?remaining,
+            "waiting out the shared throttle window"
+        );
+    }
     gate.wait().await;
     match call.await {
         Ok(value) => {
