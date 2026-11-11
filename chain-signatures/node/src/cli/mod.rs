@@ -78,8 +78,7 @@ pub enum Cli {
         /// This node's account ed25519 secret key
         #[arg(long, env("MPC_ACCOUNT_SK"), hide_env_values = true)]
         account_sk: SecretKey,
-        /// Port the node's web server listens on. Whatever `--my-address` resolves to
-        /// (load balancer or direct) must forward to this port.
+        /// Port the node's web server listens on.
         #[arg(
             long,
             env("MPC_WEB_PORT"),
@@ -1346,6 +1345,23 @@ mod tests {
             "publish must wait out the stack gate's engaged window (base cooldown), took {:?}",
             start.elapsed()
         );
+    }
+
+    /// `--help` is the only list of parameters, so each one explains itself there.
+    #[test]
+    fn every_start_parameter_has_help() {
+        use clap::CommandFactory;
+
+        let cmd = Cli::command();
+        let start = cmd
+            .find_subcommand("start")
+            .expect("start subcommand must exist");
+        let without_help: Vec<_> = start
+            .get_arguments()
+            .filter(|arg| arg.get_help().is_none())
+            .map(|arg| arg.get_id().as_str())
+            .collect();
+        assert!(without_help.is_empty(), "no help text: {without_help:?}");
     }
 
     #[test]
