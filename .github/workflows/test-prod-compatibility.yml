@@ -1,8 +1,7 @@
 name: Prod Compatibility Tests
 
-# Informational, PR-only and not a required check: a failure means
-# investigate before a rolling deploy. Not run on develop on purpose, so it
-# never colours the default branch status.
+# Required check: ensures backward compatibility between current code and
+# the latest tagged release binary during rolling deployments.
 on:
   workflow_dispatch:
     inputs:
@@ -10,6 +9,7 @@ on:
         description: "release tag to test against (default: latest release)"
         required: false
   pull_request:
+  merge_group:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

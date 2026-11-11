@@ -661,22 +661,27 @@ impl CheckpointStorage {
 }
 
 /// In-memory records, by request and leg.
-type LocalRecords = HashMap<(SignId, u8), SignStatus>;
+type LocalRecords = HashMap<(SignId, Leg), SignStatus>;
 
-const FIRST_LEG: u8 = 0;
-const ATTESTATION: u8 = 1;
-const LEGS: [u8; 2] = [FIRST_LEG, ATTESTATION];
+/// The byte after the request id in a record's field, so the values are part of the format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Leg {
+    First = 0,
+    Attestation = 1,
+}
+
+const LEGS: [Leg; 2] = [Leg::First, Leg::Attestation];
 
 /// The leg a record belongs to, so an attestation never replaces the first leg's signature.
-fn leg(status: &SignStatus) -> u8 {
+fn leg(status: &SignStatus) -> Leg {
     match status {
-        SignStatus::Bidirectional(BidirectionalProgress::Final { .. }) => ATTESTATION,
-        _ => FIRST_LEG,
+        SignStatus::Bidirectional(BidirectionalProgress::Final { .. }) => Leg::Attestation,
+        _ => Leg::First,
     }
 }
 
-fn local_field(id: SignId, leg: u8) -> Vec<u8> {
-    [id.request_id.as_slice(), &[leg]].concat()
+fn local_field(id: SignId, leg: Leg) -> Vec<u8> {
+    [id.request_id.as_slice(), &[leg as u8]].concat()
 }
 
 fn encode_local(status: &SignStatus) -> anyhow::Result<Vec<u8>> {
