@@ -278,10 +278,38 @@ impl Backlog {
         // Only decrement total pending if an entry was actually removed
         if removed {
             self.total_pending.fetch_sub(1, Ordering::Relaxed);
+            // Only a restart reads the record, so it goes in the background; catching up deletes
+            // any this misses.
+            let (storage, id) = (self.checkpoints.storage().clone(), *id);
+            tokio::spawn(async move {
+                if let Err(err) = storage.remove_local(chain, &[id]).await {
+                    tracing::warn!(?chain, ?id, ?err, "failed to remove a local record");
+                }
+            });
         }
 
         self.observe_backlog_size(chain, len);
         removed
+    }
+
+    /// Delete the records of requests no longer in the backlog, which a rebase past their
+    /// `Response` or a failed delete leaves. Call it once caught up.
+    pub(crate) async fn forget_stale_local(&self, chain: Chain) {
+        let storage = self.checkpoints.storage();
+        let stale: Vec<SignId> = match storage.load_local(chain).await {
+            Ok(records) => {
+                let pending = self.pending(&chain).read().await;
+                let gone = |id: &SignId| pending.get(id).is_none();
+                records.into_iter().map(|(id, _)| id).filter(gone).collect()
+            }
+            Err(err) => {
+                tracing::warn!(?chain, ?err, "failed to load local records");
+                return;
+            }
+        };
+        if let Err(err) = storage.remove_local(chain, &stale).await {
+            tracing::warn!(?chain, ?err, "failed to remove local records");
+        }
     }
 
     /// Get an in-flight sign request entry from the backlog for the specified chain.
