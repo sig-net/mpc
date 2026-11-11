@@ -65,20 +65,22 @@ pub struct MidnightArgs {
         requires = "midnight_node_url"
     )]
     pub midnight_output_storage_bucket: Option<String>,
-    /// Object prefix within the bucket (default: v1).
+    /// Object prefix within the bucket.
     #[arg(
         long,
         env("MPC_MIDNIGHT_OUTPUT_STORAGE_PREFIX"),
-        requires = "midnight_node_url"
+        default_value = "v1",
+        requires = "midnight_output_storage_bucket"
     )]
-    pub midnight_output_storage_prefix: Option<String>,
-    /// Maximum time for one cache initialization attempt or storing one output, in seconds (default: 30).
+    pub midnight_output_storage_prefix: String,
+    /// Maximum time for one cache initialization attempt or storing one output, in seconds.
     #[arg(
         long,
         env("MPC_MIDNIGHT_OUTPUT_STORAGE_TIMEOUT_SECS"),
-        requires = "midnight_node_url"
+        default_value_t = 30,
+        requires = "midnight_output_storage_bucket"
     )]
-    pub midnight_output_storage_timeout_secs: Option<u64>,
+    pub midnight_output_storage_timeout_secs: u64,
     /// Local GCS emulator endpoint for integration tests; uses anonymous credentials.
     #[cfg(feature = "test-feature")]
     #[arg(long, requires = "midnight_node_url")]
@@ -119,13 +121,12 @@ impl MidnightArgs {
         #[cfg_attr(not(feature = "test-feature"), allow(unused_mut))]
         let mut publisher = PublisherConfig {
             funding_seed: funding_seed.expose_secret().to_string(),
-            indexer_ws_url: indexer_ws_url.to_string(),
+            indexer_ws_url,
             output_storage: self.midnight_output_storage_bucket.map(|bucket| {
                 OutputStorageConfig::new(
                     bucket,
-                    self.midnight_output_storage_prefix
-                        .unwrap_or_else(|| "v1".to_string()),
-                    Duration::from_secs(self.midnight_output_storage_timeout_secs.unwrap_or(30)),
+                    self.midnight_output_storage_prefix,
+                    Duration::from_secs(self.midnight_output_storage_timeout_secs),
                 )
             }),
             ..Default::default()
@@ -143,7 +144,7 @@ impl MidnightArgs {
             }
         }
         let config = MidnightConfig {
-            node_url: node_url.to_string(),
+            node_url,
             central_address,
             responder_address,
             publisher,
@@ -195,12 +196,12 @@ mod tests {
     /// assertion cannot pass on a dropped flag.
     fn configured() -> MidnightConfig {
         MidnightConfig {
-            node_url: "http://127.0.0.1:9944/".into(),
+            node_url: "http://127.0.0.1:9944/".parse().unwrap(),
             central_address: MidnightAddress::from_bytes([0xab; 32]),
             responder_address: MidnightAddress::from_bytes([0xcd; 32]),
             publisher: PublisherConfig {
                 funding_seed: "0f".repeat(32),
-                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".into(),
+                indexer_ws_url: "ws://127.0.0.1:8088/api/v3/graphql/ws".parse().unwrap(),
                 output_storage: Some(OutputStorageConfig::new(
                     "midnight-results".into(),
                     "staging/testnet".into(),
@@ -292,6 +293,22 @@ mod tests {
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
+    /// Prefix and timeout only mean something with a bucket; without one they
+    /// used to be dropped silently.
+    #[test]
+    fn output_storage_tuning_requires_the_bucket() {
+        crate::cli::tests::assert_midnight_env_unset();
+        for flag in [
+            "--midnight-output-storage-prefix=v2",
+            "--midnight-output-storage-timeout-secs=5",
+        ] {
+            assert!(
+                MidnightArgs::try_parse_from(["test", flag]).is_err(),
+                "{flag}"
+            );
+        }
+    }
+
     #[test]
     fn the_midnight_flags_are_all_or_nothing() {
         // A publisher flag accepted on its own would let a node carry a funding
@@ -346,7 +363,8 @@ mod tests {
             .iter()
             .position(|arg| arg == "--midnight-output-storage-bucket")
             .expect("configured Midnight args include the storage bucket");
-        argv.drain(index..=index + 1);
+        // The bucket, prefix and timeout flags with their values are the last six entries.
+        argv.truncate(index);
         let parsed =
             MidnightArgs::try_parse_from(argv).expect("Midnight can run without GCS storage");
         assert!(parsed.midnight_output_storage_bucket.is_none());
@@ -359,13 +377,22 @@ mod tests {
     }
 
     #[test]
-    fn output_storage_defaults_are_resolved_at_the_cli_boundary() {
+    fn bucket_without_prefix_and_timeout_gets_the_defaults() {
         crate::cli::tests::assert_midnight_env_unset();
-        let mut args = configured_args();
-        args.midnight_output_storage_prefix = None;
-        args.midnight_output_storage_timeout_secs = None;
+        let mut argv = configured_argv();
+        for flag in [
+            "--midnight-output-storage-prefix",
+            "--midnight-output-storage-timeout-secs",
+        ] {
+            let index = argv.iter().position(|arg| arg == flag).unwrap();
+            argv.drain(index..=index + 1);
+        }
 
-        let config = args.into_config().unwrap().unwrap();
+        let config = MidnightArgs::try_parse_from(argv)
+            .unwrap()
+            .into_config()
+            .unwrap()
+            .unwrap();
         assert_eq!(
             config.publisher.output_storage,
             Some(OutputStorageConfig::new(

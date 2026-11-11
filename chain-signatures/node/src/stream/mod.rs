@@ -107,6 +107,7 @@ pub(crate) async fn handle_chain_event<T: ChainTelemetry>(
             ctx.caught_up = true;
             // Set before the requeue scan, so an entry that misses the scan sees it.
             ctx.backlog.set_caught_up(chain, true);
+            ctx.backlog.forget_stale_local(chain).await;
 
             requeue_pending_sign_requests(ctx, chain)
                 .await

@@ -52,6 +52,10 @@ const FEE_PASSES: usize = 8;
 const REPLAY_BATCH: usize = 512;
 /// Backoff between subscription attempts.
 const RESUBSCRIBE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+/// The header of a ledger event as ledger 8 serialized it.
+const LEDGER_8_EVENT_HEADER: &[u8] = b"midnight:event[v9]:";
+/// The longest backoff between subscriptions the indexer keeps refusing to open.
+const MAX_REFUSED_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 /// The longest backoff between replays that keep restarting from the first event.
 const MAX_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(600);
 /// The least time between two checkpoints a caught-up replay keeps; the first after a
@@ -233,6 +237,16 @@ pub(crate) fn event_hash(raw: &[u8]) -> [u8; 32] {
     sha2::Sha256::digest(raw).into()
 }
 
+/// Whether ledger 8 serialized this event. A chain that upgraded from ledger 8 to
+/// ledger 9 still serves those events, but emptied its DUST state at the upgrade and
+/// applied its DUST generation again as this ledger's events. So they are no part of
+/// this ledger's replay, and the wallet SDK's `skipLedgerV8DustHistory` starts after
+/// them too. That holds for this one upgrade: an event of any other version this
+/// ledger cannot read fails the replay.
+fn is_ledger_8_event(raw: &[u8]) -> bool {
+    raw.starts_with(LEDGER_8_EVENT_HEADER)
+}
+
 /// The replay restarted from the first event: the stream and the state disagree.
 #[derive(Debug, thiserror::Error)]
 #[error("restarting the DUST replay from the first event")]
@@ -376,6 +390,8 @@ impl FundingWallet {
 enum Ended {
     /// The connection or the stream ended; the replay goes on from where it is.
     Dropped,
+    /// The subscription could not be opened; the replay goes on from where it is.
+    Refused,
     /// The replay restarted from the first event, after catching up or not.
     Restarted { caught_up: bool },
     /// A failed submit started the replay over from the latest checkpoint.
@@ -385,12 +401,13 @@ enum Ended {
 /// Follows the event stream for the wallet's lifetime: resubscribes after any
 /// failure from the newest applied event, and starts over from the first event when
 /// the replayed state can no longer absorb what the indexer sends, backing off while
-/// that keeps happening before the replay catches up.
+/// that keeps happening before the replay catches up, or while the indexer refuses to
+/// open a subscription at all.
 async fn follow(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) {
     if let Some(store) = &shared.store {
         restore(&shared, store.as_ref()).await;
     }
-    let mut delay = RESUBSCRIBE_DELAY;
+    let (mut restart_delay, mut refused_delay) = (RESUBSCRIBE_DELAY, RESUBSCRIBE_DELAY);
     loop {
         // Its own task, so a panic below ends one subscription rather than the
         // wallet; held so that dropping the wallet aborts it too.
@@ -416,12 +433,19 @@ async fn follow(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         shared.state().connected = false;
         shared.progress.send_replace(());
-        delay = match ended {
-            Ended::Restarted { caught_up: false } => (delay * 2).min(MAX_RESTART_DELAY),
-            Ended::Restarted { caught_up: true } => RESUBSCRIBE_DELAY * 2,
-            Ended::Dropped | Ended::Reloaded => RESUBSCRIBE_DELAY,
+        // Each backoff grows over a run of its own kind of ending and starts again
+        // after any other: a refusal ends a run of restarts as a dropped connection does.
+        refused_delay = match ended {
+            Ended::Refused => (refused_delay * 2).min(MAX_REFUSED_DELAY),
+            _ => RESUBSCRIBE_DELAY,
         };
-        tokio::time::sleep(delay).await;
+        restart_delay = match ended {
+            Ended::Restarted { caught_up: false } => (restart_delay * 2).min(MAX_RESTART_DELAY),
+            Ended::Restarted { caught_up: true } => RESUBSCRIBE_DELAY * 2,
+            Ended::Refused | Ended::Dropped | Ended::Reloaded => RESUBSCRIBE_DELAY,
+        };
+        // At most one of the two has grown.
+        tokio::time::sleep(restart_delay.max(refused_delay)).await;
     }
 }
 
@@ -543,6 +567,7 @@ async fn subscribe_once(shared: Arc<Shared>, source: Arc<dyn DustEventSource>) -
                 ?error,
                 "midnight funding wallet: DUST event subscription failed"
             );
+            return Ended::Refused;
         }
     }
     Ended::Dropped
@@ -667,9 +692,10 @@ async fn keep_checkpoint(shared: &Shared) {
     }
 }
 
-/// Replays one batch. An event the state cannot absorb means the stream and the
-/// state disagree about history, so the state restarts from the first event; so does
-/// a restored checkpoint whose event the indexer no longer serves.
+/// Replays one batch, passing over the events ledger 8 wrote. An event the state
+/// cannot absorb means the stream and the state disagree about history, so the state
+/// restarts from the first event; so does a restored checkpoint whose event the
+/// indexer no longer serves.
 fn apply(shared: &Shared, batch: Vec<anyhow::Result<DustEventUpdate>>) -> anyhow::Result<()> {
     let mut updates = Vec::with_capacity(batch.len());
     let mut failure = None;
@@ -706,6 +732,7 @@ fn apply(shared: &Shared, batch: Vec<anyhow::Result<DustEventUpdate>>) -> anyhow
     if let Some(newest) = fresh.last() {
         let events = fresh
             .iter()
+            .filter(|update| !is_ledger_8_event(&update.raw))
             .map(|update| {
                 midnight_serialize::tagged_deserialize::<Event<DefaultDB>>(&mut &update.raw[..])
                     .with_context(|| format!("DUST event {} did not decode", update.id))
@@ -1065,6 +1092,43 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// The first two DUST events of Midnight Preview, which ledger 8 serialized; see
+    /// fixtures/README.md.
+    fn ledger_8_updates() -> Vec<DustEventUpdate> {
+        let events: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../fixtures/dust-events-preview-ledger-8.json"
+        ))
+        .unwrap();
+        events
+            .iter()
+            .map(|event| DustEventUpdate {
+                id: event["id"].as_u64().unwrap(),
+                max_id: event["maxId"].as_u64().unwrap(),
+                raw: hex::decode(event["raw"].as_str().unwrap()).unwrap(),
+            })
+            .collect()
+    }
+
+    /// The fixture's timeline as a chain that upgraded from ledger 8 serves it: ledger
+    /// 8's events first, then this ledger's from the next id on.
+    fn upgraded_chain_updates() -> Vec<DustEventUpdate> {
+        let ledger_8 = ledger_8_updates();
+        let offset = ledger_8.last().unwrap().id;
+        let current = fixture_updates();
+        let max_id = current.last().unwrap().id + offset;
+        ledger_8
+            .into_iter()
+            .chain(current.into_iter().map(|mut update| {
+                update.id += offset;
+                update
+            }))
+            .map(|mut update| {
+                update.max_id = max_id;
+                update
+            })
+            .collect()
+    }
+
     pub(crate) fn funded_key() -> DustSecretKey {
         dust_secret_key(&parse_seed(FUNDED_SEED).unwrap()).unwrap()
     }
@@ -1262,6 +1326,99 @@ pub(crate) mod tests {
             replayed().utxos().count(),
             "the batched replay is the single replay"
         );
+    }
+
+    #[test]
+    fn the_replay_starts_after_the_events_ledger_8_wrote() {
+        let shared = shared();
+        let updates = upgraded_chain_updates();
+        // In two deliveries, so one holds events of both ledgers.
+        let (first, rest) = updates.split_at(10);
+        apply(&shared, first.iter().cloned().map(Ok).collect()).unwrap();
+        apply(&shared, rest.iter().cloned().map(Ok).collect()).unwrap();
+        let state = shared.state();
+        assert!(state.is_ready());
+        assert_eq!(state.applied, Some(updates.last().unwrap().id));
+        let expected = replayed();
+        assert!(expected.utxos().count() > 0);
+        assert_eq!(
+            state.local.utxos().collect::<Vec<_>>(),
+            expected.utxos().collect::<Vec<_>>(),
+            "the replay is this ledger's timeline alone"
+        );
+    }
+
+    #[test]
+    fn a_timeline_that_never_left_ledger_8_is_caught_up_without_dust() {
+        let shared = shared();
+        let mut updates = ledger_8_updates();
+        let newest = updates.last().unwrap().id;
+        for update in &mut updates {
+            update.max_id = newest;
+        }
+        apply(&shared, updates.into_iter().map(Ok).collect()).unwrap();
+        let state = shared.state();
+        assert!(state.is_ready());
+        assert_eq!(state.applied, Some(newest));
+        assert_eq!(state.local.utxos().count(), 0);
+    }
+
+    /// `update` with its event header rewritten to `event[v<version>]`.
+    fn with_event_version(mut update: DustEventUpdate, version: &str) -> DustEventUpdate {
+        let colons = update
+            .raw
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte == b':');
+        let header_end = colons.map(|(at, _)| at).nth(1).unwrap();
+        update.raw.splice(
+            ..=header_end,
+            format!("midnight:event[v{version}]:").into_bytes(),
+        );
+        update
+    }
+
+    #[test]
+    fn only_a_ledger_8_event_header_is_passed_over() {
+        let ledger_8 = ledger_8_updates();
+        assert!(is_ledger_8_event(&ledger_8[0].raw));
+        let current = fixture_updates();
+        assert!(!is_ledger_8_event(&current[0].raw));
+        assert!(is_ledger_8_event(
+            &with_event_version(current[0].clone(), "9").raw
+        ));
+        // Another version, a version written another way and what is no event header
+        // at all go to the decoder, which refuses them.
+        for raw in [
+            &b"midnight:event[v9]"[..],
+            b"midnight:event[v8]:",
+            b"midnight:event[v12]:",
+            b"midnight:event[v13]:",
+            b"midnight:event[v9999]:",
+            b"midnight:event[v+9]:",
+            b"midnight:event[v09]:",
+            b"midnight:event[v]:",
+            b"midnight:zswap-event[v9]:",
+            b"",
+        ] {
+            assert!(!is_ledger_8_event(raw), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_event_of_another_version_this_ledger_cannot_read_restarts_the_replay() {
+        // Ledger 9's release candidates wrote `event[v13]`, and no upgrade from them
+        // applied a chain's DUST again.
+        let updates: Vec<_> = fixture_updates()
+            .into_iter()
+            .map(|update| with_event_version(update, "13"))
+            .collect();
+        let shared = shared();
+        let error = apply(&shared, updates.into_iter().map(Ok).collect()).unwrap_err();
+        assert!(format!("{error:#}").contains("did not decode"), "{error:#}");
+        let state = shared.state();
+        assert!(!state.is_ready());
+        assert_eq!(state.applied, None);
     }
 
     #[test]
@@ -2061,6 +2218,133 @@ pub(crate) mod tests {
             .ready_by(Instant::now() + std::time::Duration::from_secs(60))
             .await
             .unwrap();
+    }
+
+    /// Cannot be subscribed to: the indexer refuses the connection.
+    #[derive(Default)]
+    struct Refuses {
+        subscriptions: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl DustEventSource for Refuses {
+        async fn subscribe(
+            &self,
+            _from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            self.subscriptions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("HTTP error: 403 Forbidden")
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_subscription_is_retried_with_a_growing_delay() {
+        let source = Arc::new(Refuses::default());
+        let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+        let attempts = || {
+            source
+                .subscriptions
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+        // Attempts at 0, 4, 12, 28 and 60 s, then one a minute: 14 in the first ten
+        // minutes, where the resubscribe delay alone would make 300.
+        tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+        assert_eq!(attempts(), 5);
+        tokio::time::sleep(std::time::Duration::from_secs(540)).await;
+        assert_eq!(attempts(), 14);
+    }
+
+    /// How one subscription of [`RefusesAndRestarts`] goes.
+    #[derive(Clone, Copy)]
+    enum Attempt {
+        /// The indexer refuses the connection.
+        Refused,
+        /// Serves a timeline with an event the state cannot absorb.
+        Restarts,
+    }
+
+    /// Goes through `attempts` one subscription each, then serves the fixture's timeline
+    /// and stays open; records when each subscription was asked for.
+    struct RefusesAndRestarts {
+        attempts: Vec<Attempt>,
+        subscriptions: Mutex<Vec<tokio::time::Instant>>,
+    }
+
+    impl RefusesAndRestarts {
+        /// The seconds between each subscription and the one before it.
+        async fn gaps(attempts: Vec<Attempt>) -> Vec<u64> {
+            let source = Arc::new(Self {
+                attempts,
+                subscriptions: Mutex::default(),
+            });
+            let _wallet = FundingWallet::start(funded_key(), source.clone(), None);
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            let at = source.subscriptions.lock().unwrap();
+            at.windows(2)
+                .map(|pair| (pair[1] - pair[0]).as_secs())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl DustEventSource for RefusesAndRestarts {
+        async fn subscribe(
+            &self,
+            from: Option<u64>,
+        ) -> anyhow::Result<BoxStream<'static, anyhow::Result<DustEventUpdate>>> {
+            let attempt = {
+                let mut subscriptions = self.subscriptions.lock().unwrap();
+                subscriptions.push(tokio::time::Instant::now());
+                self.attempts.get(subscriptions.len() - 1).copied()
+            };
+            let mut updates = fixture_updates();
+            match attempt {
+                Some(Attempt::Refused) => anyhow::bail!("HTTP error: 403 Forbidden"),
+                Some(Attempt::Restarts) => updates[5].raw.truncate(10),
+                None => {}
+            }
+            let served: Vec<_> = updates
+                .into_iter()
+                .filter(|update| from.is_none_or(|from| update.id >= from))
+                .map(Ok)
+                .collect();
+            Ok(futures_util::stream::iter(served)
+                .chain(futures_util::stream::pending())
+                .boxed())
+        }
+
+        async fn indexed_time(&self) -> anyhow::Result<Timestamp> {
+            unimplemented!("never asked")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_after_refused_subscriptions_is_not_delayed_by_their_backoff() {
+        use Attempt::{Refused, Restarts};
+        let gaps = RefusesAndRestarts::gaps(vec![
+            Refused, Refused, Refused, Refused, Refused, Refused, Restarts,
+        ])
+        .await;
+        // The refusals back off to a minute; the restart that follows them waits what a
+        // first restart waits.
+        assert_eq!(gaps, [4, 8, 16, 32, 60, 60, 4]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_subscription_after_restarts_is_not_delayed_by_their_backoff() {
+        use Attempt::{Refused, Restarts};
+        let gaps = RefusesAndRestarts::gaps(vec![
+            Restarts, Restarts, Restarts, Refused, Refused, Restarts,
+        ])
+        .await;
+        // The restarts back off to 16 s; the refusals that follow wait what first
+        // refusals wait, and end the run of restarts as a dropped connection does.
+        assert_eq!(gaps, [4, 8, 16, 4, 8, 4]);
     }
 
     /// Serves `batches` in order as separate deliveries, each after `gap` of
@@ -3224,7 +3508,9 @@ mod live {
     #[ignore = "needs MIDNIGHT_LIVE_INDEXER_WS_URL; replays that indexer's whole DUST history"]
     async fn a_wallet_replays_a_live_indexer_to_its_newest_event() {
         let url = std::env::var("MIDNIGHT_LIVE_INDEXER_WS_URL")
-            .expect("MIDNIGHT_LIVE_INDEXER_WS_URL must be set");
+            .ok()
+            .and_then(|url| url.parse().ok())
+            .expect("MIDNIGHT_LIVE_INDEXER_WS_URL must be a URL");
         let file = std::env::var("MIDNIGHT_LIVE_DUST_CHECKPOINT")
             .ok()
             .map(std::path::PathBuf::from);
