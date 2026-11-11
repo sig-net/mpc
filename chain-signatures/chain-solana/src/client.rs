@@ -290,6 +290,9 @@ impl SolanaClient {
 
     pub async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
         let max_attempts = self.catchup_retry.max_times;
+        let block_config = serde_json::to_value(Self::block_fetch_config())
+            .context("serializing the getBlock config")?;
+
         retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.catchup_retry,
@@ -309,9 +312,7 @@ impl SolanaClient {
             {
                 #[cfg(feature = "bench")]
                 crate::bench::rpc_inc("getBlock(refetch)");
-                let block_config = serde_json::to_value(Self::block_fetch_config())
-                    .context("serializing the getBlock config")?;
-                self.rpc_call::<UiConfirmedBlock>("getBlock", json!([slot, block_config]))
+                self.rpc_call::<UiConfirmedBlock>("getBlock", json!([slot, &block_config]))
                     .await
             }
         )
@@ -420,6 +421,15 @@ impl SolanaClient {
         address: &Pubkey,
         before: Option<Signature>,
     ) -> anyhow::Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
+        let config = serde_json::to_value(RpcSignaturesForAddressConfig {
+            before: before.map(|sig| sig.to_string()),
+            until: None,
+            limit: Some(CATCHUP_PAGE_SIZE),
+            commitment: Some(CommitmentConfig::finalized()),
+            min_context_slot: None,
+        })
+        .context("serializing the getSignaturesForAddress config")?;
+
         retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.catchup_retry,
@@ -437,17 +447,9 @@ impl SolanaClient {
             {
                 #[cfg(feature = "bench")]
                 crate::bench::rpc_inc("getSignaturesForAddress");
-                let config = serde_json::to_value(RpcSignaturesForAddressConfig {
-                    before: before.map(|sig| sig.to_string()),
-                    until: None,
-                    limit: Some(CATCHUP_PAGE_SIZE),
-                    commitment: Some(CommitmentConfig::finalized()),
-                    min_context_slot: None,
-                })
-                .context("serializing the getSignaturesForAddress config")?;
                 self.rpc_call::<Vec<RpcConfirmedTransactionStatusWithSignature>>(
                     "getSignaturesForAddress",
-                    json!([address.to_string(), config]),
+                    json!([address.to_string(), &config]),
                 )
                 .await
                 .inspect(|_batch| {
