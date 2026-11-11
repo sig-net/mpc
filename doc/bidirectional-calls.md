@@ -519,6 +519,10 @@ A node has to be able to check a `Response` from the event alone, since a
 `Response` removes the request on every node. The event of Section 7
 carries a hash of the output for that.
 
+Storing before publishing is best effort. A node whose storing operation fails
+logs it and publishes anyway. After a restart a node may therefore sign that
+request a second time.
+
 Properties:
 
 * M1 The MPC signs a request only if it provably comes from the contract it
@@ -1080,14 +1084,25 @@ The output itself travels off chain. Clients are responsible for recovering
 it from the target chain so they can deliver the exact serialised
 output the MPC attested to the application contract. Each target chain
 integration must document how the MPC obtains the output so clients can
-follow the same procedure.
+follow the same procedure. The recovery method is chain-specific.
 
-The recovery method is chain-specific. For example, on EVM chains the MPC
-reads a mined call's return data with the `debug_traceTransaction` RPC method,
-using `callTracer`'s top call frame. A client retrieves that data, decodes it
-with the request's `outputDeserializationSchema` and re-serialises it in
-the source chain's encoding, which that schema determines, reproducing
-the MPC's conversions.
+###### EVM
+
+The MPC reads a mined call's return data with the `debug_traceTransaction`
+RPC method, using `callTracer`'s top call frame. A client retrieves that
+data, decodes it with the request's `outputDeserializationSchema` and
+re-serialises it in the source chain's encoding, which that schema
+determines, reproducing the MPC's conversions.
+
+###### Tron
+
+The MPC reads the executed transaction's receipt with
+`/walletsolidity/gettransactioninfobyid`. The receipt's `contractResult` field carries the top call's return
+data (the same bytes `callTracer`'s top frame yields on EVM). A client
+retrieves the receipt, decodes that data with the request's
+`outputDeserializationSchema` and re-serialises it in the source chain's
+encoding, reproducing the MPC's conversions. Events are not read: a
+contract that reports a result only through an event has no output, same as on EVM.
 
 As a convenience, MPC nodes may serve the serialised output they attest in
 a public cache. This helps dApp developers who lack access to a node that
@@ -1120,6 +1135,8 @@ Source chains are Midnight, Solana, Hydration and Canton.
 
 Checked against `develop` at `1d823c4e`. Still to change:
 
+* `local` keeps the latest signature and the latest attestation per request.
+* Reading `local` back after a restart.
 * Unviable from another request's response.
 * Finding nonce siblings, and executions under every published signature.
 * Refusing non-canonical request fields, and the reserved paths on every

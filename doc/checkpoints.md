@@ -50,7 +50,7 @@ Vocabulary, per node per source chain:
   A plain sign request is finished by its first published signature, so it won't have signatures in its entry.
   * Only finalised source-chain events change the backlog: for a bidirectional request, the handlers of [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3); for a plain sign request, its admission and its first published signature.
   * Nothing read from a destination chain changes the backlog, and neither does anything the node produced itself.
-  * Everything else a node keeps about a request is *node-local*. A node stores in `local` the signatures and attestations it took part in producing and what it read on the destination chain. `local` is persisted and does not go into checkpoints.
+  * Everything else a node keeps about a request is *node-local*. A node stores in `local` the signatures and attestations it took part in producing and what it read on the destination chain. A node tries to persist signatures and attestations before publishing them. `local` does not go into checkpoints.
 
 * **Acting**: for each entry in the backlog, doing whatever it still needs: signing, looking for the execution, attesting, publishing.
   These are steps, not states of the entry; how far a node got is node-local.
@@ -239,6 +239,7 @@ What the node already produced is in its node-local records, so it repeats nothi
 [bidirectional-calls.md](bidirectional-calls.md) (Section 4.3, the `Response` handler) deletes a node-local record when the node processes the `Response` for its request.
 A node that rebases forward skips those Responses, so a caught-up node also deletes the records of requests that are not in its backlog.
 A node that is behind does not, since it may hold a record for a request above its processed height.
+The code deletes a record when its request leaves the backlog, and on catching up deletes the records of requests that are not in it.
 If the node takes a stale head for the real head, it deletes the record of a request it has not reached yet, and later signs or sends for that request a second time, which [bidirectional-calls.md](bidirectional-calls.md) makes harmless (C3a, replay protection).
 
 ### Rebase and re-index
@@ -416,7 +417,8 @@ The interval is `checkpoint_interval`, a per-chain constant with no per-node ove
 
 3. Entries (§1 Backlog, which [bidirectional-calls.md](bidirectional-calls.md) also needs).
    Now: an entry is the request and its status, the node's progress and the phases read from either chain, and the whole entry goes into the checkpoint.
-   There is no `local` store and no `signatures` list.
+   A node tries to store its signatures and attestations in `local` before publishing them.
+   There is no `signatures` list.
    Design: an entry holds the rid, the request and `signatures`, and the node's own progress is node-local in `local`, outside checkpoints.
 4. Digest (§2).
    Now: the digest covers the rids and one status tag per entry.
