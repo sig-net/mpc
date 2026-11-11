@@ -76,11 +76,7 @@ impl Default for NodeConfig {
         Self {
             nodes: 3,
             threshold: 2,
-            protocol: ProtocolConfig {
-                min_mine_triple_pairs: 16,
-                min_mine_presignatures: 16,
-                max_mine_generations: 2,
-            },
+            protocol: ProtocolConfig::new(16, 16, 2),
             eth: None,
             sol: None,
             hydration: None,

@@ -3,6 +3,7 @@ mod args;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::backlog::Backlog;
+use crate::build;
 use crate::config::{Config, NetworkConfig};
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
@@ -31,6 +32,7 @@ pub use args::{
     solana::SolArgs, tron::TronArgs,
 };
 
+use anyhow::Context as _;
 use clap::Parser;
 use deadpool_redis::{Hook, Runtime};
 use enum_map::EnumMap;
@@ -50,6 +52,7 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, SecretKey};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 /// Capacity of the SignCommand channel that feeds chain sign events from the
@@ -57,6 +60,7 @@ use url::Url;
 const MAX_SIGN_COMMANDS: usize = 16384;
 
 #[derive(Parser, Debug)]
+#[command(version = build::version_with_commit())]
 pub enum Cli {
     Start {
         /// NEAR RPC address
@@ -205,12 +209,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
         } => {
             let _guard = logs::setup(env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
-            crate::metrics::init_metrics(
-                &account_id,
-                env!("CARGO_PKG_VERSION"),
-                option_env!("GIT_COMMIT_HASH"),
-                option_env!("BUILD_TIMESTAMP"),
-            );
+            // Installed before the slow startup steps, so a stop during them
+            // is an orderly exit rather than the OS default.
+            let shutdown = shutdown_signal();
+            crate::metrics::init_metrics(&account_id);
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
 
@@ -263,7 +265,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let account_pk = signer.public_key();
 
             let RpcHandles {
-                near_client,
                 near_governance_client,
                 rpc_channel,
                 rpc_executor,
@@ -276,7 +277,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &stack,
                 backlog.clone(),
             )
-            .await;
+            .await?;
 
             let sync_task = SyncTask::new(
                 &node_client,
@@ -295,7 +296,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 &my_address,
                 &cipher_pk_hex,
                 &network,
-                &near_client,
+                &near_rpc,
                 &stack.configs,
             );
 
@@ -364,16 +365,23 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 node_client.clone(),
                 checkpoints_rx,
             )
-            .await;
+            .await?;
             tracing::info!("node tasks spawned");
 
-            // A core task never returns in normal operation, so the first to finish ends the node.
-            let err = match tasks.join_next().await {
-                Some(Ok(Err(err))) => err,
-                Some(Err(join)) => anyhow::Error::from(join),
-                _ => anyhow::anyhow!("core task exited"),
+            // A core task never returns in normal operation, so the first to
+            // finish ends the node; a stop signal ends it cleanly.
+            let outcome = tokio::select! {
+                finished = tasks.join_next() => Err(match finished {
+                    Some(Ok(Err(err))) => err,
+                    Some(Err(join)) => anyhow::Error::from(join),
+                    _ => anyhow::anyhow!("core task exited"),
+                }),
+                _ = shutdown.cancelled() => Ok(()),
             };
-            tracing::error!(?err, "core task ended, shutting down");
+            match &outcome {
+                Ok(()) => tracing::info!("shutdown requested, stopping"),
+                Err(err) => tracing::error!(?err, "core task ended, shutting down"),
+            }
             tasks.abort_all();
             while let Some(result) = tasks.join_next().await {
                 match result {
@@ -384,9 +392,41 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     _ => {}
                 }
             }
-            Err(err)
+            outcome
         }
     }
+}
+
+/// Cancelled on SIGTERM or Ctrl-C. If a handler cannot be installed the node
+/// runs without one and stops the way the OS stops it.
+fn shutdown_signal() -> CancellationToken {
+    let token = CancellationToken::new();
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                Err(err) => {
+                    tracing::error!(?err, "no SIGTERM handler; stops will not be orderly");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::select! {
+            _ = terminate => tracing::info!(signal = "SIGTERM", "stop signal received"),
+            result = tokio::signal::ctrl_c() => match result {
+                Ok(()) => tracing::info!(signal = "SIGINT", "stop signal received"),
+                Err(err) => {
+                    tracing::error!(?err, "no SIGINT handler; stops will not be orderly");
+                    std::future::pending::<()>().await;
+                }
+            },
+        }
+        cancel.cancel();
+    });
+    token
 }
 
 #[allow(clippy::type_complexity)]
@@ -474,14 +514,14 @@ impl ChainStack {
     }
 
     /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
-    /// each other chain is added only when configured. A client that fails to build is
-    /// logged and skipped rather than aborting startup.
+    /// each other chain is added only when configured. A configured chain whose client
+    /// cannot be built fails startup: a node must not sign for a chain it cannot reach.
     /// `backlog` lets publishers that queue (Midnight) re-check a response before spending on it.
     async fn publishers(
         &self,
         near: NearClient,
         backlog: Backlog,
-    ) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
+    ) -> anyhow::Result<HashMap<Chain, Arc<dyn ChainPublisher>>> {
         let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
         publishers.insert(Chain::NEAR, Arc::new(near));
 
@@ -504,46 +544,43 @@ impl ChainStack {
         }
         if let Some(hydration) = &self.configs.hydration {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
-            match rpc::HydrationClient::new(hydration, telemetry).await {
-                Ok(client) => {
-                    publishers.insert(
-                        Chain::Hydration,
-                        self.gated_publisher(Chain::Hydration, "hydration publish", client),
-                    );
-                }
-                Err(e) => tracing::error!(%e, "failed to create hydration client"),
-            }
+            let client = rpc::HydrationClient::new(hydration, telemetry)
+                .context("failed to create hydration client")?;
+            publishers.insert(
+                Chain::Hydration,
+                self.gated_publisher(Chain::Hydration, "hydration publish", client),
+            );
         }
         if let Some(canton) = &self.configs.canton {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
-            match CantonClient::new(canton, telemetry, self.gate(Chain::Canton)).await {
-                Ok(client) => {
-                    publishers.insert(Chain::Canton, Arc::new(client));
-                }
-                Err(e) => tracing::error!(%e, "failed to create canton client"),
-            }
+            let client = CantonClient::new(canton, telemetry, self.gate(Chain::Canton))
+                .await
+                .context("failed to create canton client")?;
+            publishers.insert(Chain::Canton, Arc::new(client));
         }
         if let Some(midnight) = &self.configs.midnight {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
             let awaiter = Arc::new(rpc::BacklogAwaiter::new(backlog));
-            match RecoveringMidnightPublisher::start(
+            let client = RecoveringMidnightPublisher::start(
                 midnight,
                 telemetry,
                 awaiter,
                 self.midnight_dust.clone(),
-            ) {
-                Ok(client) => {
-                    publishers.insert(
-                        Chain::Midnight,
-                        self.gated_publisher(Chain::Midnight, "midnight publish", client),
-                    );
-                }
-                Err(e) => tracing::error!(%e, "failed to create midnight publisher"),
-            }
+            )
+            .context("failed to create midnight publisher")?;
+            publishers.insert(
+                Chain::Midnight,
+                self.gated_publisher(Chain::Midnight, "midnight publish", client),
+            );
         }
 
-        publishers
+        Ok(publishers)
     }
+}
+
+/// Host of `url` for the startup log: RPC URLs may carry API keys.
+fn host_of(url: &Url) -> &str {
+    url.host_str().unwrap_or("invalid")
 }
 
 /// Emit the single structured "starting node" banner describing this node's identity
@@ -556,7 +593,7 @@ fn log_startup(
     my_address: &Url,
     cipher_pk_hex: &str,
     network: &NetworkConfig,
-    near_client: &NearClient,
+    near_rpc: &Url,
     chains: &ChainConfigs,
 ) {
     let eth_signer_address = chains.eth.as_ref().map(|c| c.signer_address());
@@ -569,21 +606,21 @@ fn log_startup(
         %account_pk,
         %my_address,
         cipher_pk_hex = %cipher_pk_hex,
-        version = %crate::metrics::version(),
-        git_commit_hash = %crate::metrics::git_commit_hash(),
-        build_timestamp = %crate::metrics::build_timestamp(),
+        version = build::VERSION,
+        git_commit_hash = build::GIT_COMMIT_HASH,
+        build_timestamp = build::BUILD_TIMESTAMP,
         sign_pk = %network.sign_sk.public_key(),
-        near_rpc_url = %near_client.rpc_addr(),
+        near_rpc_host = %host_of(near_rpc),
         eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.to_string()).unwrap_or_else(|| "None".to_string()),
         eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
         sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.to_string()).unwrap_or_else(|| "None".to_string()),
-        sol_rpc_url = %chains.sol.as_ref().map(|c| c.rpc_http_url.as_str()).unwrap_or("None"),
+        sol_rpc_host = %chains.sol.as_ref().map_or("None", |c| host_of(&c.rpc_http_url)),
         sol_signer_address = %sol_signer_address.as_deref().unwrap_or("None"),
-        hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
+        hydration_rpc_host = %chains.hydration.as_ref().map_or("None", |c| host_of(&c.rpc_ws_url)),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
-        canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
-        midnight_node_url = %chains.midnight.as_ref().map(|c| c.node_url.as_str()).unwrap_or("None"),
-        tron_endpoint = %chains.tron.as_ref().map(|c| c.endpoint.as_str()).unwrap_or("None"),
+        canton_json_api_host = %chains.canton.as_ref().map_or("None", |c| host_of(&c.json_api_url)),
+        midnight_node_host = %chains.midnight.as_ref().map_or("None", |c| host_of(&c.node_url)),
+        tron_host = %chains.tron.as_ref().map_or("None", |c| host_of(&c.endpoint)),
         "starting node",
     );
 }
@@ -621,7 +658,6 @@ impl MeshHandles {
 }
 
 struct RpcHandles {
-    near_client: NearClient,
     near_governance_client: NearGovernanceClient,
     rpc_channel: RpcChannel,
     rpc_executor: RpcExecutor,
@@ -636,7 +672,7 @@ impl RpcHandles {
         signer: InMemorySigner,
         stack: &ChainStack,
         backlog: Backlog,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         let near_rpc = near_fetch::Client::new(near_rpc_url.as_str());
         // One set of gates for every NEAR call: the publisher and the governance
@@ -658,15 +694,14 @@ impl RpcHandles {
             signer,
             near_gates,
         );
-        let publishers = stack.publishers(near_client.clone(), backlog).await;
+        let publishers = stack.publishers(near_client, backlog).await?;
         let (rpc_channel, rpc_executor) =
             RpcExecutor::new(near_governance_client.clone(), publishers).await;
-        Self {
-            near_client,
+        Ok(Self {
             near_governance_client,
             rpc_channel,
             rpc_executor,
-        }
+        })
     }
 }
 
@@ -799,11 +834,11 @@ async fn spawn_indexers(
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
     backlog: Backlog,
-    mut contract_watcher: ContractStateWatcher,
+    contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
-) {
+) -> anyhow::Result<()> {
     let ChainStack { configs, gates, .. } = stack;
     let ChainConfigs {
         eth,
@@ -844,66 +879,55 @@ async fn spawn_indexers(
 
     if let Some(eth_config) = eth {
         let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
-        match EthereumIndexer::new(
+        let eth_indexer = EthereumIndexer::new(
             eth_config,
             backlog.clone(),
             eth_telemetry.clone(),
             gates[Chain::Ethereum].clone(),
         )
         .await
-        {
-            Ok(eth_indexer) => {
-                tracing::info!("ethereum indexer created successfully");
-                tasks.spawn(run_supervised(
-                    eth_indexer,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Ethereum].clone(),
-                    )
-                    .with_ethereum_chain_id(ethereum_chain_id),
-                    eth_telemetry,
-                ));
-            }
-            Err(err) => {
-                tracing::error!(?err, "failed to create ethereum indexer");
-            }
-        }
+        .context("failed to create ethereum indexer")?;
+        tracing::info!("ethereum indexer created successfully");
+        tasks.spawn(run_supervised(
+            eth_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Ethereum].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            eth_telemetry,
+        ));
     }
 
     if let Some(sol_config) = sol {
         let sol_telemetry = NodeTelemetry::new(Chain::Solana);
-        match SolanaIndexer::new(
+        let sol_indexer = SolanaIndexer::new(
             sol_config,
             backlog.clone(),
             sol_telemetry.clone(),
             gates[Chain::Solana].clone(),
-        ) {
-            Ok(sol_indexer) => {
-                tracing::info!("solana indexer created successfully");
-                tasks.spawn(run_supervised(
-                    sol_indexer,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Solana].clone(),
-                    )
-                    .with_ethereum_chain_id(ethereum_chain_id),
-                    sol_telemetry,
-                ));
-            }
-            Err(err) => {
-                tracing::error!(?err, "failed to create solana indexer");
-            }
-        }
+        )
+        .context("failed to create solana indexer")?;
+        tracing::info!("solana indexer created successfully");
+        tasks.spawn(run_supervised(
+            sol_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Solana].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            sol_telemetry,
+        ));
     }
 
     if let Some(hydration_config) = hydration {
@@ -931,109 +955,93 @@ async fn spawn_indexers(
 
     if let Some(canton_config) = canton {
         let canton_telemetry = NodeTelemetry::new(Chain::Canton);
-        match CantonIndexer::new(
+        let canton_indexer = CantonIndexer::new(
             canton_config,
             backlog.clone(),
             canton_telemetry.clone(),
             gates[Chain::Canton].clone(),
         )
         .await
-        {
-            Ok(canton_indexer) => {
-                tracing::info!("canton indexer created successfully");
-                tasks.spawn(run_supervised(
-                    canton_indexer,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Canton].clone(),
-                    )
-                    .with_ethereum_chain_id(ethereum_chain_id),
-                    canton_telemetry,
-                ));
-            }
-            Err(err) => {
-                tracing::error!(?err, "failed to create canton indexer");
-            }
-        }
+        .context("failed to create canton indexer")?;
+        tracing::info!("canton indexer created successfully");
+        tasks.spawn(run_supervised(
+            canton_indexer,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Canton].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            canton_telemetry,
+        ));
     }
 
     if let Some(midnight_config) = midnight {
         let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
         // TODO: read-side gating - this indexer's reads don't share the
         // chain's cooldown gate yet
-        tracing::info!("Midnight indexer waiting for the network public key");
-        // Fails only when the contract watcher is gone, and then the process
-        // is already ending.
-        let root_pk = match contract_watcher.wait_public_key().await {
-            Ok(pk) => pk,
-            Err(err) => {
-                tracing::error!(?err, "midnight indexer: no network public key");
-                return;
-            }
-        };
-        match MidnightIndexer::new(
-            midnight_config,
+        // Waits for the network public key inside the task, so a stop signal or
+        // a failed core task during the wait still ends the node.
+        let mut contract_watcher = contract_watcher.clone();
+        let ctx = StreamContext::new(
             backlog.clone(),
-            midnight_telemetry.clone(),
-            root_pk,
+            sign_tx.clone(),
+            rpc_channel.clone(),
+            contract_watcher.clone(),
+            mesh_state.clone(),
+            node_client.clone(),
+            checkpoints_rx[Chain::Midnight].clone(),
         )
-        .await
-        {
-            Ok(midnight_indexer) => {
-                tracing::info!("midnight indexer created successfully");
-                tasks.spawn(run_supervised(
-                    midnight_indexer,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Midnight].clone(),
-                    )
-                    .with_ethereum_chain_id(ethereum_chain_id),
-                    midnight_telemetry,
-                ));
-            }
-            Err(err) => {
-                tracing::error!(?err, "failed to create midnight indexer");
-            }
-        }
+        .with_ethereum_chain_id(ethereum_chain_id);
+        let backlog = backlog.clone();
+        tasks.spawn(async move {
+            tracing::info!("Midnight indexer waiting for the network public key");
+            // Fails only when the contract watcher is gone, and then the process
+            // is already ending.
+            let root_pk = contract_watcher
+                .wait_public_key()
+                .await
+                .context("midnight indexer: no network public key")?;
+            let midnight_indexer = MidnightIndexer::new(
+                midnight_config,
+                backlog,
+                midnight_telemetry.clone(),
+                root_pk,
+            )
+            .await
+            .context("failed to create midnight indexer")?;
+            tracing::info!("midnight indexer created successfully");
+            run_supervised(midnight_indexer, ctx, midnight_telemetry).await
+        });
     }
 
     // Target-only: no source indexer — the watcher serves every source
     // chain's Tron-targeted requests.
     if let Some(tron_config) = tron {
         let tron_telemetry = NodeTelemetry::new(Chain::Tron);
-        match TronWatcher::new(tron_config, backlog.clone(), tron_telemetry.clone()) {
-            Ok(watcher) => {
-                tracing::info!("tron execution watcher created successfully");
-                tokio::spawn(run_supervised(
-                    watcher,
-                    StreamContext::new(
-                        backlog.clone(),
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        node_client.clone(),
-                        checkpoints_rx[Chain::Tron].clone(),
-                    )
-                    .with_ethereum_chain_id(ethereum_chain_id),
-                    tron_telemetry,
-                ));
-            }
-            Err(err) => {
-                tracing::error!(?err, "failed to create tron watcher");
-            }
-        }
+        let watcher = TronWatcher::new(tron_config, backlog.clone(), tron_telemetry.clone())
+            .context("failed to create tron watcher")?;
+        tracing::info!("tron execution watcher created successfully");
+        tasks.spawn(run_supervised(
+            watcher,
+            StreamContext::new(
+                backlog.clone(),
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                node_client.clone(),
+                checkpoints_rx[Chain::Tron].clone(),
+            )
+            .with_ethereum_chain_id(ethereum_chain_id),
+            tron_telemetry,
+        ));
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1167,7 +1175,8 @@ mod tests {
 
         let publishers = ChainStack::new(chains)
             .publishers(undialed_near_client(), Backlog::new())
-            .await;
+            .await
+            .unwrap();
 
         assert!(
             !publishers.contains_key(&Chain::Midnight),
@@ -1200,6 +1209,35 @@ mod tests {
         assert_eq!(tron.endpoint.as_str(), "https://api.trongrid.io/");
     }
 
+    /// Hydration's RPC is dialed on first publish: a node whose Hydration
+    /// endpoint is down still starts, and a bad signer still fails startup.
+    #[tokio::test]
+    async fn hydration_publisher_registers_while_its_rpc_is_unreachable() {
+        let chains = |signer_uri: &str| ChainConfigs {
+            eth: None,
+            sol: None,
+            hydration: Some(HydrationConfig {
+                // Nothing listens on port 1.
+                rpc_ws_url: "ws://127.0.0.1:1".parse().unwrap(),
+                signer_uri: signer_uri.to_string(),
+            }),
+            canton: None,
+            midnight: None,
+            tron: None,
+        };
+
+        let publishers = ChainStack::new(chains("//Alice"))
+            .publishers(undialed_near_client(), Backlog::new())
+            .await
+            .unwrap();
+        assert!(publishers.contains_key(&Chain::Hydration));
+
+        assert!(ChainStack::new(chains("not a signer uri"))
+            .publishers(undialed_near_client(), Backlog::new())
+            .await
+            .is_err());
+    }
+
     /// A Midnight node that is unreachable at startup must not leave the node without a
     /// Midnight publisher for its lifetime: the publisher registers and connects later.
     #[tokio::test]
@@ -1211,12 +1249,12 @@ mod tests {
             canton: None,
             midnight: Some(MidnightConfig {
                 // Nothing listens on port 1, so the startup dial is refused.
-                node_url: "http://127.0.0.1:1".to_string(),
+                node_url: "http://127.0.0.1:1".parse().unwrap(),
                 central_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xab; 32]),
                 responder_address: mpc_chain_midnight::MidnightAddress::from_bytes([0xcd; 32]),
                 publisher: mpc_chain_midnight::PublisherConfig {
                     funding_seed: "ab".repeat(32),
-                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".to_string(),
+                    indexer_ws_url: "ws://127.0.0.1:1/api/v3/graphql/ws".parse().unwrap(),
                     ..Default::default()
                 },
                 rpc: Default::default(),
@@ -1227,7 +1265,8 @@ mod tests {
 
         let publishers = ChainStack::new(chains)
             .publishers(undialed_near_client(), Backlog::new())
-            .await;
+            .await
+            .unwrap();
 
         assert!(publishers.contains_key(&Chain::Midnight));
     }
@@ -1273,7 +1312,8 @@ mod tests {
 
         let publishers = stack
             .publishers(undialed_near_client(), Backlog::new())
-            .await;
+            .await
+            .unwrap();
         let publisher = publishers
             .get(&Chain::Solana)
             .expect("solana publisher must be wired when configured");
