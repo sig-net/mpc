@@ -305,9 +305,11 @@ chain](#source-chain). See
 What a contract asks the network to sign. A [bidirectional
 request](#bidirectional-request) is the tuple (sender, transaction, target,
 key, schema), where the sender is the requesting contract. It is made when
-the contract passes it to `sign_bidirectional` and that call accepts it
+the contract calls `sign_bidirectional` with the other four fields, which
+sets the sender to the calling contract and accepts the call
 (`IndexedSignRequest`, `SignKind`,
-`chain-signatures/primitives/src/requests.rs`). See
+`chain-signatures/primitives/src/requests.rs`; `SignBidirectionalEvent`,
+`chain-signatures/primitives/src/bidirectional.rs`). See
 [bidirectional-calls.md §2](bidirectional-calls.md#2-vocabulary).
 
 ## Request id
