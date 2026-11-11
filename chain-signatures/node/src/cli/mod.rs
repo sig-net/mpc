@@ -861,7 +861,7 @@ async fn spawn_indexers(
 
     // Every source chain's stream admits bidirectional requests targeting Ethereum.
     // Admission must match across nodes, so they all need the same Ethereum network.
-    let ethereum_chain_id = eth.as_ref().and_then(EthConfig::chain_id);
+    let ethereum_chain_id = eth.as_ref().map(EthConfig::chain_id);
     if ethereum_chain_id.is_none() {
         tracing::warn!(
             "ethereum not configured: Ethereum-targeted requests are admitted without the \
