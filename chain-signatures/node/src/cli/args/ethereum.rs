@@ -94,7 +94,6 @@ impl EthArgs {
             account_sk, // this is safe because EthConfig has custom Debug implementation that redacts the account_sk field
             execution_rpc_http_url,
             contract_address,
-            optimistic_requests: network.is_optimistic(),
             network,
             // TODO: currently we only have Ethereum and Sepolia, so defaults
             // are fine. Make these configurable when we add more chains.
@@ -169,7 +168,7 @@ mod tests {
                 .into_config()
                 .unwrap()
                 .expect("configured chain");
-            assert!(!config.optimistic_requests, "{network}");
+            assert!(!config.network.is_optimistic(), "{network}");
         }
     }
 
@@ -181,7 +180,7 @@ mod tests {
             .into_config()
             .unwrap()
             .expect("configured chain");
-        assert!(config.optimistic_requests);
+        assert!(config.network.is_optimistic());
     }
 
     #[cfg(not(feature = "test-feature"))]

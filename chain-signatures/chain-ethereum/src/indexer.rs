@@ -314,7 +314,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// The catchup-live anchor: the first processable head + 1.
     /// Returns `None` on cancellation.
     async fn sample_anchor(&self, cancel: &CancellationToken) -> Option<u64> {
-        let tag = if self.config.optimistic_requests {
+        let tag = if self.config.network.is_optimistic() {
             BlockNumberOrTag::Latest
         } else {
             BlockNumberOrTag::Finalized
@@ -496,6 +496,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
 #[cfg(test)]
 mod tests {
     use crate::client::CatchupItem;
+    use crate::config::EthNetwork;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
     use alloy::rpc::types::BlockId;
@@ -560,7 +561,7 @@ mod tests {
                         "error": {"code": -32000, "message": "unavailable"}
                     })
                 } else {
-                    json!({"jsonrpc": "2.0", "id": id, "result": format!("{SEPOLIA_CHAIN_ID:#x}")})
+                    json!({"jsonrpc": "2.0", "id": id, "result": format!("{:#x}", EthNetwork::Sepolia.chain_id())})
                 };
                 reply.to_string().into_bytes()
             })
@@ -578,7 +579,7 @@ mod tests {
         .await
         .expect("the chain id should be sampled once the RPC answers");
 
-        assert_eq!(chain_id, Some(SEPOLIA_CHAIN_ID));
+        assert_eq!(chain_id, Some(EthNetwork::Sepolia.chain_id()));
         chain_id_mock.assert_async().await;
     }
 
@@ -598,7 +599,7 @@ mod tests {
             .create_async()
             .await;
         let mut builder = test_utils::TestIndexerBuilder::new(server.url());
-        builder.eth.optimistic_requests = true;
+        builder.eth.network = crate::config::EthNetwork::Anvil;
         let indexer = builder.build().await;
 
         assert_eq!(
@@ -1006,7 +1007,7 @@ mod tests {
         async fn spawn(processed: u64, finalized: u64) -> Self {
             let mut server = Server::new_async().await;
             let finalized = Arc::new(AtomicU64::new(finalized));
-            mock_chain_id(&mut server, SEPOLIA_CHAIN_ID).await;
+            mock_chain_id(&mut server, EthNetwork::Sepolia.chain_id()).await;
 
             // Anchor sampling + finalized head polling.
             server
@@ -1091,9 +1092,6 @@ mod tests {
                 .expect("run() should exit Ok on cancel");
         }
     }
-
-    /// `TestIndexerBuilder` configures sepolia.
-    const SEPOLIA_CHAIN_ID: u64 = 11_155_111;
 
     #[tokio::test]
     async fn run_refuses_an_rpc_on_another_network() {
